@@ -22,7 +22,7 @@ import {
 } from '@stratusagent/core';
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
+import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 import { assertDerivedStatePath } from '@stratusagent/permissions';
 import { createShardedFileMemoryStore } from './memory.ts';
 import { ConfigFileError } from './config-file.ts';

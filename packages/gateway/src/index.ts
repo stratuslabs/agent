@@ -6,6 +6,10 @@ import {
   type Message,
   filePathsOf,
   isUnaddressedTurn,
+  carriesKey,
+  leastTrusted,
+  senderTrustOf,
+  SENDER_TRUST_METADATA_KEY,
   workItemState,
   lastResponseIsAnswer,
   MAX_IDEMPOTENCY_KEY_LENGTH,
@@ -48,6 +52,7 @@ import {
   type Executor,
   type ExecutorContribution,
   type ImageAttachment,
+  imagesWithinReplayBudget,
   type ObserveEntry,
   matchesToolAllowlist,
   type JsonObject,
@@ -917,7 +922,79 @@ export interface DispatchInput {
    * rendering it.
    */
   onRepeat?: (repeat: 'live' | 'finished') => void;
+  /**
+   * Opts this dispatch into merged turns. A message that arrives while the
+   * session's turn is running is not given a turn of its own: every
+   * opted-in, addressed dispatch queued by the time that turn ends is
+   * answered by ONE next turn, its messages joined in arrival order in one
+   * user message (`Message.absorbedKeys` keeps each one's key, so a repeat
+   * is that turn). No delay is added; the batch is whatever queued.
+   *
+   * The first queued dispatch leads: its `turnId` stamps the merged turn's
+   * events, and it resolves as any dispatch does. Each later one is
+   * absorbed — called here, before it resolves (or rejects) with the same
+   * outcome — and, like a `live` repeat, posts nothing of its own: the
+   * leader's caller renders the answer. A caller that cannot withdraw what
+   * it put up leaves this unset and keeps one turn per dispatch.
+   *
+   * The merged turn runs at the least trusted sender in it. A turn nobody
+   * asked for (`addressed: false`) is never merged.
+   */
+  onAbsorbed?: () => void;
 }
+
+/** A dispatch absorbed into a merged turn, waiting for its outcome. */
+interface MergeJoiner {
+  input: DispatchInput;
+  resolve: (session: Session) => void;
+  reject: (error: unknown) => void;
+}
+
+interface MergeBatch {
+  agentId: string | undefined;
+  absorbed: MergeJoiner[];
+  /** Every image in the batch so far, leader's first. */
+  images: ImageAttachment[];
+  /** Characters of the merged user message so far, separators included. */
+  chars: number;
+}
+
+/**
+ * The most text one merged user message may hold (card 423). The runner's
+ * overflow recovery can drop earlier transcript but never part of the
+ * newest message, so a batch must not grow that message past what one
+ * message could be on its own: this is Slack's own message-length limit.
+ * A single message longer than this still runs, alone, as it would have
+ * without merging.
+ */
+const MERGED_TEXT_BUDGET_CHARS = 40_000;
+
+/** Separator between merged messages; counted against the text budget. */
+const MERGED_SEPARATOR = '\n\n';
+
+/**
+ * Whether `images` all fit the replay budget together. A merged turn's
+ * images are one message's, and the runner empties whatever falls outside
+ * the budget before the provider sees it, so a batch that would overflow
+ * must not take the message that overflows it (card 423).
+ */
+const fitsReplayBudget = (images: readonly ImageAttachment[]): boolean =>
+  images.length === 0 || imagesWithinReplayBudget([{ id: '', createdAt: '', role: 'user', content: '', images: [...images] }]).size === images.length;
+
+/** A signal that aborts once every one of `signals` has. */
+const allAborted = (signals: readonly AbortSignal[]): AbortSignal => {
+  const controller = new AbortController();
+  const check = (): void => {
+    if (!controller.signal.aborted && signals.every((signal) => signal.aborted)) {
+      controller.abort(signals[signals.length - 1]?.reason);
+    }
+  };
+  for (const signal of signals) {
+    signal.addEventListener('abort', check, { once: true });
+  }
+  check();
+  return controller.signal;
+};
 
 export interface ObserveInput {
   sessionId: string;
@@ -3025,6 +3102,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // then the entry is a claim that may yet be refused. `addressed` is false
   // for a turn nobody asked for, which `holdsMessage` does not count.
   const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>>();
+  /**
+   * The merged turn still taking messages, per session (card 423): led by
+   * the first opted-in dispatch that queued behind a running turn, closed
+   * the moment that dispatch reaches the head of the chain. See
+   * `DispatchInput.onAbsorbed`.
+   */
+  const openBatches = new Map<string, MergeBatch>();
   /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
   let orphanedAtStart: ReadonlySet<string> = new Set();
 
@@ -3135,7 +3219,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       : runsOnHarness(config) || (fallback !== undefined && runsOnHarness(fallback));
   };
 
-  const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
+  const dispatchInternal = async (input: DispatchInput, absorbedKeys: readonly string[] = []): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
     // understand, and a daemon that kept writing into them would be the
@@ -3255,6 +3339,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
           ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+          ...(absorbedKeys.length > 0 ? { absorbedKeys: [...absorbedKeys] } : {}),
           ...(hostedLoop ? { hostedLoop } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
@@ -3269,6 +3354,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.images !== undefined ? { images: input.images } : {}),
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+        ...(absorbedKeys.length > 0 ? { absorbedKeys: [...absorbedKeys] } : {}),
         ...(hostedLoop ? { hostedLoop } : {}),
         ...(input.earlier !== undefined && input.earlier.length > 0 ? { earlier: input.earlier } : {}),
         metadata,
@@ -3951,6 +4037,58 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return attach();
     }
 
+    // Merged turns (card 423): an opted-in message behind a running turn
+    // joins the batch already waiting, if there is one for the same agent.
+    const mergeable = input.onAbsorbed !== undefined && input.addressed !== false;
+    const open = openBatches.get(input.sessionId);
+    if (
+      mergeable &&
+      open !== undefined &&
+      open.agentId === input.agentId &&
+      fitsReplayBudget([...open.images, ...(input.images ?? [])]) &&
+      open.chars + MERGED_SEPARATOR.length + input.userMessage.length <= MERGED_TEXT_BUDGET_CHARS
+    ) {
+      open.images.push(...(input.images ?? []));
+      open.chars += MERGED_SEPARATOR.length + input.userMessage.length;
+      waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
+      const joined = new Promise<Session>((resolve, reject) => {
+        open.absorbed.push({ input, resolve, reject });
+      });
+      if (idempotencyKey !== undefined) {
+        // Provisional, like a queued dispatch's: a redelivery while it waits
+        // attaches here; the merged turn confirms it once it owns the key.
+        const items = liveWorkItems.get(input.sessionId) ?? new Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>();
+        if (!items.has(idempotencyKey)) {
+          items.set(idempotencyKey, { turn: joined, agentId: input.agentId, confirmed: false, addressed: true });
+          liveWorkItems.set(input.sessionId, items);
+        }
+        void joined.catch(() => {}).finally(() => {
+          const current = liveWorkItems.get(input.sessionId);
+          if (current?.get(idempotencyKey)?.turn === joined) {
+            current.delete(idempotencyKey);
+            if (current.size === 0) {
+              liveWorkItems.delete(input.sessionId);
+            }
+          }
+        });
+      }
+      return joined;
+    }
+    // It cannot join (or its images or text would overflow the batch's
+    // budget), so the open batch takes no more: a message arriving
+    // after this one must not be answered ahead of it.
+    if (open !== undefined) {
+      openBatches.delete(input.sessionId);
+    }
+    // Otherwise it leads a new batch, if it is waiting behind a turn at all:
+    // a message to an idle session runs at once, alone.
+    const batch: MergeBatch | undefined = mergeable && sessionChains.has(input.sessionId)
+      ? { agentId: input.agentId, absorbed: [], images: [...(input.images ?? [])], chars: input.userMessage.length }
+      : undefined;
+    if (batch !== undefined) {
+      openBatches.set(input.sessionId, batch);
+    }
+
     // Reads `turn` only once it is assigned: the registration below runs
     // after it, and the chain's work runs in a later tick (`.then`).
     const claimLiveItem = (key: string, confirmed: boolean): void => {
@@ -3958,14 +4096,147 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       items.set(key, { turn, agentId: input.agentId, confirmed, addressed: input.addressed !== false });
       liveWorkItems.set(input.sessionId, items);
     };
+
+    /**
+     * This dispatch's turn with the messages it absorbed (card 423). Each
+     * part is judged on its own first, as it would have been alone: one
+     * cancelled while it waited is refused, one that repeats a turn the
+     * session already holds is that turn. What is left runs as one turn.
+     */
+    const runMerged = async (absorbed: readonly MergeJoiner[]): Promise<Session> => {
+      type Part = { input: DispatchInput; joiner?: MergeJoiner };
+      const parts: Part[] = [{ input }, ...absorbed.map((joiner) => ({ input: joiner.input, joiner }))];
+      let leader: { session: Session } | { error: unknown } | undefined;
+      const settle = (part: Part, outcome: { session: Session } | { error: unknown }): void => {
+        if (part.joiner === undefined) {
+          // Settled the moment it is known, not when the chain moves on: a
+          // leader cancelled or repeated while it waited must leave its
+          // caller's queue before the turn it handed over starts rendering.
+          leader = outcome;
+          settleLeader(outcome);
+        } else if ('session' in outcome) {
+          part.joiner.resolve(outcome.session);
+        } else {
+          part.joiner.reject(outcome.error);
+        }
+      };
+      const runnable: Part[] = [];
+      for (const part of parts) {
+        const own = part.input;
+        if (own.signal?.aborted) {
+          settle(part, { error: abortErrorFor(own.signal) });
+          continue;
+        }
+        if (own.idempotencyKey !== undefined) {
+          try {
+            const repeated = await settleRepeat(input.sessionId, own.idempotencyKey, own.agentId, own.turnId, own.onRepeat);
+            if (repeated !== undefined) {
+              settle(part, { session: repeated });
+              continue;
+            }
+          } catch (error) {
+            settle(part, { error });
+            continue;
+          }
+        }
+        runnable.push(part);
+      }
+      const head = runnable[0];
+      if (head === undefined) {
+        return finish(leader);
+      }
+
+      // Every runnable key now belongs to this turn.
+      const keys = runnable.flatMap((part) => (part.input.idempotencyKey !== undefined ? [part.input.idempotencyKey] : []));
+      const items = liveWorkItems.get(input.sessionId);
+      for (const key of keys) {
+        const item = items?.get(key);
+        if (item !== undefined) {
+          item.confirmed = true;
+        }
+      }
+
+      // The turn runs at the least trusted sender in it: everyone's words
+      // are in its one message.
+      const labelled = runnable.some((part) => part.input.metadata !== undefined && SENDER_TRUST_METADATA_KEY in part.input.metadata);
+      const lowest = leastTrusted(...runnable.map((part) => senderTrustOf(part.input.metadata)));
+      const newest = runnable[runnable.length - 1]!.input;
+      const metadata = labelled ? { ...newest.metadata, [SENDER_TRUST_METADATA_KEY]: lowest } : newest.metadata;
+      const images = runnable.flatMap((part) => part.input.images ?? []);
+      const signals = runnable.map((part) => part.input.signal);
+      // Cancelled only when every caller in it is: one caller giving up
+      // must not take the others' answer with it.
+      const signal = signals.every((candidate): candidate is AbortSignal => candidate !== undefined)
+        ? allAborted(signals)
+        : undefined;
+      const [primaryKey, ...absorbedKeys] = keys;
+      const merged: DispatchInput = {
+        sessionId: input.sessionId,
+        ...(head.input.agentId !== undefined ? { agentId: head.input.agentId } : {}),
+        userMessage: runnable.map((part) => part.input.userMessage).join(MERGED_SEPARATOR),
+        ...(images.length > 0 ? { images } : {}),
+        ...(head.input.earlier !== undefined ? { earlier: head.input.earlier } : {}),
+        ...(metadata !== undefined ? { metadata } : {}),
+        ...(signal !== undefined ? { signal } : {}),
+        ...(head.input.turnId !== undefined ? { turnId: head.input.turnId } : {}),
+        ...(primaryKey !== undefined ? { idempotencyKey: primaryKey } : {}),
+      };
+
+      await settleOrphanedItem(input.sessionId);
+      let outcome: { session: Session } | { error: unknown };
+      if (merged.turnId !== undefined) {
+        activeTurns.set(input.sessionId, merged.turnId);
+      }
+      try {
+        outcome = { session: await dispatchInternal(merged, absorbedKeys) };
+      } catch (error) {
+        outcome = { error };
+      } finally {
+        if (merged.turnId !== undefined) {
+          activeTurns.delete(input.sessionId);
+        }
+      }
+      for (const part of runnable) {
+        if (part !== head) {
+          part.input.onAbsorbed?.();
+        }
+        settle(part, outcome);
+      }
+      return finish(leader);
+    };
+    const finish = (outcome: { session: Session } | { error: unknown } | undefined): Session => {
+      if (outcome === undefined) {
+        throw new Error('A merged turn settled without an outcome for its leader.');
+      }
+      if ('error' in outcome) {
+        throw outcome.error;
+      }
+      return outcome.session;
+    };
+    // What this caller is handed. It follows the chain's work, except that a
+    // batch leader settles it early (`settle` in `runMerged`).
+    let settleLeader: (outcome: { session: Session } | { error: unknown }) => void = () => {};
+    const turn = new Promise<Session>((resolve, reject) => {
+      settleLeader = (outcome) => ('error' in outcome ? reject(outcome.error) : resolve(outcome.session));
+    });
     waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
-    const turn: Promise<Session> = onSessionChain(input.sessionId, async () => {
-      // No longer waiting once it reaches the head of the chain.
-      const left = (waitingDispatches.get(input.sessionId) ?? 1) - 1;
+    const chained: Promise<Session> = onSessionChain(input.sessionId, async () => {
+      // The batch closes here: anything arriving from now on waits behind
+      // this turn and leads the next one.
+      if (batch !== undefined && openBatches.get(input.sessionId) === batch) {
+        openBatches.delete(input.sessionId);
+      }
+      const absorbed = batch?.absorbed ?? [];
+      // No longer waiting once it reaches the head of the chain — nor is
+      // anything it absorbed.
+      const left = (waitingDispatches.get(input.sessionId) ?? 1) - 1 - absorbed.length;
       if (left > 0) {
         waitingDispatches.set(input.sessionId, left);
       } else {
         waitingDispatches.delete(input.sessionId);
+      }
+      if (absorbed.length > 0) {
+        return runMerged(absorbed);
       }
       // Before `activeTurns` is touched: a repeat that runs nothing must
       // not claim the session's turn id, even for the instant it takes.
@@ -3995,6 +4266,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         activeTurns.delete(input.sessionId);
       }
     });
+    // A second settle (a leader already settled early) is a no-op.
+    chained.then((session) => settleLeader({ session }), (error: unknown) => settleLeader({ error }));
     if (idempotencyKey !== undefined) {
       // A repeat that queued instead of attaching — it named another agent,
       // and is about to be refused — must not displace the turn it repeats.
@@ -4036,6 +4309,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
 
+    // Heard after the batch waiting on this session opened, so anything
+    // said after it must not be answered ahead of it: the batch takes no
+    // more, and a later message leads the next one (card 423).
+    openBatches.delete(input.sessionId);
     return onSessionChain(input.sessionId, async () => {
       assertStateCompatible(env);
       const existing = await store.get(input.sessionId);
@@ -4681,7 +4958,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const transcript = workItemState(session, idempotencyKey) !== undefined ? session : await archivedRepeat(session, idempotencyKey);
       // Accepted as addressed: a turn nobody asked for (`addressed: false`,
       // stored overheard) was this agent hearing the message, not taking it.
-      const keyed = transcript?.messages.findLast((message) => message.role === 'user' && message.idempotencyKey === idempotencyKey);
+      const keyed = transcript?.messages.findLast((message) => carriesKey(message, idempotencyKey));
       return keyed !== undefined && keyed.overheard !== true;
     },
 

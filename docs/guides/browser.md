@@ -47,7 +47,7 @@ can name, which is what a single risk word gave up on.
    **Always allow**.
 
 There is no third tier, and the absence is deliberate: the shell has a
-built-in safe list because `git status` is read-only wherever it runs, and
+built-in safe list because `pwd` is read-only wherever it runs, and
 no site has that property. Whether clicking on one is harmless is a fact
 about your account on it, so shipping a list would be this project guessing
 at your permissions. Anything not granted asks, and in

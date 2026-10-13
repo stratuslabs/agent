@@ -51,6 +51,12 @@ they are the whole model:
    agent's: Slack redelivering it after a restart goes back to the agent
    that accepted it, not to whoever has spoken since — and if that agent's
    app has not come back, the others stand down rather than run it again.
+   Another app's bot counts as a speaker: an agent served by another daemon,
+   or any integration posting in the thread. After it posts, this daemon's
+   agents stand down for untagged replies until one of them is named. Only
+   who posted and when is kept, not what it said. After a restart the thread
+   is read (`conversations.replies`) to tell; if that read fails, the agent
+   answers as before and a warning says why.
 5. **How an agent listens is the soul's to say.** Rules 3 and 4 are the
    `thread` mode, the default. A soul with `listens: mentions` takes only
    messages that name it, and hears the rest. One with `listens: judge`
@@ -175,7 +181,7 @@ needs the history scopes; without them an agent hears a thread only from
 the mention that brought it in. A colleague's reply is
 heard by the daemon that posted it, not through Slack — an agent served by
 another daemon is a stranger's bot to this one, and its replies are not
-heard at all.
+heard at all. They do count for who spoke last (rule 4).
 
 Three edges worth knowing. An agent whose app was installed before the
 history scopes below is told about mentions only, and behaves exactly as it

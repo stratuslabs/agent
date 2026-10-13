@@ -8754,6 +8754,46 @@ test('a repeat of a turn another delivery is still waiting on posts nothing', as
   }
 });
 
+test('a message absorbed into a merged turn posts nothing, and it asked to be merged', async () => {
+  // Card 423: the merged turn's leading message posts the one answer; an
+  // absorbed one takes down what it put up, failure or not.
+  for (const fails of [false, true]) {
+    let optedIn = false;
+    const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'one answer for both'));
+    const gateway: StubGateway = {
+      ...stub,
+      async dispatch(input) {
+        optedIn = input.onAbsorbed !== undefined;
+        input.onAbsorbed?.();
+        if (fails) {
+          throw new Error('the provider refused the request');
+        }
+        return sessionWithReply(input.sessionId, 'one answer for both');
+      },
+    };
+    for (const replies of ['stream', 'final'] as const) {
+      const web = createFakeWeb('B-AVA', 'T1');
+      const socket = createFakeSocket();
+      const statuses = recordStatuses(web);
+      const adapter = createAdapterAsShipped({
+        agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies }],
+        editIntervalMs: 0,
+        createSocketClient: () => socket,
+        createWebClient: () => web,
+      });
+      await adapter.start(gateway);
+      await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+      await adapter.stop();
+      const label = `${fails ? 'failed' : 'answered'}, ${replies}`;
+      assert.ok(optedIn, `${label}: the adapter did not opt into merged turns`);
+      assert.equal(web.posts.length, web.deletes.length, `${label}: a placeholder stayed up`);
+      const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+      assert.ok(!said.some((text) => text?.includes('one answer for both') || text?.includes('refused')), `${label}: the absorbed message answered`);
+      assert.equal(statuses.at(-1)?.status ?? '', '', `${label}: a loading status stayed up`);
+    }
+  }
+});
+
 test('a repeat of a failed turn posts the failure, and a live repeat of one posts nothing', async () => {
   const failed = (sessionId: string, key: string): Session => {
     const now = new Date().toISOString();
@@ -10517,4 +10557,244 @@ test('a paused daemon answers a mention with its pause sentence, not as a failur
   const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
   assert.ok(said.includes("I'm paused: this workspace's usage limit is reached."), said.join('\n'));
   assert.ok(!said.some((text) => /Something went wrong/.test(text ?? '')), said.join('\n'));
+});
+
+/** A message another app's bot posted: an agent served by some other gateway, or any integration. */
+const foreignBotMessage = (input: { text: string; ts: string; thread: string; user?: string; botId?: string }) => ({
+  body: { team_id: 'T1', event_id: `evt-bot-${input.ts}` },
+  event: {
+    type: 'message',
+    channel_type: 'channel',
+    user: input.user ?? 'U-FLY',
+    bot_id: input.botId ?? 'B-FLY-APP',
+    text: input.text,
+    ts: input.ts,
+    thread_ts: input.thread,
+    channel: 'C1',
+  },
+});
+
+test('an untagged reply after another gateway\'s agent spoke last is not answered here, until this agent is named again', async () => {
+  // Fly Test runs on its own gateway, so nothing in this process's sessions
+  // knows it is in the thread. Only its message says so.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:950.0', '2026-01-01T00:00:00.000Z']]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('message', channelMessage({ text: 'first?', ts: '950.1', thread: '950.0' }));
+  await socket.deliver('message', foreignBotMessage({ text: 'Fly Test here', ts: '950.3', thread: '950.0' }));
+  // Fly Test spoke last: this reply is its, not Ava's.
+  await socket.deliver('message', channelMessage({ text: 'and you?', ts: '950.4', thread: '950.0' }));
+  // Naming Ava hands the thread back, and the reply after that is hers again.
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> back to you', ts: '950.5', thread: '950.0' }));
+  await socket.deliver('message', channelMessage({ text: 'and then?', ts: '950.6', thread: '950.0' }));
+  // A bot message delivered late but posted before Ava held the thread does
+  // not take it from her.
+  await socket.deliver('message', foreignBotMessage({ text: 'late echo', ts: '950.55', thread: '950.0' }));
+  await socket.deliver('message', channelMessage({ text: 'still you?', ts: '950.7', thread: '950.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'Dylan: first?',
+    'Dylan: back to you',
+    'Dylan: and then?',
+    'Dylan: still you?',
+  ]);
+});
+
+test('after a restart, an untagged reply goes unanswered here when another gateway\'s agent spoke after this one, read from the thread', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const warnings: string[] = [];
+  // Ava's session says she last spoke at 960.2 (Slack seconds).
+  const spokeAt = new Date(960.2 * 1000).toISOString();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:960.0', spokeAt],
+    ['slack:ava:T1:C1:961.0', spokeAt],
+    ['slack:ava:T1:C1:962.0', spokeAt],
+  ]));
+  const threads: Record<string, Array<Record<string, unknown>>> = {
+    // Fly Test answered after Ava.
+    '960.0': [
+      { ts: '960.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+      { ts: '960.2', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+      { ts: '960.3', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+    ],
+    // Fly Test spoke, then Ava: still Ava's.
+    '961.0': [
+      { ts: '961.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+      { ts: '961.1', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+      { ts: '961.2', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+    ],
+  };
+  web.conversations.replies = async (args: { ts: string; latest?: string }) => {
+    if (args.ts === '962.0') {
+      throw new Error('missing_scope');
+    }
+    return {
+      messages: (threads[args.ts] ?? []).filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+      response_metadata: { next_cursor: '' },
+    };
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line: string) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'and you?', ts: '960.4', thread: '960.0' }));
+  await socket.deliver('message', channelMessage({ text: 'go on', ts: '961.4', thread: '961.0' }));
+  // A thread that cannot be read is answered as before, with a warning.
+  await socket.deliver('message', channelMessage({ text: 'still there?', ts: '962.4', thread: '962.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'Dylan: go on',
+    'Dylan: still there?',
+  ]);
+  assert.ok(warnings.some((line) => line.includes('missing_scope')), warnings.join('\n'));
+});
+
+test('after a restart, the thread read places this agent at its reply in the thread, not at its transcript time', async () => {
+  // Ava's placeholder went up at 963.1, Fly Test posted beneath it at 963.2
+  // while she was generating, and the edit filled the placeholder in later:
+  // her transcript says 963.5, but Fly Test is the last voice in the thread.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:963.0', new Date(963.5 * 1000).toISOString()]]));
+  const thread = [
+    { ts: '963.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+    { ts: '963.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+    { ts: '963.2', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+  ];
+  web.conversations.replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'and you?', ts: '963.6', thread: '963.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), []);
+});
+
+test('after a restart, the thread read finds the local agent that spoke last by position, not by transcript time', async () => {
+  // Ava's placeholder went up at 970.1, Fly Test posted at 970.2, Bea
+  // answered at 970.3, and Ava's reply finished last: her transcript says
+  // 970.5, but Bea is the last voice in the thread and the reply is hers.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:970.0', new Date(970.5 * 1000).toISOString()],
+    ['slack:bea:T1:C1:970.0', new Date(970.3 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '970.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+    { ts: '970.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+    { ts: '970.2', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+    { ts: '970.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'Bea here' },
+  ];
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const followUp = channelMessage({ text: 'and you?', ts: '970.6', thread: '970.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['bea', 'Dylan: and you?'],
+  ]);
+});
+
+test('after a restart, only a mention this agent would admit takes the thread back from another gateway\'s agent', async () => {
+  // Live, a refused sender's mention and any bot's mention hand nothing
+  // over, so the thread read must not count them either.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const spokeAt = new Date(970.2 * 1000).toISOString();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:970.0', spokeAt],
+    ['slack:ava:T1:C1:971.0', spokeAt],
+    ['slack:ava:T1:C1:972.0', spokeAt],
+  ]));
+  const threads: Record<string, Array<Record<string, unknown>>> = {
+    // An unlisted person names Ava after Fly Test spoke: refused, no handover.
+    '970.0': [
+      { ts: '970.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+      { ts: '970.2', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+      { ts: '970.3', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+      { ts: '970.35', user: 'U-EVE', text: '<@B-AVA> over to you' },
+    ],
+    // Fly Test itself names Ava: a bot's mention is no handover.
+    '971.0': [
+      { ts: '971.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+      { ts: '971.2', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+      { ts: '971.3', user: 'U-FLY', bot_id: 'B-FLY-APP', text: '<@B-AVA> your turn' },
+    ],
+    // A principal names Ava after Fly Test: hers again.
+    '972.0': [
+      { ts: '972.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+      { ts: '972.2', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+      { ts: '972.3', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+      { ts: '972.35', user: 'U-DYLAN', text: '<@B-AVA> back to you' },
+    ],
+  };
+  web.conversations.replies = async (args: { ts: string; latest?: string }) => ({
+    messages: (threads[args.ts] ?? []).filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'], admit: 'principals' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'and you?', ts: '970.4', thread: '970.0' }));
+  await socket.deliver('message', channelMessage({ text: 'and you?', ts: '971.4', thread: '971.0' }));
+  await socket.deliver('message', channelMessage({ text: 'go on', ts: '972.4', thread: '972.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: go on']);
 });
