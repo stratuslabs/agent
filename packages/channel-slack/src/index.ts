@@ -4871,34 +4871,46 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   /**
    * The durable half of `noteForeignSpeaker`, for a thread this process has
-   * no record of: whether a bot this adapter does not serve posted in the
-   * thread after `agentId` last held it, read from the thread itself. Held
-   * means its own message there or a message naming it, whichever is
-   * newest, by position in the thread (its session's `lastSpokeAt` only
-   * when its bot user id is unknown). False whenever it cannot tell: no
-   * thread read, a failed read, or a thread too long to reach its newest
-   * replies. Then the reply is answered as it was before this check.
+   * no record of: where each of `candidates` last held the thread, and where
+   * a bot this adapter does not serve last spoke, read from the thread
+   * itself. Held means an agent's own message there or a person's message
+   * naming it that it would admit, by position in the thread (its session's
+   * `lastSpokeAt` only when its bot user id is unknown). Undefined whenever
+   * it cannot tell: no thread read, a failed read, or a thread too long to
+   * reach its newest replies. Then the reply is routed as it was before
+   * this check.
    */
-  const foreignSpokeSince = async (
-    agentId: string,
+  const threadPositions = async (
+    candidates: Array<{ agentId: string; lastSpokeAt?: string }>,
     parts: { team: string; conversation: string; thread: string },
     ts: string,
-    lastSpokeAt: string | undefined,
-  ): Promise<boolean> => {
-    const connection = connections.find((candidate) => candidate.config.agentId === agentId)
+  ): Promise<{ held: Map<string, number>; foreign: number } | undefined> => {
+    const connection = connections.find((candidate) => candidate.config.agentId === candidates[0]?.agentId)
       ?? connections.find((candidate) => candidate.teamId === parts.team);
     const replies = connection?.web.conversations.replies;
     if (!connection || !replies) {
-      return false;
+      return undefined;
     }
-    const botUserId = botIdentities.get(agentId)?.botUserId;
     // Positions in the thread, as the live record keeps them: a reply that
     // filled a placeholder sits where the placeholder was posted, above
     // anything posted while it was being written, though the transcript
-    // dates it later. `lastSpokeAt` stands in only when this agent's own
+    // dates it later. `lastSpokeAt` stands in only when an agent's own
     // messages can't be told apart in the read.
-    const spoke = botUserId !== undefined || lastSpokeAt === undefined ? Number.NaN : Date.parse(lastSpokeAt) / 1000;
-    let held = Number.isFinite(spoke) ? spoke : 0;
+    const held = new Map<string, number>();
+    const byBotUser = new Map<string, string>();
+    for (const candidate of candidates) {
+      const botUserId = botIdentities.get(candidate.agentId)?.botUserId;
+      if (botUserId !== undefined) {
+        byBotUser.set(botUserId, candidate.agentId);
+        held.set(candidate.agentId, 0);
+        continue;
+      }
+      const spoke = candidate.lastSpokeAt === undefined ? Number.NaN : Date.parse(candidate.lastSpokeAt) / 1000;
+      held.set(candidate.agentId, Number.isFinite(spoke) ? spoke : 0);
+    }
+    const place = (agentId: string, at: number): void => {
+      held.set(agentId, Math.max(held.get(agentId) ?? 0, at));
+    };
     let foreign = 0;
     try {
       let cursor: string | undefined;
@@ -4918,8 +4930,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (!Number.isFinite(at) || !(at < Number(ts))) {
             continue;
           }
-          if (botUserId !== undefined && message.user === botUserId) {
-            held = Math.max(held, at);
+          const own = message.user === undefined ? undefined : byBotUser.get(message.user);
+          if (own !== undefined) {
+            place(own, at);
             continue;
           }
           const bot = message.bot_id !== undefined || message.subtype === 'bot_message';
@@ -4931,24 +4944,38 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             }
             continue;
           }
-          // A person naming this agent takes the thread back only if this
+          // A person naming an agent takes the thread for it only if that
           // agent would admit them, as the live handover does.
-          if (botUserId !== undefined && message.user !== undefined
-            && mentions(message.text ?? '', botUserId)
-            && admitsSender(agentConfigFor(agentId), message.user)) {
-            held = Math.max(held, at);
+          const sender = message.user;
+          if (sender === undefined) {
+            continue;
+          }
+          const named = agentNamedIn(message.text ?? '', parts.team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
+          if (named !== undefined && held.has(named) && botIdentities.get(named)?.botUserId !== undefined) {
+            place(named, at);
           }
         }
         cursor = page.response_metadata?.next_cursor || undefined;
       } while (cursor && pages < EARLIER_THREAD_PAGES);
       if (cursor) {
-        return false;
+        return undefined;
       }
     } catch (error) {
-      warn(`slack: could not read thread ${parts.thread} in ${parts.conversation} to see whether another app spoke last, so ${agentId} answers as before: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
+      warn(`slack: could not read thread ${parts.thread} in ${parts.conversation} to see who spoke last, so it is routed as before: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
     }
-    return foreign > held;
+    return { held, foreign };
+  };
+
+  /** Whether another app spoke in the thread after `agentId` last held it. */
+  const foreignSpokeSince = async (
+    agentId: string,
+    parts: { team: string; conversation: string; thread: string },
+    ts: string,
+    lastSpokeAt: string | undefined,
+  ): Promise<boolean> => {
+    const read = await threadPositions([{ agentId, ...(lastSpokeAt !== undefined ? { lastSpokeAt } : {}) }], parts, ts);
+    return read !== undefined && read.foreign > (read.held.get(agentId) ?? 0);
   };
   /**
    * Which of this process's agents a message names, or undefined if it
@@ -5142,12 +5169,33 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         tied = true;
       }
     }
-    if (tied || !latest) {
-      return undefined;
+    const bySession = tied ? undefined : latest?.agentId;
+    // Sessions date a reply by when it finished, the thread by where its
+    // placeholder went up, and an agent on another gateway may have spoken
+    // since: only the thread can say who holds it. When it can't be read,
+    // the sessions decide, as before.
+    const read = await threadPositions(engaged, parts, ts);
+    if (!read) {
+      return bySession;
     }
-    // An agent on another gateway may have spoken since, which only the
-    // thread can say.
-    return await foreignSpokeSince(latest.agentId, parts, ts, latest.lastSpokeAt) ? undefined : latest.agentId;
+    let holder: { agentId: string; at: number } | undefined;
+    let tiedAt = false;
+    for (const entry of engaged) {
+      const at = read.held.get(entry.agentId) ?? 0;
+      if (at <= 0) {
+        continue;
+      }
+      if (!holder || at > holder.at) {
+        holder = { agentId: entry.agentId, at };
+        tiedAt = false;
+      } else if (at === holder.at) {
+        tiedAt = true;
+      }
+    }
+    if (!holder) {
+      return read.foreign > 0 ? undefined : bySession;
+    }
+    return tiedAt || read.foreign > holder.at ? undefined : holder.agentId;
   };
 
   /**

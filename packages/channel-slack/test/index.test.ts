@@ -10659,6 +10659,52 @@ test('after a restart, the thread read places this agent at its reply in the thr
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), []);
 });
 
+test('after a restart, the thread read finds the local agent that spoke last by position, not by transcript time', async () => {
+  // Ava's placeholder went up at 970.1, Fly Test posted at 970.2, Bea
+  // answered at 970.3, and Ava's reply finished last: her transcript says
+  // 970.5, but Bea is the last voice in the thread and the reply is hers.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:970.0', new Date(970.5 * 1000).toISOString()],
+    ['slack:bea:T1:C1:970.0', new Date(970.3 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '970.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+    { ts: '970.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+    { ts: '970.2', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+    { ts: '970.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'Bea here' },
+  ];
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const followUp = channelMessage({ text: 'and you?', ts: '970.6', thread: '970.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['bea', 'Dylan: and you?'],
+  ]);
+});
+
 test('after a restart, only a mention this agent would admit takes the thread back from another gateway\'s agent', async () => {
   // Live, a refused sender's mention and any bot's mention hand nothing
   // over, so the thread read must not count them either.
