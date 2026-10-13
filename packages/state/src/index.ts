@@ -260,6 +260,8 @@ export {
   KNOWN_CODEX_MODELS,
   type ProviderKeyVerdict,
   verifyProviderKey,
+  type ProviderModelVerdict,
+  probeProviderModel,
   type CatalogModel,
   type ModelCatalogSelection,
   collectAvailableModels,

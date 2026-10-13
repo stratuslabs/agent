@@ -4,7 +4,10 @@
 roster live at once on its own provider and model, sessions in SQLite so
 they survive restarts, delegation between agents, a watchdog for stalled
 turns, and any installed channels connected. Ctrl+C or SIGTERM drains
-cleanly, and a second one during the drain is ignored rather than cutting
+cleanly: new turns are refused, in-flight ones get up to 30 seconds to
+finish, and any still running after that are aborted and recorded as
+failed ("stratusd is stopping"), which also kills the shell commands they
+started. A second signal during the drain is ignored rather than cutting
 it short (SIGKILL ends the process at once).
 
 It stays a foreground process on purpose — debuggable, and composable with
@@ -34,8 +37,9 @@ What they get:
 The unit runs the daemon by **absolute path** — the node binary and script
 of the process that installed it, never a bare `stratus`. A service manager
 starts with a minimal environment and never loads the shell profile that
-puts `stratus` on your `PATH`. It stops with SIGTERM, so the gateway's
-drain actually runs. (Upgrading node moves those absolute paths — see
+puts `stratus` on your `PATH`. It stops with SIGTERM and waits 75 seconds
+before SIGKILL (`ExitTimeOut` in the plist, `TimeoutStopSec` in the unit),
+so the gateway's drain, and the abort at the end of it, actually run. (Upgrading node moves those absolute paths — see
 [Updating](./updating.md) for why `stratus update` rewrites the unit.)
 
 For the same reason the unit carries a **`PATH`**: the one in the shell

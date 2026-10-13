@@ -18,6 +18,7 @@ import {
   saveConfigFile,
   servedRuntimes,
   verifyProviderKey,
+  probeProviderModel,
   type StateEnvironment,
 } from '../src/index.ts';
 
@@ -155,6 +156,85 @@ test('verifyProviderKey condemns a key only on an explicit auth failure', async 
 
   const ok = await verifyProviderKey('anthropic', 'sk-ant', undefined, async () => jsonResponse({ data: [] }));
   assert.equal(ok.status, 'ok');
+});
+
+test('probeProviderModel sends an OpenAI-compatible run its own shape and judges only a refusal', async () => {
+  const asked: Array<{ url: string; auth: string | null; body: unknown }> = [];
+  const answered = await probeProviderModel('openai', 'sk-good', 'gpt-4.1-mini', 'http://localhost:1234/v1/', (async (input: string | URL | Request, init?: RequestInit) => {
+    asked.push({ url: String(input), auth: new Headers(init?.headers).get('authorization'), body: JSON.parse(String(init?.body)) });
+    return jsonResponse({ choices: [{ message: { role: 'assistant', content: 'pong' }, finish_reason: 'stop' }] });
+  }) as typeof fetch);
+  assert.equal(answered.status, 'answered');
+  // No output cap: the adapter sends none on a run, and some models refuse `max_tokens`.
+  assert.deepEqual(asked, [{
+    url: 'http://localhost:1234/v1/chat/completions',
+    auth: 'Bearer sk-good',
+    body: { model: 'gpt-4.1-mini', messages: [{ role: 'user', content: 'ping' }] },
+  }]);
+
+  const unknown = await probeProviderModel('openai', 'sk-good', 'gpt-nope', undefined, async () =>
+    new Response(JSON.stringify({ error: { message: `The model \`gpt-nope\` does not exist${' x'.repeat(200)}` } }), { status: 404 }));
+  assert.equal(unknown.status, 'refused');
+  assert.match(unknown.detail ?? '', /^HTTP 404: The model `gpt-nope` does not exist/);
+  assert.ok((unknown.detail ?? '').length <= 'HTTP 404: '.length + 200, 'a long provider message is cut to one line');
+
+  const notJson = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, async () => new Response('<html>bad gateway</html>', { status: 502 }));
+  assert.deepEqual(notJson, { status: 'no answer', detail: 'HTTP 502' });
+
+  const offline = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, async () => { throw new TypeError('fetch failed'); });
+  assert.deepEqual(offline, { status: 'no answer', detail: 'fetch failed' });
+});
+
+test('probeProviderModel judges a 429 that says the account has no credit, not a plain rate limit', async () => {
+  const answer = (status: number, body: unknown) => async () => new Response(JSON.stringify(body), { status });
+
+  // OpenAI's out-of-credit answer is a 429 with code insufficient_quota.
+  const noQuota = await probeProviderModel('openai', 'sk', 'gpt-4.1-mini', undefined, answer(429, {
+    error: { message: 'You exceeded your current quota, please check your plan and billing details.', type: 'insufficient_quota', code: 'insufficient_quota' },
+  }));
+  assert.equal(noQuota.status, 'refused');
+  assert.match(noQuota.detail ?? '', /^HTTP 429: You exceeded your current quota/);
+
+  // A 429 whose message is about credit or billing is the same, whichever provider.
+  const noCredit = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, answer(429, {
+    type: 'error', error: { type: 'rate_limit_error', message: 'Your credit balance is too low to access the Anthropic API.' },
+  }));
+  assert.equal(noCredit.status, 'refused');
+
+  // An ordinary rate limit still says nothing about the model.
+  const limited = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, answer(429, {
+    type: 'error', error: { type: 'rate_limit_error', message: 'Number of request tokens has exceeded your per-minute rate limit' },
+  }));
+  assert.equal(limited.status, 'no answer');
+  const bare = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, async () => new Response('', { status: 429 }));
+  assert.deepEqual(bare, { status: 'no answer', detail: 'HTTP 429' });
+});
+
+test('probeProviderModel counts a 200 as answered only when it carries a completion a run would accept', async () => {
+  const ok = (body: string) => async () => new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+
+  // A run refuses these, so the probe must not call them answered.
+  for (const body of ['', 'not json', '{}', JSON.stringify({ choices: [] }), JSON.stringify({ choices: [{ finish_reason: 'stop' }] })]) {
+    const verdict = await probeProviderModel('openai', 'sk', 'gpt-4.1-mini', 'http://localhost:1234/v1', ok(body));
+    assert.equal(verdict.status, 'refused', `openai 200 body ${JSON.stringify(body)}`);
+    assert.match(verdict.detail ?? '', /^HTTP 200/);
+  }
+  for (const body of ['', '{}', JSON.stringify({ type: 'error' })]) {
+    const verdict = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined, ok(body));
+    assert.equal(verdict.status, 'refused', `anthropic 200 body ${JSON.stringify(body)}`);
+  }
+
+  const anthropic = await probeProviderModel('anthropic', 'sk-ant', 'claude-opus-5', undefined,
+    ok(JSON.stringify({ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'p' }], stop_reason: 'max_tokens' })));
+  assert.equal(anthropic.status, 'answered');
+});
+
+test('probeProviderModel does not take a 429 that only mentions quota for an empty account', async () => {
+  const answer = (body: unknown) => async () => new Response(JSON.stringify(body), { status: 429 });
+  for (const message of ['Rate limit reached: quota exceeded for requests per minute', 'Daily quota exceeded, try again tomorrow', 'Too many requests for your credits tier']) {
+    const verdict = await probeProviderModel('openai', 'sk', 'gpt-4.1-mini', 'http://localhost:1234/v1', answer({ error: { message, code: 'rate_limit_exceeded' } }));
+    assert.equal(verdict.status, 'no answer', message);
+  }
 });
 
 test('collectAvailableModels never sends the default provider secret to a second provider', async () => {

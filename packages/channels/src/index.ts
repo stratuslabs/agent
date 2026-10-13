@@ -214,6 +214,16 @@ export interface GatewayLike {
      * `@stratusagent/gateway`.
      */
     onRepeat?: (repeat: 'live' | 'finished') => void;
+    /**
+     * Opts into merged turns: sent while the session's turn runs, this
+     * message may be answered by one next turn together with others that
+     * queued. Called before the dispatch settles when it was absorbed into
+     * such a turn led by an earlier message, whose caller posts the answer,
+     * so this one takes down anything of its own and posts nothing. A host
+     * without it ignores the field. See `DispatchInput.onAbsorbed` in
+     * `@stratusagent/gateway`.
+     */
+    onAbsorbed?: () => void;
   }): Promise<Session>;
   readonly bus: EventBus;
   agents(): AgentDefinition[];

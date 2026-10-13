@@ -291,6 +291,13 @@ export type SlackThreadMessage = SlackHistoryMessage;
 const EARLIER_MESSAGE_LIMIT = 40;
 /** The most pages of 200 read from a thread for that: 4,000 replies. */
 const EARLIER_THREAD_PAGES = 20;
+
+/**
+ * The holder-record name for a bot this adapter does not serve: an agent on
+ * another gateway, or any other app. The colon keeps it from ever equaling
+ * an agent id, so the holder rule reads it as "somebody else's".
+ */
+const FOREIGN_SPEAKER_PREFIX = 'slack-bot:';
 /**
  * At the top of a channel, how many of its most recent messages a mention
  * opens with, and how many are read to find them.
@@ -4865,6 +4872,157 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     return undefined;
   };
+
+  /**
+   * Whether `user` is one of this adapter's own agents in `team`. Their
+   * replies reach the holder record through `ReplyOutcome.spokeAt`, and
+   * their sessions answer for them after a restart.
+   */
+  const isFleetBot = (team: string, user: string | undefined): boolean =>
+    user !== undefined && [...botIdentities.values()].some(
+      (identity) => identity.teamId === team && identity.botUserId === user,
+    );
+
+  /**
+   * Records a bot this adapter does not serve as the thread's holder from
+   * the message it posted. An agent on another gateway answers in the same
+   * threads, and nothing in this process's sessions knows it spoke: without
+   * this, an agent here that spoke earlier keeps taking every untagged reply,
+   * and the reply meant for the other agent is answered twice. Only who
+   * spoke and when is kept, never what was said; the bot's message itself is
+   * still dropped by `admit`. Any app counts, an integration included: an
+   * untagged reply right after another app posted is not plainly this
+   * agent's, and naming the agent hands the thread back.
+   */
+  const noteForeignSpeaker = (connection: AgentConnection, args: SlackSocketEventArgs): void => {
+    const event = args.event;
+    if (!event || event.type !== 'message' || event.channel_type === 'im') {
+      return;
+    }
+    if (event.bot_id === undefined && event.subtype !== 'bot_message') {
+      return;
+    }
+    if (event.subtype !== undefined && event.subtype !== 'bot_message' && !HUMAN_MESSAGE_SUBTYPES.has(event.subtype)) {
+      // An edit, a deletion, a join: not somebody speaking.
+      return;
+    }
+    const team = args.body?.team_id ?? connection.teamId;
+    const speaker = event.user ?? event.bot_id;
+    if (speaker === undefined || isFleetBot(team, event.user)) {
+      return;
+    }
+    const thread = event.thread_ts ?? event.ts;
+    rememberAddressee(threadKeyFor({ team, conversation: event.channel, thread }), `${FOREIGN_SPEAKER_PREFIX}${speaker}`, event.ts);
+  };
+
+  /**
+   * The durable half of `noteForeignSpeaker`, for a thread this process has
+   * no record of: where each of `candidates` last held the thread, and where
+   * a bot this adapter does not serve last spoke, read from the thread
+   * itself. Held means an agent's own message there or a person's message
+   * naming it that it would admit, by position in the thread (its session's
+   * `lastSpokeAt` only when its bot user id is unknown). Undefined whenever
+   * it cannot tell: no thread read, a failed read, or a thread too long to
+   * reach its newest replies. Then the reply is routed as it was before
+   * this check.
+   */
+  const threadPositions = async (
+    candidates: Array<{ agentId: string; lastSpokeAt?: string }>,
+    parts: { team: string; conversation: string; thread: string },
+    ts: string,
+  ): Promise<{ held: Map<string, number>; foreign: number } | undefined> => {
+    const connection = connections.find((candidate) => candidate.config.agentId === candidates[0]?.agentId)
+      ?? connections.find((candidate) => candidate.teamId === parts.team);
+    const replies = connection?.web.conversations.replies;
+    if (!connection || !replies) {
+      return undefined;
+    }
+    // Positions in the thread, as the live record keeps them: a reply that
+    // filled a placeholder sits where the placeholder was posted, above
+    // anything posted while it was being written, though the transcript
+    // dates it later. `lastSpokeAt` stands in only when an agent's own
+    // messages can't be told apart in the read.
+    const held = new Map<string, number>();
+    const byBotUser = new Map<string, string>();
+    for (const candidate of candidates) {
+      const botUserId = botIdentities.get(candidate.agentId)?.botUserId;
+      if (botUserId !== undefined) {
+        byBotUser.set(botUserId, candidate.agentId);
+        held.set(candidate.agentId, 0);
+        continue;
+      }
+      const spoke = candidate.lastSpokeAt === undefined ? Number.NaN : Date.parse(candidate.lastSpokeAt) / 1000;
+      held.set(candidate.agentId, Number.isFinite(spoke) ? spoke : 0);
+    }
+    const place = (agentId: string, at: number): void => {
+      held.set(agentId, Math.max(held.get(agentId) ?? 0, at));
+    };
+    let foreign = 0;
+    try {
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page: { messages?: SlackThreadMessage[]; response_metadata?: { next_cursor?: string } } = await replies.call(connection.web.conversations, {
+          channel: parts.conversation,
+          ts: parts.thread,
+          latest: ts,
+          inclusive: false,
+          limit: 200,
+          ...(cursor ? { cursor } : {}),
+        });
+        pages += 1;
+        for (const message of page.messages ?? []) {
+          const at = Number(message.ts);
+          if (!Number.isFinite(at) || !(at < Number(ts))) {
+            continue;
+          }
+          const own = message.user === undefined ? undefined : byBotUser.get(message.user);
+          if (own !== undefined) {
+            place(own, at);
+            continue;
+          }
+          const bot = message.bot_id !== undefined || message.subtype === 'bot_message';
+          if (bot) {
+            // A bot's mention hands nothing over live (admit ignores bots),
+            // so here it is only another app speaking, or a peer's words.
+            if (!isFleetBot(parts.team, message.user)) {
+              foreign = Math.max(foreign, at);
+            }
+            continue;
+          }
+          // A person naming an agent takes the thread for it only if that
+          // agent would admit them, as the live handover does.
+          const sender = message.user;
+          if (sender === undefined) {
+            continue;
+          }
+          const named = agentNamedIn(message.text ?? '', parts.team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
+          if (named !== undefined && held.has(named) && botIdentities.get(named)?.botUserId !== undefined) {
+            place(named, at);
+          }
+        }
+        cursor = page.response_metadata?.next_cursor || undefined;
+      } while (cursor && pages < EARLIER_THREAD_PAGES);
+      if (cursor) {
+        return undefined;
+      }
+    } catch (error) {
+      warn(`slack: could not read thread ${parts.thread} in ${parts.conversation} to see who spoke last, so it is routed as before: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+    return { held, foreign };
+  };
+
+  /** Whether another app spoke in the thread after `agentId` last held it. */
+  const foreignSpokeSince = async (
+    agentId: string,
+    parts: { team: string; conversation: string; thread: string },
+    ts: string,
+    lastSpokeAt: string | undefined,
+  ): Promise<boolean> => {
+    const read = await threadPositions([{ agentId, ...(lastSpokeAt !== undefined ? { lastSpokeAt } : {}) }], parts, ts);
+    return read !== undefined && read.foreign > (read.held.get(agentId) ?? 0);
+  };
   /**
    * Which of this process's agents a message names, or undefined if it
    * names none of them.
@@ -5032,13 +5190,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       for (const [agentId, identity] of botIdentities) {
         if (identity.teamId === parts.team && identity.botUserId === parts.parentUser) {
-          return agentId;
+          return await foreignSpokeSince(agentId, parts, ts, undefined) ? undefined : agentId;
         }
       }
       return undefined;
     }
     if (engaged.length === 1) {
-      return first.agentId;
+      return await foreignSpokeSince(first.agentId, parts, ts, first.lastSpokeAt) ? undefined : first.agentId;
     }
     let latest: { agentId: string; lastSpokeAt: string } | undefined;
     let tied = false;
@@ -5057,7 +5215,33 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         tied = true;
       }
     }
-    return tied ? undefined : latest?.agentId;
+    const bySession = tied ? undefined : latest?.agentId;
+    // Sessions date a reply by when it finished, the thread by where its
+    // placeholder went up, and an agent on another gateway may have spoken
+    // since: only the thread can say who holds it. When it can't be read,
+    // the sessions decide, as before.
+    const read = await threadPositions(engaged, parts, ts);
+    if (!read) {
+      return bySession;
+    }
+    let holder: { agentId: string; at: number } | undefined;
+    let tiedAt = false;
+    for (const entry of engaged) {
+      const at = read.held.get(entry.agentId) ?? 0;
+      if (at <= 0) {
+        continue;
+      }
+      if (!holder || at > holder.at) {
+        holder = { agentId: entry.agentId, at };
+        tiedAt = false;
+      } else if (at === holder.at) {
+        tiedAt = true;
+      }
+    }
+    if (!holder) {
+      return read.foreign > 0 ? undefined : bySession;
+    }
+    return tiedAt || read.foreign > holder.at ? undefined : holder.agentId;
   };
 
   /**
@@ -5173,6 +5357,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   const admit = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
     const event = args.event;
+    if (gatewayRef) {
+      noteForeignSpeaker(connection, args);
+    }
     if (!gatewayRef || !event || !event.user || event.bot_id || !isPersonSpeaking(event)) {
       return undefined;
     }
@@ -5782,6 +5969,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // key is shared, and the running turn's status stays up instead.
       renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
       let repeat: 'live' | 'finished' | undefined;
+      let absorbed = false;
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,
@@ -5799,8 +5987,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         onRepeat: (kind) => {
           repeat = kind;
         },
+        // Sent while a turn is running, this message is answered by the
+        // next turn together with everything else that queued (card 423);
+        // the first of them renders that answer.
+        onAbsorbed: () => {
+          absorbed = true;
+        },
       });
-      return { renderer, turn, repeat: () => repeat };
+      return { renderer, turn, repeat: () => repeat, absorbed: () => absorbed };
     });
 
     // Whatever way the intake ended, it is no longer in flight.
@@ -5820,7 +6014,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       return;
     }
-    const { renderer, turn, repeat } = started;
+    const { renderer, turn, repeat, absorbed } = started;
 
     const removeFromQueue = (): void => {
       const current = renderers.get(sessionId);
@@ -5850,7 +6044,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // The turn is a live earlier delivery's, and that delivery's renderer
     // posts its answer, or its failure: this one takes down whatever it put
     // up and says nothing.
-    if (repeat() === 'live') {
+    // Likewise a message absorbed into a merged turn: the turn's leading
+    // message's renderer answers for all of them.
+    if (repeat() === 'live' || absorbed()) {
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;

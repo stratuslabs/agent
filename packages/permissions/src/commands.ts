@@ -128,8 +128,9 @@ const DESTRUCTIVE_FLAGS = [
 /**
  * The commands that run unattended out of the box.
  *
- * Short on purpose. Every entry is a promise that no argument shape reaches
- * outside the repository it is run in, and the tempting additions —
+ * Short on purpose. Every entry is a promise that no argument shape runs
+ * another program, writes a file, or reads a path it is given, and the
+ * tempting additions —
  * `cat`, `ls`, `grep` — cannot make it: they read whatever path they are
  * given, and `cat ~/.stratus/credentials.json` is a safe-listed credential
  * read. An operator who wants those adds them deliberately, or approves
@@ -148,7 +149,16 @@ const DESTRUCTIVE_FLAGS = [
  */
 export const NUMERIC_FLAG = '-<number>';
 
-export const SAFE_COMMAND_SCOPES: CommandScope[] = [
+/**
+ * The limits a persisted or declared `git` scope inherits, though no `git`
+ * form runs unattended. Git runs programs a repository's own files name
+ * (fsmonitor, diff and filter drivers), and some read forms take a path
+ * anywhere on disk, so a repository the agent can write, or an argument it
+ * chose, turns a read into something nobody approved. Every `git` call asks
+ * or runs on a grant a person made. The table stays so that approving
+ * `git branch` once still persists the listing form only.
+ */
+const GIT_SCOPE_LIMITS: CommandScope[] = [
   { command: 'git', args: ['status'] },
   { command: 'git', args: ['log'] },
   { command: 'git', args: ['diff'] },
@@ -197,6 +207,9 @@ export const SAFE_COMMAND_SCOPES: CommandScope[] = [
     allowedFlags: ['--verbose', 'v'],
     deniedArgs: ['add', 'remove', 'rm', 'rename', 'set-url', 'set-head', 'set-branches', 'prune', 'update'],
   },
+];
+
+export const SAFE_COMMAND_SCOPES: CommandScope[] = [
   // Filters: what they read is stdin, which is what makes them safe at the
   // end of a pipeline whose first command is. Each is held to its listing
   // shape, a named set of flags, and no token the shell would expand, so
@@ -262,6 +275,12 @@ export const SAFE_COMMAND_SCOPES: CommandScope[] = [
   { command: 'whoami' },
   { command: 'uname' },
 ];
+
+/**
+ * Every built-in limit a stored scope inherits: the unattended list and the
+ * `git` forms that ask. A persisted scope is never wider than these.
+ */
+const SCOPE_LIMITS: CommandScope[] = [...GIT_SCOPE_LIMITS, ...SAFE_COMMAND_SCOPES];
 
 /**
  * Every shell control operator, as a rejection set rather than a blacklist
@@ -834,7 +853,7 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
     // Flag-first: the exact command, held to every constraint the safe
     // list draws for this base command, because the subcommand that would
     // pick between them cannot be identified past a flag of unknown arity.
-    const forBase = SAFE_COMMAND_SCOPES.filter((scope) => scope.command === analysis.base);
+    const forBase = SCOPE_LIMITS.filter((scope) => scope.command === analysis.base);
     const denied = [...ALWAYS_DENIED_FLAGS, ...DESTRUCTIVE_FLAGS, ...forBase.flatMap((scope) => scope.deniedFlags ?? [])];
     const deniedArgs = forBase.flatMap((scope) => scope.deniedArgs ?? []);
     for (const token of tokens) {
@@ -902,7 +921,7 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
   if (first !== undefined && (analysis.expands?.[firstIndex + 1] || /[*?[\]{}~$\\#]/.test(first))) {
     return undefined;
   }
-  const sameScope = SAFE_COMMAND_SCOPES
+  const sameScope = SCOPE_LIMITS
     .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === (first ?? ''));
   const inherited = sameScope.flatMap((scope) => scope.deniedFlags ?? []);
   const args = first === undefined ? [] : [first];
@@ -968,7 +987,7 @@ export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } 
   if (analysis.expands?.some((expands) => expands) || analysis.tokens.some((token) => /[*?[\]{}~$\\#]/.test(token))) {
     return { reason: 'it contains something the shell would expand' };
   }
-  const forBase = SAFE_COMMAND_SCOPES.filter((scope) => scope.command === analysis.base);
+  const forBase = SCOPE_LIMITS.filter((scope) => scope.command === analysis.base);
   const declared = args.join(' ');
   // A prefix shorter than a subcommand the built-in list limits would cover
   // that subcommand's mutating forms: `git` would run `git branch release`,
@@ -994,7 +1013,11 @@ export const commandScopeFromPrefix = (prefix: string): { scope: CommandScope } 
       && (scope.listOnly || scope.allowedFlags || scope.maxPositionals !== undefined || scope.literal || (scope.flagsWithValue ?? []).length > 0);
   });
   if (extended) {
-    return { reason: `it extends \`${describeCommandScope(extended)}\`, which the built-in list already limits; it runs unattended within those limits without an entry` };
+    return {
+      reason: SAFE_COMMAND_SCOPES.includes(extended)
+        ? `it extends \`${describeCommandScope(extended)}\`, which the built-in list already limits; it runs unattended within those limits without an entry`
+        : `it extends \`${describeCommandScope(extended)}\`, which the built-in list limits; list \`${describeCommandScope(extended)}\` instead, which keeps them`,
+    };
   }
   // And the same prefix as a built-in scope keeps every limit it draws —
   // list-only, the named flags, the positional count — never just the

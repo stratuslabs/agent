@@ -129,3 +129,29 @@ test('an unkeyed turn nobody asked for is a turn: it is the latest, and its fail
   const observed: Message = { ...user('aside'), overheard: true, observed: true };
   assert.equal(isLatestTurn({ messages: [user('hello', 'k1'), assistant('hi'), observed] }, 'k1'), true);
 });
+
+test('a message absorbed into a merged turn is found by its own key, as that turn', () => {
+  // Card 423: messages queued behind a running turn are answered by one
+  // turn. The merged message carries every absorbed dispatch's key, so a
+  // crash repeat of any of them resolves to that turn instead of running again.
+  const merged: Message = { ...user('first\n\nsecond', 'k1'), absorbedKeys: ['k2'] };
+  assert.equal(workItemState({ status: 'running', messages: [merged] }, 'k2'), 'unfinished');
+  assert.equal(workItemState({ status: 'completed', messages: [merged, assistant('both')] }, 'k2'), 'finished');
+  assert.equal(turnReplyFor({ messages: [merged, assistant('both')] }, 'k2'), 'both');
+  assert.equal(isLatestTurn({ messages: [merged, assistant('both')] }, 'k2'), true);
+  assert.equal(turnFailureFor({ status: 'failed', messages: [{ ...merged, turnError: 'boom' }] }, 'k2'), 'boom');
+  assert.deepEqual(turnFilesFor({ messages: [merged, toolFile('/tmp/a.txt')] }, 'k2').map((file) => file.path), ['/tmp/a.txt']);
+  assert.equal(workItemState({ status: 'completed', messages: [merged] }, 'k3'), undefined);
+});
+
+test('resume records absorbed keys on the turn\'s one user message', async () => {
+  const provider: ModelProvider = { name: 'ok', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } };
+  const runner = new AgentRunner({ provider });
+  const agent = { id: 'ava', name: 'Ava' };
+  await runner.run({ sessionId: 's', agent, userMessage: 'hello', idempotencyKey: 'k0' });
+  const session = await runner.resume({ sessionId: 's', userMessage: 'first\n\nsecond', idempotencyKey: 'k1', absorbedKeys: ['k2'] });
+  const users = session.messages.filter((message) => message.role === 'user');
+  assert.equal(users.length, 2);
+  assert.deepEqual(users[1]?.absorbedKeys, ['k2']);
+  assert.equal(workItemState(session, 'k2'), 'finished');
+});
