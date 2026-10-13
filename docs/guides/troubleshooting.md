@@ -134,8 +134,11 @@ a problem.
   Slack only when it is promoted, so there the warning is in the daemon log
   but not in `stratus doctor`. Slack can't report event subscriptions to a
   bot token, so no warning only clears the scopes: check the app's
-  `message.*` events too. With scopes and events both in place, a missing
-  reply usually means another agent spoke last in that thread.
+  `message.*` events too. With scopes and events both in place, check the
+  soul's [`listens`](./slack.md#how-an-agent-listens) setting: `mentions`
+  hears untagged replies without answering them, and `judge` may choose
+  silence or be past its attention window. Under the default `thread`, a
+  missing reply usually means another agent spoke last in that thread.
 - **A DM to the app says "Sending messages to this app has been turned
   off"** — that is Slack's App Home setting, not Stratus: the app was
   created before the manifest turned on its Messages Tab. In the app's
