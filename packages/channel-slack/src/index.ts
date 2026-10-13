@@ -290,6 +290,13 @@ export type SlackThreadMessage = SlackHistoryMessage;
 const EARLIER_MESSAGE_LIMIT = 40;
 /** The most pages of 200 read from a thread for that: 4,000 replies. */
 const EARLIER_THREAD_PAGES = 20;
+
+/**
+ * The holder-record name for a bot this adapter does not serve: an agent on
+ * another gateway, or any other app. The colon keeps it from ever equaling
+ * an agent id, so the holder rule reads it as "somebody else's".
+ */
+const FOREIGN_SPEAKER_PREFIX = 'slack-bot:';
 /**
  * At the top of a channel, how many of its most recent messages a mention
  * opens with, and how many are read to find them.
@@ -4819,6 +4826,112 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     return undefined;
   };
+
+  /**
+   * Whether `user` is one of this adapter's own agents in `team`. Their
+   * replies reach the holder record through `ReplyOutcome.spokeAt`, and
+   * their sessions answer for them after a restart.
+   */
+  const isFleetBot = (team: string, user: string | undefined): boolean =>
+    user !== undefined && [...botIdentities.values()].some(
+      (identity) => identity.teamId === team && identity.botUserId === user,
+    );
+
+  /**
+   * Records a bot this adapter does not serve as the thread's holder from
+   * the message it posted. An agent on another gateway answers in the same
+   * threads, and nothing in this process's sessions knows it spoke: without
+   * this, an agent here that spoke earlier keeps taking every untagged reply,
+   * and the reply meant for the other agent is answered twice. Only who
+   * spoke and when is kept, never what was said; the bot's message itself is
+   * still dropped by `admit`. Any app counts, an integration included: an
+   * untagged reply right after another app posted is not plainly this
+   * agent's, and naming the agent hands the thread back.
+   */
+  const noteForeignSpeaker = (connection: AgentConnection, args: SlackSocketEventArgs): void => {
+    const event = args.event;
+    if (!event || event.type !== 'message' || event.channel_type === 'im') {
+      return;
+    }
+    if (event.bot_id === undefined && event.subtype !== 'bot_message') {
+      return;
+    }
+    if (event.subtype !== undefined && event.subtype !== 'bot_message' && !HUMAN_MESSAGE_SUBTYPES.has(event.subtype)) {
+      // An edit, a deletion, a join: not somebody speaking.
+      return;
+    }
+    const team = args.body?.team_id ?? connection.teamId;
+    const speaker = event.user ?? event.bot_id;
+    if (speaker === undefined || isFleetBot(team, event.user)) {
+      return;
+    }
+    const thread = event.thread_ts ?? event.ts;
+    rememberAddressee(threadKeyFor({ team, conversation: event.channel, thread }), `${FOREIGN_SPEAKER_PREFIX}${speaker}`, event.ts);
+  };
+
+  /**
+   * The durable half of `noteForeignSpeaker`, for a thread this process has
+   * no record of: whether a bot this adapter does not serve posted in the
+   * thread after `agentId` last held it, read from the thread itself. Held
+   * means its own message there, a message naming it, or its session's
+   * `lastSpokeAt`, whichever is newest. False whenever it cannot tell: no
+   * thread read, a failed read, or a thread too long to reach its newest
+   * replies. Then the reply is answered as it was before this check.
+   */
+  const foreignSpokeSince = async (
+    agentId: string,
+    parts: { team: string; conversation: string; thread: string },
+    ts: string,
+    lastSpokeAt: string | undefined,
+  ): Promise<boolean> => {
+    const connection = connections.find((candidate) => candidate.config.agentId === agentId)
+      ?? connections.find((candidate) => candidate.teamId === parts.team);
+    const replies = connection?.web.conversations.replies;
+    if (!connection || !replies) {
+      return false;
+    }
+    const botUserId = botIdentities.get(agentId)?.botUserId;
+    const spoke = lastSpokeAt === undefined ? Number.NaN : Date.parse(lastSpokeAt) / 1000;
+    let held = Number.isFinite(spoke) ? spoke : 0;
+    let foreign = 0;
+    try {
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page: { messages?: SlackThreadMessage[]; response_metadata?: { next_cursor?: string } } = await replies.call(connection.web.conversations, {
+          channel: parts.conversation,
+          ts: parts.thread,
+          latest: ts,
+          inclusive: false,
+          limit: 200,
+          ...(cursor ? { cursor } : {}),
+        });
+        pages += 1;
+        for (const message of page.messages ?? []) {
+          const at = Number(message.ts);
+          if (!Number.isFinite(at) || !(at < Number(ts))) {
+            continue;
+          }
+          if (botUserId !== undefined && (message.user === botUserId || mentions(message.text ?? '', botUserId))) {
+            held = Math.max(held, at);
+            continue;
+          }
+          const bot = message.bot_id !== undefined || message.subtype === 'bot_message';
+          if (bot && !isFleetBot(parts.team, message.user)) {
+            foreign = Math.max(foreign, at);
+          }
+        }
+        cursor = page.response_metadata?.next_cursor || undefined;
+      } while (cursor && pages < EARLIER_THREAD_PAGES);
+      if (cursor) {
+        return false;
+      }
+    } catch (error) {
+      warn(`slack: could not read thread ${parts.thread} in ${parts.conversation} to see whether another app spoke last, so ${agentId} answers as before: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    return foreign > held;
+  };
   /**
    * Which of this process's agents a message names, or undefined if it
    * names none of them.
@@ -4986,13 +5099,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       for (const [agentId, identity] of botIdentities) {
         if (identity.teamId === parts.team && identity.botUserId === parts.parentUser) {
-          return agentId;
+          return await foreignSpokeSince(agentId, parts, ts, undefined) ? undefined : agentId;
         }
       }
       return undefined;
     }
     if (engaged.length === 1) {
-      return first.agentId;
+      return await foreignSpokeSince(first.agentId, parts, ts, first.lastSpokeAt) ? undefined : first.agentId;
     }
     let latest: { agentId: string; lastSpokeAt: string } | undefined;
     let tied = false;
@@ -5011,7 +5124,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         tied = true;
       }
     }
-    return tied ? undefined : latest?.agentId;
+    if (tied || !latest) {
+      return undefined;
+    }
+    // An agent on another gateway may have spoken since, which only the
+    // thread can say.
+    return await foreignSpokeSince(latest.agentId, parts, ts, latest.lastSpokeAt) ? undefined : latest.agentId;
   };
 
   /**
@@ -5094,6 +5212,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const admit = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
     const event = args.event;
+    if (gatewayRef) {
+      noteForeignSpeaker(connection, args);
+    }
     if (!gatewayRef || !event || !event.user || event.bot_id || !isPersonSpeaking(event)) {
       return undefined;
     }

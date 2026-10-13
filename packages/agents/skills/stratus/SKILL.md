@@ -142,7 +142,7 @@ When a stored key "isn't found", check in this order:
 - With several agents in one thread, an untagged reply goes to whoever spoke last. Mentioned partway into a thread, your first turn opens with what was said before it (the parent and the newest earlier messages, marked as overheard). Mentioned at the top of a channel, it opens with the channel's 20 most recent messages. Both need the Slack app's history scopes. Without them you hear the thread from the mention onward only. A stranger or another bot among those earlier messages lowers the conversation's trust as if they had spoken to you.
 - **Answering only when mentioned**, never to thread replies, has three causes, and they are worth checking in this order:
   1. `listens: mentions` in your soul.
-  2. Another agent spoke last in that thread.
+  2. Another agent spoke last in that thread. That includes an agent on another daemon or machine, and any other app's bot that posted there.
   3. The app is missing the history scopes (`channels:history`, `groups:history`, `mpim:history`) and their `message.*` events, which means adding them and reinstalling the app.
 
   Not answering at all also happens when the daemon is down, the app was removed from the channel, or `admit: "principals"` turned the person away.

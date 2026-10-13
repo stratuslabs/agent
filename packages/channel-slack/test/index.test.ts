@@ -10518,3 +10518,112 @@ test('a paused daemon answers a mention with its pause sentence, not as a failur
   assert.ok(said.includes("I'm paused: this workspace's usage limit is reached."), said.join('\n'));
   assert.ok(!said.some((text) => /Something went wrong/.test(text ?? '')), said.join('\n'));
 });
+
+/** A message another app's bot posted: an agent served by some other gateway, or any integration. */
+const foreignBotMessage = (input: { text: string; ts: string; thread: string; user?: string; botId?: string }) => ({
+  body: { team_id: 'T1', event_id: `evt-bot-${input.ts}` },
+  event: {
+    type: 'message',
+    channel_type: 'channel',
+    user: input.user ?? 'U-FLY',
+    bot_id: input.botId ?? 'B-FLY-APP',
+    text: input.text,
+    ts: input.ts,
+    thread_ts: input.thread,
+    channel: 'C1',
+  },
+});
+
+test('an untagged reply after another gateway\'s agent spoke last is not answered here, until this agent is named again', async () => {
+  // Fly Test runs on its own gateway, so nothing in this process's sessions
+  // knows it is in the thread. Only its message says so.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:950.0', '2026-01-01T00:00:00.000Z']]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('message', channelMessage({ text: 'first?', ts: '950.1', thread: '950.0' }));
+  await socket.deliver('message', foreignBotMessage({ text: 'Fly Test here', ts: '950.3', thread: '950.0' }));
+  // Fly Test spoke last: this reply is its, not Ava's.
+  await socket.deliver('message', channelMessage({ text: 'and you?', ts: '950.4', thread: '950.0' }));
+  // Naming Ava hands the thread back, and the reply after that is hers again.
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> back to you', ts: '950.5', thread: '950.0' }));
+  await socket.deliver('message', channelMessage({ text: 'and then?', ts: '950.6', thread: '950.0' }));
+  // A bot message delivered late but posted before Ava held the thread does
+  // not take it from her.
+  await socket.deliver('message', foreignBotMessage({ text: 'late echo', ts: '950.55', thread: '950.0' }));
+  await socket.deliver('message', channelMessage({ text: 'still you?', ts: '950.7', thread: '950.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'Dylan: first?',
+    'Dylan: back to you',
+    'Dylan: and then?',
+    'Dylan: still you?',
+  ]);
+});
+
+test('after a restart, an untagged reply goes unanswered here when another gateway\'s agent spoke after this one, read from the thread', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const warnings: string[] = [];
+  // Ava's session says she last spoke at 960.2 (Slack seconds).
+  const spokeAt = new Date(960.2 * 1000).toISOString();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:960.0', spokeAt],
+    ['slack:ava:T1:C1:961.0', spokeAt],
+    ['slack:ava:T1:C1:962.0', spokeAt],
+  ]));
+  const threads: Record<string, Array<Record<string, unknown>>> = {
+    // Fly Test answered after Ava.
+    '960.0': [
+      { ts: '960.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+      { ts: '960.2', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+      { ts: '960.3', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+    ],
+    // Fly Test spoke, then Ava: still Ava's.
+    '961.0': [
+      { ts: '961.0', user: 'U-DYLAN', text: '<@B-AVA> hi' },
+      { ts: '961.1', user: 'U-FLY', bot_id: 'B-FLY-APP', text: 'Fly Test here' },
+      { ts: '961.2', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'hello' },
+    ],
+  };
+  web.conversations.replies = async (args: { ts: string; latest?: string }) => {
+    if (args.ts === '962.0') {
+      throw new Error('missing_scope');
+    }
+    return {
+      messages: (threads[args.ts] ?? []).filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+      response_metadata: { next_cursor: '' },
+    };
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line: string) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'and you?', ts: '960.4', thread: '960.0' }));
+  await socket.deliver('message', channelMessage({ text: 'go on', ts: '961.4', thread: '961.0' }));
+  // A thread that cannot be read is answered as before, with a warning.
+  await socket.deliver('message', channelMessage({ text: 'still there?', ts: '962.4', thread: '962.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'Dylan: go on',
+    'Dylan: still there?',
+  ]);
+  assert.ok(warnings.some((line) => line.includes('missing_scope')), warnings.join('\n'));
+});
