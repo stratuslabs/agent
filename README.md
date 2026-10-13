@@ -27,8 +27,9 @@ stratus setup     # sign in, create an agent, give it tools, connect Slack — o
 stratus chat      # talk; the conversation persists
 ```
 
-No API key or provider sign-in yet? `stratus run "say hello"` works
-offline on the built-in demo provider. Needs Node 22.13+ (on the 23.x
+No API key or provider sign-in yet? `stratus run --provider demo "say hello"`
+works offline on the built-in demo model. With nothing configured, a plain
+run stops and points you to `stratus setup` rather than answering as the demo. Needs Node 22.13+ (on the 23.x
 line, 23.4+) — details in [Installation](docs/start/installation.md).
 
 ## What your agents can do

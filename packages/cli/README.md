@@ -35,7 +35,7 @@ edit, no env vars to export. Walkthrough:
 ```bash
 stratus setup                          # onboarding menu: providers, models, agent, plugins, channels, approvals
 stratus chat                           # talk — the conversation persists
-stratus run "say hello"                # one-shot run (works offline on the demo provider)
+stratus run --provider demo "say hello"  # one-shot run, offline on the demo model
 stratus serve                          # stratusd: the whole roster, always on
 stratus serve --approvals remote       # ask a human in Slack instead of refusing
 stratus service install                # keep stratusd running under launchd/systemd

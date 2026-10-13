@@ -233,6 +233,8 @@ export {
   ignoredUntrustedConfigKeys,
   discoverIgnoredUntrustedConfig,
   resolveRuntimeConfig,
+  NoProviderConfiguredError,
+  signedInProviders,
   languageFor,
 } from './runtime.ts';
 

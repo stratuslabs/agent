@@ -19,7 +19,7 @@ const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'str
 
 test('a paused gateway refuses new work with its message, and finishes the turn already running', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
   try {
@@ -144,7 +144,7 @@ const recordingAdapter = (name: string, order: string[], servesWhileHeld?: boole
 
 test('a held gateway starts only what serves while held, refuses work, and promote brings up the rest', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const order: string[] = [];
   const gateway = createGateway({
     env,

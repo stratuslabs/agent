@@ -99,7 +99,7 @@ test('taint survives a daemon restart mid-session: the session still writes exte
 
 test('the gateway carries each turn’s sender to a resumed session, so a stranger mid-thread lowers it for good', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
   try {
@@ -149,7 +149,7 @@ test('the session label is the daemon’s to write: a caller cannot seed it thro
 
 test('a rollover archives the transcript and starts the same id over — the remedy for a session that predates labels', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
   try {
@@ -234,7 +234,7 @@ test('a rollover archives the transcript and starts the same id over — the rem
 
 test('a rollover over a store whose injected slice is still unknown is unknown on its first turn, correctly', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
   try {
@@ -283,7 +283,7 @@ test('a rollover refuses a session with a turn in flight', async () => {
 
 test('a serving daemon stops taking work once a newer build has stamped the home', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
   try {

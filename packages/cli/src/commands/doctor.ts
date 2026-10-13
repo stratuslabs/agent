@@ -527,11 +527,13 @@ export const collectDoctorReport = async (
       ? `${soulPath} (soul frontmatter)`
       : fileConfig.provider
         ? (winner?.path ?? 'config')
-        : 'built-in default — nothing set a provider';
+        : resolved?.inferredProvider !== undefined
+          ? 'the only provider signed in — nothing set one'
+          : 'nothing set a provider';
   // When resolution fails the intended provider is still worth reporting:
   // "why is it anthropic" is exactly the question, and the problems below
   // already say no run can start.
-  const intendedProvider = envProviderPick?.value ?? soul?.provider ?? fileConfig.provider ?? 'demo';
+  const intendedProvider = envProviderPick?.value ?? soul?.provider ?? fileConfig.provider ?? 'none';
   const provider: DoctorSetting = resolved
     ? { value: resolved.provider, source: providerSource }
     : { value: `${intendedProvider} (unreachable)`, source: providerSource };
