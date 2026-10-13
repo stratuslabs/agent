@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -28,7 +28,7 @@ const createStreams = () => {
  */
 const doctor = async (
   argv: string[],
-  answer: number | 'offline',
+  answer: number | 'offline' | 'hang',
   credential: Record<string, unknown> = { type: 'api_key', value: 'sk-ant-stored' },
 ) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
@@ -44,6 +44,11 @@ const doctor = async (
     calls.push({ url: String(url), key: (init?.headers as Record<string, string> | undefined)?.['x-api-key'] });
     if (answer === 'offline') {
       throw new TypeError('fetch failed');
+    }
+    if (answer === 'hang') {
+      // Accepts the connection and never answers, and ignores any abort
+      // signal, so only doctor's own deadline can end the wait.
+      return new Promise<Response>(() => {});
     }
     return new Response('{}', { status: answer });
   }) as typeof fetch;
@@ -97,4 +102,24 @@ test('doctor --live --format json reports the checks as data', async () => {
   assert.equal(exitCode, 1);
   const report = JSON.parse(output.stdout) as { keyChecks: unknown[] };
   assert.deepEqual(report.keyChecks, [{ provider: 'anthropic', role: 'default', status: 'rejected', detail: 'HTTP 401' }]);
+});
+
+test('doctor --live gives up on a provider that never answers and does not judge the key', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const run = doctor(['doctor', '--live'], 'hang');
+    let finished = false;
+    void run.then(() => { finished = true; });
+    // Let doctor reach the probe, then run its deadline out.
+    for (let i = 0; i < 200 && !finished; i += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      mock.timers.tick(5_000);
+    }
+    assert.ok(finished, 'doctor --live hung on a provider that never answered');
+    const { exitCode, output } = await run;
+    assert.equal(exitCode, 0);
+    assert.match(output.stdout, /anthropic +no answer \(no answer within 10s\); the key was not judged/);
+  } finally {
+    mock.timers.reset();
+  }
 });

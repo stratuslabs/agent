@@ -64,6 +64,29 @@ const keyToCheck = (
   return { skip: 'no key' };
 };
 
+/** A provider's models list answers in well under a second; past this, doctor reports no answer instead of hanging. */
+const KEY_CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * `fetchImpl` with a deadline. The signal stops a real request; the race
+ * also covers a transport that ignores it, so doctor always finishes.
+ */
+const withDeadline = (fetchImpl: typeof fetch): typeof fetch => (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`no answer within ${KEY_CHECK_TIMEOUT_MS / 1000}s`));
+    }, KEY_CHECK_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([fetchImpl(input, { ...init, signal: controller.signal }), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}) as typeof fetch;
+
 /**
  * `--live`: the one part of doctor that leaves the machine. Each provider a
  * run consults is asked whether it accepts the key that run would send —
@@ -90,7 +113,7 @@ const checkKeys = async (
       checks.push({ provider: target.provider, role: target.role, status: 'not checked', detail: plan.skip });
       continue;
     }
-    const verdict = await verifyProviderKey(target.provider, plan.key, plan.baseUrl, env.fetch ?? globalThis.fetch);
+    const verdict = await verifyProviderKey(target.provider, plan.key, plan.baseUrl, withDeadline(env.fetch ?? globalThis.fetch));
     const status = verdict.status === 'ok' ? 'accepted' : verdict.status;
     checks.push({ provider: target.provider, role: target.role, status, ...(verdict.detail ? { detail: verdict.detail } : {}) });
     if (status === 'rejected') {
