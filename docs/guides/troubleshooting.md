@@ -50,6 +50,27 @@ surprises: a run that turns out to be on the `demo` provider, and an
 `ANTHROPIC_API_KEY` in the environment quietly demoting a Claude
 subscription sign-in to per-token billing.
 
+Doctor stays on the machine by default. `stratus doctor --live` also asks
+each provider your runs use (the default and any fallback) whether it
+accepts the key that run would send, using the same free models-list call
+setup makes when you enter a key. When the key is accepted, it then asks the
+run's model for a one-token reply, which catches a model name the provider
+doesn't know or an account it won't bill:
+
+```text
+Live check
+  anthropic key accepted · claude-opus-5 answered
+```
+
+That reply is a real, billed call (one output token on Anthropic; an
+OpenAI-compatible endpoint gets the same uncapped request a run sends).
+
+A refused key or a refused model is a problem and doctor exits non-zero. No
+answer (offline, rate-limited, overloaded, or a compatible endpoint with no
+models route) says nothing about the key or model, so it isn't a problem. A
+subscription sign-in has no key to send and is reported as not checked, and a
+codex model is not asked because codex runs it through its own harness.
+
 The files are only half the answer when a daemon is running. It
 re-resolves runtime settings (provider, model, system prompt and the rest of
 the runtime config) on every turn, but daemon-level settings (plugins,
@@ -125,7 +146,20 @@ a problem.
   Slack tells it about mentions only. Add `channels:history` /
   `groups:history` / `mpim:history` and the matching `message.*` events and
   reinstall the app once; [Slack](./slack.md#talking-to-an-agent) has the
-  rest of the addressing rules.
+  rest of the addressing rules. You don't have to guess: when an agent's app
+  connects, the daemon warns `slack: <agent>'s app is missing bot scopes: …`
+  for every scope the manifest asks for that the app lacks (`files:read`
+  too, without which images reach the agent by name only), and `stratus
+  doctor` lists the same line under the daemon's startup warnings. A daemon
+  started with `--held` (or a held `--hold-new-version` start) connects
+  Slack only when it is promoted, so there the warning is in the daemon log
+  but not in `stratus doctor`. Slack can't report event subscriptions to a
+  bot token, so no warning only clears the scopes: check the app's
+  `message.*` events too. With scopes and events both in place, check the
+  soul's [`listens`](./slack.md#how-an-agent-listens) setting: `mentions`
+  hears untagged replies without answering them, and `judge` may choose
+  silence or be past its attention window. Under the default `thread`, a
+  missing reply usually means another agent spoke last in that thread.
 - **A DM to the app says "Sending messages to this app has been turned
   off"** — that is Slack's App Home setting, not Stratus: the app was
   created before the manifest turned on its Messages Tab. In the app's

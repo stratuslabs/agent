@@ -11,6 +11,7 @@ import type {
 } from '@stratusagent/core';
 import {
   bridgeKernelTools,
+  BRIDGED_RESULT_MAX_CHARS,
   createClaudeCodeProvider,
   DEFAULT_CLAUDE_CODE_MODEL,
   hasHostedToolSideEffects,
@@ -90,6 +91,9 @@ test('generate runs a turn through the Agent SDK and returns the result text', a
   // API key is cleared so billing cannot silently fall back to it.
   assert.equal(options.env?.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-test');
   assert.equal(options.env?.ANTHROPIC_API_KEY, undefined);
+  // The bridge bounds results itself; the CLI's own token cut must not fire
+  // first and append its note to a result that was not cut.
+  assert.equal(options.env?.MAX_MCP_OUTPUT_TOKENS, String(BRIDGED_RESULT_MAX_CHARS * 4));
 });
 
 test('the Claude Code path sends the shared defaults the host resolved', async () => {
@@ -509,6 +513,56 @@ test('a bridged external result reaches the loop marked untrusted, and every oth
   assert.equal(await textFor('agent'), JSON.stringify({ echoed: 'a' }));
   assert.equal(await textFor('unknown'), JSON.stringify({ stdout: 'b' }));
   assert.equal(await textFor('legacy'), JSON.stringify({ echoed: 'c' }));
+});
+
+test('an oversized bridged result is cut with a note instead of reaching the SDK whole', async () => {
+  // The Claude Code CLI swaps a text result over 100k characters for a file
+  // under ~/.claude, outside every agent root, so the model could not read
+  // it. The bridge bounds the text first and says how much was cut.
+  const big = 'A1b2'.repeat(60_000);
+  const [bridged] = bridgeKernelTools([{ name: 'probe.read' }], createSession(), async (_session, call) => ({
+    callId: call.id,
+    toolName: call.toolName,
+    ok: true,
+    output: { data: big },
+    trust: 'external',
+  }));
+  const content = (await bridged!.handler({}, {})).content;
+  const texts = content.flatMap((block) => (block.type === 'text' ? [block.text] : []));
+  const total = texts.reduce((sum, text) => sum + text.length, 0);
+  assert.ok(total < 100_000, `bridged text is ${total} characters`);
+  const [first] = texts;
+  assert.ok(first!.startsWith(JSON.stringify({ untrusted: true, untrustedNote: UNTRUSTED_TOOL_RESULT_NOTE }).slice(0, -1)));
+  const full = JSON.stringify({ untrusted: true, untrustedNote: UNTRUSTED_TOOL_RESULT_NOTE, output: { data: big } });
+  assert.ok(first!.startsWith(full.slice(0, BRIDGED_RESULT_MAX_CHARS)));
+  assert.match(first!, new RegExp(`cut at ${BRIDGED_RESULT_MAX_CHARS.toLocaleString('en-US')} of ${full.length.toLocaleString('en-US')} characters`));
+});
+
+test('a bridged result under the bound passes through unchanged', async () => {
+  const text = 'x'.repeat(BRIDGED_RESULT_MAX_CHARS - 20);
+  const [bridged] = bridgeKernelTools([{ name: 'probe.read' }], createSession(), async (_session, call) => ({
+    callId: call.id,
+    toolName: call.toolName,
+    ok: true,
+    output: text,
+  }));
+  const [block] = (await bridged!.handler({}, {})).content;
+  assert.equal(block?.type === 'text' ? block.text : undefined, JSON.stringify(text));
+});
+
+test('the bridge never splits a surrogate pair when it cuts', async () => {
+  const [bridged] = bridgeKernelTools([{ name: 'probe.read' }], createSession(), async (_session, call) => ({
+    callId: call.id,
+    toolName: call.toolName,
+    ok: true,
+    // One character of JSON quote, then pairs: an odd cut point lands mid-pair.
+    output: '\u{1F600}'.repeat(BRIDGED_RESULT_MAX_CHARS),
+  }));
+  const [block] = (await bridged!.handler({}, {})).content;
+  const text = block?.type === 'text' ? block.text : '';
+  const body = text.slice(0, text.indexOf('\n\n['));
+  assert.ok(body.length <= BRIDGED_RESULT_MAX_CHARS);
+  assert.ok(!/[\uD800-\uDBFF]$/.test(body), 'cut ends on a lone high surrogate');
 });
 
 test('concurrent bridged tool calls execute one at a time', async () => {

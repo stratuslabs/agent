@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 import { tokenFingerprint } from '@stratusagent/control-api';
-import { claimHome } from '@stratusagent/gateway';
+import { DEFAULT_STOP_DRAIN_TIMEOUT_MS, claimHome } from '@stratusagent/gateway';
 
 import {
   createFileMemoryStore,
@@ -2166,6 +2166,56 @@ test('setup signs into Claude with a pasted API key, verifies it, and saves cred
   assert.match(output.stdout, /signed in with an API key — ready to go/);
 });
 
+test('setup reads the saved settings back and does not call a run that cannot start ready', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const missingSoul = path.join(home, 'no-such-soul.md');
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { STRATUS_SOUL: missingSoul },
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '9\n']),
+      fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /✓ Key verified/);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail:/);
+  assert.match(output.stdout, /no-such-soul\.md/);
+  assert.match(output.stdout, /stratus doctor/);
+});
+
+test('setup reads the settings back before calling an environment key ready', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const missingSoul = path.join(home, 'no-such-soul.md');
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'env-key', STRATUS_SOUL: missingSoul },
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => true,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail:/);
+  assert.match(output.stdout, /no-such-soul\.md/);
+});
+
 test('setup stores a Claude subscription setup token', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const { streams, output } = createStreams();
@@ -2339,6 +2389,32 @@ test('setup warns when exported env vars override the saved config', async () =>
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.match(output.stdout, /You are ready to go/);
+  assert.match(output.stdout, /stratus run --provider demo "say hello"/);
+});
+
+test('setup still reads the settings back when an exported variable is overridden by a suggested flag', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const missingSoul = path.join(home, 'no-such-soul.md');
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { STRATUS_PROVIDER: 'openai', STRATUS_SOUL: missingSoul },
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail:/);
+  assert.match(output.stdout, /no-such-soul\.md/);
   assert.match(output.stdout, /stratus run --provider demo "say hello"/);
 });
 
@@ -6415,6 +6491,35 @@ test('--no-login installs the service without the login trigger', async () => {
   );
   const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
   assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
+});
+
+test('both service units give a stop longer than the daemon\'s drain and post-abort windows before SIGKILL', async () => {
+  // A stop drains for DEFAULT_STOP_DRAIN_TIMEOUT_MS, then aborts what is
+  // still running and gives the aborted turns the same window again to
+  // record their failure. The manager's SIGKILL has to land after both, or
+  // the abort never happens or its record is cut off: launchd's default is about five seconds, and its
+  // kill of the job skips a shell command's own process group, which then
+  // runs on after the daemon.
+  const darwinHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: darwinHome, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const plist = await readFile(path.join(darwinHome, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  const exitTimeOut = /<key>ExitTimeOut<\/key>\s*<integer>(\d+)<\/integer>/.exec(plist);
+  assert.ok(exitTimeOut, plist);
+  assert.ok(Number(exitTimeOut[1]) * 1000 > 2 * DEFAULT_STOP_DRAIN_TIMEOUT_MS, `ExitTimeOut ${exitTimeOut[1]}s`);
+
+  const linuxHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'linux',
+    homeDir: linuxHome,
+    execPath: '/usr/bin/node',
+    scriptPath: '/usr/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+  const unit = await readFile(path.join(linuxHome, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  const stopSec = /TimeoutStopSec=(\d+)/.exec(unit);
+  assert.ok(stopSec, unit);
+  assert.ok(Number(stopSec[1]) * 1000 > 2 * DEFAULT_STOP_DRAIN_TIMEOUT_MS, `TimeoutStopSec=${stopSec[1]}`);
+  assert.equal(stopSec[1], exitTimeOut[1]);
 });
 
 test('the systemd unit restarts on failure and enables at login', async () => {
