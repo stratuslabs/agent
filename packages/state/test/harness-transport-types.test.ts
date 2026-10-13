@@ -52,3 +52,21 @@ test('a callback of an unrelated shape is rejected', () => {
   };
   assert.ok(env);
 });
+
+test('a callback narrower than what the harness passes is rejected', () => {
+  const stringOnly = (params: { prompt: string }) => {
+    void params;
+    return none();
+  };
+  const needsResume = (params: { input: string; resumeThreadId: string; clientOptions: object; threadOptions: object; signal: AbortSignal }) => {
+    void params;
+    return none();
+  };
+  const env: Pick<StateEnvironment, 'queryFn' | 'codexRunTurn'> = {
+    // @ts-expect-error image turns pass an AsyncIterable prompt, not only a string
+    queryFn: stringOnly,
+    // @ts-expect-error a thread's first turn passes no resumeThreadId
+    codexRunTurn: needsResume,
+  };
+  assert.ok(env);
+});

@@ -972,30 +972,34 @@ export const CODEX_THREAD_METADATA_KEY = 'codexThreadId';
 /**
  * The harness transports (the Agent SDK's `query`, codex's `runTurn`) as a
  * host carries them through config and environment without importing a
- * harness package that may not be installed. Each is the structural slice
- * of the harness's own params a host can see; the harness package is the
- * only reader and casts to its full signature. Declared with method syntax
- * so the harness's exact transport type (whose params are narrower than
- * this slice) stays assignable, while a callback of an unrelated shape is
- * still rejected and an inline callback still sees typed params.
+ * harness package that may not be installed.
+ *
+ * Function properties, so their params are checked contravariantly: a
+ * callback is accepted only if it takes every params object a harness can
+ * pass. The params are therefore a lower bound of the harness's own: the
+ * fields a host can read keep their real types, and the harness-specific
+ * ones a host has no business reading (SDK options, codex client and
+ * thread options, an image prompt's message type) are `never`, which every
+ * harness type accepts. So the harness's own transport type is assignable,
+ * while a callback that needs `prompt` to be a string or `resumeThreadId`
+ * to be present is rejected. The harness package is the only caller and
+ * casts to its full signature.
  */
-export type ClaudeCodeTransport = {
-  transport(params: {
-    prompt: string | AsyncIterable<unknown>;
-    options?: object;
-  }): AsyncIterable<unknown>;
-}['transport'];
+export type ClaudeCodeTransport = (params: {
+  /** A string, or an image turn's single user message (opaque here). */
+  prompt: string | AsyncIterable<never>;
+  options?: never;
+}) => AsyncIterable<unknown>;
 
 /** Codex's `runTurn`, as a host carries it. See ClaudeCodeTransport. */
-export type CodexTransport = {
-  transport(params: {
-    input: string;
-    resumeThreadId?: string;
-    clientOptions: object;
-    threadOptions: object;
-    signal: AbortSignal;
-  }): AsyncIterable<unknown>;
-}['transport'];
+export type CodexTransport = (params: {
+  input: string;
+  /** Absent on a thread's first turn. */
+  resumeThreadId?: string;
+  clientOptions: never;
+  threadOptions: never;
+  signal: AbortSignal;
+}) => AsyncIterable<unknown>;
 
 /**
  * Executes one kernel tool call on behalf of a provider-hosted loop. The
