@@ -121,3 +121,24 @@ test('a harness that is installed but missing one of its own dependencies keeps 
   const truncated = missing("Cannot find module '/usr/lib/node_modules/@stratusagent/provider-claude-code/dist/index.js' imported from /usr/lib/node_modules/@stratusagent/state/dist/provider-runtime.js");
   assert.equal(harnessNotInstalledError('claude-code', truncated), undefined);
 });
+
+test('harnessesUsedBy names the harness a runtime and its fallback load, and nothing for API runtimes', async () => {
+  const { harnessesUsedBy, HARNESS_PACKAGE_NAMES } = await import('../src/index.ts');
+  assert.deepEqual(harnessesUsedBy({ provider: 'anthropic', model: 'm', authToken: 'sk-ant-oat' }), ['claude-code']);
+  // An API key wins over a token, as createRuntimeProvider decides.
+  assert.deepEqual(harnessesUsedBy({ provider: 'anthropic', model: 'm', apiKey: 'k', authToken: 't' }), []);
+  assert.deepEqual(harnessesUsedBy({ provider: 'openai', model: 'm', apiKey: 'k', baseUrl: 'https://x' }), []);
+  assert.deepEqual(harnessesUsedBy({ provider: 'demo' }), []);
+  assert.deepEqual(
+    harnessesUsedBy({ provider: 'anthropic', model: 'm', apiKey: 'k', fallback: { provider: 'codex', model: 'gpt' } }),
+    ['codex'],
+  );
+  assert.deepEqual(
+    harnessesUsedBy({ provider: 'codex', model: 'gpt', fallback: { provider: 'anthropic', model: 'm', authToken: 't' } }),
+    ['codex', 'claude-code'],
+  );
+  assert.deepEqual(HARNESS_PACKAGE_NAMES, {
+    'claude-code': '@stratusagent/provider-claude-code',
+    codex: '@stratusagent/provider-codex',
+  });
+});

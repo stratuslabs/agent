@@ -364,5 +364,26 @@ Run `stratus update` to apply the above.
 
 Only packages that are installed are considered — installing one is still
 a separate, deliberate act (`stratus setup` offers the ones your answers
-imply), and `update` never adds a package you do not have. Which ones are
-installed, and what each contributes, is `stratus plugins`.
+imply), and `update` never adds a package you do not have, with one
+exception below. Which ones are installed, and what each contributes, is
+`stratus plugins`.
+
+### The provider your agents run on
+
+The Claude subscription runtime (`@stratusagent/provider-claude-code`) and
+the Codex runtime (`@stratusagent/provider-codex`) each bring a native binary
+of a few hundred MB, so the CLI no longer carries them: `stratus setup`
+installs the one you choose. Builds before 0.12.3 carried both inside the
+CLI, so replacing that CLI removes them. `stratus update` therefore checks
+which of the two your agents use (the default, its fallback, and any soul
+that pins its own provider) and installs a missing one at the CLI's version
+before the daemon comes back. `stratus update --check` lists it:
+
+```
+  provider    @stratusagent/provider-claude-code — your agents use it and it is not installed
+```
+
+An upgrade that goes around `stratus update` (a plain
+`npm install -g @stratusagent/cli`) leaves it missing. `stratus doctor`
+reports that as a problem and `stratus serve` warns at start; until it is
+installed, turns on that provider fail with the install command.
