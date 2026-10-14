@@ -478,3 +478,15 @@ test('a different soul already in an unlinked agent folder is still a taken name
   assert.equal(await readFile(visible, 'utf8'), 'somebody wrote this');
   assert.equal(await exists(path.join(agentsDirPath(env), 'ava.md')), false);
 });
+
+test('a workspace link whose whole agents folder was deleted gets the folder back as ours, marker included', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  createAgentWorkspaces(env).prepare('ava');
+  await fs.promises.rm(path.join(home, 'Agents'), { recursive: true, force: true });
+
+  createAgentWorkspaces(env).prepare('ava');
+  assert.ok((await stat(path.join(home, 'Agents', AGENTS_HOME_MARKER))).isFile(), 'the recreated folder is still marked as Stratus\'s');
+  assert.ok((await stat(path.join(home, 'Agents', 'ava', 'workspace'))).isDirectory());
+  assert.equal(resolveAgentsHome(env), path.join(home, 'Agents'), 'new agents keep going to the same folder, not ~/Stratus');
+});

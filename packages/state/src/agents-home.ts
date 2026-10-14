@@ -369,7 +369,12 @@ export const surfaceNewWorkspaceSync = (env: StateEnvironment, agentId: string):
     }
     const target = path.resolve(path.dirname(hidden), text);
     const agentsHome = resolveAgentsHome(env);
-    if (agentsHome !== undefined && target === visibleWorkspacePathIn(agentsHome, agentId)) {
+    // Claimed again first: when the whole folder was deleted, a bare
+    // `mkdir` would bring it back without the marker, and the next
+    // resolution would read it as somebody else's and move on to
+    // `~/Stratus`.
+    if (agentsHome !== undefined && target === visibleWorkspacePathIn(agentsHome, agentId)
+      && claimAgentsHome(env) === agentsHome) {
       mkdirSync(target, { recursive: true, mode: 0o700 });
     }
     return;
