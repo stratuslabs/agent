@@ -1704,3 +1704,37 @@ test('an OpenAI-compatible error body that is not JSON is redacted too', async (
     return true;
   });
 });
+
+// Local runtimes take any key, so a short one can be an ordinary word the
+// classifiers below look for. They read the endpoint's own text; only what
+// is thrown is redacted.
+test('a short key that is also a diagnostic word does not hide an overflow or an image refusal', async () => {
+  const overflow = createOpenAICompatibleProvider({
+    model: 'local-llama',
+    apiKey: 'context',
+    fetch: (async () => ({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: { message: 'the request exceeds the available context size' } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => overflow.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  let attempts = 0;
+  const request = requestWithImage();
+  const image = createOpenAICompatibleProvider({
+    model: 'local-llava',
+    apiKey: 'image',
+    fetch: (async () => {
+      attempts += 1;
+      return attempts === 1
+        ? { ok: false, status: 400, text: async () => JSON.stringify({ error: { message: 'Could not process image' } }) }
+        : { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }) };
+    }) as unknown as typeof fetch,
+  });
+  await image.generate(request);
+  assert.equal(attempts, 2, 'retried without the images');
+});

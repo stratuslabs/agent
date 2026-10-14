@@ -474,10 +474,11 @@ export const createOpenAICompatibleProvider = ({
         if (response.ok) {
           break;
         }
-        const message = redactSecrets(
-          payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`,
-          [apiKey, ...Object.values(headers)],
-        );
+        // Classified on the endpoint's own words, and redacted only in what
+        // is thrown: a local runtime takes any key, and a short one can be
+        // a word the checks below look for ("context", "image").
+        const reported = payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`;
+        const message = redactSecrets(reported, [apiKey, ...Object.values(headers)]);
         // The transcript did not fit. Reported as the one provider failure
         // the kernel can act on — it answers by sending less history —
         // rather than as the final error every other 400 here is. Matched
@@ -503,7 +504,7 @@ export const createOpenAICompatibleProvider = ({
         // throw away the pictures a turn was about and retry — when what
         // the request needed was less history, which the kernel would have
         // supplied.
-        if (response.status === 400 && overflowedContext(payload, message)) {
+        if (response.status === 400 && overflowedContext(payload, reported)) {
           throw new ContextOverflowError(
             `The conversation no longer fits ${model}'s context window (${message}).`,
           );
@@ -514,7 +515,7 @@ export const createOpenAICompatibleProvider = ({
         // emptied on the session itself, since stored as they are they would
         // fail every later turn the same way, and the turn goes on with a
         // note in each one's place.
-        if (response.status === 400 && sent.length > 0 && !imagesRetried && /image/i.test(message)) {
+        if (response.status === 400 && sent.length > 0 && !imagesRetried && /image/i.test(reported)) {
           for (const image of sent) {
             omitImage(image);
           }
