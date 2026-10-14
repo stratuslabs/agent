@@ -26,6 +26,20 @@ export {
 } from './workspace-migration.ts';
 
 export {
+  AGENTS_DIR_ENV,
+  AGENTS_HOME_MARKER,
+  VISIBLE_SOUL_FILENAME,
+  claimAgentsHome,
+  inspectAgentsHome,
+  resolveAgentsHome,
+  surfaceAgentsHome,
+  visibleAgentDirIn,
+  visibleSoulPathIn,
+  visibleWorkspacePathIn,
+  writeNewSoulFile,
+} from './agents-home.ts';
+
+export {
   type StateEnvironment,
   readProcessEnv,
   readWorkingDirectory,

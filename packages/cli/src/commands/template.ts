@@ -7,7 +7,6 @@ import {
   rm,
   stat,
   unlink,
-  writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,6 +25,7 @@ import {
   validateConfigFile,
   saveConfigFile,
   stratusHomePath,
+  writeNewSoulFile,
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment, CliConfigFile } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -650,7 +650,11 @@ export const runTemplateAdd = async (
         // "refused without --force" quietly becomes an overwrite of
         // somebody's newer file, and a forced write lands on a file created
         // after the unlink.
-        await writeFile(destination, agent.contents, { flag: 'wx' });
+        // Into the agent's visible folder, linked from `destination`. With
+        // `--force` the soul already in that folder is replaced too, or
+        // removing the link above would leave it behind as the folder's
+        // soul while the roster served the new one.
+        await writeNewSoulFile(env, agent.file, agent.id, agent.contents, command.force ? { replace: true } : {});
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
           throw error;

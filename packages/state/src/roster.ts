@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   type AgentDefinition,
@@ -33,6 +33,7 @@ import {
   readWorkingDirectory,
   readNonEmptyString,
 } from './environment.ts';
+import { writeNewSoulFile } from './agents-home.ts';
 import { agentMemoryFilePath, agentsDirPath, foldedAgentId, stratusHomePath } from './paths.ts';
 import {
   isRegisteredProviderName,
@@ -597,7 +598,9 @@ export const claimSoulFile = async (
     const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
     if (!taken(agent.id)) {
       try {
-        await writeFile(soulPath, render(agent), { flag: 'wx' });
+        // Into the agent's visible folder, linked from `soulPath`; exclusive
+        // at both ends, so a taken name still fails with EEXIST below.
+        await writeNewSoulFile(env, `${agent.id}.md`, agent.id, render(agent));
         return { agent, soulPath };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {

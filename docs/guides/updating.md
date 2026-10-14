@@ -285,6 +285,20 @@ often a `~/.stratus/state.json` that cannot be written: a command that
 writes state refuses rather than persist data the stamp was meant to
 protect, and a read-only one warns and continues.
 
+## Souls and workspaces move to the agents folder
+
+Not a migration: no schema version changes, and an older build still finds
+every agent, because what it reads is a link to where the file went. The
+first `stratus serve` or `stratus update` of this build moves each soul and
+workspace still kept as a real file in `~/.stratus/agents/` into its own
+folder in `~/Agents` (or `~/Stratus`, see
+[the agents folder](../reference/state-layout.md#the-agents-folder)) and
+leaves a link at the old path. It logs one line saying how many moved and
+naming any it left in place. It runs on every start rather than once, so a
+soul dropped into `~/.stratus/agents/` later is moved too, and costs one
+directory listing when there is nothing to do. A workspace move that is
+interrupted is finished by the next start, provenance ledger included.
+
 ## `stratus update` does the sequence in the order that cannot lose data
 
 ```bash

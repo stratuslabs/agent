@@ -34,7 +34,9 @@ Everything is under `~/.stratus/` on the daemon's machine:
 | `gateway.json`, `gateway-token` | Where the control API is listening, and its bearer token. `0600` |
 | `stratusd.lock` | The running daemon's claim on this home: one daemon per home |
 
-Deleting a soul file takes the agent off the roster but keeps its `agents/<id>/` state, its standing approvals included (a new agent given the same id inherits them), and its schedules in `fleet.db`. Deleting `agents/<id>/` erases its history, memories, grants, and files.
+Souls and workspaces are normally links into a visible agents folder in the home directory: `agents/<id>.md` points to `~/Agents/<id>/soul.md` and `agents/<id>/workspace` to `~/Agents/<id>/workspace/`. That is where a person edits a soul or finds an agent's files. The folder is `~/Stratus` instead when `~/Agents` already belonged to something else. There is none (everything stays in `~/.stratus/agents/`) when both names are taken, when `~/.stratus` is on a different disk from the home directory (the Docker image), or with `STRATUS_AGENTS_DIR=off`; `STRATUS_AGENTS_DIR=<path>` chooses one outright, and `stratus doctor` names the one in use. A soul or workspace still kept as a real file under `~/.stratus/agents/` is moved there by the next `stratus serve` or `stratus update`. `fs.*` refuses every soul, under either name.
+
+Deleting a soul file takes the agent off the roster but keeps its `agents/<id>/` state, its standing approvals included (a new agent given the same id inherits them), and its schedules in `fleet.db`. Deleting `agents/<id>/` erases its history, memories, and grants; the files in `~/Agents/<id>/workspace/` stay until that folder is deleted too. Deleting or renaming `~/Agents/<id>/` takes the agent off the roster (its state is untouched) until the folder is put back.
 
 ## Your soul
 

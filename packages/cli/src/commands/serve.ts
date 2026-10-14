@@ -30,6 +30,7 @@ import {
   resolveAgentPrincipals,
   resolveAgentSlack,
   repairWorkspacesIfPending,
+  surfaceAgentsHome,
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
@@ -256,6 +257,16 @@ const serveHeldHome = async (
   const repaired = await repairWorkspacesIfPending(env);
   if (repaired !== undefined) {
     log(`workspace layout: ${repaired}`);
+  }
+
+  // Then souls and workspaces still kept as real files in the hidden home
+  // move to the visible agents folder, with links left where they were.
+  // Here for the reason the repair above is: the home claim is held and the
+  // stores are not open yet. No stamp, so a soul dropped into
+  // ~/.stratus/agents by hand becomes visible on the next start too.
+  const surfaced = await surfaceAgentsHome(env);
+  if (surfaced !== undefined) {
+    log(`agents folder: ${surfaced}`);
   }
 
   // Agents with stored Slack tokens go live in Slack automatically — the

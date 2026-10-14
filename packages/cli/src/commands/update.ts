@@ -7,6 +7,7 @@ import {
   pendingStateMigrations,
   readStateStamp,
   repairWorkspacesIfPending,
+  surfaceAgentsHome,
   runStateMigrations,
   STATE_SCHEMA_VERSION,
   type AppliedStateMigration,
@@ -490,6 +491,10 @@ const runUpdateSteps = async (
       const repaired = await repairWorkspacesIfPending(env);
       if (repaired !== undefined) {
         writeLine(streams.stdout, `workspace layout: ${repaired}`);
+      }
+      const surfaced = await surfaceAgentsHome(env);
+      if (surfaced !== undefined) {
+        writeLine(streams.stdout, `agents folder: ${surfaced}`);
       }
     }
   } catch (error) {

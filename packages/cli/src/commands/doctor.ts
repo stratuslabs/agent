@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   agentsDirPath,
+  inspectAgentsHome,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
   globalConfigPath,
@@ -184,6 +185,13 @@ export interface DoctorReport {
   slackAgents: string[];
   slackPackageInstalled: boolean;
   rosterCount: number;
+  /**
+   * The visible folder souls and workspaces live in (`~/Agents`, or
+   * `~/Stratus` when `~/Agents` belongs to something else, or what
+   * `STRATUS_AGENTS_DIR` names). Absent when there is none: both names
+   * taken, `~/.stratus` on another filesystem, or `STRATUS_AGENTS_DIR=off`.
+   */
+  agentsFolder?: string;
   /** The running daemon, as it reports itself. */
   daemon: DoctorDaemon;
   problems: string[];
@@ -693,6 +701,23 @@ export const collectDoctorReport = async (
     );
   }
 
+  // A soul or workspace link whose folder was deleted or renamed in the
+  // agents folder: the soul drops out of the roster with a warning, and a
+  // missing workspace only comes back empty on the next write, so say which.
+  let agentsFolder: string | undefined;
+  try {
+    const inspected = await inspectAgentsHome(env);
+    agentsFolder = inspected.agentsHome;
+    if (inspected.dangling.length > 0) {
+      problems.push(
+        `These link into the agents folder, but what they point at is gone: ${inspected.dangling.join(', ')}. `
+        + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace is recreated empty on the next write.',
+      );
+    }
+  } catch (error) {
+    problems.push(error instanceof Error ? error.message : String(error));
+  }
+
   // The invisible failure doctor exists to surface: the service unit embeds
   // absolute node and entrypoint paths, and upgrading node (an nvm version
   // directory, say) leaves the unit pointing at an interpreter that no
@@ -763,6 +788,7 @@ export const collectDoctorReport = async (
     slackAgents,
     slackPackageInstalled,
     rosterCount,
+    ...(agentsFolder !== undefined ? { agentsFolder } : {}),
     daemon,
     problems,
   };
@@ -812,6 +838,7 @@ export const runDoctor = async (
     writeLine(streams.stdout, `            (${shadowedPath} exists but is outranked)`);
   }
   writeLine(streams.stdout, `  agents    ${report.rosterCount} soul file${report.rosterCount === 1 ? '' : 's'}`);
+  writeLine(streams.stdout, `            ${report.agentsFolder !== undefined ? `in ${report.agentsFolder}` : 'no visible agents folder, so souls and workspaces stay in ~/.stratus/agents'}`);
 
   if (report.fallback) {
     writeLine(streams.stdout, `  ${'fallback'.padEnd(10)}${report.fallback.provider} · ${report.fallback.model}`);
