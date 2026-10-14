@@ -359,6 +359,13 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
         maxOutputBytes: settings.maxOutputBytes,
       };
     },
+    // And again after: another turn of this agent may record a tainted
+    // write while the command runs, before it reads that file. A record is
+    // made before its bytes land and never clears, so the read after the
+    // process exits sees every write the command could have read.
+    ...(options.ledger !== undefined
+      ? { settleTrust: (session: Session) => recordedLabel(options.ledger!, session.agent.id) }
+      : {}),
     parseResult(result: LocalCommandExecution, context): JsonValue {
       const maxOutputBytes = maxOutputBytesFor(config, context.session);
       const stdout = truncate(result.stdout, maxOutputBytes, result.stdoutTruncated);

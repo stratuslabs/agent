@@ -43,7 +43,9 @@ Once the agent has a file on record as written from an `external` session
 `external` instead, because a command can print any file it can read and
 which ones it reads can't be told from its text. With
 `approvals.externalContent: "gate"` that closes the session's grants after
-any command, the same as `fs.read` of that file would. To clear it, remove
+any command, the same as `fs.read` of that file would. The ledger is read
+before the command starts and again after it exits, so a tainted write that
+lands while it runs counts too. To clear it, remove
 the path's lines from the agent's `fs-provenance.jsonl`. The ledger is
 opened from the host's workspaces, so a plugin built without that seam
 labels everything `unknown`.

@@ -111,6 +111,14 @@ export interface LocalCommandTool extends Tool {
     session: Session,
     context?: LocalCommandCreateContext,
   ): LocalCommandInvocation | Promise<LocalCommandInvocation>;
+  /**
+   * Asked once the process has exited — success, failure, timeout or abort
+   * alike — for a label its output may carry that was not knowable when the
+   * command was built: a file it read may have been marked since. Whatever
+   * it returns is marked like `markTrust`; a hook that throws marks
+   * `external`, since that output's provenance is then unvouched for.
+   */
+  settleTrust?(session: Session): TrustLevel | undefined | Promise<TrustLevel | undefined>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
 
@@ -127,6 +135,14 @@ export interface LocalCommandToolDefinition {
     session: Session,
     context?: LocalCommandCreateContext,
   ): LocalCommandInvocation | Promise<LocalCommandInvocation>;
+  /**
+   * Asked once the process has exited — success, failure, timeout or abort
+   * alike — for a label its output may carry that was not knowable when the
+   * command was built: a file it read may have been marked since. Whatever
+   * it returns is marked like `markTrust`; a hook that throws marks
+   * `external`, since that output's provenance is then unvouched for.
+   */
+  settleTrust?(session: Session): TrustLevel | undefined | Promise<TrustLevel | undefined>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
 
@@ -171,6 +187,7 @@ export const defineLocalCommandTool = ({
   risk,
   outputTrust,
   createCommand,
+  settleTrust,
   parseResult,
 }: LocalCommandToolDefinition): LocalCommandTool => ({
   name,
@@ -182,6 +199,7 @@ export const defineLocalCommandTool = ({
   ...(outputTrust ? { outputTrust } : {}),
   runtime: 'local-command',
   createCommand,
+  ...(settleTrust ? { settleTrust } : {}),
   ...(parseResult ? { parseResult } : {}),
   async execute() {
     throw new Error(`Local command tool must run through LocalCommandExecutor: ${name}`);
@@ -236,6 +254,19 @@ export class LocalCommandExecutor implements Executor {
         maxOutputBytes: resolveMaxOutputBytes(invocation.maxOutputBytes, this.maxOutputBytes),
         ...(context?.signal ? { signal: context.signal } : {}),
       });
+      // Before any result is built, so each one below carries it. Not raced
+      // against the signal: an aborted command's partial output still
+      // reaches the model, and must not lose its label to the abort.
+      if (tool.settleTrust) {
+        try {
+          const settled = await tool.settleTrust(session);
+          if (settled !== undefined) {
+            marking.context.markTrust!(settled);
+          }
+        } catch {
+          marking.context.markTrust!('external');
+        }
+      }
 
       if (execution.aborted) {
         return failureResult(

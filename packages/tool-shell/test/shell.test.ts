@@ -432,6 +432,33 @@ test('a shell read after a tainted write carries the ledger\'s label, as fs.read
   assert.equal(failed.trust, 'external');
 });
 
+test('a tainted write that lands while the command runs still labels its result', async () => {
+  // Another turn of the same agent writes after the command was built but
+  // before it reads the file: the ledger is read again once it finishes,
+  // on every exit — success, failure and timeout.
+  for (const [command, timeoutMs, ok] of [
+    ['sleep 0.4; cat notes.txt', undefined, true],
+    ['sleep 0.4; cat notes.txt; exit 3', undefined, false],
+    ['sleep 0.4; cat notes.txt; sleep 5', 1_000, false],
+  ] as const) {
+    const { workspaces, workspace } = await ledgerHome();
+    const notes = path.join(workspace, 'notes.txt');
+    await writeFile(notes, 'my own notes\n');
+    const tools = await registryFor({}, undefined, workspaces);
+    const running = createLocalCommandExecutor().execute(
+      { id: 'call-1', toolName: 'shell.run', input: { command, ...(timeoutMs ? { timeoutMs } : {}) } },
+      tools.get('shell.run')!,
+      session('ava'),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await createFileLedger((id) => workspaces.forAgent(id)).recordWrite('ava', notes, 'external');
+    await writeFile(notes, 'text a web page wrote\n');
+    const result = await running;
+    assert.equal(result.ok, ok, command);
+    assert.equal(result.trust, 'external', command);
+  }
+});
+
 test('with nothing tainted on record a shell result stays unknown', async () => {
   const { workspaces, workspace } = await ledgerHome();
   await writeFile(path.join(workspace, 'notes.txt'), 'my own notes\n');
