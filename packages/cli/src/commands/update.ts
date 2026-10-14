@@ -281,6 +281,7 @@ const runUpdateSteps = async (
   const missingHarnesses = await missingHarnessPackages(
     unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
     harnessConfigPath,
+    { asService: true },
   );
   for (const name of missingHarnesses) {
     out(`  provider    ${name} — your agents use it and it is not installed`);
@@ -446,6 +447,7 @@ const runUpdateSteps = async (
     ? await missingHarnessPackages(
       unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
       harnessConfigPath,
+      { asService: true },
     )
     : missingHarnesses;
   if (!(await installHarnessPackages(harnessesNow, streams, env))) {

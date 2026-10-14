@@ -2864,7 +2864,7 @@ export const runSetup = async (
     // Claude by subscription or Codex was the decision, and the CLI no
     // longer carries either harness, so a daemon started without it fails
     // every turn. Through the saved files, so a soul's own pin counts.
-    await installHarnessPackages(await missingHarnessPackages(env, configPath), streams, env);
+    await installHarnessPackages(await missingHarnessPackages(env, configPath, { asService: true }), streams, env);
     await offerOptionalPackages();
 
     // Last, so the daemon starts against the config and credentials that

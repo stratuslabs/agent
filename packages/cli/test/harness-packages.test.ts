@@ -115,6 +115,58 @@ test('the second half of an update installs the harness the old CLI carried and 
   assert.match(output.stdout, /Installed @stratusagent\/provider-claude-code/);
 });
 
+test('update installs the harness the service needs even when this shell exports a provider key', async () => {
+  // The unit carries only PATH: ANTHROPIC_API_KEY in the updating shell
+  // makes a foreground run use the API, but the daemon reads the stored
+  // Claude sign-in and runs on claude-code.
+  const home = await subscriptionHome();
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { STRATUS_UPDATE_RESUME: 'stopped', ANTHROPIC_API_KEY: 'sk-ant-api-shell' },
+      serviceRunner: noService,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async () => undefined,
+      packageResolver: missing(CLAUDE_CODE, CODEX),
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(installs, [[`${CLAUDE_CODE}@${CLI_VERSION}`]]);
+});
+
+test('setup installs the claude-code harness for a subscription even when this shell exports a provider key', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-api-shell' },
+      serviceRunner: stubServiceRunner,
+      packageResolver: missing(CLAUDE_CODE),
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '9\n']),
+    },
+  });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.deepEqual(installs, [[`${CLAUDE_CODE}@${CLI_VERSION}`]]);
+});
+
 test('update leaves harness packages alone when the one in use is installed', async () => {
   const home = await subscriptionHome();
   const installs: string[][] = [];

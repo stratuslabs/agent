@@ -1,4 +1,4 @@
-import { HARNESS_PACKAGE_NAMES, harnessesUsedBy, servedRuntimes } from '@stratusagent/state';
+import { HARNESS_PACKAGE_NAMES, harnessesUsedBy, readProcessEnv, servedRuntimes } from '@stratusagent/state';
 import type { CliEnvironment, CliStreams } from './environment.ts';
 import { writeLine } from './io.ts';
 import { packageInstalled } from './loaders.ts';
@@ -18,8 +18,27 @@ import { CLI_VERSION, defaultPackageInstaller } from './npm.ts';
 export const missingHarnessPackages = async (
   env: CliEnvironment,
   configPath?: string,
+  /** Setup and update, which install what a service started later runs on. */
+  options: { asService?: boolean } = {},
 ): Promise<string[]> => {
-  const runtimes = await servedRuntimes(env, configPath).catch(() => []);
+  // With asService, resolved twice: as this shell would run it, and as the
+  // service would.
+  // The unit carries only PATH, so a provider key or STRATUS_* override
+  // exported here (ANTHROPIC_API_KEY beside a stored Claude sign-in, say)
+  // reaches a foreground run but never the daemon, which then needs the
+  // harness this shell's view would skip. Installing one a shell override
+  // happens to avoid costs disk; missing one fails every turn.
+  const shellEnv = readProcessEnv(env);
+  const serviceEnv: CliEnvironment = {
+    ...env,
+    processEnv: {
+      ...(shellEnv.PATH !== undefined ? { PATH: shellEnv.PATH } : {}),
+      ...(shellEnv.HOME !== undefined ? { HOME: shellEnv.HOME } : {}),
+    },
+  };
+  const runtimes = (await Promise.all((options.asService ? [env, serviceEnv] : [env]).map(
+    (view) => servedRuntimes(view, configPath).catch(() => []),
+  ))).flat();
   const used = new Set(runtimes.flatMap(({ runtime }) => harnessesUsedBy(runtime)));
   return [...used]
     .map((harness) => HARNESS_PACKAGE_NAMES[harness])
