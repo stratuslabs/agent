@@ -246,6 +246,9 @@ export {
   type RegisteredProviders,
   createRuntimeProvider,
   runsOnHarness,
+  harnessesUsedBy,
+  HARNESS_PACKAGE_NAMES,
+  type HarnessName,
 } from './provider-runtime.ts';
 
 export {

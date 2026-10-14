@@ -18,7 +18,15 @@ stratus setup
 ```
 
 That one package is everything you need to run agents: the runtime, the
-providers, the agent roster, and the always-on gateway all come with it.
+API-key providers (Anthropic, OpenAI and OpenAI-compatible), the agent
+roster, and the always-on gateway all come with it. The two subscription
+runtimes are separate because each brings a native binary of a few hundred
+MB; `stratus setup` installs the one you pick:
+
+```bash
+npm install -g @stratusagent/provider-claude-code   # Claude Pro/Max subscription
+npm install -g @stratusagent/provider-codex         # ChatGPT subscription or Codex key
+```
 [Setup](./setup.md) is the whole onboarding — no config files to edit and no
 env vars to export.
 

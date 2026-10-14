@@ -11,7 +11,7 @@ ships — is specified in
 ## What one install brings
 
 Installing the CLI (`npm install -g @stratusagent/cli`) brings the whole
-runtime with it — these thirteen packages are what you get, and you never
+runtime with it — these eleven packages are what you get, and you never
 install them individually:
 
 - `@stratusagent/cli`, the `stratus` command: setup, chat, one-shot runs, the gateway, the dashboard
@@ -22,11 +22,17 @@ install them individually:
 - `@stratusagent/permissions`, the policy layer deciding what a tool call may do unattended, what needs a human, and what is refused
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/provider-anthropic`, the Claude provider on the official Anthropic SDK
-- `@stratusagent/provider-claude-code`, the Claude subscription runtime on the Claude Agent SDK
-- `@stratusagent/provider-codex`, the ChatGPT/Codex runtime on the OpenAI Codex SDK, with kernel tools served over a loopback MCP endpoint
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 - `@stratusagent/plugins`, the plugin host: reads a plugin's manifest without importing it, holds `setup()` to what that manifest declared, and turns a config block into running capability
+
+The two harness runtimes are separate installs, because each brings a native
+binary of a few hundred MB and most machines use one or neither. `stratus
+setup` installs the one you choose, and `stratus update` keeps it installed
+and level with the CLI:
+
+- `@stratusagent/provider-claude-code`, the Claude subscription runtime on the Claude Agent SDK
+- `@stratusagent/provider-codex`, the ChatGPT/Codex runtime on the OpenAI Codex SDK, with kernel tools served over a loopback MCP endpoint
 
 ## Installing a plugin does not run it
 

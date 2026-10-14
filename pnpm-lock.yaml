@@ -119,12 +119,6 @@ importers:
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic
-      '@stratusagent/provider-claude-code':
-        specifier: workspace:*
-        version: link:../provider-claude-code
-      '@stratusagent/provider-codex':
-        specifier: workspace:*
-        version: link:../provider-codex
       '@stratusagent/providers':
         specifier: workspace:*
         version: link:../providers
@@ -147,6 +141,12 @@ importers:
       '@stratusagent/plugin-mcp':
         specifier: workspace:*
         version: link:../plugin-mcp
+      '@stratusagent/provider-claude-code':
+        specifier: workspace:*
+        version: link:../provider-claude-code
+      '@stratusagent/provider-codex':
+        specifier: workspace:*
+        version: link:../provider-codex
       '@stratusagent/provider-openai':
         specifier: workspace:*
         version: link:../provider-openai
@@ -488,16 +488,16 @@ importers:
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic
+      '@stratusagent/providers':
+        specifier: workspace:*
+        version: link:../providers
+    devDependencies:
       '@stratusagent/provider-claude-code':
         specifier: workspace:*
         version: link:../provider-claude-code
       '@stratusagent/provider-codex':
         specifier: workspace:*
         version: link:../provider-codex
-      '@stratusagent/providers':
-        specifier: workspace:*
-        version: link:../providers
-    devDependencies:
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

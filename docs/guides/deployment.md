@@ -108,6 +108,7 @@ Node `>=22.13 <23 || >=23.4` on the host, then:
 sudo useradd --system --home-dir /var/lib/stratus --shell /usr/sbin/nologin stratus
 sudo npm install -g @stratusagent/cli @stratusagent/control-api @stratusagent/channel-slack \
   @stratusagent/tool-fs @stratusagent/tool-shell @stratusagent/tool-web @stratusagent/tool-browser
+# + @stratusagent/provider-claude-code or @stratusagent/provider-codex if agents run on a subscription
 sudo install -d -m 0700 /etc/stratus
 sudo install -m 0600 /dev/null /etc/stratus/stratusd.env    # then add provider keys
 sudo cp deploy/systemd/stratusd.service /etc/systemd/system/

@@ -319,6 +319,31 @@ const HARNESS_PACKAGES: Record<HarnessName, { specifier: string; label: string }
   },
 };
 
+/** The package that carries each harness provider, for whoever has to install one. */
+export const HARNESS_PACKAGE_NAMES: Readonly<Record<HarnessName, string>> = {
+  'claude-code': HARNESS_PACKAGES['claude-code'].specifier,
+  codex: HARNESS_PACKAGES.codex.specifier,
+};
+
+/**
+ * The harnesses a resolved runtime loads on its turns: its own and its
+ * fallback's, by the same rule `createRuntimeProvider` builds them with.
+ * Neither package ships with the CLI, so this is what setup installs,
+ * `stratus update` keeps installed, and doctor checks for.
+ */
+export const harnessesUsedBy = (config: RuntimeConfig): HarnessName[] => {
+  const of = (runtime: { provider: string; apiKey?: string | undefined; authToken?: string | undefined }): HarnessName | undefined => {
+    if (runtime.provider === 'codex') return 'codex';
+    return runtime.provider === 'anthropic' && runsOnHarness(runtime) ? 'claude-code' : undefined;
+  };
+  const used = new Set<HarnessName>();
+  for (const runtime of [config, ...('fallback' in config && config.fallback ? [config.fallback] : [])]) {
+    const harness = of(runtime);
+    if (harness) used.add(harness);
+  }
+  return [...used];
+};
+
 /**
  * The error a turn fails with when its harness package is missing, or
  * `undefined` when `error` is anything else. Matched on the package Node

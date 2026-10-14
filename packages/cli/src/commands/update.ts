@@ -32,6 +32,7 @@ import {
 } from '../npm.ts';
 import type { ParsedUpdateCommand } from '../parse.ts';
 import { readCompanions } from '../companions.ts';
+import { installHarnessPackages, missingHarnessPackages } from '../harness-packages.ts';
 
 /**
  * `stratus update` — the whole upgrade dance, in the order that cannot lose
@@ -272,6 +273,19 @@ const runUpdateSteps = async (
     }
   }
 
+  // The harness providers the configured agents run on, when this machine
+  // does not have them: the CLI stopped carrying claude-code and codex, so
+  // an upgrade from a build that did removes them with the old CLI. Read
+  // against the config the service is pinned to, as the daemon reads it.
+  const harnessConfigPath = unit?.configPath;
+  const missingHarnesses = await missingHarnessPackages(
+    unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
+    harnessConfigPath,
+  );
+  for (const name of missingHarnesses) {
+    out(`  provider    ${name} — your agents use it and it is not installed`);
+  }
+
   if (command.check) {
     for (const migration of pending) {
       out(`  pending     ${migration.id} — ${migration.description}`);
@@ -280,7 +294,7 @@ const runUpdateSteps = async (
       out('This build cannot update that state — upgrade the package itself (`npm install -g @stratusagent/cli`).');
       return 1;
     }
-    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0;
+    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0 || missingHarnesses.length > 0;
     out(actionable
       ? 'Run `stratus update` to apply the above.'
       : 'Nothing to do.');
@@ -421,6 +435,21 @@ const runUpdateSteps = async (
     out(latest === undefined
       ? 'Skipping the package upgrade — npm did not answer.'
       : 'Package already up to date.');
+  }
+
+  // Here rather than with the companions above: this runs on the build the
+  // update is heading for, both when it resumed after replacing the CLI
+  // (the first half's package list came from the old build, which still
+  // carried both harnesses) and when the CLI was already current. A fresh
+  // read, because the CLI install above may have removed one.
+  const harnessesNow = resume !== undefined || upgrading.length > 0
+    ? await missingHarnessPackages(
+      unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
+      harnessConfigPath,
+    )
+    : missingHarnesses;
+  if (!(await installHarnessPackages(harnessesNow, streams, env))) {
+    upgradeFailed = true;
   }
 
   // Stopping the *managed* service is not the same as having the home to

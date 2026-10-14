@@ -1,3 +1,4 @@
+import { installHarnessPackages, missingHarnessPackages } from '../harness-packages.ts';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { JsonObject } from '@stratusagent/core';
@@ -2859,6 +2860,11 @@ export const runSetup = async (
     // LaunchAgent come up with the Slack channel and the control API
     // already present, instead of warning about them in a log nobody reads
     // until the dashboard fails.
+    // The provider package comes first, and without a question: choosing
+    // Claude by subscription or Codex was the decision, and the CLI no
+    // longer carries either harness, so a daemon started without it fails
+    // every turn. Through the saved files, so a soul's own pin counts.
+    await installHarnessPackages(await missingHarnessPackages(env, configPath), streams, env);
     await offerOptionalPackages();
 
     // Last, so the daemon starts against the config and credentials that

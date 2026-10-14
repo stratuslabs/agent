@@ -40,6 +40,7 @@ import { writeLine, pathExists } from '../io.ts';
 import { ignoredConfigRemedy } from '../runtime.ts';
 import { loadSlackAdapter } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
+import { harnessesMissingMessage, missingHarnessPackages } from '../harness-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
 
@@ -647,6 +648,11 @@ export const collectDoctorReport = async (
   const behind = (await readCompanions(CLI_VERSION, env)).filter((entry) => entry.stale);
   if (behind.length > 0) {
     problems.push(companionsBehindMessage(behind));
+  }
+
+  const missingHarnesses = await missingHarnessPackages(env, command.configPath);
+  if (missingHarnesses.length > 0) {
+    problems.push(harnessesMissingMessage(missingHarnesses));
   }
 
   let rosterCount = 0;
