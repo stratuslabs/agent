@@ -532,3 +532,20 @@ test('settleTrust runs after the process exits and labels every outcome; a throw
   assert.equal(threw.ok, true);
   assert.equal(threw.trust, 'external');
 });
+
+test('a settleTrust that never settles labels external and still returns the result', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'demo.stuck',
+    createCommand() {
+      return { command: process.execPath, args: ['-e', ''] };
+    },
+    settleTrust() {
+      return new Promise<undefined>(() => {});
+    },
+  });
+  const started = Date.now();
+  const result = await createLocalCommandExecutor().execute({ id: 'c', toolName: 'demo.stuck', input: {} }, tool, session);
+  assert.equal(result.ok, true);
+  assert.equal(result.trust, 'external');
+  assert.ok(Date.now() - started < 10_000);
+});

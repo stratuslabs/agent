@@ -263,12 +263,27 @@ export interface ShellToolOptions {
  * operator repairs it.
  */
 const recordedLabel = async (ledger: TaintedWriteLedger, agentId: string): Promise<TrustLevel> => {
+  // Bounded: a ledger path replaced by a FIFO never finishes reading, and a
+  // command must not wait on it either before it starts or after it exits.
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return leastTrusted('unknown', ...Object.values(await ledger.snapshot(agentId)));
+    const snapshot = await Promise.race([
+      ledger.snapshot(agentId),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), LEDGER_READ_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    return snapshot === undefined ? 'external' : leastTrusted('unknown', ...Object.values(snapshot));
   } catch {
     return 'external';
+  } finally {
+    clearTimeout(timer);
   }
 };
+
+/** How long a command waits for the ledger before labelling its output `external`. */
+const LEDGER_READ_TIMEOUT_MS = 1_000;
 
 export const createShellTool = (config: JsonObject = {}, options: ShellToolOptions = {}): LocalCommandTool => {
   const tool = defineLocalCommandTool({

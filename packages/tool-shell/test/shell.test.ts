@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, open, realpath, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -490,6 +491,25 @@ test('a ledger that cannot be read labels the result external rather than stoppi
   assert.equal(read.ok, true);
   assert.equal(String((read.output as JsonObject).stdout).trim(), 'hi');
   assert.equal(read.trust, 'external');
+});
+
+test('a ledger replaced by a FIFO labels the result external instead of hanging the turn', async () => {
+  // Nothing ever writes to the FIFO, so a plain read of it never returns.
+  const { workspaces, workspace } = await ledgerHome();
+  const fifo = path.join(workspace, LEDGER_FILENAME);
+  execFileSync('mkfifo', [fifo]);
+  const tools = await registryFor({}, undefined, workspaces);
+  try {
+    const started = Date.now();
+    const read = await runLabelled(tools, 'echo hi');
+    assert.equal(String((read.output as JsonObject).stdout).trim(), 'hi');
+    assert.equal(read.trust, 'external');
+    assert.ok(Date.now() - started < 10_000);
+  } finally {
+    // Release the reads still parked on the FIFO so the test process exits.
+    const writer = await open(fifo, 'w');
+    await writer.close();
+  }
 });
 
 test('with the external-content gate on, a shell read of a tainted file closes the session\'s grants', async () => {

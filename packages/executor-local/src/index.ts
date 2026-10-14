@@ -256,10 +256,12 @@ export class LocalCommandExecutor implements Executor {
       });
       // Before any result is built, so each one below carries it. Not raced
       // against the signal: an aborted command's partial output still
-      // reaches the model, and must not lose its label to the abort.
+      // reaches the model, and must not lose its label to the abort. Bounded
+      // instead: a hook that never settles (a ledger swapped for a FIFO)
+      // labels `external` rather than holding the turn forever.
       if (tool.settleTrust) {
         try {
-          const settled = await tool.settleTrust(session);
+          const settled = await settleWithin(tool.settleTrust(session), SETTLE_TRUST_TIMEOUT_MS);
           if (settled !== undefined) {
             marking.context.markTrust!(settled);
           }
@@ -333,6 +335,25 @@ export class LocalCommandExecutor implements Executor {
     }
   }
 }
+
+/** The longest a tool's `settleTrust` may take before its output is labelled `external`. */
+const SETTLE_TRUST_TIMEOUT_MS = 2_000;
+
+/** The hook's answer, or a rejection once `ms` pass, so the caller's catch labels `external`. */
+const settleWithin = async <T>(value: T | Promise<T>, ms: number): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(value),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('settleTrust timed out')), ms);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 export const createLocalCommandExecutor = (
   options: LocalCommandExecutorOptions = {},
