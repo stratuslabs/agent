@@ -83,6 +83,9 @@ test('a cloud namespace that hands names to tenants is refused, at any region, a
     's3.dualstack.eu-west-1.amazonaws.com', 's3-website-us-east-1.amazonaws.com',
     's3-website.eu-central-1.amazonaws.com', 'execute-api.us-east-1.amazonaws.com',
     'lambda-url.us-gov-west-1.on.aws', 'us-east-1.amazonaws.com', 'compute-1.amazonaws.com',
+    // Every S3 endpoint family, not only the ones listed by name.
+    's3-accelerate.amazonaws.com', 's3-accelerate.dualstack.amazonaws.com', 's3-control.us-east-1.amazonaws.com',
+    's3-fips.dualstack.us-east-1.amazonaws.com', 's3-outposts.us-west-2.amazonaws.com', 's3-express-usw2-az1.us-west-2.amazonaws.com',
     'storage.googleapis.com', 'blob.core.windows.net', 'githubusercontent.com', 'raw.githubusercontent.com', 'r2.dev',
   ]) {
     assert.equal(normalizeTrustedDomain(shared), undefined, shared);

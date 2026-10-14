@@ -162,10 +162,14 @@ export const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
 // Listing each would be hundreds of entries, so an entry under these bases
 // whose every label is a service or a region is the namespace, and refused;
 // one with a tenant's label (a bucket, an API id) is that tenant's name.
+// S3 is matched as a family (`s3`, `s3-accelerate`, `s3-website-us-east-1`,
+// `s3-control`, ...) because AWS keeps adding endpoint kinds; a bucket that
+// happens to be named `s3-something` and is listed bare is refused too, with
+// the same error, which is the safe direction.
 const AWS_BASES = ['amazonaws.com', 'on.aws'];
 const AWS_REGION = '[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\\d';
 const AWS_NAMESPACE_LABEL = new RegExp(
-  `^(?:${AWS_REGION}|(?:s3|s3-website)(?:-${AWS_REGION})?|s3-accesspoint|s3-object-lambda|s3-fips|dualstack`
+  `^(?:${AWS_REGION}|s3(?:-[a-z0-9-]+)?|dualstack`
   + '|execute-api|lambda-url|elb|compute|compute-1|vpce)$',
 );
 
