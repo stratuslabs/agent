@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -316,4 +318,47 @@ test('one agent whose move cannot finish is reported, and the others still move'
   assert.match(report ?? '', /moved 0 soul\(s\) and 1 workspace\(s\)/);
   assert.match(report ?? '', /ava's workspace \(.*was recreated while its workspace was moving/);
   assert.ok((await lstat(agentWorkspacePath(env, 'bea'))).isSymbolicLink());
+});
+
+test('template add --force leaves the visible soul alone when the hidden name is taken meanwhile', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  claimAgentsHome(env);
+  await mkdir(path.join(home, 'Agents', 'ava'), { recursive: true });
+  await writeFile(path.join(home, 'Agents', 'ava', 'soul.md'), 'kept');
+  // Another process recreated the roster entry after the caller unlinked it.
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await writeFile(path.join(agentsDirPath(env), 'ava.md'), 'theirs');
+
+  await assert.rejects(
+    () => writeNewSoulFile(env, 'ava.md', 'ava', soulText('ava'), { replace: true }),
+    { code: 'EEXIST' },
+  );
+  assert.equal(await readFile(path.join(home, 'Agents', 'ava', 'soul.md'), 'utf8'), 'kept');
+  assert.equal(await readFile(path.join(agentsDirPath(env), 'ava.md'), 'utf8'), 'theirs');
+  assert.deepEqual((await readdir(path.join(home, 'Agents', 'ava'))).filter((name) => name.endsWith('.tmp')), []);
+});
+
+test('where symlinks cannot be made (Windows without Developer Mode), souls and workspaces stay hidden', async (t) => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  const denied = (): never => {
+    throw Object.assign(new Error('EPERM: operation not permitted, symlink'), { code: 'EPERM' });
+  };
+  t.mock.method(fs, 'symlinkSync', denied);
+  t.mock.method(fs.promises, 'symlink', async () => denied());
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+
+  assert.equal(claimAgentsHome(env), undefined);
+  const soulPath = await writeNewSoulFile(env, 'ava.md', 'ava', soulText('ava'));
+  assert.equal(soulPath, path.join(agentsDirPath(env), 'ava.md'));
+  assert.ok((await lstat(soulPath)).isFile());
+  assert.equal(await exists(path.join(home, 'Agents')), false, 'no visible folder is claimed that nothing links into');
+  await surfaceAgentsHome(env);
+  assert.ok((await lstat(soulPath)).isFile(), 'the existing soul is not moved either');
+  assert.equal(await exists(path.join(home, 'Agents')), false);
 });

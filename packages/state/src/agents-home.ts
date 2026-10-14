@@ -204,6 +204,27 @@ export const resolveAgentsHome = (env: StateEnvironment): string | undefined => 
     ?? candidates.find((candidate) => candidate.state === 'free'))?.directory;
 };
 
+const LINK_UNAVAILABLE = new Set(['EPERM', 'EACCES', 'ENOTSUP', 'ENOSYS', 'EOPNOTSUPP']);
+
+/**
+ * Whether symlinks can be created in `directory`, by making (and removing)
+ * a dangling one. Only a refusal says no; any other failure is thrown.
+ */
+const canLinkFrom = (directory: string): boolean => {
+  mkdirSync(directory, { recursive: true });
+  const probe = path.join(directory, `.link-probe-${randomUUID()}`);
+  try {
+    symlinkSync(`${probe}.target`, probe, 'file');
+  } catch (error) {
+    if (LINK_UNAVAILABLE.has((error as NodeJS.ErrnoException).code ?? '')) {
+      return false;
+    }
+    throw error;
+  }
+  rmSync(probe, { force: true });
+  return true;
+};
+
 /**
  * {@link resolveAgentsHome}, creating the folder and its marker when it is
  * not there yet. Synchronous because its caller, `AgentWorkspaces.prepare`,
@@ -219,6 +240,12 @@ export const resolveAgentsHome = (env: StateEnvironment): string | undefined => 
 export const claimAgentsHome = (env: StateEnvironment): string | undefined => {
   const configured = configuredAgentsHome(env);
   if (configured === 'off') {
+    return undefined;
+  }
+  // Everything in the folder is reached through a link from the hidden
+  // home. Where links cannot be made (Windows without Developer Mode or
+  // Administrator), claim nothing and keep the hidden layout.
+  if (!canLinkFrom(agentsDirPath(env))) {
     return undefined;
   }
   if (configured !== undefined) {
@@ -370,28 +397,28 @@ export const writeNewSoulFile = async (
   }
   const visible = visibleSoulPathIn(agentsHome, agentId);
   await mkdir(path.dirname(visible), { recursive: true, mode: 0o700 });
-  let created = true;
   if (options.replace === true) {
+    // Claim the hidden name before touching the visible soul, so a name
+    // taken meanwhile fails with the person's soul still as it was. Until
+    // the rename the link serves the old soul, which is still a whole soul.
     const temporary = `${visible}.${randomUUID()}.tmp`;
     try {
       await writeFile(temporary, contents, { flag: 'wx', mode: 0o644 });
+      await symlink(visible, hidden, 'file');
       await rename(temporary, visible);
     } catch (error) {
       await rm(temporary, { force: true });
       throw error;
     }
-    created = false;
-  } else {
-    await writeFile(visible, contents, { flag: 'wx', mode: 0o644 });
+    return hidden;
   }
+  await writeFile(visible, contents, { flag: 'wx', mode: 0o644 });
   try {
     await symlink(visible, hidden, 'file');
   } catch (error) {
     // The hidden name is taken after all: leave nothing behind that a later
     // claim of this id would trip over.
-    if (created) {
-      await unlink(visible).catch(() => undefined);
-    }
+    await unlink(visible).catch(() => undefined);
     throw error;
   }
   return hidden;

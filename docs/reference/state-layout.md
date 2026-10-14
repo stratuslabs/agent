@@ -68,6 +68,8 @@ Sessions, memories, grants and everything else stay in `~/.stratus`.
   `~/.stratus` and nothing else: anything written to `~/Agents` there
   would be lost when the container is recreated. A Fly volume or a second
   disk mounted at `~/.stratus` is the same case.
+  Where symlinks cannot be made (Windows without Developer Mode or
+  Administrator), there is no agents folder and the hidden layout stays.
 - **Choosing it yourself.** `STRATUS_AGENTS_DIR` names the folder outright
   (`~` expands; it may not be inside `~/.stratus`, and it is used even on
   another disk), and `STRATUS_AGENTS_DIR=off` turns the folder off.
