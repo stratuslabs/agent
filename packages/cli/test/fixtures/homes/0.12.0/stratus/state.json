@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 4,
+  "applied": [
+    "0001-owner-only-state-files",
+    "0002-provenance-labels",
+    "0003-per-agent-state-layout",
+    "0004-per-agent-workspaces"
+  ]
+}
