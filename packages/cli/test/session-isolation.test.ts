@@ -99,6 +99,11 @@ export const createPlugin = () => ({
             agentId: session.agent.id,
             texts: session.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => m.content).filter((text) => text.length > 0),
             facts: factsIn(request.memory),
+            // Tool traffic too: assistant tool-call records have empty
+            // content and tool results have role tool, so the texts above
+            // never show them.
+            calls: session.messages.flatMap((m) => (m.toolCalls ?? []).map((call) => call.id)),
+            results: session.messages.filter((m) => m.role === 'tool').map((m) => m.toolResult?.callId ?? '(no callId)'),
           }) + '\\n');
           const last = session.messages.at(-1);
           if (last?.role === 'tool') {
@@ -161,7 +166,22 @@ interface Seen {
   agentId: string;
   texts: string[];
   facts: string[];
+  calls: string[];
+  results: string[];
 }
+
+// Every tool call id the fixture makes starts with the session that made
+// it, so a call or result moved into another conversation shows up here
+// even when its text would pass. Each result also answers a call that
+// same request carries.
+const assertOwnToolTraffic = (request: Seen): void => {
+  for (const id of [...request.calls, ...request.results]) {
+    assert.ok(id.startsWith(`${request.sessionId}:`), `${request.sessionId} was handed another conversation's tool traffic: ${id}`);
+  }
+  for (const id of request.results) {
+    assert.ok(request.calls.includes(id), `${request.sessionId} carried a result for a call it never made: ${id}`);
+  }
+};
 
 const seenBy = async (file: string): Promise<Seen[]> =>
   (await readFile(file, 'utf8')).split('\n').filter((line) => line.length > 0).map((line) => JSON.parse(line) as Seen);
@@ -245,6 +265,7 @@ test('concurrent turns see only their own conversation and their own agent\'s me
     for (const text of request.texts) {
       assert.match(text, mine[request.sessionId]!, `${request.sessionId} was handed another conversation's message: ${text}`);
     }
+    assertOwnToolTraffic(request);
     const other = request.agentId === 'ava' ? /beta/ : /alpha/;
     for (const fact of request.facts) {
       assert.doesNotMatch(fact, other, `${request.agentId} was handed another agent's memory: ${fact}`);
@@ -255,6 +276,9 @@ test('concurrent turns see only their own conversation and their own agent\'s me
   // conversation where it was never said. Without this, a request that
   // carried no memory at all would pass the check above.
   const fresh = (sessionId: string) => requests.filter((request) => request.sessionId === sessionId).at(-1)!;
+  // And the tool-traffic check had something to look at: the remember
+  // calls' results are in both first conversations' later requests.
+  assert.ok(fresh('a-1').results.length > 0 && fresh('b-1').results.length > 0, JSON.stringify([fresh('a-1'), fresh('b-1')]));
   assert.ok(fresh('a-2').facts.some((fact) => /alpha ledger/.test(fact)), JSON.stringify(fresh('a-2')));
   assert.ok(fresh('b-2').facts.some((fact) => /beta ledger/.test(fact)), JSON.stringify(fresh('b-2')));
 });
@@ -276,7 +300,7 @@ test('a session one agent holds cannot be written to as another agent', async (t
 });
 
 test('an approval answers only the call it was asked for, and Always allow stays with one agent', async (t) => {
-  const { daemon, runs } = await withDaemon(t);
+  const { daemon, runs, seen } = await withDaemon(t);
 
   // Three calls to the same tool park at once: two of Ava's conversations and one of Bea's.
   await Promise.all([
@@ -325,6 +349,17 @@ test('an approval answers only the call it was asked for, and Always allow stays
   };
   assert.deepEqual(await toolsGranted('ava'), ['fixture.mark']);
   assert.deepEqual(await toolsGranted('bea'), []);
+
+  // Every call returned the same "marked", so only the ids tell the
+  // results apart: each follow-up carried its own session's call and result.
+  const requests = await seenBy(seen);
+  for (const request of requests) {
+    assert.equal(request.agentId, request.sessionId.startsWith('a-') ? 'ava' : 'bea');
+    assertOwnToolTraffic(request);
+  }
+  for (const sessionId of ['a-1', 'a-2', 'a-3', 'b-1']) {
+    assert.ok(requests.some((request) => request.sessionId === sessionId && request.results.length === 1), `${sessionId} follow-up carried its result`);
+  }
 });
 
 test('one conversation stuck in a running tool does not hold up the same agent\'s other conversations', async (t) => {
