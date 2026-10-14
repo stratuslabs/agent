@@ -490,3 +490,61 @@ test('a workspace link whose whole agents folder was deleted gets the folder bac
   assert.ok((await stat(path.join(home, 'Agents', 'ava', 'workspace'))).isDirectory());
   assert.equal(resolveAgentsHome(env), path.join(home, 'Agents'), 'new agents keep going to the same folder, not ~/Stratus');
 });
+
+test('agent new that loses a race to an identical request leaves the winner\'s soul in place', async (t) => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  claimAgentsHome(env);
+  const visible = path.join(home, 'Agents', 'ava', 'soul.md');
+  const hidden = path.join(agentsDirPath(env), 'ava.md');
+  const realSymlink = fs.promises.symlink;
+  // A second identical request adopts this write's soul and links it first.
+  t.mock.method(fs.promises, 'symlink', async (target: string, linkPath: string, kind?: string) => {
+    if (linkPath === hidden) {
+      await realSymlink(visible, hidden, 'file');
+      throw Object.assign(new Error(`EEXIST: file already exists, symlink '${linkPath}'`), { code: 'EEXIST' });
+    }
+    return realSymlink(target, linkPath, kind as 'file');
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+
+  await assert.rejects(() => writeNewSoulFile(env, 'ava.md', 'ava', soulText('ava')), { code: 'EEXIST' });
+  assert.equal(await readFile(visible, 'utf8'), soulText('ava'), 'the soul the winner linked is still there');
+  assert.equal(await readFile(hidden, 'utf8'), soulText('ava'), 'and the roster still reads it');
+});
+
+test('a soul copied across volumes never overwrites one written into the agent folder meanwhile', async (t) => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  const hiddenSoul = path.join(agentsDirPath(env), 'ava.md');
+  const visible = path.join(home, 'Agents', 'ava', 'soul.md');
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await writeFile(hiddenSoul, soulText('ava'));
+  claimAgentsHome(env);
+  t.mock.method(fs.promises, 'link', async () => {
+    throw Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+  });
+  const realCopy = fs.promises.copyFile;
+  // template add --force installs a new soul while the copy is staged.
+  t.mock.method(fs.promises, 'copyFile', async (from: string, to: string, mode?: number) => {
+    await realCopy(from, to, mode);
+    await writeFile(visible, 'replacement');
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+
+  const report = await surfaceAgentsHome(env);
+  assert.match(report ?? '', /left in place/);
+  assert.equal(await readFile(visible, 'utf8'), 'replacement');
+  assert.equal(await readFile(hiddenSoul, 'utf8'), soulText('ava'), 'the hidden soul is not swapped for a link');
+  assert.ok((await lstat(hiddenSoul)).isFile());
+  assert.deepEqual((await readdir(path.dirname(visible))).filter((name) => name.endsWith('.copy')), []);
+});

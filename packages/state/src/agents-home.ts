@@ -480,8 +480,10 @@ export const writeNewSoulFile = async (
     await symlink(visible, hidden, 'file');
   } catch (error) {
     // The hidden name is taken after all: leave nothing behind that a later
-    // claim of this id would trip over.
-    if (wrote) {
+    // claim of this id would trip over. Unless the hidden name is a link to
+    // this very soul: an identical request racing this one adopted it, and
+    // removing it now would leave that request's agent dangling.
+    if (wrote && (await readlink(hidden).catch(() => undefined)) !== visible) {
       await unlink(visible).catch(() => undefined);
     }
     throw error;
@@ -558,6 +560,14 @@ const surfaceSoul = async (env: StateEnvironment, agentsHome: string, file: stri
       const staged = path.join(path.dirname(visible), `.${path.basename(visible)}.${randomUUID()}.copy`);
       await copyFile(hidden, staged, constants.COPYFILE_EXCL);
       try {
+        // A soul put there while the copy was staged (template add --force,
+        // say) is somebody's, and rename would overwrite it. Node has no
+        // exclusive rename, so look again as late as possible.
+        if (await lstatOrUndefined(visible) !== undefined) {
+          await rm(staged, { force: true });
+          report.skipped.push(`${file} (${visible} already exists)`);
+          return;
+        }
         await rename(staged, visible);
       } catch (renameError) {
         await rm(staged, { force: true });
