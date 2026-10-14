@@ -24,11 +24,12 @@ import { DEFAULT_SOUL_STARTER } from './setup.ts';
 /**
  * The provider/model a newly created soul pins. Frontmatter pins what a run
  * from this directory would actually use: env vars outrank the active
- * config file (project-local or explicit first, global otherwise), and no
- * provider anywhere falls back to demo — the exact precedence of stratus
- * run. Demo produces no model at all: the soul keeps following the
- * machine's configuration instead of demanding credentials nothing has
- * signed in for. The active config's model was written for the provider
+ * config file (project-local or explicit first, global otherwise). When
+ * nothing names a provider the soul pins none, so a run infers the one
+ * signed-in provider exactly as `stratus run` does; demo is pinned only when
+ * something names it. Demo produces no model at all: the soul keeps
+ * following the machine's configuration instead of demanding credentials
+ * nothing has signed in for. The active config's model was written for the provider
  * named in that config, so it only travels into the soul when they still
  * match; otherwise the selected provider's own default model stands in.
  *
@@ -37,14 +38,17 @@ import { DEFAULT_SOUL_STARTER } from './setup.ts';
 export const soulPinForNewAgent = (
   activeConfig: StratusConfigFile,
   processEnv: NodeJS.ProcessEnv,
-): { provider: StratusProviderName; model?: string } => {
+): { provider?: StratusProviderName; model?: string } => {
   // The map already validates, so the value is a provider name; the cast
   // only undoes `readNonEmptyString`'s widening to `string`.
   const envProvider = readNonEmptyString(
     processEnv.STRATUS_PROVIDER,
     (value) => parseProviderName(value, 'STRATUS_PROVIDER'),
   ) as StratusProviderName | undefined;
-  const provider = envProvider ?? activeConfig.provider ?? 'demo';
+  const provider = envProvider ?? activeConfig.provider;
+  if (provider === undefined) {
+    return {};
+  }
   if (provider === 'demo') {
     return { provider };
   }
@@ -62,6 +66,32 @@ export const soulPinForNewAgent = (
           ? DEFAULT_CODEX_MODEL
           : DEFAULT_ANTHROPIC_MODEL);
   return model !== undefined ? { provider, model } : { provider };
+};
+
+/**
+ * The global config after making a new agent the default. A provider is
+ * written only when the config has none and something named one: with
+ * nothing named, runs infer the signed-in provider, and writing a fallback
+ * here would silently pin every later run to it.
+ *
+ * Exported for tests: the interactive path that consumes it needs a TTY.
+ */
+export const defaultAgentConfig = (
+  globalConfig: CliConfigFile,
+  soulProvider: StratusProviderName | undefined,
+  soulPath: string,
+): CliConfigFile => {
+  // Re-validated rather than cast: `readNonEmptyString` widens to `string`,
+  // and the shared parser is what says which strings are provider names.
+  // Every source feeding soulProvider is already one, so this narrows
+  // without being able to throw.
+  const provider = globalConfig.provider
+    ?? (soulProvider !== undefined ? parseProviderName(soulProvider, 'provider') : undefined);
+  return {
+    ...globalConfig,
+    ...(provider !== undefined ? { provider } : {}),
+    soul: soulPath,
+  };
 };
 
 export const runAgentNew = async (
@@ -105,7 +135,7 @@ export const runAgentNew = async (
         writeLine(streams.stdout, `Note: ${message}.`);
       });
       const { provider: soulProvider, model: soulModel } = soulPinForNewAgent(activeConfig, processEnv);
-      const soulPin = soulProvider !== 'demo' && soulModel !== undefined
+      const soulPin = soulProvider !== undefined && soulProvider !== 'demo' && soulModel !== undefined
         ? { provider: soulProvider, model: soulModel }
         : {};
 
@@ -137,15 +167,7 @@ export const runAgentNew = async (
           }
         }
         if (globalConfig !== undefined) {
-          // Re-validated rather than cast: `readNonEmptyString` widens to
-          // `string`, and the shared parser is what says which strings are
-          // provider names. Every source feeding soulProvider is already one,
-          // so this narrows without being able to throw.
-          const config: CliConfigFile = {
-            ...globalConfig,
-            provider: globalConfig.provider ?? parseProviderName(soulProvider, 'provider'),
-            soul: soulPath,
-          };
+          const config = defaultAgentConfig(globalConfig, soulProvider, soulPath);
           await saveConfigFile(globalConfigPath(env), config);
           madeDefault = true;
           if (configLocation && configLocation.path !== globalConfigPath(env)) {

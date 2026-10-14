@@ -55,6 +55,7 @@ import {
   runCli,
   serveArgv,
   soulPinForNewAgent,
+  defaultAgentConfig,
   warnOnCredentialOverride,
   readRecentRecords,
   slackAppManifest,
@@ -5397,7 +5398,27 @@ test('a new agent on a codex machine pins the codex default model, not a Claude 
     soulPinForNewAgent({ provider: 'openai', model: 'gpt-4.1-mini' }, { STRATUS_PROVIDER: 'codex' }),
     { provider: 'codex', model: 'gpt-5.5' },
   );
-  assert.deepEqual(soulPinForNewAgent({}, {}), { provider: 'demo' });
+  // Nothing chose a provider: the soul pins none, so a run infers the one
+  // signed-in provider rather than being sent to the demo model.
+  assert.deepEqual(soulPinForNewAgent({}, {}), {});
+  assert.deepEqual(soulPinForNewAgent({}, { STRATUS_PROVIDER: 'demo' }), { provider: 'demo' });
+});
+
+test('making a new agent the default never writes a provider nothing chose', () => {
+  // A machine signed in to one provider with no provider setting: runs
+  // infer it, and "Make default" must not pin the global config to demo.
+  assert.deepEqual(
+    defaultAgentConfig({}, soulPinForNewAgent({}, {}).provider, '/home/me/agent.md'),
+    { soul: '/home/me/agent.md' },
+  );
+  assert.deepEqual(
+    defaultAgentConfig({ provider: 'anthropic' }, 'codex', '/a.md'),
+    { provider: 'anthropic', soul: '/a.md' },
+  );
+  assert.deepEqual(
+    defaultAgentConfig({}, 'codex', '/a.md'),
+    { provider: 'codex', soul: '/a.md' },
+  );
 });
 
 test('doctor names the custom variable that actually supplied the key', async () => {
