@@ -102,7 +102,7 @@ export const createPlugin = () => ({
           }) + '\\n');
           const last = session.messages.at(-1);
           if (last?.role === 'tool') {
-            return { parts: [{ type: 'text', text: 'tool said: ' + JSON.stringify(last.toolResult?.ok ? last.toolResult.output : last.toolResult?.error) }] };
+            return { parts: [{ type: 'text', text: 'tool said in ' + session.id + ': ' + JSON.stringify(last.toolResult?.ok ? last.toolResult.output : last.toolResult?.error) }] };
           }
           const text = latestUser(session);
           if (/ together$/.test(text) && !(await together())) {
@@ -237,7 +237,7 @@ test('concurrent turns see only their own conversation and their own agent\'s me
   assert.equal(lastText(b2), 'echo b-2: b2 first together');
 
   const owner: Record<string, string> = { 'a-1': 'ava', 'a-2': 'ava', 'b-1': 'bea', 'b-2': 'bea' };
-  const mine: Record<string, RegExp> = { 'a-1': /a1|ava keeps|echo a-1|tool said/, 'a-2': /a2|echo a-2/, 'b-1': /b1|bea keeps|echo b-1|tool said/, 'b-2': /b2|echo b-2/ };
+  const mine: Record<string, RegExp> = { 'a-1': /a1|ava keeps|echo a-1|tool said in a-1:/, 'a-2': /a2|echo a-2/, 'b-1': /b1|bea keeps|echo b-1|tool said in b-1:/, 'b-2': /b2|echo b-2/ };
   const requests = await seenBy(seen);
   assert.ok(requests.length >= 8, `expected every turn to reach the provider, saw ${requests.length}`);
   for (const request of requests) {
@@ -297,7 +297,7 @@ test('an approval answers only the call it was asked for, and Always allow stays
   // Deny for another: nothing runs, the turn says so, Ava's other call is untouched.
   assert.equal((await daemon.api('POST', '/approvals', { requestId: b1.requestId, answer: 'deny' })).status, 200);
   const denied = await completed(daemon, 'b-1', 1);
-  assert.match(lastText(denied), /tool said: /);
+  assert.match(lastText(denied), /tool said in b-1: /);
   assert.doesNotMatch(lastText(denied), /marked/);
   assert.deepEqual(await runsOf(runs), ['mark a-1']);
   assert.deepEqual((await pending(daemon)).map((approval) => approval.sessionId), ['a-2']);
