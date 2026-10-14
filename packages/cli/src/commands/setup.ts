@@ -1,4 +1,4 @@
-import { installHarnessPackages, missingHarnessPackages } from '../harness-packages.ts';
+import { harnessesMissingMessage, installHarnessPackages, missingHarnessPackages } from '../harness-packages.ts';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { JsonObject } from '@stratusagent/core';
@@ -2709,7 +2709,8 @@ export const runSetup = async (
   /**
    * Write everything the menu decided, then report whether the always-on
    * service step it performed — installing the service, or removing one the
-   * user chose not to run — succeeded.
+   * user chose not to run — and the install of the provider harness the
+   * config runs on both succeeded.
    *
    * A boolean rather than a throw: the service is the one optional part of
    * setup and everything else is already on disk by the time it runs, so
@@ -2864,7 +2865,11 @@ export const runSetup = async (
     // Claude by subscription or Codex was the decision, and the CLI no
     // longer carries either harness, so a daemon started without it fails
     // every turn. Through the saved files, so a soul's own pin counts.
-    await installHarnessPackages(await missingHarnessPackages(env, configPath, { asService: true }), streams, env);
+    // A failed install is carried like a failed service step: everything is
+    // saved, but the exit code and the closing line must not call a config
+    // whose every turn fails ready.
+    const harnesses = await missingHarnessPackages(env, configPath, { asService: true });
+    const harnessInstallFailed = !(await installHarnessPackages(harnesses, streams, env));
     await offerOptionalPackages();
 
     // Last, so the daemon starts against the config and credentials that
@@ -2966,7 +2971,9 @@ export const runSetup = async (
       ...(flagged.has('STRATUS_MODEL') ? { model: String(state.model ?? defaultModelFor(state.provider)) } : {}),
       ...(flagged.has('STRATUS_BASE_URL') ? { baseUrl: state.baseUrl ?? DEFAULT_OPENAI_BASE_URL } : {}),
     };
-    const readBackFailure = await resolveRuntimeConfig(readBackSelection, env).then(
+    const readBackFailure = harnessInstallFailed
+      ? harnessesMissingMessage(harnesses)
+      : await resolveRuntimeConfig(readBackSelection, env).then(
         () => undefined,
         (error: unknown) => (error instanceof Error ? error.message : String(error)),
       );
@@ -3008,7 +3015,7 @@ export const runSetup = async (
     if (dashboardReady) {
       writeLine(streams.stdout, '  stratus dashboard');
     }
-    return !serviceStepFailed;
+    return !serviceStepFailed && !harnessInstallFailed;
   };
 
   try {

@@ -259,6 +259,31 @@ test('setup installs the claude-code harness when the Claude subscription is cho
   assert.match(output.stdout, /Running: npm install -g @stratusagent\/provider-claude-code@/);
 });
 
+test('setup that cannot install the harness exits 1 and does not say ready', async () => {
+  // The CLI no longer carries the harness, so a failed install leaves a
+  // saved config on which every turn fails. Saved either way; the exit code
+  // and the closing line carry it, as for a failed service step.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: missing(CLAUDE_CODE),
+      packageInstaller: async () => ({ ok: false, message: 'npm exited with code 243' }),
+      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '9\n']),
+    },
+  });
+  assert.equal(exitCode, 1, output.stdout);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail: @stratusagent\/provider-claude-code is not installed/);
+  assert.match(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'), /"provider": "anthropic"/);
+});
+
 test('setup installs no harness for an API-key provider', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
