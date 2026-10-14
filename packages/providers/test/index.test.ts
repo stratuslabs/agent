@@ -1738,3 +1738,41 @@ test('a short key that is also a diagnostic word does not hide an overflow or an
   await image.generate(request);
   assert.equal(attempts, 2, 'retried without the images');
 });
+
+// The endpoint's body is untrusted JSON: `error.message` need not be a
+// string. A non-string one is still classified (here by its code) and
+// still redacted, rather than throwing a TypeError from the redaction.
+test('a non-string error message from the endpoint is classified, not thrown as a TypeError', async () => {
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: (async () => ({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: { code: 'context_length_exceeded', message: 123 } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => provider.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  const leaky = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'sk-secret-value',
+    fetch: (async () => ({
+      ok: false,
+      status: 401,
+      text: async () => JSON.stringify({ error: { message: { detail: 'bad key sk-secret-value' } } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => leaky.generate(createRequest()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error && !(error instanceof TypeError), String(error));
+      assert.ok(!error.message.includes('sk-secret-value'), error.message);
+      assert.match(error.message, /bad key/);
+      return true;
+    },
+  );
+});

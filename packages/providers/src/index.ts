@@ -477,7 +477,15 @@ export const createOpenAICompatibleProvider = ({
         // Classified on the endpoint's own words, and redacted only in what
         // is thrown: a local runtime takes any key, and a short one can be
         // a word the checks below look for ("context", "image").
-        const reported = payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`;
+        // The body is the endpoint's own JSON, so `error.message` is only a
+        // string by convention: anything else is shown as JSON rather than
+        // left to throw from the checks and the redaction below.
+        const reportedMessage: unknown = payload.error?.message;
+        const reported = typeof reportedMessage === 'string'
+          ? reportedMessage
+          : reportedMessage != null
+            ? JSON.stringify(reportedMessage)
+            : payload.rawText ?? `Provider request failed with status ${response.status}`;
         const message = redactSecrets(reported, [apiKey, ...Object.values(headers)]);
         // The transcript did not fit. Reported as the one provider failure
         // the kernel can act on — it answers by sending less history —
