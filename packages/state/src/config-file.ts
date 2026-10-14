@@ -19,6 +19,8 @@ import {
   type PluginsConfig,
   type StratusConfigFile,
 } from './config.ts';
+import { normalizeTrustedDomain, trustedDomainProblem } from '@stratusagent/permissions';
+
 import { REGISTERED_PROVIDER_NAME_PATTERN, parseProviderName } from './provider-names.ts';
 
 /**
@@ -433,7 +435,15 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     // or `openai.com:8443` is someone who meant a domain and would get a
     // daemon quietly asking anyway.
     const domains = Array.isArray(source.trustedDomains) ? source.trustedDomains : undefined;
-    const normalized = domains?.map((entry) => (typeof entry === 'string' ? normalizeTrustedDomainEntry(entry) : undefined));
+    // A shared suffix (`github.io`) is spelled like a domain, so it gets
+    // its own message: the generic one would read as a typo.
+    const shared = domains
+      ?.map((entry) => (typeof entry === 'string' ? trustedDomainProblem(entry) : undefined))
+      .find((problem) => problem !== undefined && problem !== 'not a domain');
+    if (shared !== undefined) {
+      throw new Error(`Invalid ${where}.trustedDomains in config ${configPath}: ${shared}.`);
+    }
+    const normalized = domains?.map((entry) => (typeof entry === 'string' ? normalizeTrustedDomain(entry) : undefined));
     if (normalized === undefined || normalized.some((entry) => entry === undefined)) {
       throw new Error(
         `Invalid ${where}.trustedDomains in config ${configPath}: expected a list of domains like ["openai.com", "developer.apple.com"], with no scheme, path, or port.`,
@@ -442,12 +452,6 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     route.trustedDomains = [...new Set(normalized as string[])];
   }
   return route;
-};
-
-/** The same normalization the permission engine applies: `*.x.com` and `.x.com` mean `x.com`. */
-const normalizeTrustedDomainEntry = (raw: string): string | undefined => {
-  const domain = raw.trim().toLowerCase().replace(/^\*\./, '').replace(/^\./, '');
-  return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(domain) ? domain : undefined;
 };
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {

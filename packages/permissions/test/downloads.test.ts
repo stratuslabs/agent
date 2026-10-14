@@ -60,6 +60,20 @@ test('a trusted domain covers itself and its subdomains over https, and nothing 
   }
 });
 
+test('a suffix anyone can register a site under is never a trusted domain', () => {
+  // `co.uk` would cover every company's site under it, and `github.io`
+  // every user's page: the operator meant one site, not all of them.
+  for (const shared of ['co.uk', '*.github.io', '.vercel.app', 'COM.AU', 'herokuapp.com']) {
+    assert.equal(normalizeTrustedDomain(shared), undefined, shared);
+  }
+  assert.equal(trustedDomainOf('https://attacker.co.uk', ['co.uk']), undefined);
+  assert.equal(trustedDomainOf('https://someone.github.io', ['github.io']), undefined);
+  // A site registered under one is an ordinary domain.
+  assert.equal(normalizeTrustedDomain('bbc.co.uk'), 'bbc.co.uk');
+  assert.equal(trustedDomainOf('https://www.bbc.co.uk', ['bbc.co.uk']), 'bbc.co.uk');
+  assert.equal(normalizeTrustedDomain('stratuslabs.github.io'), 'stratuslabs.github.io');
+});
+
 test('a plain download into the workspace is recognized, and its site is what it answers', async () => {
   const { workspace } = await layout();
   const site = async (command: string, cwd = workspace) => downloadInsideWorkspace(analyzeCommand(command), cwd, workspace);

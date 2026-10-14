@@ -126,8 +126,48 @@ export const parseOriginScope = (raw: unknown): OriginScope | undefined => {
  * never widens into something nobody wrote.
  */
 export const normalizeTrustedDomain = (raw: string): string | undefined => {
+  const domain = trustedDomainSpelling(raw);
+  return domain !== undefined && !isSharedSuffix(domain) ? domain : undefined;
+};
+
+/** The domain an entry spells, before asking whether it is one site. */
+const trustedDomainSpelling = (raw: string): string | undefined => {
   const domain = raw.trim().toLowerCase().replace(/^\*\./, '').replace(/^\./, '');
   return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(domain) ? domain : undefined;
+};
+
+/**
+ * Suffixes anyone can register a site under. Trusting `co.uk` or
+ * `github.io` trusts every stranger's site below it, which is never what an
+ * operator listing a vendor's docs meant. A short list of the common ones,
+ * not the Public Suffix List: that would be a dependency for every install,
+ * and the docs already say a trusted domain should be one site you know.
+ */
+export const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
+  // Country second levels with open registration.
+  'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk', 'com.au', 'net.au', 'org.au', 'co.nz', 'org.nz',
+  'co.jp', 'co.kr', 'co.in', 'co.za', 'com.br', 'com.cn', 'com.mx', 'com.tr', 'com.sg', 'com.hk',
+  // Hosting where every user gets a subdomain.
+  'github.io', 'gitlab.io', 'vercel.app', 'netlify.app', 'pages.dev', 'workers.dev', 'fly.dev',
+  'herokuapp.com', 'onrender.com', 'web.app', 'firebaseapp.com', 'appspot.com', 'azurewebsites.net',
+  'cloudfront.net', 'amazonaws.com', 'blogspot.com', 'wordpress.com', 'glitch.me', 'replit.app',
+  'ngrok.io', 'ngrok-free.app', 'trycloudflare.com', 'deno.dev', 'surge.sh',
+]);
+
+const isSharedSuffix = (domain: string): boolean => SHARED_SUFFIXES.has(domain);
+
+/**
+ * Why an entry is not a trusted domain, for a config error that names the
+ * fix, or undefined when it is one.
+ */
+export const trustedDomainProblem = (raw: string): string | undefined => {
+  const domain = trustedDomainSpelling(raw);
+  if (domain === undefined) {
+    return 'not a domain';
+  }
+  return isSharedSuffix(domain)
+    ? `${domain} is a suffix anyone can register a site under, so trusting it trusts every site below it. Name the site instead (stratuslabs.github.io, not github.io)`
+    : undefined;
 };
 
 /**
