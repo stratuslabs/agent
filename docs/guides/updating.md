@@ -298,6 +298,8 @@ naming any it left in place. It runs on every start rather than once, so a
 soul dropped into `~/.stratus/agents/` later is moved too, and costs one
 directory listing when there is nothing to do. A workspace move that is
 interrupted is finished by the next start, provenance ledger included.
+`stratus update --check` lists the move while one is still to happen, and
+counts it as something to apply.
 
 ## `stratus update` does the sequence in the order that cannot lose data
 

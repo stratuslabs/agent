@@ -2,7 +2,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   agentsDirPath,
-  inspectAgentsHome,
+  planAgentsHome,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
   globalConfigPath,
@@ -188,10 +188,11 @@ export interface DoctorReport {
   /**
    * The visible folder souls and workspaces live in (`~/Agents`, or
    * `~/Stratus` when `~/Agents` belongs to something else, or what
-   * `STRATUS_AGENTS_DIR` names). Absent when there is none: both names
-   * taken, `~/.stratus` on another filesystem, or `STRATUS_AGENTS_DIR=off`.
+   * `STRATUS_AGENTS_DIR` names), as `planAgentsHome` decides it for `serve`
+   * too. `claimed` is false for a folder the next start would create.
+   * Absent when there is none, with the reason.
    */
-  agentsFolder?: string;
+  agentsFolder?: { path: string; claimed: boolean; pending: number } | { reason: string };
   /** The running daemon, as it reports itself. */
   daemon: DoctorDaemon;
   problems: string[];
@@ -701,17 +702,28 @@ export const collectDoctorReport = async (
     );
   }
 
-  // A soul or workspace link whose folder was deleted or renamed in the
-  // agents folder: the soul drops out of the roster with a warning, and a
-  // missing workspace only comes back empty on the next write, so say which.
-  let agentsFolder: string | undefined;
+  // The same plan `serve` acts on: where the folder is (or why there is
+  // none here), what the next start would move, and what is broken. A soul
+  // or workspace link whose folder was deleted or renamed: the soul drops
+  // out of the roster with a warning, and a missing workspace only comes
+  // back empty on the next write, so say which. And a soul in the folder
+  // nothing links to, which the roster never reads.
+  let agentsFolder: DoctorReport['agentsFolder'];
   try {
-    const inspected = await inspectAgentsHome(env);
-    agentsFolder = inspected.agentsHome;
-    if (inspected.dangling.length > 0) {
+    const plan = await planAgentsHome(env);
+    agentsFolder = plan.agentsHome !== undefined
+      ? { path: plan.agentsHome, claimed: plan.claimed, pending: plan.souls.length + plan.workspaces.length }
+      : { reason: plan.reason ?? 'none available' };
+    if (plan.dangling.length > 0) {
       problems.push(
-        `These link into the agents folder, but what they point at is gone: ${inspected.dangling.join(', ')}. `
+        `These link into the agents folder, but what they point at is gone: ${plan.dangling.join(', ')}. `
         + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace is recreated empty on the next write.',
+      );
+    }
+    if (plan.unlinked.length > 0) {
+      problems.push(
+        `These souls are in the agents folder but no agent reads them: ${plan.unlinked.join(', ')}. `
+        + 'Probably left by an `agent new` or `template add` that was stopped partway: run it again, or delete the folder if you don\'t want the agent.',
       );
     }
   } catch (error) {
@@ -838,7 +850,14 @@ export const runDoctor = async (
     writeLine(streams.stdout, `            (${shadowedPath} exists but is outranked)`);
   }
   writeLine(streams.stdout, `  agents    ${report.rosterCount} soul file${report.rosterCount === 1 ? '' : 's'}`);
-  writeLine(streams.stdout, `            ${report.agentsFolder !== undefined ? `in ${report.agentsFolder}` : 'no visible agents folder, so souls and workspaces stay in ~/.stratus/agents'}`);
+  const folder = report.agentsFolder;
+  writeLine(streams.stdout, `            ${folder === undefined
+    ? 'agents folder unknown'
+    : 'reason' in folder
+      ? `no visible agents folder (${folder.reason}), so souls and workspaces stay in ~/.stratus/agents`
+      : folder.claimed
+        ? `in ${folder.path}${folder.pending > 0 ? ` (${folder.pending} more to move there on the next start)` : ''}`
+        : `${folder.path} is created on the next start${folder.pending > 0 ? `, and ${folder.pending} soul(s) or workspace(s) move there` : ''}`}`);
 
   if (report.fallback) {
     writeLine(streams.stdout, `  ${'fallback'.padEnd(10)}${report.fallback.provider} · ${report.fallback.model}`);

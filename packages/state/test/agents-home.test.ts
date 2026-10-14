@@ -19,8 +19,8 @@ import {
   createAgentWorkspaces,
   createHostProtectedPaths,
   grantSoulCredential,
-  inspectAgentsHome,
   loadRosterSouls,
+  planAgentsHome,
   resolveAgentsHome,
   surfaceAgentsHome,
   writeNewSoulFile,
@@ -122,10 +122,10 @@ test('a workspace folder somebody deleted comes back empty on the next write, ra
   const visible = path.join(home, 'Agents', 'ava', 'workspace');
   await import('node:fs/promises').then((fs) => fs.rm(path.join(home, 'Agents', 'ava'), { recursive: true }));
 
-  assert.deepEqual((await inspectAgentsHome(env)).dangling, [`${agentWorkspacePath(env, 'ava')} -> ${visible}`]);
+  assert.deepEqual((await planAgentsHome(env)).dangling, [`${agentWorkspacePath(env, 'ava')} -> ${visible}`]);
   workspaces.prepare('ava');
   assert.ok((await stat(visible)).isDirectory());
-  assert.deepEqual((await inspectAgentsHome(env)).dangling, []);
+  assert.deepEqual((await planAgentsHome(env)).dangling, []);
 });
 
 test('a workspace an operator linked somewhere else is left exactly where they put it', async () => {
@@ -405,4 +405,76 @@ test('a soul move interrupted after a copy (no hard links) is finished, not repo
   assert.match(report ?? '', /moved 1 soul/);
   assert.doesNotMatch(report ?? '', /left in place/);
   assert.equal(await readlink(hiddenSoul), path.join(home, 'Agents', 'ava', 'soul.md'));
+});
+
+test('the plan names the folder only where it can be used, and creates nothing', async (t) => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  const denied = (): never => {
+    throw Object.assign(new Error('EPERM: operation not permitted, symlink'), { code: 'EPERM' });
+  };
+  t.mock.method(fs, 'symlinkSync', denied);
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+
+  const plan = await planAgentsHome(env);
+  assert.equal(plan.agentsHome, undefined, 'no folder is reported that claiming would refuse');
+  assert.match(plan.reason ?? '', /symlinks/);
+  assert.equal(await exists(path.join(home, 'Agents')), false);
+  assert.deepEqual((await readdir(agentsDirPath(env))).filter((name) => name.startsWith('.link-probe-')), []);
+});
+
+test('the plan lists what the next pass would move, and is empty after it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentsDirPath(env), 'ava.md'), soulText('ava'));
+
+  const before = await planAgentsHome(env);
+  assert.equal(before.agentsHome, path.join(home, 'Agents'));
+  assert.equal(before.claimed, false);
+  assert.deepEqual(before.souls, ['ava.md']);
+  assert.deepEqual(before.workspaces, ['ava']);
+  assert.equal(await exists(path.join(home, 'Agents')), false, 'planning creates nothing');
+
+  await surfaceAgentsHome(env);
+  const after = await planAgentsHome(env);
+  assert.equal(after.claimed, true);
+  assert.deepEqual(after.souls, []);
+  assert.deepEqual(after.workspaces, []);
+  assert.deepEqual(after.unlinked, []);
+});
+
+test('agent new interrupted after writing the visible soul finishes on retry instead of leaving an orphan', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  claimAgentsHome(env);
+  // The state a crash between the visible write and the hidden link leaves.
+  const visible = path.join(home, 'Agents', 'ava', 'soul.md');
+  await mkdir(path.dirname(visible), { recursive: true });
+  await writeFile(visible, soulText('ava'));
+  assert.deepEqual((await planAgentsHome(env)).unlinked, [visible], 'doctor can name it');
+
+  const soulPath = await writeNewSoulFile(env, 'ava.md', 'ava', soulText('ava'));
+  assert.equal(await readlink(soulPath), visible);
+  assert.deepEqual((await planAgentsHome(env)).unlinked, []);
+});
+
+test('a different soul already in an unlinked agent folder is still a taken name', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  claimAgentsHome(env);
+  const visible = path.join(home, 'Agents', 'ava', 'soul.md');
+  await mkdir(path.dirname(visible), { recursive: true });
+  await writeFile(visible, 'somebody wrote this');
+
+  await assert.rejects(() => writeNewSoulFile(env, 'ava.md', 'ava', soulText('ava')), { code: 'EEXIST' });
+  assert.equal(await readFile(visible, 'utf8'), 'somebody wrote this');
+  assert.equal(await exists(path.join(agentsDirPath(env), 'ava.md')), false);
 });

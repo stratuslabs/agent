@@ -169,19 +169,16 @@ const configuredAgentsHome = (env: StateEnvironment): string | 'off' | undefined
   return resolved;
 };
 
-/**
- * Where the agents folder is, without creating anything: the folder
- * {@link AGENTS_DIR_ENV} names, else `~/Agents` or `~/Stratus` — the first one
- * already marked as ours, else the first that does not exist yet. Undefined
- * when both exist and neither is ours.
- */
-export const resolveAgentsHome = (env: StateEnvironment): string | undefined => {
+/** Where the folder is, or why there is none, by its name alone. */
+type NameDecision = { agentsHome: string; reason?: undefined } | { agentsHome?: undefined; reason: string };
+
+const decideAgentsHomeName = (env: StateEnvironment): NameDecision => {
   const configured = configuredAgentsHome(env);
   if (configured === 'off') {
-    return undefined;
+    return { reason: `${AGENTS_DIR_ENV}=off` };
   }
   if (configured !== undefined) {
-    return configured;
+    return { agentsHome: configured };
   }
   const home = readHomeDirectory(env);
   // Only beside a Stratus home on the same filesystem. The Docker image
@@ -194,24 +191,43 @@ export const resolveAgentsHome = (env: StateEnvironment): string | undefined => 
   // `STRATUS_AGENTS_DIR` is the operator's call and is not second-guessed.
   const stateDevice = deviceOf(stratusHomePath(env));
   if (stateDevice !== undefined && deviceOf(home) !== stateDevice) {
-    return undefined;
+    return { reason: `${stratusHomePath(env)} is on a different filesystem from ${home}` };
   }
   const candidates = AGENTS_HOME_NAMES.map((name) => {
     const directory = path.join(home, name);
     return { directory, state: candidateState(directory) };
   });
-  return (candidates.find((candidate) => candidate.state === 'ours')
+  const chosen = (candidates.find((candidate) => candidate.state === 'ours')
     ?? candidates.find((candidate) => candidate.state === 'free'))?.directory;
+  return chosen !== undefined
+    ? { agentsHome: chosen }
+    : { reason: `${candidates.map((candidate) => candidate.directory).join(' and ')} both belong to something else` };
 };
 
-const LINK_UNAVAILABLE = new Set(['EPERM', 'EACCES', 'ENOTSUP', 'ENOSYS', 'EOPNOTSUPP']);
+/**
+ * Where the agents folder is by name, without creating anything: the folder
+ * {@link AGENTS_DIR_ENV} names, else `~/Agents` or `~/Stratus` — the first one
+ * already marked as ours, else the first that does not exist yet. Undefined
+ * when both exist and neither is ours. Whether links can be made there is
+ * {@link planAgentsHome}'s question; this one only reads names.
+ */
+export const resolveAgentsHome = (env: StateEnvironment): string | undefined => decideAgentsHomeName(env).agentsHome;
+
+// EROFS too: a read-only home moves nothing, so it has no folder rather than a failed start.
+const LINK_UNAVAILABLE = new Set(['EPERM', 'EACCES', 'EROFS', 'ENOTSUP', 'ENOSYS', 'EOPNOTSUPP']);
 
 /**
- * Whether symlinks can be created in `directory`, by making (and removing)
- * a dangling one. Only a refusal says no; any other failure is thrown.
+ * Whether symlinks can be created beside the souls, by making (and removing)
+ * a dangling one in the hidden agents directory, or the Stratus home when
+ * that does not exist yet. Creates nothing that outlives the call. Only a
+ * refusal says no; any other failure is thrown. With neither directory there
+ * yet, nothing can be probed, and only Windows is assumed to refuse.
  */
-const canLinkFrom = (directory: string): boolean => {
-  mkdirSync(directory, { recursive: true });
+const linksWork = (env: StateEnvironment): boolean => {
+  const directory = [agentsDirPath(env), stratusHomePath(env)].find((candidate) => deviceOf(candidate) !== undefined);
+  if (directory === undefined) {
+    return process.platform !== 'win32';
+  }
   const probe = path.join(directory, `.link-probe-${randomUUID()}`);
   try {
     symlinkSync(`${probe}.target`, probe, 'file');
@@ -223,6 +239,20 @@ const canLinkFrom = (directory: string): boolean => {
   }
   rmSync(probe, { force: true });
   return true;
+};
+
+const LINKS_UNAVAILABLE_REASON = 'symlinks cannot be made here (on Windows, turn on Developer Mode)';
+
+/** The one decision every caller shares: the folder to use, or why there is none. */
+const decideAgentsHome = (env: StateEnvironment): NameDecision => {
+  const byName = decideAgentsHomeName(env);
+  if (byName.agentsHome === undefined) {
+    return byName;
+  }
+  // Everything in the folder is reached through a link from the hidden
+  // home. Where links cannot be made (Windows without Developer Mode or
+  // Administrator), there is no folder, and the hidden layout stays.
+  return linksWork(env) ? byName : { reason: LINKS_UNAVAILABLE_REASON };
 };
 
 /**
@@ -238,17 +268,13 @@ const canLinkFrom = (directory: string): boolean => {
  * the name is taken, and the loop then asks again.
  */
 export const claimAgentsHome = (env: StateEnvironment): string | undefined => {
+  mkdirSync(agentsDirPath(env), { recursive: true });
+  const decided = decideAgentsHome(env);
+  if (decided.agentsHome === undefined) {
+    return undefined;
+  }
   const configured = configuredAgentsHome(env);
-  if (configured === 'off') {
-    return undefined;
-  }
-  // Everything in the folder is reached through a link from the hidden
-  // home. Where links cannot be made (Windows without Developer Mode or
-  // Administrator), claim nothing and keep the hidden layout.
-  if (!canLinkFrom(agentsDirPath(env))) {
-    return undefined;
-  }
-  if (configured !== undefined) {
+  if (configured !== undefined && configured !== 'off') {
     mkdirSync(configured, { recursive: true, mode: 0o700 });
     try {
       writeFileSync(path.join(configured, AGENTS_HOME_MARKER), MARKER_TEXT, { flag: 'wx', mode: 0o600 });
@@ -365,6 +391,27 @@ export const surfaceNewWorkspaceSync = (env: StateEnvironment, agentId: string):
   }
 };
 
+const errnoOf = (error: unknown): string | undefined => (error as NodeJS.ErrnoException).code;
+
+const lstatOrUndefined = async (filePath: string) => {
+  try {
+    return await lstat(filePath);
+  } catch (error) {
+    if (errnoOf(error) === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+const isUnlinkedCopyOf = async (visible: string, hidden: string, contents: string): Promise<boolean> => {
+  if (await lstatOrUndefined(hidden) !== undefined) {
+    return false;
+  }
+  const info = await lstatOrUndefined(visible);
+  return info?.isFile() === true && (await readFile(visible, 'utf8')) === contents;
+};
+
 /**
  * Write a new agent's soul: into its folder in the agents folder, linked
  * from `agents/<file>` where the roster reads it. Exclusive at both ends, so
@@ -412,13 +459,26 @@ export const writeNewSoulFile = async (
     }
     return hidden;
   }
-  await writeFile(visible, contents, { flag: 'wx', mode: 0o644 });
+  let wrote = true;
+  try {
+    await writeFile(visible, contents, { flag: 'wx', mode: 0o644 });
+  } catch (error) {
+    // A soul with these exact bytes and nothing linking to it is this
+    // write's own, left by a run stopped before the link below: finish it.
+    // Different bytes, or a hidden name already there, are somebody's.
+    if (errnoOf(error) !== 'EEXIST' || !(await isUnlinkedCopyOf(visible, hidden, contents))) {
+      throw error;
+    }
+    wrote = false;
+  }
   try {
     await symlink(visible, hidden, 'file');
   } catch (error) {
     // The hidden name is taken after all: leave nothing behind that a later
     // claim of this id would trip over.
-    await unlink(visible).catch(() => undefined);
+    if (wrote) {
+      await unlink(visible).catch(() => undefined);
+    }
     throw error;
   }
   return hidden;
@@ -432,19 +492,6 @@ interface SurfaceReport {
   workspaces: number;
   skipped: string[];
 }
-
-const errnoOf = (error: unknown): string | undefined => (error as NodeJS.ErrnoException).code;
-
-const lstatOrUndefined = async (filePath: string) => {
-  try {
-    return await lstat(filePath);
-  } catch (error) {
-    if (errnoOf(error) === 'ENOENT') {
-      return undefined;
-    }
-    throw error;
-  }
-};
 
 /**
  * Replace a hidden file with a link to `target`, in one rename, so there is
@@ -621,23 +668,8 @@ const surfaceWorkspace = async (env: StateEnvironment, agentsHome: string, agent
  * Returns the line to log, or undefined when there was nothing to do.
  */
 export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string | undefined> => {
-  let entries;
-  try {
-    entries = await readdir(agentsDirPath(env), { withFileTypes: true });
-  } catch (error) {
-    if (errnoOf(error) === 'ENOENT') {
-      return undefined;
-    }
-    throw error;
-  }
-  const souls = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.md')).map((entry) => entry.name).sort();
-  const agentDirs = entries.filter((entry) => entry.isDirectory() && isValidAgentId(entry.name)).map((entry) => entry.name).sort();
-  const pendingWork = souls.length > 0 || (await Promise.all(agentDirs.map(async (agentId) => {
-    const info = await lstatOrUndefined(agentWorkspacePath(env, agentId));
-    return (info?.isDirectory() ?? false)
-      || await lstatOrUndefined(path.join(agentStateDirPath(env, agentId), SURFACING_MARKER)) !== undefined;
-  }))).some(Boolean);
-  if (!pendingWork) {
+  const plan = await planAgentsHome(env);
+  if (plan.agentsHome === undefined || (plan.souls.length === 0 && plan.workspaces.length === 0)) {
     return undefined;
   }
   await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
@@ -645,6 +677,7 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
   if (agentsHome === undefined) {
     return undefined;
   }
+  const { souls, workspaces: agentDirs } = plan;
   const report: SurfaceReport = { souls: 0, workspaces: 0, skipped: [] };
   // One agent's failure is that agent's line in the report, never a start
   // refused for the whole fleet: everything this does leaves the agent
@@ -674,46 +707,110 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
   return parts.length > 0 ? parts.join('; ') : undefined;
 };
 
+/** What {@link planAgentsHome} found. */
+export interface AgentsHomePlan {
+  /** The folder in use, or the one the next claim would create. */
+  agentsHome?: string;
+  /** Whether {@link agentsHome} exists and carries the marker. */
+  claimed: boolean;
+  /** Why there is no folder, when there is none. */
+  reason?: string;
+  /** Soul files in `~/.stratus/agents` the next pass would move. */
+  souls: string[];
+  /** Agents whose workspace the next pass would move or finish moving. */
+  workspaces: string[];
+  /** Hidden links of ours whose target is gone, as `link -> target`. */
+  dangling: string[];
+  /** Souls in the folder that no hidden name links to, so the roster never reads them. */
+  unlinked: string[];
+}
+
+const isRealSoulToMove = async (filePath: string): Promise<boolean> => {
+  let agentId: string;
+  try {
+    agentId = (await loadSoulFile(filePath)).agent.id;
+  } catch {
+    return false;
+  }
+  return isValidAgentId(agentId) && foldedAgentId(agentId) !== DEFAULT_STRATUS_AGENT.id;
+};
+
 /**
- * What `stratus doctor` says about the agents folder: where it is, and any
- * hidden soul or workspace link of ours whose target is gone (somebody
- * deleted or renamed the agent's folder). Reads only.
+ * The state of the agents folder, decided once for every caller: `serve`
+ * and `update` (through {@link surfaceAgentsHome}), `update --check`, and
+ * `stratus doctor`. Where the folder is, whether it can be used here at all
+ * (the same symlink probe a claim makes, which leaves nothing behind), what
+ * the next pass would move, and what is broken. Creates nothing.
  */
-export const inspectAgentsHome = async (env: StateEnvironment): Promise<{ agentsHome?: string; dangling: string[] }> => {
-  const agentsHome = resolveAgentsHome(env);
-  const dangling: string[] = [];
+export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomePlan> => {
+  const decided = decideAgentsHome(env);
+  const agentsHome = decided.agentsHome;
+  const plan: AgentsHomePlan = {
+    ...(agentsHome !== undefined ? { agentsHome } : { reason: decided.reason }),
+    claimed: agentsHome !== undefined && candidateState(agentsHome) === 'ours',
+    souls: [],
+    workspaces: [],
+    dangling: [],
+    unlinked: [],
+  };
   let entries;
   try {
     entries = await readdir(agentsDirPath(env), { withFileTypes: true });
   } catch (error) {
     if (errnoOf(error) === 'ENOENT') {
-      return { ...(agentsHome !== undefined ? { agentsHome } : {}), dangling };
+      return plan;
     }
     throw error;
   }
-  const candidates = entries.flatMap((entry) => {
-    if (entry.isSymbolicLink() && entry.name.endsWith('.md')) {
-      return [path.join(agentsDirPath(env), entry.name)];
-    }
-    if (entry.isDirectory() && isValidAgentId(entry.name)) {
-      return [agentWorkspacePath(env, entry.name)];
-    }
-    return [];
-  });
-  for (const candidate of candidates) {
-    let text: string;
-    try {
-      text = await readlink(candidate);
-    } catch {
+  const links: Array<{ link: string; target: string }> = [];
+  for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+    const entryPath = path.join(agentsDirPath(env), entry.name);
+    if (entry.name.endsWith('.md')) {
+      if (entry.isFile()) {
+        if (agentsHome !== undefined && await isRealSoulToMove(entryPath)) {
+          plan.souls.push(entry.name);
+        }
+      } else if (entry.isSymbolicLink()) {
+        links.push({ link: entryPath, target: path.resolve(path.dirname(entryPath), await readlink(entryPath)) });
+      }
       continue;
     }
-    const target = path.resolve(path.dirname(candidate), text);
-    if (agentsHome === undefined || !insideOrAt(agentsHome, target)) {
+    if (!entry.isDirectory() || !isValidAgentId(entry.name)) {
       continue;
     }
-    if (await lstatOrUndefined(target) === undefined) {
-      dangling.push(`${candidate} -> ${target}`);
+    const workspace = agentWorkspacePath(env, entry.name);
+    const info = await lstatOrUndefined(workspace);
+    const interrupted = await lstatOrUndefined(path.join(agentStateDirPath(env, entry.name), SURFACING_MARKER)) !== undefined;
+    if (agentsHome !== undefined && (info?.isDirectory() === true || interrupted)) {
+      plan.workspaces.push(entry.name);
+    }
+    if (info?.isSymbolicLink() === true) {
+      links.push({ link: workspace, target: path.resolve(path.dirname(workspace), await readlink(workspace)) });
     }
   }
-  return { ...(agentsHome !== undefined ? { agentsHome } : {}), dangling };
+  if (agentsHome === undefined) {
+    return plan;
+  }
+  for (const { link, target } of links) {
+    if (insideOrAt(agentsHome, target) && await lstatOrUndefined(target) === undefined) {
+      plan.dangling.push(`${link} -> ${target}`);
+    }
+  }
+  if (!plan.claimed) {
+    return plan;
+  }
+  const linkedTargets = new Set(links.map(({ target }) => target));
+  let folders;
+  try {
+    folders = await readdir(agentsHome, { withFileTypes: true });
+  } catch {
+    return plan;
+  }
+  for (const folder of folders.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()) {
+    const soul = path.join(agentsHome, folder, VISIBLE_SOUL_FILENAME);
+    if (!linkedTargets.has(soul) && (await lstatOrUndefined(soul))?.isFile() === true) {
+      plan.unlinked.push(soul);
+    }
+  }
+  return plan;
 };

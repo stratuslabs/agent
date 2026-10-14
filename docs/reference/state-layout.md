@@ -73,7 +73,7 @@ Sessions, memories, grants and everything else stay in `~/.stratus`.
 - **Choosing it yourself.** `STRATUS_AGENTS_DIR` names the folder outright
   (`~` expands; it may not be inside `~/.stratus`, and it is used even on
   another disk), and `STRATUS_AGENTS_DIR=off` turns the folder off.
-  `stratus doctor` prints which folder is in use.
+  `stratus doctor` prints which folder is in use, or why there is none.
 - **When things move there.** A new agent (`stratus agent new`,
   `stratus template add`) is written there, and a workspace is made there
   the first time a tool writes a file. A soul or workspace that is still a
@@ -83,7 +83,10 @@ Sessions, memories, grants and everything else stay in `~/.stratus`.
   workspace's provenance ledger across, so a fetched file stays labeled as
   fetched. A folder that already has a soul or workspace under that id is
   left alone, and the start says so. A workspace you linked somewhere else
-  yourself stays where you put it.
+  yourself stays where you put it. `stratus update --check` lists a move
+  that is still to happen. An `agent new` or `template add` stopped
+  partway can leave a soul in the folder that nothing links to; running
+  it again finishes it, and `stratus doctor` lists any it finds.
 - **An agent cannot edit its own soul there.** `fs.*` refuses every soul
   under its visible name too, so an agent given `~/Agents` as a root still
   cannot rewrite its tools or credentials.

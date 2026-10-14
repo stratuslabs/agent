@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   newerStateMessage,
   pendingStateMigrations,
+  planAgentsHome,
   readStateStamp,
   repairWorkspacesIfPending,
   surfaceAgentsHome,
@@ -288,6 +289,15 @@ const runUpdateSteps = async (
     out(`  provider    ${name} — your agents use it and it is not installed`);
   }
 
+  // The unstamped move into the visible agents folder, which `update`
+  // applies below while it holds the home: decided by the same plan, so the
+  // check and the apply never disagree about whether there is one.
+  const agentsPlan = await planAgentsHome(env);
+  const agentsPending = agentsPlan.agentsHome !== undefined && (agentsPlan.souls.length > 0 || agentsPlan.workspaces.length > 0);
+  if (agentsPending) {
+    out(`  agents      ${agentsPlan.souls.length} soul(s) and ${agentsPlan.workspaces.length} workspace(s) to move into ${agentsPlan.agentsHome}`);
+  }
+
   if (command.check) {
     for (const migration of pending) {
       out(`  pending     ${migration.id} — ${migration.description}`);
@@ -296,7 +306,7 @@ const runUpdateSteps = async (
       out('This build cannot update that state — upgrade the package itself (`npm install -g @stratusagent/cli`).');
       return 1;
     }
-    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0 || missingHarnesses.length > 0;
+    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0 || missingHarnesses.length > 0 || agentsPending;
     out(actionable
       ? 'Run `stratus update` to apply the above.'
       : 'Nothing to do.');
