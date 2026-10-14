@@ -114,7 +114,7 @@ this package's code:
 | `command`, `args`, `cwd` | stdio | The subprocess to spawn. Exactly one of `command` / `url` per server. |
 | `env` | stdio | Variables set outright, name to value — where a server's API key goes. |
 | `passEnv` | stdio | Names forwarded from the daemon's environment. Defaults to `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`. |
-| `url` | HTTP | The Streamable HTTP endpoint. Redirects are followed only within the same origin (scheme, host and port), so `headers` are never sent to another host. Point `url` at the final endpoint if the server redirects elsewhere; a redirect that leaves the origin fails the connection with an error naming it. |
+| `url` | HTTP | The Streamable HTTP endpoint. Redirects are followed only within the same origin (scheme, host and port), plus the upgrade from `http://host` to `https://host` with both on default ports, so `headers` are never sent to another host. Point `url` at the final endpoint if the server redirects elsewhere; a redirect that leaves the origin fails the connection with an error naming it. |
 | `headers` | HTTP | Headers sent with every request — where a bearer token goes. |
 | `connectTimeoutMs` | both | One budget for the connect handshake *and* the whole tool-discovery walk (default 15000), so a server can stall startup neither by being unreachable nor by paginating slowly. |
 | `callTimeoutMs` | both | Per-call budget (default 60000). |
