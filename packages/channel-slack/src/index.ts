@@ -5602,16 +5602,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const listens = listensOf(connection.config.agentId);
     if (listens === 'mentions' || listens === 'judge') {
       // Except a stop (card 337): the holder rule decides whose it is, as
-      // for any agent, and it only acts if there is something to stop.
-      const holderStop = threadKey !== undefined &&
-        holderAt(threadKey, event.ts) === connection.config.agentId &&
+      // for any agent, and it only acts if there is something to stop. A
+      // thread the record has forgotten is left to the sessions, as below,
+      // so a stop for a turn that outlived its record still reaches it.
+      const approverStop = threadKey !== undefined &&
         (connection.config.approvers ?? []).includes(sender) &&
         isStopRequest(text, connection.botUserId);
+      const stopHolder = approverStop ? holderAt(threadKey, event.ts) : undefined;
       return {
         ...admission,
         overhear: true,
         ...(listens === 'judge' ? { judge: true } : {}),
-        ...(holderStop ? { holderStop: true } : {}),
+        ...(stopHolder === connection.config.agentId ? { holderStop: true } : {}),
+        ...(approverStop && stopHolder === undefined ? { settled: false } : {}),
       };
     }
 
@@ -5763,8 +5766,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         );
         if (winner !== connection.config.agentId) {
           // Not this agent's to answer — and, if it is in the thread,
-          // this agent's to hear, same as the two warm stand-downs.
-          overhear = true;
+          // this agent's to hear, same as the two warm stand-downs. A judged
+          // message stays judged: only a stop sends a judging agent here,
+          // and one that is not its holder's is judged as it would be warm.
+          if (!judged) {
+            overhear = true;
+          }
         } else {
           if (threadKey) {
             // Answered from the store rather than from memory: hold it, so

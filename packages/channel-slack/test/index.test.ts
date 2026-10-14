@@ -11145,6 +11145,34 @@ for (const listens of ['mentions', 'judge'] as const) {
     assert.equal(gateway.dispatches.length, 1, 'no turn is taken on the stop');
     assert.ok(gateway.observes.some((observed) => observed.message.endsWith('stop')));
   });
+
+  test(`an untagged stop still cancels a ${listens}-listening agent's turn once the holder record has forgotten the thread`, async () => {
+    const { gateway, signals } = stoppableGateway();
+    gateway.agents = () => [{ id: 'ava', name: 'Ava', listens }];
+    const stoppable = gateway.dispatch.bind(gateway);
+    gateway.dispatch = async (input) =>
+      input.sessionId.endsWith(':100.1') ? stoppable(input) : sessionWithReply(input.sessionId, 'ok');
+    gateway.sessionRouting = async (sessionId: string) =>
+      sessionId.endsWith(':100.1') ? { agentId: 'ava', metadata: {}, lastSpokeAt: '2026-01-01T00:00:01.000Z' } : undefined;
+    const { socket, adapter } = stopAdapter(['U-DYLAN']);
+    await adapter.start(gateway);
+
+    void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+    await until(() => signals.length === 1);
+    // Evict this thread from the in-memory holder record while the turn runs.
+    const fillers: Array<Promise<void>> = [];
+    for (let index = 0; index < 2001; index += 1) {
+      fillers.push(socket.deliver('app_mention', mention('<@B-AVA>', { ts: `200.${index}`, thread_ts: `3${index}.0` })));
+    }
+    await Promise.all(fillers);
+    await socket.deliver('message', channelMessage({ text: 'stop', ts: '100.3', thread: '100.1' }));
+    await until(() => signals[0]?.aborted === true || signals.length > 1);
+
+    assert.equal(signals[0]?.aborted, true, 'the running turn is cancelled');
+    assert.equal(signals.length, 1, 'the stop itself is not a turn');
+    await socket.settled();
+    await adapter.stop();
+  });
 }
 
 test('an untagged stop does not reach a mentions-listening agent when another agent holds the thread', async () => {
