@@ -380,8 +380,11 @@ port. An agent's list adds to the top-level one, like `commands`. Write a
 domain with no scheme, path, or port; anything else is refused at startup.
 Trust a site you know, never a suffix strangers can register under:
 `co.uk`, `github.io`, `vercel.app` and similar shared suffixes are refused
-too, so write `bbc.co.uk` or `stratuslabs.github.io`. The built-in list
-covers the common ones, not every public suffix.
+too, so write `bbc.co.uk` or `stratuslabs.github.io`. So are shared storage
+hosts (`s3.amazonaws.com` and its regional forms, `storage.googleapis.com`,
+`githubusercontent.com`); name the bucket instead
+(`docs-bucket.s3.amazonaws.com`). The built-in list covers the common ones,
+not every public suffix.
 
 What runs without asking:
 

@@ -152,9 +152,32 @@ export const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
   'herokuapp.com', 'onrender.com', 'web.app', 'firebaseapp.com', 'appspot.com', 'azurewebsites.net',
   'cloudfront.net', 'amazonaws.com', 'blogspot.com', 'wordpress.com', 'glitch.me', 'replit.app',
   'ngrok.io', 'ngrok-free.app', 'trycloudflare.com', 'deno.dev', 'surge.sh',
+  // Object storage and raw file hosts, where a path or a subdomain is a
+  // stranger's bucket or repository.
+  'githubusercontent.com', 'raw.githubusercontent.com', 'storage.googleapis.com', 'blob.core.windows.net', 'r2.dev',
 ]);
 
-const isSharedSuffix = (domain: string): boolean => SHARED_SUFFIXES.has(domain);
+// AWS hands out names inside service namespaces, region by region:
+// `bucket.s3.us-east-1.amazonaws.com`, `id.execute-api.eu-west-1.amazonaws.com`.
+// Listing each would be hundreds of entries, so an entry under these bases
+// whose every label is a service or a region is the namespace, and refused;
+// one with a tenant's label (a bucket, an API id) is that tenant's name.
+const AWS_BASES = ['amazonaws.com', 'on.aws'];
+const AWS_REGION = '[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\\d';
+const AWS_NAMESPACE_LABEL = new RegExp(
+  `^(?:${AWS_REGION}|(?:s3|s3-website)(?:-${AWS_REGION})?|s3-accesspoint|s3-object-lambda|s3-fips|dualstack`
+  + '|execute-api|lambda-url|elb|compute|compute-1|vpce)$',
+);
+
+const isAwsNamespace = (domain: string): boolean => AWS_BASES.some((base) => {
+  if (domain === base) {
+    return true;
+  }
+  return domain.endsWith(`.${base}`)
+    && domain.slice(0, -base.length - 1).split('.').every((label) => AWS_NAMESPACE_LABEL.test(label));
+});
+
+const isSharedSuffix = (domain: string): boolean => SHARED_SUFFIXES.has(domain) || isAwsNamespace(domain);
 
 /**
  * Why an entry is not a trusted domain, for a config error that names the

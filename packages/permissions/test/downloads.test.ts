@@ -11,6 +11,7 @@ import {
   createPermissionPolicy,
   downloadInsideWorkspace,
   normalizeTrustedDomain,
+  trustedDomainProblem,
   trustedDomainOf,
   type OriginScope,
 } from '../src/index.ts';
@@ -72,6 +73,26 @@ test('a suffix anyone can register a site under is never a trusted domain', () =
   assert.equal(normalizeTrustedDomain('bbc.co.uk'), 'bbc.co.uk');
   assert.equal(trustedDomainOf('https://www.bbc.co.uk', ['bbc.co.uk']), 'bbc.co.uk');
   assert.equal(normalizeTrustedDomain('stratuslabs.github.io'), 'stratuslabs.github.io');
+});
+
+test('a cloud namespace that hands names to tenants is refused, at any region, and a tenant\'s own name is not', () => {
+  // `amazonaws.com` itself is not where strangers publish; the service
+  // namespaces below it are, region by region.
+  for (const shared of [
+    's3.amazonaws.com', 's3.us-east-1.amazonaws.com', 's3-us-west-2.amazonaws.com',
+    's3.dualstack.eu-west-1.amazonaws.com', 's3-website-us-east-1.amazonaws.com',
+    's3-website.eu-central-1.amazonaws.com', 'execute-api.us-east-1.amazonaws.com',
+    'lambda-url.us-gov-west-1.on.aws', 'us-east-1.amazonaws.com', 'compute-1.amazonaws.com',
+    'storage.googleapis.com', 'blob.core.windows.net', 'githubusercontent.com', 'raw.githubusercontent.com', 'r2.dev',
+  ]) {
+    assert.equal(normalizeTrustedDomain(shared), undefined, shared);
+    assert.notEqual(trustedDomainProblem(shared), undefined, shared);
+  }
+  assert.equal(trustedDomainOf('https://attacker-bucket.s3.amazonaws.com', ['s3.amazonaws.com']), undefined);
+  // One bucket, one API, one account: a name somebody owns.
+  for (const owned of ['docs-bucket.s3.amazonaws.com', 'docs-bucket.s3.us-east-1.amazonaws.com', 'abc123.execute-api.us-east-1.amazonaws.com', 'acct.blob.core.windows.net']) {
+    assert.equal(normalizeTrustedDomain(owned), owned, owned);
+  }
 });
 
 test('a plain download into the workspace is recognized, and its site is what it answers', async () => {
