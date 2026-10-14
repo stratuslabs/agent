@@ -5609,10 +5609,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         (connection.config.approvers ?? []).includes(sender) &&
         isStopRequest(text, connection.botUserId);
       const stopHolder = approverStop ? holderAt(threadKey, event.ts) : undefined;
+      // A stop held by another agent is only heard: judging it would let an
+      // attentive agent take a turn on a stop that was never its own.
+      const stopForAnother = stopHolder !== undefined && stopHolder !== connection.config.agentId;
       return {
         ...admission,
         overhear: true,
-        ...(listens === 'judge' ? { judge: true } : {}),
+        ...(listens === 'judge' && !stopForAnother ? { judge: true } : {}),
         ...(stopHolder === connection.config.agentId ? { holderStop: true } : {}),
         ...(approverStop && stopHolder === undefined ? { settled: false } : {}),
       };
@@ -5766,12 +5769,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         );
         if (winner !== connection.config.agentId) {
           // Not this agent's to answer — and, if it is in the thread,
-          // this agent's to hear, same as the two warm stand-downs. A judged
-          // message stays judged: only a stop sends a judging agent here,
-          // and one that is not its holder's is judged as it would be warm.
-          if (!judged) {
-            overhear = true;
-          }
+          // this agent's to hear, same as the two warm stand-downs. Only a
+          // stop sends a judging agent here, and a stop the sessions place
+          // with another agent is heard, never judged, as it is warm.
+          judged = false;
+          overhear = true;
         } else {
           if (threadKey) {
             // Answered from the store rather than from memory: hold it, so

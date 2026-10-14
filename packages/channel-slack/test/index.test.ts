@@ -11175,6 +11175,76 @@ for (const listens of ['mentions', 'judge'] as const) {
   });
 }
 
+for (const evicted of [false, true]) {
+  test(`an untagged stop is only heard by an attentive judging agent when another agent holds the thread${evicted ? ', after the holder record forgot it' : ''}`, async () => {
+    const { gateway, signals, finishers } = stoppableGateway();
+    gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }, { id: 'bea', name: 'Bea' }];
+    // Ava has just answered in this thread, so she is attentive: an
+    // ordinary untagged reply here would be judged as a turn.
+    gateway.sessionRouting = async (sessionId: string) =>
+      sessionId.startsWith('slack:ava:') && sessionId.endsWith(':100.1')
+        ? { agentId: 'ava', metadata: {}, lastAnsweredAt: new Date(100_000).toISOString(), heardSinceAnswered: 0 }
+        : sessionId.endsWith(':100.1')
+          ? { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(100_000).toISOString() }
+          : undefined;
+    // Only the thread under test runs a stoppable turn; the fillers that
+    // evict it answer at once. Every turn Ava is handed is recorded here,
+    // before it can wait on anything.
+    const avaTurns: string[] = [];
+    const stoppable = gateway.dispatch.bind(gateway);
+    gateway.dispatch = async (input) => {
+      if (input.agentId === 'ava' && input.sessionId.endsWith(':100.1')) {
+        avaTurns.push(input.userMessage);
+      }
+      return input.sessionId.endsWith(':100.1') ? stoppable(input) : sessionWithReply(input.sessionId, 'ok');
+    };
+    const socketAva = createFakeSocket();
+    const socketBea = createFakeSocket();
+    const adapter = createSlackChannelAdapter({
+      agents: [
+        { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', approvers: ['U-DYLAN'], replies: 'stream' },
+        { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', approvers: ['U-DYLAN'], replies: 'stream' },
+      ],
+      editIntervalMs: 0,
+      createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+      createWebClient: (botToken) => (botToken === 'xoxb-a' ? createFakeWeb('B-AVA', 'T1') : createFakeWeb('B-BEA', 'T1')),
+    });
+    await adapter.start(gateway);
+
+    // Bea is working on the thread.
+    const toBea = mention('<@B-BEA> long job');
+    void socketBea.deliver('app_mention', toBea);
+    void socketAva.deliver('message', { ...toBea, event: { ...toBea.event, type: 'message' } });
+    await until(() => signals.length === 1);
+    if (evicted) {
+      const fillers: Array<Promise<void>> = [];
+      for (let index = 0; index < 2001; index += 1) {
+        const filler = mention('<@B-AVA>', { ts: `200.${index}`, thread_ts: `3${index}.0` });
+        fillers.push(socketAva.deliver('app_mention', filler));
+      }
+      await Promise.all(fillers);
+    }
+
+    const stop = channelMessage({ text: 'stop', ts: '100.3', thread: '100.1' });
+    await Promise.all([socketAva.deliver('message', stop), socketBea.deliver('message', stop)]);
+    await until(() => signals[0]?.aborted === true);
+    await until(() => avaTurns.length > 0 || gateway.observes.some((observed) => observed.sessionId.startsWith('slack:ava:') && observed.message.endsWith('stop')));
+    finishers.splice(0).forEach((finish) => finish());
+
+    assert.deepEqual(avaTurns, [], 'Ava takes no turn on a stop meant for Bea');
+    assert.ok(gateway.observes.some((observed) => observed.sessionId.startsWith('slack:ava:') && observed.message.endsWith('stop')), 'Ava hears it');
+    // Release anything a judged stop would have queued, so a failure here
+    // reports instead of hanging.
+    for (let round = 0; round < 50; round += 1) {
+      finishers.splice(0).forEach((finish) => finish());
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await socketAva.settled();
+    await socketBea.settled();
+    await adapter.stop();
+  });
+}
+
 test('an untagged stop does not reach a mentions-listening agent when another agent holds the thread', async () => {
   const { gateway, signals, finishers } = stoppableGateway();
   gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'mentions' }, { id: 'bea', name: 'Bea' }];
