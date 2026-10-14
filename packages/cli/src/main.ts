@@ -5,6 +5,7 @@ import {
   drainSharedMemory,
   runStateMigrations,
   STATE_SCHEMA_VERSION,
+  NoProviderConfiguredError,
 } from '@stratusagent/state';
 import { runAgentNew } from './commands/agent-new.ts';
 import { runAgents } from './commands/agents.ts';
@@ -297,8 +298,9 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
     const message = error instanceof Error ? error.message : String(error);
     writeLine(streams.stderr, `Error: ${message}`);
     // The help is for a person at a terminal; under a log shipper it would
-    // be a hundred records burying the one that says what failed.
-    if (!jsonLog) {
+    // be a hundred records burying the one that says what failed. A missing
+    // provider is not a usage mistake, and its message already says what to do.
+    if (!jsonLog && !(error instanceof NoProviderConfiguredError)) {
       writeLine(streams.stderr, '');
       writeLine(streams.stderr, HELP_TEXT);
     }

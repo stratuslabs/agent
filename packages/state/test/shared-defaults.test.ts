@@ -38,13 +38,13 @@ test('the config file takes a language tag and refuses anything else', async () 
 test('a soul language outranks the config file, and neither leaves the default to the prompt', async () => {
   const soul = '---\nname: Ava\nlanguage: en-AU\n---\n\nYou are Ava.\n';
 
-  const neither = await newHome({});
+  const neither = await newHome({ provider: 'demo' });
   assert.equal((await resolveRuntimeConfig({}, { homeDir: neither, cwd: neither, processEnv: {} })).language, undefined);
 
-  const configOnly = await newHome({ language: 'en-GB' });
+  const configOnly = await newHome({ provider: 'demo', language: 'en-GB' });
   assert.equal((await resolveRuntimeConfig({}, { homeDir: configOnly, cwd: configOnly, processEnv: {} })).language, 'en-GB');
 
-  const both = await newHome({ language: 'en-GB' }, soul);
+  const both = await newHome({ provider: 'demo', language: 'en-GB' }, soul);
   const resolved = await resolveRuntimeConfig(
     { soul: path.join(both, '.stratus', 'agents', 'ava.md') },
     { homeDir: both, cwd: both, processEnv: {} },
@@ -77,7 +77,7 @@ test('describeServingModel reports the configured model, its fallback, and a swi
   });
   assert.equal(describeServingModel(config, true).onFallback, true);
   // The demo runtime has no model to name.
-  const demo = await newHome({});
+  const demo = await newHome({ provider: 'demo' });
   assert.deepEqual(describeServingModel(await resolveRuntimeConfig({}, { homeDir: demo, cwd: demo, processEnv: {} }), false), { provider: 'demo' });
 });
 

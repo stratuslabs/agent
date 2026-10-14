@@ -7,11 +7,11 @@ Usage:
   stratus setup
   stratus chat
   stratus chat --soul ./examples/souls/blair.md
-  stratus run --prompt "Use the demo tool"
+  stratus run --provider demo --prompt "Use the demo tool"
   stratus run "Say hello"
   ANTHROPIC_API_KEY=... stratus run --provider anthropic "Say hello"
   stratus run --soul ./examples/souls/blair.md "Say hello"
-  echo "Use the echo tool" | stratus run --stdin
+  echo "Use the echo tool" | stratus run --provider demo --stdin
   STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents

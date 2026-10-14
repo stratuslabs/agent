@@ -61,8 +61,10 @@ stratusd ok at http://0.0.0.0:4123 — version 0.11.6, up 8s, 1 agent, 0 session
 ```
 
 The address is the container's own: `0.0.0.0` inside it, published as
-`127.0.0.1:4123` on the host. An empty `stratusd.env` starts the offline
-demo provider, which is a fine way to prove the plumbing first.
+`127.0.0.1:4123` on the host. To prove the plumbing first, put
+`STRATUS_PROVIDER=demo` in `stratusd.env` for the offline demo provider. With
+no provider named and no sign-in stored, the daemon starts but refuses every
+turn.
 
 For [`tool-browser`](./browser.md), set `target: browser` in
 [`compose.yaml`](../../deploy/docker/compose.yaml) (and a different
@@ -136,7 +138,7 @@ cannot:
 
 | Secret | From the environment? | How |
 | --- | --- | --- |
-| A provider API key | **Yes** | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `CODEX_API_KEY`. A key alone does not select a provider — with nothing naming one, agents run on the demo — so set `STRATUS_PROVIDER` too, or `provider` in the config, or `provider:` in a soul. `STRATUS_API_KEY` outranks every provider's own variable at once, so it belongs only on a single-provider fleet. See [Configuration](../reference/config.md). |
+| A provider API key | **Yes** | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `CODEX_API_KEY`. A key alone does not select a provider — with nothing naming one and no stored sign-in, every turn is refused with a pointer to `stratus setup` — so set `STRATUS_PROVIDER` too, or `provider` in the config, or `provider:` in a soul. `STRATUS_API_KEY` outranks every provider's own variable at once, so it belongs only on a single-provider fleet. See [Configuration](../reference/config.md). |
 | A named credential (`search.apiKey`) | **Yes**, in the image | By its exact name, read after any stored entry of that name — and only by an agent whose soul lists it under `credentials:`. The image starts the daemon with no shell in between because a POSIX shell drops a variable named `search.apiKey` on its way to exec; a system unit's `EnvironmentFile=` may refuse such a name too. Storing it works everywhere: `printf %s "$KEY" \| docker exec -i stratusd stratus credential set search.apiKey`. |
 | The control API's token | **Yes**, as a file | Set `STRATUS_GATEWAY_TOKEN_FILE` to a file holding the token (a mounted secret), and the daemon uses it instead of generating one, copying it into `~/.stratus/gateway-token` so `stratus health` and the other local commands keep working. One line, at least 32 printable characters, no spaces. Replace the file and restart to rotate it; a file that is missing or malformed stops the daemon from starting rather than falling back to a token nothing else knows. Unset, the daemon generates its own the first time, as before. |
 | Slack tokens | **No** | Read only from `credentials.json` in the home, because they are the daemon's own and an agent must never resolve them. Store them with `docker exec -it stratusd stratus setup` → **Channels**, or through the API (below), then `stratus restart`. |

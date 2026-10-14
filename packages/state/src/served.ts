@@ -137,6 +137,8 @@ export const servedRuntimes = async (
    * which is why scanning stays the default rather than moving to the caller.
    */
   roster?: Array<ParsedSoul | undefined>,
+  /** Told about each pass that could not resolve, for a caller that reports it. */
+  onUnresolved?: (error: unknown) => void,
 ): Promise<ServedRuntime[]> => {
   // The pinned file, not whatever the working directory holds. What this
   // discovers decides which daemon-wide model, endpoint, and credentials
@@ -190,7 +192,10 @@ export const servedRuntimes = async (
     const runtime = await resolveRuntimeConfig(
       { ...pass.selection, ...(configPath ? { configPath } : {}) },
       pass.env,
-    ).catch(() => undefined);
+    ).catch((error: unknown) => {
+      onUnresolved?.(error);
+      return undefined;
+    });
     if (runtime) {
       resolved.push({ runtime, env: pass.env });
     }

@@ -14,6 +14,7 @@ import { hasAgentSignInEntry, loadAgentSignIns, loadCredentials, type StoredCred
 import { credentialsPath } from './paths.ts';
 import { type StateEnvironment, readProcessEnv, readNonEmptyString } from './environment.ts';
 import {
+  CREDENTIAL_PROVIDER_NAMES,
   type StratusProviderName,
   isRegisteredProviderName,
   type CredentialProviderName,
@@ -158,6 +159,40 @@ const resolveAgentSignIn = async (env: StateEnvironment, agentId: string): Promi
   return undefined;
 };
 
+/**
+ * Nothing chose a provider and the stored sign-ins don't settle it. A run
+ * is refused rather than put on the demo model, whose canned replies read
+ * as a broken agent.
+ */
+/**
+ * The providers with a stored sign-in, in a fixed order. When nothing
+ * chooses a provider, exactly one of these is the run's provider.
+ */
+export const signedInProviders = async (env: StateEnvironment): Promise<CredentialProviderName[]> => {
+  const stored = await loadCredentials(env);
+  return CREDENTIAL_PROVIDER_NAMES.filter((name) => stored[name] !== undefined);
+};
+
+export class NoProviderConfiguredError extends Error {
+  readonly code = 'STRATUS_NO_PROVIDER';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'NoProviderConfiguredError';
+  }
+}
+
+const noProviderMessage = (signedIn: readonly CredentialProviderName[], envKeys: readonly CredentialProviderName[]): string => {
+  if (signedIn.length > 1) {
+    return `No provider is chosen, and there are sign-ins for ${signedIn.join(' and ')}, so the run was refused rather than guessing. `
+      + 'Pick the default in `stratus setup` → Providers, or set STRATUS_PROVIDER for this run.';
+  }
+  const envHint = envKeys.length > 0
+    ? ` ${envKeys.map(defaultApiKeyEnvName).join(' and ')} ${envKeys.length > 1 ? 'are' : 'is'} set, but a key alone doesn't choose a provider: set ${envKeys.map((name) => `STRATUS_PROVIDER=${name}`).join(' or ')}.`
+    : '';
+  return `No provider is configured, so there is nothing to run on. Run \`stratus setup\` to sign in to one, or pass --provider (\`demo\` runs the offline demo model).${envHint}`;
+};
+
 export const resolveRuntimeConfig = async (
   selection: RuntimeSelection,
   env: StateEnvironment = {},
@@ -177,11 +212,26 @@ export const resolveRuntimeConfig = async (
   // The soul's pin in resolved form, so a soul saying `ollama` compares
   // equal to the `plugin:ollama` every other input has been read into.
   const soulProvider = readNonEmptyString(soul?.provider, (value) => parseProviderName(value, 'soul file'));
-  const provider = selection.provider
+  const chosenProvider = selection.provider
     ?? readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
     ?? soulProvider
-    ?? fileConfig.provider
-    ?? 'demo';
+    ?? fileConfig.provider;
+
+  // Nothing chose one: the only provider with a stored sign-in is the
+  // obvious choice, and is reported as inferred. None, or several, is an
+  // error. The demo model runs only when something names it.
+  let inferredProvider: CredentialProviderName | undefined;
+  if (chosenProvider === undefined) {
+    const signedIn = await signedInProviders(env);
+    if (signedIn.length !== 1) {
+      const envKeys = CREDENTIAL_PROVIDER_NAMES.filter(
+        (name) => readNonEmptyString(processEnv[defaultApiKeyEnvName(name)]) !== undefined,
+      );
+      throw new NoProviderConfiguredError(noProviderMessage(signedIn, envKeys));
+    }
+    inferredProvider = signedIn[0];
+  }
+  const provider = chosenProvider ?? inferredProvider!;
 
   // What the untrusted file asked for and did not get, for the CLI to say
   // once the run is up — a persona that silently failed to apply reads as
@@ -662,5 +712,5 @@ export const resolveRuntimeConfig = async (
     }
   }
 
-  return resolved;
+  return inferredProvider !== undefined ? { ...resolved, inferredProvider } : resolved;
 };

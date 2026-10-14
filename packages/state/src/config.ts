@@ -545,6 +545,11 @@ type RuntimeConfigVariant =
 export type RuntimeConfig = RuntimeConfigVariant & {
   ignoredFromUntrustedConfig?: IgnoredUntrustedConfig;
   /**
+   * Set when nothing chose a provider and the run took the only provider
+   * with a stored sign-in. Hosts say so once, since no setting names it.
+   */
+  inferredProvider?: CredentialProviderName;
+  /**
    * The language the run writes in: the soul's `language:`, then the config
    * file's `language`. Absent means neither set one, and the prompt uses
    * `DEFAULT_LANGUAGE`. Resolved here so no host decides between the two.

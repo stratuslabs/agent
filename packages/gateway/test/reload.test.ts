@@ -548,7 +548,7 @@ test('a turn that outlives the drain window is aborted as restarting, and the re
 
 test('a gateway whose host gave it no way back refuses to restart, and says so', async () => {
   const home = await newHome();
-  const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
   await gateway.start();
   try {
     assert.throws(() => gateway.restart(), RestartUnsupportedError);
@@ -798,7 +798,7 @@ test('a turn queued behind the one aborted at the window is aborted too, not lef
 test('a restart asked for with a window that is not a number of milliseconds is refused, and is not a restart', async () => {
   const home = await newHome();
   const gateway = createGateway({
-    env: { homeDir: home, cwd: home, processEnv: {} },
+    env: { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
     idleTimeoutMs: 0,
     log: () => {},
     warn: () => {},

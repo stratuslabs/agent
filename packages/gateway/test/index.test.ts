@@ -111,7 +111,7 @@ const openAiToolCall = (name: string, args: object): Response =>
 
 test('sessions survive a gateway restart and resume with full history', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
 
   const first = createGateway({ env, idleTimeoutMs: 0 });
   await first.start();
@@ -133,7 +133,7 @@ test('sessions survive a gateway restart and resume with full history', async ()
 
 test('a session\'s routing carries its latest reply, for a channel finishing a turn it did not start', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
   try {
@@ -162,7 +162,7 @@ test('a session\'s routing carries its latest reply, for a channel finishing a t
 
 test('a session\'s routing reports when its agent last spoke, not when the row last changed', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
   try {
@@ -194,7 +194,7 @@ test('a session\'s routing reports when its agent last spoke, not when the row l
 
 test('observe puts a message into a session with no turn, on the session\'s chain, and refuses what dispatch refuses', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
   const events: StratusEvent[] = [];
@@ -572,7 +572,7 @@ test('a session never crosses agent identities', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
   const fetchImpl = (async () => openAiText('ok')) as typeof fetch;
-  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo', OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
 
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
@@ -653,7 +653,7 @@ test('messages to one session are single-flight; separate sessions run concurren
 
 test('a stopping gateway refuses new work but drains in-flight turns', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
 
@@ -752,7 +752,7 @@ test('a queued dispatch whose signal aborted while waiting never mutates the ses
 
 test('channel adapters start after the roster and stop before the drain', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
 
   const order: string[] = [];
   let sawAgentsAtStart = 0;
@@ -783,7 +783,7 @@ test('channel adapters start after the roster and stop before the drain', async 
 
 test('a channel adapter that fails to start does not take the gateway down', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const warnings: string[] = [];
 
   const broken = {
@@ -940,7 +940,7 @@ test('a start that fails after a channel parked an approval denies it before tha
 
 test('a start that fails after a channel accepted a turn lets that turn finish before the store closes', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
 
   // A channel that is up before the required one fails can already have
   // dispatched — a Slack message arriving in the window. Closing the store
@@ -1355,7 +1355,7 @@ test('an agentId-less dispatch answers as the configured default soul', async ()
   await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova, precise and quick.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
 
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
 
@@ -1387,7 +1387,7 @@ test('a configured default soul that would share a roster agent\'s directory is 
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
 
   const warnings: string[] = [];
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
 
@@ -1486,7 +1486,7 @@ test('an agentId-less session resumes with its stored agent after the default so
   await writeFile(path.join(home, 'mira.md'), '---\nname: Mira\n---\n\nYou are Mira.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
 
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
 
@@ -1517,7 +1517,7 @@ test('an edited config-only default soul reaches resumed sessions on their next 
   await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova, mark one.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
 
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
 
@@ -1664,7 +1664,7 @@ test('a pinless cached soul never inherits the default soul\'s pins while unread
     return openAiText('should not be called for ava');
   }) as typeof fetch;
 
-  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo', OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
   await gateway.start();
 
@@ -1689,7 +1689,7 @@ test('repointing the default soul to a new file with the same id takes effect', 
   await writeFile(path.join(home, 'nova-v2.md'), '---\nname: Nova\n---\n\nYou are Nova, mark two.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
 
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
 
@@ -1783,7 +1783,7 @@ test('an unreadable default soul path degrades startup instead of failing it', a
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'missing.md' }));
 
   const warnings: string[] = [];
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
 
@@ -1805,7 +1805,7 @@ test('a malformed config.json degrades dispatches instead of failing them', asyn
 
   const fetchImpl = (async () => openAiText('ava fine')) as typeof fetch;
   const warnings: string[] = [];
-  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo', OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
 
@@ -2057,7 +2057,7 @@ test('removing the default soul updates the cached default to the built-in', asy
   await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
 
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
   await gateway.start();
 
@@ -2194,7 +2194,7 @@ test('a roster soul cannot hijack the reserved built-in agent id', async () => {
   await writeSoul(home, 'imposter.md', '---\nname: Stratus\nprovider: openai\nmodel: model-x\n---\n\nI am an imposter.\n');
 
   const warnings: string[] = [];
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
 
@@ -2224,7 +2224,7 @@ const brokerHarness = async (
   options: { approvalTimeoutMs?: number; channels?: GatewayChannelAdapter[] } = {},
 ) => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   let transport: ApprovalTransport | undefined;
   const events: StratusEvent[] = [];
   const gateway = createGateway({
@@ -4530,7 +4530,7 @@ test('GATEWAY_ONLY_TOOL_NAMES is exactly what a gateway adds over a plain host',
 
 test('a dispatch carrying images stores them on the turn it opens and on the turn it resumes', async () => {
   const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
   await gateway.start();
 
@@ -5598,7 +5598,7 @@ test('a repeat naming the agent a live dispatch left unnamed attaches to it, and
   const env = {
     homeDir: home,
     cwd: home,
-    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    processEnv: { STRATUS_PROVIDER: 'demo', OPENAI_API_KEY: 'sk-o' },
     fetch: (async () => openAiText('reply')) as typeof fetch,
   };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
@@ -5760,7 +5760,7 @@ test('a repeat naming nobody, of a claim that failed before writing anything, ru
   const env = {
     homeDir: home,
     cwd: home,
-    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    processEnv: { STRATUS_PROVIDER: 'demo', OPENAI_API_KEY: 'sk-o' },
     fetch: (async () => openAiText('reply')) as typeof fetch,
   };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });

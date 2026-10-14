@@ -86,6 +86,13 @@ export const resolveRuntimeConfig = (
  */
 export const warnOnUntrustedConfig = (runtime: RuntimeConfig, streams: CliStreams, soulFlag = true): void => {
   warnOnIgnoredConfig(runtime.ignoredFromUntrustedConfig, streams, soulFlag);
+  // Nothing named this provider, so say once where it came from.
+  if (runtime.inferredProvider !== undefined) {
+    writeLine(
+      streams.stderr,
+      `No provider is set, so this runs on ${runtime.inferredProvider}, the only one signed in. Pick a default in \`stratus setup\` → Providers to make it explicit.`,
+    );
+  }
 };
 
 /** The environment variable that names each refused key, as the resolver reads it. */

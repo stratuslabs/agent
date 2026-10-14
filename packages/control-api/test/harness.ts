@@ -101,7 +101,9 @@ export const startApi = async (
   } = {},
 ): Promise<Harness> => {
   const home = setup.home ?? await newHome();
-  const env: StateEnvironment = { homeDir: home, cwd: home, processEnv: {}, ...setup.env };
+  // The offline demo model, picked explicitly: nothing here is signed in,
+  // and an unconfigured run is refused.
+  const env: StateEnvironment = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' }, ...setup.env };
   let transport: ApprovalTransport | undefined;
   const gateway = createGateway({
     env,

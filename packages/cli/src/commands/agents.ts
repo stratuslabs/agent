@@ -77,7 +77,11 @@ export const runAgents = async (
   }
 
   const describeRunsOn = (runsOn: { provider: string; model?: string }): string =>
-    (runsOn.provider === 'demo' ? 'demo (offline)' : `${runsOn.provider}${runsOn.model ? ` · ${runsOn.model}` : ''}`);
+    (runsOn.provider === 'demo'
+      ? 'demo (offline)'
+      : runsOn.provider === 'none'
+        ? 'no provider — run `stratus setup`'
+        : `${runsOn.provider}${runsOn.model ? ` · ${runsOn.model}` : ''}`);
 
   writeLine(streams.stdout, command.gateway ? `Agents on ${command.gateway}` : 'Agents');
   for (const agent of listings) {

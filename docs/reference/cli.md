@@ -14,7 +14,7 @@ stratus run "say hello"
 stratus run --soul ./blair.md "introduce yourself"
 stratus run --provider anthropic --model claude-opus-5-5 "hello"
 stratus run --provider codex "say hello"
-stratus run --prompt "use the echo tool" --format json
+stratus run --provider demo --prompt "use the echo tool" --format json
 stratus serve                          # stratusd: the whole roster, always on; exits 78 on a config it cannot load
 stratus serve --idle-timeout 120 --no-events
 stratus serve --approvals remote       # ask a human in Slack instead of refusing
