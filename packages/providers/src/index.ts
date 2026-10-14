@@ -402,6 +402,20 @@ export const defineScriptedProvider = ({
   });
 };
 
+/**
+ * The configured header values an endpoint might repeat in its error text.
+ * An `authorization` header carries a scheme and a credential, and an
+ * endpoint may name the credential alone ("invalid token: ..."), so that
+ * part counts on its own too.
+ */
+const headerSecrets = (headers: Record<string, string>): string[] =>
+  Object.entries(headers).flatMap(([name, value]) => {
+    const credential = /^(?:proxy-)?authorization$/i.test(name)
+      ? /^\s*\S+\s+(\S.*?)\s*$/.exec(value)?.[1]
+      : undefined;
+    return credential === undefined ? [value] : [value, credential];
+  });
+
 export const createOpenAICompatibleProvider = ({
   model,
   apiKey,
@@ -486,7 +500,7 @@ export const createOpenAICompatibleProvider = ({
           : reportedMessage != null
             ? JSON.stringify(reportedMessage)
             : payload.rawText ?? `Provider request failed with status ${response.status}`;
-        const message = redactSecrets(reported, [apiKey, ...Object.values(headers)]);
+        const message = redactSecrets(reported, [apiKey, ...headerSecrets(headers)]);
         // The transcript did not fit. Reported as the one provider failure
         // the kernel can act on — it answers by sending less history —
         // rather than as the final error every other 400 here is. Matched

@@ -1776,3 +1776,25 @@ test('a non-string error message from the endpoint is classified, not thrown as 
     },
   );
 });
+
+// A configured `authorization` header replaces the generated one. An
+// endpoint that names the token alone, without its scheme, must not leak it.
+test('the token inside a configured authorization header is redacted on its own too', async () => {
+  for (const name of ['authorization', 'Authorization', 'proxy-authorization']) {
+    const provider = createOpenAICompatibleProvider({
+      model: 'gpt-4.1-mini',
+      apiKey: 'unused-key',
+      headers: { [name]: 'Bearer alt-secret-token' },
+      fetch: (async () => ({
+        ok: false,
+        status: 401,
+        text: async () => JSON.stringify({ error: { message: 'invalid token: alt-secret-token' } }),
+      })) as unknown as typeof fetch,
+    });
+    await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+      assert.ok(!error.message.includes('alt-secret-token'), `${name}: ${error.message}`);
+      assert.match(error.message, /invalid token: \[redacted\]/);
+      return true;
+    });
+  }
+});
