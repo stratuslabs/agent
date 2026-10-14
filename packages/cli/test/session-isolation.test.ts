@@ -59,6 +59,18 @@ const factsIn = (memory) => {
   }
   return out;
 };
+// Turns whose message ends in "together" hold their provider call open
+// until all of them have entered it, so they are in flight at the same
+// time inside the daemon, not just submitted at the same time. If they
+// never all arrive, each one answers "barrier timed out" instead.
+const TOGETHER = 4;
+const waiting = [];
+const together = () => new Promise((resolve) => {
+  const timer = setTimeout(() => resolve(false), 5000);
+  timer.unref();
+  waiting.push(() => { clearTimeout(timer); resolve(true); });
+  if (waiting.length >= TOGETHER) for (const release of waiting.splice(0)) release();
+});
 export const createPlugin = () => ({
   name: 'isolation-fixture',
   setup(context) {
@@ -93,6 +105,9 @@ export const createPlugin = () => ({
             return { parts: [{ type: 'text', text: 'tool said: ' + JSON.stringify(last.toolResult?.ok ? last.toolResult.output : last.toolResult?.error) }] };
           }
           const text = latestUser(session);
+          if (/ together$/.test(text) && !(await together())) {
+            return { parts: [{ type: 'text', text: 'barrier timed out' }] };
+          }
           const turn = session.messages.filter((m) => m.role === 'user').length;
           const remember = /^remember (.+)$/.exec(text);
           if (remember) {
@@ -202,12 +217,13 @@ test('concurrent turns see only their own conversation and their own agent\'s me
   await Promise.all([completed(daemon, 'a-1', 1), completed(daemon, 'b-1', 1)]);
 
   // Then four turns at once: each agent's first conversation again, and a
-  // second conversation for each.
+  // second conversation for each. The fixture holds each provider call
+  // until all four are inside one, so they really overlap.
   await Promise.all([
-    send(daemon, 'a-1', 'ava', 'a1 second'),
-    send(daemon, 'a-2', 'ava', 'a2 first'),
-    send(daemon, 'b-1', 'bea', 'b1 second'),
-    send(daemon, 'b-2', 'bea', 'b2 first'),
+    send(daemon, 'a-1', 'ava', 'a1 second together'),
+    send(daemon, 'a-2', 'ava', 'a2 first together'),
+    send(daemon, 'b-1', 'bea', 'b1 second together'),
+    send(daemon, 'b-2', 'bea', 'b2 first together'),
   ]);
   const [a1, a2, b1, b2] = await Promise.all([
     completed(daemon, 'a-1', 2),
@@ -215,10 +231,10 @@ test('concurrent turns see only their own conversation and their own agent\'s me
     completed(daemon, 'b-1', 2),
     completed(daemon, 'b-2', 1),
   ]);
-  assert.equal(lastText(a1), 'echo a-1: a1 second');
-  assert.equal(lastText(a2), 'echo a-2: a2 first');
-  assert.equal(lastText(b1), 'echo b-1: b1 second');
-  assert.equal(lastText(b2), 'echo b-2: b2 first');
+  assert.equal(lastText(a1), 'echo a-1: a1 second together');
+  assert.equal(lastText(a2), 'echo a-2: a2 first together');
+  assert.equal(lastText(b1), 'echo b-1: b1 second together');
+  assert.equal(lastText(b2), 'echo b-2: b2 first together');
 
   const owner: Record<string, string> = { 'a-1': 'ava', 'a-2': 'ava', 'b-1': 'bea', 'b-2': 'bea' };
   const mine: Record<string, RegExp> = { 'a-1': /a1|ava keeps|echo a-1|tool said/, 'a-2': /a2|echo a-2/, 'b-1': /b1|bea keeps|echo b-1|tool said/, 'b-2': /b2|echo b-2/ };
