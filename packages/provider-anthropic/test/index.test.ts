@@ -1670,3 +1670,29 @@ test('a tool image the API cannot process is dropped from inside its tool_result
     assert.deepEqual(session.messages[2]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'shot.png' }]);
   }
 });
+
+// An endpoint that repeats the key it was sent — a proxy set through
+// baseUrl, say. Its error text is stored on the turn, logged, and posted to
+// the channel as the failure, so the key must not survive into it.
+test('a provider error that repeats the key comes back with the key redacted', async () => {
+  const key = 'sk-ant-test-0123456789abcdef';
+  const echoing = (async (_input: any, init?: any) => {
+    const sent = new Headers(init?.headers ?? {}).get('x-api-key') ?? '';
+    return new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: `invalid x-api-key: ${sent}` } }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createAnthropicProvider({ apiKey: key, fetch: echoing });
+
+  const error = await provider.generate({ session: createSession() }).then(
+    () => assert.fail('expected the call to fail'),
+    (caught: unknown) => caught,
+  );
+  assert.ok(error instanceof Error);
+  // Still the SDK's error, so anything that reads its status still can.
+  assert.equal((error as Error & { status?: number }).status, 401);
+  assert.ok(!error.message.includes(key), error.message);
+  assert.ok(!String(error.stack).includes(key));
+  assert.match(error.message, /invalid x-api-key: \[redacted\]/);
+});

@@ -1664,3 +1664,43 @@ test('renderTranscriptPrompt names a tool\'s images it cannot carry', () => {
   assert.match(rendered, /\[tool browser\.screenshot\] .*\[This call returned an image \(a\.png\) that this replay cannot show you; say so rather than guessing at it\.\]/);
   assert.doesNotMatch(rendered, /iVBORw0KGgo/);
 });
+
+// An endpoint that repeats the key it was sent. Its error text is stored on
+// the turn, logged, and posted to the channel as the failure.
+test('an OpenAI-compatible error that repeats the key comes back with the key redacted', async () => {
+  const key = 'sk-test-0123456789abcdef';
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: key,
+    baseUrl: 'https://example.test/v1',
+    fetch: async (_url, init) => {
+      const sent = String((init?.headers as Record<string, string>).authorization);
+      return {
+        ok: false,
+        status: 401,
+        text: async () => JSON.stringify({ error: { message: `Bad credentials: ${sent}` } }),
+      } as Response;
+    },
+  });
+
+  await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+    assert.ok(!error.message.includes(key), error.message);
+    assert.match(error.message, /Bad credentials: Bearer \[redacted\]/);
+    return true;
+  });
+});
+
+test('an OpenAI-compatible error body that is not JSON is redacted too', async () => {
+  const key = 'sk-test-0123456789abcdef';
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: key,
+    baseUrl: 'https://example.test/v1',
+    fetch: async () => ({ ok: false, status: 502, text: async () => `<html>upstream rejected key ${key}</html>` }) as Response,
+  });
+
+  await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+    assert.ok(!error.message.includes(key), error.message);
+    return true;
+  });
+});

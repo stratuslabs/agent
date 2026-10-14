@@ -1,5 +1,6 @@
 import {
   ContextOverflowError,
+  redactSecrets,
   isUnaddressedTurn,
   transcriptOf,
   droppedImageNote,
@@ -473,7 +474,10 @@ export const createOpenAICompatibleProvider = ({
         if (response.ok) {
           break;
         }
-        const message = payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`;
+        const message = redactSecrets(
+          payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`,
+          [apiKey, ...Object.values(headers)],
+        );
         // The transcript did not fit. Reported as the one provider failure
         // the kernel can act on — it answers by sending less history —
         // rather than as the final error every other 400 here is. Matched

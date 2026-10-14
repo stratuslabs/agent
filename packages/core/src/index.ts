@@ -3404,6 +3404,24 @@ export const turnFilesFor = (
 };
 
 /**
+ * `text` with each of `secrets` replaced by `[redacted]`. For failure text
+ * an endpoint wrote: a proxy may repeat the key it was sent, and that text
+ * is stored on the turn, logged, and posted to the channel as the failure.
+ * Values under 8 characters are skipped, being too short to be a credential
+ * and likely to occur by chance; longer ones go first, so a secret that
+ * contains another is replaced whole.
+ */
+export const redactSecrets = (text: string, secrets: Iterable<string | undefined>): string => {
+  const values = [...new Set([...secrets].filter((value): value is string => value !== undefined && value.length >= 8))]
+    .sort((a, b) => b.length - a.length);
+  let redacted = text;
+  for (const value of values) {
+    redacted = redacted.split(value).join('[redacted]');
+  }
+  return redacted;
+};
+
+/**
  * Fail a session's in-flight turn: `status` and `lastError`, and the error
  * on the turn's own user message (`Message.turnError`), where the next
  * turn cannot overwrite it. The one write every path that fails a turn
