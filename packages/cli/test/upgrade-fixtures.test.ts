@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, readFile, stat } from 'node:fs/promises';
+import { chmod, cp, mkdtemp, readFile, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { STATE_SCHEMA_VERSION, createHomeMemoryStore } from '@stratusagent/state';
+import { STATE_SCHEMA_VERSION, createHomeMemoryStore, loadCredentials } from '@stratusagent/state';
 
 import { runCli } from '../src/index.ts';
 
@@ -24,6 +24,10 @@ const homeFrom = async (release: string): Promise<string> => {
   const home = await mkdtemp(path.join(os.tmpdir(), `stratus-upgrade-${release}-`));
   // Stored as `stratus/`, because the repository ignores `.stratus/`.
   await cp(path.join(fixturesDir, release, 'stratus'), path.join(home, '.stratus'), { recursive: true });
+  // The release left its credentials owner-only, and its stamp already lists
+  // the migration that tightens them, so the upgrade won't touch the mode.
+  // Git checks the file out 0644; put back what the release left on disk.
+  await chmod(path.join(home, '.stratus', 'credentials.json'), 0o600);
   return home;
 };
 
@@ -58,13 +62,14 @@ const serving = async (
     env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
   });
   const hung = Symbol('hung');
-  const gaveUp = new Promise<typeof hung>((resolve) => {
-    const timer = setTimeout(() => resolve(hung), 10_000);
-    timer.unref?.();
-  });
-  const url = await Promise.race([ready, gaveUp, run.then(() => hung)]);
-  assert.notEqual(url, hung, `the upgraded home never served its control API; stderr: ${stderr}`);
+  let failed = true;
   try {
+    let giveUp: NodeJS.Timeout | undefined;
+    const gaveUp = new Promise<typeof hung>((resolve) => {
+      giveUp = setTimeout(() => resolve(hung), 10_000);
+    });
+    const url = await Promise.race([ready, gaveUp, run.then(() => hung)]).finally(() => clearTimeout(giveUp));
+    assert.notEqual(url, hung, `the upgraded home never served its control API; stderr: ${stderr}`);
     const token = (await readFile(path.join(home, '.stratus', 'gateway-token'), 'utf8')).trim();
     await work(async (method, route, body) => {
       const response = await fetch(`${url as string}/api/v1${route}`, {
@@ -74,9 +79,15 @@ const serving = async (
       });
       return { status: response.status, json: await response.json() };
     });
+    failed = false;
   } finally {
+    // Always stop the daemon, even when readiness or `work` failed, so a
+    // failure is reported instead of leaving the test process running.
     controller.abort();
-    assert.equal(await run, 0, `serve did not stop cleanly; stderr: ${stderr}`);
+    const code = await run;
+    if (!failed) {
+      assert.equal(code, 0, `serve did not stop cleanly; stderr: ${stderr}`);
+    }
   }
   return output;
 };
@@ -148,6 +159,10 @@ for (const release of RELEASES) {
 
     assert.equal(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'), credentialsBefore);
     assert.equal((await stat(path.join(home, '.stratus', 'credentials.json'))).mode & 0o077, 0, 'credentials must stay owner-only');
+    // ...and the stored sign-in is still one the current build can use.
+    assert.deepEqual(await loadCredentials({ homeDir: home, cwd: home }), {
+      anthropic: { type: 'api_key', value: 'sk-ant-FIXTURE-not-a-real-key' },
+    });
 
     // A second start finds nothing to migrate and keeps the continued turn.
     const second = await serving(home, async (api) => {

@@ -9,7 +9,8 @@ How each was made, with the release installed from npm into a throwaway
 prefix and `HOME`:
 
 1. `config.json` set to `{ "provider": "demo", "api": { "port": <free port> } }`
-   and `credentials.json` to a fake Anthropic key (`sk-ant-FIXTURE-not-a-real-key`).
+   and `credentials.json` to a fake Anthropic key in the shape these releases read
+   (`{ "anthropic": { "type": "api_key", "value": "sk-ant-FIXTURE-not-a-real-key" } }`).
 2. `stratus serve`, with `@stratusagent/control-api` of the same version installed.
 3. Over the control API: `POST /agents` for Ava (`provider: demo`) and Bob;
    `POST /sessions/fixture-ava-1/messages` with "Say hello", then "Use the
