@@ -484,7 +484,11 @@ const surfaceSoul = async (env: StateEnvironment, agentsHome: string, file: stri
   const hiddenInfo = await lstat(hidden);
   const visibleInfo = await lstatOrUndefined(visible);
   if (visibleInfo !== undefined) {
-    if (visibleInfo.ino !== hiddenInfo.ino || visibleInfo.dev !== hiddenInfo.dev) {
+    // The same file (a hard link), or the same bytes (the copy a crash left
+    // where links are refused): this pass's own earlier work, so finish it.
+    const same = (visibleInfo.ino === hiddenInfo.ino && visibleInfo.dev === hiddenInfo.dev)
+      || (visibleInfo.isFile() && (await readFile(visible)).equals(await readFile(hidden)));
+    if (!same) {
       report.skipped.push(`${file} (${visible} already exists)`);
       return;
     }
@@ -497,7 +501,16 @@ const surfaceSoul = async (env: StateEnvironment, agentsHome: string, file: stri
       if (code !== 'EXDEV' && code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EMLINK') {
         throw error;
       }
-      await copyFile(hidden, visible, constants.COPYFILE_EXCL);
+      // Copied under a temporary name and renamed, so a crash never leaves
+      // a partial soul at the visible name for the next pass to refuse.
+      const staged = path.join(path.dirname(visible), `.${path.basename(visible)}.${randomUUID()}.copy`);
+      await copyFile(hidden, staged, constants.COPYFILE_EXCL);
+      try {
+        await rename(staged, visible);
+      } catch (renameError) {
+        await rm(staged, { force: true });
+        throw renameError;
+      }
     }
   }
   await replaceWithLink(hidden, visible, 'file');
@@ -548,9 +561,16 @@ const surfaceWorkspace = async (env: StateEnvironment, agentsHome: string, agent
     throw error;
   });
   if (pending !== undefined) {
-    await finishWorkspace(hidden, marker, pending);
-    report.workspaces += 1;
-    return;
+    const hiddenInfo = await lstatOrUndefined(hidden);
+    if (hiddenInfo?.isDirectory() === true && await lstatOrUndefined(pending.to) === undefined) {
+      // Stopped between writing the marker and the rename: nothing has moved,
+      // so the marker is void and the move starts over below.
+      await rm(marker, { force: true });
+    } else {
+      await finishWorkspace(hidden, marker, pending);
+      report.workspaces += 1;
+      return;
+    }
   }
   const info = await lstatOrUndefined(hidden);
   if (info === undefined || !info.isDirectory()) {

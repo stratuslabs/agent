@@ -307,8 +307,10 @@ test('one agent whose move cannot finish is reported, and the others still move'
   for (const id of ['ava', 'bea']) {
     await mkdir(agentWorkspacePath(env, id), { recursive: true });
   }
-  // Ava's hidden workspace is a real directory again while a marker says it
-  // already moved: the case `finishWorkspace` refuses rather than guesses.
+  // Ava's workspace already moved, and a real hidden directory is back while
+  // the marker is still there: the case `finishWorkspace` refuses rather than
+  // guesses.
+  await mkdir(path.join(home, 'Agents', 'ava', 'workspace'), { recursive: true });
   await writeFile(
     path.join(agentStateDirPath(env, 'ava'), '.workspace-surfacing'),
     JSON.stringify({ from: [agentWorkspacePath(env, 'ava')], to: path.join(home, 'Agents', 'ava', 'workspace') }),
@@ -361,4 +363,46 @@ test('where symlinks cannot be made (Windows without Developer Mode), souls and 
   await surfaceAgentsHome(env);
   assert.ok((await lstat(soulPath)).isFile(), 'the existing soul is not moved either');
   assert.equal(await exists(path.join(home, 'Agents')), false);
+});
+
+test('a workspace move interrupted before the rename starts over instead of refusing forever', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  const hiddenWorkspace = agentWorkspacePath(env, 'ava');
+  const visibleWorkspace = path.join(home, 'Agents', 'ava', 'workspace');
+  claimAgentsHome(env);
+  await mkdir(hiddenWorkspace, { recursive: true });
+  await writeFile(path.join(hiddenWorkspace, 'notes.md'), 'kept');
+  // The state a crash between writing the marker and the rename leaves behind.
+  await mkdir(path.dirname(visibleWorkspace), { recursive: true });
+  await writeFile(
+    path.join(agentStateDirPath(env, 'ava'), '.workspace-surfacing'),
+    JSON.stringify({ from: [hiddenWorkspace], to: visibleWorkspace }),
+  );
+
+  const report = await surfaceAgentsHome(env);
+  assert.match(report ?? '', /moved 0 soul\(s\) and 1 workspace\(s\)/);
+  assert.doesNotMatch(report ?? '', /left in place/);
+  assert.equal(await readlink(hiddenWorkspace), visibleWorkspace);
+  assert.equal(await readFile(path.join(visibleWorkspace, 'notes.md'), 'utf8'), 'kept');
+  assert.equal(await exists(path.join(agentStateDirPath(env, 'ava'), '.workspace-surfacing')), false);
+  assert.equal(await surfaceAgentsHome(env), undefined, 'a second pass has nothing to do');
+});
+
+test('a soul move interrupted after a copy (no hard links) is finished, not reported as a conflict', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  const hiddenSoul = path.join(agentsDirPath(env), 'ava.md');
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await writeFile(hiddenSoul, soulText('ava'));
+  claimAgentsHome(env);
+  // The state a crash between the copy fallback and the link leaves behind:
+  // the same bytes at both names, under different inodes.
+  await mkdir(path.join(home, 'Agents', 'ava'));
+  await writeFile(path.join(home, 'Agents', 'ava', 'soul.md'), soulText('ava'));
+
+  const report = await surfaceAgentsHome(env);
+  assert.match(report ?? '', /moved 1 soul/);
+  assert.doesNotMatch(report ?? '', /left in place/);
+  assert.equal(await readlink(hiddenSoul), path.join(home, 'Agents', 'ava', 'soul.md'));
 });
