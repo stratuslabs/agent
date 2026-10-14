@@ -124,36 +124,45 @@ const startDaemon = async (home: string): Promise<Daemon> => {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
-  const url = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`serve never announced its control API:\n${output}`)), 20_000);
-    const read = (chunk: Buffer) => {
-      output += chunk.toString();
-      const found = /control API on (http:\/\/\S+?)\s/.exec(output);
-      if (found?.[1]) {
+  // Until the caller holds the daemon, its cleanup can't reach the child, so
+  // any failure here kills it before rethrowing. Otherwise a startup that
+  // stalls leaves serve running and the suite hangs instead of failing.
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`serve never announced its control API:\n${output}`)), 20_000);
+      const read = (chunk: Buffer) => {
+        output += chunk.toString();
+        const found = /control API on (http:\/\/\S+?)\s/.exec(output);
+        if (found?.[1]) {
+          clearTimeout(timer);
+          resolve(found[1]);
+        }
+      };
+      child.stdout!.on('data', read);
+      child.stderr!.on('data', read);
+      child.once('exit', (code, signal) => {
         clearTimeout(timer);
-        resolve(found[1]);
-      }
-    };
-    child.stdout!.on('data', read);
-    child.stderr!.on('data', read);
-    child.once('exit', (code, signal) => {
-      clearTimeout(timer);
-      reject(new Error(`serve exited (${code ?? signal}) before serving:\n${output}`));
-    });
-  });
-  const token = (await readFile(path.join(home, '.stratus', 'gateway-token'), 'utf8')).trim();
-  return {
-    child,
-    output: () => output,
-    async api(method, route, body) {
-      const response = await fetch(`${url}/api/v1${route}`, {
-        method,
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        reject(new Error(`serve exited (${code ?? signal}) before serving:\n${output}`));
       });
-      return { status: response.status, json: await response.json() };
-    },
-  };
+    });
+    const token = (await readFile(path.join(home, '.stratus', 'gateway-token'), 'utf8')).trim();
+    return {
+      child,
+      output: () => output,
+      async api(method, route, body) {
+        const response = await fetch(`${url}/api/v1${route}`, {
+          method,
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return { status: response.status, json: await response.json() };
+      },
+    };
+  } catch (error) {
+    child.kill('SIGKILL');
+    await exited(child);
+    throw error;
+  }
 };
 
 const exited = (child: ChildProcess): Promise<void> =>
