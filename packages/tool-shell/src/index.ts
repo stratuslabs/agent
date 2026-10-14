@@ -3,11 +3,13 @@ import path from 'node:path';
 
 import {
   DEFAULT_SUBPROCESS_PASS_ENV,
+  leastTrusted,
   type AgentWorkspaces,
   type JsonObject,
   type JsonValue,
   type Plugin,
   type Session,
+  type TrustLevel,
 } from '@stratusagent/core';
 import {
   defineLocalCommandTool,
@@ -16,7 +18,14 @@ import {
   type LocalCommandInvocation,
   type LocalCommandTool,
 } from '@stratusagent/executor-local';
-import { expandHome, resolvePluginAgentConfig, workspacePreparer, workspaceResolver } from '@stratusagent/plugins';
+import {
+  createFileLedger,
+  expandHome,
+  resolvePluginAgentConfig,
+  workspacePreparer,
+  workspaceResolver,
+  type TaintedWriteLedger,
+} from '@stratusagent/plugins';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -231,7 +240,35 @@ export interface ShellToolOptions {
   workspaces?: AgentWorkspaces;
   /** What `~` in `cwd` expands to. Defaults to the daemon user's home. */
   home?: string;
+  /**
+   * The host's tainted-write ledger, the one `fs.read` consults. The plugin
+   * opens it from the `workspaces` seam; without one nothing is looked up
+   * and results stay at `unknown`.
+   */
+  ledger?: TaintedWriteLedger;
 }
+
+/**
+ * The label a command's output can carry, given what this agent has on
+ * record as written from a tainted session.
+ *
+ * A command can print any file it can read, and `cat notes.txt` of a page
+ * saved last week must not come back cleaner than `fs.read` of it would:
+ * that is the laundering the ledger exists to stop. Which files a command
+ * reads cannot be told from its text (`python x.py` reads what `x.py`
+ * says), so the result takes the ledger's lowest label — over-marking, the
+ * safe direction the ledger already chose. Never higher than `unknown`. A
+ * ledger that cannot be read is provenance nobody can vouch for, and labels
+ * the result `external` rather than refusing a command that may be how the
+ * operator repairs it.
+ */
+const recordedLabel = async (ledger: TaintedWriteLedger, agentId: string): Promise<TrustLevel> => {
+  try {
+    return leastTrusted('unknown', ...Object.values(await ledger.snapshot(agentId)));
+  } catch {
+    return 'external';
+  }
+};
 
 export const createShellTool = (config: JsonObject = {}, options: ShellToolOptions = {}): LocalCommandTool => {
   const tool = defineLocalCommandTool({
@@ -270,10 +307,15 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       },
       required: ['command'],
     },
-    async createCommand(input, session): Promise<LocalCommandInvocation> {
+    async createCommand(input, session, context): Promise<LocalCommandInvocation> {
       const command = typeof input.command === 'string' ? input.command.trim() : '';
       if (!command) {
         throw new Error('command is required.');
+      }
+      // Before the process exists, so every result the executor makes from
+      // here carries it: a failing command's stdout reaches the model too.
+      if (options.ledger !== undefined) {
+        context?.markTrust?.(await recordedLabel(options.ledger, session.agent.id));
       }
       const settings = settingsFor(
         config,
@@ -369,14 +411,21 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
 export const createShellPlugin = (config: JsonObject = {}, options: ShellToolOptions = {}): Plugin => ({
   name: '@stratusagent/tool-shell',
   setup(context) {
+    // The host's seam, unless the caller that constructed this plugin
+    // already supplied one: an option passed by hand is the more specific
+    // answer, the way `plugin-mcp` treats `log`.
+    const workspaces = options.workspaces ?? context.workspaces;
+    // The ledger follows the host's seam only, never this plugin's own
+    // `workspaceRoot` or `cwd`, the way `tool-fs` and `plugin-mcp` open it:
+    // relocating where commands run must not point it at a second ledger.
+    // Read only here, so naming the path is enough.
+    const ledgerFor = options.ledger === undefined && context.workspaces !== undefined
+      ? workspaceResolver(context.workspaces, undefined)
+      : undefined;
     context.tools.register(createShellTool(config, {
       ...options,
-      // The host's seam, unless the caller that constructed this plugin
-      // already supplied one: an option passed by hand is the more specific
-      // answer, the way `plugin-mcp` treats `log`.
-      ...(options.workspaces === undefined && context.workspaces !== undefined
-        ? { workspaces: context.workspaces }
-        : {}),
+      ...(workspaces !== undefined ? { workspaces } : {}),
+      ...(ledgerFor !== undefined ? { ledger: createFileLedger(ledgerFor) } : {}),
     }));
   },
 });

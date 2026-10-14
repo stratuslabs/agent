@@ -38,6 +38,16 @@ through a shell past the label `web.fetch` carries. Recognising fetching
 programs by name would be the list the contract rejects. See
 [Memory](../../docs/concepts/memory.md#where-a-fact-came-from).
 
+Once the agent has a file on record as written from an `external` session
+(the ledger `fs.read` consults), every command's output is labelled
+`external` instead, because a command can print any file it can read and
+which ones it reads can't be told from its text. With
+`approvals.externalContent: "gate"` that closes the session's grants after
+any command, the same as `fs.read` of that file would. To clear it, remove
+the path's lines from the agent's `fs-provenance.jsonl`. The ledger is
+opened from the host's workspaces, so a plugin built without that seam
+labels everything `unknown`.
+
 `gated` rather than `dangerous` on purpose. The danger of a shell is in its
 argument, not in its identity: marking the tool `dangerous` would mean no
 command could ever run unattended — `git status` included — and marking it

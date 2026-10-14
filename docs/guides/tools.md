@@ -196,6 +196,8 @@ risk levels. Four things are worth knowing here:
   labels a file the agent wrote while its session was tainted, from a
   per-agent ledger at `~/.stratus/agents/<agent>/workspace/fs-provenance.jsonl`
   (`fs.move` carries those labels to the new path; `shell.run mv` cannot).
+  While that ledger holds an `external` file, `shell.run` output is
+  `external` too, since `cat` of the file prints the same bytes.
   The session that read any of it only
   ever gets less trusted, and every fact it remembers carries the label.
   The model reads an `external` result inside an envelope marked

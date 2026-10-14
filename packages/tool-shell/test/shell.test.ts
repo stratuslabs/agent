@@ -17,6 +17,8 @@ import {
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import { createPermissionPolicy, type PermissionDecision } from '@stratusagent/permissions';
 
+import { createFileLedger, LEDGER_FILENAME } from '@stratusagent/plugins';
+
 import { createShellPlugin, createShellTool } from '../src/index.ts';
 
 const session = (agentId = 'ava'): Session => ({
@@ -390,4 +392,134 @@ test('git never opens an editor from a shell command', async () => {
 test('git is never pointed at another repository through the environment', async () => {
   const tools = await registryFor({ passEnv: ['PATH'], env: { GIT_DIR: '/outside/.git', GIT_WORK_TREE: '/outside', GIT_CONFIG_GLOBAL: '/keep/gitconfig' } }, { PATH: process.env.PATH });
   assert.equal(String((await runCommand(tools, 'echo "[$GIT_DIR][$GIT_WORK_TREE][$GIT_CONFIG_GLOBAL]"')).stdout).trim(), '[][][/keep/gitconfig]');
+});
+
+// The tainted-write ledger `fs.read` consults. A shell read of the same
+// file must not come back cleaner than `fs.read` of it would.
+const ledgerHome = async (): Promise<{ workspaces: AgentWorkspaces; workspace: string }> => {
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-ledger-')));
+  const workspace = path.join(home, 'agents', 'ava', 'workspace');
+  await mkdir(workspace, { recursive: true });
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(home, 'agents', agentId, 'workspace'),
+    all: async () => [workspace],
+  };
+  return { workspaces, workspace };
+};
+
+const runLabelled = async (tools: ToolRegistry, command: string) =>
+  createLocalCommandExecutor().execute(
+    { id: 'call-1', toolName: 'shell.run', input: { command } },
+    tools.get('shell.run')!,
+    session('ava'),
+  );
+
+test('a shell read after a tainted write carries the ledger\'s label, as fs.read would', async () => {
+  const { workspaces, workspace } = await ledgerHome();
+  const notes = path.join(workspace, 'notes.txt');
+  await writeFile(notes, 'text a web page wrote\n');
+  await createFileLedger((id) => workspaces.forAgent(id)).recordWrite('ava', notes, 'external');
+  const tools = await registryFor({}, undefined, workspaces);
+
+  const read = await runLabelled(tools, 'cat notes.txt');
+  assert.equal(read.ok, true);
+  assert.equal(read.trust, 'external');
+
+  // A failing command's output reaches the model too.
+  const failed = await runLabelled(tools, 'cat notes.txt; exit 3');
+  assert.equal(failed.ok, false);
+  assert.equal(failed.trust, 'external');
+});
+
+test('with nothing tainted on record a shell result stays unknown', async () => {
+  const { workspaces, workspace } = await ledgerHome();
+  await writeFile(path.join(workspace, 'notes.txt'), 'my own notes\n');
+  const tools = await registryFor({}, undefined, workspaces);
+
+  const read = await runLabelled(tools, 'cat notes.txt');
+  assert.equal(read.ok, true);
+  assert.equal(read.trust, 'unknown');
+});
+
+test('another agent\'s tainted writes do not label this agent\'s commands', async () => {
+  const { workspaces } = await ledgerHome();
+  const juno = workspaces.forAgent('juno');
+  await mkdir(juno, { recursive: true });
+  await writeFile(path.join(juno, 'page.txt'), 'fetched\n');
+  await createFileLedger((id) => workspaces.forAgent(id)).recordWrite('juno', path.join(juno, 'page.txt'), 'external');
+  const tools = await registryFor({}, undefined, workspaces);
+
+  const read = await runLabelled(tools, 'echo hi');
+  assert.equal(read.trust, 'unknown');
+});
+
+test('a ledger that cannot be read labels the result external rather than stopping the command', async () => {
+  const { workspaces, workspace } = await ledgerHome();
+  await writeFile(path.join(workspace, LEDGER_FILENAME), 'not a ledger line\n');
+  const tools = await registryFor({}, undefined, workspaces);
+
+  const read = await runLabelled(tools, 'echo hi');
+  assert.equal(read.ok, true);
+  assert.equal(String((read.output as JsonObject).stdout).trim(), 'hi');
+  assert.equal(read.trust, 'external');
+});
+
+test('with the external-content gate on, a shell read of a tainted file closes the session\'s grants', async () => {
+  const { workspaces, workspace } = await ledgerHome();
+  const notes = path.join(workspace, 'notes.txt');
+  await writeFile(notes, 'text a web page wrote\n');
+  await createFileLedger((id) => workspaces.forAgent(id)).recordWrite('ava', notes, 'external');
+  // A repository the agent's own git can read unattended under workspace
+  // autonomy, which the gate withdraws once the session is external.
+  const git = (args: string) => createLocalCommandExecutor().execute(
+    { id: 'git', toolName: 'shell.run', input: { command: `git ${args}` } },
+    createShellTool({ cwd: workspace }),
+    session('ava'),
+  );
+  assert.equal((await git('init -q')).ok, true);
+  assert.equal((await git('-c user.email=a@b -c user.name=a commit -q --allow-empty -m one')).ok, true);
+
+  const decisions: PermissionDecision[] = [];
+  const tools = await registryFor({}, undefined, workspaces);
+  const commands = ['cat notes.txt', 'git log --oneline'];
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate() {
+      const command = commands[turn];
+      turn += 1;
+      return command === undefined
+        ? { parts: [{ type: 'text', text: 'done' }] }
+        : { parts: [{ type: 'tool-call', call: { id: `c${turn}`, toolName: 'shell.run', input: { command } } }] };
+    },
+  };
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    executor: createLocalCommandExecutor(),
+    approvals: createPermissionPolicy({
+      mode: 'headless',
+      onDecision: (decision) => decisions.push(decision),
+      commands: { workspace: { directoryFor: () => workspace } },
+      gateExternalContent: () => true,
+    }),
+    store: new InMemorySessionStore(),
+    maxTurns: 6,
+  });
+  await runner.initialize();
+  const finished = await runner.run({
+    sessionId: 'shell-ledger-gate',
+    agent: { id: 'ava', name: 'Ava', tools: ['shell.*'] },
+    userMessage: 'read your notes',
+  });
+
+  const results = finished.messages.filter((message) => message.role === 'tool');
+  // The read itself runs unattended, and arrives labelled as fs.read would.
+  assert.equal(results[0]?.toolResult?.ok, true);
+  assert.equal(results[0]?.toolResult?.trust, 'external');
+  // And the git read that workspace autonomy would otherwise allow asks,
+  // which headless cannot do.
+  assert.equal(results[1]?.toolResult?.ok, false);
+  assert.match(decisions[1]?.reason ?? '', /after this conversation read external content \(from shell\.run\)/);
 });

@@ -95,9 +95,22 @@ export interface LocalCommandContext {
   markTrust?: (trust: TrustLevel) => void;
 }
 
+/**
+ * What `createCommand` is handed besides the input: the per-call producer
+ * channel, so a tool that knows before the process starts what its output
+ * can carry labels it once — every result below, the failures included.
+ */
+export interface LocalCommandCreateContext {
+  markTrust?: (trust: TrustLevel) => void;
+}
+
 export interface LocalCommandTool extends Tool {
   runtime: 'local-command';
-  createCommand(input: ToolCall['input'], session: Session): LocalCommandInvocation | Promise<LocalCommandInvocation>;
+  createCommand(
+    input: ToolCall['input'],
+    session: Session,
+    context?: LocalCommandCreateContext,
+  ): LocalCommandInvocation | Promise<LocalCommandInvocation>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
 
@@ -109,7 +122,11 @@ export interface LocalCommandToolDefinition {
   risk?: ToolRisk;
   /** See Tool.outputTrust in @stratusagent/core. Omitted means `agent`. */
   outputTrust?: TrustLevel;
-  createCommand(input: ToolCall['input'], session: Session): LocalCommandInvocation | Promise<LocalCommandInvocation>;
+  createCommand(
+    input: ToolCall['input'],
+    session: Session,
+    context?: LocalCommandCreateContext,
+  ): LocalCommandInvocation | Promise<LocalCommandInvocation>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
 
@@ -208,7 +225,7 @@ export class LocalCommandExecutor implements Executor {
       if (signal?.aborted) {
         return failureResult(call, `Command aborted before start: ${call.toolName}`, null, trust());
       }
-      const invocation = await raceWithAbort(tool.createCommand(call.input, session), signal, 'Command construction');
+      const invocation = await raceWithAbort(tool.createCommand(call.input, session, { markTrust: marking.context.markTrust! }), signal, 'Command construction');
       if (signal?.aborted) {
         return failureResult(call, `Command aborted before start: ${call.toolName}`, null, trust());
       }
