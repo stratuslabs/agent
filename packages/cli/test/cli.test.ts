@@ -10301,6 +10301,12 @@ test('stratus grants goes through the running daemon, whose store is the one the
   assert.match(listing.output.stdout, /from the daemon at http:\/\/127\.0\.0\.1:4123/);
   // What only a live daemon can say: the grant would not apply right now.
   assert.match(listing.output.stdout, /stale: no loaded tool has this name/);
+  // This daemon predates destination grants and leaves the key out; JSON
+  // still answers with the same schema as a current daemon.
+  const older = fakeGateway(() => new Response(JSON.stringify({ agentId: 'ava', scopes: [], origins: [], tools: [] }), { status: 200 }));
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--format', 'json'], streams: asJson.streams, env: { ...env, fetch: older.fetchImpl } }), 0);
+  assert.deepEqual((JSON.parse(asJson.output.stdout) as { destinations?: unknown }).destinations, []);
 
   const revoke = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
@@ -10329,6 +10335,25 @@ test('stratus grants goes through the running daemon, whose store is the one the
     1,
   );
   assert.match(explicit.output.stderr, /Could not reach the gateway at http:\/\/127\.0\.0\.1:9/);
+
+  // A conversation grant the daemon says will not apply is marked, like a tool grant.
+  const current = fakeGateway(() => new Response(JSON.stringify({
+    agentId: 'ava',
+    scopes: [],
+    origins: [],
+    tools: [],
+    destinations: [{
+      tool: 'notes.write',
+      destination: 'slack:C-OLD',
+      package: 'somebody-elses-notes',
+      grantedAt: '2026-10-12T00:00:00.000Z',
+      description: 'slack:C-OLD (notes.write)',
+      stale: 'the tool is now contributed by stratus-plugin-notes, not somebody-elses-notes, so a call asks again',
+    }],
+  }), { status: 200 }));
+  const marked = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: marked.streams, env: { ...env, fetch: current.fetchImpl } }), 0);
+  assert.match(marked.output.stdout, /slack:C-OLD \(notes\.write\).*stale: the tool is now contributed by stratus-plugin-notes/);
   await rm(home, { recursive: true, force: true });
 });
 

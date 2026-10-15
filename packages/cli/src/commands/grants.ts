@@ -29,6 +29,7 @@ interface GrantsListing extends AgentGrantsListing {
   agentId: string;
   configCommands?: string[];
   tools: Array<ToolGrant & { stale?: string }>;
+  destinations: Array<AgentGrantsListing['destinations'][number] & { stale?: string }>;
 }
 
 /**
@@ -166,7 +167,10 @@ export const runGrants = async (
     return createOperatorCommands(await loadServeApprovals(env, command.configPath, warn), warn).declaredFor(agentId);
   };
 
-  const render = (listing: GrantsListing, source: string): number => {
+  const render = (answered: GrantsListing, source: string): number => {
+    // A daemon older than destination grants answers without the key. Filled
+    // in before either format, so JSON keeps one schema through an upgrade.
+    const listing: GrantsListing = { ...answered, destinations: answered.destinations ?? [] };
     if (command.format === 'json') {
       writeLine(streams.stdout, JSON.stringify({ ...listing, source, configCommands: declared, configSource }, null, 2));
       return 0;
@@ -182,8 +186,7 @@ export const runGrants = async (
         writeLine(streams.stdout, `    ${entry}`);
       }
     }
-    // A daemon older than destination grants answers without the key.
-    const destinations = listing.destinations ?? [];
+    const destinations = listing.destinations;
     const total = listing.tools.length + listing.scopes.length + listing.origins.length + destinations.length;
     if (total === 0) {
       writeLine(streams.stdout, `${agentId} has no standing grants beyond the built-in safe list (${source}).`);
@@ -215,7 +218,8 @@ export const runGrants = async (
       writeLine(streams.stdout, '  conversations');
       for (const grant of destinations) {
         const by = grant.grantedBy ? ` by ${grant.grantedBy}` : '';
-        writeLine(streams.stdout, `    ${grant.description}  (granted ${grant.grantedAt}${by})`);
+        const stale = grant.stale ? `  — stale: ${grant.stale}` : '';
+        writeLine(streams.stdout, `    ${grant.description}  (granted ${grant.grantedAt}${by})${stale}`);
       }
     }
     writeLine(streams.stdout, `Take one back: stratus grants revoke ${agentId} --tool <name> | --scope "<command>" | --origin <origin> | --destination <channel:id>`);

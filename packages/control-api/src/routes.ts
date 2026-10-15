@@ -1228,21 +1228,26 @@ export const routes: Route[] = [
       // plugin updated, the tool gone — would be the audit view lying in
       // the reassuring direction. Only a live daemon can say, which is why
       // `stratus grants` reading the files directly cannot show it.
+      // Conversation grants follow the same contributor rule in the policy,
+      // so they are judged the same way here.
       const contributors = new Map(context.gateway.tools().map((tool) => [tool.name, tool.package]));
+      const staleness = (grant: { tool: string; package?: string }): string | undefined =>
+        !contributors.has(grant.tool)
+          ? 'no loaded tool has this name, so the grant applies to nothing until one does'
+          : contributors.get(grant.tool) !== grant.package
+            ? `the tool is now contributed by ${contributors.get(grant.tool) ?? 'the kernel'}, not ${grant.package ?? 'the kernel'}, so a call asks again`
+            : undefined;
+      const marked = <T extends { tool: string; package?: string }>(grant: T): T & { stale?: string } => {
+        const stale = staleness(grant);
+        return { ...grant, ...(stale !== undefined ? { stale } : {}) };
+      };
       return {
         agentId,
         configCommands: context.configCommands?.(agentId) ?? [],
         scopes: listing.scopes,
         origins: listing.origins,
-        destinations: listing.destinations,
-        tools: listing.tools.map((grant) => {
-          const stale = !contributors.has(grant.tool)
-            ? 'no loaded tool has this name, so the grant applies to nothing until one does'
-            : contributors.get(grant.tool) !== grant.package
-              ? `the tool is now contributed by ${contributors.get(grant.tool) ?? 'the kernel'}, not ${grant.package ?? 'the kernel'}, so a call asks again`
-              : undefined;
-          return { ...grant, ...(stale !== undefined ? { stale } : {}) };
-        }),
+        destinations: listing.destinations.map(marked),
+        tools: listing.tools.map(marked),
       };
     },
   },
