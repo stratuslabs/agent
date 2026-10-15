@@ -97,6 +97,13 @@ const COLD_VERDICT_CAPACITY = 256;
  */
 const THREAD_HANDOVER_DEPTH = 32;
 /**
+ * How many agent mentions one thread admits in a row before a person has
+ * to speak there again (card 513): enough for a question, an answer and a
+ * follow-up each way, and a stop to two agents tagging each other forever.
+ * Counted per daemon, in memory; a restart starts it again.
+ */
+export const AGENT_MENTION_HOP_LIMIT = 4;
+/**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
  * this process never sees would otherwise grow it for the life of the
@@ -204,6 +211,19 @@ export interface SlackAgentConfig {
    * adapter warns at startup.
    */
   homeChannels?: string[];
+  /**
+   * Whether this agent answers a mention from another agent's Slack bot
+   * (card 513). Absent, the default, it ignores every bot, as it always
+   * has. Present, it answers a team agent that names it: one of this
+   * daemon's own agents, or one listed in `team` (name -> bot user id,
+   * for agents served by other daemons). `only`, when set, narrows that
+   * to the named team agents. Never any other bot. What a team agent says
+   * is labelled `unknown`, below a principal, since nothing here can see
+   * what its words were built from; it can't stop a turn or answer an
+   * approval, and a thread stops taking agent mentions at
+   * `AGENT_MENTION_HOP_LIMIT` until a person speaks there.
+   */
+  agentMentions?: { team?: Record<string, string>; only?: string[] };
 }
 
 // The thin surfaces of the Slack SDKs the adapter touches — injectable so
@@ -2864,6 +2884,12 @@ interface Admission {
    * `listens` says about ordinary replies.
    */
   holderStop?: boolean;
+  /**
+   * The team agent this message came from, when another agent's bot named
+   * this one (card 513). Its words are labelled `unknown`, and it is never
+   * a stop or an approver's reply.
+   */
+  fromAgent?: string;
 }
 
 interface AgentConnection {
@@ -5367,10 +5393,114 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return true;
   };
 
+  /**
+   * Agent mentions admitted per thread since a person last spoke there, by
+   * message ts (card 513). A copy of one message reaching a second socket,
+   * or redelivered, is the same hop. Bounded like the addressee map.
+   */
+  const agentHops = new Map<string, string[]>();
+
+  /** Which team agent a bot user is, as `connection` sees it, if any. */
+  const teamAgentFor = (connection: AgentConnection, team: string, botUser: string): string | undefined => {
+    for (const [agentId, identity] of botIdentities) {
+      if (identity.teamId === team && identity.botUserId === botUser) {
+        return agentId;
+      }
+    }
+    for (const [name, id] of Object.entries(connection.config.agentMentions?.team ?? {})) {
+      if (id === botUser) {
+        return name;
+      }
+    }
+    return undefined;
+  };
+
+  /**
+   * A message another agent's bot posted, for an agent that answers team
+   * agents (`agentMentions`, card 513). Admitted only when it names this
+   * agent, comes from a team agent this one listens to, and the thread is
+   * under its hop limit; anything else from a bot is dropped, as every
+   * bot message was before. Never part of the holder rule: a bot naming an
+   * agent asks it one thing, and hands it nothing.
+   */
+  const admitAgentMention = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
+    const event = args.event;
+    const settings = connection.config.agentMentions;
+    if (!settings || !event || event.user === undefined || event.user === connection.botUserId) {
+      return undefined;
+    }
+    if ((event.type !== 'app_mention' && event.type !== 'message') || event.channel_type === 'im') {
+      return undefined;
+    }
+    if (event.subtype !== undefined && event.subtype !== 'bot_message') {
+      return undefined;
+    }
+    const text = event.text ?? '';
+    if (!mentions(text, connection.botUserId)) {
+      return undefined;
+    }
+    const team = args.body?.team_id ?? connection.teamId;
+    const name = teamAgentFor(connection, team, event.user);
+    if (name === undefined) {
+      return undefined;
+    }
+    const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
+    if (settings.only !== undefined && !settings.only.includes(name)) {
+      if (!alreadySeen(eventKey)) {
+        log(`slack: ${connection.config.agentId} ignored a mention from agent ${name}: not on its agent mention list`);
+      }
+      return undefined;
+    }
+    const thread = event.thread_ts ?? event.ts;
+    const threadKey = threadKeyFor({ team, conversation: event.channel, thread });
+    const hops = agentHops.get(threadKey) ?? [];
+    if (!hops.includes(event.ts)) {
+      if (hops.length >= AGENT_MENTION_HOP_LIMIT) {
+        if (!alreadySeen(eventKey)) {
+          log(`slack: ${connection.config.agentId} ignored a mention from agent ${name}: the thread reached its hop limit of ${AGENT_MENTION_HOP_LIMIT} agent mentions; a person has to speak there first`);
+        }
+        return undefined;
+      }
+      agentHops.delete(threadKey);
+      agentHops.set(threadKey, [...hops, event.ts]);
+      if (agentHops.size > THREAD_ADDRESSEE_CAPACITY) {
+        const oldest = agentHops.keys().next();
+        if (!oldest.done) {
+          agentHops.delete(oldest.value);
+        }
+      }
+    }
+    if (alreadySeen(eventKey)) {
+      return undefined;
+    }
+    return {
+      event,
+      isDm: false,
+      team,
+      eventKey,
+      userId: event.user,
+      sessionId: channelSessionKey({ channel: 'slack', agentId: connection.config.agentId, team, conversation: event.channel, thread }),
+      thread,
+      threadKey,
+      settled: true,
+      overhear: false,
+      judge: false,
+      fromAgent: name,
+    };
+  };
+
   const admit = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
     const event = args.event;
     if (gatewayRef) {
       noteForeignSpeaker(connection, args);
+    }
+    if (gatewayRef && event && (event.bot_id !== undefined || event.subtype === 'bot_message')) {
+      return admitAgentMention(connection, args);
+    }
+    if (event && event.user !== undefined && event.channel_type !== 'im' && isPersonSpeaking(event) && admitsSender(connection.config, event.user)) {
+      // A person this agent admits, speaking in a thread, ends a run of
+      // agent mentions there. Someone it refuses can't restart one.
+      agentHops.delete(threadKeyFor({ team: args.body?.team_id ?? connection.teamId, conversation: event.channel, thread: event.thread_ts ?? event.ts }));
     }
     if (!gatewayRef || !event || !event.user || event.bot_id || !isPersonSpeaking(event)) {
       return undefined;
@@ -5689,6 +5819,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (
       (!admitted.overhear || admitted.holderStop === true) &&
       admitted.settled &&
+      admitted.fromAgent === undefined &&
       (connection.config.approvers ?? []).includes(userId) &&
       isStopRequest(event.text ?? '', connection.botUserId) &&
       stopTurns(connection, sessionId, userId, event.channel)
@@ -5837,7 +5968,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           warn,
           reasons,
           options.attachmentStore
-            ? createAttachmentSaver(options.attachmentStore, connection.config.agentId, senderTrustFor(connection.config, userId), options.now ?? Date.now)
+            ? createAttachmentSaver(options.attachmentStore, connection.config.agentId, admitted.fromAgent !== undefined ? 'unknown' : senderTrustFor(connection.config, userId), options.now ?? Date.now)
             : undefined,
         );
       // An image or a document with nothing said is still a question
@@ -5846,7 +5977,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (cleaned.length === 0 && images.length === 0 && texts.length === 0 && saved.length === 0) {
         return undefined;
       }
-      const author = await authorFor(connection, userId);
+      // A team agent goes by the name the operator gave it, not a profile
+      // its own app chose.
+      const author = admitted.fromAgent ?? await authorFor(connection, userId);
       // In shared channels the model should know who is speaking; a DM is
       // unambiguous. A bare image in a channel still says who sent it.
       const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);
@@ -5857,7 +5990,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // `unknown` exactly as a channel mention would be. The same label
       // whether the agent answers or only hears: the text is in its
       // transcript either way.
-      const senderTrust = senderTrustFor(connection.config, userId);
+      // A team agent is below a principal whatever the list says: its
+      // words carry whatever its own session was exposed to, which nothing
+      // here can see (card 513).
+      const senderTrust: TrustLevel = admitted.fromAgent !== undefined ? 'unknown' : senderTrustFor(connection.config, userId);
       // Who can read this, so the agent writes for them, and a thread says
       // it is one. A DM names the other person only when they are one of
       // the operator's principals: this lands in the system prompt, and

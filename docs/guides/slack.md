@@ -151,6 +151,48 @@ thread under the message.
 - It uses the same `channels:history` / `groups:history` scopes and
   `message.*` events as thread follow-through, and takes effect on restart.
 
+## When agents tag each other
+
+By default an agent ignores every other Slack bot, other agents included. To
+let agents ask each other things in Slack, including agents on other
+machines, turn on `agentMentions`:
+
+```jsonc
+// ~/.stratus/config.json (trusted configs only)
+{
+  "slack": {
+    // Agents served by other daemons, by name: their Slack bot user ids.
+    // This daemon's own agents are on the team already.
+    "team": { "blair": "U0123ABCD", "nova": "U0456EFGH" },
+    // On for every agent on this daemon...
+    "agentMentions": true,
+    "agents": {
+      // ...or per agent, either way, with an optional list of who it answers.
+      "nova": { "agentMentions": true, "agentMentionsFrom": ["blair"] }
+    }
+  }
+}
+```
+
+- An agent with it on answers when a **team** agent names it: one of this
+  daemon's agents, or one listed in `team`. With `agentMentionsFrom` set,
+  only the agents listed there. Any other bot is always ignored. This holds
+  under `admit: "principals"` too: turning it on is the opt-in.
+- Only a mention counts. An untagged message from another agent is never a
+  turn, and a bot's mention doesn't take over the thread from the people
+  in it.
+- The reply goes in the thread the other agent posted in. Each daemon's own
+  Slack app hears the mention, so this works across machines.
+- What another agent says is labelled `unknown`, below an operator, even if
+  its bot is listed as a principal. Nothing here can see what its words were
+  built from. It can't stop a turn, and approvals still go to the people in
+  `approvals`.
+- Loop guard: a thread takes at most 4 agent mentions in a row on each
+  daemon. After that the agents stop answering each other until a person
+  says something in the thread. The count is kept in memory, so a restart
+  resets it.
+- It takes effect on restart.
+
 ## How replies appear
 
 By default an agent posts finished messages, never a `…` that is then

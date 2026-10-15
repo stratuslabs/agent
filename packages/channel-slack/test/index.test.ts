@@ -11300,3 +11300,132 @@ test('an untagged stop does not reach a mentions-listening agent when another ag
   await socketBea.settled();
   await adapter.stop();
 });
+
+// --- Agent-to-agent mentions (card 513) ---------------------------------
+
+/** A message another agent's bot posted: `user` is its bot user, `bot_id` marks it a bot. */
+const botMention = (input: { user: string; text: string; ts: string; thread?: string; type?: 'app_mention' | 'message' }) => ({
+  body: { team_id: 'T1', event_id: `evt-bot-${input.user}-${input.ts}-${input.type ?? 'app_mention'}` },
+  event: {
+    type: input.type ?? 'app_mention',
+    channel_type: 'channel',
+    user: input.user,
+    bot_id: `${input.user}-APP`,
+    text: input.text,
+    ts: input.ts,
+    channel: 'C1',
+    ...(input.thread ? { thread_ts: input.thread } : {}),
+  },
+});
+
+const agentMentionAdapter = (agentMentions?: { team?: Record<string, string>; only?: string[] }) => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const logs: string[] = [];
+  const trusts: unknown[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'on it'));
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    trusts.push(input.metadata?.senderTrust);
+    return dispatch(input);
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', approvers: ['U-DYLAN'], principals: ['U-DYLAN', 'U-NOVA'], ...(agentMentions ? { agentMentions } : {}) },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    log: (line) => logs.push(line),
+  });
+  return { socketAva, socketBea, webAva, gateway, adapter, logs, trusts };
+};
+
+test('with agent mentions off, another agent tagging this one is ignored', async () => {
+  const { socketAva, gateway, adapter } = agentMentionAdapter();
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', botMention({ user: 'B-BEA', text: '<@B-AVA> can you check CI?', ts: '100.1' }));
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> can you check CI?', ts: '100.2' }));
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches, []);
+});
+
+test('with agent mentions on, a team agent tagging this one gets an answer in its thread, labelled below a principal', async () => {
+  // Nova is even listed as a principal by mistake: a bot is still not one.
+  const { socketAva, webAva, gateway, adapter, trusts } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  await adapter.start(gateway);
+  // Nova, on another daemon, tags Ava in a thread; the same message also
+  // arrives as a channel message, and is still one turn.
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> can you check CI?', ts: '110.2', thread: '110.0' }));
+  await socketAva.deliver('message', botMention({ user: 'U-NOVA', text: '<@B-AVA> can you check CI?', ts: '110.2', thread: '110.0', type: 'message' }));
+  // Bea, an agent on this daemon, is on the team without being listed.
+  await socketAva.deliver('app_mention', botMention({ user: 'B-BEA', text: '<@B-AVA> and the deploy?', ts: '111.1' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.sessionId, dispatch.userMessage]), [
+    ['slack:ava:T1:C1:110.0', 'nova: can you check CI?'],
+    ['slack:ava:T1:C1:111.1', 'bea: and the deploy?'],
+  ]);
+  assert.deepEqual(trusts, ['unknown', 'unknown']);
+  assert.equal(webAva.posts[0]?.thread_ts, '110.0');
+});
+
+test('a bot that is not on the team is ignored even with agent mentions on', async () => {
+  const { socketAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', botMention({ user: 'U-GITHUB', text: '<@B-AVA> please merge', ts: '120.1' }));
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches, []);
+});
+
+test('with a whitelist, only the listed team agents are answered', async () => {
+  const { socketAva, gateway, adapter, logs } = agentMentionAdapter({ team: { nova: 'U-NOVA' }, only: ['bea'] });
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> hi', ts: '130.1' }));
+  await socketAva.deliver('app_mention', botMention({ user: 'B-BEA', text: '<@B-AVA> hi', ts: '130.2' }));
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['bea: hi']);
+  assert.ok(logs.some((line) => line.includes('nova') && line.includes('not on its agent mention list')), logs.join('\n'));
+});
+
+test('an untagged message from a team agent is never a turn', async () => {
+  const { socketAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  await adapter.start(gateway);
+  await socketAva.deliver('message', botMention({ user: 'U-NOVA', text: 'done with CI', ts: '140.2', thread: '140.0', type: 'message' }));
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches, []);
+});
+
+test('two agents tagging each other in a thread stop at the hop limit, and a person speaking resets it', async () => {
+  const { socketAva, gateway, adapter, logs } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  await adapter.start(gateway);
+  for (let hop = 1; hop <= 6; hop += 1) {
+    await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${hop}`, ts: `150.${hop}`, thread: '150.0' }));
+  }
+  await socketAva.deliver('message', channelMessage({ text: 'ok you two, one more', ts: '150.7', thread: '150.0' }));
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> round 7', ts: '150.8', thread: '150.0' }));
+  await adapter.stop();
+  const fromNova = gateway.dispatches.filter((dispatch) => dispatch.userMessage.startsWith('nova:')).map((dispatch) => dispatch.userMessage);
+  assert.deepEqual(fromNova, ['nova: round 1', 'nova: round 2', 'nova: round 3', 'nova: round 4', 'nova: round 7']);
+  assert.ok(logs.some((line) => line.includes('hop limit')), logs.join('\n'));
+});
+
+test('a team agent cannot stop this agent\'s turn, even listed as an approver', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', approvers: ['U-DYLAN', 'U-NOVA'], agentMentions: { team: { nova: 'U-NOVA' } } }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> stop', ts: '160.1' }));
+  await adapter.stop();
+  // Not a stop: an ordinary message from Nova.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['nova: stop']);
+});
