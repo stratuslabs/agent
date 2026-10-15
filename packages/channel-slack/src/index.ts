@@ -21,6 +21,7 @@ import {
   IMAGE_ATTACHMENT_MAX_DIMENSION,
   IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   escapeControlCharacters,
+  RunAbortedError,
   type AlwaysMeans,
   type CredentialScope,
   type ApprovalAnswer,
@@ -831,6 +832,14 @@ class ReplyRenderer {
    * not be this one.
    */
   readonly turnId: string = randomUUID();
+  /**
+   * What a Slack stop aborts (card 337): the signal this renderer's dispatch
+   * runs under, so a stop cancels this turn whether it is running or still
+   * queued behind another.
+   */
+  readonly controller = new AbortController();
+  /** The Slack user who stopped this turn, once someone has. */
+  stoppedBy: string | undefined;
   private buffer = '';
   /**
    * In `final` mode, what the model has said since its last tool call. A
@@ -1652,6 +1661,19 @@ class ReplyRenderer {
     } finally {
       this.settle();
     }
+  }
+
+  /**
+   * Ends a turn an approver stopped from Slack: says who stopped it where
+   * the reply would have gone. A turn nobody asked for that had said
+   * nothing stays silent, as its failure would.
+   */
+  async stopped(by: string): Promise<ReplyOutcome> {
+    await this.editChain;
+    if (this.lazy && !this.ref && this.buffer.trim().length === 0) {
+      return this.finalize('');
+    }
+    return this.finalize(`Stopped by <@${by}>.`);
   }
 
   async fail(message: string): Promise<ReplyOutcome> {
@@ -2541,6 +2563,21 @@ const mentions = (text: string, botUserId: string): boolean =>
   botUserId.length > 0 && text.includes(`<@${botUserId}>`);
 
 /**
+ * Whether a message asks this agent to stop (card 337): the word "stop"
+ * and nothing else but mentions and closing punctuation, in any case. A
+ * message that mentions someone and not this agent is for them. Exported
+ * for tests.
+ */
+export const isStopRequest = (text: string, botUserId: string): boolean => {
+  const mentioned = [...text.matchAll(/<@([^>|]+)(?:\|[^>]*)?>/g)].map((match) => match[1]);
+  if (mentioned.length > 0 && !mentioned.includes(botUserId)) {
+    return false;
+  }
+  const words = text.replace(/<@[^>|]+(?:\|[^>]*)?>/g, ' ').trim().replace(/[.!]+$/, '').trim();
+  return words.toLowerCase() === 'stop';
+};
+
+/**
  * Slack's three markup characters. Tool input is written by a model, so it
  * reaches this message as untrusted text: unescaped, `<@U123>` becomes a
  * real mention and `<!channel>` a real broadcast, letting an agent ping a
@@ -2819,6 +2856,14 @@ interface Admission {
    * intake decides it.
    */
   judge: boolean;
+  /**
+   * An approver's untagged stop in a thread this agent holds, reaching an
+   * agent that listens to mentions or judges (card 337). Still heard if
+   * nothing is running to stop, but if something is, it stops it: the
+   * holder rule is what makes an untagged stop this agent's, whatever
+   * `listens` says about ordinary replies.
+   */
+  holderStop?: boolean;
 }
 
 interface AgentConnection {
@@ -2893,6 +2938,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Per-session intake chains: the pre-dispatch pipeline (lookups,
   // placeholder, dispatch call) runs in Slack receipt order.
   const intakeChains = new Map<string, Promise<void>>();
+  /**
+   * Stop (card 337), for messages still in intake: how many each session
+   * has between claiming a place on its chain and reaching `renderers`, and
+   * the latest stop to land there. A message compares the stop it claimed
+   * its place under with the one in force when it is about to dispatch, so a
+   * stop also cancels a message whose lookups were still running.
+   */
+  const intakeInFlight = new Map<string, number>();
+  const stopsBySession = new Map<string, { count: number; by: string }>();
   const displayNames = new Map<string, string>();
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
@@ -5280,6 +5334,39 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * case, where by definition no message of this thread has been seen in
    * this process.
    */
+  /**
+   * Stop (card 337): cancels every turn this agent is running or has queued
+   * in this conversation, including messages still in intake, and says
+   * nothing was stopped when there was nothing to stop. Synchronous, and
+   * called off the intake chain before any dispatch, so a stop is never
+   * queued behind the turn it stops nor merged into the next one. The
+   * caller has checked that the sender is an approver: a stop throws away
+   * work someone else asked for.
+   *
+   * `fromIntake` is a stop that could only be placed on the intake chain,
+   * once the sessions named this agent (the cold case). Everything ahead of
+   * it on the chain has already been dispatched, and everything still in
+   * intake arrived after it, so it cancels the dispatched turns only.
+   */
+  const stopTurns = (connection: AgentConnection, sessionId: string, userId: string, channel: string, fromIntake = false): boolean => {
+    const running = renderers.get(sessionId) ?? [];
+    const inIntake = fromIntake ? 0 : intakeInFlight.get(sessionId) ?? 0;
+    if (running.length === 0 && inIntake === 0) {
+      return false;
+    }
+    for (const renderer of running) {
+      if (renderer.stoppedBy === undefined) {
+        renderer.stoppedBy = userId;
+        renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${userId}`));
+      }
+    }
+    if (inIntake > 0) {
+      stopsBySession.set(sessionId, { count: (stopsBySession.get(sessionId)?.count ?? 0) + 1, by: userId });
+    }
+    log(`slack: ${userId} stopped ${running.length + inIntake} turn(s) of ${connection.config.agentId} in ${channel}`);
+    return true;
+  };
+
   const admit = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
     const event = args.event;
     if (gatewayRef) {
@@ -5393,6 +5480,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Consuming the key here is safe because a refused message records
     // nothing a later copy could be needed for.
     if (!admitsSender(connection.config, sender)) {
+      // An approver the operator did not list as a principal can still stop
+      // the agent (card 337): approving is its own grant. Only when the
+      // message names this agent (or is a DM to it), and nothing else they
+      // say gets through.
+      if (
+        addressed &&
+        (connection.config.approvers ?? []).includes(sender) &&
+        isStopRequest(text, connection.botUserId) &&
+        !alreadySeen(eventKey)
+      ) {
+        const stopSession = channelSessionKey({
+          channel: 'slack',
+          agentId: connection.config.agentId,
+          team,
+          conversation: event.channel,
+          ...(thread ? { thread } : {}),
+        });
+        if (stopTurns(connection, stopSession, sender, event.channel)) {
+          return undefined;
+        }
+        log(`slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`);
+        return undefined;
+      }
       const refusal = `slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`;
       const held = threadKey !== undefined ? holderAt(threadKey, event.ts) : undefined;
       if (addressed || held === connection.config.agentId) {
@@ -5494,11 +5604,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // "whose is an untagged reply", and for these two agents the soul has
     // already answered.
     const listens = listensOf(connection.config.agentId);
-    if (listens === 'mentions') {
-      return { ...admission, overhear: true };
-    }
-    if (listens === 'judge') {
-      return { ...admission, overhear: true, judge: true };
+    if (listens === 'mentions' || listens === 'judge') {
+      // Except a stop (card 337): the holder rule decides whose it is, as
+      // for any agent, and it only acts if there is something to stop. A
+      // thread the record has forgotten is left to the sessions, as below,
+      // so a stop for a turn that outlived its record still reaches it.
+      const approverStop = threadKey !== undefined &&
+        (connection.config.approvers ?? []).includes(sender) &&
+        isStopRequest(text, connection.botUserId);
+      const stopHolder = approverStop ? holderAt(threadKey, event.ts) : undefined;
+      // A stop held by another agent is only heard: judging it would let an
+      // attentive agent take a turn on a stop that was never its own.
+      const stopForAnother = stopHolder !== undefined && stopHolder !== connection.config.agentId;
+      return {
+        ...admission,
+        overhear: true,
+        ...(listens === 'judge' && !stopForAnother ? { judge: true } : {}),
+        ...(stopHolder === connection.config.agentId ? { holderStop: true } : {}),
+        ...(approverStop && stopHolder === undefined ? { settled: false } : {}),
+      };
     }
 
     // The record is what this process has actually seen, in the order it
@@ -5556,6 +5680,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const { event, isDm, team, userId, thread, sessionId, threadKey, eventKey } = admitted;
+
+    // Stop (card 337), see `stopTurns`. Only a message addressed to this
+    // agent: an untagged reply this agent merely overhears is the holder's
+    // (unless this agent is the holder and only `listens` made it an
+    // overhear, see `holderStop`), and one only the sessions can place is
+    // not this agent's to act on yet.
+    if (
+      (!admitted.overhear || admitted.holderStop === true) &&
+      admitted.settled &&
+      (connection.config.approvers ?? []).includes(userId) &&
+      isStopRequest(event.text ?? '', connection.botUserId) &&
+      stopTurns(connection, sessionId, userId, event.channel)
+    ) {
+      return;
+    }
+
     // What the gateway knows this message by (see `dispatchKeyFor`).
     const dispatchKey = dispatchKeyFor(eventKey);
 
@@ -5566,6 +5706,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // reverse order in durable history. The chain is claimed here,
     // synchronously, so a message's place in it is fixed by when Slack
     // delivered it and not by how long anything it does takes.
+    const stopsAtClaim = stopsBySession.get(sessionId)?.count ?? 0;
+    // Only intake that can still become a turn is something a stop can
+    // cancel. A settled overhear that is not judged only ever reaches
+    // `gateway.observe`, so counting it would let a stop with nothing to
+    // stop be consumed instead of passing on as an ordinary message.
+    const mayRun = !admitted.overhear || admitted.judge || !admitted.settled;
+    if (mayRun) {
+      intakeInFlight.set(sessionId, (intakeInFlight.get(sessionId) ?? 0) + 1);
+    }
+    let leftIntake = !mayRun;
+    const leaveIntake = (): void => {
+      if (leftIntake) {
+        return;
+      }
+      leftIntake = true;
+      const left = (intakeInFlight.get(sessionId) ?? 1) - 1;
+      if (left > 0) {
+        intakeInFlight.set(sessionId, left);
+      } else {
+        intakeInFlight.delete(sessionId);
+        stopsBySession.delete(sessionId);
+      }
+    };
     const intake = onIntakeChain(sessionId, async () => {
       // The durable half of addressing runs INSIDE the chain, for the same
       // reason: it awaits, and a message that had to ask the sessions must
@@ -5610,12 +5773,27 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         );
         if (winner !== connection.config.agentId) {
           // Not this agent's to answer — and, if it is in the thread,
-          // this agent's to hear, same as the two warm stand-downs.
+          // this agent's to hear, same as the two warm stand-downs. Only a
+          // stop sends a judging agent here, and a stop the sessions place
+          // with another agent is heard, never judged, as it is warm.
+          judged = false;
           overhear = true;
-        } else if (threadKey) {
-          // Answered from the store rather than from memory: hold it, so
-          // the rest of the thread is ordered by receipt like any other.
-          rememberAddressee(threadKey, connection.config.agentId, event.ts);
+        } else {
+          if (threadKey) {
+            // Answered from the store rather than from memory: hold it, so
+            // the rest of the thread is ordered by receipt like any other.
+            rememberAddressee(threadKey, connection.config.agentId, event.ts);
+          }
+          // Stop (card 337) for a message only the sessions could place:
+          // now that they say it is this agent's, it is a stop like the
+          // warm one above, not a message to queue behind the turn it stops.
+          if (
+            (connection.config.approvers ?? []).includes(userId) &&
+            isStopRequest(event.text ?? '', connection.botUserId) &&
+            stopTurns(connection, sessionId, userId, event.channel, true)
+          ) {
+            return undefined;
+          }
         }
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
@@ -5814,6 +5992,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const queue = renderers.get(sessionId) ?? [];
       queue.push(renderer);
       renderers.set(sessionId, queue);
+      // Stopped while its lookups ran: dispatched under an aborted signal,
+      // so it ends the way a queued turn a stop reached does.
+      const stopped = stopsBySession.get(sessionId);
+      leaveIntake();
+      if (stopped !== undefined && stopped.count !== stopsAtClaim && renderer.stoppedBy === undefined) {
+        renderer.stoppedBy = stopped.by;
+        renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${stopped.by}`));
+      }
       // In a DM each message is its own status key, and Slack stops showing
       // the running turn's once a newer message sits below it — so a
       // message queued there that stayed dark read as the agent having
@@ -5831,6 +6017,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ...(earlier.length > 0 ? { earlier } : {}),
         turnId: renderer.turnId,
         metadata,
+        signal: renderer.controller.signal,
         // A redelivery this process no longer remembers (it restarted, or
         // the dedupe evicted it) is still the message it was: the gateway
         // runs no second turn for it, and says so through `onRepeat`.
@@ -5848,6 +6035,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return { renderer, turn, repeat: () => repeat, absorbed: () => absorbed };
     });
 
+    // Whatever way the intake ended, it is no longer in flight.
+    void intake.then(leaveIntake, leaveIntake);
     const started = await intake;
     if (!started) {
       return;
@@ -5999,7 +6188,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not a failure of the agent. Matched by name, as this package does
       // not import the gateway. A turn nobody asked for stays silent.
       const pausedReply = failure instanceof Error && failure.name === 'IntakePausedError';
-      const { spoke, spokeAt } = pausedReply
+      const { spoke, spokeAt } = renderer.stoppedBy !== undefined
+        ? await renderer.stopped(renderer.stoppedBy)
+        : pausedReply
         ? await renderer.finalize(renderer.lazy ? '' : (failure as Error).message)
         : await renderer.fail(failure instanceof Error ? failure.message : String(failure));
       if (spoke && threadKey !== undefined) {
