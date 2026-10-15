@@ -1033,7 +1033,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         : undefined;
       if (destination !== undefined && !externalGate) {
         // Read per call, never cached here, so a revoke is the next call's answer.
-        const standing = findMatchingDestinationGrant(call.toolName, destination, account, [
+        const standing = findMatchingDestinationGrant(call.toolName, destination, account, contributor, [
           ...(processDestinations.get(session.agent.id) ?? []),
           ...(destinations?.whitelist ? await destinations.whitelist.destinationsFor(session.agent.id) : []),
         ]);
@@ -1423,6 +1423,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             tool: call.toolName,
             destination,
             ...(account !== undefined ? { account } : {}),
+            ...(contributor !== undefined ? { package: contributor } : {}),
             grantedAt: new Date().toISOString(),
             ...(actor !== undefined ? { grantedBy: actor } : {}),
           };

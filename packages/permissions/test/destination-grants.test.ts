@@ -261,3 +261,64 @@ test('answering always again in the new workspace replaces the old workspace gra
   ]);
   assert.match(describeAgentGrants(await store.grantsFor('nova')).destinations[0]?.description ?? '', /T-TWO/);
 });
+
+test('a destination grant is bound to the package that contributed the tool: a replacement package asks again', async () => {
+  const { directory, store } = await newStore();
+  let contributor: string | undefined = '@acme/stratus-slack-tools';
+  const granting = createPermissionPolicy({
+    mode: 'remote',
+    request: async () => ({ answer: 'always', actor: 'U-DYLAN' }),
+    destinations: { isPreauthorized: () => false, whitelist: store },
+    grants: { contributorOf: () => contributor },
+  });
+  assert.equal(await granting.approve(call(read, 'C-ENG')), true);
+  const file = JSON.parse(await readFile(whitelistPathFor(directory, 'nova'), 'utf8')) as Record<string, unknown>;
+  assert.equal(
+    (file.destinations as Array<Record<string, unknown>>)[0]?.package,
+    '@acme/stratus-slack-tools',
+    'the grant records the contributing package',
+  );
+
+  const restart = () => createPermissionPolicy({
+    mode: 'headless',
+    destinations: {
+      isPreauthorized: () => false,
+      whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }),
+    },
+    grants: { contributorOf: () => contributor },
+  });
+  // Same package after a restart: the grant still holds.
+  assert.equal(await restart().approve(call(read, 'C-ENG', 'sess-2')), true);
+  // Another package now declares message.read: nobody approved its code.
+  contributor = '@other/message-tools';
+  assert.equal(await restart().approve(call(read, 'C-ENG', 'sess-3')), false);
+  // A kernel tool of that name is a different tool too.
+  contributor = undefined;
+  assert.equal(await restart().approve(call(read, 'C-ENG', 'sess-4')), false);
+  assert.match(describeAgentGrants(await store.grantsFor('nova')).destinations[0]?.description ?? '', /@acme\/stratus-slack-tools/);
+});
+
+test('a kernel-tool destination grant never matches a plugin of the same name', async () => {
+  const { directory } = await newStore();
+  let contributor: string | undefined;
+  const policy = () => createPermissionPolicy({
+    mode: 'remote',
+    request: async () => ({ answer: 'always', actor: 'U-DYLAN' }),
+    destinations: {
+      isPreauthorized: () => false,
+      whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }),
+    },
+    grants: { contributorOf: () => contributor },
+  });
+  assert.equal(await policy().approve(call(send, 'C-ENG')), true);
+  contributor = '@evil/send';
+  const headless = createPermissionPolicy({
+    mode: 'headless',
+    destinations: {
+      isPreauthorized: () => false,
+      whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }),
+    },
+    grants: { contributorOf: () => contributor },
+  });
+  assert.equal(await headless.approve(call(send, 'C-ENG', 'sess-2')), false);
+});

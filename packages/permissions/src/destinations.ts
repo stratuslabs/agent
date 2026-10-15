@@ -27,6 +27,12 @@ export interface DestinationGrant {
    * notion, and then it matches only while the channel still reports none.
    */
   account?: string;
+  /**
+   * The plugin package that contributed the tool when granted; absent for a
+   * kernel tool. Same rule as a tool grant (`grants.ts`): the same name from
+   * another package, or from none, is a different tool and asks again.
+   */
+  package?: string;
   /** When the approver answered, ISO-8601. */
   grantedAt: string;
   /** Who answered, in the ids of the channel that asked; absent at a terminal. */
@@ -34,28 +40,37 @@ export interface DestinationGrant {
 }
 
 /**
- * `account` is the workspace the agent's channel reports now. Compared
+ * `account` is the workspace the agent's channel reports now, and
+ * `contributor` the package contributing the tool now. Both compared
  * exactly, absent included: a grant from a known workspace never matches
- * while the workspace is unknown (the app is not connected), and a grant
- * with none never matches once the channel reports one.
+ * while the workspace is unknown (the app is not connected), a grant with
+ * none never matches once the channel reports one, and a grant on one
+ * package's tool never covers another package's (or a kernel tool) of the
+ * same name.
  */
 export const matchesDestinationGrant = (
   tool: string,
   destination: string,
   account: string | undefined,
+  contributor: string | undefined,
   grant: DestinationGrant,
-): boolean => grant.tool === tool && grant.destination === destination && grant.account === account;
+): boolean => grant.tool === tool
+  && grant.destination === destination
+  && grant.account === account
+  && grant.package === contributor;
 
 export const findMatchingDestinationGrant = (
   tool: string,
   destination: string,
   account: string | undefined,
+  contributor: string | undefined,
   grants: readonly DestinationGrant[],
-): DestinationGrant | undefined => grants.find((grant) => matchesDestinationGrant(tool, destination, account, grant));
+): DestinationGrant | undefined =>
+  grants.find((grant) => matchesDestinationGrant(tool, destination, account, contributor, grant));
 
 /** One line an operator can read in a log or a grant listing. */
 export const describeDestinationGrant = (grant: DestinationGrant): string =>
-  `${grant.destination}${grant.account === undefined ? '' : ` in ${grant.account}`} (${grant.tool})`;
+  `${grant.destination}${grant.account === undefined ? '' : ` in ${grant.account}`} (${grant.tool}${grant.package === undefined ? '' : `, ${grant.package}`})`;
 
 /**
  * One row per tool and destination: a second answer replaces the first,
@@ -85,6 +100,7 @@ export const parseDestinationGrant = (raw: unknown): DestinationGrant | undefine
     tool: source.tool,
     destination: source.destination,
     ...(typeof source.account === 'string' && source.account.length > 0 ? { account: source.account } : {}),
+    ...(typeof source.package === 'string' && source.package.length > 0 ? { package: source.package } : {}),
     grantedAt: typeof source.grantedAt === 'string' ? source.grantedAt : new Date(0).toISOString(),
     ...(typeof source.grantedBy === 'string' && source.grantedBy.length > 0 ? { grantedBy: source.grantedBy } : {}),
   };
