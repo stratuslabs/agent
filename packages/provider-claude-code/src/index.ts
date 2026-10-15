@@ -651,6 +651,11 @@ export const createClaudeCodeProvider = ({
         // and the CLI skips the token-count call it makes before cutting.
         // An operator's explicit setting still wins.
         MAX_MCP_OUTPUT_TOKENS: process.env.MAX_MCP_OUTPUT_TOKENS ?? String(BRIDGED_RESULT_MAX_CHARS * 4),
+        // The CLI's silent-turn reminder tells the model, mid-turn, that
+        // the user has not heard from it and to post an update. In a chat
+        // channel each of those becomes a progress message; Stratus's own
+        // prompt already says when to update. Off unless the operator set it.
+        CLAUDE_CODE_SILENT_TURN_REMINDER: process.env.CLAUDE_CODE_SILENT_TURN_REMINDER ?? '0',
         ...(authToken ? { CLAUDE_CODE_OAUTH_TOKEN: authToken } : {}),
       },
       ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),

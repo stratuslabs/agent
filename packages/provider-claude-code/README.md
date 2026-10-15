@@ -16,5 +16,6 @@ const provider = createClaudeCodeProvider({
 - **Kernel tools run here too.** Pass `executeTool` (the CLI wires `AgentRunner.executeHostedToolCall` automatically) and the request's tools are bridged into the Claude Code loop as an in-process MCP server: Claude calls them mid-turn, your host executes them — approval policy, agent allowlists, and `tool.called`/`tool.completed` events included — and the result feeds back into the same turn. `memory.remember` works on a subscription exactly like it does on an API key.
 - The subprocess environment pins billing to the subscription in both auth modes (any ambient `ANTHROPIC_API_KEY` is cleared). With `authToken` set the setup token is used; omit it to use the machine's existing `claude` sign-in.
 - Claude Code's built-in tools stay disabled — Stratus owns the tool surface.
+- Claude Code's silent-turn reminder is off: during a long run of tool calls the CLI would otherwise tell the model the user hasn't heard from it, and each reminder becomes a progress post in Slack. Set `CLAUDE_CODE_SILENT_TURN_REMINDER=1` in the daemon's environment to turn it back on.
 
 Most users won't wire this directly — `@stratusagent/cli` routes subscription sign-ins here automatically: `stratus setup` → Providers → Claude → **Claude subscription**.
