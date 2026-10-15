@@ -1489,6 +1489,102 @@ test('in a shared thread an untagged reply goes to whoever spoke last, and a men
   ]);
 });
 
+test('in a shared thread an untagged reply stays with the agent the thread belongs to; a mention gets one answer from the named agent', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const clock = stampsAfter();
+  webAva.stamp = clock.stamp;
+  webBea.stamp = clock.stamp;
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Dylan starts the thread with Ava: it is hers.
+  clock.at('950.0');
+  await socketAva.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-950-0' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> plan the release', ts: '950.0', channel: 'C1' },
+  });
+  await socketBea.deliver('message', channelMessage({ text: '<@B-AVA> plan the release', ts: '950.0' }));
+  // He pulls Bea in for one question, and she answers it.
+  clock.at('950.2');
+  await socketAva.deliver('message', channelMessage({ text: '<@B-BEA> anything blocking?', ts: '950.2', thread: '950.0' }));
+  await socketBea.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-950-2' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> anything blocking?', ts: '950.2', thread_ts: '950.0', channel: 'C1' },
+  });
+  // An untagged reply after that is still Ava's: Bea, who spoke last, stays quiet.
+  clock.at('950.3');
+  const followUp = channelMessage({ text: 'ok, go ahead', ts: '950.3', thread: '950.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: plan the release'],
+    ['bea', 'Dylan: anything blocking?'],
+    ['ava', 'Dylan: ok, go ahead'],
+  ]);
+});
+
+test('after a restart, the thread read gives an untagged reply to the agent the thread belongs to, not the last to speak', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:955.0', new Date(955.1 * 1000).toISOString()],
+    ['slack:bea:T1:C1:955.0', new Date(955.3 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '955.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '955.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'on it' },
+    { ts: '955.2', user: 'U-DYLAN', text: '<@B-BEA> anything blocking?' },
+    { ts: '955.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'nothing' },
+  ];
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const followUp = channelMessage({ text: 'ok, go ahead', ts: '955.4', thread: '955.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  const next = channelMessage({ text: 'and the notes?', ts: '955.5', thread: '955.0' });
+  await socketAva.deliver('message', next);
+  await socketBea.deliver('message', next);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: ok, go ahead'],
+    ['ava', 'Dylan: and the notes?'],
+  ]);
+});
+
 test('an agent in a shared thread hears what is said to the other one, and posts nothing for it', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
