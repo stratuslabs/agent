@@ -1,5 +1,7 @@
 import {
   ContextOverflowError,
+  redactedError,
+  redactSecrets,
   isUnaddressedTurn,
   transcriptOf,
   droppedImageNote,
@@ -401,6 +403,30 @@ export const defineScriptedProvider = ({
   });
 };
 
+/**
+ * A configured value both as written and as Fetch sends it: Fetch trims
+ * surrounding spaces and tabs from a header value, so an endpoint echoes
+ * the trimmed form.
+ */
+const asSent = (value: string): string[] => {
+  const sent = value.replace(/^[\t ]+|[\t ]+$/g, '');
+  return sent === value ? [value] : [value, sent];
+};
+
+/**
+ * The configured header values an endpoint might repeat in its error text.
+ * An `authorization` header carries a scheme and a credential, and an
+ * endpoint may name the credential alone ("invalid token: ..."), so that
+ * part counts on its own too.
+ */
+const headerSecrets = (headers: Record<string, string>): string[] =>
+  Object.entries(headers).flatMap(([name, value]) => {
+    const credential = /^(?:proxy-)?authorization$/i.test(name)
+      ? /^\s*\S+\s+(\S.*?)\s*$/.exec(value)?.[1]
+      : undefined;
+    return credential === undefined ? asSent(value) : [...asSent(value), credential];
+  });
+
 export const createOpenAICompatibleProvider = ({
   model,
   apiKey,
@@ -418,8 +444,12 @@ export const createOpenAICompatibleProvider = ({
   }
 
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+  // Copied once: what is sent and what is redacted are the same values, so
+  // a caller mutating its object later cannot send a credential the
+  // redaction never heard of.
+  const configuredHeaders: Record<string, string> = { ...headers };
 
-  return defineProvider({
+  const provider = defineProvider({
     name,
     async generate(request) {
       const toolNames = createOpenAICompatibleToolNameMapping(request.tools);
@@ -450,7 +480,7 @@ export const createOpenAICompatibleProvider = ({
             headers: {
               'content-type': 'application/json',
               authorization: `Bearer ${apiKey}`,
-              ...headers,
+              ...configuredHeaders,
             },
             body: JSON.stringify({
               model,
@@ -473,7 +503,19 @@ export const createOpenAICompatibleProvider = ({
         if (response.ok) {
           break;
         }
-        const message = payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`;
+        // Classified on the endpoint's own words, and redacted only in what
+        // is thrown: a local runtime takes any key, and a short one can be
+        // a word the checks below look for ("context", "image").
+        // The body is the endpoint's own JSON, so `error.message` is only a
+        // string by convention: anything else is shown as JSON rather than
+        // left to throw from the checks and the redaction below.
+        const reportedMessage: unknown = payload.error?.message;
+        const reported = typeof reportedMessage === 'string'
+          ? reportedMessage
+          : reportedMessage != null
+            ? JSON.stringify(reportedMessage)
+            : payload.rawText ?? `Provider request failed with status ${response.status}`;
+        const message = redactSecrets(reported, [...asSent(apiKey), ...headerSecrets(configuredHeaders)]);
         // The transcript did not fit. Reported as the one provider failure
         // the kernel can act on — it answers by sending less history —
         // rather than as the final error every other 400 here is. Matched
@@ -499,7 +541,7 @@ export const createOpenAICompatibleProvider = ({
         // throw away the pictures a turn was about and retry — when what
         // the request needed was less history, which the kernel would have
         // supplied.
-        if (response.status === 400 && overflowedContext(payload, message)) {
+        if (response.status === 400 && overflowedContext(payload, reported)) {
           throw new ContextOverflowError(
             `The conversation no longer fits ${model}'s context window (${message}).`,
           );
@@ -510,7 +552,7 @@ export const createOpenAICompatibleProvider = ({
         // emptied on the session itself, since stored as they are they would
         // fail every later turn the same way, and the turn goes on with a
         // note in each one's place.
-        if (response.status === 400 && sent.length > 0 && !imagesRetried && /image/i.test(message)) {
+        if (response.status === 400 && sent.length > 0 && !imagesRetried && /image/i.test(reported)) {
           for (const image of sent) {
             omitImage(image);
           }
@@ -601,6 +643,23 @@ export const createOpenAICompatibleProvider = ({
       return usage ? { ...result, usage } : result;
     },
   });
+
+  // Whatever leaves `generate` failed is stored on the turn, logged, and
+  // posted to the channel, and the endpoint's words reach it from more than
+  // the error branch (a 200's structured refusal). Redacted once here, on
+  // every error, so no path has to remember to. The classification above
+  // still reads the raw text; this only changes what is thrown.
+  const secrets = [...asSent(apiKey), ...headerSecrets(configuredHeaders)];
+  return {
+    ...provider,
+    async generate(request) {
+      try {
+        return await provider.generate(request);
+      } catch (error) {
+        throw redactedError(error, secrets);
+      }
+    },
+  };
 };
 
 /**

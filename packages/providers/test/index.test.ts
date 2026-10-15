@@ -1664,3 +1664,213 @@ test('renderTranscriptPrompt names a tool\'s images it cannot carry', () => {
   assert.match(rendered, /\[tool browser\.screenshot\] .*\[This call returned an image \(a\.png\) that this replay cannot show you; say so rather than guessing at it\.\]/);
   assert.doesNotMatch(rendered, /iVBORw0KGgo/);
 });
+
+// An endpoint that repeats the key it was sent. Its error text is stored on
+// the turn, logged, and posted to the channel as the failure.
+test('an OpenAI-compatible error that repeats the key comes back with the key redacted', async () => {
+  const key = 'sk-test-0123456789abcdef';
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: key,
+    baseUrl: 'https://example.test/v1',
+    fetch: async (_url, init) => {
+      const sent = String((init?.headers as Record<string, string>).authorization);
+      return {
+        ok: false,
+        status: 401,
+        text: async () => JSON.stringify({ error: { message: `Bad credentials: ${sent}` } }),
+      } as Response;
+    },
+  });
+
+  await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+    assert.ok(!error.message.includes(key), error.message);
+    assert.match(error.message, /Bad credentials: Bearer \[redacted\]/);
+    return true;
+  });
+});
+
+test('an OpenAI-compatible error body that is not JSON is redacted too', async () => {
+  const key = 'sk-test-0123456789abcdef';
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: key,
+    baseUrl: 'https://example.test/v1',
+    fetch: async () => ({ ok: false, status: 502, text: async () => `<html>upstream rejected key ${key}</html>` }) as Response,
+  });
+
+  await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+    assert.ok(!error.message.includes(key), error.message);
+    return true;
+  });
+});
+
+// Local runtimes take any key, so a short one can be an ordinary word the
+// classifiers below look for. They read the endpoint's own text; only what
+// is thrown is redacted.
+test('a short key that is also a diagnostic word does not hide an overflow or an image refusal', async () => {
+  const overflow = createOpenAICompatibleProvider({
+    model: 'local-llama',
+    apiKey: 'context',
+    fetch: (async () => ({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: { message: 'the request exceeds the available context size' } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => overflow.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  let attempts = 0;
+  const request = requestWithImage();
+  const image = createOpenAICompatibleProvider({
+    model: 'local-llava',
+    apiKey: 'image',
+    fetch: (async () => {
+      attempts += 1;
+      return attempts === 1
+        ? { ok: false, status: 400, text: async () => JSON.stringify({ error: { message: 'Could not process image' } }) }
+        : { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }) };
+    }) as unknown as typeof fetch,
+  });
+  await image.generate(request);
+  assert.equal(attempts, 2, 'retried without the images');
+});
+
+// The endpoint's body is untrusted JSON: `error.message` need not be a
+// string. A non-string one is still classified (here by its code) and
+// still redacted, rather than throwing a TypeError from the redaction.
+test('a non-string error message from the endpoint is classified, not thrown as a TypeError', async () => {
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: (async () => ({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: { code: 'context_length_exceeded', message: 123 } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => provider.generate(createRequest()),
+    (error: unknown) => error instanceof ContextOverflowError,
+  );
+
+  const leaky = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'sk-secret-value',
+    fetch: (async () => ({
+      ok: false,
+      status: 401,
+      text: async () => JSON.stringify({ error: { message: { detail: 'bad key sk-secret-value' } } }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => leaky.generate(createRequest()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error && !(error instanceof TypeError), String(error));
+      assert.ok(!error.message.includes('sk-secret-value'), error.message);
+      assert.match(error.message, /bad key/);
+      return true;
+    },
+  );
+});
+
+// A configured `authorization` header replaces the generated one. An
+// endpoint that names the token alone, without its scheme, must not leak it.
+test('the token inside a configured authorization header is redacted on its own too', async () => {
+  for (const name of ['authorization', 'Authorization', 'proxy-authorization']) {
+    const provider = createOpenAICompatibleProvider({
+      model: 'gpt-4.1-mini',
+      apiKey: 'unused-key',
+      headers: { [name]: 'Bearer alt-secret-token' },
+      fetch: (async () => ({
+        ok: false,
+        status: 401,
+        text: async () => JSON.stringify({ error: { message: 'invalid token: alt-secret-token' } }),
+      })) as unknown as typeof fetch,
+    });
+    await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+      assert.ok(!error.message.includes('alt-secret-token'), `${name}: ${error.message}`);
+      assert.match(error.message, /invalid token: \[redacted\]/);
+      return true;
+    });
+  }
+});
+
+// Fetch trims surrounding spaces and tabs from header values before sending
+// them, so an endpoint echoes the trimmed credential. That form is redacted
+// too, for a configured header and for the API key.
+test('a credential configured with surrounding whitespace is redacted as sent', async () => {
+  const cases: Array<{ apiKey: string; headers: Record<string, string>; echoed: string }> = [
+    { apiKey: 'unused-key', headers: { 'x-api-key': '  spaced-secret-token\t' }, echoed: 'spaced-secret-token' },
+    { apiKey: ' padded-api-key-value ', headers: {}, echoed: 'padded-api-key-value' },
+  ];
+  for (const { apiKey, headers, echoed } of cases) {
+    const provider = createOpenAICompatibleProvider({
+      model: 'gpt-4.1-mini',
+      apiKey,
+      headers,
+      fetch: (async () => ({
+        ok: false,
+        status: 401,
+        text: async () => JSON.stringify({ error: { message: `invalid key: ${echoed}` } }),
+      })) as unknown as typeof fetch,
+    });
+    await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+      assert.ok(!error.message.includes(echoed), error.message);
+      assert.match(error.message, /invalid key: \[redacted\]/);
+      return true;
+    });
+  }
+});
+
+// Every error `generate` throws is stored, logged and posted, not only the
+// non-2xx ones: a 200 can carry the endpoint's words too.
+test('a structured refusal that repeats the key is redacted like an error body', async () => {
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'sk-secret-value',
+    headers: { 'x-api-key': 'hdr-secret' },
+    fetch: (async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: null, refusal: 'I will not use sk-secret-value or hdr-secret' }, finish_reason: 'stop' }],
+      }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => provider.generate(createRequest()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Provider refused the request/);
+      assert.ok(!error.message.includes('sk-secret-value'), error.message);
+      assert.ok(!error.message.includes('hdr-secret'), error.message);
+      assert.ok(!(error.stack ?? '').includes('sk-secret-value'));
+      return true;
+    },
+  );
+});
+
+test('a headers object changed after construction neither sends nor leaks a value the redaction never saw', async () => {
+  const headers: Record<string, string> = { authorization: 'Bearer first-secret-token' };
+  let sent = '';
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'sk-secret-value',
+    headers,
+    fetch: (async (_url: string, init: RequestInit) => {
+      sent = (init.headers as Record<string, string>).authorization ?? '';
+      return { ok: false, status: 401, text: async () => JSON.stringify({ error: { message: `bad token ${sent}` } }) };
+    }) as unknown as typeof fetch,
+  });
+  headers.authorization = 'Bearer second-secret-token';
+  await assert.rejects(() => provider.generate(createRequest()), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.ok(!error.message.includes('secret-token'), error.message);
+    return true;
+  });
+  assert.equal(sent, 'Bearer first-secret-token');
+});

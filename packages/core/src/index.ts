@@ -3404,6 +3404,62 @@ export const turnFilesFor = (
 };
 
 /**
+ * `text` with each of `secrets` replaced by `[redacted]`. For failure text
+ * an endpoint wrote: a proxy may repeat the key it was sent, and that text
+ * is stored on the turn, logged, and posted to the channel as the failure.
+ * Every configured value counts, whatever its length. One of 8 characters
+ * or more is replaced wherever it occurs; a shorter one only where it
+ * stands alone (no letter or digit on either side), as an echoed key does,
+ * so a key like `k` cannot turn every word holding a `k` into noise.
+ * Longer values go first, so a secret that contains another is replaced
+ * whole.
+ */
+export const redactSecrets = (text: string, secrets: Iterable<string | undefined>): string => {
+  const values = [...new Set([...secrets].filter((value): value is string => value !== undefined && value !== ''))]
+    .sort((a, b) => b.length - a.length);
+  let redacted = text;
+  for (const value of values) {
+    if (value.length >= 8) {
+      redacted = redacted.split(value).join('[redacted]');
+      continue;
+    }
+    const literal = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    redacted = redacted.replace(new RegExp(`(?<![A-Za-z0-9])${literal}(?![A-Za-z0-9])`, 'g'), '[redacted]');
+  }
+  return redacted;
+};
+
+/**
+ * The error with every secret redacted, in place where it can be, so its
+ * class and identity survive (an abort is still the caller's abort). Only
+ * touched when something changes: some errors (a DOMException's message)
+ * cannot be written, and those that carry a secret are replaced by a plain
+ * Error with the redacted text rather than thrown as they are.
+ */
+export const redactedError = (error: unknown, secrets: Iterable<string | undefined>): unknown => {
+  if (!(error instanceof Error)) {
+    return error;
+  }
+  const values = [...secrets];
+  const message = redactSecrets(error.message, values);
+  const stack = typeof error.stack === 'string' ? redactSecrets(error.stack, values) : undefined;
+  if (message === error.message && stack === error.stack) {
+    return error;
+  }
+  try {
+    error.message = message;
+    if (stack !== undefined) {
+      error.stack = stack;
+    }
+    return error;
+  } catch {
+    const replacement = new Error(message);
+    replacement.name = error.name;
+    return replacement;
+  }
+};
+
+/**
  * Fail a session's in-flight turn: `status` and `lastError`, and the error
  * on the turn's own user message (`Message.turnError`), where the next
  * turn cannot overwrite it. The one write every path that fails a turn
