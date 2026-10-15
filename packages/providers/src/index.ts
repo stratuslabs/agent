@@ -403,6 +403,16 @@ export const defineScriptedProvider = ({
 };
 
 /**
+ * A configured value both as written and as Fetch sends it: Fetch trims
+ * surrounding spaces and tabs from a header value, so an endpoint echoes
+ * the trimmed form.
+ */
+const asSent = (value: string): string[] => {
+  const sent = value.replace(/^[\t ]+|[\t ]+$/g, '');
+  return sent === value ? [value] : [value, sent];
+};
+
+/**
  * The configured header values an endpoint might repeat in its error text.
  * An `authorization` header carries a scheme and a credential, and an
  * endpoint may name the credential alone ("invalid token: ..."), so that
@@ -413,7 +423,7 @@ const headerSecrets = (headers: Record<string, string>): string[] =>
     const credential = /^(?:proxy-)?authorization$/i.test(name)
       ? /^\s*\S+\s+(\S.*?)\s*$/.exec(value)?.[1]
       : undefined;
-    return credential === undefined ? [value] : [value, credential];
+    return credential === undefined ? asSent(value) : [...asSent(value), credential];
   });
 
 export const createOpenAICompatibleProvider = ({
@@ -500,7 +510,7 @@ export const createOpenAICompatibleProvider = ({
           : reportedMessage != null
             ? JSON.stringify(reportedMessage)
             : payload.rawText ?? `Provider request failed with status ${response.status}`;
-        const message = redactSecrets(reported, [apiKey, ...headerSecrets(headers)]);
+        const message = redactSecrets(reported, [...asSent(apiKey), ...headerSecrets(headers)]);
         // The transcript did not fit. Reported as the one provider failure
         // the kernel can act on — it answers by sending less history —
         // rather than as the final error every other 400 here is. Matched

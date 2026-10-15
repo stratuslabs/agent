@@ -1798,3 +1798,30 @@ test('the token inside a configured authorization header is redacted on its own 
     });
   }
 });
+
+// Fetch trims surrounding spaces and tabs from header values before sending
+// them, so an endpoint echoes the trimmed credential. That form is redacted
+// too, for a configured header and for the API key.
+test('a credential configured with surrounding whitespace is redacted as sent', async () => {
+  const cases: Array<{ apiKey: string; headers: Record<string, string>; echoed: string }> = [
+    { apiKey: 'unused-key', headers: { 'x-api-key': '  spaced-secret-token\t' }, echoed: 'spaced-secret-token' },
+    { apiKey: ' padded-api-key-value ', headers: {}, echoed: 'padded-api-key-value' },
+  ];
+  for (const { apiKey, headers, echoed } of cases) {
+    const provider = createOpenAICompatibleProvider({
+      model: 'gpt-4.1-mini',
+      apiKey,
+      headers,
+      fetch: (async () => ({
+        ok: false,
+        status: 401,
+        text: async () => JSON.stringify({ error: { message: `invalid key: ${echoed}` } }),
+      })) as unknown as typeof fetch,
+    });
+    await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+      assert.ok(!error.message.includes(echoed), error.message);
+      assert.match(error.message, /invalid key: \[redacted\]/);
+      return true;
+    });
+  }
+});

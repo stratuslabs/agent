@@ -978,8 +978,11 @@ export const createAnthropicProvider = ({
   // Whatever leaves `generate` failed is stored on the turn, logged, and
   // posted to the channel, and an endpoint set through `baseUrl` may have
   // repeated the key in its error body. Redacted in place, so the SDK's
-  // error keeps its class and status for anything that reads them.
-  const secrets = [apiKey, authToken];
+  // error keeps its class and status for anything that reads them. Fetch
+  // trims surrounding spaces and tabs from a header value, so the trimmed
+  // form is what an endpoint would echo.
+  const secrets = [apiKey, authToken].flatMap((value) =>
+    typeof value === 'string' ? [value, value.replace(/^[\t ]+|[\t ]+$/g, '')] : [value]);
   return {
     ...provider,
     async generate(request: ProviderRequest) {

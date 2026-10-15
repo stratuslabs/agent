@@ -1696,3 +1696,25 @@ test('a provider error that repeats the key comes back with the key redacted', a
   assert.ok(!String(error.stack).includes(key));
   assert.match(error.message, /invalid x-api-key: \[redacted\]/);
 });
+
+// Fetch trims surrounding spaces and tabs from a header value, so a key
+// configured with them is echoed trimmed, and that form is redacted too.
+test('a key configured with surrounding whitespace is redacted as sent', async () => {
+  const key = 'sk-ant-test-padded-0123456789';
+  const echoing = (async (_input: any, init?: any) => {
+    const sent = new Headers(init?.headers ?? {}).get('x-api-key') ?? '';
+    return new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: `invalid x-api-key: ${sent}` } }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createAnthropicProvider({ apiKey: ` ${key}\t`, fetch: echoing });
+
+  const error = await provider.generate({ session: createSession() }).then(
+    () => assert.fail('expected the call to fail'),
+    (caught: unknown) => caught,
+  );
+  assert.ok(error instanceof Error);
+  assert.ok(!error.message.includes(key), error.message);
+  assert.match(error.message, /invalid x-api-key: \[redacted\]/);
+});
