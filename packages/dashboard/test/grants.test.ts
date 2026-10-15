@@ -16,6 +16,12 @@ test('the approval card says what Always allow would grant, so no two lifetimes 
   assert.match(alwaysOffer('session', 'Ava') ?? '', /rest of this session/);
   assert.match(alwaysOffer('scope', 'Ava') ?? '', /command's scope/);
   assert.match(alwaysOffer('origin', 'Ava') ?? '', /this site/);
+  // A standing per-conversation grant (message.read/send) outlives the
+  // session, so the card must say so rather than render a bare button.
+  assert.equal(
+    alwaysOffer('destination', 'Ava'),
+    'Always allow lets Ava use this tool on this conversation without asking, until revoked.',
+  );
 
   // A request carrying no label — an older daemon across an upgrade — says
   // nothing rather than guessing at a lifetime it cannot know.

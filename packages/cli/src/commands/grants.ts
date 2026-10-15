@@ -29,6 +29,7 @@ interface GrantsListing extends AgentGrantsListing {
   agentId: string;
   configCommands?: string[];
   tools: Array<ToolGrant & { stale?: string }>;
+  destinations: Array<AgentGrantsListing['destinations'][number] & { stale?: string }>;
 }
 
 /**
@@ -62,9 +63,11 @@ export const runGrants = async (
       ? { tool: command.tool }
       : command.scope !== undefined
         ? { scope: command.scope }
-        : { origin: command.origin ?? '' }
+        : command.destination !== undefined
+          ? { destination: command.destination }
+          : { origin: command.origin ?? '' }
     : undefined;
-  const named = revocation?.tool ?? revocation?.scope ?? revocation?.origin ?? '';
+  const named = revocation?.tool ?? revocation?.scope ?? revocation?.destination ?? revocation?.origin ?? '';
 
   const fromFiles = async (): Promise<number> => {
     declared = await localDeclared();
@@ -99,7 +102,9 @@ export const runGrants = async (
           ? await store.forgetTool(agentId, revocation.tool)
           : revocation.scope !== undefined
             ? await store.forgetScope(agentId, revocation.scope)
-            : await store.forgetOrigin(agentId, revocation.origin ?? '');
+            : revocation.destination !== undefined
+              ? await store.forgetDestination(agentId, revocation.destination)
+              : await store.forgetOrigin(agentId, revocation.origin ?? '');
         return reportRevocation(revoked);
       } finally {
         lock.release();
@@ -162,7 +167,10 @@ export const runGrants = async (
     return createOperatorCommands(await loadServeApprovals(env, command.configPath, warn), warn).declaredFor(agentId);
   };
 
-  const render = (listing: GrantsListing, source: string): number => {
+  const render = (answered: GrantsListing, source: string): number => {
+    // A daemon older than destination grants answers without the key. Filled
+    // in before either format, so JSON keeps one schema through an upgrade.
+    const listing: GrantsListing = { ...answered, destinations: answered.destinations ?? [] };
     if (command.format === 'json') {
       writeLine(streams.stdout, JSON.stringify({ ...listing, source, configCommands: declared, configSource }, null, 2));
       return 0;
@@ -178,7 +186,8 @@ export const runGrants = async (
         writeLine(streams.stdout, `    ${entry}`);
       }
     }
-    const total = listing.tools.length + listing.scopes.length + listing.origins.length;
+    const destinations = listing.destinations;
+    const total = listing.tools.length + listing.scopes.length + listing.origins.length + destinations.length;
     if (total === 0) {
       writeLine(streams.stdout, `${agentId} has no standing grants beyond the built-in safe list (${source}).`);
       writeLine(streams.stdout, 'An "always allow" answered on one of its gated calls creates one.');
@@ -205,7 +214,15 @@ export const runGrants = async (
         writeLine(streams.stdout, `    ${row.description}`);
       }
     }
-    writeLine(streams.stdout, `Take one back: stratus grants revoke ${agentId} --tool <name> | --scope "<command>" | --origin <origin>`);
+    if (destinations.length > 0) {
+      writeLine(streams.stdout, '  conversations');
+      for (const grant of destinations) {
+        const by = grant.grantedBy ? ` by ${grant.grantedBy}` : '';
+        const stale = grant.stale ? `  — stale: ${grant.stale}` : '';
+        writeLine(streams.stdout, `    ${grant.description}  (granted ${grant.grantedAt}${by})${stale}`);
+      }
+    }
+    writeLine(streams.stdout, `Take one back: stratus grants revoke ${agentId} --tool <name> | --scope "<command>" | --origin <origin> | --destination <channel:id>`);
     return 0;
   };
 

@@ -51,9 +51,9 @@ const sendTool = (name: string): Tool => ({
   },
 });
 
-const sendContext = (name: string, sessionId = 'sess-1'): ApprovalContext => ({
+const sendContext = (name: string, sessionId = 'sess-1', destination = 'slack:C-ENG'): ApprovalContext => ({
   session: session(sessionId),
-  call: { id: 'call-1', toolName: name, input: { destination: 'slack:C-ENG' } },
+  call: { id: 'call-1', toolName: name, input: { destination } },
   tool: sendTool(name),
   risk: 'gated',
 });
@@ -161,7 +161,7 @@ test('the interactive prompt renders a gated call\'s arguments, so a schedule sh
   assert.match(asked[0]!, /arguments truncated — inspect the call before approving/);
 });
 
-test('"always" on a destination-scoped tool lasts for the session that said it, and no longer', async () => {
+test('"always" on a destination-scoped tool covers that tool on that one conversation, in every session', async () => {
   let asks = 0;
   const asked: string[] = [];
   const policy = createPermissionPolicy({
@@ -174,18 +174,20 @@ test('"always" on a destination-scoped tool lasts for the session that said it, 
   });
 
   assert.equal(await policy.approve(sendContext('message.send')), true);
-  assert.match(asked[0]!, /always this session/, 'the prompt says which lifetime it is offering');
+  assert.match(asked[0]!, /always slack:C-ENG for Ava, until revoked/, 'the prompt says what it is offering');
   assert.equal(await policy.approve(sendContext('message.send')), true);
-  assert.equal(asks, 1, 'the second call in the same session did not ask again');
+  assert.equal(asks, 1, 'the second call did not ask again');
 
-  // A different tool is a different question, even in the same session.
+  // Another session, same conversation: still covered.
+  assert.equal(await policy.approve(sendContext('message.send', 'sess-2')), true);
+  assert.equal(asks, 1);
+
+  // A different tool is a different question.
   assert.equal(await policy.approve(sendContext('message.post')), true);
   assert.equal(asks, 2);
 
-  // And another session starts over: a yes to "send anywhere" must not
-  // become a standing grant across conversations — no per-destination
-  // grant exists yet, so the session is the widest honest lifetime.
-  assert.equal(await policy.approve(sendContext('message.send', 'sess-2')), true);
+  // And a different conversation is too: never a yes to every channel.
+  assert.equal(await policy.approve(sendContext('message.send', 'sess-1', 'slack:C-OPS')), true);
   assert.equal(asks, 3);
 });
 
@@ -298,7 +300,7 @@ test('remote mode refuses to be constructed with no way to ask', () => {
   );
 });
 
-test('a remote answer decides the call, and always on a destination-scoped tool covers the rest of the session', async () => {
+test('a remote answer decides the call, and always on a destination-scoped tool covers that conversation', async () => {
   const asked: Array<[string, string | undefined]> = [];
   const answers: ApprovalAnswer[] = ['once', 'always', 'deny'];
   const decisions: PermissionDecision[] = [];
@@ -320,15 +322,19 @@ test('a remote answer decides the call, and always on a destination-scoped tool 
 
   // The request says in advance which lifetime "always" would create, so
   // the transport can word the button and the outcome without guessing.
-  assert.deepEqual(asked, [['shell.run', 'tool'], ['message.send', 'session'], ['fs.delete', undefined]]);
-  // A remote "always" is session-scoped exactly like the prompt's, so the
-  // two surfaces cannot mean different things by the same word.
-  assert.match(decisions[2]!.reason, /rest of this session/);
+  assert.deepEqual(asked, [['shell.run', 'tool'], ['message.send', 'destination'], ['fs.delete', undefined]]);
+  // A remote "always" means what the prompt's does, so the two surfaces
+  // cannot mean different things by the same word.
+  assert.match(decisions[1]!.reason, /slack:C-ENG \(message\.send\) now runs without asking for ava until revoked/);
+  assert.match(decisions[2]!.reason, /standing grant/);
+  assert.equal(decisions[2]!.destination, 'slack:C-ENG');
   assert.match(decisions[3]!.reason, /was not approved/);
 
-  // Session-scoped means session-scoped: another session asks again.
+  // Another session in the same conversation is covered; another
+  // conversation asks again.
+  assert.equal(await policy.approve(sendContext('message.send', 'sess-2')), true);
   answers.push('deny');
-  assert.equal(await policy.approve(sendContext('message.send', 'sess-2')), false);
+  assert.equal(await policy.approve(sendContext('message.send', 'sess-2', 'slack:C-OPS')), false);
   assert.deepEqual(asked.map(([name]) => name), ['shell.run', 'message.send', 'fs.delete', 'message.send']);
 });
 

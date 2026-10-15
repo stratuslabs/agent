@@ -6112,3 +6112,35 @@ test('an agent delegating to itself keeps Always allow, and metadata alone does 
 
   await gateway.stop();
 });
+
+test('approvals transport reports the workspace of the channel a destination names', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
+  const slack: GatewayChannelAdapter = {
+    name: 'slack',
+    async start() {},
+    async stop() {},
+    accountFor: (agentId) => (agentId === 'ava' ? 'T-ONE' : undefined),
+  };
+  const plain: GatewayChannelAdapter = { name: 'web', async start() {}, async stop() {} };
+  let accountFor: ((agentId: string, destination: string) => string | undefined) | undefined;
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    channels: [slack, plain],
+    warn: () => {},
+    approvals: (given) => {
+      accountFor = given.destinations.accountFor;
+      return { async approve() { return true; } };
+    },
+  });
+  await gateway.start();
+  try {
+    assert.equal(accountFor?.('ava', 'slack:C0C6GF7R96X'), 'T-ONE');
+    assert.equal(accountFor?.('bea', 'slack:C0C6GF7R96X'), undefined, 'an agent with no app there has no workspace');
+    assert.equal(accountFor?.('ava', 'web:C0C6GF7R96X'), undefined, 'a channel without accounts reports none');
+    assert.equal(accountFor?.('ava', 'nochannel'), undefined);
+  } finally {
+    await gateway.stop();
+  }
+});

@@ -3861,15 +3861,17 @@ export type ApprovalAnswer = 'once' | 'always' | 'deny';
  *   (`Tool.originFor`).
  * - `tool` — the tool itself, durable and per agent, until an operator
  *   revokes it: the standing grant, for a gated tool that names no scope.
+ * - `destination` — this tool on this one conversation (`Tool.destinationFor`),
+ *   durable and per agent, until revoked. Never the tool on every
+ *   conversation: that would be a standing yes to every channel the app
+ *   is in.
  * - `session` — the tool, for this session and this process only. What a
- *   tool judged by destination (`Tool.destinationFor`) gets outside a
- *   schedule, because a durable grant there would be a standing yes to
- *   every destination, and no per-destination grant exists yet.
+ *   call judged by destination gets when its input names no destination.
  *
  * Absent when `always` remembers nothing at all — the one-shot case,
  * which `oneShot` names.
  */
-export type AlwaysMeans = 'scope' | 'origin' | 'tool' | 'session';
+export type AlwaysMeans = 'scope' | 'origin' | 'tool' | 'destination' | 'session';
 
 /**
  * A human's answer, and who gave it when a channel can say. What a
@@ -4270,6 +4272,8 @@ export interface ChannelAdapterLike {
     }>;
     more: boolean;
   }>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.accountFor`. */
+  accountFor?(agentId: string): string | undefined;
 }
 
 /**

@@ -62,6 +62,7 @@ stratus grants blair                   # what blair may do unattended: standing 
 stratus grants revoke blair --tool web.fetch            # take a standing grant back — a running daemon stops honouring it at once
 stratus grants revoke blair --scope "git push"          # or a command scope, by the line the listing shows
 stratus grants revoke blair --origin https://app.example.com
+stratus grants revoke blair --destination slack:C0123ABCD  # a conversation granted for message.read or message.send
 stratus memory list blair              # every live fact, with its trust label, pin, and validity
 stratus memory list blair --trust unknown --format json
 stratus memory search blair deploy pipeline             # the way the agent searches: words, and what a fact is about

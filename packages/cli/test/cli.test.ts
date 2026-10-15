@@ -10108,8 +10108,11 @@ test('parseCommand reads the grants command and its revoke form', () => {
   assert.deepEqual(parseCommand(['grants', 'revoke', 'ava', '--origin', 'https://app.example.com']), {
     command: 'grants', action: 'revoke', agentId: 'ava', format: 'text', origin: 'https://app.example.com',
   });
+  assert.deepEqual(parseCommand(['grants', 'revoke', 'ava', '--destination', 'slack:C0123ABCD']), {
+    command: 'grants', action: 'revoke', agentId: 'ava', format: 'text', destination: 'slack:C0123ABCD',
+  });
   assert.throws(() => parseCommand(['grants']), /needs the agent id/);
-  assert.throws(() => parseCommand(['grants', 'revoke', 'ava']), /exactly one of --tool, --scope, or --origin/);
+  assert.throws(() => parseCommand(['grants', 'revoke', 'ava']), /exactly one of --tool, --scope, --origin, or --destination/);
   assert.throws(() => parseCommand(['grants', 'revoke', 'ava', '--tool', 'a', '--scope', 'b']), /exactly one of/);
   assert.throws(() => parseCommand(['grants', 'ava', '--tool', 'a']), /Unknown option: --tool/);
   assert.throws(() => parseCommand(['grants', 'ava', 'juno']), /Unexpected argument: juno/);
@@ -10168,6 +10171,7 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   await store.remember('ava', { command: 'git', args: ['push'], denyRefspecForms: true });
   await store.rememberOrigin('ava', { origin: 'https://app.example.com' });
   await store.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z', grantedBy: 'U1' });
+  await store.rememberDestination('ava', { tool: 'message.read', destination: 'slack:C-ENG', grantedAt: '2026-10-12T01:00:00.000Z', grantedBy: 'U1' });
 
   const listing = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'ava'], streams: listing.streams, env }), 0);
@@ -10175,6 +10179,8 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   assert.match(listing.output.stdout, /web\.fetch \(stratus-plugin-web\) {2}\(granted 2026-09-07T01:00:00\.000Z by U1\)/);
   assert.match(listing.output.stdout, /commands\n {4}git push/);
   assert.match(listing.output.stdout, /sites\n {4}https:\/\/app\.example\.com/);
+  assert.match(listing.output.stdout, /conversations\n {4}slack:C-ENG \(message\.read\) {2}\(granted 2026-10-12T01:00:00\.000Z by U1\)/);
+  assert.match(listing.output.stdout, /--destination <channel:id>/);
   assert.match(listing.output.stdout, /stratus grants revoke ava --tool/);
 
   const asJson = createStreams();
@@ -10190,6 +10196,7 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   assert.match(revoke.output.stdout, /Revoked web\.fetch for ava\./);
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--scope', 'git push'], streams: createStreams().streams, env }), 0);
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--origin', 'https://app.example.com'], streams: createStreams().streams, env }), 0);
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--destination', 'slack:C-ENG'], streams: createStreams().streams, env }), 0);
 
   const missing = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: missing.streams, env }), 1);
@@ -10200,7 +10207,7 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
     directory: path.join(home, '.stratus', 'agents'),
     stateHome: path.join(home, '.stratus'),
   }).grantsFor('ava');
-  assert.deepEqual(after, { scopes: [], origins: [], tools: [] });
+  assert.deepEqual(after, { scopes: [], origins: [], tools: [], destinations: [] });
 
   const empty = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'ava'], streams: empty.streams, env }), 0);
@@ -10294,6 +10301,12 @@ test('stratus grants goes through the running daemon, whose store is the one the
   assert.match(listing.output.stdout, /from the daemon at http:\/\/127\.0\.0\.1:4123/);
   // What only a live daemon can say: the grant would not apply right now.
   assert.match(listing.output.stdout, /stale: no loaded tool has this name/);
+  // This daemon predates destination grants and leaves the key out; JSON
+  // still answers with the same schema as a current daemon.
+  const older = fakeGateway(() => new Response(JSON.stringify({ agentId: 'ava', scopes: [], origins: [], tools: [] }), { status: 200 }));
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--format', 'json'], streams: asJson.streams, env: { ...env, fetch: older.fetchImpl } }), 0);
+  assert.deepEqual((JSON.parse(asJson.output.stdout) as { destinations?: unknown }).destinations, []);
 
   const revoke = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
@@ -10322,6 +10335,25 @@ test('stratus grants goes through the running daemon, whose store is the one the
     1,
   );
   assert.match(explicit.output.stderr, /Could not reach the gateway at http:\/\/127\.0\.0\.1:9/);
+
+  // A conversation grant the daemon says will not apply is marked, like a tool grant.
+  const current = fakeGateway(() => new Response(JSON.stringify({
+    agentId: 'ava',
+    scopes: [],
+    origins: [],
+    tools: [],
+    destinations: [{
+      tool: 'notes.write',
+      destination: 'slack:C-OLD',
+      package: 'somebody-elses-notes',
+      grantedAt: '2026-10-12T00:00:00.000Z',
+      description: 'slack:C-OLD (notes.write)',
+      stale: 'the tool is now contributed by stratus-plugin-notes, not somebody-elses-notes, so a call asks again',
+    }],
+  }), { status: 200 }));
+  const marked = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: marked.streams, env: { ...env, fetch: current.fetchImpl } }), 0);
+  assert.match(marked.output.stdout, /slack:C-OLD \(notes\.write\).*stale: the tool is now contributed by stratus-plugin-notes/);
   await rm(home, { recursive: true, force: true });
 });
 

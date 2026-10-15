@@ -468,6 +468,15 @@ export interface ChannelAdapter {
    * an implementation returns text, never platform markup or tokens.
    */
   readConversation?(request: ConversationReadRequest): Promise<ConversationReadResult>;
+  /**
+   * The workspace this agent's app is connected to, for a transport whose
+   * conversation ids are unique only within one: a Slack team id.
+   * Undefined when the agent has no app here or it has not authenticated.
+   * A standing per-conversation grant records it and matches only under
+   * the same one. Optional: a transport whose ids are globally unique
+   * lacks the method.
+   */
+  accountFor?(agentId: string): string | undefined;
 }
 
 export interface ChannelSessionKeyParts {
