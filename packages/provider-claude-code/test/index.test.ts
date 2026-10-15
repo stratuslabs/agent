@@ -96,6 +96,30 @@ test('generate runs a turn through the Agent SDK and returns the result text', a
   assert.equal(options.env?.MAX_MCP_OUTPUT_TOKENS, String(BRIDGED_RESULT_MAX_CHARS * 4));
 });
 
+test('the Claude Code subprocess has its silent-turn reminder off unless the operator set it', async () => {
+  const run = async () => {
+    const { queryFn, calls } = createFakeQuery([
+      { type: 'result', subtype: 'success', is_error: false, result: 'Done.' },
+    ]);
+    await createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn }).generate({ session: createSession() });
+    return (calls[0]!.options as { env?: Record<string, string | undefined> }).env;
+  };
+  const saved = process.env.CLAUDE_CODE_SILENT_TURN_REMINDER;
+  try {
+    // The CLI otherwise injects "The user hasn't heard from you in a
+    // while..." into long turns, and each one becomes a progress post in
+    // the conversation the agent is answering.
+    delete process.env.CLAUDE_CODE_SILENT_TURN_REMINDER;
+    assert.equal((await run())?.CLAUDE_CODE_SILENT_TURN_REMINDER, '0');
+    // An operator who wants it back still can.
+    process.env.CLAUDE_CODE_SILENT_TURN_REMINDER = '1';
+    assert.equal((await run())?.CLAUDE_CODE_SILENT_TURN_REMINDER, '1');
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CODE_SILENT_TURN_REMINDER;
+    else process.env.CLAUDE_CODE_SILENT_TURN_REMINDER = saved;
+  }
+});
+
 test('the Claude Code path sends the shared defaults the host resolved', async () => {
   const { queryFn, calls } = createFakeQuery([
     { type: 'system', subtype: 'init' },
