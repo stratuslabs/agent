@@ -374,6 +374,16 @@ export interface DestinationScopeOptions {
    * process only, like every other grant with nowhere to go.
    */
   whitelist?: DestinationWhitelistStore;
+  /**
+   * The workspace the agent's channel is connected to right now, for the
+   * channel the destination names (the Slack team id for `slack:C…`), or
+   * undefined when there is none or it is not connected. A destination
+   * grant records it and matches only under the same one, because a
+   * conversation id is unique only within its workspace. Asked per call,
+   * so an app that moved workspaces stops matching its old grants on the
+   * next call.
+   */
+  accountFor?(agentId: string, destination: string): string | undefined | Promise<string | undefined>;
   /** Called when a destination grant is persisted, for the daemon's log. */
   onGranted?: (event: { agentId: string; grant: DestinationGrant }) => void;
 }
@@ -1016,9 +1026,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
       }
 
+      // Which workspace this destination is in right now, for binding a
+      // grant to it (see `DestinationScopeOptions.accountFor`).
+      const account = destination !== undefined
+        ? await destinations?.accountFor?.(session.agent.id, destination)
+        : undefined;
       if (destination !== undefined && !externalGate) {
         // Read per call, never cached here, so a revoke is the next call's answer.
-        const standing = findMatchingDestinationGrant(call.toolName, destination, [
+        const standing = findMatchingDestinationGrant(call.toolName, destination, account, [
           ...(processDestinations.get(session.agent.id) ?? []),
           ...(destinations?.whitelist ? await destinations.whitelist.destinationsFor(session.agent.id) : []),
         ]);
@@ -1407,6 +1422,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           const grant: DestinationGrant = {
             tool: call.toolName,
             destination,
+            ...(account !== undefined ? { account } : {}),
             grantedAt: new Date().toISOString(),
             ...(actor !== undefined ? { grantedBy: actor } : {}),
           };

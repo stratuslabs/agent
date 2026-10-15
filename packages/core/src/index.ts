@@ -4272,6 +4272,8 @@ export interface ChannelAdapterLike {
     }>;
     more: boolean;
   }>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.accountFor`. */
+  accountFor?(agentId: string): string | undefined;
 }
 
 /**

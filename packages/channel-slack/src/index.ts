@@ -6014,6 +6014,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     name: 'slack',
     resolveOutbound,
     readConversation,
+    // A channel id is unique only within its workspace, so a standing
+    // grant on one is bound to the team the agent's app authenticated in.
+    accountFor: (agentId: string) => botIdentities.get(agentId)?.teamId || undefined,
     requestCredential,
 
     async start(gateway) {

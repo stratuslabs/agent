@@ -212,3 +212,52 @@ test('a hand-edited destination row missing its tool or destination grants nothi
     grantedAt: new Date(0).toISOString(),
   });
 });
+
+test('a grant is bound to the workspace it was made in: the same channel id under another team does not match', async () => {
+  const { directory, store } = await newStore();
+  let team: string | undefined = 'T-ONE';
+  const granting = createPermissionPolicy({
+    mode: 'remote',
+    request: async () => ({ answer: 'always', actor: 'U-DYLAN' }),
+    destinations: { isPreauthorized: () => false, whitelist: store, accountFor: () => team },
+  });
+  assert.equal(await granting.approve(call(read, 'C0C6GF7R96X')), true);
+  const file = JSON.parse(await readFile(whitelistPathFor(directory, 'nova'), 'utf8')) as Record<string, unknown>;
+  assert.equal((file.destinations as Array<Record<string, unknown>>)[0]?.account, 'T-ONE', 'the grant records its workspace');
+
+  const restart = () => createPermissionPolicy({
+    mode: 'headless',
+    destinations: {
+      isPreauthorized: () => false,
+      whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }),
+      accountFor: () => team,
+    },
+  });
+  // Same team after a restart: the grant still holds.
+  assert.equal(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-2')), true);
+  // The agent's Slack app now belongs to another workspace that happens to
+  // reuse the id: nobody approved that conversation.
+  team = 'T-TWO';
+  assert.equal(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-3')), false);
+  // Not connected at all: the workspace is unknown, so nothing matches.
+  team = undefined;
+  assert.equal(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-4')), false);
+});
+
+test('answering always again in the new workspace replaces the old workspace grant', async () => {
+  const { directory, store } = await newStore();
+  let team = 'T-ONE';
+  const policy = createPermissionPolicy({
+    mode: 'remote',
+    request: async () => ({ answer: 'always', actor: 'U-DYLAN' }),
+    destinations: { isPreauthorized: () => false, whitelist: store, accountFor: () => team },
+  });
+  assert.equal(await policy.approve(call(send, 'C0C6GF7R96X')), true);
+  team = 'T-TWO';
+  assert.equal(await policy.approve(call(send, 'C0C6GF7R96X', 'sess-2')), true);
+  const grants = await store.destinationsFor('nova');
+  assert.deepEqual(grants.map(({ destination, account }) => ({ destination, account })), [
+    { destination: 'slack:C0C6GF7R96X', account: 'T-TWO' },
+  ]);
+  assert.match(describeAgentGrants(await store.grantsFor('nova')).destinations[0]?.description ?? '', /T-TWO/);
+});

@@ -9840,6 +9840,13 @@ test('a reply under a home-channel message reaches its owner even when another s
 
 // ---- conversation reads (message.read) -------------------------------------
 
+test('accountFor reports the team each agent\'s app authenticated in, for binding conversation grants', async () => {
+  const adapter = await startedAdapterWith(createFakeWeb('B-AVA', 'T1'));
+  assert.equal(adapter.accountFor?.('ava'), 'T1');
+  assert.equal(adapter.accountFor?.('bea'), undefined);
+  await adapter.stop();
+});
+
 test('readConversation reads a thread the app can see, paging and naming authors', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C-FEEDBACK', { is_member: true });

@@ -269,6 +269,8 @@ export interface GatewayChannelAdapter {
     before?: string;
     limit: number;
   }): ReturnType<ConversationReader>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.accountFor`. */
+  accountFor?(agentId: string): string | undefined;
   /**
    * Shows a person a form for a credential an agent asked for, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
@@ -367,6 +369,12 @@ export interface ApprovalTransport {
    */
   destinations: {
     isPreauthorized(session: Session, destination: string): boolean;
+    /**
+     * The workspace the agent's channel for this `channel:to` destination
+     * is connected to (`ChannelAdapter.accountFor`), so a standing grant
+     * on one conversation is bound to the workspace it was made in.
+     */
+    accountFor(agentId: string, destination: string): string | undefined;
   };
 }
 
@@ -1866,6 +1874,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         request: requestApproval,
         destinations: {
           isPreauthorized: (session, destination) => scheduler.isPreauthorized(session, destination),
+          accountFor: (agentId, destination) => {
+            const separator = destination.indexOf(':');
+            if (separator <= 0) {
+              return undefined;
+            }
+            const kind = destination.slice(0, separator);
+            return channelCarrying(kind, agentId, (candidate) => candidate.accountFor !== undefined)
+              .adapter?.accountFor?.(agentId);
+          },
         },
         contributorOf: (toolName) => toolProvenance().get(toolName)?.package,
       })

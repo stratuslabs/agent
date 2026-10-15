@@ -192,7 +192,12 @@ warning naming the file.
   (`message.read`, `message.send`) gets that tool on that one
   conversation, never every conversation the app is in: reading a channel
   is not posting in it, and a yes for one channel is not a yes for the
-  next. Only a call that names no conversation at all falls back to the
+  next. The grant also records the workspace (the Slack team) the
+  agent's app was in, because a channel id is only unique inside one: if
+  the agent's Slack app is replaced with one from another workspace, the
+  old grants stop matching and the agent asks again, and answering
+  **Always allow** there replaces the old row. `stratus grants` shows the
+  workspace next to the conversation. Only a call that names no conversation at all falls back to the
   rest of the session, and the prompt says so. Everything lives in
   `~/.stratus/agents/<id>/whitelist.json` and survives a restart. When that
   file exists and no longer parses it is never written over, so the answer
