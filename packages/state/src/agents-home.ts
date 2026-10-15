@@ -503,6 +503,12 @@ export const writeNewSoulFile = async (
     }
     return hidden;
   }
+  // A hidden name already there, a dangling link included, is taken: checked
+  // before the visible soul is published, so a link left pointing at this
+  // path is never brought to life by the write.
+  if (await lstatOrUndefined(hidden) !== undefined) {
+    throw Object.assign(new Error(`EEXIST: file already exists, ${hidden}`), { code: 'EEXIST', path: hidden });
+  }
   let wrote = true;
   try {
     await writeFile(visible, contents, { flag: 'wx', mode: 0o644 });
@@ -655,7 +661,17 @@ const surfaceWorkspace = async (env: StateEnvironment, agentsHome: string, agent
   const hidden = agentWorkspacePath(env, agentId);
   const stateDir = agentStateDirPath(env, agentId);
   const marker = path.join(stateDir, SURFACING_MARKER);
-  const pending = await readFile(marker, 'utf8').then((raw) => JSON.parse(raw) as SurfacingRecord, (error: unknown) => {
+  const visibleTarget = visibleWorkspacePathIn(agentsHome, agentId);
+  const pending = await readFile(marker, 'utf8').then((raw) => {
+    try {
+      return JSON.parse(raw) as SurfacingRecord;
+    } catch {
+      // Unreadable (a marker from a build that wrote it in place, cut
+      // short). Read as written before the rename, which the check below
+      // confirms against the disk before voiding it.
+      return { from: [hidden], to: visibleTarget } satisfies SurfacingRecord;
+    }
+  }, (error: unknown) => {
     if (errnoOf(error) === 'ENOENT') {
       return undefined;
     }
@@ -691,7 +707,15 @@ const surfaceWorkspace = async (env: StateEnvironment, agentsHome: string, agent
   }
   const record: SurfacingRecord = { from, to: visible };
   await mkdir(path.dirname(visible), { recursive: true, mode: 0o700 });
-  await writeFile(marker, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+  // Staged and renamed into place, so the marker is whole or absent.
+  const stagedMarker = `${marker}.${randomUUID()}.tmp`;
+  await writeFile(stagedMarker, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+  try {
+    await rename(stagedMarker, marker);
+  } catch (error) {
+    await rm(stagedMarker, { force: true });
+    throw error;
+  }
   try {
     await rename(hidden, visible);
   } catch (error) {
@@ -819,8 +843,19 @@ const soulBlockedBy = async (hidden: string, visible: string): Promise<boolean> 
 };
 
 /** The device the folder is (or would be created) on. */
-const agentsHomeDevice = (agentsHome: string): number | undefined =>
-  deviceOf(agentsHome) ?? deviceOf(path.dirname(agentsHome));
+const agentsHomeDevice = (agentsHome: string): number | undefined => {
+  // The deepest existing ancestor: a configured folder whose parents do not
+  // exist yet is created on that one's filesystem.
+  let current = path.resolve(agentsHome);
+  for (;;) {
+    const device = deviceOf(current);
+    const parent = path.dirname(current);
+    if (device !== undefined || parent === current) {
+      return device;
+    }
+    current = parent;
+  }
+};
 
 /**
  * The state of the agents folder, decided once for every caller: `serve`

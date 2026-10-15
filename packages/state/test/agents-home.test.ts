@@ -641,3 +641,35 @@ test('one agent whose state cannot be inspected is named, and the others still p
   assert.match(report ?? '', /moved 1 soul\(s\) and 1 workspace\(s\)/);
   assert.match(report ?? '', /left in place: bea/);
 });
+
+test('a configured agents folder whose parents do not exist yet is on the home\'s filesystem, not another volume', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: { [AGENTS_DIR_ENV]: path.join(home, 'deep', 'er', 'Agents') } };
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  const plan = await planAgentsHome(env);
+  assert.deepEqual(plan.workspaces, ['ava']);
+  assert.deepEqual(plan.blocked, []);
+});
+
+test('a dangling hidden link at the new agent\'s name is taken, and the visible soul is never written', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  const agentsHome = claimAgentsHome(env)!;
+  await mkdir(agentsDirPath(env), { recursive: true });
+  const visible = path.join(agentsHome, 'ava', 'soul.md');
+  await symlink(visible, path.join(agentsDirPath(env), 'ava.md'));
+  await assert.rejects(() => writeNewSoulFile(env, 'ava.md', 'ava', soulText('ava')), { code: 'EEXIST' });
+  assert.equal(await exists(visible), false, 'the old link is not brought to life');
+});
+
+test('a cut-short workspace marker from before the rename is voided and the move goes ahead', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentWorkspacePath(env, 'ava'), 'note.txt'), 'kept');
+  await writeFile(path.join(agentStateDirPath(env, 'ava'), '.workspace-surfacing'), '{"from":["/x');
+  const report = await surfaceAgentsHome(env);
+  assert.match(report ?? '', /moved 0 soul\(s\) and 1 workspace\(s\)/);
+  assert.equal(await readFile(path.join(home, 'Agents', 'ava', 'workspace', 'note.txt'), 'utf8'), 'kept');
+  assert.equal(await exists(path.join(agentStateDirPath(env, 'ava'), '.workspace-surfacing')), false);
+});
