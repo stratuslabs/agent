@@ -11,6 +11,7 @@ import {
   createPermissionPolicy,
   downloadInsideWorkspace,
   normalizeTrustedDomain,
+  trustedDomainProblem,
   trustedDomainOf,
   type OriginScope,
 } from '../src/index.ts';
@@ -57,6 +58,47 @@ test('a trusted domain covers itself and its subdomains over https, and nothing 
   assert.equal(normalizeTrustedDomain(' OpenAI.com '), 'openai.com');
   for (const bad of ['https://openai.com', 'openai.com/docs', 'openai.com:443', 'com', '*', '', 'open ai.com']) {
     assert.equal(normalizeTrustedDomain(bad), undefined, bad);
+  }
+});
+
+test('a suffix anyone can register a site under is never a trusted domain', () => {
+  // `co.uk` would cover every company's site under it, and `github.io`
+  // every user's page: the operator meant one site, not all of them.
+  for (const shared of ['co.uk', '*.github.io', '.vercel.app', 'COM.AU', 'herokuapp.com']) {
+    assert.equal(normalizeTrustedDomain(shared), undefined, shared);
+  }
+  assert.equal(trustedDomainOf('https://attacker.co.uk', ['co.uk']), undefined);
+  assert.equal(trustedDomainOf('https://someone.github.io', ['github.io']), undefined);
+  // A site registered under one is an ordinary domain.
+  assert.equal(normalizeTrustedDomain('bbc.co.uk'), 'bbc.co.uk');
+  assert.equal(trustedDomainOf('https://www.bbc.co.uk', ['bbc.co.uk']), 'bbc.co.uk');
+  assert.equal(normalizeTrustedDomain('stratuslabs.github.io'), 'stratuslabs.github.io');
+});
+
+test('a cloud namespace that hands names to tenants is refused, at any region, and a tenant\'s own name is not', () => {
+  // `amazonaws.com` itself is not where strangers publish; the service
+  // namespaces below it are, region by region.
+  for (const shared of [
+    's3.amazonaws.com', 's3.us-east-1.amazonaws.com', 's3-us-west-2.amazonaws.com',
+    's3.dualstack.eu-west-1.amazonaws.com', 's3-website-us-east-1.amazonaws.com',
+    's3-website.eu-central-1.amazonaws.com', 'execute-api.us-east-1.amazonaws.com',
+    'lambda-url.us-gov-west-1.on.aws', 'us-east-1.amazonaws.com', 'compute-1.amazonaws.com',
+    // Every S3 endpoint family, not only the ones listed by name.
+    's3-accelerate.amazonaws.com', 's3-accelerate.dualstack.amazonaws.com', 's3-control.us-east-1.amazonaws.com',
+    's3-fips.dualstack.us-east-1.amazonaws.com', 's3-outposts.us-west-2.amazonaws.com', 's3-express-usw2-az1.us-west-2.amazonaws.com',
+    'storage.googleapis.com', 'blob.core.windows.net', 'githubusercontent.com', 'raw.githubusercontent.com', 'r2.dev',
+    // Every GitHub content host serves strangers' files, gists included.
+    'gist.githubusercontent.com', 'objects.githubusercontent.com', 'user-images.githubusercontent.com',
+    // AWS's other partitions: the EU sovereign cloud and China.
+    's3.eusc-de-east-1.amazonaws.eu', 'amazonaws.eu', 's3.cn-north-1.amazonaws.com.cn',
+  ]) {
+    assert.equal(normalizeTrustedDomain(shared), undefined, shared);
+    assert.notEqual(trustedDomainProblem(shared), undefined, shared);
+  }
+  assert.equal(trustedDomainOf('https://attacker-bucket.s3.amazonaws.com', ['s3.amazonaws.com']), undefined);
+  // One bucket, one API, one account: a name somebody owns.
+  for (const owned of ['docs-bucket.s3.eusc-de-east-1.amazonaws.eu', 'docs-bucket.s3.amazonaws.com', 'docs-bucket.s3.us-east-1.amazonaws.com', 'abc123.execute-api.us-east-1.amazonaws.com', 'acct.blob.core.windows.net']) {
+    assert.equal(normalizeTrustedDomain(owned), owned, owned);
   }
 });
 

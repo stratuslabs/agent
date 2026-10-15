@@ -1763,6 +1763,11 @@ test('approvals.trustedDomains adds up per agent, normalizes, and refuses anythi
       JSON.stringify(bad),
     );
   }
+  // A shared suffix is refused by name, not as a malformed domain.
+  await assert.rejects(
+    loadConfigFile(await writeConfig('trusted-suffix.json', { approvals: { trustedDomains: ['openai.com', '*.github.io'] } })),
+    /Invalid approvals\.trustedDomains in config .*: github\.io is a suffix anyone can register a site under/,
+  );
 });
 
 test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {

@@ -378,6 +378,14 @@ A domain covers itself and its subdomains (`openai.com` covers
 `developers.openai.com`, never `evilopenai.com`), over https on the default
 port. An agent's list adds to the top-level one, like `commands`. Write a
 domain with no scheme, path, or port; anything else is refused at startup.
+Trust a site you know, never a suffix strangers can register under:
+`co.uk`, `github.io`, `vercel.app` and similar shared suffixes are refused
+too, so write `bbc.co.uk` or `stratuslabs.github.io`. So are shared storage
+hosts (`s3.amazonaws.com` and its regional forms, `storage.googleapis.com`,
+any `githubusercontent.com` host); name the bucket instead
+(`docs-bucket.s3.amazonaws.com`). This check is best-effort: the built-in
+list covers the common shared hosts, not every public suffix, so it is no
+substitute for listing only sites you know.
 
 What runs without asking:
 

@@ -126,8 +126,88 @@ export const parseOriginScope = (raw: unknown): OriginScope | undefined => {
  * never widens into something nobody wrote.
  */
 export const normalizeTrustedDomain = (raw: string): string | undefined => {
+  const domain = trustedDomainSpelling(raw);
+  return domain !== undefined && !isSharedSuffix(domain) ? domain : undefined;
+};
+
+/** The domain an entry spells, before asking whether it is one site. */
+const trustedDomainSpelling = (raw: string): string | undefined => {
   const domain = raw.trim().toLowerCase().replace(/^\*\./, '').replace(/^\./, '');
   return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(domain) ? domain : undefined;
+};
+
+/**
+ * Suffixes anyone can register a site under. Trusting `co.uk` or
+ * `github.io` trusts every stranger's site below it, which is never what an
+ * operator listing a vendor's docs meant. A short list of the common ones,
+ * not the Public Suffix List: that would be a dependency for every install,
+ * and the docs already say a trusted domain should be one site you know.
+ * Best-effort by design: it catches the common mistakes, and a shared host
+ * missing from it is a gap to add here, not a promise this list made.
+ */
+export const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
+  // Country second levels with open registration.
+  'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk', 'com.au', 'net.au', 'org.au', 'co.nz', 'org.nz',
+  'co.jp', 'co.kr', 'co.in', 'co.za', 'com.br', 'com.cn', 'com.mx', 'com.tr', 'com.sg', 'com.hk',
+  // Hosting where every user gets a subdomain.
+  'github.io', 'gitlab.io', 'vercel.app', 'netlify.app', 'pages.dev', 'workers.dev', 'fly.dev',
+  'herokuapp.com', 'onrender.com', 'web.app', 'firebaseapp.com', 'appspot.com', 'azurewebsites.net',
+  'cloudfront.net', 'amazonaws.com', 'blogspot.com', 'wordpress.com', 'glitch.me', 'replit.app',
+  'ngrok.io', 'ngrok-free.app', 'trycloudflare.com', 'deno.dev', 'surge.sh',
+  // Object storage and raw file hosts, where a path or a subdomain is a
+  // stranger's bucket or repository.
+  'storage.googleapis.com', 'blob.core.windows.net', 'r2.dev',
+]);
+
+/**
+ * Hosts whose every subdomain is shared too: GitHub serves raw files,
+ * gists, release assets and uploads for every user from hosts under
+ * `githubusercontent.com`, so the parent and anything below it is refused.
+ */
+const SHARED_PARENTS = ['githubusercontent.com'];
+
+// AWS hands out names inside service namespaces, region by region:
+// `bucket.s3.us-east-1.amazonaws.com`, `id.execute-api.eu-west-1.amazonaws.com`.
+// Listing each would be hundreds of entries, so an entry under these bases
+// whose every label is a service or a region is the namespace, and refused;
+// one with a tenant's label (a bucket, an API id) is that tenant's name.
+// S3 is matched as a family (`s3`, `s3-accelerate`, `s3-website-us-east-1`,
+// `s3-control`, ...) because AWS keeps adding endpoint kinds; a bucket that
+// happens to be named `s3-something` and is listed bare is refused too, with
+// the same error, which is the safe direction.
+const AWS_BASES = ['amazonaws.com', 'amazonaws.com.cn', 'amazonaws.eu', 'on.aws'];
+// `us-east-1`, `us-gov-west-1`, `us-isob-east-1`, `cn-north-1`, and the
+// sovereign cloud's `eusc-de-east-1`.
+const AWS_REGION = '[a-z]{2,4}(?:-gov|-iso[a-z]?)?(?:-[a-z]+){1,2}-\\d';
+const AWS_NAMESPACE_LABEL = new RegExp(
+  `^(?:${AWS_REGION}|s3(?:-[a-z0-9-]+)?|dualstack`
+  + '|execute-api|lambda-url|elb|compute|compute-1|vpce)$',
+);
+
+const isAwsNamespace = (domain: string): boolean => AWS_BASES.some((base) => {
+  if (domain === base) {
+    return true;
+  }
+  return domain.endsWith(`.${base}`)
+    && domain.slice(0, -base.length - 1).split('.').every((label) => AWS_NAMESPACE_LABEL.test(label));
+});
+
+const isSharedSuffix = (domain: string): boolean => SHARED_SUFFIXES.has(domain)
+  || SHARED_PARENTS.some((parent) => domain === parent || domain.endsWith(`.${parent}`))
+  || isAwsNamespace(domain);
+
+/**
+ * Why an entry is not a trusted domain, for a config error that names the
+ * fix, or undefined when it is one.
+ */
+export const trustedDomainProblem = (raw: string): string | undefined => {
+  const domain = trustedDomainSpelling(raw);
+  if (domain === undefined) {
+    return 'not a domain';
+  }
+  return isSharedSuffix(domain)
+    ? `${domain} is a suffix anyone can register a site under, so trusting it trusts every site below it. Name the site instead (stratuslabs.github.io, not github.io)`
+    : undefined;
 };
 
 /**
