@@ -11318,6 +11318,9 @@ const botMention = (input: { user: string; text: string; ts: string; thread?: st
   },
 });
 
+/** A team agent's line without the reply-tag hint, for tests about routing. */
+const plainAgentLine = (message: string): string => message.replace(/^(\S+) \(an agent; it sees your answer only if you tag <@[^>]+>\):/, '$1:');
+
 const agentMentionAdapter = (agentMentions?: { team?: Record<string, string>; only?: string[] }) => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
@@ -11366,8 +11369,8 @@ test('with agent mentions on, a team agent tagging this one gets an answer in it
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.sessionId, dispatch.userMessage]), [
-    ['slack:ava:T1:C1:110.0', 'nova: can you check CI?'],
-    ['slack:ava:T1:C1:111.1', 'bea: and the deploy?'],
+    ['slack:ava:T1:C1:110.0', 'nova (an agent; it sees your answer only if you tag <@U-NOVA>): can you check CI?'],
+    ['slack:ava:T1:C1:111.1', 'bea (an agent; it sees your answer only if you tag <@B-BEA>): and the deploy?'],
   ]);
   assert.deepEqual(trusts, ['unknown', 'unknown']);
   assert.equal(webAva.posts[0]?.thread_ts, '110.0');
@@ -11387,7 +11390,7 @@ test('with a whitelist, only the listed team agents are answered', async () => {
   await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> hi', ts: '130.1' }));
   await socketAva.deliver('app_mention', botMention({ user: 'B-BEA', text: '<@B-AVA> hi', ts: '130.2' }));
   await adapter.stop();
-  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['bea: hi']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['bea (an agent; it sees your answer only if you tag <@B-BEA>): hi']);
   assert.ok(logs.some((line) => line.includes('nova') && line.includes('not on its agent mention list')), logs.join('\n'));
 });
 
@@ -11408,7 +11411,7 @@ test('two agents tagging each other in a thread stop at the hop limit, and a per
   await socketAva.deliver('message', channelMessage({ text: 'ok you two, one more', ts: '150.7', thread: '150.0' }));
   await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> round 7', ts: '150.8', thread: '150.0' }));
   await adapter.stop();
-  const fromNova = gateway.dispatches.filter((dispatch) => dispatch.userMessage.startsWith('nova:')).map((dispatch) => dispatch.userMessage);
+  const fromNova = gateway.dispatches.map((dispatch) => plainAgentLine(dispatch.userMessage)).filter((message) => message.startsWith('nova:'));
   assert.deepEqual(fromNova, ['nova: round 1', 'nova: round 2', 'nova: round 3', 'nova: round 4', 'nova: round 7']);
   assert.ok(logs.some((line) => line.includes('hop limit')), logs.join('\n'));
 });
@@ -11427,7 +11430,7 @@ test('a team agent cannot stop this agent\'s turn, even listed as an approver', 
   await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> stop', ts: '160.1' }));
   await adapter.stop();
   // Not a stop: an ordinary message from Nova.
-  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['nova: stop']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => plainAgentLine(dispatch.userMessage)), ['nova: stop']);
 });
 
 test('a configured team agent id counts only in the receiving agent\'s own workspace', async () => {
@@ -11483,7 +11486,7 @@ test('a team agent asking one agent something does not take the thread from the 
   await beaTurn;
   await adapter.stop();
 
-  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, plainAgentLine(dispatch.userMessage)]), [
     ['ava', 'Dylan: plan it'],
     ['bea', 'nova: what is blocking?'],
     ['ava', 'Dylan: go on'],

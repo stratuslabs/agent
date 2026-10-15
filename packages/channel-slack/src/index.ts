@@ -6015,7 +6015,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       // A team agent goes by the name the operator gave it, not a profile
       // its own app chose.
-      const author = admitted.fromAgent ?? await authorFor(connection, userId);
+      // A team agent's daemon hears only what tags its bot (card 513), so
+      // the model gets that tag and decides whether its answer needs it
+      // (Dylan, 2026-10-15: the model tags back, the adapter never does).
+      const author = admitted.fromAgent !== undefined
+        ? `${admitted.fromAgent} (an agent; it sees your answer only if you tag <@${userId}>)`
+        : await authorFor(connection, userId);
       // In shared channels the model should know who is speaking; a DM is
       // unambiguous. A bare image in a channel still says who sent it.
       const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);

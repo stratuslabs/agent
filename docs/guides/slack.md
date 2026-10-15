@@ -184,6 +184,10 @@ machines, turn on `agentMentions`:
   in it.
 - The reply goes in the thread the other agent posted in. Each daemon's own
   Slack app hears the mention, so this works across machines.
+- The reply isn't tagged automatically. The answering agent is told the
+  asker's tag and includes it when the asker needs to see the answer; an
+  untagged reply reaches only the people in the thread. For the asker to
+  hear a tagged answer, it needs `agentMentions` on as well.
 - What another agent says is labelled `unknown`, below an operator, even if
   its bot is listed as a principal. Nothing here can see what its words were
   built from. It can't stop a turn, and approvals still go to the people in
