@@ -39,8 +39,9 @@ here, for the same reason.
   UIs, which show the same list in their own window.
 - `--force` replaces an agent or skill already installed under that name.
   Without it those are skipped and everything else still installs. It
-  replaces the roster entry itself — if that entry is a symlink, the link
-  goes and the file it pointed at is left alone.
+  replaces the roster entry itself — if that entry is a symlink you made,
+  the link goes and the file it pointed at is left alone — and the soul in
+  the agent's own folder in [`~/Agents`](../reference/state-layout.md#the-agents-folder).
 
 A running daemon holds its roster and its plugins in memory, so anything a
 template adds needs `stratus restart` before it is served — a new agent as
@@ -52,7 +53,7 @@ much as a new plugin.
 | --- | --- |
 | `template.json` | `name` and `description`, shown in the review. The only required file. |
 | `config.json` | Merged into `~/.stratus/config.json`. Keys under `plugins` name the packages to install and enable. |
-| `agents/*.md` | [Soul files](../concepts/agents.md#soul-files), copied to `~/.stratus/agents/`. The filename is the id. |
+| `agents/*.md` | [Soul files](../concepts/agents.md#soul-files), each installed as `~/Agents/<id>/soul.md` and linked from `~/.stratus/agents/` (see [the agents folder](../reference/state-layout.md#the-agents-folder)). The filename is the id. |
 | `skills/<id>/SKILL.md` | [Skills](./skills.md), installed exactly as `stratus skill add` installs them. |
 | `README.md` | For whoever reads the template. The installer ignores it. |
 

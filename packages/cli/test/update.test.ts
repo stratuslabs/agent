@@ -19,6 +19,8 @@ import {
 } from '../src/index.ts';
 import { defaultUpdateContinuation } from '../src/commands/update.ts';
 import {
+  agentsDirPath,
+  agentWorkspacePath,
   credentialsPath,
   readStateStamp,
   runStateMigrations,
@@ -1274,4 +1276,23 @@ test('a resumed update that throws after taking over still restarts the daemon i
   assert.equal(code, 1);
   assert.match(output.stderr, /Update failed: EIO/);
   assert.ok(starts.length > 0, 'the daemon the first half stopped must be started again');
+});
+
+test('update --check counts a pending move into the agents folder as actionable', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await runStateMigrations(env, { exclusive: true });
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentsDirPath(env), 'ava.md'), '---\nid: ava\nname: Ava\n---\nYou are Ava.\n');
+
+  const check = createStreams();
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams: check.streams,
+    env: { ...env, serviceRunner: runningServiceRunner, packageVersionFetcher: async () => CLI_VERSION },
+  });
+  assert.equal(code, 1, check.output.stdout);
+  assert.match(check.output.stdout, /agents +1 soul\(s\) and 1 workspace\(s\) to move into .*Agents/);
+  assert.doesNotMatch(check.output.stdout, /Nothing to do/);
+  await assert.rejects(() => stat(path.join(home, 'Agents')), 'the check moves nothing');
 });

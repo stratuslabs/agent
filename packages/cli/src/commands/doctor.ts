@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   agentsDirPath,
+  planAgentsHome,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
   globalConfigPath,
@@ -185,6 +186,14 @@ export interface DoctorReport {
   slackAgents: string[];
   slackPackageInstalled: boolean;
   rosterCount: number;
+  /**
+   * The visible folder souls and workspaces live in (`~/Agents`, or
+   * `~/Stratus` when `~/Agents` belongs to something else, or what
+   * `STRATUS_AGENTS_DIR` names), as `planAgentsHome` decides it for `serve`
+   * too. `claimed` is false for a folder the next start would create.
+   * Absent when there is none, with the reason.
+   */
+  agentsFolder?: { path: string; claimed: boolean; pending: number } | { reason: string };
   /** The running daemon, as it reports itself. */
   daemon: DoctorDaemon;
   problems: string[];
@@ -704,6 +713,34 @@ export const collectDoctorReport = async (
     );
   }
 
+  // The same plan `serve` acts on: where the folder is (or why there is
+  // none here), what the next start would move, and what is broken. A soul
+  // or workspace link whose folder was deleted or renamed: the soul drops
+  // out of the roster with a warning, and a missing workspace only comes
+  // back empty on the next write, so say which. And a soul in the folder
+  // nothing links to, which the roster never reads.
+  let agentsFolder: DoctorReport['agentsFolder'];
+  try {
+    const plan = await planAgentsHome(env);
+    agentsFolder = plan.agentsHome !== undefined
+      ? { path: plan.agentsHome, claimed: plan.claimed, pending: plan.souls.length + plan.workspaces.length }
+      : { reason: plan.reason ?? 'none available' };
+    if (plan.dangling.length > 0) {
+      problems.push(
+        `These link into the agents folder, but what they point at is gone: ${plan.dangling.join(', ')}. `
+        + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace is recreated empty on the next write.',
+      );
+    }
+    if (plan.unlinked.length > 0) {
+      problems.push(
+        `These souls are in the agents folder but no agent reads them: ${plan.unlinked.join(', ')}. `
+        + 'Probably left by an `agent new` or `template add` that was stopped partway: run it again, or delete the folder if you don\'t want the agent.',
+      );
+    }
+  } catch (error) {
+    problems.push(error instanceof Error ? error.message : String(error));
+  }
+
   // The invisible failure doctor exists to surface: the service unit embeds
   // absolute node and entrypoint paths, and upgrading node (an nvm version
   // directory, say) leaves the unit pointing at an interpreter that no
@@ -774,6 +811,7 @@ export const collectDoctorReport = async (
     slackAgents,
     slackPackageInstalled,
     rosterCount,
+    ...(agentsFolder !== undefined ? { agentsFolder } : {}),
     daemon,
     problems,
   };
@@ -823,6 +861,14 @@ export const runDoctor = async (
     writeLine(streams.stdout, `            (${shadowedPath} exists but is outranked)`);
   }
   writeLine(streams.stdout, `  agents    ${report.rosterCount} soul file${report.rosterCount === 1 ? '' : 's'}`);
+  const folder = report.agentsFolder;
+  writeLine(streams.stdout, `            ${folder === undefined
+    ? 'agents folder unknown'
+    : 'reason' in folder
+      ? `no visible agents folder (${folder.reason}), so souls and workspaces stay in ~/.stratus/agents`
+      : folder.claimed
+        ? `in ${folder.path}${folder.pending > 0 ? ` (${folder.pending} more to move there on the next start)` : ''}`
+        : `${folder.path} is created on the next start${folder.pending > 0 ? `, and ${folder.pending} soul(s) or workspace(s) move there` : ''}`}`);
 
   if (report.fallback) {
     writeLine(streams.stdout, `  ${'fallback'.padEnd(10)}${report.fallback.provider} · ${report.fallback.model}`);

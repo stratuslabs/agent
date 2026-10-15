@@ -75,6 +75,14 @@ skills:
 You are a sharp, warm generalist assistant. Answer first, explain second...
 ```
 
+Each agent's soul lives in its own folder in `~/Agents` in your home
+directory, as `~/Agents/<id>/soul.md`, beside the `workspace/` its tools
+write into, so you can open and edit it without showing hidden files.
+`~/.stratus/agents/<id>.md` is a link to it, and is still the name
+`stratus agents`, `--soul` and the roster use. When `~/Agents` already
+belongs to something else the folder is `~/Stratus`; see
+[the agents folder](../reference/state-layout.md#the-agents-folder).
+
 Every agent is also told, ahead of its persona, how to reply in chat: like
 a text message — usually one to four short sentences, the answer first, no
 preamble, recap, or closing offer, and headers or bullets only where they
