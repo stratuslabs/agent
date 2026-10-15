@@ -11430,6 +11430,23 @@ test('two agents tagging each other in a thread stop at the hop limit, and a per
   assert.ok(logs.some((line) => line.includes('hop limit')), logs.join('\n'));
 });
 
+test('a delayed copy of an older human message does not reset newer agent hops', async () => {
+  const { socketAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  await adapter.start(gateway);
+  for (let hop = 1; hop <= 4; hop += 1) {
+    await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${hop}`, ts: `155.${hop}`, thread: '155.0' }));
+  }
+  // Another agent's socket delivers a person's message that predates every hop.
+  await socketAva.deliver('message', channelMessage({ text: 'earlier note', ts: '155.05', thread: '155.0' }));
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> round 5', ts: '155.5', thread: '155.0' }));
+  // A person speaking after the hops still resets the run.
+  await socketAva.deliver('message', channelMessage({ text: 'carry on', ts: '155.6', thread: '155.0' }));
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> round 6', ts: '155.7', thread: '155.0' }));
+  await adapter.stop();
+  const fromNova = gateway.dispatches.map((dispatch) => plainAgentLine(dispatch.userMessage)).filter((message) => message.startsWith('nova:'));
+  assert.deepEqual(fromNova, ['nova: round 1', 'nova: round 2', 'nova: round 3', 'nova: round 4', 'nova: round 6']);
+});
+
 test('a team agent cannot stop this agent\'s turn, even listed as an approver', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

@@ -2933,6 +2933,20 @@ interface AgentConnection {
 /** Uncached author names one `message.read` looks up; the rest keep their id. */
 const READ_NAME_LOOKUPS = 10;
 
+/**
+ * Orders two Slack message timestamps ("seconds.micros"). Compared as
+ * integers, not floats: a current ts has more digits than a double holds.
+ */
+const compareSlackTs = (left: string, right: string): number => {
+  const [leftSeconds = '0', leftMicros = ''] = left.split('.');
+  const [rightSeconds = '0', rightMicros = ''] = right.split('.');
+  const seconds = Number(leftSeconds) - Number(rightSeconds);
+  if (seconds !== 0) {
+    return Math.sign(seconds);
+  }
+  return Math.sign(Number(leftMicros.padEnd(6, '0').slice(0, 6)) - Number(rightMicros.padEnd(6, '0').slice(0, 6)));
+};
+
 export const createSlackChannelAdapter = (options: SlackAdapterOptions): ChannelAdapter => {
   const log = options.log ?? (() => {});
   const warn = options.warn ?? (() => {});
@@ -5542,8 +5556,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     if (event && event.user !== undefined && event.channel_type !== 'im' && isPersonSpeaking(event) && admitsSender(connection.config, event.user)) {
       // A person this agent admits, speaking in a thread, ends a run of
-      // agent mentions there. Someone it refuses can't restart one.
-      agentHops.delete(threadKeyFor({ team: args.body?.team_id ?? connection.teamId, conversation: event.channel, thread: event.thread_ts ?? event.ts }));
+      // agent mentions there. Someone it refuses can't restart one. Only
+      // hops before the person's message reset: another agent's socket can
+      // deliver an older human message late, after newer hops.
+      const hopKey = threadKeyFor({ team: args.body?.team_id ?? connection.teamId, conversation: event.channel, thread: event.thread_ts ?? event.ts });
+      const hops = agentHops.get(hopKey);
+      if (hops) {
+        const newer = hops.filter((hop) => compareSlackTs(hop, event.ts) > 0);
+        if (newer.length > 0) {
+          agentHops.set(hopKey, newer);
+        } else {
+          agentHops.delete(hopKey);
+        }
+      }
     }
     if (!gatewayRef || !event || !event.user || event.bot_id || !isPersonSpeaking(event)) {
       return undefined;
