@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { constants, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { type Dirent, constants, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import {
   copyFile,
   link,
@@ -227,6 +227,11 @@ const decideAgentsHomeName = (env: StateEnvironment): NameDecision => {
     const directory = path.join(home, name);
     return { directory, state: candidateState(directory) };
   });
+  // A folder known to be ours is used whatever the other name is.
+  const ours = candidates.find((candidate) => candidate.state === 'ours');
+  if (ours !== undefined) {
+    return { agentsHome: ours.directory };
+  }
   const unreadable = candidates.find((candidate) => typeof candidate.state === 'object');
   if (unreadable !== undefined && typeof unreadable.state === 'object') {
     return { reason: `${unreadable.directory} cannot be read (${unreadable.state.unreadable}), so whether it is Stratus's is unknown` };
@@ -849,6 +854,16 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
   // Souls first, then workspaces, the order the pass reports them in.
   const blockedWorkspaces: string[] = [];
   for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+    // One entry that cannot be inspected (an agent's state directory with
+    // restrictive permissions) is that entry's line, never a failed plan:
+    // `serve` plans on every start, and one agent must not stop the rest.
+    try {
+      await inspectEntry(entry);
+    } catch (error) {
+      plan.blocked.push(`${entry.name} (could not be inspected: ${errnoOf(error) ?? (error instanceof Error ? error.message : String(error))})`);
+    }
+  }
+  async function inspectEntry(entry: Dirent): Promise<void> {
     const entryPath = path.join(agentsDirPath(env), entry.name);
     if (entry.name.endsWith('.md')) {
       if (entry.isFile()) {
@@ -864,10 +879,10 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
       } else if (entry.isSymbolicLink()) {
         links.push({ link: entryPath, target: path.resolve(path.dirname(entryPath), await readlink(entryPath)) });
       }
-      continue;
+      return;
     }
     if (!entry.isDirectory() || !isValidAgentId(entry.name)) {
-      continue;
+      return;
     }
     const workspace = agentWorkspacePath(env, entry.name);
     const info = await lstatOrUndefined(workspace);
@@ -894,7 +909,8 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     return plan;
   }
   for (const { link, target } of links) {
-    if (insideOrAt(agentsHome, target) && await lstatOrUndefined(target) === undefined) {
+    const gone = await lstatOrUndefined(target).then((info) => info === undefined, () => false);
+    if (insideOrAt(agentsHome, target) && gone) {
       plan.dangling.push(`${link} -> ${target}`);
     }
   }

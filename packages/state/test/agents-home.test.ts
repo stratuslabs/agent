@@ -603,3 +603,41 @@ test('STRATUS_AGENTS_DIR is refused when a link leads it into the Stratus home',
     assert.throws(() => resolveAgentsHome(env), /inside .*\.stratus/, named);
   }
 });
+
+test('an ~/Agents that is ours is used even when ~/Stratus cannot be read', async (t) => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) {
+    t.skip('mode 000 does not deny access here');
+    return;
+  }
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  assert.equal(claimAgentsHome(env), path.join(home, 'Agents'));
+  const other = path.join(home, 'Stratus');
+  await mkdir(other);
+  await fs.promises.chmod(other, 0o000);
+  t.after(() => fs.promises.chmod(other, 0o755));
+  assert.equal(resolveAgentsHome(env), path.join(home, 'Agents'));
+});
+
+test('one agent whose state cannot be inspected is named, and the others still plan and move', async (t) => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) {
+    t.skip('mode 000 does not deny access here');
+    return;
+  }
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentsDirPath(env), 'ava.md'), soulText('ava'));
+  const locked = agentStateDirPath(env, 'bea');
+  await mkdir(path.join(locked, 'workspace'), { recursive: true });
+  await fs.promises.chmod(locked, 0o000);
+  t.after(() => fs.promises.chmod(locked, 0o755));
+
+  const plan = await planAgentsHome(env);
+  assert.deepEqual(plan.souls, ['ava.md']);
+  assert.deepEqual(plan.workspaces, ['ava']);
+  assert.match(plan.blocked.join('\n'), /bea \(could not be inspected: EACCES\)/);
+  const report = await surfaceAgentsHome(env);
+  assert.match(report ?? '', /moved 1 soul\(s\) and 1 workspace\(s\)/);
+  assert.match(report ?? '', /left in place: bea/);
+});
