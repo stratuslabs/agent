@@ -263,15 +263,18 @@ export interface ShellToolOptions {
  * operator repairs it.
  */
 const recordedLabel = async (ledger: TaintedWriteLedger, agentId: string): Promise<TrustLevel> => {
-  // Bounded: a ledger path replaced by a FIFO never finishes reading, and a
-  // command must not wait on it either before it starts or after it exits.
+  // Bounded as well, for a ledger this plugin did not open: the file ledger
+  // refuses a FIFO or device before reading it, but a host-supplied one, or
+  // a stalled network filesystem, could still never answer, and a command
+  // must not wait on it either before it starts or after it exits. Not
+  // unref'd: it is cleared below, and an unref'd bound is one a process
+  // with nothing else running exits through instead of waiting out.
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const snapshot = await Promise.race([
       ledger.snapshot(agentId),
       new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), LEDGER_READ_TIMEOUT_MS);
-        timer.unref?.();
       }),
     ]);
     return snapshot === undefined ? 'external' : leastTrusted('unknown', ...Object.values(snapshot));

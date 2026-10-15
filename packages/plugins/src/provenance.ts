@@ -243,6 +243,28 @@ export const ledgerTrustOfContent = (raw: string): TrustLevel | undefined => {
  * had a ledger at the blocked path anyway. `prepareFor` defaults to
  * `workspaceFor` for a host that wires this by hand with one resolver.
  */
+/**
+ * Opens the ledger, refusing anything but a regular file before a byte is
+ * read. The name can be replaced with a FIFO or a device: a read of a FIFO
+ * nobody writes to never returns, and abandoning it doesn't cancel it, so
+ * each one would hold a libuv worker for good until unrelated file I/O
+ * stalls. `O_NONBLOCK` lets the open itself return for a FIFO, and the
+ * check runs on the descriptor that was opened, so a swap after it can't
+ * slip a different file in.
+ */
+const openLedger = async (filePath: string, flags: number, mode?: number): Promise<FileHandle> => {
+  const handle = await open(filePath, flags | constants.O_NONBLOCK, mode);
+  try {
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(`The filesystem provenance ledger is not a regular file: ${filePath}. Remove it to start over; the cost is that files written by earlier tainted sessions read as the agent's own.`);
+    }
+    return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+};
+
 export const createFileLedger = (
   workspaceFor: (agentId: string) => string,
   prepareFor: (agentId: string) => string = workspaceFor,
@@ -253,7 +275,12 @@ export const createFileLedger = (
   const read = async (agentId: string): Promise<Record<string, TrustLevel>> => {
     const filePath = ledgerPath(agentId);
     try {
-      return parseLedger(await readFile(filePath, 'utf8'), filePath);
+      const handle = await openLedger(filePath, constants.O_RDONLY);
+      try {
+        return parseLedger((await handle.readFile()).toString('utf8'), filePath);
+      } finally {
+        await handle.close();
+      }
     } catch (error) {
       // No ledger yet, or a workspace root that is not a directory: either
       // way nothing has been recorded. A tainted write still fails when it
@@ -287,7 +314,7 @@ export const createFileLedger = (
       // would put the record in some other file while the bytes it
       // describes land where the resolver already decided. O_APPEND keeps
       // the write itself atomic against a peer's.
-      const handle = await open(filePath, constants.O_RDWR | constants.O_CREAT | constants.O_APPEND, 0o600);
+      const handle = await openLedger(filePath, constants.O_RDWR | constants.O_CREAT | constants.O_APPEND, 0o600);
       try {
         // Tightened before the append, like the memory file: the mode on
         // open applies only when it creates the file.

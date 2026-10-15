@@ -346,8 +346,10 @@ const settleWithin = async <T>(value: T | Promise<T>, ms: number): Promise<T> =>
     return await Promise.race([
       Promise.resolve(value),
       new Promise<never>((_, reject) => {
+        // Not unref'd: cleared below either way, and an unref'd bound lets a
+        // process with nothing else running exit mid-turn instead of
+        // labelling the result (`stratus run`, or a test on Node 22).
         timer = setTimeout(() => reject(new Error('settleTrust timed out')), ms);
-        timer.unref?.();
       }),
     ]);
   } finally {
