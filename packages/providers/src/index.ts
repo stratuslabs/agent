@@ -1,5 +1,6 @@
 import {
   ContextOverflowError,
+  redactedError,
   redactSecrets,
   isUnaddressedTurn,
   transcriptOf,
@@ -425,35 +426,6 @@ const headerSecrets = (headers: Record<string, string>): string[] =>
       : undefined;
     return credential === undefined ? asSent(value) : [...asSent(value), credential];
   });
-
-/**
- * The error with every secret redacted, in place where it can be, so its
- * class and identity survive (an abort is still the caller's abort). Only
- * touched when something changes: some errors (a DOMException's message)
- * cannot be written, and those that carry a secret are replaced by a plain
- * Error with the redacted text rather than thrown as they are.
- */
-const redactedError = (error: unknown, secrets: string[]): unknown => {
-  if (!(error instanceof Error)) {
-    return error;
-  }
-  const message = redactSecrets(error.message, secrets);
-  const stack = typeof error.stack === 'string' ? redactSecrets(error.stack, secrets) : undefined;
-  if (message === error.message && stack === error.stack) {
-    return error;
-  }
-  try {
-    error.message = message;
-    if (stack !== undefined) {
-      error.stack = stack;
-    }
-    return error;
-  } catch {
-    const replacement = new Error(message);
-    replacement.name = error.name;
-    return replacement;
-  }
-};
 
 export const createOpenAICompatibleProvider = ({
   model,

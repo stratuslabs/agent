@@ -10,7 +10,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
   ContextOverflowError,
-  redactSecrets,
+  redactedError,
   transcriptOf,
   isUnaddressedTurn,
   droppedImageNote,
@@ -989,13 +989,7 @@ export const createAnthropicProvider = ({
       try {
         return await provider.generate(request);
       } catch (error) {
-        if (error instanceof Error) {
-          error.message = redactSecrets(error.message, secrets);
-          if (typeof error.stack === 'string') {
-            error.stack = redactSecrets(error.stack, secrets);
-          }
-        }
-        throw error;
+        throw redactedError(error, secrets);
       }
     },
   };
