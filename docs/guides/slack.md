@@ -161,7 +161,8 @@ machines, turn on `agentMentions`:
 // ~/.stratus/config.json (trusted configs only)
 {
   "slack": {
-    // Agents served by other daemons, by name: their Slack bot user ids.
+    // Agents served by other daemons, by name: their Slack bot user ids,
+    // in the same workspace as the agents that answer them.
     // This daemon's own agents are on the team already.
     "team": { "blair": "U0123ABCD", "nova": "U0456EFGH" },
     // On for every agent on this daemon...

@@ -4949,6 +4949,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (speaker === undefined || isFleetBot(team, event.user)) {
       return;
     }
+    // A team agent asking one of this daemon's agents something (card 513)
+    // is a question, not another voice taking the thread: the agent asked
+    // answers it, and the thread stays with whoever held it.
+    const asker = event.user;
+    if (asker !== undefined && [...botIdentities].some(([agentId, identity]) =>
+      identity.teamId === team && mentions(event.text ?? '', identity.botUserId) && answersAgentMention(agentId, team, asker))) {
+      return;
+    }
     const thread = event.thread_ts ?? event.ts;
     rememberAddressee(threadKeyFor({ team, conversation: event.channel, thread }), `${FOREIGN_SPEAKER_PREFIX}${speaker}`, event.ts);
   };
@@ -5400,19 +5408,42 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const agentHops = new Map<string, string[]>();
 
-  /** Which team agent a bot user is, as `connection` sees it, if any. */
-  const teamAgentFor = (connection: AgentConnection, team: string, botUser: string): string | undefined => {
+  /**
+   * Which team agent a bot user in `team` is, for the agent configured by
+   * `config` in workspace `agentTeam`, if any. A configured id counts only
+   * in that agent's own workspace: user ids are unique per workspace, so the
+   * same id elsewhere is some other bot.
+   */
+  const teamAgentFor = (config: SlackAgentConfig, agentTeam: string | undefined, team: string, botUser: string): string | undefined => {
     for (const [agentId, identity] of botIdentities) {
       if (identity.teamId === team && identity.botUserId === botUser) {
         return agentId;
       }
     }
-    for (const [name, id] of Object.entries(connection.config.agentMentions?.team ?? {})) {
+    if (agentTeam === undefined || agentTeam !== team) {
+      return undefined;
+    }
+    for (const [name, id] of Object.entries(config.agentMentions?.team ?? {})) {
       if (id === botUser) {
         return name;
       }
     }
     return undefined;
+  };
+
+  /**
+   * Whether `agentId` answers a mention from `botUser` in `team`: it has
+   * agent mentions on, the bot is a team agent to it, and on its list if it
+   * keeps one. The hop limit is not asked here.
+   */
+  const answersAgentMention = (agentId: string, team: string, botUser: string): boolean => {
+    const config = agentConfigFor(agentId);
+    const settings = config?.agentMentions;
+    if (!config || !settings) {
+      return false;
+    }
+    const name = teamAgentFor(config, botIdentities.get(agentId)?.teamId, team, botUser);
+    return name !== undefined && (settings.only === undefined || settings.only.includes(name));
   };
 
   /**
@@ -5440,7 +5471,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return undefined;
     }
     const team = args.body?.team_id ?? connection.teamId;
-    const name = teamAgentFor(connection, team, event.user);
+    const name = teamAgentFor(connection.config, connection.teamId, team, event.user);
     if (name === undefined) {
       return undefined;
     }

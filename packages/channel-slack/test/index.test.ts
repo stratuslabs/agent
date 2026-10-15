@@ -11429,3 +11429,63 @@ test('a team agent cannot stop this agent\'s turn, even listed as an approver', 
   // Not a stop: an ordinary message from Nova.
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['nova: stop']);
 });
+
+test('a configured team agent id counts only in the receiving agent\'s own workspace', async () => {
+  const { socketAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  await adapter.start(gateway);
+  // The same id in another workspace is some other bot.
+  const elsewhere = botMention({ user: 'U-NOVA', text: '<@B-AVA> hi', ts: '170.1' });
+  await socketAva.deliver('app_mention', { ...elsewhere, body: { ...elsewhere.body, team_id: 'T2' } });
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches, []);
+});
+
+test('a team agent asking one agent something does not take the thread from the agent that holds it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  let releaseBea!: () => void;
+  const gateBea = new Promise<void>((resolve) => {
+    releaseBea = resolve;
+  });
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    if (sessionId.startsWith('slack:bea:')) {
+      await gateBea;
+    }
+    return sessionWithReply(sessionId, 'ok');
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', agentMentions: { team: { nova: 'U-NOVA' } } },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Dylan's thread with Ava.
+  const toAva = channelMessage({ text: '<@B-AVA> plan it', ts: '180.1', thread: '180.0' });
+  await socketAva.deliver('message', toAva);
+  await socketBea.deliver('message', toAva);
+  // Nova, on another daemon, asks Bea something there; Bea is still working.
+  const fromNova = botMention({ user: 'U-NOVA', text: '<@B-BEA> what is blocking?', ts: '180.2', thread: '180.0', type: 'message' });
+  await socketAva.deliver('message', fromNova);
+  const beaTurn = socketBea.deliver('message', fromNova);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  // Dylan's untagged reply is still Ava's.
+  const followUp = channelMessage({ text: 'go on', ts: '180.3', thread: '180.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  releaseBea();
+  await beaTurn;
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: plan it'],
+    ['bea', 'nova: what is blocking?'],
+    ['ava', 'Dylan: go on'],
+  ]);
+});
