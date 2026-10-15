@@ -2063,6 +2063,13 @@ const APPROVAL_SUMMARY_LIMIT = 160;
  */
 const HUMAN_MESSAGE_SUBTYPES = new Set(['file_share', 'me_message', 'thread_broadcast']);
 
+/**
+ * Message subtypes that are another agent's bot speaking (card 513): a plain
+ * bot post, an upload with a comment, or a thread reply also sent to the
+ * channel. Edits, deletions and joins are never a mention to answer.
+ */
+const AGENT_SPEECH_SUBTYPES = new Set(['bot_message', 'file_share', 'thread_broadcast']);
+
 const isPersonSpeaking = (event: SlackInboundEvent): boolean =>
   event.subtype === undefined || HUMAN_MESSAGE_SUBTYPES.has(event.subtype);
 
@@ -5468,7 +5475,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if ((event.type !== 'app_mention' && event.type !== 'message') || event.channel_type === 'im') {
       return undefined;
     }
-    if (event.subtype !== undefined && event.subtype !== 'bot_message') {
+    if (event.subtype !== undefined && !AGENT_SPEECH_SUBTYPES.has(event.subtype)) {
       return undefined;
     }
     const text = event.text ?? '';

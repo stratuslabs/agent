@@ -11304,7 +11304,7 @@ test('an untagged stop does not reach a mentions-listening agent when another ag
 // --- Agent-to-agent mentions (card 513) ---------------------------------
 
 /** A message another agent's bot posted: `user` is its bot user, `bot_id` marks it a bot. */
-const botMention = (input: { user: string; text: string; ts: string; thread?: string; type?: 'app_mention' | 'message' }) => ({
+const botMention = (input: { user: string; text: string; ts: string; thread?: string; type?: 'app_mention' | 'message'; subtype?: string }) => ({
   body: { team_id: 'T1', event_id: `evt-bot-${input.user}-${input.ts}-${input.type ?? 'app_mention'}` },
   event: {
     type: input.type ?? 'app_mention',
@@ -11315,6 +11315,7 @@ const botMention = (input: { user: string; text: string; ts: string; thread?: st
     ts: input.ts,
     channel: 'C1',
     ...(input.thread ? { thread_ts: input.thread } : {}),
+    ...(input.subtype ? { subtype: input.subtype } : {}),
   },
 });
 
@@ -11374,6 +11375,19 @@ test('with agent mentions on, a team agent tagging this one gets an answer in it
   ]);
   assert.deepEqual(trusts, ['unknown', 'unknown']);
   assert.equal(webAva.posts[0]?.thread_ts, '110.0');
+});
+
+test('a team agent tagging this one in a file share or thread broadcast is answered; an edit is not', async () => {
+  const { socketAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  await adapter.start(gateway);
+  await socketAva.deliver('message', botMention({ user: 'U-NOVA', text: '<@B-AVA> here is the log', ts: '115.1', type: 'message', subtype: 'file_share' }));
+  await socketAva.deliver('message', botMention({ user: 'U-NOVA', text: '<@B-AVA> also posting this to the channel', ts: '116.1', thread: '116.0', type: 'message', subtype: 'thread_broadcast' }));
+  await socketAva.deliver('message', botMention({ user: 'U-NOVA', text: '<@B-AVA> edited', ts: '117.1', type: 'message', subtype: 'message_changed' }));
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.sessionId, plainAgentLine(dispatch.userMessage)]), [
+    ['slack:ava:T1:C1:115.1', 'nova: here is the log'],
+    ['slack:ava:T1:C1:116.0', 'nova: also posting this to the channel'],
+  ]);
 });
 
 test('a bot that is not on the team is ignored even with agent mentions on', async () => {
