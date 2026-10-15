@@ -444,6 +444,10 @@ export const createOpenAICompatibleProvider = ({
   }
 
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+  // Copied once: what is sent and what is redacted are the same values, so
+  // a caller mutating its object later cannot send a credential the
+  // redaction never heard of.
+  const configuredHeaders: Record<string, string> = { ...headers };
 
   const provider = defineProvider({
     name,
@@ -476,7 +480,7 @@ export const createOpenAICompatibleProvider = ({
             headers: {
               'content-type': 'application/json',
               authorization: `Bearer ${apiKey}`,
-              ...headers,
+              ...configuredHeaders,
             },
             body: JSON.stringify({
               model,
@@ -511,7 +515,7 @@ export const createOpenAICompatibleProvider = ({
           : reportedMessage != null
             ? JSON.stringify(reportedMessage)
             : payload.rawText ?? `Provider request failed with status ${response.status}`;
-        const message = redactSecrets(reported, [...asSent(apiKey), ...headerSecrets(headers)]);
+        const message = redactSecrets(reported, [...asSent(apiKey), ...headerSecrets(configuredHeaders)]);
         // The transcript did not fit. Reported as the one provider failure
         // the kernel can act on — it answers by sending less history —
         // rather than as the final error every other 400 here is. Matched
@@ -645,7 +649,7 @@ export const createOpenAICompatibleProvider = ({
   // the error branch (a 200's structured refusal). Redacted once here, on
   // every error, so no path has to remember to. The classification above
   // still reads the raw text; this only changes what is thrown.
-  const secrets = [...asSent(apiKey), ...headerSecrets(headers)];
+  const secrets = [...asSent(apiKey), ...headerSecrets(configuredHeaders)];
   return {
     ...provider,
     async generate(request) {

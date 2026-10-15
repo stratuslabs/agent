@@ -1853,3 +1853,24 @@ test('a structured refusal that repeats the key is redacted like an error body',
     },
   );
 });
+
+test('a headers object changed after construction neither sends nor leaks a value the redaction never saw', async () => {
+  const headers: Record<string, string> = { authorization: 'Bearer first-secret-token' };
+  let sent = '';
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'sk-secret-value',
+    headers,
+    fetch: (async (_url: string, init: RequestInit) => {
+      sent = (init.headers as Record<string, string>).authorization ?? '';
+      return { ok: false, status: 401, text: async () => JSON.stringify({ error: { message: `bad token ${sent}` } }) };
+    }) as unknown as typeof fetch,
+  });
+  headers.authorization = 'Bearer second-secret-token';
+  await assert.rejects(() => provider.generate(createRequest()), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.ok(!error.message.includes('secret-token'), error.message);
+    return true;
+  });
+  assert.equal(sent, 'Bearer first-secret-token');
+});
