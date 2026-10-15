@@ -2,6 +2,7 @@ import { ago, duration, el, until } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
 import { alwaysOffer } from '../lib/grants.js';
+import { servingRow } from '../lib/serving.js';
 import { isActive, navigate, refreshCore, store } from '../app.js';
 
 export const activityPanel = (filter) => {
@@ -121,11 +122,15 @@ const quickStats = () => {
     health?.runtimes?.length
       ? el('div', {},
           el('h3', {}, 'Serving'),
-          el('div', { class: 'rows' }, ...health.runtimes.map((runtime) => el('div', { class: 'row' },
-            el('div', { class: 'grow' },
-              el('div', { class: 'title' }, runtime.model ? `${runtime.provider} · ${runtime.model}` : runtime.provider),
-              el('div', { class: 'sub' }, `credentials: ${runtime.credentials}`)),
-          ))))
+          el('div', { class: 'rows' }, ...health.runtimes.map((runtime) => {
+            const row = servingRow(runtime);
+            return el('div', { class: 'row' },
+              el('div', { class: 'grow' },
+                el('div', { class: row.problem ? 'title problem' : 'title' }, row.title, row.problem ? ' ' : null,
+                  row.problem ? el('span', { class: 'pill failed' }, 'not serving') : null),
+                el('div', { class: row.problem ? 'sub problem' : 'sub' }, row.detail)),
+            );
+          })))
       : null,
   );
 };
