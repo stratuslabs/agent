@@ -1825,3 +1825,31 @@ test('a credential configured with surrounding whitespace is redacted as sent', 
     });
   }
 });
+
+// Every error `generate` throws is stored, logged and posted, not only the
+// non-2xx ones: a 200 can carry the endpoint's words too.
+test('a structured refusal that repeats the key is redacted like an error body', async () => {
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'sk-secret-value',
+    headers: { 'x-api-key': 'hdr-secret' },
+    fetch: (async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: null, refusal: 'I will not use sk-secret-value or hdr-secret' }, finish_reason: 'stop' }],
+      }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(
+    () => provider.generate(createRequest()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Provider refused the request/);
+      assert.ok(!error.message.includes('sk-secret-value'), error.message);
+      assert.ok(!error.message.includes('hdr-secret'), error.message);
+      assert.ok(!(error.stack ?? '').includes('sk-secret-value'));
+      return true;
+    },
+  );
+});

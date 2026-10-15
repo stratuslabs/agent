@@ -426,6 +426,35 @@ const headerSecrets = (headers: Record<string, string>): string[] =>
     return credential === undefined ? asSent(value) : [...asSent(value), credential];
   });
 
+/**
+ * The error with every secret redacted, in place where it can be, so its
+ * class and identity survive (an abort is still the caller's abort). Only
+ * touched when something changes: some errors (a DOMException's message)
+ * cannot be written, and those that carry a secret are replaced by a plain
+ * Error with the redacted text rather than thrown as they are.
+ */
+const redactedError = (error: unknown, secrets: string[]): unknown => {
+  if (!(error instanceof Error)) {
+    return error;
+  }
+  const message = redactSecrets(error.message, secrets);
+  const stack = typeof error.stack === 'string' ? redactSecrets(error.stack, secrets) : undefined;
+  if (message === error.message && stack === error.stack) {
+    return error;
+  }
+  try {
+    error.message = message;
+    if (stack !== undefined) {
+      error.stack = stack;
+    }
+    return error;
+  } catch {
+    const replacement = new Error(message);
+    replacement.name = error.name;
+    return replacement;
+  }
+};
+
 export const createOpenAICompatibleProvider = ({
   model,
   apiKey,
@@ -444,7 +473,7 @@ export const createOpenAICompatibleProvider = ({
 
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
 
-  return defineProvider({
+  const provider = defineProvider({
     name,
     async generate(request) {
       const toolNames = createOpenAICompatibleToolNameMapping(request.tools);
@@ -638,6 +667,23 @@ export const createOpenAICompatibleProvider = ({
       return usage ? { ...result, usage } : result;
     },
   });
+
+  // Whatever leaves `generate` failed is stored on the turn, logged, and
+  // posted to the channel, and the endpoint's words reach it from more than
+  // the error branch (a 200's structured refusal). Redacted once here, on
+  // every error, so no path has to remember to. The classification above
+  // still reads the raw text; this only changes what is thrown.
+  const secrets = [...asSent(apiKey), ...headerSecrets(headers)];
+  return {
+    ...provider,
+    async generate(request) {
+      try {
+        return await provider.generate(request);
+      } catch (error) {
+        throw redactedError(error, secrets);
+      }
+    },
+  };
 };
 
 /**
