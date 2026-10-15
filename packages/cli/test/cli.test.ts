@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { EventEmitter, once } from 'node:events';
@@ -15047,4 +15047,28 @@ test('a continuation shows in --events and keeps its counts in the log', () => {
   const event = { type: 'session.continued' as const, sessionId: 's1', continuation: 2, turns: 40 };
   assert.equal(formatEvent(event), '• session.continued #2 (+40 turns)');
   assert.deepEqual(eventDetail(event), { continuation: 2, turns: 40 });
+});
+
+test('template add --force that cannot write the new soul keeps the agent it was replacing', async (t) => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) {
+    t.skip('mode 500 does not deny writes here');
+    return;
+  }
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-home-')));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const first = await writeTemplateDir({ 'template.json': EXAMPLE_MANIFEST, 'agents/scribe.md': EXAMPLE_SOUL });
+  assert.equal(await runCli({ argv: ['template', 'add', first, '--yes'], streams: createStreams().streams, env }), 0);
+  const roster = path.join(home, '.stratus', 'agents', 'scribe.md');
+  const folder = path.join(home, 'Agents', 'scribe');
+  assert.ok((await lstat(roster)).isSymbolicLink(), 'installed into the visible folder');
+
+  // The visible folder can no longer take a new file.
+  await chmod(folder, 0o500);
+  t.after(() => chmod(folder, 0o755));
+  const second = await writeTemplateDir({ 'template.json': EXAMPLE_MANIFEST, 'agents/scribe.md': EXAMPLE_SOUL.replace('notes', 'lists') });
+  const { streams } = createStreams();
+  assert.notEqual(await runCli({ argv: ['template', 'add', second, '--yes', '--force'], streams, env }), 0);
+
+  assert.equal(await readFile(roster, 'utf8'), EXAMPLE_SOUL, 'the roster still serves the agent');
+  assert.deepEqual((await readdir(path.dirname(roster))).filter((name) => name.endsWith('.replaced')), []);
 });

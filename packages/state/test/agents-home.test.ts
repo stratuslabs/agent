@@ -548,3 +548,58 @@ test('a soul copied across volumes never overwrites one written into the agent f
   assert.ok((await lstat(hiddenSoul)).isFile());
   assert.deepEqual((await readdir(path.dirname(visible))).filter((name) => name.endsWith('.copy')), []);
 });
+
+test('an ~/Agents that cannot be read moves nothing and does not stop the start', async (t) => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) {
+    t.skip('mode 000 does not deny access here');
+    return;
+  }
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  const locked = path.join(home, 'Agents');
+  await mkdir(locked);
+  await writeFile(path.join(locked, AGENTS_HOME_MARKER), '');
+  const hiddenSoul = path.join(agentsDirPath(env), 'ava.md');
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await writeFile(hiddenSoul, soulText('ava'));
+  await fs.promises.chmod(locked, 0o000);
+  t.after(() => fs.promises.chmod(locked, 0o755));
+
+  // Ours or somebody else's cannot be told from here, so neither name is
+  // used: ~/Stratus would split the agents across two folders if it was ours.
+  assert.equal(resolveAgentsHome(env), undefined);
+  assert.equal(await surfaceAgentsHome(env), undefined);
+  assert.match((await planAgentsHome(env)).reason ?? '', /cannot be read/);
+  assert.ok((await lstat(hiddenSoul)).isFile(), 'the soul stays where it was');
+  assert.equal(await exists(path.join(home, 'Stratus')), false);
+});
+
+test('a move the pass will always leave in place is blocked in the plan, not pending', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentWorkspacePath(env, 'ava'), { recursive: true });
+  await writeFile(path.join(agentsDirPath(env), 'ava.md'), soulText('ava'));
+  // Something else is already at both visible names.
+  await mkdir(path.join(home, 'Agents', 'ava', 'workspace'), { recursive: true });
+  await writeFile(path.join(home, 'Agents', AGENTS_HOME_MARKER), '');
+  await writeFile(path.join(home, 'Agents', 'ava', 'soul.md'), soulText('ava') + 'Edited elsewhere.\n');
+
+  await surfaceAgentsHome(env);
+  const plan = await planAgentsHome(env);
+  assert.deepEqual(plan.souls, [], 'nothing pending: an update would skip it again');
+  assert.deepEqual(plan.workspaces, []);
+  assert.equal(plan.blocked.length, 2);
+  assert.match(plan.blocked.join('\n'), /ava\.md .*already exists/);
+  assert.match(plan.blocked.join('\n'), /ava's workspace .*already exists/);
+});
+
+test('STRATUS_AGENTS_DIR is refused when a link leads it into the Stratus home', async () => {
+  const home = await newHome();
+  await mkdir(agentsDirPath({ homeDir: home, processEnv: {} }), { recursive: true });
+  const alias = path.join(home, 'alias');
+  await symlink(path.join(home, '.stratus', 'agents'), alias);
+  for (const named of [alias, path.join(alias, 'mine')]) {
+    const env = { homeDir: home, processEnv: { [AGENTS_DIR_ENV]: named } };
+    assert.throws(() => resolveAgentsHome(env), /inside .*\.stratus/, named);
+  }
+});

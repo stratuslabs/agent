@@ -1,13 +1,16 @@
 import {
   cp,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
   unlink,
 } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -635,9 +638,15 @@ export const runTemplateAdd = async (
         // whatever it points at — a file outside the agents directory that
         // this command was never asked to touch. `unlink` removes the link
         // itself, so a dangling one is replaced too.
+        // Moved aside rather than unlinked, so a write that cannot start
+        // (the visible folder gone or unwritable) puts the old entry back
+        // instead of leaving the agent missing from the roster.
+        let aside: string | undefined;
         if (command.force) {
+          const candidate = path.join(path.dirname(destination), `.${path.basename(destination)}.${randomUUID()}.replaced`);
           try {
-            await unlink(destination);
+            await rename(destination, candidate);
+            aside = candidate;
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
               throw error;
@@ -654,7 +663,24 @@ export const runTemplateAdd = async (
         // `--force` the soul already in that folder is replaced too, or
         // removing the link above would leave it behind as the folder's
         // soul while the roster served the new one.
-        await writeNewSoulFile(env, agent.file, agent.id, agent.contents, command.force ? { replace: true } : {});
+        try {
+          await writeNewSoulFile(env, agent.file, agent.id, agent.contents, command.force ? { replace: true } : {});
+        } catch (error) {
+          if (aside !== undefined) {
+            // Only back into an empty name: whatever got there meanwhile
+            // is newer than the entry being restored.
+            const free = await lstat(destination).then(() => false, () => true);
+            if (free) {
+              await rename(aside, destination).catch(() => undefined);
+            } else {
+              await unlink(aside).catch(() => undefined);
+            }
+          }
+          throw error;
+        }
+        if (aside !== undefined) {
+          await unlink(aside).catch(() => undefined);
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
           throw error;

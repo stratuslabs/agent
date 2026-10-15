@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { constants, lstatSync, mkdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { constants, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import {
   copyFile,
   link,
@@ -83,7 +83,12 @@ const MARKER_TEXT = [
   '',
 ].join('\n');
 
-type CandidateState = 'ours' | 'free' | 'taken';
+/**
+ * `unreadable`: the name exists but whether it is ours cannot be read (mode
+ * 000, an ACL, a broken mount). Neither name is used then: if it was ours,
+ * claiming the other would split the agents across two folders.
+ */
+type CandidateState = 'ours' | 'free' | 'taken' | { unreadable: string };
 
 /**
  * Followed rather than `lstat`ed: an operator who points `~/Agents` at a
@@ -112,15 +117,16 @@ const candidateState = (directory: string): CandidateState => {
     if (code === 'ENOTDIR') {
       return 'taken';
     }
-    throw error;
+    return { unreadable: code ?? String(error) };
   }
   try {
     return statSync(path.join(directory, AGENTS_HOME_MARKER)).isFile() ? 'ours' : 'taken';
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
       return 'taken';
     }
-    throw error;
+    return { unreadable: code ?? String(error) };
   }
 };
 
@@ -133,6 +139,28 @@ const deviceOf = (target: string): number | undefined => {
       return undefined;
     }
     throw error;
+  }
+};
+
+/**
+ * Where a path really is: its deepest existing ancestor with links
+ * resolved, and the rest as written. What a containment check has to
+ * compare, since a link at any level can point anywhere.
+ */
+const physicalPath = (target: string): string => {
+  const missing: string[] = [];
+  let current = path.resolve(target);
+  for (;;) {
+    try {
+      return path.join(realpathSync(current), ...missing.reverse());
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) {
+        return path.resolve(target);
+      }
+      missing.push(path.basename(current));
+      current = parent;
+    }
   }
 };
 
@@ -160,7 +188,9 @@ const configuredAgentsHome = (env: StateEnvironment): string | 'off' | undefined
   const resolved = path.resolve(expanded);
   // Inside the hidden home it would be a folder of links pointing at itself,
   // and everything in it is protected from the agents anyway.
-  if (insideOrAt(stratusHomePath(env), resolved)) {
+  // Lexically and physically: a link outside the home can lead into it.
+  if (insideOrAt(stratusHomePath(env), resolved)
+    || insideOrAt(physicalPath(stratusHomePath(env)), physicalPath(resolved))) {
     throw new Error(
       `${AGENTS_DIR_ENV} names ${resolved}, which is inside ${stratusHomePath(env)}. `
       + 'Point it at a folder outside the Stratus home, or unset it to use ~/Agents.',
@@ -197,6 +227,10 @@ const decideAgentsHomeName = (env: StateEnvironment): NameDecision => {
     const directory = path.join(home, name);
     return { directory, state: candidateState(directory) };
   });
+  const unreadable = candidates.find((candidate) => typeof candidate.state === 'object');
+  if (unreadable !== undefined && typeof unreadable.state === 'object') {
+    return { reason: `${unreadable.directory} cannot be read (${unreadable.state.unreadable}), so whether it is Stratus's is unknown` };
+  }
   const chosen = (candidates.find((candidate) => candidate.state === 'ours')
     ?? candidates.find((candidate) => candidate.state === 'free'))?.directory;
   return chosen !== undefined
@@ -684,8 +718,13 @@ const surfaceWorkspace = async (env: StateEnvironment, agentsHome: string, agent
  */
 export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string | undefined> => {
   const plan = await planAgentsHome(env);
-  if (plan.agentsHome === undefined || (plan.souls.length === 0 && plan.workspaces.length === 0)) {
+  if (plan.agentsHome === undefined) {
     return undefined;
+  }
+  // Still named on every start, as before the plan knew about them: the
+  // operator resolves these by hand, and only a line here says so.
+  if (plan.souls.length === 0 && plan.workspaces.length === 0) {
+    return plan.blocked.length > 0 ? `left in place: ${plan.blocked.join('; ')}` : undefined;
   }
   await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
   const agentsHome = claimAgentsHome(env);
@@ -693,7 +732,7 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
     return undefined;
   }
   const { souls, workspaces: agentDirs } = plan;
-  const report: SurfaceReport = { souls: 0, workspaces: 0, skipped: [] };
+  const report: SurfaceReport = { souls: 0, workspaces: 0, skipped: [...plan.blocked] };
   // One agent's failure is that agent's line in the report, never a start
   // refused for the whole fleet: everything this does leaves the agent
   // working from wherever its files are now, and a workspace caught between
@@ -734,21 +773,49 @@ export interface AgentsHomePlan {
   souls: string[];
   /** Agents whose workspace the next pass would move or finish moving. */
   workspaces: string[];
+  /**
+   * Moves the next pass would leave in place, with why: something else is
+   * already at the visible name, or the workspace is on another volume.
+   * Not pending: nothing an update does changes them.
+   */
+  blocked: string[];
   /** Hidden links of ours whose target is gone, as `link -> target`. */
   dangling: string[];
   /** Souls in the folder that no hidden name links to, so the roster never reads them. */
   unlinked: string[];
 }
 
-const isRealSoulToMove = async (filePath: string): Promise<boolean> => {
+/** The agent id of a hidden soul the next pass would surface, or undefined. */
+const soulToMove = async (filePath: string): Promise<string | undefined> => {
   let agentId: string;
   try {
     agentId = (await loadSoulFile(filePath)).agent.id;
   } catch {
+    return undefined;
+  }
+  return isValidAgentId(agentId) && foldedAgentId(agentId) !== DEFAULT_STRATUS_AGENT.id ? agentId : undefined;
+};
+
+/**
+ * Whether `surfaceSoul` would leave this soul in place: a different file is
+ * already at the visible name. The same file, or the same bytes, is the
+ * pass's own unfinished work and still pending.
+ */
+const soulBlockedBy = async (hidden: string, visible: string): Promise<boolean> => {
+  const visibleInfo = await lstatOrUndefined(visible);
+  if (visibleInfo === undefined) {
     return false;
   }
-  return isValidAgentId(agentId) && foldedAgentId(agentId) !== DEFAULT_STRATUS_AGENT.id;
+  const hiddenInfo = await lstat(hidden);
+  if (visibleInfo.ino === hiddenInfo.ino && visibleInfo.dev === hiddenInfo.dev) {
+    return false;
+  }
+  return !(visibleInfo.isFile() && (await readFile(visible)).equals(await readFile(hidden)));
 };
+
+/** The device the folder is (or would be created) on. */
+const agentsHomeDevice = (agentsHome: string): number | undefined =>
+  deviceOf(agentsHome) ?? deviceOf(path.dirname(agentsHome));
 
 /**
  * The state of the agents folder, decided once for every caller: `serve`
@@ -765,6 +832,7 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     claimed: agentsHome !== undefined && candidateState(agentsHome) === 'ours',
     souls: [],
     workspaces: [],
+    blocked: [],
     dangling: [],
     unlinked: [],
   };
@@ -778,12 +846,20 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     throw error;
   }
   const links: Array<{ link: string; target: string }> = [];
+  // Souls first, then workspaces, the order the pass reports them in.
+  const blockedWorkspaces: string[] = [];
   for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
     const entryPath = path.join(agentsDirPath(env), entry.name);
     if (entry.name.endsWith('.md')) {
       if (entry.isFile()) {
-        if (agentsHome !== undefined && await isRealSoulToMove(entryPath)) {
-          plan.souls.push(entry.name);
+        const agentId = agentsHome !== undefined ? await soulToMove(entryPath) : undefined;
+        if (agentsHome !== undefined && agentId !== undefined) {
+          const visible = visibleSoulPathIn(agentsHome, agentId);
+          if (await soulBlockedBy(entryPath, visible)) {
+            plan.blocked.push(`${entry.name} (${visible} already exists)`);
+          } else {
+            plan.souls.push(entry.name);
+          }
         }
       } else if (entry.isSymbolicLink()) {
         links.push({ link: entryPath, target: path.resolve(path.dirname(entryPath), await readlink(entryPath)) });
@@ -796,13 +872,24 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     const workspace = agentWorkspacePath(env, entry.name);
     const info = await lstatOrUndefined(workspace);
     const interrupted = await lstatOrUndefined(path.join(agentStateDirPath(env, entry.name), SURFACING_MARKER)) !== undefined;
-    if (agentsHome !== undefined && (info?.isDirectory() === true || interrupted)) {
+    if (agentsHome !== undefined && interrupted) {
       plan.workspaces.push(entry.name);
+    } else if (agentsHome !== undefined && info?.isDirectory() === true) {
+      // The two reasons `surfaceWorkspace` leaves one in place for good.
+      const visible = visibleWorkspacePathIn(agentsHome, entry.name);
+      if (await lstatOrUndefined(visible) !== undefined) {
+        blockedWorkspaces.push(`${entry.name}'s workspace (${visible} already exists)`);
+      } else if (info.dev !== agentsHomeDevice(agentsHome)) {
+        blockedWorkspaces.push(`${entry.name}'s workspace (on another volume from ${agentsHome})`);
+      } else {
+        plan.workspaces.push(entry.name);
+      }
     }
     if (info?.isSymbolicLink() === true) {
       links.push({ link: workspace, target: path.resolve(path.dirname(workspace), await readlink(workspace)) });
     }
   }
+  plan.blocked.push(...blockedWorkspaces);
   if (agentsHome === undefined) {
     return plan;
   }

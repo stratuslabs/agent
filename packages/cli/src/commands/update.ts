@@ -297,6 +297,12 @@ const runUpdateSteps = async (
   if (agentsPending) {
     out(`  agents      ${agentsPlan.souls.length} soul(s) and ${agentsPlan.workspaces.length} workspace(s) to move into ${agentsPlan.agentsHome}`);
   }
+  // Left in place for good, so named but never counted as pending: an
+  // update cannot move them, and a check that kept saying it could would
+  // never go quiet.
+  for (const blocked of agentsPlan.blocked) {
+    out(`  agents      left in place: ${blocked}`);
+  }
 
   if (command.check) {
     for (const migration of pending) {
