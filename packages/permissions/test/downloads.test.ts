@@ -87,13 +87,17 @@ test('a cloud namespace that hands names to tenants is refused, at any region, a
     's3-accelerate.amazonaws.com', 's3-accelerate.dualstack.amazonaws.com', 's3-control.us-east-1.amazonaws.com',
     's3-fips.dualstack.us-east-1.amazonaws.com', 's3-outposts.us-west-2.amazonaws.com', 's3-express-usw2-az1.us-west-2.amazonaws.com',
     'storage.googleapis.com', 'blob.core.windows.net', 'githubusercontent.com', 'raw.githubusercontent.com', 'r2.dev',
+    // Every GitHub content host serves strangers' files, gists included.
+    'gist.githubusercontent.com', 'objects.githubusercontent.com', 'user-images.githubusercontent.com',
+    // AWS's other partitions: the EU sovereign cloud and China.
+    's3.eusc-de-east-1.amazonaws.eu', 'amazonaws.eu', 's3.cn-north-1.amazonaws.com.cn',
   ]) {
     assert.equal(normalizeTrustedDomain(shared), undefined, shared);
     assert.notEqual(trustedDomainProblem(shared), undefined, shared);
   }
   assert.equal(trustedDomainOf('https://attacker-bucket.s3.amazonaws.com', ['s3.amazonaws.com']), undefined);
   // One bucket, one API, one account: a name somebody owns.
-  for (const owned of ['docs-bucket.s3.amazonaws.com', 'docs-bucket.s3.us-east-1.amazonaws.com', 'abc123.execute-api.us-east-1.amazonaws.com', 'acct.blob.core.windows.net']) {
+  for (const owned of ['docs-bucket.s3.eusc-de-east-1.amazonaws.eu', 'docs-bucket.s3.amazonaws.com', 'docs-bucket.s3.us-east-1.amazonaws.com', 'abc123.execute-api.us-east-1.amazonaws.com', 'acct.blob.core.windows.net']) {
     assert.equal(normalizeTrustedDomain(owned), owned, owned);
   }
 });

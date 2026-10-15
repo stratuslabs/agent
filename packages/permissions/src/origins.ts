@@ -142,6 +142,8 @@ const trustedDomainSpelling = (raw: string): string | undefined => {
  * operator listing a vendor's docs meant. A short list of the common ones,
  * not the Public Suffix List: that would be a dependency for every install,
  * and the docs already say a trusted domain should be one site you know.
+ * Best-effort by design: it catches the common mistakes, and a shared host
+ * missing from it is a gap to add here, not a promise this list made.
  */
 export const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
   // Country second levels with open registration.
@@ -154,8 +156,15 @@ export const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
   'ngrok.io', 'ngrok-free.app', 'trycloudflare.com', 'deno.dev', 'surge.sh',
   // Object storage and raw file hosts, where a path or a subdomain is a
   // stranger's bucket or repository.
-  'githubusercontent.com', 'raw.githubusercontent.com', 'storage.googleapis.com', 'blob.core.windows.net', 'r2.dev',
+  'storage.googleapis.com', 'blob.core.windows.net', 'r2.dev',
 ]);
+
+/**
+ * Hosts whose every subdomain is shared too: GitHub serves raw files,
+ * gists, release assets and uploads for every user from hosts under
+ * `githubusercontent.com`, so the parent and anything below it is refused.
+ */
+const SHARED_PARENTS = ['githubusercontent.com'];
 
 // AWS hands out names inside service namespaces, region by region:
 // `bucket.s3.us-east-1.amazonaws.com`, `id.execute-api.eu-west-1.amazonaws.com`.
@@ -166,8 +175,10 @@ export const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
 // `s3-control`, ...) because AWS keeps adding endpoint kinds; a bucket that
 // happens to be named `s3-something` and is listed bare is refused too, with
 // the same error, which is the safe direction.
-const AWS_BASES = ['amazonaws.com', 'on.aws'];
-const AWS_REGION = '[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\\d';
+const AWS_BASES = ['amazonaws.com', 'amazonaws.com.cn', 'amazonaws.eu', 'on.aws'];
+// `us-east-1`, `us-gov-west-1`, `us-isob-east-1`, `cn-north-1`, and the
+// sovereign cloud's `eusc-de-east-1`.
+const AWS_REGION = '[a-z]{2,4}(?:-gov|-iso[a-z]?)?(?:-[a-z]+){1,2}-\\d';
 const AWS_NAMESPACE_LABEL = new RegExp(
   `^(?:${AWS_REGION}|s3(?:-[a-z0-9-]+)?|dualstack`
   + '|execute-api|lambda-url|elb|compute|compute-1|vpce)$',
@@ -181,7 +192,9 @@ const isAwsNamespace = (domain: string): boolean => AWS_BASES.some((base) => {
     && domain.slice(0, -base.length - 1).split('.').every((label) => AWS_NAMESPACE_LABEL.test(label));
 });
 
-const isSharedSuffix = (domain: string): boolean => SHARED_SUFFIXES.has(domain) || isAwsNamespace(domain);
+const isSharedSuffix = (domain: string): boolean => SHARED_SUFFIXES.has(domain)
+  || SHARED_PARENTS.some((parent) => domain === parent || domain.endsWith(`.${parent}`))
+  || isAwsNamespace(domain);
 
 /**
  * Why an entry is not a trusted domain, for a config error that names the
