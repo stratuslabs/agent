@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 import {
   newerStateMessage,
   pendingStateMigrations,
+  planAgentsHome,
   readStateStamp,
   repairWorkspacesIfPending,
+  surfaceAgentsHome,
   runStateMigrations,
   STATE_SCHEMA_VERSION,
   type AppliedStateMigration,
@@ -32,6 +34,7 @@ import {
 } from '../npm.ts';
 import type { ParsedUpdateCommand } from '../parse.ts';
 import { readCompanions } from '../companions.ts';
+import { installHarnessPackages, missingHarnessPackages } from '../harness-packages.ts';
 
 /**
  * `stratus update` — the whole upgrade dance, in the order that cannot lose
@@ -272,6 +275,35 @@ const runUpdateSteps = async (
     }
   }
 
+  // The harness providers the configured agents run on, when this machine
+  // does not have them: the CLI stopped carrying claude-code and codex, so
+  // an upgrade from a build that did removes them with the old CLI. Read
+  // against the config the service is pinned to, as the daemon reads it.
+  const harnessConfigPath = unit?.configPath;
+  const missingHarnesses = await missingHarnessPackages(
+    unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
+    harnessConfigPath,
+    { asService: true },
+  );
+  for (const name of missingHarnesses) {
+    out(`  provider    ${name} — your agents use it and it is not installed`);
+  }
+
+  // The unstamped move into the visible agents folder, which `update`
+  // applies below while it holds the home: decided by the same plan, so the
+  // check and the apply never disagree about whether there is one.
+  const agentsPlan = await planAgentsHome(env);
+  const agentsPending = agentsPlan.agentsHome !== undefined && (agentsPlan.souls.length > 0 || agentsPlan.workspaces.length > 0);
+  if (agentsPending) {
+    out(`  agents      ${agentsPlan.souls.length} soul(s) and ${agentsPlan.workspaces.length} workspace(s) to move into ${agentsPlan.agentsHome}`);
+  }
+  // Left in place for good, so named but never counted as pending: an
+  // update cannot move them, and a check that kept saying it could would
+  // never go quiet.
+  for (const blocked of agentsPlan.blocked) {
+    out(`  agents      left in place: ${blocked}`);
+  }
+
   if (command.check) {
     for (const migration of pending) {
       out(`  pending     ${migration.id} — ${migration.description}`);
@@ -280,7 +312,7 @@ const runUpdateSteps = async (
       out('This build cannot update that state — upgrade the package itself (`npm install -g @stratusagent/cli`).');
       return 1;
     }
-    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0;
+    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0 || missingHarnesses.length > 0 || agentsPending;
     out(actionable
       ? 'Run `stratus update` to apply the above.'
       : 'Nothing to do.');
@@ -423,6 +455,22 @@ const runUpdateSteps = async (
       : 'Package already up to date.');
   }
 
+  // Here rather than with the companions above: this runs on the build the
+  // update is heading for, both when it resumed after replacing the CLI
+  // (the first half's package list came from the old build, which still
+  // carried both harnesses) and when the CLI was already current. A fresh
+  // read, because the CLI install above may have removed one.
+  const harnessesNow = resume !== undefined || upgrading.length > 0
+    ? await missingHarnessPackages(
+      unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
+      harnessConfigPath,
+      { asService: true },
+    )
+    : missingHarnesses;
+  if (!(await installHarnessPackages(harnessesNow, streams, env))) {
+    upgradeFailed = true;
+  }
+
   // Stopping the *managed* service is not the same as having the home to
   // ourselves, and the marked migrations are told which one this is. A
   // daemon running in a foreground `stratus serve`, or under a supervisor
@@ -459,6 +507,10 @@ const runUpdateSteps = async (
       const repaired = await repairWorkspacesIfPending(env);
       if (repaired !== undefined) {
         writeLine(streams.stdout, `workspace layout: ${repaired}`);
+      }
+      const surfaced = await surfaceAgentsHome(env);
+      if (surfaced !== undefined) {
+        writeLine(streams.stdout, `agents folder: ${surfaced}`);
       }
     }
   } catch (error) {

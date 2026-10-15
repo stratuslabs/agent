@@ -1,5 +1,7 @@
 import {
   ContextOverflowError,
+  redactedError,
+  redactSecrets,
   isUnaddressedTurn,
   transcriptOf,
   droppedImageNote,
@@ -401,6 +403,30 @@ export const defineScriptedProvider = ({
   });
 };
 
+/**
+ * A configured value both as written and as Fetch sends it: Fetch trims
+ * surrounding spaces and tabs from a header value, so an endpoint echoes
+ * the trimmed form.
+ */
+const asSent = (value: string): string[] => {
+  const sent = value.replace(/^[\t ]+|[\t ]+$/g, '');
+  return sent === value ? [value] : [value, sent];
+};
+
+/**
+ * The configured header values an endpoint might repeat in its error text.
+ * An `authorization` header carries a scheme and a credential, and an
+ * endpoint may name the credential alone ("invalid token: ..."), so that
+ * part counts on its own too.
+ */
+const headerSecrets = (headers: Record<string, string>): string[] =>
+  Object.entries(headers).flatMap(([name, value]) => {
+    const credential = /^(?:proxy-)?authorization$/i.test(name)
+      ? /^\s*\S+\s+(\S.*?)\s*$/.exec(value)?.[1]
+      : undefined;
+    return credential === undefined ? asSent(value) : [...asSent(value), credential];
+  });
+
 export const createOpenAICompatibleProvider = ({
   model,
   apiKey,
@@ -418,8 +444,12 @@ export const createOpenAICompatibleProvider = ({
   }
 
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+  // Copied once: what is sent and what is redacted are the same values, so
+  // a caller mutating its object later cannot send a credential the
+  // redaction never heard of.
+  const configuredHeaders: Record<string, string> = { ...headers };
 
-  return defineProvider({
+  const provider = defineProvider({
     name,
     async generate(request) {
       const toolNames = createOpenAICompatibleToolNameMapping(request.tools);
@@ -450,7 +480,7 @@ export const createOpenAICompatibleProvider = ({
             headers: {
               'content-type': 'application/json',
               authorization: `Bearer ${apiKey}`,
-              ...headers,
+              ...configuredHeaders,
             },
             body: JSON.stringify({
               model,
@@ -473,7 +503,19 @@ export const createOpenAICompatibleProvider = ({
         if (response.ok) {
           break;
         }
-        const message = payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`;
+        // Classified on the endpoint's own words, and redacted only in what
+        // is thrown: a local runtime takes any key, and a short one can be
+        // a word the checks below look for ("context", "image").
+        // The body is the endpoint's own JSON, so `error.message` is only a
+        // string by convention: anything else is shown as JSON rather than
+        // left to throw from the checks and the redaction below.
+        const reportedMessage: unknown = payload.error?.message;
+        const reported = typeof reportedMessage === 'string'
+          ? reportedMessage
+          : reportedMessage != null
+            ? JSON.stringify(reportedMessage)
+            : payload.rawText ?? `Provider request failed with status ${response.status}`;
+        const message = redactSecrets(reported, [...asSent(apiKey), ...headerSecrets(configuredHeaders)]);
         // The transcript did not fit. Reported as the one provider failure
         // the kernel can act on — it answers by sending less history —
         // rather than as the final error every other 400 here is. Matched
@@ -499,7 +541,7 @@ export const createOpenAICompatibleProvider = ({
         // throw away the pictures a turn was about and retry — when what
         // the request needed was less history, which the kernel would have
         // supplied.
-        if (response.status === 400 && overflowedContext(payload, message)) {
+        if (response.status === 400 && overflowedContext(payload, reported)) {
           throw new ContextOverflowError(
             `The conversation no longer fits ${model}'s context window (${message}).`,
           );
@@ -510,7 +552,7 @@ export const createOpenAICompatibleProvider = ({
         // emptied on the session itself, since stored as they are they would
         // fail every later turn the same way, and the turn goes on with a
         // note in each one's place.
-        if (response.status === 400 && sent.length > 0 && !imagesRetried && /image/i.test(message)) {
+        if (response.status === 400 && sent.length > 0 && !imagesRetried && /image/i.test(reported)) {
           for (const image of sent) {
             omitImage(image);
           }
@@ -601,6 +643,23 @@ export const createOpenAICompatibleProvider = ({
       return usage ? { ...result, usage } : result;
     },
   });
+
+  // Whatever leaves `generate` failed is stored on the turn, logged, and
+  // posted to the channel, and the endpoint's words reach it from more than
+  // the error branch (a 200's structured refusal). Redacted once here, on
+  // every error, so no path has to remember to. The classification above
+  // still reads the raw text; this only changes what is thrown.
+  const secrets = [...asSent(apiKey), ...headerSecrets(configuredHeaders)];
+  return {
+    ...provider,
+    async generate(request) {
+      try {
+        return await provider.generate(request);
+      } catch (error) {
+        throw redactedError(error, secrets);
+      }
+    },
+  };
 };
 
 /**
@@ -918,6 +977,88 @@ const isProviderResponse = (value: ProviderResponseInput): value is ProviderResp
 // drifts from the first. `provider-claude-code` re-exports them, so the
 // documented import paths still work.
 // ---------------------------------------------------------------------------
+
+/** The codex CLI's own current default model. */
+export const DEFAULT_CODEX_MODEL = 'gpt-5.5';
+
+/**
+ * Where a session records the Claude Code SDK session it is continuing.
+ *
+ * The pairing is the whole point of resuming: the kernel's session id is
+ * ours and durable, the SDK's is its own and lives beside its transcript
+ * under `~/.claude/projects`. Storing the link in session metadata means
+ * it survives tool execution, approval waits, and a daemon restart, and
+ * is garbage-collected with the session — the same treatment the
+ * Anthropic provider gives its raw turns, for the same reasons.
+ *
+ * This and the two keys below live here, not in the harness packages that
+ * write them, because the host has to name them (to keep them off a fresh
+ * transcript) whether or not that harness is installed.
+ */
+export const SDK_SESSION_METADATA_KEY = 'claudeCodeSessionId';
+
+/**
+ * Which sign-in the stored SDK session was made under, as a fingerprint.
+ *
+ * An SDK session is resumed only under the sign-in that made it. Two
+ * agents can run on two subscriptions in one daemon, and a token can be
+ * replaced or removed while a conversation is open; resuming across that
+ * change would carry one account's harness session into another's. A
+ * mismatch starts a fresh SDK session and replays the kernel's history
+ * into it, the same recovery a lost transcript gets.
+ *
+ * A one-way hash, truncated, with a fixed prefix, so the session store
+ * never holds anything a token could be recovered from. A session stored
+ * before this key existed has none. On the shared sign-in it resumes as it
+ * always did, because the upgrade itself must not cost every open
+ * conversation a replay. Under an agent's own sign-in it does not: nothing
+ * says which account made it, and that agent's sign-in is the one case
+ * where it matters.
+ */
+export const SDK_SESSION_AUTH_METADATA_KEY = 'claudeCodeAuth';
+
+/**
+ * Where a session records the codex thread it is continuing.
+ *
+ * The kernel's session id is ours and durable; the thread id is codex's
+ * and lives beside its transcript under `~/.codex/sessions`. Storing the
+ * link in session metadata means it survives tool execution, approval
+ * waits, and a daemon restart, and is garbage-collected with the session —
+ * the same treatment the Claude Code provider gives its SDK session id.
+ */
+export const CODEX_THREAD_METADATA_KEY = 'codexThreadId';
+
+/**
+ * The harness transports (the Agent SDK's `query`, codex's `runTurn`) as a
+ * host carries them through config and environment without importing a
+ * harness package that may not be installed.
+ *
+ * Function properties, so their params are checked contravariantly: a
+ * callback is accepted only if it takes every params object a harness can
+ * pass. The params are therefore a lower bound of the harness's own: the
+ * fields a host can read keep their real types, and the harness-specific
+ * ones a host has no business reading (SDK options, codex client and
+ * thread options, an image prompt's message type) are `never`, which every
+ * harness type accepts. So the harness's own transport type is assignable,
+ * while a callback that needs `prompt` to be a string or `resumeThreadId`
+ * to be present is rejected. The harness package is the only caller and
+ * casts to its full signature.
+ */
+export type ClaudeCodeTransport = (params: {
+  /** A string, or an image turn's single user message (opaque here). */
+  prompt: string | AsyncIterable<never>;
+  options?: never;
+}) => AsyncIterable<unknown>;
+
+/** Codex's `runTurn`, as a host carries it. See ClaudeCodeTransport. */
+export type CodexTransport = (params: {
+  input: string;
+  /** Absent on a thread's first turn. */
+  resumeThreadId?: string;
+  clientOptions: never;
+  threadOptions: never;
+  signal: AbortSignal;
+}) => AsyncIterable<unknown>;
 
 /**
  * Executes one kernel tool call on behalf of a provider-hosted loop. The

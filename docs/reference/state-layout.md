@@ -23,7 +23,7 @@ what moves when you rename an agent.
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
 | `plugins/<package>/` | What one [plugin](../architecture/plugins.md) keeps across restarts, such as a channel's read position, by package name; a scoped package nests under its scope (`plugins/@scope/name/`). Created only when a plugin asks for it. `0700` at every level. |
-| `agents/` | One `<id>.md` soul per agent, plus one directory per agent — below. |
+| `agents/` | One `<id>.md` soul per agent, plus one directory per agent — below. Each soul, and each agent's `workspace/`, is normally a link into the [agents folder](#the-agents-folder). |
 
 ## One directory per agent
 
@@ -34,12 +34,67 @@ what moves when you rename an agent.
 | `agents/<id>/sessions.db` | Its conversations, whole: messages, status, and the provider replay state a resumed turn needs. `0600`. |
 | `agents/<id>/memory.jsonl` | What it [remembers](../concepts/memory.md), one JSON record per line, plus the derived `memory.jsonl.index` beside it. `0600`. |
 | `agents/<id>/whitelist.json` | What it may do unattended: command scopes, origins, and standing tool grants. See [Approvals](../guides/approvals.md#standing-grants). `0600`. An install still waiting on the upgrade move has this as `agents/<id>.whitelist.json`, and that file is the one both read and written until it moves. |
-| `agents/<id>/workspace/` | Where its tools put the files they produce — a screenshot a channel uploads, a report it wrote, an image an MCP server returned — plus `fs-provenance.jsonl`, the ledger that remembers which of those files came from outside (see [Tools](../guides/tools.md)). `0700`. An install still waiting on the upgrade move has this as `workspaces/<id>/`. |
+| `agents/<id>/workspace/` | A link to `~/Agents/<id>/workspace/` (see [the agents folder](#the-agents-folder)). Where its tools put the files they produce — a screenshot a channel uploads, a report it wrote, an image an MCP server returned — plus `fs-provenance.jsonl`, the ledger that remembers which of those files came from outside (see [Tools](../guides/tools.md)). `0700`. An install still waiting on the upgrade move has this as `workspaces/<id>/`. |
 
-The agent's **soul stays a file in `agents/`**, not in this directory: a
+The agent's **soul is named in `agents/`**, not in this directory: a
 soul is your input — edited, copied between machines, read by `stratus
 agents` with no daemon anywhere near it — while everything above is the
-agent's own state.
+agent's own state. The file itself is normally in the agents folder, below.
+
+## The agents folder
+
+The two things in here that a person opens, each agent's soul and the files
+its tools produced, live in a visible folder in your home directory, beside
+Documents and Downloads, so neither needs hidden files shown:
+
+| Path | What it is |
+| --- | --- |
+| `~/Agents/<id>/soul.md` | The agent's soul. Edit it here. `~/.stratus/agents/<id>.md` is a link to it, and is the name the roster, `stratus agents` and `--soul` go on using. |
+| `~/Agents/<id>/workspace/` | Its workspace. `~/.stratus/agents/<id>/workspace` is a link to it. |
+| `~/Agents/.stratus-agents` | The marker that says this folder is Stratus's. |
+
+Sessions, memories, grants and everything else stay in `~/.stratus`.
+
+- **Which folder.** `~/Agents`, unless that name already belongs to
+  something else: a folder Stratus did not create (it has no
+  `.stratus-agents` marker) is never written to, and `~/Stratus` is used by
+  the same rule instead. On macOS's default case-insensitive disk an
+  existing `~/agents` *is* `~/Agents`, so it counts as taken. When both
+  names are taken there is no agents folder, and souls and workspaces stay
+  as real files in `~/.stratus/agents/` as they always were.
+- **Only on the same disk as `~/.stratus`.** When `~/.stratus` is on a
+  different filesystem from the rest of your home directory, there is no
+  agents folder either. That is the Docker image, whose volume holds
+  `~/.stratus` and nothing else: anything written to `~/Agents` there
+  would be lost when the container is recreated. A Fly volume or a second
+  disk mounted at `~/.stratus` is the same case.
+  Where symlinks cannot be made (Windows without Developer Mode or
+  Administrator), there is no agents folder and the hidden layout stays.
+- **Choosing it yourself.** `STRATUS_AGENTS_DIR` names the folder outright
+  (`~` expands; it may not be inside `~/.stratus`, and it is used even on
+  another disk), and `STRATUS_AGENTS_DIR=off` turns the folder off.
+  `stratus doctor` prints which folder is in use, or why there is none.
+- **When things move there.** A new agent (`stratus agent new`,
+  `stratus template add`) is written there, and a workspace is made there
+  the first time a tool writes a file. A soul or workspace that is still a
+  real file in `~/.stratus/agents/` (an install from before this, or a soul
+  you dropped in by hand) is moved there by the next `stratus serve` or
+  `stratus update`, and a link left at the old path. The move carries each
+  workspace's provenance ledger across, so a fetched file stays labeled as
+  fetched. A folder that already has a soul or workspace under that id is
+  left alone, and the start says so. A workspace you linked somewhere else
+  yourself stays where you put it. `stratus update --check` lists a move
+  that is still to happen. An `agent new` or `template add` stopped
+  partway can leave a soul in the folder that nothing links to; running
+  it again finishes it, and `stratus doctor` lists any it finds.
+- **An agent cannot edit its own soul there.** `fs.*` refuses every soul
+  under its visible name too, so an agent given `~/Agents` as a root still
+  cannot rewrite its tools or credentials.
+- **Deleting or renaming `~/Agents/<id>/`** leaves the links pointing at
+  nothing: the agent drops off the roster with a warning, and its workspace
+  comes back empty on the next write. `stratus doctor` lists the broken
+  links. Its sessions, memories and grants are untouched in `~/.stratus`.
+  Put the folder back, or rename it back, to restore the agent.
 
 Per-agent directories are the point rather than a tidier listing. A store
 is opened on one agent's path, so there is no query another agent's
@@ -47,12 +102,12 @@ conversations or memories could come back from: the handle does not exist,
 rather than a filter having remembered to exclude them. Two things follow
 that are worth knowing:
 
-- **Deleting `agents/<id>/` forgets that agent's history, memories, grants
-  and produced files together**, and leaves every other agent untouched.
-  One path to name is the point of the workspace living in here: before it
-  did, an "erase this agent" had two directories to remember. Copy
-  `agents/<id>/workspace/` out first if the files its tools produced are
-  yours to keep. Deleting only the soul keeps all of it, which is
+- **Deleting `agents/<id>/` forgets that agent's history, memories and
+  grants together**, and leaves every other agent untouched. Its produced
+  files go too when its workspace is a real directory in here; when it is
+  the usual link into the [agents folder](#the-agents-folder), only the
+  link goes and the files stay in `~/Agents/<id>/workspace/`, so erasing
+  the agent completely means deleting `~/Agents/<id>/` as well. Deleting only the soul keeps all of it, which is
   deliberate: restore the soul later and the agent finds its history where
   it left it.
 - **Renaming an agent's `id:` re-keys all of it.** The old directory stays

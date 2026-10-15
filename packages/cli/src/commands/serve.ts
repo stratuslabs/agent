@@ -32,6 +32,7 @@ import {
   resolveAgentPrincipals,
   resolveAgentSlack,
   repairWorkspacesIfPending,
+  surfaceAgentsHome,
   runStateMigrations,
   servedRuntimes,
   discoverIgnoredUntrustedConfig,
@@ -48,6 +49,7 @@ import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
 import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
+import { harnessesMissingMessage, missingHarnessPackages } from '../harness-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
 import { startupConfigFiles } from '../config-digest.ts';
 import { holdsForVersion, recordPromotedVersion } from '../promotion.ts';
@@ -259,6 +261,16 @@ const serveHeldHome = async (
     log(`workspace layout: ${repaired}`);
   }
 
+  // Then souls and workspaces still kept as real files in the hidden home
+  // move to the visible agents folder, with links left where they were.
+  // Here for the reason the repair above is: the home claim is held and the
+  // stores are not open yet. No stamp, so a soul dropped into
+  // ~/.stratus/agents by hand becomes visible on the next start too.
+  const surfaced = await surfaceAgentsHome(env);
+  if (surfaced !== undefined) {
+    log(`agents folder: ${surfaced}`);
+  }
+
   // Agents with stored Slack tokens go live in Slack automatically — the
   // tokens are gateway infrastructure secrets in the channels namespace of
   // ~/.stratus/credentials.json (see @stratusagent/channel-slack's README
@@ -409,6 +421,11 @@ const serveHeldHome = async (
   const behind = (await readCompanions(CLI_VERSION, env)).filter((entry) => entry.stale);
   if (behind.length > 0) {
     warn(companionsBehindMessage(behind));
+  }
+
+  const missingHarnesses = await missingHarnessPackages(env, command.configPath);
+  if (missingHarnesses.length > 0) {
+    warn(harnessesMissingMessage(missingHarnesses));
   }
 
   const channelCredentials = await loadChannelCredentials(env);

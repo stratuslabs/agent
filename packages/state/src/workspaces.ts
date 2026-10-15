@@ -4,6 +4,7 @@ import type { AgentWorkspaces } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
 import { assertDerivedStatePathSync, isSymlinkedStatePathSync } from '@stratusagent/permissions';
 import { type StateEnvironment } from './environment.ts';
+import { surfaceNewWorkspaceSync } from './agents-home.ts';
 import { agentStateDirPath, agentWorkspacePath, agentsDirPath, stratusHomePath } from './paths.ts';
 
 /**
@@ -49,6 +50,11 @@ export const createAgentWorkspaces = (env: StateEnvironment): AgentWorkspaces =>
       // The walk rather than the leaf, and the same rule as every other
       // writer of an agent's state directory: see `assertDerivedStatePath`.
       assertDerivedStatePathSync(stratusHomePath(env), stateDir, 'directory');
+      mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+      // A workspace that does not exist yet is made in the visible agents
+      // folder and linked from here, so what an agent produces is somewhere
+      // a person can open without showing hidden files. See `agents-home.ts`.
+      surfaceNewWorkspaceSync(env, agentId);
       mkdirSync(workspace, { recursive: true, mode: 0o700 });
       // `mkdir`'s mode applies only to what it creates, so a directory an
       // older build or a pre-fix plugin already left is whatever it was —

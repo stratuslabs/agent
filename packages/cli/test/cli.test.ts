@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { EventEmitter, once } from 'node:events';
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 import { tokenFingerprint } from '@stratusagent/control-api';
-import { claimHome } from '@stratusagent/gateway';
+import { DEFAULT_STOP_DRAIN_TIMEOUT_MS, claimHome } from '@stratusagent/gateway';
 
 import {
   createFileMemoryStore,
@@ -55,6 +55,7 @@ import {
   runCli,
   serveArgv,
   soulPinForNewAgent,
+  defaultAgentConfig,
   warnOnCredentialOverride,
   readRecentRecords,
   slackAppManifest,
@@ -440,7 +441,8 @@ test('runCli agents on a fresh machine shows only the built-in default', async (
   const exitCode = await runCli({ argv: ['agents'], streams, env: { cwd, homeDir: home, processEnv: {} } });
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Stratus {2}\(default, built-in\)/);
-  assert.match(output.stdout, /currently demo \(offline\)/);
+  // Nothing is signed in, so there is nothing to run on yet, and it says so.
+  assert.match(output.stdout, /currently no provider — run `stratus setup`/);
   assert.match(output.stdout, /create your own with: stratus agent new/);
 });
 
@@ -483,7 +485,7 @@ test('runCli prints help text', async () => {
 
 test('runCli executes the demo tool loop', async () => {
   const { streams, output } = createStreams();
-  const exitCode = await runCli({ argv: ['run', '--prompt', 'please use the echo tool'], streams });
+  const exitCode = await runCli({ argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool'], streams });
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Starting Stratus Agent local loop with provider=demo/);
@@ -876,7 +878,7 @@ test('runCli warns like the daemon when a soul enables a skill without its requi
   const exitCode = await runCli({
     argv: ['run', '--prompt', 'hello'],
     streams,
-    env: { cwd, homeDir: home, processEnv: {} },
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
 
   // The same advisory `stratus serve` gives at roster load — a local test
@@ -906,7 +908,7 @@ test('a soul listing only tools nothing provides is warned about, and still runs
   const exitCode = await runCli({
     argv: ['run', '--prompt', 'hello'],
     streams,
-    env: { cwd, homeDir: home, processEnv: {} },
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
 
   // Both dead entries named, and the fact that nothing is left — an agent
@@ -985,7 +987,7 @@ test('a daemon soul run locally is told the names are right and the process is n
   const exitCode = await runCli({
     argv: ['run', '--prompt', 'hello'],
     streams,
-    env: { cwd, homeDir: home, processEnv: {} },
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
 
   assert.equal(exitCode, 0);
@@ -998,7 +1000,7 @@ test('a daemon soul run locally is told the names are right and the process is n
 test('runCli denies tool calls when approvals are set to never', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({
-    argv: ['run', '--prompt', 'please use the echo tool', '--approvals', 'never'],
+    argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'never'],
     streams,
   });
 
@@ -1012,7 +1014,7 @@ test('runCli denies tool calls when approvals are set to never', async () => {
 test('runCli prompts for approval in ask mode and honors the answer', async () => {
   const approved = createStreams();
   const approvedExit = await runCli({
-    argv: ['run', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
+    argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
     streams: approved.streams,
     env: { approvalInput: Readable.from(['y\n']) },
   });
@@ -1025,7 +1027,7 @@ test('runCli prompts for approval in ask mode and honors the answer', async () =
 
   const denied = createStreams();
   const deniedExit = await runCli({
-    argv: ['run', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
+    argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
     streams: denied.streams,
     env: { approvalInput: Readable.from(['n\n']) },
   });
@@ -1038,7 +1040,7 @@ test('runCli prompts for approval in ask mode and honors the answer', async () =
 test('runCli keeps stdout parseable when combining json format with ask approvals', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({
-    argv: ['run', '--prompt', 'please use the echo tool', '--format', 'json', '--approvals', 'ask'],
+    argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--format', 'json', '--approvals', 'ask'],
     streams,
     env: { approvalInput: Readable.from(['y\n']) },
   });
@@ -1059,7 +1061,7 @@ test('runCli keeps stdout parseable when combining json format with ask approval
 test('runCli can render machine-readable json output', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({
-    argv: ['run', '--prompt', 'please use the echo tool', '--format', 'json'],
+    argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--format', 'json'],
     streams,
   });
 
@@ -1357,7 +1359,7 @@ test('runCli reports missing api key errors for real providers', async () => {
 test('runCli reads stdin from an injected stdin stream', async () => {
   const { streams, output } = createStreams();
   const stdinStream = Readable.from(['inspect this tool\n']);
-  const exitCode = await runCli({ argv: ['run', '--stdin'], streams, env: { stdinStream } });
+  const exitCode = await runCli({ argv: ['run', '--provider', 'demo', '--stdin'], streams, env: { stdinStream } });
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /inspect this tool/);
@@ -1365,7 +1367,7 @@ test('runCli reads stdin from an injected stdin stream', async () => {
 });
 
 test('source bin script works with piped stdin', async () => {
-  const child = spawn(process.execPath, ['--experimental-strip-types', './src/bin.ts', 'run', '--stdin'], {
+  const child = spawn(process.execPath, ['--experimental-strip-types', './src/bin.ts', 'run', '--provider', 'demo', '--stdin'], {
     cwd: packageDir,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -1552,7 +1554,7 @@ Be warm and concise.
   const exitCode = await runCli({
     argv: ['run', '--soul', soulPath, '--format', 'json', 'hello'],
     streams,
-    env: { cwd: tempDir, homeDir: tempHome, processEnv: {} },
+    env: { cwd: tempDir, homeDir: tempHome, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
 
   assert.equal(exitCode, 0);
@@ -1565,7 +1567,7 @@ Be warm and concise.
   await runCli({
     argv: ['run', '--soul', soulPath, 'hello'],
     streams: text.streams,
-    env: { cwd: tempDir, homeDir: tempHome, processEnv: {} },
+    env: { cwd: tempDir, homeDir: tempHome, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
   assert.match(text.output.stdout, /provider=demo as Ava/);
 });
@@ -1956,7 +1958,7 @@ test('an unnamed soul keeps the same generated identity across invocations', asy
     format: 'text',
     events: true,
     soul: soulPath,
-  }, { cwd: tempDir, homeDir: tempHome, processEnv: {} });
+  }, { cwd: tempDir, homeDir: tempHome, processEnv: { STRATUS_PROVIDER: 'demo' } });
 
   const first = await resolveTwice();
   const second = await resolveTwice();
@@ -2166,6 +2168,56 @@ test('setup signs into Claude with a pasted API key, verifies it, and saves cred
   assert.match(output.stdout, /signed in with an API key — ready to go/);
 });
 
+test('setup reads the saved settings back and does not call a run that cannot start ready', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const missingSoul = path.join(home, 'no-such-soul.md');
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { STRATUS_SOUL: missingSoul },
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '9\n']),
+      fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /✓ Key verified/);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail:/);
+  assert.match(output.stdout, /no-such-soul\.md/);
+  assert.match(output.stdout, /stratus doctor/);
+});
+
+test('setup reads the settings back before calling an environment key ready', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const missingSoul = path.join(home, 'no-such-soul.md');
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'env-key', STRATUS_SOUL: missingSoul },
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => true,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail:/);
+  assert.match(output.stdout, /no-such-soul\.md/);
+});
+
 test('setup stores a Claude subscription setup token', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const { streams, output } = createStreams();
@@ -2339,6 +2391,32 @@ test('setup warns when exported env vars override the saved config', async () =>
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.match(output.stdout, /You are ready to go/);
+  assert.match(output.stdout, /stratus run --provider demo "say hello"/);
+});
+
+test('setup still reads the settings back when an exported variable is overridden by a suggested flag', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const missingSoul = path.join(home, 'no-such-soul.md');
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { STRATUS_PROVIDER: 'openai', STRATUS_SOUL: missingSoul },
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.doesNotMatch(output.stdout, /ready to go/);
+  assert.match(output.stdout, /Saved, but a run started here would fail:/);
+  assert.match(output.stdout, /no-such-soul\.md/);
   assert.match(output.stdout, /stratus run --provider demo "say hello"/);
 });
 
@@ -3966,7 +4044,7 @@ test('legacy per-directory memories migrate into the agent\'s own store on first
   const exitCode = await runCli({
     argv: ['run', 'hello'],
     streams,
-    env: { cwd: projectDir, homeDir: home, processEnv: {} },
+    env: { cwd: projectDir, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
   assert.equal(exitCode, 0);
 
@@ -3987,7 +4065,7 @@ test('legacy per-directory memories migrate into the agent\'s own store on first
   await runCli({
     argv: ['run', 'hello again'],
     streams: createStreams().streams,
-    env: { cwd: projectDir, homeDir: home, processEnv: {} },
+    env: { cwd: projectDir, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
   const after = (await readFile(agentMemoryFilePath({ homeDir: home }, 'demo-agent'), 'utf8'))
     .split('\n')
@@ -4015,7 +4093,7 @@ test('an interrupted memory migration finishes without duplicating facts', async
   const exitCode = await runCli({
     argv: ['run', 'hello'],
     streams: createStreams().streams,
-    env: { cwd: projectDir, homeDir: home, processEnv: {} },
+    env: { cwd: projectDir, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
   assert.equal(exitCode, 0);
 
@@ -4039,6 +4117,27 @@ test('memory reads dedupe by entry id', async () => {
   const { entries } = await store.list('ava');
   assert.equal(entries.length, 1);
   assert.equal(entries[0]?.id, entry.id);
+});
+
+test('serve moves a soul left in ~/.stratus/agents into the visible agents folder before serving it', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  const hidden = path.join(serveHome, '.stratus', 'agents', 'ava.md');
+  await writeFile(hidden, '---\nid: ava\nname: Ava\n---\nYou are Ava.\n');
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--no-api'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stdout, /agents folder: moved 1 soul\(s\) and 0 workspace\(s\) into .*Agents/);
+  assert.equal(await readlink(hidden), path.join(serveHome, 'Agents', 'ava', 'soul.md'));
+  assert.match(output.stdout, /stratusd ready — 2 agent\(s\)/);
 });
 
 test('runCli serve starts the gateway, prints a ready line, and drains on shutdown', async () => {
@@ -5112,6 +5211,46 @@ test('doctor flags an environment key that demotes a subscription sign-in', asyn
   assert.match(output.stdout, /billed per token instead of through your plan/);
 });
 
+test('run with no provider configured refuses with a pointer to setup instead of answering as the demo model', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['run', '--prompt', 'hello'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.notEqual(exitCode, 0);
+  assert.match(output.stderr, /No provider is configured/);
+  assert.match(output.stderr, /stratus setup/);
+  assert.doesNotMatch(output.stderr, /Usage:/, 'the error says what to do; the help would bury it');
+  assert.doesNotMatch(output.stdout, /provider=demo/);
+});
+
+test('doctor says a provider was taken from the only sign-in when nothing set one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Synthetic value only.
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ openai: { type: 'api_key', value: 'synthetic-key' } }), { mode: 0o600 });
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.match(output.stdout, /provider {2}openai/);
+  assert.match(output.stdout, /the only provider signed in — nothing set one/);
+});
+
+test('doctor keeps the provider taken from the only sign-in when that run then fails', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Synthetic value only. An unbound stored key is withheld from the
+  // project config's custom base URL, so the openai run cannot start.
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ openai: { type: 'api_key', value: 'synthetic-key' } }), { mode: 0o600 });
+  await writeFile(path.join(cwd, 'stratus.config.json'), JSON.stringify({ baseUrl: 'https://example.invalid/v1' }));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['doctor'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /provider {2}openai \(unreachable\)/);
+  assert.match(output.stdout, /the only provider signed in — nothing set one/);
+  assert.match(output.stdout, /No run can start/);
+});
+
 test('doctor names the project config that outranks the global one', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
@@ -5128,9 +5267,9 @@ test('doctor names the project config that outranks the global one', async () =>
   });
 
   assert.equal(exitCode, 1);
-  // The project file has no provider key, so the run silently falls to demo
-  // even though the global config names anthropic.
-  assert.match(output.stdout, /provider {2}demo/);
+  // The project file has no provider key, so no run can start here even
+  // though the global config names anthropic.
+  assert.match(output.stdout, /provider {2}none \(unreachable\)/);
   assert.match(output.stdout, new RegExp(`${shadow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} outranks`));
   assert.match(output.stdout, /exists but is outranked/);
 });
@@ -5280,7 +5419,27 @@ test('a new agent on a codex machine pins the codex default model, not a Claude 
     soulPinForNewAgent({ provider: 'openai', model: 'gpt-4.1-mini' }, { STRATUS_PROVIDER: 'codex' }),
     { provider: 'codex', model: 'gpt-5.5' },
   );
-  assert.deepEqual(soulPinForNewAgent({}, {}), { provider: 'demo' });
+  // Nothing chose a provider: the soul pins none, so a run infers the one
+  // signed-in provider rather than being sent to the demo model.
+  assert.deepEqual(soulPinForNewAgent({}, {}), {});
+  assert.deepEqual(soulPinForNewAgent({}, { STRATUS_PROVIDER: 'demo' }), { provider: 'demo' });
+});
+
+test('making a new agent the default never writes a provider nothing chose', () => {
+  // A machine signed in to one provider with no provider setting: runs
+  // infer it, and "Make default" must not pin the global config to demo.
+  assert.deepEqual(
+    defaultAgentConfig({}, soulPinForNewAgent({}, {}).provider, '/home/me/agent.md'),
+    { soul: '/home/me/agent.md' },
+  );
+  assert.deepEqual(
+    defaultAgentConfig({ provider: 'anthropic' }, 'codex', '/a.md'),
+    { provider: 'anthropic', soul: '/a.md' },
+  );
+  assert.deepEqual(
+    defaultAgentConfig({}, 'codex', '/a.md'),
+    { provider: 'codex', soul: '/a.md' },
+  );
 });
 
 test('doctor names the custom variable that actually supplied the key', async () => {
@@ -6415,6 +6574,35 @@ test('--no-login installs the service without the login trigger', async () => {
   );
   const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
   assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
+});
+
+test('both service units give a stop longer than the daemon\'s drain and post-abort windows before SIGKILL', async () => {
+  // A stop drains for DEFAULT_STOP_DRAIN_TIMEOUT_MS, then aborts what is
+  // still running and gives the aborted turns the same window again to
+  // record their failure. The manager's SIGKILL has to land after both, or
+  // the abort never happens or its record is cut off: launchd's default is about five seconds, and its
+  // kill of the job skips a shell command's own process group, which then
+  // runs on after the daemon.
+  const darwinHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: darwinHome, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const plist = await readFile(path.join(darwinHome, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  const exitTimeOut = /<key>ExitTimeOut<\/key>\s*<integer>(\d+)<\/integer>/.exec(plist);
+  assert.ok(exitTimeOut, plist);
+  assert.ok(Number(exitTimeOut[1]) * 1000 > 2 * DEFAULT_STOP_DRAIN_TIMEOUT_MS, `ExitTimeOut ${exitTimeOut[1]}s`);
+
+  const linuxHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'linux',
+    homeDir: linuxHome,
+    execPath: '/usr/bin/node',
+    scriptPath: '/usr/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+  const unit = await readFile(path.join(linuxHome, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  const stopSec = /TimeoutStopSec=(\d+)/.exec(unit);
+  assert.ok(stopSec, unit);
+  assert.ok(Number(stopSec[1]) * 1000 > 2 * DEFAULT_STOP_DRAIN_TIMEOUT_MS, `TimeoutStopSec=${stopSec[1]}`);
+  assert.equal(stopSec[1], exitTimeOut[1]);
 });
 
 test('the systemd unit restarts on failure and enables at login', async () => {
@@ -12724,7 +12912,12 @@ test('--force replaces a symlinked roster entry instead of writing through it', 
     /never asked to touch/,
     'writing through the link would have truncated the target',
   );
-  assert.equal((await lstat(path.join(home, '.stratus', 'agents', 'scribe.md'))).isSymbolicLink(), false);
+  // Replaced, not written through: the entry is now this install's own
+  // link, into the agent's visible folder, rather than the one it found.
+  assert.equal(
+    await readlink(path.join(home, '.stratus', 'agents', 'scribe.md')),
+    path.join(home, 'Agents', 'scribe', 'soul.md'),
+  );
   assert.equal(await readFile(path.join(home, '.stratus', 'agents', 'scribe.md'), 'utf8'), EXAMPLE_SOUL);
 });
 
@@ -13930,7 +14123,7 @@ test('gated runs a safe tool without asking and asks about the rest; a defaulted
 test('runCli with no --approvals runs a safe tool at a terminal without a prompt', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({
-    argv: ['run', '--prompt', 'please use the echo tool'],
+    argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool'],
     streams,
     env: { terminal: true },
   });
@@ -14541,7 +14734,7 @@ test('a plugin executor selected by a trusted config runs the commands, and a se
   const exitCode = await runCli({
     argv: ['run', '--prompt', 'please use the echo tool', '--format', 'json'],
     streams,
-    env: { homeDir: home, cwd: home, processEnv: {} },
+    env: { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
 
   assert.equal(exitCode, 0, output.stderr);
@@ -14559,7 +14752,7 @@ test('a plugin executor selected by a trusted config runs the commands, and a se
   const refusedCode = await runCli({
     argv: ['run', '--prompt', 'please use the echo tool'],
     streams: refused.streams,
-    env: { homeDir: home, cwd: home, processEnv: {} },
+    env: { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
   assert.notEqual(refusedCode, 0);
   assert.match(refused.output.stderr, /selects executor sandbox, which no loaded plugin registers \(registered: fixture\)/);
@@ -14650,7 +14843,7 @@ test('a project-local config cannot deselect the executor or memory store a trus
   const exitCode = await runCli({
     argv: ['run', '--prompt', 'please use the echo tool', '--format', 'json'],
     streams,
-    env: { homeDir: home, cwd, processEnv: {} },
+    env: { homeDir: home, cwd, processEnv: { STRATUS_PROVIDER: 'demo' } },
   });
 
   assert.equal(exitCode, 0, output.stderr);
@@ -14727,7 +14920,7 @@ test('parseCommand reads serve --log-format and health, and refuses what neither
 test('serve --log-format json puts exactly the log file\'s records on stdout, and nothing else', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-json-log-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
 
   const { stdout, stderr } = await withServedApi(home, async ({ url, token }) => {
     // Queued before the stop, so the stop's drain is what waits for the
@@ -14923,4 +15116,28 @@ test('a continuation shows in --events and keeps its counts in the log', () => {
   const event = { type: 'session.continued' as const, sessionId: 's1', continuation: 2, turns: 40 };
   assert.equal(formatEvent(event), '• session.continued #2 (+40 turns)');
   assert.deepEqual(eventDetail(event), { continuation: 2, turns: 40 });
+});
+
+test('template add --force that cannot write the new soul keeps the agent it was replacing', async (t) => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) {
+    t.skip('mode 500 does not deny writes here');
+    return;
+  }
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-home-')));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const first = await writeTemplateDir({ 'template.json': EXAMPLE_MANIFEST, 'agents/scribe.md': EXAMPLE_SOUL });
+  assert.equal(await runCli({ argv: ['template', 'add', first, '--yes'], streams: createStreams().streams, env }), 0);
+  const roster = path.join(home, '.stratus', 'agents', 'scribe.md');
+  const folder = path.join(home, 'Agents', 'scribe');
+  assert.ok((await lstat(roster)).isSymbolicLink(), 'installed into the visible folder');
+
+  // The visible folder can no longer take a new file.
+  await chmod(folder, 0o500);
+  t.after(() => chmod(folder, 0o755));
+  const second = await writeTemplateDir({ 'template.json': EXAMPLE_MANIFEST, 'agents/scribe.md': EXAMPLE_SOUL.replace('notes', 'lists') });
+  const { streams } = createStreams();
+  assert.notEqual(await runCli({ argv: ['template', 'add', second, '--yes', '--force'], streams, env }), 0);
+
+  assert.equal(await readFile(roster, 'utf8'), EXAMPLE_SOUL, 'the roster still serves the agent');
+  assert.deepEqual((await readdir(path.dirname(roster))).filter((name) => name.endsWith('.replaced')), []);
 });

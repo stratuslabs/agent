@@ -270,6 +270,8 @@ export interface ParsedDoctorCommand {
   command: 'doctor';
   format: 'text' | 'json';
   configPath?: string;
+  /** Also ask each provider a run uses whether it accepts the key (network). */
+  live?: boolean;
 }
 
 export interface ParsedUpdateCommand {
@@ -673,6 +675,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   if (command === 'doctor') {
     let format: 'text' | 'json' = 'text';
     let configPath: string | undefined;
+    let live = false;
     for (let index = 0; index < rest.length; index += 1) {
       const token = rest[index];
       if (!token) {
@@ -695,9 +698,13 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
+      if (token === '--live') {
+        live = true;
+        continue;
+      }
       throw new Error(`Unknown option: ${token}`);
     }
-    return { command: 'doctor', format, ...(configPath ? { configPath } : {}) };
+    return { command: 'doctor', format, ...(configPath ? { configPath } : {}), ...(live ? { live } : {}) };
   }
 
   if (command === 'update') {

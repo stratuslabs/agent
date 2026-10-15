@@ -1,3 +1,6 @@
+import { readdir } from 'node:fs/promises';
+import path from 'node:path';
+
 import type { ProtectedPaths } from '@stratusagent/core';
 
 import { ConfigFileError } from './config-file.ts';
@@ -5,6 +8,7 @@ import { resolveConfigLocation } from './config-location.ts';
 import type { RuntimeSelection } from './config.ts';
 import { type StateEnvironment } from './environment.ts';
 import {
+  agentsDirPath,
   credentialsPath,
   gatewayInfoPath,
   gatewayTokenPath,
@@ -55,6 +59,23 @@ export const createHostProtectedPaths = (
         gatewayInfoPath(env),
         globalConfigPath(env),
       ];
+      // Every soul by its roster name. The home covers that name already;
+      // listing it is for the file behind it, since a soul is normally a
+      // link into the visible agents folder (`~/Agents/<id>/soul.md`), and
+      // the guard protects a listed path's canonical spelling, and its
+      // inode, as well. Without this an agent given `~/Agents` as a root
+      // could rewrite its own tools and credentials.
+      try {
+        for (const file of await readdir(agentsDirPath(env))) {
+          if (file.endsWith('.md')) {
+            listed.push(path.join(agentsDirPath(env), file));
+          }
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
       if (selection.stateDir !== undefined && !listed.includes(selection.stateDir)) {
         listed.push(selection.stateDir);
       }

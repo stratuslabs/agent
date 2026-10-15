@@ -375,7 +375,7 @@ const eachLedgerRecord = async (
  * canonical path while this migration walks the configured one, and a
  * single-spelling comparison would quietly match nothing.
  */
-const remapLedger = async (workspace: string, from: readonly string[], to: string): Promise<number> => {
+export const remapLedger = async (workspace: string, from: readonly string[], to: string): Promise<number> => {
   const ledgerPath = ledgerIn(workspace);
   // What this ledger would gain, keyed as a record is keyed — a path and its
   // label together. A repair that is derived rather than remembered runs

@@ -58,16 +58,14 @@ test('headless runs a safe scope and refuses everything outside one, in the log'
     commands: {},
   });
 
-  assert.equal(await policy.approve(contextFor('git status')), true);
-  assert.equal(await policy.approve(contextFor('git status --short')), true);
+  assert.equal(await policy.approve(contextFor('pwd')), true);
+  assert.equal(await policy.approve(contextFor('uname -a')), true);
 
-  // `git` has safe scopes; `git clean` is not one of them, and listing the
-  // executable would have covered it.
   assert.equal(await policy.approve(contextFor('git clean -fdx')), false);
   assert.equal(await policy.approve(contextFor('git push origin main')), false);
 
   assert.deepEqual(decisions.map((decision) => decision.allowed), [true, true, false, false]);
-  assert.match(decisions[0]?.reason ?? '', /inside the approved scope "git status"/);
+  assert.match(decisions[0]?.reason ?? '', /inside the approved scope "pwd"/);
   // Every denial says what was refused, because an unattended refusal that
   // appears nowhere reads as an agent that chose not to act — but it says it
   // without quoting the command, which is a tool input and stays out of the
@@ -77,6 +75,32 @@ test('headless runs a safe scope and refuses everything outside one, in the log'
   // The command travels beside the reason instead, for a surface that is
   // showing it to a person.
   assert.equal(decisions[2]?.command, 'git clean -fdx');
+});
+
+test('no git form runs unattended out of the box', async () => {
+  // Git runs programs a repository's own files name, and some read forms
+  // take a path anywhere on disk, so none of it is safe for any caller.
+  assert.equal(SAFE_COMMAND_SCOPES.some((scope) => scope.command === 'git'), false);
+  const policy = createPermissionPolicy({ mode: 'headless', commands: {} });
+  for (const command of [
+    'git status',
+    'git status --short',
+    'git diff',
+    'git diff a.txt b.txt',
+    'git log -p',
+    'git show HEAD',
+    'git blame notes.txt',
+    'git describe',
+    'git rev-parse HEAD',
+    'git ls-files',
+    'git shortlog',
+    'git branch',
+    'git tag',
+    'git remote -v',
+    'git log | grep fix',
+  ]) {
+    assert.equal(await policy.approve(contextFor(command)), false, `should ask: ${command}`);
+  }
 });
 
 test('every control operator defeats a safe base command', async () => {
@@ -442,12 +466,18 @@ test('“always” on a command that has no scope says so, rather than claiming 
   assert.doesNotMatch(decisions[0]?.reason ?? '', /rest of this session/);
 });
 
-test('a safe scope covers the listing form and not the creating one', async () => {
-  const decisions: PermissionDecision[] = [];
+/** What approving each listing form once persists, the way Always allow would. */
+const listingGrants = (): CommandScope[] =>
+  ['git branch', 'git tag', 'git remote -v'].map((command) => {
+    const scope = normalizeCommandScope(analyzeCommand(command));
+    assert.ok(scope, command);
+    return scope;
+  });
+
+test('a scope approved from a listing form covers listing and not creating', async () => {
   const policy = createPermissionPolicy({
     mode: 'headless',
-    onDecision: (decision) => decisions.push(decision),
-    commands: {},
+    commands: { safeScopes: [...SAFE_COMMAND_SCOPES, ...listingGrants()] },
   });
 
   // Listing, in every flag-shaped form.
@@ -464,8 +494,6 @@ test('a safe scope covers the listing form and not the creating one', async () =
   assert.equal(await policy.approve(contextFor('git tag v1.0.0')), false);
   assert.equal(await policy.approve(contextFor('git remote show origin')), false);
 
-  // And the persisted form inherits the same distinction, so approving
-  // `git branch` once never makes creating one unattended.
   const scope = normalizeCommandScope(analyzeCommand('git branch --list'));
   assert.equal(scope?.listOnly, true);
 });
@@ -496,7 +524,10 @@ test('a command that can be handed a path is not safe, whatever it is called', a
 });
 
 test('a listing scope names the flags it allows, so a mutating one it never heard of is refused', async () => {
-  const policy = createPermissionPolicy({ mode: 'headless', commands: {} });
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { safeScopes: [...SAFE_COMMAND_SCOPES, ...listingGrants()] },
+  });
 
   // The listing flags, including bundles, `=` forms, and the numeric
   // argument `git tag -n5` carries.
@@ -533,12 +564,20 @@ test('a listing scope names the flags it allows, so a mutating one it never hear
   assert.equal(scope?.allowedFlags?.includes('--unset-upstream'), false);
 });
 
+/** Git read forms an operator granted, since none is built in. */
+const gitReadGrants = (): CommandScope[] => [
+  { command: 'git', args: ['log'] },
+  { command: 'git', args: ['diff'] },
+  { command: 'git', args: ['status'] },
+  ...listingGrants(),
+];
+
 test('a pipeline runs unattended when every stage would on its own', async () => {
   const decisions: PermissionDecision[] = [];
   const policy = createPermissionPolicy({
     mode: 'headless',
     onDecision: (decision) => decisions.push(decision),
-    commands: {},
+    commands: { safeScopes: [...SAFE_COMMAND_SCOPES, ...gitReadGrants()] },
   });
 
   const allowed = [
@@ -559,7 +598,10 @@ test('a pipeline runs unattended when every stage would on its own', async () =>
 });
 
 test('a pipeline asks when any stage could read a path, run a program, or write', async () => {
-  const policy = createPermissionPolicy({ mode: 'headless', commands: {} });
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { safeScopes: [...SAFE_COMMAND_SCOPES, ...gitReadGrants()] },
+  });
 
   const refused = [
     // A stage no scope covers.
@@ -705,7 +747,7 @@ test('a command an operator declares is a prefix whose tail may vary, minus the 
   // And a prefix longer than a limited built-in scope, whose limits it
   // would otherwise shed.
   for (const prefix of ['grep fix', 'git branch release']) {
-    assert.match((commandScopeFromPrefix(prefix) as { reason: string }).reason, /already limits/, prefix);
+    assert.match((commandScopeFromPrefix(prefix) as { reason: string }).reason, /built-in list (already )?limits/, prefix);
   }
   // And a prefix shorter than a limited subcommand is refused outright.
   assert.match((commandScopeFromPrefix('git') as { reason: string }).reason, /git branch/);

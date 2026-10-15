@@ -59,6 +59,7 @@ import {
   CHANNEL_KIND_PATTERN,
   CREDENTIAL_NAME_PATTERN,
   NamedCredentialExistsError,
+  NoProviderConfiguredError,
   type AgentSummary,
   type CredentialProviderName,
   type RuntimeConfig,
@@ -596,14 +597,25 @@ export const routes: Route[] = [
       // NOT probed: a monitoring view polls this, and a live call per poll
       // would spend the operator's rate limit to tell them what resolution
       // already knows.
-      const runtimes = new Map<string, { provider: string; model?: string; credentials: string }>();
+      const runtimes = new Map<string, { provider: string; model?: string; credentials: string; problem?: string }>();
       // Resolved from the roster the gateway is serving, not from the agents
       // directory. A soul added without a successful reload is not dispatched
       // yet, and a loaded soul that was deleted or broken since still is —
       // either way a directory scan bills the wrong set. `servedSouls` hands
       // over the pins the gateway itself would apply.
       const roster = (await context.gateway.servedSouls()).map((entry) => entry.soul);
-      for (const served of await servedRuntimes(context.env, context.configPath, roster)) {
+      // An agent with no provider at all is refused on every turn, so it is
+      // listed as such rather than left out of the runtimes it isn't in.
+      let noProvider: string | undefined;
+      const servedList = await servedRuntimes(context.env, context.configPath, roster, (error) => {
+        if (error instanceof NoProviderConfiguredError) {
+          noProvider ??= error.message;
+        }
+      });
+      if (noProvider !== undefined) {
+        runtimes.set('none', { provider: 'none', credentials: 'none', problem: noProvider });
+      }
+      for (const served of servedList) {
         const model = served.runtime.provider === 'demo' ? undefined : served.runtime.model;
         const entry = {
           provider: served.runtime.provider,

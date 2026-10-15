@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/cli",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -36,8 +36,6 @@
     "@stratusagent/permissions": "workspace:*",
     "@stratusagent/plugins": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
-    "@stratusagent/provider-claude-code": "workspace:*",
-    "@stratusagent/provider-codex": "workspace:*",
     "@stratusagent/providers": "workspace:*",
     "@stratusagent/state": "workspace:*"
   },
@@ -47,6 +45,8 @@
     "@stratusagent/dashboard": "workspace:*",
     "@stratusagent/memory-sqlite": "workspace:*",
     "@stratusagent/plugin-mcp": "workspace:*",
+    "@stratusagent/provider-claude-code": "workspace:*",
+    "@stratusagent/provider-codex": "workspace:*",
     "@stratusagent/provider-openai": "workspace:*",
     "@stratusagent/tool-browser": "workspace:*",
     "@stratusagent/tool-fs": "workspace:*",

@@ -1,3 +1,4 @@
+import { harnessesMissingMessage, installHarnessPackages, missingHarnessPackages } from '../harness-packages.ts';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { JsonObject } from '@stratusagent/core';
@@ -8,7 +9,7 @@ import {
   PluginManifestError,
 } from '@stratusagent/plugins';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
+import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 import { formatSoul, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import {
   claimSoulFile,
@@ -33,6 +34,7 @@ import {
   readProcessEnv,
   readWorkingDirectory,
   resolveAgentApprovals,
+  resolveRuntimeConfig,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
   saveChannelCredentials,
@@ -2707,7 +2709,8 @@ export const runSetup = async (
   /**
    * Write everything the menu decided, then report whether the always-on
    * service step it performed — installing the service, or removing one the
-   * user chose not to run — succeeded.
+   * user chose not to run — and the install of the provider harness the
+   * config runs on both succeeded.
    *
    * A boolean rather than a throw: the service is the one optional part of
    * setup and everything else is already on disk by the time it runs, so
@@ -2858,6 +2861,15 @@ export const runSetup = async (
     // LaunchAgent come up with the Slack channel and the control API
     // already present, instead of warning about them in a log nobody reads
     // until the dashboard fails.
+    // The provider package comes first, and without a question: choosing
+    // Claude by subscription or Codex was the decision, and the CLI no
+    // longer carries either harness, so a daemon started without it fails
+    // every turn. Through the saved files, so a soul's own pin counts.
+    // A failed install is carried like a failed service step: everything is
+    // saved, but the exit code and the closing line must not call a config
+    // whose every turn fails ready.
+    const harnesses = await missingHarnessPackages(env, configPath, { asService: true });
+    const harnessInstallFailed = !(await installHarnessPackages(harnesses, streams, env));
     await offerOptionalPackages();
 
     // Last, so the daemon starts against the config and credentials that
@@ -2943,16 +2955,55 @@ export const runSetup = async (
     }
     const extraFlags = conflicts.flatMap((conflict) => (conflict.flag ? [` ${conflict.flag}`] : [])).join('');
 
+    // Read back what was just written, through the resolver a run uses,
+    // before saying "ready". The menu's state is what setup meant to save;
+    // whether a run starts is decided by the files on disk plus this shell's
+    // environment, and the two have disagreed: a soul named in the
+    // environment that no longer exists fails every run while the menu
+    // looked signed in. Only the "ready" claim waits on this. The
+    // not-signed-in branch already says what is missing. An exported
+    // variable the suggested command overrides with a flag is resolved with
+    // that same flag, so the read-back checks the command it suggests.
+    const flagged = new Set(conflicts.flatMap((conflict) => (conflict.flag ? [conflict.envVar] : [])));
+    const readBackSelection = {
+      configPath,
+      ...(flagged.has('STRATUS_PROVIDER') ? { provider: state.provider } : {}),
+      ...(flagged.has('STRATUS_MODEL') ? { model: String(state.model ?? defaultModelFor(state.provider)) } : {}),
+      ...(flagged.has('STRATUS_BASE_URL') ? { baseUrl: state.baseUrl ?? DEFAULT_OPENAI_BASE_URL } : {}),
+    };
+    const readBackFailure = harnessInstallFailed
+      ? harnessesMissingMessage(harnesses)
+      : await resolveRuntimeConfig(readBackSelection, env).then(
+        () => undefined,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+    const failedReadBack = (): boolean => {
+      if (readBackFailure === undefined) {
+        return false;
+      }
+      writeLine(streams.stdout, `Saved, but a run started here would fail: ${readBackFailure}`);
+      writeLine(streams.stdout, `Run \`stratus doctor${runConfigFlag}${shadowConfigFlag}\` for the full picture. Once it is fixed, try:`);
+      return true;
+    };
+
     if (state.provider === 'demo') {
-      writeLine(streams.stdout, 'You are ready to go — no account needed. Try:');
+      if (!failedReadBack()) {
+        writeLine(streams.stdout, 'You are ready to go — no account needed. Try:');
+      }
     } else if (readNonEmptyString(processEnv.STRATUS_API_KEY)) {
-      writeLine(streams.stdout, 'STRATUS_API_KEY is exported and takes precedence over your saved sign-in. You are ready to go. Try:');
+      if (!failedReadBack()) {
+        writeLine(streams.stdout, 'STRATUS_API_KEY is exported and takes precedence over your saved sign-in. You are ready to go. Try:');
+      }
     } else if (isRegisteredProviderName(state.provider) || state.credentials[credentialProviderOf(state.provider) ?? 'anthropic']) {
-      writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
+      if (!failedReadBack()) {
+        writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
+      }
     } else {
       const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
       if (readNonEmptyString(processEnv[keyEnv])) {
-        writeLine(streams.stdout, `${keyEnv} is set in your environment — you are ready to go. Try:`);
+        if (!failedReadBack()) {
+          writeLine(streams.stdout, `${keyEnv} is set in your environment — you are ready to go. Try:`);
+        }
       } else {
         writeLine(streams.stdout, 'You are NOT signed in yet — re-run `stratus setup` and pick option 1, or:');
         writeLine(streams.stdout, `  export ${keyEnv}=your-key`);
@@ -2964,7 +3015,7 @@ export const runSetup = async (
     if (dashboardReady) {
       writeLine(streams.stdout, '  stratus dashboard');
     }
-    return !serviceStepFailed;
+    return !serviceStepFailed && !harnessInstallFailed;
   };
 
   try {

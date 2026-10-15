@@ -9,13 +9,13 @@ need no setup at all, or show every setting spelled out.
 The `demo` provider needs no account at all:
 
 ```bash
-stratus run "say hello"
+stratus run --provider demo "say hello"
 ```
 
 Or trigger the demo tool:
 
 ```bash
-stratus run --prompt "please use the echo tool"
+stratus run --provider demo --prompt "please use the echo tool"
 ```
 
 ## 2) Open the local dashboard

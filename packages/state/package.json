@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/state",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -28,11 +28,11 @@
     "@stratusagent/permissions": "workspace:*",
     "@stratusagent/plugins": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
-    "@stratusagent/provider-claude-code": "workspace:*",
-    "@stratusagent/provider-codex": "workspace:*",
     "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
+    "@stratusagent/provider-claude-code": "workspace:*",
+    "@stratusagent/provider-codex": "workspace:*",
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },

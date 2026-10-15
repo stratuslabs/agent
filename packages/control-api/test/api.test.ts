@@ -503,9 +503,11 @@ test('health reports the roster and its runtimes without probing a provider', as
     assert.ok(health.agents.some((agent) => agent.id === 'ava'));
     assert.equal(health.sessions.total, 0);
     assert.equal(health.approvals.pending, 0);
-    // Demo, because nothing is signed in here — and reported as such rather
-    // than guessed at.
-    assert.ok(health.runtimes.some((runtime) => runtime.provider === 'demo'));
+    // Nothing is signed in and nothing picks a provider, so every turn is
+    // refused — reported as such rather than guessed at or left out.
+    const none = health.runtimes.find((runtime) => runtime.provider === 'none');
+    assert.ok(none, `expected a provider-less runtime, got ${JSON.stringify(health.runtimes)}`);
+    assert.match((none as { problem?: string }).problem ?? '', /stratus setup/);
     assert.equal(fetched, 0, 'health made no network call');
   } finally {
     await harness.stop();

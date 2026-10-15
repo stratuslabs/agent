@@ -130,6 +130,9 @@ body {
 .row .grow { flex: 1; min-width: 0; }
 .row .title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .title.problem { white-space: normal; }
+.row .sub.problem { color: var(--danger); white-space: normal; overflow-wrap: break-word; }
+.row .title .pill { margin-left: 4px; vertical-align: 1px; }
 
 .pill {
   font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600;

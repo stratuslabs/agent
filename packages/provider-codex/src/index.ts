@@ -23,11 +23,15 @@ import {
   latestUserMessagePrompt,
   markHostedToolSideEffects,
   renderTranscriptPrompt,
+  CODEX_THREAD_METADATA_KEY,
+  DEFAULT_CODEX_MODEL,
   type HostedToolExecutor,
 } from '@stratusagent/providers';
 
-/** The codex CLI's own current default model. */
-export const DEFAULT_CODEX_MODEL = 'gpt-5.5';
+// The default model and the thread key live in `@stratusagent/providers`,
+// because the host names both whether or not this package is installed.
+// Re-exported here, where they used to live.
+export { CODEX_THREAD_METADATA_KEY, DEFAULT_CODEX_MODEL };
 
 const MCP_SERVER_NAME = 'stratus';
 
@@ -466,17 +470,6 @@ export interface CodexProviderConfig {
    */
   onResumeFailed?: (error: unknown) => void;
 }
-
-/**
- * Where a session records the codex thread it is continuing.
- *
- * The kernel's session id is ours and durable; the thread id is codex's
- * and lives beside its transcript under `~/.codex/sessions`. Storing the
- * link in session metadata means it survives tool execution, approval
- * waits, and a daemon restart, and is garbage-collected with the session —
- * the same treatment the Claude Code provider gives its SDK session id.
- */
-export const CODEX_THREAD_METADATA_KEY = 'codexThreadId';
 
 const readThreadId = (session: ProviderRequest['session']): string | undefined => {
   const stored = session.metadata?.[CODEX_THREAD_METADATA_KEY];

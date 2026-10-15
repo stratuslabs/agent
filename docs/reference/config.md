@@ -11,6 +11,11 @@ Precedence, highest first:
 4. **Config file** — a project-local `stratus.config.json` outranks the
    global `~/.stratus/config.json`
 
+When none of these names a provider, a run uses the one provider you have
+signed in to and says so. With no sign-in, or more than one, the run is
+refused with a pointer to `stratus setup`. The offline `demo` model runs only
+when something names it.
+
 `stratus setup` writes the global file for you; a project can carry its own
 `stratus.config.json` (start from
 [`stratus.config.json.example`](../../stratus.config.json.example)), and

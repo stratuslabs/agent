@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   type AgentDefinition,
@@ -22,7 +22,7 @@ import {
 } from '@stratusagent/core';
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
+import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 import { assertDerivedStatePath } from '@stratusagent/permissions';
 import { createShardedFileMemoryStore } from './memory.ts';
 import { ConfigFileError } from './config-file.ts';
@@ -33,6 +33,7 @@ import {
   readWorkingDirectory,
   readNonEmptyString,
 } from './environment.ts';
+import { writeNewSoulFile } from './agents-home.ts';
 import { agentMemoryFilePath, agentsDirPath, foldedAgentId, stratusHomePath } from './paths.ts';
 import {
   isRegisteredProviderName,
@@ -40,6 +41,7 @@ import {
   parseProviderName,
 } from './provider-names.ts';
 import { type SoulPinContext, applySoulPins } from './served.ts';
+import { signedInProviders } from './runtime.ts';
 import { DEFAULT_STRATUS_AGENT, resolveConfiguredSoul, loadRosterSouls } from './souls.ts';
 
 // Unsouled runs used to remember facts under a per-provider default agent.
@@ -597,7 +599,9 @@ export const claimSoulFile = async (
     const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
     if (!taken(agent.id)) {
       try {
-        await writeFile(soulPath, render(agent), { flag: 'wx' });
+        // Into the agent's visible folder, linked from `soulPath`; exclusive
+        // at both ends, so a taken name still fails with EEXIST below.
+        await writeNewSoulFile(env, `${agent.id}.md`, agent.id, render(agent));
         return { agent, soulPath };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
@@ -671,6 +675,11 @@ export const listAgentSummaries = async (
   // Listing must never be blocked by a broken config — it only feeds the
   // default marker and the "runs on" lines.
   const { config: activeConfig, location: activeConfigLocation } = await discoverActiveConfig(env, warn, configPath);
+  // What a run picks when nothing names a provider: the only stored
+  // sign-in, or none at all (that run is refused). A broken credentials
+  // file is reported elsewhere; the listing still answers.
+  const signedIn = await signedInProviders(env).catch(() => []);
+  const unchosenProvider = signedIn.length === 1 ? signedIn[0]! : 'none';
 
   const pinContext: SoulPinContext = {
     ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
@@ -693,7 +702,7 @@ export const listAgentSummaries = async (
    * Two surfaces disagreeing about which provider is being billed.
    *
    * What is left afterwards still follows `resolveRuntimeConfig`'s precedence
-   * — env, soul, config, demo — because a listing must answer even when no
+   * — env, soul, config, the only stored sign-in — because a listing must answer even when no
    * credential resolves, which is precisely when someone is looking at it.
    */
   const runsOnFor = (soul?: ParsedSoul): { provider: string; model?: string } => {
@@ -708,8 +717,8 @@ export const listAgentSummaries = async (
     // config and environment were read into.
     const soulProvider = readNonEmptyString(soul?.provider, (value) => parseProviderName(value, 'soul file'));
     const soulModel = soul?.model;
-    const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? 'demo';
-    if (provider === 'demo') {
+    const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? unchosenProvider;
+    if (provider === 'demo' || provider === 'none') {
       return { provider };
     }
     const soulModelApplies = soulProvider === undefined || soulProvider === provider;

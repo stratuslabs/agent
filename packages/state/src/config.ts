@@ -1,7 +1,6 @@
 import type { JsonObject } from '@stratusagent/core';
 import type { ParsedSoul } from '@stratusagent/agents';
-import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
-import type { CodexRunTurn } from '@stratusagent/provider-codex';
+import type { ClaudeCodeTransport, CodexTransport } from '@stratusagent/providers';
 import {
   type RegisteredProviderName,
   type StratusProviderName,
@@ -382,12 +381,12 @@ export interface FallbackRuntime {
    * this, that configuration reaches the real Agent SDK the moment the
    * primary fails.
    */
-  queryFn?: ClaudeCodeQueryFn;
+  queryFn?: ClaudeCodeTransport;
   /**
    * The codex harness transport for a codex fallback — `queryFn`'s
    * counterpart, for the same reason: no other primary carries one.
    */
-  codexRunTurn?: CodexRunTurn;
+  codexRunTurn?: CodexTransport;
   /**
    * A codex fallback with no key runs on the machine's own `codex login`
    * sign-in. Recorded explicitly (from the stored subscription marker)
@@ -482,7 +481,7 @@ type RuntimeConfigVariant =
        * only half of what this config can select is reachable from a
        * test.
        */
-      queryFn?: ClaudeCodeQueryFn;
+      queryFn?: ClaudeCodeTransport;
       /** See StratusConfigFile.promptCache. Absent means the adapter's default (on). */
       promptCache?: boolean;
       /** See StratusConfigFile.promptCacheTtl. Absent means the adapter's default ('5m'). */
@@ -516,7 +515,7 @@ type RuntimeConfigVariant =
        * anthropic variant's `queryFn`. Without it a codex config is the
        * one runtime a test cannot drive.
        */
-      codexRunTurn?: CodexRunTurn;
+      codexRunTurn?: CodexTransport;
       soul?: ParsedSoul;
       /** Absolute path the soul was loaded from, for callers that re-read it. */
       soulPath?: string;
@@ -545,6 +544,11 @@ type RuntimeConfigVariant =
 
 export type RuntimeConfig = RuntimeConfigVariant & {
   ignoredFromUntrustedConfig?: IgnoredUntrustedConfig;
+  /**
+   * Set when nothing chose a provider and the run took the only provider
+   * with a stored sign-in. Hosts say so once, since no setting names it.
+   */
+  inferredProvider?: CredentialProviderName;
   /**
    * The language the run writes in: the soul's `language:`, then the config
    * file's `language`. Absent means neither set one, and the prompt uses

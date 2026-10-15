@@ -10,6 +10,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
   ContextOverflowError,
+  redactedError,
   transcriptOf,
   isUnaddressedTurn,
   droppedImageNote,
@@ -694,7 +695,7 @@ export const createAnthropicProvider = ({
   // in the system block, which changes only when a memory does.
   let memoryAtTailSupported = !prefixBound;
 
-  return {
+  const provider: ModelProvider = {
     name,
     async generate(request: ProviderRequest) {
       const rawTurns = rawTurnsFrom(request.session);
@@ -971,6 +972,25 @@ export const createAnthropicProvider = ({
       }
 
       return usage ? { parts, usage } : { parts };
+    },
+  };
+
+  // Whatever leaves `generate` failed is stored on the turn, logged, and
+  // posted to the channel, and an endpoint set through `baseUrl` may have
+  // repeated the key in its error body. Redacted in place, so the SDK's
+  // error keeps its class and status for anything that reads them. Fetch
+  // trims surrounding spaces and tabs from a header value, so the trimmed
+  // form is what an endpoint would echo.
+  const secrets = [apiKey, authToken].flatMap((value) =>
+    typeof value === 'string' ? [value, value.replace(/^[\t ]+|[\t ]+$/g, '')] : [value]);
+  return {
+    ...provider,
+    async generate(request: ProviderRequest) {
+      try {
+        return await provider.generate(request);
+      } catch (error) {
+        throw redactedError(error, secrets);
+      }
     },
   };
 };

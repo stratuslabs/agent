@@ -1,5 +1,5 @@
 import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
+import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 
 export const HELP_TEXT = `Stratus Agent CLI
 
@@ -7,11 +7,11 @@ Usage:
   stratus setup
   stratus chat
   stratus chat --soul ./examples/souls/blair.md
-  stratus run --prompt "Use the demo tool"
+  stratus run --provider demo --prompt "Use the demo tool"
   stratus run "Say hello"
   ANTHROPIC_API_KEY=... stratus run --provider anthropic "Say hello"
   stratus run --soul ./examples/souls/blair.md "Say hello"
-  echo "Use the echo tool" | stratus run --stdin
+  echo "Use the echo tool" | stratus run --provider demo --stdin
   STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
@@ -73,7 +73,7 @@ Commands:
                    delegation, and a watchdog — one per home (it refuses to
                    start over a daemon already serving ~/.stratus, and exits
                    78 on a trusted config that will not load), and
-                   Ctrl+C / SIGTERM drains cleanly
+                   Ctrl+C / SIGTERM drains (30s, then aborts)
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
                    says is also written to ~/.stratus/logs, which
@@ -236,7 +236,9 @@ Commands:
                    (override with --token or STRATUS_GATEWAY_TOKEN)
   doctor           Show what a run would use right now — provider, model, soul —
                    and which file or environment variable decided each, then
-                   flag anything that would surprise you (--format json)
+                   flag anything that would surprise you (--format json).
+                   --live also asks each provider your runs use whether it
+                   accepts the key
   update           The whole upgrade dance, in the order that cannot lose
                    data: stop stratusd, upgrade the package from npm —
                    together with every optional first-party package this

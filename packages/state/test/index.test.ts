@@ -138,13 +138,14 @@ test('config file is written owner-read-only, and a loose one is tightened on th
   assert.equal((await stat(directory)).mode & 0o777, 0o755);
 });
 
-test('runtime config defaults to the demo provider with no configuration', async () => {
-  const config = await resolveRuntimeConfig({}, {
-    homeDir: tempHome,
-    cwd: tempHome,
+test('runtime config with no configuration refuses to run rather than falling back to the demo provider', async () => {
+  // Its own home: the shared one picks up configs other tests save.
+  const empty = await mkdtemp(path.join(os.tmpdir(), 'stratus-state-empty-'));
+  await assert.rejects(resolveRuntimeConfig({}, {
+    homeDir: empty,
+    cwd: empty,
     processEnv: {},
-  });
-  assert.equal(config.provider, 'demo');
+  }), /No provider is configured/);
 });
 
 test('fallback stickiness is per session, never per pooled provider', async () => {
@@ -1762,6 +1763,11 @@ test('approvals.trustedDomains adds up per agent, normalizes, and refuses anythi
       JSON.stringify(bad),
     );
   }
+  // A shared suffix is refused by name, not as a malformed domain.
+  await assert.rejects(
+    loadConfigFile(await writeConfig('trusted-suffix.json', { approvals: { trustedDomains: ['openai.com', '*.github.io'] } })),
+    /Invalid approvals\.trustedDomains in config .*: github\.io is a suffix anyone can register a site under/,
+  );
 });
 
 test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {

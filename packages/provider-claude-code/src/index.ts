@@ -34,6 +34,8 @@ import {
   promptImagesOf,
   markHostedToolSideEffects,
   renderTranscriptPrompt,
+  SDK_SESSION_AUTH_METADATA_KEY,
+  SDK_SESSION_METADATA_KEY,
   type HostedToolExecutor,
 } from '@stratusagent/providers';
 
@@ -43,10 +45,44 @@ import {
 // and the documented import paths keep working.
 export { bridgedToolNames, hasHostedToolSideEffects, markHostedToolSideEffects };
 
+// The session keys moved there too, because the host names them whether or
+// not this package is installed.
+export { SDK_SESSION_AUTH_METADATA_KEY, SDK_SESSION_METADATA_KEY };
+
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5-5';
 
 
 const MCP_SERVER_NAME = 'stratus';
+
+/**
+ * The most text, in UTF-16 code units, one bridged tool result hands the
+ * Claude Code loop. The CLI swaps a text result over 100,000 characters
+ * for a file under ~/.claude/projects, outside every agent root, so the
+ * model gets a path it cannot open. Below that it cuts anything it counts
+ * over MAX_MCP_OUTPUT_TOKENS (25,000 by default). The bridge bounds results
+ * itself, under the first, and lifts the second to match (see `env` below),
+ * so a result is either whole or cut here with a note saying so.
+ */
+export const BRIDGED_RESULT_MAX_CHARS = 90_000;
+
+/**
+ * Cuts a rendered result to the bound, from the end so a leading
+ * `untrusted` label survives, and never between the halves of a surrogate
+ * pair. The note names both sizes and points at paging, which fs.read and
+ * web.fetch support and other tools can be asked to narrow.
+ */
+const boundBridgedText = (text: string): string => {
+  if (text.length <= BRIDGED_RESULT_MAX_CHARS) {
+    return text;
+  }
+  let end = BRIDGED_RESULT_MAX_CHARS;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  const format = (count: number): string => count.toLocaleString('en-US');
+  return `${text.slice(0, end)}\n\n[Stratus: this tool result was cut at ${format(BRIDGED_RESULT_MAX_CHARS)} of ${format(text.length)} characters. Ask for less, or page with offset where the tool supports it.]`;
+};
 
 /**
  * Executes one kernel tool call on behalf of the Claude Code loop. The
@@ -151,7 +187,7 @@ export const bridgeKernelTools = (
           content: [
             {
               type: 'text' as const,
-              text: renderToolResultContent(result),
+              text: boundBridgedText(renderToolResultContent(result)),
             },
             // What the call showed, as MCP carries an image: the harness
             // hands it to the model as that tool's output.
@@ -350,38 +386,6 @@ const linkedAbortController = (signal: AbortSignal): AbortController => {
 
 // The Agent SDK takes a single prompt string per query, so multi-turn
 // sessions are rendered as a transcript with the latest user message last.
-/**
- * Where a session records the SDK session it is continuing.
- *
- * The pairing is the whole point of resuming: the kernel's session id is
- * ours and durable, the SDK's is its own and lives beside its transcript
- * under `~/.claude/projects`. Storing the link in session metadata means
- * it survives tool execution, approval waits, and a daemon restart, and
- * is garbage-collected with the session — the same treatment the
- * Anthropic provider gives its raw turns, for the same reasons.
- */
-export const SDK_SESSION_METADATA_KEY = 'claudeCodeSessionId';
-
-/**
- * Which sign-in the stored SDK session was made under, as a fingerprint.
- *
- * An SDK session is resumed only under the sign-in that made it. Two
- * agents can run on two subscriptions in one daemon, and a token can be
- * replaced or removed while a conversation is open; resuming across that
- * change would carry one account's harness session into another's. A
- * mismatch starts a fresh SDK session and replays the kernel's history
- * into it, the same recovery a lost transcript gets.
- *
- * A one-way hash, truncated, with a fixed prefix, so the session store
- * never holds anything a token could be recovered from. A session stored
- * before this key existed has none. On the shared sign-in it resumes as it
- * always did, because the upgrade itself must not cost every open
- * conversation a replay. Under an agent's own sign-in it does not: nothing
- * says which account made it, and that agent's sign-in is the one case
- * where it matters.
- */
-export const SDK_SESSION_AUTH_METADATA_KEY = 'claudeCodeAuth';
-
 const authFingerprintOf = (authToken: string | undefined): string => (authToken
   ? `token:${createHash('sha256').update(`stratus-claude-code-auth\0${authToken}`).digest('hex').slice(0, 16)}`
   : 'machine');
@@ -641,6 +645,12 @@ export const createClaudeCodeProvider = ({
         ...process.env,
         CLAUDE_AGENT_SDK_CLIENT_APP: 'stratus-agent',
         ANTHROPIC_API_KEY: undefined,
+        // The bridge already bounds each result (BRIDGED_RESULT_MAX_CHARS).
+        // This allows four tokens a character, well above what text
+        // ordinarily costs, so a bounded result is not cut a second time
+        // and the CLI skips the token-count call it makes before cutting.
+        // An operator's explicit setting still wins.
+        MAX_MCP_OUTPUT_TOKENS: process.env.MAX_MCP_OUTPUT_TOKENS ?? String(BRIDGED_RESULT_MAX_CHARS * 4),
         ...(authToken ? { CLAUDE_CODE_OAUTH_TOKEN: authToken } : {}),
       },
       ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),

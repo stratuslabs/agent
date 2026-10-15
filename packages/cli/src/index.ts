@@ -172,7 +172,7 @@ export { runRestart } from './commands/restart.ts';
 
 export { runHealth } from './commands/health.ts';
 
-export { soulPinForNewAgent, runAgentNew } from './commands/agent-new.ts';
+export { soulPinForNewAgent, defaultAgentConfig, runAgentNew } from './commands/agent-new.ts';
 
 export { openExternalUrl, runDashboard } from './commands/dashboard.ts';
 

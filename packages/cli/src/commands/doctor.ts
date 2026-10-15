@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   agentsDirPath,
+  planAgentsHome,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
   globalConfigPath,
@@ -19,6 +20,7 @@ import {
   gatewayInfoPath,
   gatewayTokenPath,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
+  signedInProviders,
   CREDENTIAL_PROVIDER_NAMES,
   type CredentialProviderName,
   type RosterEntry,
@@ -29,6 +31,8 @@ import {
   surveyLegacyWorkspaces,
   type LegacyWorkspaceState,
   quoteShellArg,
+  verifyProviderKey,
+  probeProviderModel,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { callRunningGateway, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
@@ -38,8 +42,122 @@ import { writeLine, pathExists } from '../io.ts';
 import { ignoredConfigRemedy } from '../runtime.ts';
 import { loadSlackAdapter } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
+import { harnessesMissingMessage, missingHarnessPackages } from '../harness-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
+
+export interface DoctorKeyCheck {
+  provider: CredentialProviderName;
+  role: 'default' | 'fallback';
+  status: 'accepted' | 'rejected' | 'unreachable' | 'not checked';
+  detail?: string;
+  /**
+   * Once the key is accepted: what the run's model said to a one-token call.
+   * `refused` is the provider declining it (unknown model, no credit);
+   * `no answer` is offline, rate-limited or overloaded and judges nothing.
+   */
+  model?: { id: string; status: 'answered' | 'refused' | 'no answer' | 'not checked'; detail?: string };
+}
+
+/** The key and endpoint a run would send, or why there is none to check. */
+const keyToCheck = (
+  provider: CredentialProviderName,
+  runtime: { apiKey?: string; authToken?: string; baseUrl?: string },
+): { key: string; baseUrl?: string } | { skip: string } => {
+  if (runtime.apiKey) {
+    // codex verifies against OpenAI's default endpoint; its baseUrl is not a key endpoint.
+    return { key: runtime.apiKey, ...(provider !== 'codex' && runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}) };
+  }
+  if (runtime.authToken || provider === 'codex') {
+    return { skip: 'subscription sign-in, which has no key to check' };
+  }
+  return { skip: 'no key' };
+};
+
+/** A provider's models list or a one-token reply comes back in seconds; past this, doctor reports no answer instead of hanging. */
+const KEY_CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * `fetchImpl` with a deadline. The signal stops a real request; the race
+ * also covers a transport that ignores it, so doctor always finishes.
+ */
+const withDeadline = (fetchImpl: typeof fetch): typeof fetch => (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`no answer within ${KEY_CHECK_TIMEOUT_MS / 1000}s`));
+    }, KEY_CHECK_TIMEOUT_MS);
+  });
+  try {
+    const response = await Promise.race([fetchImpl(input, { ...init, signal: controller.signal }), expired]);
+    // Read the body under the same deadline, so a reply that stalls
+    // mid-body cannot hang doctor either.
+    const body = await Promise.race([response.text(), expired]);
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+  } finally {
+    clearTimeout(timer);
+  }
+}) as typeof fetch;
+
+/**
+ * `--live`: the one part of doctor that leaves the machine. Each provider a
+ * run consults is asked whether it accepts the key that run would send —
+ * the same free models-list call setup makes when the key is entered. An
+ * accepted key is then used for a one-token call to the run's model, which
+ * catches an unknown model or an account the provider will not bill. Only
+ * a refusal is a problem: no answer says nothing about the key or model.
+ */
+const checkKeys = async (
+  resolved: RuntimeConfig,
+  env: CliEnvironment,
+  problems: string[],
+): Promise<DoctorKeyCheck[]> => {
+  type Target = { provider: CredentialProviderName; role: DoctorKeyCheck['role']; model: string; runtime: { apiKey?: string; authToken?: string; baseUrl?: string } };
+  const targets: Target[] = [];
+  if (isSignedInRuntime(resolved)) {
+    targets.push({ provider: resolved.provider, role: 'default', model: resolved.model, runtime: resolved as Target['runtime'] });
+  }
+  const fallback = resolved.provider !== 'demo' ? resolved.fallback : undefined;
+  if (fallback && (CREDENTIAL_PROVIDER_NAMES as readonly string[]).includes(fallback.provider)) {
+    targets.push({ provider: fallback.provider as CredentialProviderName, role: 'fallback', model: fallback.model, runtime: fallback });
+  }
+  const fetchImpl = withDeadline(env.fetch ?? globalThis.fetch);
+  const checks: DoctorKeyCheck[] = [];
+  for (const target of targets) {
+    const plan = keyToCheck(target.provider, target.runtime);
+    if ('skip' in plan) {
+      checks.push({ provider: target.provider, role: target.role, status: 'not checked', detail: plan.skip });
+      continue;
+    }
+    const verdict = await verifyProviderKey(target.provider, plan.key, plan.baseUrl, fetchImpl);
+    const status = verdict.status === 'ok' ? 'accepted' : verdict.status;
+    const check: DoctorKeyCheck = { provider: target.provider, role: target.role, status, ...(verdict.detail ? { detail: verdict.detail } : {}) };
+    checks.push(check);
+    if (status === 'accepted') {
+      if (target.provider === 'codex') {
+        check.model = { id: target.model, status: 'not checked', detail: 'codex runs it through its own harness' };
+      } else {
+        const reply = await probeProviderModel(target.provider, plan.key, target.model, plan.baseUrl, fetchImpl);
+        check.model = { id: target.model, status: reply.status, ...(reply.detail ? { detail: reply.detail } : {}) };
+        if (reply.status === 'refused') {
+          problems.push(
+            `${target.provider} accepted the key but would not run ${target.model} (${reply.detail ?? 'refused'}), so every such run fails. `
+            + 'Choose a model the account can use with `stratus setup` → Model, or check the account\'s billing.',
+          );
+        }
+      }
+    }
+    if (status === 'rejected') {
+      problems.push(
+        `${target.provider} refused the key ${target.role === 'default' ? 'your runs' : 'fallback runs'} send (${verdict.detail ?? 'auth failed'}), so every such run fails. `
+        + 'Sign in again with `stratus setup` → Providers, or fix the environment variable that supplies it.',
+      );
+    }
+  }
+  return checks;
+};
 
 /** One resolved setting, with the thing that decided it. */
 interface DoctorSetting {
@@ -58,9 +176,24 @@ export interface DoctorReport {
   /** The model a failing run retries on, when one is configured. */
   fallback?: { provider: string; model: string };
   signIns: Array<{ provider: CredentialProviderName; status: string }>;
+  /**
+   * With `--live` only: what each provider a run uses said about its key.
+   * `accepted`/`rejected` are the provider's answer; `unreachable` means no
+   * answer (offline, or an endpoint with no key check); `not checked` is a
+   * sign-in with no key to send, such as a subscription.
+   */
+  keyChecks?: DoctorKeyCheck[];
   slackAgents: string[];
   slackPackageInstalled: boolean;
   rosterCount: number;
+  /**
+   * The visible folder souls and workspaces live in (`~/Agents`, or
+   * `~/Stratus` when `~/Agents` belongs to something else, or what
+   * `STRATUS_AGENTS_DIR` names), as `planAgentsHome` decides it for `serve`
+   * too. `claimed` is false for a folder the next start would create.
+   * Absent when there is none, with the reason.
+   */
+  agentsFolder?: { path: string; claimed: boolean; pending: number } | { reason: string };
   /** The running daemon, as it reports itself. */
   daemon: DoctorDaemon;
   problems: string[];
@@ -399,17 +532,27 @@ export const collectDoctorReport = async (
   }
 
   const envProviderPick = envPick('STRATUS_PROVIDER');
+  // Nothing named a provider: the resolver takes the only stored sign-in.
+  // Worked out here too, so a run that picked it and then failed still
+  // reports it rather than "none".
+  const namedProvider = envProviderPick?.value ?? soul?.provider ?? fileConfig.provider;
+  const soleSignIn = resolved?.inferredProvider
+    ?? (!resolved && namedProvider === undefined
+      ? await signedInProviders(env).then((names) => (names.length === 1 ? names[0] : undefined)).catch(() => undefined)
+      : undefined);
   const providerSource = envProviderPick
     ? envProviderPick.name
     : soul?.provider
       ? `${soulPath} (soul frontmatter)`
       : fileConfig.provider
         ? (winner?.path ?? 'config')
-        : 'built-in default — nothing set a provider';
+        : soleSignIn !== undefined
+          ? 'the only provider signed in — nothing set one'
+          : 'nothing set a provider';
   // When resolution fails the intended provider is still worth reporting:
   // "why is it anthropic" is exactly the question, and the problems below
   // already say no run can start.
-  const intendedProvider = envProviderPick?.value ?? soul?.provider ?? fileConfig.provider ?? 'demo';
+  const intendedProvider = namedProvider ?? soleSignIn ?? 'none';
   const provider: DoctorSetting = resolved
     ? { value: resolved.provider, source: providerSource }
     : { value: `${intendedProvider} (unreachable)`, source: providerSource };
@@ -527,6 +670,11 @@ export const collectDoctorReport = async (
     problems.push(companionsBehindMessage(behind));
   }
 
+  const missingHarnesses = await missingHarnessPackages(env, command.configPath);
+  if (missingHarnesses.length > 0) {
+    problems.push(harnessesMissingMessage(missingHarnesses));
+  }
+
   let rosterCount = 0;
   try {
     rosterCount = (await readdir(agentsDirPath(env))).filter((file) => file.endsWith('.md')).length;
@@ -563,6 +711,34 @@ export const collectDoctorReport = async (
       `Slack tokens are stored for ${orphans.join(', ')}, which no agent matches — \`stratus serve\` skips them. `
       + 'Clear them from `stratus setup` → Channels.',
     );
+  }
+
+  // The same plan `serve` acts on: where the folder is (or why there is
+  // none here), what the next start would move, and what is broken. A soul
+  // or workspace link whose folder was deleted or renamed: the soul drops
+  // out of the roster with a warning, and a missing workspace only comes
+  // back empty on the next write, so say which. And a soul in the folder
+  // nothing links to, which the roster never reads.
+  let agentsFolder: DoctorReport['agentsFolder'];
+  try {
+    const plan = await planAgentsHome(env);
+    agentsFolder = plan.agentsHome !== undefined
+      ? { path: plan.agentsHome, claimed: plan.claimed, pending: plan.souls.length + plan.workspaces.length }
+      : { reason: plan.reason ?? 'none available' };
+    if (plan.dangling.length > 0) {
+      problems.push(
+        `These link into the agents folder, but what they point at is gone: ${plan.dangling.join(', ')}. `
+        + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace is recreated empty on the next write.',
+      );
+    }
+    if (plan.unlinked.length > 0) {
+      problems.push(
+        `These souls are in the agents folder but no agent reads them: ${plan.unlinked.join(', ')}. `
+        + 'Probably left by an `agent new` or `template add` that was stopped partway: run it again, or delete the folder if you don\'t want the agent.',
+      );
+    }
+  } catch (error) {
+    problems.push(error instanceof Error ? error.message : String(error));
   }
 
   // The invisible failure doctor exists to surface: the service unit embeds
@@ -620,6 +796,7 @@ export const collectDoctorReport = async (
   }
 
   const daemon = await inspectDaemon(env, problems);
+  const keyChecks = command.live && resolved ? await checkKeys(resolved, env, problems) : undefined;
 
   return {
     ...(winner ? { configInUse: winner.path } : {}),
@@ -630,9 +807,11 @@ export const collectDoctorReport = async (
     ...(soul ? { agent: `${soul.agent.name} (${soul.agent.id})` } : {}),
     ...(fallback ? { fallback: { provider: fallback.provider, model: fallback.model } } : {}),
     signIns,
+    ...(keyChecks ? { keyChecks } : {}),
     slackAgents,
     slackPackageInstalled,
     rosterCount,
+    ...(agentsFolder !== undefined ? { agentsFolder } : {}),
     daemon,
     problems,
   };
@@ -682,6 +861,14 @@ export const runDoctor = async (
     writeLine(streams.stdout, `            (${shadowedPath} exists but is outranked)`);
   }
   writeLine(streams.stdout, `  agents    ${report.rosterCount} soul file${report.rosterCount === 1 ? '' : 's'}`);
+  const folder = report.agentsFolder;
+  writeLine(streams.stdout, `            ${folder === undefined
+    ? 'agents folder unknown'
+    : 'reason' in folder
+      ? `no visible agents folder (${folder.reason}), so souls and workspaces stay in ~/.stratus/agents`
+      : folder.claimed
+        ? `in ${folder.path}${folder.pending > 0 ? ` (${folder.pending} more to move there on the next start)` : ''}`
+        : `${folder.path} is created on the next start${folder.pending > 0 ? `, and ${folder.pending} soul(s) or workspace(s) move there` : ''}`}`);
 
   if (report.fallback) {
     writeLine(streams.stdout, `  ${'fallback'.padEnd(10)}${report.fallback.provider} · ${report.fallback.model}`);
@@ -692,6 +879,33 @@ export const runDoctor = async (
   writeLine(streams.stdout, 'Sign-ins');
   for (const entry of report.signIns) {
     writeLine(streams.stdout, `  ${entry.provider.padEnd(10)}${entry.status}`);
+  }
+
+  if (report.keyChecks) {
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, 'Live check');
+    if (report.keyChecks.length === 0) {
+      writeLine(streams.stdout, '  no provider sign-in to check');
+    }
+    for (const check of report.keyChecks) {
+      const what = check.status === 'accepted'
+        ? 'key accepted'
+        : check.status === 'rejected'
+          ? `key refused (${check.detail ?? 'auth failed'})`
+          : check.status === 'unreachable'
+            ? `no answer (${check.detail ?? 'unreachable'}); the key was not judged`
+            : `not checked: ${check.detail ?? ''}`;
+      const model = check.model === undefined
+        ? ''
+        : check.model.status === 'answered'
+          ? ` · ${check.model.id} answered`
+          : check.model.status === 'refused'
+            ? ` · ${check.model.id} refused (${check.model.detail ?? 'refused'})`
+            : check.model.status === 'no answer'
+              ? ` · ${check.model.id} did not answer (${check.model.detail ?? 'unreachable'}); the model was not judged`
+              : ` · ${check.model.id} not checked: ${check.model.detail ?? ''}`;
+      writeLine(streams.stdout, `  ${check.provider.padEnd(10)}${what}${model}${check.role === 'fallback' ? ' (fallback)' : ''}`);
+    }
   }
 
   writeLine(streams.stdout);

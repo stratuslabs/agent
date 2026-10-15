@@ -26,6 +26,21 @@ export {
 } from './workspace-migration.ts';
 
 export {
+  AGENTS_DIR_ENV,
+  AGENTS_HOME_MARKER,
+  VISIBLE_SOUL_FILENAME,
+  claimAgentsHome,
+  planAgentsHome,
+  type AgentsHomePlan,
+  resolveAgentsHome,
+  surfaceAgentsHome,
+  visibleAgentDirIn,
+  visibleSoulPathIn,
+  visibleWorkspacePathIn,
+  writeNewSoulFile,
+} from './agents-home.ts';
+
+export {
   type StateEnvironment,
   readProcessEnv,
   readWorkingDirectory,
@@ -233,6 +248,8 @@ export {
   ignoredUntrustedConfigKeys,
   discoverIgnoredUntrustedConfig,
   resolveRuntimeConfig,
+  NoProviderConfiguredError,
+  signedInProviders,
   languageFor,
 } from './runtime.ts';
 
@@ -246,6 +263,9 @@ export {
   type RegisteredProviders,
   createRuntimeProvider,
   runsOnHarness,
+  harnessesUsedBy,
+  HARNESS_PACKAGE_NAMES,
+  type HarnessName,
 } from './provider-runtime.ts';
 
 export {
@@ -260,6 +280,8 @@ export {
   KNOWN_CODEX_MODELS,
   type ProviderKeyVerdict,
   verifyProviderKey,
+  type ProviderModelVerdict,
+  probeProviderModel,
   type CatalogModel,
   type ModelCatalogSelection,
   collectAvailableModels,

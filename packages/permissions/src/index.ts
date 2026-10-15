@@ -81,6 +81,8 @@ export {
   parseOriginScope,
   sameOriginScope,
   normalizeTrustedDomain,
+  SHARED_SUFFIXES,
+  trustedDomainProblem,
   trustedDomainOf,
   type OriginScope,
 } from './origins.ts';

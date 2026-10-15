@@ -61,8 +61,10 @@ stratusd ok at http://0.0.0.0:4123 — version 0.11.6, up 8s, 1 agent, 0 session
 ```
 
 The address is the container's own: `0.0.0.0` inside it, published as
-`127.0.0.1:4123` on the host. An empty `stratusd.env` starts the offline
-demo provider, which is a fine way to prove the plumbing first.
+`127.0.0.1:4123` on the host. To prove the plumbing first, put
+`STRATUS_PROVIDER=demo` in `stratusd.env` for the offline demo provider. With
+no provider named and no sign-in stored, the daemon starts but refuses every
+turn.
 
 For [`tool-browser`](./browser.md), set `target: browser` in
 [`compose.yaml`](../../deploy/docker/compose.yaml) (and a different
@@ -108,6 +110,8 @@ Node `>=22.13 <23 || >=23.4` on the host, then:
 sudo useradd --system --home-dir /var/lib/stratus --shell /usr/sbin/nologin stratus
 sudo npm install -g @stratusagent/cli @stratusagent/control-api @stratusagent/channel-slack \
   @stratusagent/tool-fs @stratusagent/tool-shell @stratusagent/tool-web @stratusagent/tool-browser
+# + @stratusagent/provider-codex if agents run on codex (sign-in or CODEX_API_KEY),
+#   @stratusagent/provider-claude-code if they run on a Claude subscription
 sudo install -d -m 0700 /etc/stratus
 sudo install -m 0600 /dev/null /etc/stratus/stratusd.env    # then add provider keys
 sudo cp deploy/systemd/stratusd.service /etc/systemd/system/
@@ -134,7 +138,7 @@ cannot:
 
 | Secret | From the environment? | How |
 | --- | --- | --- |
-| A provider API key | **Yes** | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `CODEX_API_KEY`. A key alone does not select a provider — with nothing naming one, agents run on the demo — so set `STRATUS_PROVIDER` too, or `provider` in the config, or `provider:` in a soul. `STRATUS_API_KEY` outranks every provider's own variable at once, so it belongs only on a single-provider fleet. See [Configuration](../reference/config.md). |
+| A provider API key | **Yes** | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `CODEX_API_KEY`. A key alone does not select a provider — with nothing naming one and no stored sign-in, every turn is refused with a pointer to `stratus setup` — so set `STRATUS_PROVIDER` too, or `provider` in the config, or `provider:` in a soul. `STRATUS_API_KEY` outranks every provider's own variable at once, so it belongs only on a single-provider fleet. See [Configuration](../reference/config.md). |
 | A named credential (`search.apiKey`) | **Yes**, in the image | By its exact name, read after any stored entry of that name — and only by an agent whose soul lists it under `credentials:`. The image starts the daemon with no shell in between because a POSIX shell drops a variable named `search.apiKey` on its way to exec; a system unit's `EnvironmentFile=` may refuse such a name too. Storing it works everywhere: `printf %s "$KEY" \| docker exec -i stratusd stratus credential set search.apiKey`. |
 | The control API's token | **Yes**, as a file | Set `STRATUS_GATEWAY_TOKEN_FILE` to a file holding the token (a mounted secret), and the daemon uses it instead of generating one, copying it into `~/.stratus/gateway-token` so `stratus health` and the other local commands keep working. One line, at least 32 printable characters, no spaces. Replace the file and restart to rotate it; a file that is missing or malformed stops the daemon from starting rather than falling back to a token nothing else knows. Unset, the daemon generates its own the first time, as before. |
 | Slack tokens | **No** | Read only from `credentials.json` in the home, because they are the daemon's own and an agent must never resolve them. Store them with `docker exec -it stratusd stratus setup` → **Channels**, or through the API (below), then `stratus restart`. |
@@ -286,7 +290,7 @@ The agent and session counts should be the ones you stopped with, and
 `stratus agents` should list every soul. Then put things back:
 
 ```bash
-docker stop -t 45 stratusd-restore-drill && docker rm stratusd-restore-drill
+docker stop -t 75 stratusd-restore-drill && docker rm stratusd-restore-drill
 docker volume rm stratus-home-restored
 docker compose start --wait stratusd
 ```
@@ -410,8 +414,9 @@ What the recipe sets, and what it leaves to you.
 - [ ] **Bounded.** `mem_limit`, `cpus`, and `pids_limit` in the compose
   file — size them to your roster, and give the `browser` target more
   memory than the slim one.
-- [ ] **Stopped gracefully.** `stop_grace_period: 45s` / `TimeoutStopSec=45`,
-  longer than the 30-second drain, so a stop finishes in-flight turns
-  rather than failing them.
+- [ ] **Stopped gracefully.** `stop_grace_period: 75s` / `TimeoutStopSec=75`,
+  longer than the 30-second drain plus the 30 seconds an aborted turn
+  gets to record its failure, so a turn still running after the drain is
+  aborted and recorded by the daemon rather than killed with it.
 - [ ] **Rebuilt.** The image carries Node and Debian; rebuild it for their
   security releases, not only for Stratus ones.
