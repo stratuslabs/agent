@@ -11489,3 +11489,58 @@ test('a team agent asking one agent something does not take the thread from the 
     ['ava', 'Dylan: go on'],
   ]);
 });
+
+test('after a restart, a team agent\'s question to another agent here does not take the thread from the agent that held it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const spokeAt = new Date(190.1 * 1000).toISOString();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:190.0', spokeAt],
+    ['slack:ava:T1:C1:191.0', spokeAt],
+  ]));
+  const threads: Record<string, Array<Record<string, unknown>>> = {
+    // Nova asked Bea something after Ava answered: still Ava's thread.
+    '190.0': [
+      { ts: '190.0', user: 'U-DYLAN', text: '<@B-AVA> plan it' },
+      { ts: '190.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+      { ts: '190.2', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: '<@B-BEA> what is blocking?' },
+    ],
+    // Nova spoke without asking anyone here: another voice, as before.
+    '191.0': [
+      { ts: '191.0', user: 'U-DYLAN', text: '<@B-AVA> plan it' },
+      { ts: '191.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+      { ts: '191.2', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: 'I can take this' },
+    ],
+  };
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: (threads[args.ts] ?? []).filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', agentMentions: { team: { nova: 'U-NOVA' } } },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  for (const message of [
+    channelMessage({ text: 'go on', ts: '190.3', thread: '190.0' }),
+    channelMessage({ text: 'and you?', ts: '191.3', thread: '191.0' }),
+  ]) {
+    await socketAva.deliver('message', message);
+    await socketBea.deliver('message', message);
+  }
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: go on'],
+  ]);
+});

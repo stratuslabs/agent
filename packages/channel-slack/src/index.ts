@@ -4922,6 +4922,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     );
 
   /**
+   * Whether a bot message is a team agent asking one of this daemon's
+   * agents something (card 513): a question, not another voice taking the
+   * thread. The agent asked answers it, and the thread stays with whoever
+   * held it. Used live and when a thread is read back after a restart.
+   */
+  const asksAgentHere = (team: string, asker: string | undefined, text: string | undefined): boolean =>
+    asker !== undefined && [...botIdentities].some(([agentId, identity]) =>
+      identity.teamId === team && mentions(text ?? '', identity.botUserId) && answersAgentMention(agentId, team, asker));
+
+  /**
    * Records a bot this adapter does not serve as the thread's holder from
    * the message it posted. An agent on another gateway answers in the same
    * threads, and nothing in this process's sessions knows it spoke: without
@@ -4949,12 +4959,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (speaker === undefined || isFleetBot(team, event.user)) {
       return;
     }
-    // A team agent asking one of this daemon's agents something (card 513)
-    // is a question, not another voice taking the thread: the agent asked
-    // answers it, and the thread stays with whoever held it.
-    const asker = event.user;
-    if (asker !== undefined && [...botIdentities].some(([agentId, identity]) =>
-      identity.teamId === team && mentions(event.text ?? '', identity.botUserId) && answersAgentMention(agentId, team, asker))) {
+    if (asksAgentHere(team, event.user, event.text)) {
       return;
     }
     const thread = event.thread_ts ?? event.ts;
@@ -5031,7 +5036,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (bot) {
             // A bot's mention hands nothing over live (admit ignores bots),
             // so here it is only another app speaking, or a peer's words.
-            if (!isFleetBot(parts.team, message.user)) {
+            if (!isFleetBot(parts.team, message.user) && !asksAgentHere(parts.team, message.user, message.text)) {
               foreign = Math.max(foreign, at);
             }
             continue;
