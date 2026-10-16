@@ -12206,7 +12206,7 @@ test('after a restart, a home channel thread stays its home agent\'s when anothe
 
 // ---- card 364 phase 2: an agent's own threaded post enters that thread's session
 
-const ownPostAdapter = async (): Promise<{ adapter: import('@stratusagent/channels').ChannelAdapter; web: FakeWeb; gateway: StubGateway }> => {
+const ownPostAdapter = async (): Promise<{ adapter: import('@stratusagent/channels').ChannelAdapter; web: FakeWeb; gateway: StubGateway; socket: ReturnType<typeof createFakeSocket> }> => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C-ENG', { is_member: true });
@@ -12222,7 +12222,7 @@ const ownPostAdapter = async (): Promise<{ adapter: import('@stratusagent/channe
     warn: () => {},
   });
   await adapter.start(gateway);
-  return { adapter, web, gateway };
+  return { adapter, web, gateway, socket };
 };
 
 const settle = async (): Promise<void> => {
@@ -12304,4 +12304,65 @@ test('stop() waits for an own post still being heard, so a restart right after a
   release();
   await stopping;
   assert.equal(gateway.observes.length, 1);
+});
+
+test('a reply typed while a long own post is still being sent is heard after the post', async () => {
+  const { adapter, gateway, web, socket } = await ownPostAdapter();
+  const order: string[] = [];
+  const observe = gateway.observe!.bind(gateway);
+  gateway.observe = async (input) => {
+    order.push(`heard: ${input.message.slice(0, 40)}`);
+    return observe(input);
+  };
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    order.push(`asked: ${input.userMessage}`);
+    return dispatch(input);
+  };
+  // The first chunk is up in Slack; the second is held, as a slow send is.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const inner = web.chat.postMessage.bind(web.chat);
+  let calls = 0;
+  web.chat.postMessage = async (args) => {
+    calls += 1;
+    if (calls === 2) {
+      await held;
+    }
+    return inner(args);
+  };
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '500.0', speaker: { sessionId: 'schedule:abc:1', trust: 'agent' } });
+  const posting = connection.post(`${'a'.repeat(3500)}\n\n${'b'.repeat(3500)}`);
+  await settle();
+  const replied = socket.deliver('app_mention', mention('<@B-AVA> what does the report mean?', { channel: 'C-ENG', ts: '500.5', thread_ts: '500.0' }));
+  await settle();
+  release();
+  await posting;
+  await replied;
+  await settle();
+  await adapter.stop();
+  const heard = order.findIndex((entry) => entry.startsWith('heard:'));
+  const asked = order.findIndex((entry) => entry.startsWith('asked:'));
+  assert.ok(heard >= 0 && asked >= 0, JSON.stringify(order));
+  assert.ok(heard < asked, JSON.stringify(order));
+});
+
+test('the chunks of an own post Slack accepted are heard even when a later chunk fails', async () => {
+  const { adapter, gateway, web } = await ownPostAdapter();
+  const inner = web.chat.postMessage.bind(web.chat);
+  let calls = 0;
+  web.chat.postMessage = async (args) => {
+    calls += 1;
+    if (calls === 2) {
+      throw new Error('rate_limited');
+    }
+    return inner(args);
+  };
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '500.0', speaker: { sessionId: 'schedule:abc:1', trust: 'agent' } });
+  await assert.rejects(() => connection.post(`${'a'.repeat(3500)}\n\n${'b'.repeat(3500)}`));
+  await settle();
+  await adapter.stop();
+  assert.equal(gateway.observes.length, 1);
+  assert.match(gateway.observes[0]!.message, /a{3500}/);
+  assert.doesNotMatch(gateway.observes[0]!.message, /b{10}/);
 });

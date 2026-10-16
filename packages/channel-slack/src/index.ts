@@ -3849,17 +3849,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * vouches for (no speaker) is not heard at all, rather than guessed at.
    *
    * Not when the sender IS that thread's session: that turn already holds
-   * the call and what it said. Claimed on the intake chain before `post`
-   * returns, so a reply typed under the report is heard after it, and not
-   * awaited by `post` (only by the shutdown drain), so a long turn running in the thread never holds up the
-   * sender, and two threads posting into each other cannot wait on each
-   * other.
+   * the call and what it said. Claimed on the intake chain BEFORE the
+   * first chunk goes to Slack, so a reply typed under the report, even
+   * while a long one is still being sent, is heard after it. `posted`
+   * settles with what Slack accepted: all of it, the chunks before one it
+   * refused (they are in the thread, so they are heard), or nothing. Not
+   * awaited by `post`, only by the shutdown drain, so a long turn running
+   * in the thread never holds up the sender, and two threads posting into
+   * each other cannot wait on each other.
    */
   const hearOwnPost = (
     connection: AgentConnection,
     channel: string,
     thread: string,
-    text: string,
+    posted: Promise<string | undefined>,
     speaker: { sessionId: string; trust: TrustLevel },
   ): void => {
     const gateway = gatewayRef;
@@ -3881,6 +3884,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       [SENDER_TRUST_METADATA_KEY]: leastTrusted('agent', speaker.trust),
     };
     const heard = onIntakeChain(sessionId, async () => {
+      const text = await posted;
+      if (text === undefined) {
+        return { observed: undefined };
+      }
       const author = await displayNameFor(connection, connection.botUserId);
       const observed = gateway.observe?.({ sessionId, agentId, message: `${author} (your own post, sent from another session): ${text}`, metadata });
       return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
@@ -3950,15 +3957,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return {
       async post(text: string): Promise<OutboundMessageRef> {
         const chunks = messageChunks(text.trim().length > 0 ? text : '(empty message)');
-        let first: OutboundMessageRef | undefined;
-        for (const chunk of chunks) {
-          const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
-          if (!first) {
-            first = { channel: posted.channel ?? channelId, ts: posted.ts ?? '' };
-          }
-        }
+        // Heard in the thread's session (card 364): its place is claimed
+        // now, before Slack shows anything, and filled once we know what
+        // Slack accepted.
+        let accepted: (heard: string | undefined) => void = () => {};
         if (thread && speaker && text.trim().length > 0) {
-          hearOwnPost(connection, channelId, thread, text, speaker);
+          hearOwnPost(connection, channelId, thread, new Promise((resolve) => { accepted = resolve; }), speaker);
+        }
+        let first: OutboundMessageRef | undefined;
+        let sent = 0;
+        try {
+          for (const chunk of chunks) {
+            const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
+            sent += 1;
+            if (!first) {
+              first = { channel: posted.channel ?? channelId, ts: posted.ts ?? '' };
+            }
+          }
+        } finally {
+          accepted(sent === chunks.length ? text : sent > 0 ? chunks.slice(0, sent).join('\n') : undefined);
         }
         return first ?? { channel: channelId, ts: '' };
       },
