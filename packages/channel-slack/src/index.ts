@@ -5216,6 +5216,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (own !== undefined) {
             place(own, at);
             posts.push({ agentId: own, at, asked: asked.has(own) });
+            // An agent here naming a colleague that answers its mentions
+            // asks it, as `admitAgentMention` has it live, so the answer is
+            // not a judge speaking unasked.
+            const sender = message.user;
+            const named = sender === undefined
+              ? []
+              : [...askedIn(message.text)].filter((agentId) => agentId !== own && answersAgentMention(agentId, parts.team, sender));
+            if (named.length > 0) {
+              asked = new Set(named);
+            }
             continue;
           }
           const bot = message.bot_id !== undefined || message.subtype === 'bot_message';
