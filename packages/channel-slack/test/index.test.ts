@@ -12004,6 +12004,57 @@ test('after a restart, an untagged stop goes to the agent asked last, not the th
   ]);
 });
 
+test('after a restart, a stop still goes to the agent asked last when a refused message warmed the thread first', async () => {
+  // Codex on #369: a cold verdict for a refused sender's message warms the
+  // live record with what the thread read found, which is posts. A mention
+  // that has not been answered yet is not a post, so a stop must not be
+  // placed by that record alone: it still reads the thread, as on main.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Bea was asked at .2 and her turn is the one running: she has a session.
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:614.0', new Date(614.1 * 1000).toISOString()],
+    ['slack:bea:T1:C1:614.0', new Date(614.2 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '614.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '614.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+    { ts: '614.2', user: 'U-DYLAN', text: '<@B-BEA> run the long check' },
+    { ts: '614.3', user: 'U-STRANGER', text: 'hey' },
+  ];
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', approvers: ['U-DYLAN'], principals: ['U-DYLAN'], admit: 'principals' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', approvers: ['U-DYLAN'], principals: ['U-DYLAN'], admit: 'principals' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const refused = channelMessage({ text: 'hey', ts: '614.3', thread: '614.0', user: 'U-STRANGER' });
+  await socketAva.deliver('message', refused);
+  await socketBea.deliver('message', refused);
+  // The refused message's audit verdict runs in the background.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const stop = channelMessage({ text: 'stop', ts: '614.4', thread: '614.0' });
+  await socketAva.deliver('message', stop);
+  await socketBea.deliver('message', stop);
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['bea', 'Dylan: stop'],
+  ]);
+});
+
 test('after a restart, a judge another agent here asked by name does not take the thread from its owner', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();

@@ -3012,7 +3012,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
   const seenOrder: string[] = [];
-  type Handover = { agentId: string; ts: string; takes?: boolean };
+  // `cold`: rebuilt from a thread read rather than seen live. Those are
+  // posts only (a mention nobody has answered yet is not one), so the
+  // owner rule may use them but `holderAt` (who was asked last) may not.
+  type Handover = { agentId: string; ts: string; takes?: boolean; cold?: boolean };
 
   /**
    * Who each thread was last handed to, in SLACK RECEIPT ORDER — written
@@ -4950,7 +4953,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Slack timestamps compare as strings: `seconds.microseconds`, both
    * parts fixed width, so lexicographic order is chronological order.
    */
-  const rememberAddressee = (key: string, agentId: string, ts: string, takes = false): void => {
+  const rememberAddressee = (key: string, agentId: string, ts: string, takes = false, cold = false): void => {
     const handovers = threadAddressee.get(key) ?? [];
     let at = handovers.length;
     while (at > 0 && (handovers[at - 1] as { ts: string }).ts > ts) {
@@ -4961,9 +4964,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (takes) {
         before.takes = true;
       }
+      // Seen live as well: no longer only a reconstruction.
+      if (!cold) {
+        delete before.cold;
+      }
       return;
     }
-    handovers.splice(at, 0, takes ? { agentId, ts, takes } : { agentId, ts });
+    handovers.splice(at, 0, { agentId, ts, ...(takes ? { takes } : {}), ...(cold ? { cold } : {}) });
     // Re-inserted rather than mutated in place: a Map iterates in insertion
     // order, which is what makes the first key the one to evict.
     threadAddressee.delete(key);
@@ -4985,6 +4992,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * handover at or before it. Undefined when this process has no handover
    * that old, which sends the question to the sessions.
    */
+  /**
+   * Whose a stop at `ts` is, from the live record: who was asked last, or,
+   * with no claim at that point, the thread's owner. Undefined when this
+   * process has seen nobody asked here, only posts a thread read rebuilt
+   * (card 508): a mention since then would not be among them, so the stop
+   * is left to a fresh read of the thread rather than sent to the owner.
+   */
+  const stopHolderAt = (key: string, ts: string): string | undefined => {
+    const held = holderAt(key, ts);
+    if (held !== undefined) {
+      return held;
+    }
+    const seenLive = (threadAddressee.get(key) ?? []).some((handover) => handover.cold !== true);
+    return seenLive ? ownerAt(key, ts) : undefined;
+  };
+
   const holderAt = (key: string, ts: string): string | undefined => {
     const handovers = threadAddressee.get(key);
     if (!handovers) {
@@ -4992,7 +5015,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
-      if (handover && handover.ts <= ts) {
+      // A claim rebuilt from a thread read is a post; who was asked since
+      // may be a mention it cannot see, so it leaves the question to a
+      // fresh read rather than answer it.
+      if (handover && handover.ts <= ts && handover.cold !== true) {
         return handover.agentId;
       }
     }
@@ -5573,7 +5599,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const key = threadKeyFor(parts);
       noteOrigin(key, ownerId);
       for (const post of takeovers) {
-        rememberAddressee(key, post.agentId, post.ts, true);
+        rememberAddressee(key, post.agentId, post.ts, true, true);
       }
     };
     if (taken && taken.agentId !== ownerId && (ownerId !== undefined || taken.at > read.foreign)) {
@@ -6008,7 +6034,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const refusedStop = (connection.config.approvers ?? []).includes(sender) && isStopRequest(text, connection.botUserId);
       const held = threadKey === undefined
         ? undefined
-        : (refusedStop ? holderAt(threadKey, event.ts) : undefined) ?? ownerAt(threadKey, event.ts);
+        : refusedStop ? stopHolderAt(threadKey, event.ts) : ownerAt(threadKey, event.ts);
       if (addressed || held === connection.config.agentId) {
         if (!alreadySeen(eventKey)) {
           log(refusal);
@@ -6139,7 +6165,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       isStopRequest(text, connection.botUserId);
     const holder = threadKey === undefined
       ? undefined
-      : (stopRequest ? holderAt(threadKey, event.ts) : undefined) ?? ownerAt(threadKey, event.ts);
+      : stopRequest ? stopHolderAt(threadKey, event.ts) : ownerAt(threadKey, event.ts);
     if (holder !== undefined && threadKey !== undefined) {
       if (holder !== connection.config.agentId) {
         // Standing down for the holder, whether or not the holder can still
