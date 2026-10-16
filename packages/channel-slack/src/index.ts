@@ -4895,8 +4895,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   /**
    * A thread's claims cut to `THREAD_HANDOVER_DEPTH`, oldest first out, but
-   * never the two `ownerAt` reads past the rest: the first claim, which is
-   * who the thread belongs to, and the latest claim that took the thread.
+   * never the two `ownerAt` reads past the rest, so at most one over: the
+   * first claim, which is who the thread belongs to, and the latest claim
+   * that took the thread.
    * Dropping that one would hand the thread back to its owner after enough
    * mentions of a third agent, while the judge that took it still answers.
    */
@@ -4913,10 +4914,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
     }
     const tailFrom = handovers.length - (THREAD_HANDOVER_DEPTH - 1);
-    if (latestTake > 0 && latestTake < tailFrom) {
-      return [first, handovers[latestTake] as Handover, ...handovers.slice(tailFrom + 1)];
-    }
-    return [first, ...handovers.slice(tailFrom)];
+    // The kept take sits on top of the full recent tail, one past the depth,
+    // so `holderAt` still sees every recent claim it saw before.
+    const tail = handovers.slice(tailFrom);
+    return latestTake > 0 && latestTake < tailFrom
+      ? [first, handovers[latestTake] as Handover, ...tail]
+      : [first, ...tail];
   };
 
   /**
