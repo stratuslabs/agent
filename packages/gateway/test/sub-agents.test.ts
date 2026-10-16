@@ -122,12 +122,32 @@ const fanoutGateway = async (options: {
   subAgents?: { maxConcurrentPerTurn?: number };
   echo?: (input: JsonObject) => unknown;
   answer?: 'once' | 'always';
+  /** A daemon config whose primary (Anthropic) is down: every call to it fails. */
+  primaryDown?: boolean;
 }) => {
   const home = await newHome();
   await writeSoul(home, options.soul);
+  const primaryCalls: string[] = [];
+  if (options.primaryDown) {
+    await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+      provider: 'anthropic',
+      model: 'model-p',
+      fallbackModel: 'model-f',
+      fallbackProvider: 'openai',
+    }));
+  }
   const parentRequests: SeenRequest[] = [];
   const subRequests: SeenRequest[] = [];
-  const fetchFake = (async (_url: string | URL | Request, init?: RequestInit) => {
+  const fetchFake = (async (url: string | URL | Request, init?: RequestInit) => {
+    if (String(url).includes('anthropic')) {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { messages?: Array<{ role: string; content?: unknown }> };
+      const first = body.messages?.find((message) => message.role === 'user')?.content;
+      primaryCalls.push(typeof first === 'string' ? first : JSON.stringify(first));
+      return new Response(JSON.stringify({ error: { type: 'invalid_request_error', message: 'primary down' } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     const request = readRequest(init);
     if (request.firstUser.includes('PARENT-GATED')) {
       parentRequests.push(request);
@@ -207,7 +227,7 @@ const fanoutGateway = async (options: {
 
   const asked: StratusEvent[] = [];
   const gateway = createGateway({
-    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test', ANTHROPIC_API_KEY: 'sk-a' }, fetch: fetchFake },
     idleTimeoutMs: 0,
     plugins: { 'stratus-plugin-fanout': { enabled: true } },
     pluginHost: await hostFor(module),
@@ -227,7 +247,7 @@ const fanoutGateway = async (options: {
       gateway.resolveApproval({ requestId: event.requestId, answer: options.answer ?? 'once', actor: 'U-DYLAN' });
     }
   });
-  return { home, gateway, parentRequests, subRequests, outcomes, handle: () => handle, echoCalls, asked };
+  return { home, gateway, parentRequests, subRequests, outcomes, handle: () => handle, echoCalls, asked, primaryCalls };
 };
 
 test('a plugin is handed the sub-agent primitive, and sub-agents started together run together', async () => {
@@ -409,6 +429,25 @@ test('a standing grant the parent holds carries to a sub-agent handed that tool,
   const result = child?.messages.find((message) => message.toolResult)?.toolResult;
   assert.equal(result?.ok, true, result?.error);
   assert.equal(result?.output, 'gated ran');
+});
+
+test('a parent already on its fallback starts its sub-agents there, not on the primary it left', async () => {
+  const harness = await fanoutGateway({
+    primaryDown: true,
+    soul: SOUL.replace('provider: openai\nmodel: model-a\n', ''),
+    tasks: [{ instruction: 'say A' }],
+    subAgent: () => openAiText('answer A'),
+  });
+  await harness.gateway.start();
+  try {
+    const parent = await harness.gateway.dispatch({ sessionId: 'parent-10', agentId: 'ava', userMessage: 'PARENT-TASK fan out' });
+    assert.equal(parent.status, 'completed');
+    assert.equal(parent.metadata?.fallbackActive, true, 'the parent did not switch, so this proves nothing');
+  } finally {
+    await harness.gateway.stop();
+  }
+  assert.deepEqual(harness.outcomes.map((outcome) => ('status' in outcome ? outcome.status : outcome.refused)), ['result']);
+  assert.deepEqual(harness.primaryCalls.filter((first) => first.includes('say A')), [], 'the sub-agent retried the primary');
 });
 
 test('sub-agents beyond the per-turn cap wait for a slot rather than run', async () => {

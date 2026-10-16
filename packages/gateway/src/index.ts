@@ -2877,6 +2877,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
             // a tainted parent must not hand a stranger's words to a
             // session that has seen nothing.
             [SENDER_TRUST_METADATA_KEY]: sessionWriteTrust(parent),
+            // On the runtime serving the parent's turn: a parent that has
+            // switched to its sticky fallback must not have its helpers
+            // retry the primary it left.
+            ...(parent.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true ? { [FALLBACK_ACTIVE_METADATA_KEY]: true } : {}),
           },
           ...(input.signal ? { signal: input.signal } : {}),
         }, [], definition));
@@ -3434,7 +3438,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * it, since that is the provider the turn will be served by.
    */
   const watchdogStreamsFor = (
-    session: Session | undefined,
+    session: Pick<Session, 'metadata'> | undefined,
     config: RuntimeConfig,
   ): { switchedToFallback: boolean; effectiveStreams: boolean; fallbackStreams: boolean } => {
     const switchedToFallback = session?.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true;
@@ -3532,7 +3536,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       throw crossIdentityError(input.sessionId, existing.agent.id, agent.id);
     }
 
-    const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(existing, config);
+    // A sub-agent's session is new, but may start on its parent's fallback.
+    const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(
+      existing ?? (subAgent !== undefined ? { metadata } : undefined),
+      config,
+    );
     // Recorded with a keyed message so a restart judges the turn by what it
     // could have run on, not by whatever the config resolves to by then.
     // The fallback counts: a turn can switch to it mid-run. Once a session
