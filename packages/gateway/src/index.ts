@@ -795,6 +795,7 @@ export interface GatewayOptions {
   /**
    * Host-owned limits for sub-agents (roadmap 24). `maxConcurrentPerTurn`
    * caps how many one parent turn runs at once; the rest wait for a slot.
+   * It must be a whole number of at least 1, or `createGateway` throws.
    */
   subAgents?: { maxConcurrentPerTurn?: number };
   /**
@@ -2744,7 +2745,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * Running sub-agents per parent session, and who waits for a slot. A
    * parent session runs one turn at a time, so this is per turn.
    */
-  const maxSubAgentsPerTurn = Math.max(1, options.subAgents?.maxConcurrentPerTurn ?? DEFAULT_SUB_AGENTS_PER_TURN);
+  const maxSubAgentsPerTurn = options.subAgents?.maxConcurrentPerTurn ?? DEFAULT_SUB_AGENTS_PER_TURN;
+  // NaN, 0, a fraction or Infinity would queue every sub-agent forever or
+  // defeat the cap, so refuse it here instead of failing later in a turn.
+  if (!Number.isInteger(maxSubAgentsPerTurn) || maxSubAgentsPerTurn < 1) {
+    throw new Error(`subAgents.maxConcurrentPerTurn must be a whole number of at least 1 (got ${String(maxSubAgentsPerTurn)}).`);
+  }
   const subAgentSlots = new Map<string, { running: number; waiting: Array<() => void> }>();
   let subAgentCount = 0;
 

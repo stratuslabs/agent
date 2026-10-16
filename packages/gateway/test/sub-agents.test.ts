@@ -668,3 +668,13 @@ test('cancelling the parent stops its sub-agents even when the plugin passes no 
     await harness.gateway.stop();
   }
 });
+
+test('a sub-agent cap that is not a positive whole number is refused when the gateway is built', async () => {
+  for (const cap of [Number.NaN, 0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      fanoutGateway({ subAgents: { maxConcurrentPerTurn: cap }, tasks: [], subAgent: () => openAiText('unused') }),
+      /maxConcurrentPerTurn/,
+      `cap ${cap} was accepted`,
+    );
+  }
+});
