@@ -4618,10 +4618,12 @@ export interface ExecutorRegistrationHandle {
  */
 export interface SubAgentRunInput {
   /**
-   * The session of the turn asking — the one a tool's `execute` was handed.
-   * Only its id is read: the host takes the agent, its allowlist and depth
-   * from its own records, so a plugin cannot widen anything by passing a
-   * session it built.
+   * The session of the turn asking: the very object a tool's `execute`
+   * was handed, while that call is running. The host checks it by
+   * identity, so an id, a copy, or a session from a call that has ended
+   * is refused, and a plugin cannot start sub-agents of a turn that did
+   * not call it. The agent, its allowlist and depth come from the host's
+   * own records, never from this object.
    */
   parent: Pick<Session, 'id'>;
   /** The task, as the sub-agent's only user message. */
@@ -4634,7 +4636,11 @@ export interface SubAgentRunInput {
   tools: string[];
   /** Not supported yet: refused rather than ignored. The parent's model runs. */
   model?: string;
-  /** The parent turn's signal: aborting it stops the sub-agent. */
+  /**
+   * An extra stop. The host already ties the sub-agent to the parent
+   * turn's own cancel, so this is only for a plugin that wants to end it
+   * sooner.
+   */
   signal?: AbortSignal;
 }
 

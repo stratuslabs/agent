@@ -222,10 +222,13 @@ plugin's own configuration. `tool-fs` is the first consumer.
 (roadmap 24): an ephemeral helper that runs as the calling agent, on its
 provider and credentials, with the tools it is handed and nothing else of
 the agent's: no persona, no memory, no skills, no channel. A plugin passes
-the session its tool was handed, an instruction, and exact tool names; the
-host reads the agent and its allowlist from its own records rather than
-from that session object, so a plugin cannot widen anything by building
-one. The host refuses, before anything runs and naming the reason, a parent
+the session object its tool was handed, an instruction, and exact tool
+names. The host accepts that object only while the call it was handed to
+is running, checked by identity: an id or a copy is refused, so a plugin
+cannot start sub-agents of a turn that did not call it. The agent and its
+allowlist come from the host's own records rather than from that object,
+so a plugin cannot widen anything by building one. The host also refuses,
+before anything runs and naming the reason, a parent
 that is not running a turn or is itself a sub-agent, the delegation depth
 limit, a tool outside the parent's allowlist, a pattern instead of a name,
 and `agent.spawn`, `agent.delegate`, `memory.*`, and `credential.request`
@@ -233,7 +236,8 @@ whatever the parent holds. A sub-agent never asks a person: a gated call it
 has no standing grant for is denied inside it, and the parent's turn gets
 that back as a result. The parent's standing grants and command scopes do
 apply to the tools in the slice. One parent turn runs at most four at once
-and the rest wait for a slot; the parent turn's signal stops them. `run()`
+and the rest wait for a slot. The parent turn's cancel stops them whether
+or not the plugin passes a signal; a plugin's `signal` is an extra stop. `run()`
 resolves with `result`, `empty` (ran and said nothing), or `error`, each
 with the sub-agent's session id and trust label: what it returns may repeat
 what it read, so a tool handing it to its own turn marks the call with that

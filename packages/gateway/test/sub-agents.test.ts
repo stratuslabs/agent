@@ -565,14 +565,105 @@ test('the primitive answers only for a turn that is running, and never for a sub
   try {
     await harness.gateway.dispatch({ sessionId: 'parent-8', agentId: 'ava', userMessage: 'PARENT-TASK fan out' });
     const handle = harness.handle()!;
-    // The parent's turn is over.
-    await assert.rejects(() => handle.run({ parent: { id: 'parent-8' }, instruction: 'late', tools: [] }), /running/);
+    // The parent's turn is over, so its session is no call's any more.
+    const parent = await harness.gateway.store.get('parent-8');
+    assert.ok(parent);
+    await assert.rejects(() => handle.run({ parent, instruction: 'late', tools: [] }), /session your tool was handed/);
     // A session nobody has.
-    await assert.rejects(() => handle.run({ parent: { id: 'no-such-session' }, instruction: 'x', tools: [] }), /no-such-session/);
-    // A sub-agent's own session cannot start more.
+    await assert.rejects(() => handle.run({ parent: { id: 'no-such-session' }, instruction: 'x', tools: [] }), /session your tool was handed/);
+    // A sub-agent's session, by id, is no call's either.
     const [outcome] = harness.outcomes;
     assert.ok(outcome && 'sessionId' in outcome);
-    await assert.rejects(() => handle.run({ parent: { id: outcome.sessionId! }, instruction: 'x', tools: [] }), /sub-agent/);
+    await assert.rejects(() => handle.run({ parent: { id: outcome.sessionId! }, instruction: 'x', tools: [] }), /session your tool was handed/);
+  } finally {
+    await harness.gateway.stop();
+  }
+});
+
+test('a plugin cannot start sub-agents of a running turn that did not call it, by id', async () => {
+  // Two turns run at once. The first holds inside the plugin's tool; the
+  // second asks for sub-agents of the first by its id alone. The first is
+  // running, so an id check passes it: the host has to tie the parent to
+  // the call that was handed it.
+  let holdFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => {
+    holdFirst = resolve;
+  });
+  let firstInTool!: (session: Session) => void;
+  const firstSession = new Promise<Session>((resolve) => {
+    firstInTool = resolve;
+  });
+  const refusals: string[] = [];
+  const harness = await fanoutGateway({
+    tasks: [],
+    fanout: async (handle, session) => {
+      if (session.id === 'parent-20') {
+        firstInTool(session);
+        await firstHeld;
+        return 'held';
+      }
+      const other = await firstSession;
+      for (const parent of [{ id: other.id }, { id: session.id }]) {
+        try {
+          await handle.run({ parent, instruction: 'take over', tools: [] });
+          refusals.push('ran');
+        } catch (error) {
+          refusals.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      holdFirst();
+      return 'asked';
+    },
+    subAgent: () => openAiText('should not run'),
+  });
+  await harness.gateway.start();
+  try {
+    await Promise.all([
+      harness.gateway.dispatch({ sessionId: 'parent-20', agentId: 'ava', userMessage: 'PARENT-TASK first' }),
+      harness.gateway.dispatch({ sessionId: 'parent-21', agentId: 'ava', userMessage: 'PARENT-TASK second' }),
+    ]);
+  } finally {
+    await harness.gateway.stop();
+  }
+  assert.equal(refusals.length, 2);
+  for (const refusal of refusals) {
+    assert.match(refusal, /session your tool was handed/);
+  }
+  assert.equal(harness.subRequests.length, 0, 'a sub-agent ran for a turn that never asked');
+});
+
+test('cancelling the parent stops its sub-agents even when the plugin passes no signal', async () => {
+  let started = 0;
+  const controller = new AbortController();
+  const harness = await fanoutGateway({
+    tasks: [],
+    fanout: async (handle, session) => Promise.allSettled(['slow one', 'slow two'].map((instruction) =>
+      handle.run({ parent: session, instruction, tools: [] }))),
+    subAgent: async () => {
+      started += 1;
+      if (started === 2) {
+        setTimeout(() => controller.abort(), 10);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      return openAiText('too late');
+    },
+  });
+  await harness.gateway.start();
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(() => harness.gateway.dispatch({
+      sessionId: 'parent-22',
+      agentId: 'ava',
+      userMessage: 'PARENT-TASK fan out',
+      signal: controller.signal,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const children = harness.gateway.store.list('ava').filter((session) => session.id.startsWith('parent-22:subagent:'));
+    assert.equal(children.length, 2);
+    for (const child of children) {
+      assert.notEqual(child.status, 'completed', `${child.id} ran on after the cancel`);
+    }
+    assert.ok(Date.now() - startedAt < 2_500, 'the cancel waited out the sub-agents');
   } finally {
     await harness.gateway.stop();
   }

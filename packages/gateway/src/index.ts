@@ -2748,6 +2748,33 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const subAgentSlots = new Map<string, { running: number; waiting: Array<() => void> }>();
   let subAgentCount = 0;
 
+  /**
+   * The session object each in-flight tool call was handed, with that
+   * call's turn signal. `subAgents.run` accepts only a parent found here:
+   * the session a running tool was given, by identity, never an id, so a
+   * plugin cannot start sub-agents of another turn (another agent's
+   * included) just because that turn is running. The signal is how the
+   * parent's cancel reaches its sub-agents whether or not the plugin
+   * passes one.
+   */
+  const toolCallsInFlight = new Map<Session, Array<AbortSignal | undefined>>();
+  const bindToolCalls = (inner: Executor): Executor => ({
+    async execute(call, tool, session, context) {
+      const entry = toolCallsInFlight.get(session) ?? [];
+      toolCallsInFlight.set(session, entry);
+      const signal = context?.signal;
+      entry.push(signal);
+      try {
+        return await inner.execute(call, tool, session, context);
+      } finally {
+        entry.splice(entry.indexOf(signal), 1);
+        if (entry.length === 0) {
+          toolCallsInFlight.delete(session);
+        }
+      }
+    },
+  });
+
   const subAgentSlot = (parentId: string, signal: AbortSignal | undefined): Promise<() => void> =>
     new Promise((resolve, reject) => {
       const entry = subAgentSlots.get(parentId) ?? { running: 0, waiting: [] };
@@ -2815,12 +2842,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // on: the plugin keeps its own objects and can change them while this
       // request is checked or waits for a slot, and a slice changed after
       // it was checked must not be the slice the sub-agent runs with.
+      const handed = request?.parent as Session | undefined;
+      const callSignals = handed ? toolCallsInFlight.get(handed) : undefined;
+      if (!callSignals) {
+        throw new Error('subAgents.run starts sub-agents only for the session your tool was handed, while that call is running. Pass that session object as "parent".');
+      }
+      // The parent turn's own stop, and the caller's as an extra one: a
+      // plugin that passes no signal still has its sub-agents cancelled
+      // with the turn.
+      const stops = [...callSignals, request.signal].filter((signal): signal is AbortSignal => signal !== undefined);
       const input = {
-        parent: { id: request?.parent?.id },
+        parent: { id: handed!.id },
         instruction: request?.instruction,
         tools: Array.isArray(request?.tools) ? [...request.tools] : request?.tools,
         model: request?.model,
-        signal: request?.signal,
+        signal: stops.length === 0 ? undefined : stops.length === 1 ? stops[0] : AbortSignal.any(stops),
       };
       const parentId = typeof input.parent.id === 'string' ? input.parent.id : '';
       if (!parentId) {
@@ -2979,7 +3015,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Runners are built on dispatch, after the plugins loaded and the
       // selection below ran, so a contributed executor is in place for
       // the first turn.
-      executor: selectedExecutor ?? createLocalCommandExecutor(),
+      executor: bindToolCalls(selectedExecutor ?? createLocalCommandExecutor()),
       ...(approvals ? { approvals } : {}),
       store,
       bus,
