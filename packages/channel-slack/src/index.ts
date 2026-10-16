@@ -4978,6 +4978,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return typeof origin === 'string' ? origin : undefined;
   };
 
+  /**
+   * The agent the thread `key` belongs to, whoever holds it now: the owner
+   * the thread read settled, or else the first claim this process saw.
+   * Answering in its own thread takes the thread back from a judge that
+   * spoke since (card 508), so the owner is asked for here, not the holder.
+   */
+  const threadOwner = (key: string): string | undefined => {
+    const origin = threadOrigins.get(key);
+    return typeof origin === 'string' ? origin : threadAddressee.get(key)?.[0]?.agentId;
+  };
+
   /** Records that this process saw the thread `key` begin, or who owns it. */
   const noteOrigin = (key: string, owner: true | string = true): void => {
     if (owner === true && threadOrigins.has(key)) {
@@ -5376,13 +5387,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // another app that spoke before any of them did (card 508). When it
     // can't be read, the sessions decide: the only agent in it, or, as a
     // last resort, the one that spoke last, which is all they record.
-    const read = await threadPositions(engaged, parts, ts);
+    // The agent that posted the root takes part even with no session here:
+    // a post made through message.send or a schedule leaves none, and a
+    // colleague named under it since must not look like the owner.
+    const candidates = [...engaged];
+    if (parts.parentUser !== undefined) {
+      for (const [agentId, identity] of botIdentities) {
+        if (identity.teamId === parts.team && identity.botUserId === parts.parentUser && !candidates.some((entry) => entry.agentId === agentId)) {
+          candidates.push({ agentId });
+        }
+      }
+    }
+    const read = await threadPositions(candidates, parts, ts);
     if (!read) {
       return engaged.length === 1 ? first.agentId : lastSpeaker(engaged);
     }
     let owner: { agentId: string; at: number } | undefined;
     let tiedAt = false;
-    for (const entry of engaged) {
+    for (const entry of candidates) {
       const at = read.held.get(entry.agentId) ?? Number.POSITIVE_INFINITY;
       if (!Number.isFinite(at) || at <= 0) {
         continue;
@@ -6508,7 +6530,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // a judging agent that chose to speak, and the owner answering in
         // its own thread, which takes it back from a judge that spoke above.
         // An answer to a mention is that message's answer and no more.
-        const takes = renderer.lazy || ownerAt(threadKey, event.ts) === connection.config.agentId;
+        const takes = renderer.lazy || threadOwner(threadKey) === connection.config.agentId;
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts, takes);
       }
       // The reply just posted took the thread's status down with it, and a
@@ -6529,7 +6551,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking has still spoken, by the same
         // rule as a reply that landed.
-        const takes = renderer.lazy || ownerAt(threadKey, event.ts) === connection.config.agentId;
+        const takes = renderer.lazy || threadOwner(threadKey) === connection.config.agentId;
         rememberAddressee(threadKey, connection.config.agentId, spokeAt ?? event.ts, takes);
       }
       renderers.get(sessionId)?.[0]?.refreshLoading();

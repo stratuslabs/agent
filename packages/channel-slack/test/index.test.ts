@@ -1583,6 +1583,50 @@ test('after a restart, the thread read gives an untagged reply to the agent the 
   ]);
 });
 
+test('after a restart, a thread an agent started with no session of its own stays its own when another agent was named in it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Ava posted the root through message.send or a schedule, so no session
+  // sits under the thread for her; Bea, named in it, has one.
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:bea:T1:C1:956.0', new Date(956.2 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '956.0', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'Nightly report: 3 failures' },
+    { ts: '956.1', user: 'U-DYLAN', text: '<@B-BEA> are these flaky?' },
+    { ts: '956.2', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'two are' },
+  ];
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const base = channelMessage({ text: 'ok, rerun the third', ts: '956.3', thread: '956.0' });
+  const followUp = { ...base, event: { ...base.event, parent_user_id: 'B-AVA' } };
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: ok, rerun the third'],
+  ]);
+});
+
 test('an agent in a shared thread hears what is said to the other one, and posts nothing for it', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
@@ -2965,11 +3009,16 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   // Ava is now the voice that just answered: Bea stands down, Ava judges.
   clock.at('1060.3');
   await both(channelMessage({ text: 'thanks', ts: '1060.3', thread: '1060.0' }));
+  // Bea, the thread's owner, is named and answers: that takes it back.
+  clock.at('1060.4');
+  await both(channelMessage({ text: '<@B-BEA> your view?', ts: '1060.4', thread: '1060.0' }));
+  clock.at('1060.5');
+  await both(channelMessage({ text: 'and then?', ts: '1060.5', thread: '1060.0' }));
   await adapter.stop();
 
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(of('bea'), ['Dylan: say more', 'Dylan: help me']);
-  assert.deepEqual(of('ava'), ['Dylan: say more', 'Dylan: help me', 'Dylan: thanks']);
+  assert.deepEqual(of('bea'), ['Dylan: say more', 'Dylan: help me', 'Dylan: your view?', 'Dylan: and then?']);
+  assert.deepEqual(of('ava').slice(0, 3), ['Dylan: say more', 'Dylan: help me', 'Dylan: thanks']);
 });
 
 test('an untagged reply is for whoever\'s reply sits lowest in the thread, not for the turn that finished last', async () => {
