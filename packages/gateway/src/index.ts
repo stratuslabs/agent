@@ -1674,13 +1674,28 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return { agentId: root.agent.id, sessionId: root.id, ...(root.metadata ? { metadata: root.metadata } : {}) };
   };
 
+  /**
+   * Which sessions are sub-agents, as the host knows it rather than as the
+   * session says (roadmap 24). Every tool in a slice is handed the same
+   * mutable Session, so the metadata marker and the id are claims a tool
+   * can rewrite. The ids are the ones `subAgents.run` minted, held while
+   * the sub-agent runs. A session object's id is read once, by the
+   * executor on its first tool call, before any tool has been handed it,
+   * so a session a tool renamed is still known by the id it ran under.
+   */
+  const liveSubAgentIds = new Set<string>();
+  const idAtFirstCall = new WeakMap<Session, string>();
+  const hostIdOf = (session: Session): string => idAtFirstCall.get(session) ?? session.id;
+  const isHostSubAgent = (session: Session): boolean =>
+    liveSubAgentIds.has(hostIdOf(session)) || isSubAgentSession(session);
+
   const requestApproval: ApprovalRequester = async (request) => {
     // A sub-agent asks no one (roadmap 24): its parent turn is the one a
     // person is accountable for, and that turn gets the refusal back as a
     // result and decides what to do. Denied as undeliverable, since nobody
     // was asked, and announced only as a resolution, so no channel renders
     // a question nobody may answer.
-    if (isSubAgentSession(request.session)) {
+    if (isHostSubAgent(request.session)) {
       void bus.emit({
         type: 'tool.approval-resolved',
         sessionId: request.session.id,
@@ -2766,6 +2781,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const toolCallsInFlight = new Map<Session, Array<AbortSignal | undefined>>();
   const bindToolCalls = (inner: Executor): Executor => ({
     async execute(call, tool, session, context) {
+      if (!idAtFirstCall.has(session)) {
+        idAtFirstCall.set(session, session.id);
+      }
       const entry = toolCallsInFlight.get(session) ?? [];
       toolCallsInFlight.set(session, entry);
       const signal = context?.signal;
@@ -2858,7 +2876,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // with the turn.
       const stops = [...callSignals, request.signal].filter((signal): signal is AbortSignal => signal !== undefined);
       const input = {
-        parent: { id: handed!.id },
+        parent: { id: hostIdOf(handed!) },
         instruction: request?.instruction,
         tools: Array.isArray(request?.tools) ? [...request.tools] : request?.tools,
         model: request?.model,
@@ -2879,7 +2897,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!parent) {
         throw new Error(`There is no session ${parentId} to start a sub-agent from.`);
       }
-      if (isSubAgentSession(parent)) {
+      if (isHostSubAgent(handed!) || isSubAgentSession(parent)) {
         throw new Error('A sub-agent cannot start sub-agents.');
       }
       if (parent.status !== 'running') {
@@ -2914,6 +2932,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(parent.agent.credentials !== undefined ? { credentials: [...parent.agent.credentials] } : {}),
       };
       let session: Session;
+      liveSubAgentIds.add(sessionId);
       try {
         session = await onSessionChain(sessionId, () => dispatchInternal({
           sessionId,
@@ -2945,6 +2964,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // which is this sub-agent's context: labelled as nobody can vouch.
         return { status: 'error', error: error instanceof Error ? error.message : String(error), sessionId, trust: 'unknown' };
       } finally {
+        liveSubAgentIds.delete(sessionId);
         release();
       }
       const trust = sessionTrustOf(session);
