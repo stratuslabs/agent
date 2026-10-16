@@ -16,6 +16,8 @@ import {
   recordTurnFailure,
   completeAnsweredTurn,
   abortErrorFor,
+  sessionTrustOf,
+  sessionWriteTrust,
   AgentRegistry,
   AgentRunner,
   ChannelRegistry,
@@ -39,6 +41,8 @@ import {
   CONVERSATION_METADATA_KEY,
   STRATUS_SKILL_ID,
   type AgentDefinition,
+  type SubAgentHandle,
+  type SubAgentOutcome,
   type AgentRuntimeContext,
   type CredentialDelivery,
   type CredentialScope,
@@ -66,6 +70,7 @@ import {
   CREDENTIAL_REQUEST_TOOL_NAME,
   createCredentialRequestTool,
   createDelegateTool,
+  DELEGATE_TOOL_NAME,
   createForgetTool,
   createPinTool,
   createMessageSendTool,
@@ -75,6 +80,7 @@ import {
   createRememberTool,
   createScheduleTools,
   DELEGATED_BY_METADATA_KEY,
+  DEFAULT_MAX_DELEGATION_DEPTH,
   DELEGATION_DEPTH_METADATA_KEY,
   delegatingSessionIdOf,
   isDelegatedSession,
@@ -787,6 +793,11 @@ export interface GatewayOptions {
    */
   executor?: string;
   /**
+   * Host-owned limits for sub-agents (roadmap 24). `maxConcurrentPerTurn`
+   * caps how many one parent turn runs at once; the rest wait for a slot.
+   */
+  subAgents?: { maxConcurrentPerTurn?: number };
+  /**
    * Which store backs agent memory, by registered name (`file`, or absent,
    * is the built-in). Same trust rule and same refusal as `executor`: a
    * daemon writing memories into a store the operator did not select is a
@@ -1365,6 +1376,32 @@ const crossIdentityError = (sessionId: string, owner: string, claimed: string): 
 /** Where the session's tool calls ran: `local-command`, or a contributed executor's registered name. */
 export const EXECUTOR_METADATA_KEY = 'executor';
 
+/**
+ * Marks a sub-agent's session (roadmap 24). Reserved: it is what makes the
+ * daemon deny the session's gated calls without asking anyone, so a caller
+ * that could set it could also clear it.
+ */
+export const SUB_AGENT_METADATA_KEY = 'subAgent';
+export const SUB_AGENT_SESSION_ID_MARKER = ':subagent:';
+/** How many sub-agents one parent turn runs at once unless the host says otherwise. */
+export const DEFAULT_SUB_AGENTS_PER_TURN = 4;
+
+export const isSubAgentSession = (session: Pick<Session, 'id' | 'metadata'>): boolean =>
+  session.metadata?.[SUB_AGENT_METADATA_KEY] === true && session.id.includes(SUB_AGENT_SESSION_ID_MARKER);
+
+/**
+ * Tools a sub-agent never gets, whatever its parent holds. `agent.spawn`
+ * would fan out inside a fan-out; `agent.delegate` runs a roster agent
+ * under that agent's own allowlist, which is the way out of a narrowed
+ * slice; `memory.*` would let it persist what nobody reviewed; and
+ * `credential.request` asks a person, which a sub-agent never does.
+ */
+const subAgentNeverGets = (name: string): boolean =>
+  name === 'agent.spawn'
+  || name === DELEGATE_TOOL_NAME
+  || name.startsWith('memory.')
+  || name === CREDENTIAL_REQUEST_TOOL_NAME;
+
 export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   PENDING_APPROVAL_METADATA_KEY,
   FALLBACK_ACTIVE_METADATA_KEY,
@@ -1390,6 +1427,7 @@ export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   // no messages and, once it grows past that index, silently stops sending
   // its own earliest turns, with no overflow and no trim event to say so.
   CONTEXT_FLOOR_METADATA_KEY,
+  SUB_AGENT_METADATA_KEY,
 ];
 
 /**
@@ -1636,6 +1674,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const requestApproval: ApprovalRequester = async (request) => {
+    // A sub-agent asks no one (roadmap 24): its parent turn is the one a
+    // person is accountable for, and that turn gets the refusal back as a
+    // result and decides what to do. Denied as undeliverable, since nobody
+    // was asked, and announced only as a resolution, so no channel renders
+    // a question nobody may answer.
+    if (isSubAgentSession(request.session)) {
+      void bus.emit({
+        type: 'tool.approval-resolved',
+        sessionId: request.session.id,
+        requestId: randomUUID(),
+        answer: 'deny',
+        reason: 'undeliverable',
+      });
+      return { answer: 'deny' };
+    }
     const delegatedFrom = await delegationOriginOf(request.session);
     return requestApprovalFrom(request, delegatedFrom);
   };
@@ -2296,10 +2349,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // The turn's own metadata, where a channel records who can read the
     // conversation now; a recovered turn has none and passes the session's.
     metadata: JsonObject | undefined,
+    // A sub-agent has no soul of its own, and its parent's is not its to edit.
+    subAgent = false,
   ): AgentRuntimeContext => {
     const conversation = conversationContextFrom(metadata);
     return {
-      ...(source.soulPath !== undefined ? { soulPath: source.soulPath, soulReloads: true } : {}),
+      ...(source.soulPath !== undefined && !subAgent ? { soulPath: source.soulPath, soulReloads: true } : {}),
       workspace: agentWorkspaces.forAgent(source.definition.id),
       ...(config.language !== undefined ? { language: config.language } : {}),
       model: describeServingModel(config, onFallback),
@@ -2683,6 +2738,172 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }),
   }));
 
+  // ---- sub-agents (roadmap 24) -------------------------------------------
+
+  /**
+   * Running sub-agents per parent session, and who waits for a slot. A
+   * parent session runs one turn at a time, so this is per turn.
+   */
+  const maxSubAgentsPerTurn = Math.max(1, options.subAgents?.maxConcurrentPerTurn ?? DEFAULT_SUB_AGENTS_PER_TURN);
+  const subAgentSlots = new Map<string, { running: number; waiting: Array<() => void> }>();
+  let subAgentCount = 0;
+
+  const subAgentSlot = (parentId: string, signal: AbortSignal | undefined): Promise<() => void> =>
+    new Promise((resolve, reject) => {
+      const entry = subAgentSlots.get(parentId) ?? { running: 0, waiting: [] };
+      subAgentSlots.set(parentId, entry);
+      const release = (): void => {
+        entry.running -= 1;
+        const next = entry.waiting.shift();
+        if (next) {
+          next();
+        } else if (entry.running === 0) {
+          subAgentSlots.delete(parentId);
+        }
+      };
+      const take = (): void => {
+        entry.running += 1;
+        resolve(release);
+      };
+      if (entry.running < maxSubAgentsPerTurn) {
+        take();
+        return;
+      }
+      const onAbort = (): void => {
+        const at = entry.waiting.indexOf(waiter);
+        if (at >= 0) {
+          entry.waiting.splice(at, 1);
+        }
+        reject(abortErrorFor(signal));
+      };
+      const waiter = (): void => {
+        signal?.removeEventListener('abort', onAbort);
+        take();
+      };
+      entry.waiting.push(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+
+  /** Why this slice cannot be a sub-agent's, or undefined when it can. */
+  const subAgentSliceProblem = (parent: Session, requested: unknown): string | undefined => {
+    if (!Array.isArray(requested) || requested.some((name) => typeof name !== 'string' || name.length === 0)) {
+      return 'A sub-agent\'s tools are a list of tool names.';
+    }
+    const allowlist = parent.agent.tools;
+    for (const name of requested as string[]) {
+      if (/[*?]/.test(name)) {
+        return `A sub-agent's tools are exact names, and ${name} is a pattern.`;
+      }
+      if (subAgentNeverGets(name)) {
+        return `${name} is never given to a sub-agent, even by an agent that holds it.`;
+      }
+      if (!tools.get(name)) {
+        return `There is no tool named ${name}.`;
+      }
+      // The parent's allowlist as its running turn holds it: a slice can
+      // only narrow what that turn may already do.
+      if (allowlist !== undefined && !matchesToolAllowlist(name, allowlist)) {
+        return `${name} is not one of ${parent.agent.id}'s tools, so a sub-agent of it cannot have it.`;
+      }
+    }
+    return undefined;
+  };
+
+  const subAgents: SubAgentHandle = {
+    async run(input) {
+      const parentId = typeof input?.parent?.id === 'string' ? input.parent.id : '';
+      if (!parentId) {
+        throw new Error('subAgents.run needs the session of the turn asking.');
+      }
+      const instruction = typeof input.instruction === 'string' ? input.instruction.trim() : '';
+      if (!instruction) {
+        throw new Error('subAgents.run needs an instruction.');
+      }
+      if (input.model !== undefined) {
+        throw new Error('A sub-agent\'s model cannot be chosen yet: it runs on its parent\'s. Leave "model" out.');
+      }
+      const parent = await store.get(parentId);
+      if (!parent) {
+        throw new Error(`There is no session ${parentId} to start a sub-agent from.`);
+      }
+      if (isSubAgentSession(parent)) {
+        throw new Error('A sub-agent cannot start sub-agents.');
+      }
+      if (parent.status !== 'running') {
+        throw new Error(`Session ${parentId} is not running a turn, and sub-agents start only from one.`);
+      }
+      const depth = typeof parent.metadata?.[DELEGATION_DEPTH_METADATA_KEY] === 'number'
+        ? parent.metadata[DELEGATION_DEPTH_METADATA_KEY]
+        : 0;
+      if (depth >= DEFAULT_MAX_DELEGATION_DEPTH) {
+        throw new Error(`Delegation depth limit reached (${DEFAULT_MAX_DELEGATION_DEPTH}).`);
+      }
+      const problem = subAgentSliceProblem(parent, input.tools);
+      if (problem) {
+        throw new Error(problem);
+      }
+      if (input.signal?.aborted) {
+        throw abortErrorFor(input.signal);
+      }
+
+      const release = await subAgentSlot(parent.id, input.signal);
+      subAgentCount += 1;
+      const sessionId = `${parent.id}${SUB_AGENT_SESSION_ID_MARKER}${depth + 1}:${subAgentCount}-${randomUUID().slice(0, 8)}`;
+      // The parent agent, narrowed: its id, provider and credentials, the
+      // slice for tools, and nothing else — no instructions (the persona),
+      // no skills, no delegates.
+      const definition: AgentDefinition = {
+        id: parent.agent.id,
+        name: parent.agent.name,
+        tools: [...new Set(input.tools)],
+        skills: [],
+        delegates: [],
+        ...(parent.agent.credentials !== undefined ? { credentials: [...parent.agent.credentials] } : {}),
+      };
+      let session: Session;
+      try {
+        session = await onSessionChain(sessionId, () => dispatchInternal({
+          sessionId,
+          agentId: parent.agent.id,
+          userMessage: instruction,
+          metadata: {
+            [SUB_AGENT_METADATA_KEY]: true,
+            [DELEGATION_DEPTH_METADATA_KEY]: depth + 1,
+            [DELEGATED_BY_METADATA_KEY]: parent.agent.id,
+            [ROOT_SESSION_ID_METADATA_KEY]: typeof parent.metadata?.[ROOT_SESSION_ID_METADATA_KEY] === 'string'
+              ? parent.metadata[ROOT_SESSION_ID_METADATA_KEY]
+              : parent.id,
+            // The instruction is the parent's text, at the parent's label:
+            // a tainted parent must not hand a stranger's words to a
+            // session that has seen nothing.
+            [SENDER_TRUST_METADATA_KEY]: sessionWriteTrust(parent),
+          },
+          ...(input.signal ? { signal: input.signal } : {}),
+        }, [], definition));
+      } catch (error) {
+        if (input.signal?.aborted) {
+          throw error;
+        }
+        // The error text may be the provider quoting what it refused,
+        // which is this sub-agent's context: labelled as nobody can vouch.
+        return { status: 'error', error: error instanceof Error ? error.message : String(error), sessionId, trust: 'unknown' };
+      } finally {
+        release();
+      }
+      const trust = sessionTrustOf(session);
+      if (session.status === 'failed') {
+        return { status: 'error', error: session.lastError ?? 'The sub-agent failed.', sessionId, trust: 'unknown' };
+      }
+      const reply = [...session.messages]
+        .reverse()
+        .find((message) => message.role === 'assistant' && message.content.trim().length > 0);
+      const outcome: SubAgentOutcome = reply
+        ? { status: 'result', text: reply.content, sessionId, trust }
+        : { status: 'empty', sessionId, trust };
+      return outcome;
+    },
+  };
+
   const runners = new Map<string, AgentRunner>();
 
   // Every provider-construction input participates in the key — model,
@@ -2700,13 +2921,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return createHash('sha256').update(JSON.stringify(providerInputs)).digest('hex');
   };
 
-  const runnerFor = (config: RuntimeConfig, agentId: string): AgentRunner => {
+  // A sub-agent's runner has no memory store, so no turn of it injects or
+  // reads the agent's memory; no skill catalog, so its prompt is its
+  // instruction and its tools; and grants nothing to every agent, since
+  // the credential request asks a person.
+  const runnerFor = (config: RuntimeConfig, agentId: string, subAgent = false): AgentRunner => {
     // The budget is a provider-construction input too (the harness
     // runtimes take it as their inner limit), so it is part of the key:
     // two agents on one model with different budgets get their own runners.
     const maxTurns = options.maxTurnsFor?.(agentId) ?? options.maxTurns;
     const autoContinue = options.autoContinueFor?.(agentId);
-    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}:${autoContinue ?? 'off'}`;
+    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}:${autoContinue ?? 'off'}${subAgent ? ':sub' : ''}`;
     const existing = runners.get(key);
     if (existing) {
       return existing;
@@ -2746,9 +2971,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       agents: registry,
       // Asking a person for a key is harmless to grant: they decide
       // everything after the question, so no soul has to list it.
-      grantedToEveryAgent: [CREDENTIAL_REQUEST_TOOL_NAME],
-      skills: skillCatalog,
-      memory,
+      grantedToEveryAgent: subAgent ? [] : [CREDENTIAL_REQUEST_TOOL_NAME],
+      ...(subAgent ? {} : { skills: skillCatalog, memory }),
       streaming: true,
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(autoContinue !== undefined
@@ -3236,7 +3460,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       : runsOnHarness(config) || (fallback !== undefined && runsOnHarness(fallback));
   };
 
-  const dispatchInternal = async (input: DispatchInput, absorbedKeys: readonly string[] = []): Promise<Session> => {
+  /**
+   * `subAgent` is the narrowed definition `subAgents.run` built: the turn
+   * runs as that, on the parent's resolved provider, with no memory and no
+   * soul. Only that path passes it.
+   */
+  const dispatchInternal = async (
+    input: DispatchInput,
+    absorbedKeys: readonly string[] = [],
+    subAgent?: AgentDefinition,
+  ): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
     // understand, and a daemon that kept writing into them would be the
@@ -3260,7 +3493,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const existing = await store.get(input.sessionId);
     const agentId = input.agentId ?? existing?.agent.id ?? await defaultAgentId();
     const source = await refreshAgent(agentId);
-    const agent = source.definition;
+    const agent = subAgent ?? source.definition;
+    if (subAgent !== undefined && existing) {
+      throw new Error(`Session ${input.sessionId} already exists; a sub-agent's session is new every time.`);
+    }
 
     // An archived transcript is the record of a conversation that has moved
     // on. Continuing it would revive a session the operator deliberately
@@ -3273,7 +3509,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
 
     const config = await runtimeForAgent(source);
-    const runner = runnerFor(config, source.definition.id);
+    const runner = runnerFor(config, source.definition.id, subAgent !== undefined);
     // Which executor the turn's tool calls run through — the built-in
     // under the name `stratus run` has always recorded, a contributed one
     // under its registered name — so a transcript says where a command
@@ -3325,6 +3561,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         if (isDelegatedSession(existing) && existing.metadata) {
           existing.metadata = withoutDelegation(existing.metadata);
         }
+        // The same for a sub-agent's session, continued as the agent itself:
+        // the marker that denies its approvals unasked comes off with the
+        // delegation markers it carries.
+        if (isSubAgentSession(existing) && existing.metadata) {
+          const { [SUB_AGENT_METADATA_KEY]: _subAgent, ...rest } = withoutDelegation(existing.metadata);
+          existing.metadata = rest;
+        }
         // The executor record follows the daemon, not the session's first
         // turn: a restart that selected another executor runs this turn's
         // commands there, and a session from before the record existed
@@ -3375,7 +3618,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(hostedLoop ? { hostedLoop } : {}),
         ...(input.earlier !== undefined && input.earlier.length > 0 ? { earlier: input.earlier } : {}),
         metadata,
-        runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
+        runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata, subAgent !== undefined),
         signal,
       });
     });
@@ -3495,6 +3738,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Whether it IS an orphan was decided before the channels started
       // (`listOrphanedDelegations`), from the parent's transcript, which
       // a message arriving since may already have rewritten.
+      // A sub-agent never parks (nobody is asked for it), and if one ever
+      // did, its parent's turn died with the last process: nothing would
+      // read its answer, and recovering it would run it as the full agent.
+      if (isSubAgentSession(session) && session.status === 'pending_approval') {
+        log(`${sessionId}: a sub-agent parked when the last stratusd stopped; failing it`);
+        await failParked(session, ABANDONED_TURN_ERROR);
+        return;
+      }
       if (orphaned && isDelegatedSession(session) && session.status === 'pending_approval' && record) {
         log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
         await failOrphanedDelegation(session);
@@ -3733,6 +3984,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * completes it first.)
    */
   const continueAbandonedTurn = async (session: Session): Promise<Session> => {
+    // Its parent's turn died with the last process, and continuing it here
+    // would run it as the full agent. (Sub-agent turns carry no key today,
+    // so this is a guard, not a path.)
+    if (isSubAgentSession(session)) {
+      return failAbandoned(session);
+    }
     // Settled either way: a turn whose agent left the roster, or whose
     // provider no longer resolves, must not stay `running` for every later
     // start and every redelivery to find unfinished and trip over again.
@@ -4409,6 +4666,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // not only on a stderr the service manager owns.
       log,
       warn,
+      subAgents,
     });
     loadedPlugins = result.loaded;
     pluginFailures = result.failures;
