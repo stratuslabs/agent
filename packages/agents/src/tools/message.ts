@@ -1,4 +1,4 @@
-import type { JsonObject, Session, Tool } from '@stratusagent/core';
+import { sessionWriteTrust, type JsonObject, type Session, type Tool, type TrustLevel } from '@stratusagent/core';
 import {
   type ScheduleDestination,
   canonicalDestination,
@@ -23,6 +23,11 @@ export type OutboundMessenger = (input: {
   text: string;
   /** Channel-native id of the message to reply under, for a threaded post. */
   thread?: string;
+  /**
+   * The sending session and the label its words carry, so a channel can
+   * let the agent hear its own threaded post in that thread's session.
+   */
+  speaker?: { sessionId: string; trust: TrustLevel };
 }) => Promise<{ id?: string } | void>;
 
 /**
@@ -99,6 +104,7 @@ export const createMessageSendTool = (
       destination,
       text,
       ...(thread !== undefined ? { thread } : {}),
+      speaker: { sessionId: session.id, trust: sessionWriteTrust(session) },
     });
     const id = posted && typeof posted.id === 'string' && posted.id.length > 0 ? posted.id : undefined;
     // The thread a reply to this post names: the root it went under, or,

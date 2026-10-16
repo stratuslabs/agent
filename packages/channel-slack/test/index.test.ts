@@ -12203,3 +12203,83 @@ test('after a restart, a home channel thread stays its home agent\'s when anothe
   await adapter.stop();
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava']);
 });
+
+// ---- card 364 phase 2: an agent's own threaded post enters that thread's session
+
+const ownPostAdapter = async (): Promise<{ adapter: import('@stratusagent/channels').ChannelAdapter; web: FakeWeb; gateway: StubGateway }> => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  // The thread 500.0 is one Ava is already in; 600.0 is one she never was.
+  gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C-ENG:500.0' ? { agentId: 'ava', metadata: {} } : undefined);
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  return { adapter, web, gateway };
+};
+
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+};
+
+test('an agent\'s own post into a thread it is in is heard in that thread\'s session, as its own, at the sender\'s label', async () => {
+  const { adapter, gateway } = await ownPostAdapter();
+  const connection = await adapter.resolveOutbound!({
+    agentId: 'ava',
+    to: 'C-ENG',
+    thread: '500.0',
+    speaker: { sessionId: 'schedule:abc:1', trust: 'external' },
+  });
+  await connection.post('nightly report: 3 PRs merged');
+  await settle();
+
+  assert.equal(gateway.observes.length, 1);
+  const heard = gateway.observes[0]!;
+  assert.equal(heard.sessionId, 'slack:ava:T1:C-ENG:500.0');
+  assert.equal(heard.agentId, 'ava');
+  assert.match(heard.message, /your own post/i);
+  assert.match(heard.message, /nightly report: 3 PRs merged/);
+  // The words carry what the sending session had seen, never more.
+  assert.equal(heard.metadata?.[SENDER_TRUST_METADATA_KEY], 'external');
+  assert.equal(heard.metadata?.slackUser, 'B-AVA');
+  assert.equal(heard.metadata?.slackThread, '500.0');
+  await adapter.stop();
+});
+
+test('an agent\'s own post is not heard where it adds nothing or nobody vouches for it', async () => {
+  const { adapter, gateway, web } = await ownPostAdapter();
+  // A thread the agent was never in: a reply there starts a session that
+  // reads the thread anyway.
+  await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '600.0', speaker: { sessionId: 'schedule:abc:1', trust: 'agent' } })).post('one');
+  // The thread's own session sending into itself already has the call.
+  await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '500.0', speaker: { sessionId: 'slack:ava:T1:C-ENG:500.0', trust: 'agent' } })).post('two');
+  // No speaker: no label to give it.
+  await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '500.0' })).post('three');
+  // Top level: not a thread's words.
+  await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', speaker: { sessionId: 'schedule:abc:1', trust: 'agent' } })).post('four');
+  await settle();
+  assert.equal(web.posts.length, 4);
+  assert.deepEqual(gateway.observes, []);
+  await adapter.stop();
+});
+
+test('an own post Slack refused is not heard', async () => {
+  const { adapter, gateway, web } = await ownPostAdapter();
+  const original = web.chat.postMessage;
+  web.chat.postMessage = async () => { throw new Error('rate_limited'); };
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '500.0', speaker: { sessionId: 'schedule:abc:1', trust: 'agent' } });
+  await assert.rejects(() => connection.post('report'));
+  web.chat.postMessage = original;
+  await settle();
+  assert.deepEqual(gateway.observes, []);
+  await adapter.stop();
+});
