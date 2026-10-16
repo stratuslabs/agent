@@ -681,6 +681,28 @@ const parseSlackEntry = (
     }
     entry.homeChannels = [...new Set(source.homeChannels as string[])];
   }
+  if (source.agentMentions !== undefined) {
+    // Refused rather than coerced, as linkPreviews is: "false" would read as on.
+    if (typeof source.agentMentions !== 'boolean') {
+      throw new Error(
+        `Invalid ${where}.agentMentions in config ${configPath}: expected true or false, received ${JSON.stringify(source.agentMentions)}.`,
+      );
+    }
+    entry.agentMentions = source.agentMentions;
+  }
+  if (source.agentMentionsFrom !== undefined) {
+    if (!perAgent) {
+      throw new Error(
+        `Invalid ${where}.agentMentionsFrom in config ${configPath}: agentMentionsFrom is per-agent; set it under slack.agents.<agentId>.agentMentionsFrom.`,
+      );
+    }
+    if (!Array.isArray(source.agentMentionsFrom) || !source.agentMentionsFrom.every((name) => typeof name === 'string' && name.length > 0)) {
+      throw new Error(
+        `Invalid ${where}.agentMentionsFrom in config ${configPath}: expected an array of team agent names, received ${JSON.stringify(source.agentMentionsFrom)}.`,
+      );
+    }
+    entry.agentMentionsFrom = [...new Set(source.agentMentionsFrom as string[])];
+  }
   return entry;
 };
 
@@ -691,6 +713,17 @@ const parseSlackConfig = (raw: unknown, configPath: string): SlackConfig | undef
   }
   const slack: SlackConfig = { ...shared };
   const source = raw as Record<string, unknown>;
+  if (source.team !== undefined) {
+    if (
+      typeof source.team !== 'object' || source.team === null || Array.isArray(source.team)
+      || !Object.values(source.team as Record<string, unknown>).every((id) => typeof id === 'string' && /^[UW][A-Z0-9]+$/.test(id))
+    ) {
+      throw new Error(
+        `Invalid slack.team in config ${configPath}: expected an object of agent name to Slack bot user id like {"blair": "U0123ABCD"}, received ${JSON.stringify(source.team)}.`,
+      );
+    }
+    slack.team = { ...(source.team as Record<string, string>) };
+  }
   if (source.agents !== undefined) {
     if (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents)) {
       throw new Error(
@@ -721,11 +754,17 @@ const parseSlackConfig = (raw: unknown, configPath: string): SlackConfig | undef
 export const resolveAgentSlack = (
   slack: SlackConfig | undefined,
   agentId: string,
-): Required<AgentSlackConfig> => ({
-  replies: slack?.agents?.[agentId]?.replies ?? slack?.replies ?? 'final',
-  linkPreviews: slack?.agents?.[agentId]?.linkPreviews ?? slack?.linkPreviews ?? true,
-  homeChannels: slack?.agents?.[agentId]?.homeChannels ?? [],
-});
+): Required<Omit<AgentSlackConfig, 'agentMentionsFrom'>> & Pick<AgentSlackConfig, 'agentMentionsFrom'> => {
+  const agentMentionsFrom = slack?.agents?.[agentId]?.agentMentionsFrom;
+  return {
+    replies: slack?.agents?.[agentId]?.replies ?? slack?.replies ?? 'final',
+    linkPreviews: slack?.agents?.[agentId]?.linkPreviews ?? slack?.linkPreviews ?? true,
+    homeChannels: slack?.agents?.[agentId]?.homeChannels ?? [],
+    // Off unless someone turned it on (card 513).
+    agentMentions: slack?.agents?.[agentId]?.agentMentions ?? slack?.agentMentions ?? false,
+    ...(agentMentionsFrom !== undefined ? { agentMentionsFrom } : {}),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Writing the config file

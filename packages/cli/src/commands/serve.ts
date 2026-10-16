@@ -463,6 +463,14 @@ const serveHeldHome = async (
             replies: presentation.replies,
             ...(presentation.linkPreviews ? {} : { linkPreviews: false }),
             ...(homeChannels.length > 0 ? { homeChannels } : {}),
+            ...(presentation.agentMentions
+              ? {
+                agentMentions: {
+                  ...(slackConfig?.team ? { team: slackConfig.team } : {}),
+                  ...(presentation.agentMentionsFrom ? { only: presentation.agentMentionsFrom } : {}),
+                },
+              }
+              : {}),
           };
         }),
         attachmentStore: (() => {
