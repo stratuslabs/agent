@@ -4995,16 +4995,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   /**
    * Whose a stop at `ts` is, from the live record: who was asked last, or,
    * with no claim at that point, the thread's owner. Undefined when this
-   * process has seen nobody asked here, only posts a thread read rebuilt
-   * (card 508): a mention since then would not be among them, so the stop
-   * is left to a fresh read of the thread rather than sent to the owner.
+   * process has seen nobody asked here by `ts`, only posts a thread read
+   * rebuilt (card 508): a mention since then would not be among them, so
+   * the stop is left to a fresh read of the thread rather than sent to the
+   * owner.
    */
   const stopHolderAt = (key: string, ts: string): string | undefined => {
     const held = holderAt(key, ts);
     if (held !== undefined) {
       return held;
     }
-    const seenLive = (threadAddressee.get(key) ?? []).some((handover) => handover.cold !== true);
+    // As of `ts`, like every reader of the record: a claim delivered first
+    // but written after the stop says nothing about who had been asked.
+    const seenLive = (threadAddressee.get(key) ?? []).some((handover) => handover.cold !== true && handover.ts <= ts);
     return seenLive ? ownerAt(key, ts) : undefined;
   };
 
