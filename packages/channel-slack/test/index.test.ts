@@ -11975,3 +11975,84 @@ test('after a restart, a judge another agent here asked by name does not take th
   await adapter.stop();
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava']);
 });
+
+test('an owner the thread read settled is forgotten with the thread\'s record, so a later reply reads the thread again', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.agents = () => [{ id: 'ava', name: 'Ava' }, { id: 'bea', name: 'Bea', listens: 'judge' }];
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:605.0', new Date(605.1 * 1000).toISOString()],
+    ['slack:bea:T1:C1:605.0', new Date(605.4 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '605.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '605.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+  ];
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: args.ts !== '605.0' ? [] : thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  // The thread read settles Ava as the owner.
+  const first = channelMessage({ text: 'what about the docs?', ts: '605.2', thread: '605.0' });
+  await socketAva.deliver('message', first);
+  await socketBea.deliver('message', first);
+  // Bea, judging, spoke unasked: the record of it is what the fillers evict.
+  thread.push(
+    { ts: '605.2', user: 'U-DYLAN', text: 'what about the docs?' },
+    { ts: '605.3', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'ok' },
+    { ts: '605.4', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'I can take the docs' },
+  );
+  const fillers: Array<Promise<void>> = [];
+  for (let index = 0; index < 2001; index += 1) {
+    fillers.push(socketAva.deliver('app_mention', mention('<@B-AVA>', { ts: `700.${index}`, thread_ts: `7${index}.0` })));
+  }
+  await Promise.all(fillers);
+  const before = gateway.dispatches.filter((dispatch) => dispatch.agentId === 'ava').length;
+  const next = channelMessage({ text: 'ok, start with the changelog', ts: '605.5', thread: '605.0' });
+  await socketAva.deliver('message', next);
+  await socketBea.deliver('message', next);
+  await adapter.stop();
+  assert.equal(gateway.dispatches.filter((dispatch) => dispatch.agentId === 'ava').length, before);
+});
+
+test('an unlisted sender\'s untagged reply is refused, and logged, by the thread\'s owner, not the agent asked last', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const logged: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', principals: ['U-DYLAN'], admit: 'principals' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', principals: ['U-DYLAN'], admit: 'principals' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? createFakeWeb('B-AVA', 'T1') : createFakeWeb('B-BEA', 'T1')),
+    log: (line) => logged.push(line),
+  });
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', mention('<@B-AVA> plan the release', { ts: '606.0' }));
+  const ask = channelMessage({ text: '<@B-BEA> check the docs', ts: '606.1', thread: '606.0' });
+  await socketAva.deliver('message', ask);
+  await socketBea.deliver('app_mention', { body: { team_id: 'T1', event_id: 'evt-606-1' }, event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> check the docs', ts: '606.1', thread_ts: '606.0', channel: 'C1' } });
+  const stranger = channelMessage({ text: 'me too', ts: '606.2', thread: '606.0', user: 'U-STRANGER' });
+  await socketAva.deliver('message', stranger);
+  await socketBea.deliver('message', stranger);
+  await adapter.stop();
+  assert.deepEqual(logged.filter((line) => /refused a message from U-STRANGER/.test(line)).map((line) => line.split(' ')[1]), ['ava'], JSON.stringify(logged));
+});

@@ -4942,6 +4942,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const oldest = threadAddressee.keys().next();
       if (!oldest.done) {
         threadAddressee.delete(oldest.value);
+        // The owner goes with the record of who took the thread since: an
+        // owner kept alone would stand in for a judge's takeover it no
+        // longer knows of, where the thread read would see it.
+        threadOrigins.delete(oldest.value);
       }
     }
   };
@@ -5937,7 +5941,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         return undefined;
       }
       const refusal = `slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`;
-      const held = threadKey !== undefined ? holderAt(threadKey, event.ts) : undefined;
+      // Whose message this is, as for an admitted one: the thread's owner's
+      // (card 508), or for a stop, whoever was asked last (card 337).
+      const refusedStop = (connection.config.approvers ?? []).includes(sender) && isStopRequest(text, connection.botUserId);
+      const held = threadKey === undefined
+        ? undefined
+        : (refusedStop ? holderAt(threadKey, event.ts) : undefined) ?? ownerAt(threadKey, event.ts);
       if (addressed || held === connection.config.agentId) {
         if (!alreadySeen(eventKey)) {
           log(refusal);
@@ -5955,7 +5964,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           conversation: event.channel,
           thread,
           ...(event.parent_user_id !== undefined ? { parentUser: event.parent_user_id } : {}),
-        }, event.ts).then((winner) => {
+        }, event.ts, refusedStop ? 'stop' : 'reply').then((winner) => {
           if (winner === connection.config.agentId) {
             log(refusal);
           }
