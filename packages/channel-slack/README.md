@@ -40,23 +40,26 @@ they are the whole model:
    [config](../../docs/guides/slack.md#a-home-channel)): there every new
    top-level message from someone it admits is addressed to it, unless the
    message names another agent.
-4. **In a thread with several agents, an untagged reply goes to whoever
-   spoke last.** The same rule people use: you are answering the voice that
-   just answered you. Naming another agent moves the conversation to them —
-   so a handover is one `@`, and it takes effect the moment it is sent, not
-   whenever the turn it starts gets around to answering: an addendum typed
-   straight after it reaches the agent you just named, and the agent that
-   *had* the thread stands down at the same instant rather than whenever its
-   own app next catches up. A message an agent already took stays that
-   agent's: Slack redelivering it after a restart goes back to the agent
-   that accepted it, not to whoever has spoken since — and if that agent's
-   app has not come back, the others stand down rather than run it again.
-   Another app's bot counts as a speaker: an agent served by another daemon,
-   or any integration posting in the thread. After it posts, this daemon's
-   agents stand down for untagged replies until one of them is named. Only
-   who posted and when is kept, not what it said. After a restart the thread
-   is read (`conversations.replies`) to tell; if that read fails, the agent
-   answers as before and a warning says why.
+4. **In a thread with several agents, an untagged reply goes to the agent
+   the thread belongs to.** That is the first agent to hold it: the one its
+   first message named, or the one that posted it. Naming another agent
+   gets that agent's answer to that message, and nothing more: the thread
+   stays where it was, so the next untagged reply goes back to its owner
+   and the agent you pulled in stays quiet unless it is named again. A
+   message an agent already took stays that agent's: Slack redelivering it
+   after a restart goes back to the agent that accepted it — and if that
+   agent's app has not come back, the others stand down rather than run it
+   again. Another app's bot that spoke in the thread before any agent here
+   held it owns it the same way: an agent served by another daemon, or any
+   integration replying in the thread. So does a thread a team agent
+   (`agentMentions.team`) started. A thread another app *started* — an
+   alert, a deploy note — is not that app's: it belongs to the first agent
+   named under it. Only who posted and when is kept, not what it said.
+   After a restart the thread is read (`conversations.replies`) to tell; if
+   that read fails, the sessions decide (the one agent there, or the one
+   that spoke last) and a warning says why. A daemon that did not see a
+   thread begin, and has not read it yet, takes the first agent it saw
+   hold it as the owner.
 5. **How an agent listens is the soul's to say.** Rules 3 and 4 are the
    `thread` mode, the default. A soul with `listens: mentions` takes only
    messages that name it, and hears the rest. One with `listens: judge`
@@ -75,16 +78,16 @@ they are the whole model:
    decides on silence. Neither mode takes
    part in the holder rule — that rule answers whose an untagged reply is,
    and for these two the soul already has — so a thread-rule agent stands
-   down for a judging or mentions-only one that spoke last: the judging
-   one decides for itself, and the mentions-only one is being talked to
-   and waits to be named. A judging agent that chooses to speak takes the
-   thread the way any speaker does, recorded once its reply has landed —
-   so a message typed while it was still deciding may be answered by both
-   it and a thread-rule colleague that held the thread before. "Spoke
-   last" is read off the thread, not the clock: the holder is whichever
-   agent's reply sits lowest, since that is the one a reader answers, and
-   a placeholder posted early and filled in slowly sits above a reply
-   posted while it was being written. A colleague's reply is never
+   down in a thread a mentions-only agent owns, or where a judging one has
+   chosen to speak: the judging one decides for itself, and the
+   mentions-only one is being talked to and waits to be named. A judging agent that chooses to speak takes the thread,
+   recorded once its reply has landed — so a message typed while it was
+   still deciding may be answered by both it and a thread-rule colleague
+   that held the thread before — and the owner takes it back by answering
+   in it. Which of the two spoke last is read off the thread, not the
+   clock: whichever reply sits lowest, since that is the one a reader
+   answers, and a placeholder posted early and filled in slowly sits above
+   a reply posted while it was being written. A colleague's reply is never
    judged, only heard.
    The window also counts messages this daemon has dispatched that the
    session does not hold yet, so a burst typed inside one turn is judged
@@ -181,7 +184,7 @@ needs the history scopes; without them an agent hears a thread only from
 the mention that brought it in. A colleague's reply is
 heard by the daemon that posted it, not through Slack — an agent served by
 another daemon is a stranger's bot to this one, and its replies are not
-heard at all. They do count for who spoke last (rule 4).
+heard at all. They do count for who a thread belongs to (rule 4).
 
 Three edges worth knowing. An agent whose app was installed before the
 history scopes below is told about mentions only, and behaves exactly as it

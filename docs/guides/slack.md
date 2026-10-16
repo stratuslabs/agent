@@ -41,14 +41,17 @@ reach it the way replying to a colleague reaches them, and so do replies
 from anyone else in the thread. Outside a thread it stays quiet; a channel
 message nobody addressed to it is not its business.
 
-Threads with more than one agent follow the rule people already use: an
-untagged reply goes to **whoever spoke last**, and mentioning another agent
-moves the conversation to them. Any other app's bot counts as a speaker too,
-including an agent served by another daemon or another machine: after it
-posts, an untagged reply is not this daemon's agents' to take, and naming
-your agent hands the thread back. A reply an agent already took stays its own,
-even if Slack delivers it again after a restart and someone else has spoken
-since. The agent that stood down keeps
+In a thread with more than one agent, an untagged reply goes to **the agent
+the thread belongs to**: the first one to hold it, usually the one you
+mentioned to start it. Mentioning another agent gets you its answer to that
+message, and that's all. The next untagged reply goes back to the thread's
+owner, and the agent you pulled in stays quiet until you name it again.
+Another app's bot that replied in the thread before any of your agents held
+it owns the thread the same way, including an agent served by another daemon
+or another machine. A thread an integration started (an alert, a deploy
+note) belongs to the first agent you mention under it. A reply an agent
+already took stays its own, even if Slack delivers it again after a
+restart. The agent that stood down keeps
 listening: what you say to its colleague in that thread, and what the
 colleague answers, go into its own session, marked as said to somebody
 else, so when you turn back to it, it answers as someone who followed
