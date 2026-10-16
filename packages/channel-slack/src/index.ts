@@ -3011,6 +3011,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
   const seenOrder: string[] = [];
+  type Handover = { agentId: string; ts: string; takes?: boolean };
+
   /**
    * Who each thread was last handed to, in SLACK RECEIPT ORDER — written
    * the moment a message is accepted for an agent, before any of the work
@@ -3055,7 +3057,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * private store here is the wrong place to answer it. The next mention
    * corrects it.
    */
-  const threadAddressee = new Map<string, Array<{ agentId: string; ts: string; takes?: boolean }>>();
+  const threadAddressee = new Map<string, Handover[]>();
   /**
    * Threads whose owner this process can name (card 508): `true` for one
    * whose first message it saw, so the first claim in `threadAddressee` is
@@ -4892,6 +4894,35 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     `${parts.team}:${parts.conversation}:${parts.thread}`;
 
   /**
+   * A thread's claims cut to `THREAD_HANDOVER_DEPTH`, oldest first out, but
+   * never the two `ownerAt` reads past the rest, so at most one over: the
+   * first claim, which is who the thread belongs to, and the latest claim
+   * that took the thread.
+   * Dropping that one would hand the thread back to its owner after enough
+   * mentions of a third agent, while the judge that took it still answers.
+   */
+  const trimHandovers = (handovers: Handover[]): Handover[] => {
+    if (handovers.length <= THREAD_HANDOVER_DEPTH) {
+      return handovers;
+    }
+    const first = handovers[0] as Handover;
+    let latestTake = -1;
+    for (let index = handovers.length - 1; index > 0; index -= 1) {
+      if (handovers[index]?.takes === true) {
+        latestTake = index;
+        break;
+      }
+    }
+    const tailFrom = handovers.length - (THREAD_HANDOVER_DEPTH - 1);
+    // The kept take sits on top of the full recent tail, one past the depth,
+    // so `holderAt` still sees every recent claim it saw before.
+    const tail = handovers.slice(tailFrom);
+    return latestTake > 0 && latestTake < tailFrom
+      ? [first, handovers[latestTake] as Handover, ...tail]
+      : [first, ...tail];
+  };
+
+  /**
    * Records that `agentId` holds the thread from the message at `ts`
    * onwards, wherever in the thread's history that message falls.
    *
@@ -4903,7 +4934,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * later insertion would take the thread from a reply that sits below it.
    * Only the same claim twice — the same message reaching a second
    * connection — is dropped.
-   * The oldest claims are dropped past `THREAD_HANDOVER_DEPTH`, and the
+   * The oldest claims are dropped past `THREAD_HANDOVER_DEPTH` (but not
+   * the first or the latest that took the thread: `trimHandovers`), and the
    * least recently written thread past `THREAD_ADDRESSEE_CAPACITY`; both
    * losses cost a lookup, never an answer, since the sessions still hold
    * the durable version.
@@ -4932,12 +4964,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     handovers.splice(at, 0, takes ? { agentId, ts, takes } : { agentId, ts });
     // Re-inserted rather than mutated in place: a Map iterates in insertion
-    // order, which is what makes the first key the one to evict. The first
-    // claim is kept past the depth: it is who the thread belongs to.
+    // order, which is what makes the first key the one to evict.
     threadAddressee.delete(key);
-    threadAddressee.set(key, handovers.length > THREAD_HANDOVER_DEPTH
-      ? [handovers[0] as { agentId: string; ts: string; takes?: boolean }, ...handovers.slice(-(THREAD_HANDOVER_DEPTH - 1))]
-      : handovers);
+    threadAddressee.set(key, trimHandovers(handovers));
     if (threadAddressee.size > THREAD_ADDRESSEE_CAPACITY) {
       const oldest = threadAddressee.keys().next();
       if (!oldest.done) {

@@ -3021,6 +3021,74 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   assert.deepEqual(of('ava').slice(0, 3), ['Dylan: say more', 'Dylan: help me', 'Dylan: thanks']);
 });
 
+test('a judge that took the thread still holds it after many exchanges with a third agent (card 508)', async () => {
+  const sockets = { a: createFakeSocket(), b: createFakeSocket(), c: createFakeSocket() };
+  const webs = { a: createFakeWeb('B-AVA', 'T1'), b: createFakeWeb('B-BEA', 'T1'), c: createFakeWeb('B-CY', 'T1') };
+  for (const web of Object.values(webs)) {
+    web.knownConversations.set('C1', { is_member: true });
+  }
+  const gateway = createStubGateway(({ sessionId, userMessage }) => {
+    if (sessionId.startsWith('slack:ava:')) {
+      return sessionWithReply(sessionId, userMessage.includes('help') ? 'Here is help' : '');
+    }
+    return sessionWithReply(sessionId, 'ok');
+  });
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'judge' },
+    { id: 'bea', name: 'Bea' },
+    { id: 'cy', name: 'Cy' },
+  ];
+  const clock = stampsAfter();
+  for (const web of Object.values(webs)) {
+    web.stamp = clock.stamp;
+  }
+  // Bea's thread; Ava is in it and stays attentive throughout.
+  gateway.sessionRouting = async (sessionId) => {
+    if (sessionId === 'slack:ava:T1:C1:1080.0') {
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString(), lastAnsweredAt: new Date(1080 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    if (sessionId === 'slack:bea:T1:C1:1080.0') {
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1080.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+    }
+    return undefined;
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+      { agentId: 'cy', appToken: 'xapp-c', botToken: 'xoxb-c' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? sockets.a : appToken === 'xapp-b' ? sockets.b : sockets.c),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webs.a : botToken === 'xoxb-b' ? webs.b : webs.c),
+  });
+  await adapter.start(gateway);
+
+  const all = (message: ReturnType<typeof channelMessage>) =>
+    Promise.all([sockets.a.deliver('message', message), sockets.b.deliver('message', message), sockets.c.deliver('message', message)]);
+  clock.at('1080.1');
+  await all(channelMessage({ text: 'say more', ts: '1080.1', thread: '1080.0' }));
+  // Ava, judging, speaks: the thread is hers now.
+  clock.at('1080.2');
+  await all(channelMessage({ text: 'help me', ts: '1080.2', thread: '1080.0' }));
+  // Twenty asides with Cy: each a mention and Cy's answer, neither of
+  // which moves the thread — more claims than the record keeps.
+  for (let round = 0; round < 20; round += 1) {
+    const ts = `${1081 + round}.0`;
+    clock.at(ts);
+    await all(channelMessage({ text: `<@B-CY> aside ${round}`, ts, thread: '1080.0' }));
+  }
+  clock.at('1200.0');
+  await all(channelMessage({ text: 'and then?', ts: '1200.0', thread: '1080.0' }));
+  await adapter.stop();
+
+  const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
+  assert.equal(of('cy').length, 20);
+  // Still Ava's: Bea stands down, and only Ava hears it as a turn.
+  assert.deepEqual(of('bea'), ['Dylan: say more', 'Dylan: help me']);
+  assert.equal(of('ava').at(-1), 'Dylan: and then?');
+});
+
 test('an untagged reply is for whoever\'s reply sits lowest in the thread, not for the turn that finished last', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
