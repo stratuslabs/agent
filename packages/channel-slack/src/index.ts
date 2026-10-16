@@ -329,7 +329,8 @@ type ThreadPositions = {
   last: Map<string, number>;
   foreign: number;
   lastForeign: number;
-  posts: Array<{ agentId: string; at: number; asked: boolean }>;
+  /** `ts` is the message's own, kept as Slack wrote it for the live record. */
+  posts: Array<{ agentId: string; at: number; ts: string; asked: boolean }>;
 };
 /**
  * At the top of a channel, how many of its most recent messages a mention
@@ -5222,7 +5223,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Each of these agents' own messages, and whether the message before it
     // had asked it anything: one nobody asked for is a judge taking the
     // thread, or its owner answering in it (card 508).
-    const posts: Array<{ agentId: string; at: number; asked: boolean }> = [];
+    const posts: Array<{ agentId: string; at: number; ts: string; asked: boolean }> = [];
     let asked = new Set<string>();
     const askedIn = (text: string | undefined): Set<string> => new Set(
       [...byBotUser].filter(([botUserId]) => mentions(text ?? '', botUserId)).map(([, agentId]) => agentId),
@@ -5248,7 +5249,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           const own = message.user === undefined ? undefined : byBotUser.get(message.user);
           if (own !== undefined) {
             place(own, at);
-            posts.push({ agentId: own, at, asked: asked.has(own) });
+            posts.push({ agentId: own, at, ts: message.ts as string, asked: asked.has(own) });
             // An agent here naming a colleague that answers its mentions
             // asks it, as `admitAgentMention` has it live, so the answer is
             // not a judge speaking unasked.
@@ -5545,7 +5546,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // turns are judged live; another agent's post there (a message.send)
     // takes nothing.
     const ownerId = owner && !tiedAt && !(read.foreign < owner.at) ? owner.agentId : undefined;
-    let taken: { agentId: string; at: number } | undefined;
+    let taken: { agentId: string; at: number; ts: string } | undefined;
     for (const post of read.posts) {
       const takes = post.agentId === ownerId || (!post.asked && listensOf(post.agentId) === 'judge');
       if (takes && (!taken || post.at > taken.at)) {
@@ -5553,6 +5554,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
     }
     if (taken && taken.agentId !== ownerId && (ownerId !== undefined || taken.at > read.foreign)) {
+      // The live record learns both halves, as it would have live: who owns
+      // the thread, and the judge's post that took it. With only the
+      // verdict, the judge's reply to this message became the first claim
+      // this process saw and read as the owner, so the real owner answering
+      // a mention could not take the thread back (Codex 4290051968). The
+      // take is recorded where the judge posted, so a reply typed before
+      // its answer lands still goes to the judge, as this verdict says.
+      if (ownerId !== undefined) {
+        const key = threadKeyFor(parts);
+        noteOrigin(key, ownerId);
+        rememberAddressee(key, taken.agentId, taken.ts, true);
+      }
       return taken.agentId;
     }
     if (!owner) {

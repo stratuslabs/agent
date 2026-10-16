@@ -12167,28 +12167,95 @@ const twoAgentsOverThread = (
 };
 
 test('after a restart, the owner a judge took the thread from can still take it back by answering', async () => {
-  const { sockets, gateway, adapter, all } = twoAgentsOverThread([
-    { ts: '608.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
-    { ts: '608.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
-    { ts: '608.2', user: 'U-DYLAN', text: 'what about the docs?' },
-    { ts: '608.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'I can take the docs' },
-  ], [['slack:ava:T1:C1:608.0', 608.1], ['slack:bea:T1:C1:608.0', 608.3]], { bea: 'judge' });
-  // Bea is attentive: she answered last and has heard nothing since.
+  // Each reply sits just after the message it answers, as in Slack: the
+  // fake's default `bot-ts-N` sorts after every real ts, which put Ava's
+  // mention record first and made her the owner by accident, hiding the
+  // bug this guards (Codex 4290051968). The cold verdict for Bea
+  // must still leave Ava recorded as the owner (Codex 4290051968), or her
+  // answer to the mention does not take the thread back.
+  const { sockets, webs, gateway, adapter, all } = twoAgentsOverThread([
+    { ts: '609.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '609.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+    { ts: '609.2', user: 'U-DYLAN', text: 'what about the docs?' },
+    { ts: '609.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'I can take the docs' },
+  ], [['slack:ava:T1:C1:609.0', 609.1], ['slack:bea:T1:C1:609.0', 609.3]], { bea: 'judge' });
+  let answering = '609.3';
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `${answering}${(seq += 1)}`;
+  }
   const routing = gateway.sessionRouting!;
   gateway.sessionRouting = async (sessionId) => {
     const found = await routing(sessionId);
     return found && sessionId.includes(':bea:')
-      ? { ...found, lastAnsweredAt: new Date(608.3 * 1000).toISOString(), heardSinceAnswered: 0 }
+      ? { ...found, lastAnsweredAt: new Date(609.3 * 1000).toISOString(), heardSinceAnswered: 0 }
       : found;
   };
   await adapter.start(gateway);
-  await all(channelMessage({ text: 'go ahead', ts: '608.4', thread: '608.0' }));
-  await sockets.ava.deliver('app_mention', { body: { team_id: 'T1', event_id: 'evt-608-5' }, event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> actually you take it', ts: '608.5', thread_ts: '608.0', channel: 'C1' } });
-  await all(channelMessage({ text: '<@B-AVA> actually you take it', ts: '608.5', thread: '608.0' }));
-  await all(channelMessage({ text: 'and next', ts: '608.6', thread: '608.0' }));
+  answering = '609.4';
+  await all(channelMessage({ text: 'go ahead', ts: '609.4', thread: '609.0' }));
+  answering = '609.5';
+  await sockets.ava.deliver('app_mention', { body: { team_id: 'T1', event_id: 'evt-609-5' }, event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> actually you take it', ts: '609.5', thread_ts: '609.0', channel: 'C1' } });
+  await all(channelMessage({ text: '<@B-AVA> actually you take it', ts: '609.5', thread: '609.0' }));
+  answering = '609.6';
+  await all(channelMessage({ text: 'and next', ts: '609.6', thread: '609.0' }));
   await adapter.stop();
-  // Bea still judges it, as a judge does; Ava, holding it again, is asked.
-  assert.deepEqual(gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('and next') && dispatch.addressed !== false).map((dispatch) => dispatch.agentId), ['ava'], JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])));
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('and next') && dispatch.addressed !== false).map((dispatch) => dispatch.agentId),
+    ['ava'],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
+test('after a restart, a reply typed while the judge is still answering stays with the judge', async () => {
+  // The other half of the cold verdict (Codex 4290051968): recording the
+  // owner must not hand the very next untagged reply back to it before the
+  // judge's answer lands, which would contradict the verdict just given.
+  const { webs, gateway, adapter, all } = twoAgentsOverThread([
+    { ts: '611.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '611.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+    { ts: '611.2', user: 'U-DYLAN', text: 'what about the docs?' },
+    { ts: '611.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'I can take the docs' },
+  ], [['slack:ava:T1:C1:611.0', 611.1], ['slack:bea:T1:C1:611.0', 611.3]], { bea: 'judge' });
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `611.4${(seq += 1)}`;
+  }
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(611.3 * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let beaStarted = false;
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    if (input.agentId === 'bea' && !beaStarted) {
+      beaStarted = true;
+      await gate;
+    }
+    return dispatch(input);
+  };
+  await adapter.start(gateway);
+  const first = all(channelMessage({ text: 'go ahead', ts: '611.4', thread: '611.0' }));
+  for (let tries = 0; !beaStarted && tries < 200; tries += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(beaStarted, true, 'the judge took the turn');
+  await all(channelMessage({ text: 'one more thing', ts: '611.5', thread: '611.0' }));
+  release();
+  await first;
+  await adapter.stop();
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.agentId === 'ava' && dispatch.addressed !== false).map((dispatch) => dispatch.userMessage),
+    [],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
 });
 
 test('after a restart, a home channel thread stays its home agent\'s when another was named before it answered', async () => {
