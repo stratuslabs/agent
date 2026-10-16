@@ -2207,9 +2207,10 @@ export const runSetup = async (
       if (entry.slackApprovers !== undefined || resolved.slackApprovers !== undefined) {
         // The other half of a working route, and the half a fresh install
         // has no way to guess it needs. A turn that arrived through Slack
-        // is answered in its own thread, but one from a schedule, a
-        // delegation or the control API reaches the adapter with no
-        // destination and is denied undeliverable — so approvers alone
+        // is answered in its own thread, and a schedule's firing in the
+        // destination it reports to, but one from a schedule with no Slack
+        // destination, a delegation or the control API reaches the adapter
+        // with nowhere to ask and is denied undeliverable — so approvers alone
         // configure approvals for exactly the calls least likely to need
         // them. `stratus plugins` reports this state; better not to create
         // it here in the first place.
@@ -2266,7 +2267,7 @@ export const runSetup = async (
             ? `${agentId} ${inheritsChannel ? 'still uses' : 'now uses'} the top-level fallback channel (${globalChannel})${inheritsChannel ? '' : ' instead of its own'}. Setup cannot turn the fallback off for one agent — remove approvals.slackChannel to drop it for everyone.`
             : `${agentId} has no fallback channel now: only turns already in Slack can be asked.`);
         } else {
-          writeLine(streams.stdout, `No fallback channel for ${agentId}: only turns already in Slack can be asked, and a scheduled or API-started call is denied undeliverable.`);
+          writeLine(streams.stdout, `No fallback channel for ${agentId}: only turns already in Slack and schedules that report to Slack can be asked, and a delegated or API-started call is denied undeliverable.`);
         }
       }
 

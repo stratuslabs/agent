@@ -915,6 +915,124 @@ test('a firing\'s report thread is bound like its grant: live firing, its agent,
   store.close();
 });
 
+test('a firing\'s approval destination is bound like its grant: live firing, its agent, its schedule', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const sessionLike = (sessionId: string, agentId: string, scheduleId?: string): Session => {
+    const now = new Date().toISOString();
+    return {
+      id: sessionId,
+      agent: { id: agentId, name: agentId },
+      status: 'running',
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+      ...(scheduleId ? { metadata: { [SCHEDULE_ID_METADATA_KEY]: scheduleId } } : {}),
+    };
+  };
+  const during: Array<[string, unknown]> = [];
+  const fired = deferred<string>();
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      const firing = (agentId: string, scheduleId?: string): Session => sessionLike(input.sessionId, agentId, scheduleId);
+      during.push(['own schedule', runtime.approvalDestinationFor(firing('ava', 'sched-1'))]);
+      during.push(["another agent's session", runtime.approvalDestinationFor(firing('bea', 'sched-1'))]);
+      during.push(['no schedule id', runtime.approvalDestinationFor(firing('ava'))]);
+      during.push(['schedule with no destination', runtime.approvalDestinationFor(firing('ava', 'quiet-1'))]);
+      assert.equal(runtime.cancel('sched-1'), true);
+      during.push(['after cancel', runtime.approvalDestinationFor(firing('ava', 'sched-1'))]);
+      fired.resolve(input.sessionId);
+    },
+  });
+  store.insert(record({
+    id: 'sched-1',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    destination: { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' },
+    nextFireAt: new Date(Date.now() - 5).toISOString(),
+  }));
+  store.insert(record({
+    id: 'quiet-1',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    nextFireAt: new Date(Date.now() + 600_000).toISOString(),
+  }));
+  await runtime.start();
+  const firingSessionId = await fired.promise;
+  runtime.stop();
+  await runtime.drain();
+
+  assert.deepEqual(during, [
+    ['own schedule', { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' }],
+    ["another agent's session", undefined],
+    ['no schedule id', undefined],
+    ['schedule with no destination', undefined],
+    ['after cancel', undefined],
+  ]);
+  // A settled firing, or a forged session carrying its metadata, gets none:
+  // asking there would let a caller steer approval prompts into a channel.
+  assert.equal(runtime.approvalDestinationFor(sessionLike(firingSessionId, 'ava', 'sched-1')), undefined);
+  store.close();
+});
+
+test('a firing\'s gated call is announced with its schedule\'s destination, and an ordinary turn\'s is not', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+  const ROOT = '1791400000.000100';
+
+  // Every turn tries a channel no schedule declared, so every turn asks.
+  let calls = 0;
+  const fetchFake = (async () => {
+    calls += 1;
+    return calls % 2 === 1
+      ? openAiToolCall('message_send', { destination: { channel: 'slack', to: 'CEXEC0001' }, text: 'hi' }, `call-${calls}`)
+      : openAiText('done');
+  }) as typeof fetch;
+  const asked: Array<{ sessionId: string; scheduleDestination: unknown }> = [];
+  const firingDone = deferred<string>();
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    channels: [fakeSlackChannel(['CENG00001', 'CEXEC0001'])],
+    approvals: (transport: ApprovalTransport) =>
+      createPermissionPolicy({ mode: 'remote', request: transport.request, destinations: transport.destinations }),
+  });
+  gateway.bus.subscribe((event: StratusEvent) => {
+    if (event.type === 'tool.approval-requested') {
+      asked.push({ sessionId: event.sessionId, scheduleDestination: event.scheduleDestination });
+      gateway.resolveApproval({ requestId: event.requestId, answer: 'deny', actor: 'U-DYLAN' });
+    }
+    if (event.type === 'session.completed' && event.sessionId.startsWith('schedule:')) {
+      firingDone.resolve(event.sessionId);
+    }
+  });
+  await gateway.start();
+  const store = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+  store.insert(record({
+    id: 'sched-1',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    destination: { channel: 'slack', to: 'CENG00001', thread: ROOT },
+    nextFireAt: new Date(Date.now() - 5).toISOString(),
+  }));
+  store.close();
+  const firingSessionId = await firingDone.promise;
+  // An ordinary turn of the same agent, outside any firing, carries none.
+  // (A dispatch cannot name the schedule in its metadata at all: the key is
+  // reserved, and the unit test above covers a session that carries it.)
+  try {
+    await gateway.dispatch({ sessionId: 'api-turn-1', agentId: 'ava', userMessage: 'post somewhere' });
+  } finally {
+    await gateway.stop();
+  }
+
+  assert.deepEqual(asked[0], {
+    sessionId: firingSessionId,
+    scheduleDestination: { channel: 'slack', to: 'CENG00001', thread: ROOT },
+  });
+  const ordinary = asked.filter((entry) => entry.sessionId === 'api-turn-1');
+  assert.equal(ordinary.length, 1, 'the ordinary turn reached a gated call');
+  assert.equal(ordinary[0]?.scheduleDestination, undefined);
+});
+
 test('a row written before report threads existed still fires top-level and keeps its grant', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));

@@ -266,7 +266,9 @@ The manual equivalent, if you prefer:
 When `stratus serve` runs with `approvals.mode: "remote"`, a gated tool call
 parks the turn and the adapter asks here. The question goes to the thread the
 turn is happening in; a turn with no Slack conversation of its own (scheduled
-work, a delegate) asks in the configured `slackChannel`.
+work, a delegate) asks in the configured `slackChannel`. With no
+`slackChannel` set, a schedule's firing asks in the schedule's own Slack
+destination, under its report thread if it has one; a delegate is denied.
 
 The request names the **site** for a call judged by one (`browser.act`),
 because its arguments are a CSS selector and say nothing about where a click

@@ -45,6 +45,7 @@ import {
   type AgentMemoryStore,
   type AlwaysMeans,
   type ApprovalDelegationOrigin,
+  type ApprovalScheduleDestination,
   type ApprovalAnswer,
   type ApprovalOutcome,
   type ApprovalPolicy,
@@ -452,6 +453,8 @@ export interface PendingApproval {
   metadata?: JsonObject;
   /** Where a delegated call's work was asked from — see the event. */
   delegatedFrom?: ApprovalDelegationOrigin;
+  /** Where a scheduled firing's schedule reports — see the event. */
+  scheduleDestination?: ApprovalScheduleDestination;
 }
 
 export interface ResolveApprovalInput {
@@ -1687,6 +1690,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
      */
     let announced: Promise<void> = Promise.resolve();
 
+    // Read when the request is made, from the scheduler's own records: a
+    // live firing of a schedule approved with a destination, nothing else.
+    // Delegated work is not included yet; its sub-session is not a firing.
+    const scheduleDestination = scheduler.approvalDestinationFor(request.session);
+
     // Work one agent does for another is allowed one call at a time. The
     // people asked are the delegating conversation's, and a standing grant
     // would widen what the other agent may do on its own work for good —
@@ -1751,6 +1759,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(expiresAt ? { expiresAt } : {}),
         ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
         ...(delegatedFrom ? { delegatedFrom } : {}),
+        ...(scheduleDestination ? { scheduleDestination } : {}),
       },
     });
 
@@ -1802,6 +1811,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...(always !== undefined ? { always } : {}),
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
       ...(delegatedFrom ? { delegatedFrom } : {}),
+      ...(scheduleDestination ? { scheduleDestination } : {}),
       ...(expiresAt ? { expiresAt } : {}),
     });
     // Drained at shutdown alongside the resolutions: a channel that has not

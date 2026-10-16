@@ -3907,6 +3907,16 @@ export interface ApprovalDelegationOrigin {
   metadata?: JsonObject;
 }
 
+/** A schedule's approved destination, as an approval request carries it. */
+export interface ApprovalScheduleDestination {
+  /** Channel kind, e.g. 'slack': only that channel may ask there. */
+  channel: string;
+  /** Channel-native conversation id. */
+  to: string;
+  /** The thread the schedule reports under, when it was set to one. */
+  thread?: string;
+}
+
 export type ApprovalResolutionReason = 'decided' | 'timeout' | 'cancelled' | 'undeliverable';
 
 export type StratusEvent =
@@ -3975,6 +3985,16 @@ export type StratusEvent =
        * Set by the gateway from its own records, never from a caller.
        */
       delegatedFrom?: ApprovalDelegationOrigin;
+      /**
+       * Where the schedule this call is running for reports, when it is a
+       * live scheduled firing whose schedule was approved with a
+       * destination. Not set for work a firing delegates. A firing has no conversation of
+       * its own, and that destination is one a person already approved as
+       * where it speaks, so a renderer with no approval channel of its own
+       * asks there. Set by the gateway from the scheduler's own records,
+       * never from session metadata a caller could write.
+       */
+      scheduleDestination?: ApprovalScheduleDestination;
       /**
        * When the request gives up and denies itself, ISO-8601. Absent when
        * it never will — a deadline of "now" would be a worse lie than

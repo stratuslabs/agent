@@ -272,6 +272,13 @@ export interface SchedulerRuntime {
    * steers a send.
    */
   reportThreadFor(session: Session, destination: ScheduleDestination): string | undefined;
+  /**
+   * Where a live firing's approval may be asked when its channel has no
+   * approval channel of its own: the destination its schedule was approved
+   * with, thread included (card 218). Bound exactly as `isPreauthorized`
+   * is, so metadata alone never steers a prompt into a conversation.
+   */
+  approvalDestinationFor(session: Session): ScheduleDestination | undefined;
   /** All agents' schedules, for the operator surfaces. */
   list(): ScheduleRecord[];
   /** Cancel any agent's schedule — the operator's stop button. */
@@ -645,6 +652,21 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       return canonicalDestination(record.destination) === canonicalDestination(destination)
         ? record.destination.thread
         : undefined;
+    },
+    approvalDestinationFor(session) {
+      if (!activeFirings.has(session.id)) {
+        return undefined;
+      }
+      const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
+      if (typeof scheduleId !== 'string') {
+        return undefined;
+      }
+      const record = store.get(scheduleId);
+      if (record === undefined || record.agentId !== session.agent.id || record.destination === undefined) {
+        return undefined;
+      }
+      const { channel, to, thread } = record.destination;
+      return { channel, to, ...(thread !== undefined ? { thread } : {}) };
     },
     list() {
       return store.list();
