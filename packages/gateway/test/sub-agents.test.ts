@@ -124,6 +124,8 @@ const fanoutGateway = async (options: {
   answer?: 'once' | 'always';
   /** A daemon config whose primary (Anthropic) is down: every call to it fails. */
   primaryDown?: boolean;
+  /** Replaces the fan-out tool's body, for a test that drives the handle itself. */
+  fanout?: (handle: SubAgentHandle, session: Session, signal?: AbortSignal) => Promise<unknown>;
 }) => {
   const home = await newHome();
   await writeSoul(home, options.soul);
@@ -188,6 +190,9 @@ const fanoutGateway = async (options: {
           name: 'test.fanout',
           risk: 'safe',
           async execute(input: JsonObject, session: Session, toolContext?: ExecutionContext) {
+            if (options.fanout) {
+              return (await options.fanout(context.subAgents!, session, toolContext?.signal)) as JsonObject;
+            }
             const tasks = (input.tasks ?? []) as Task[];
             const settled = await Promise.all(tasks.map(async (task) => {
               try {
@@ -448,6 +453,47 @@ test('a parent already on its fallback starts its sub-agents there, not on the p
   }
   assert.deepEqual(harness.outcomes.map((outcome) => ('status' in outcome ? outcome.status : outcome.refused)), ['result']);
   assert.deepEqual(harness.primaryCalls.filter((first) => first.includes('say A')), [], 'the sub-agent retried the primary');
+});
+
+test('a slice changed by the plugin while its sub-agent waits for a slot is not the slice it runs with', async () => {
+  let releaseFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let firstStarted!: () => void;
+  const firstRunning = new Promise<void>((resolve) => {
+    firstStarted = resolve;
+  });
+  const harness = await fanoutGateway({
+    subAgents: { maxConcurrentPerTurn: 1 },
+    tasks: [],
+    fanout: async (handle, session) => {
+      const first = handle.run({ parent: session, instruction: 'first', tools: [] });
+      const slice = ['test.echo'];
+      const second = handle.run({ parent: session, instruction: 'second', tools: slice });
+      await firstRunning;
+      // Validated and queued behind the first: now widen it.
+      slice.push('memory.remember', 'test.gated');
+      releaseFirst();
+      return Promise.all([first, second]);
+    },
+    subAgent: async (request) => {
+      if (request.firstUser === 'first') {
+        firstStarted();
+        await firstHeld;
+      }
+      return openAiText(`did ${request.firstUser}`);
+    },
+  });
+  await harness.gateway.start();
+  try {
+    await harness.gateway.dispatch({ sessionId: 'parent-11', agentId: 'ava', userMessage: 'PARENT-TASK fan out' });
+  } finally {
+    await harness.gateway.stop();
+  }
+  const second = harness.subRequests.find((request) => request.firstUser === 'second');
+  assert.ok(second, 'the second sub-agent never ran');
+  assert.deepEqual(second.tools, ['test_echo']);
 });
 
 test('sub-agents beyond the per-turn cap wait for a slot rather than run', async () => {

@@ -2810,8 +2810,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const subAgents: SubAgentHandle = {
-    async run(input) {
-      const parentId = typeof input?.parent?.id === 'string' ? input.parent.id : '';
+    async run(request) {
+      // Copied before the first await, and only the copy is read from here
+      // on: the plugin keeps its own objects and can change them while this
+      // request is checked or waits for a slot, and a slice changed after
+      // it was checked must not be the slice the sub-agent runs with.
+      const input = {
+        parent: { id: request?.parent?.id },
+        instruction: request?.instruction,
+        tools: Array.isArray(request?.tools) ? [...request.tools] : request?.tools,
+        model: request?.model,
+        signal: request?.signal,
+      };
+      const parentId = typeof input.parent.id === 'string' ? input.parent.id : '';
       if (!parentId) {
         throw new Error('subAgents.run needs the session of the turn asking.');
       }
@@ -2855,7 +2866,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const definition: AgentDefinition = {
         id: parent.agent.id,
         name: parent.agent.name,
-        tools: [...new Set(input.tools)],
+        tools: [...new Set(input.tools as string[])],
         skills: [],
         delegates: [],
         ...(parent.agent.credentials !== undefined ? { credentials: [...parent.agent.credentials] } : {}),
