@@ -11447,6 +11447,23 @@ test('a delayed copy of an older human message does not reset newer agent hops',
   assert.deepEqual(fromNova, ['nova: round 1', 'nova: round 2', 'nova: round 3', 'nova: round 4', 'nova: round 6']);
 });
 
+test('under admit: principals, a remote team agent\'s earlier messages are kept as context for its mention', async () => {
+  const thread = [
+    { ts: '560.1', user: 'U-DYLAN', text: 'CI is red on main' },
+    { ts: '560.2', bot_id: 'B-NOVA-APP', user: 'U-NOVA', text: 'diagnostic: test X times out', bot_profile: { name: 'Nova' } },
+    { ts: '560.3', bot_id: 'B-GH-APP', user: 'U-GITHUB', text: 'build failed', bot_profile: { name: 'GitHub' } },
+  ];
+  const { socket, gateway, adapter } = threadAdapter(thread, { principals: ['U-DYLAN'], admit: 'principals', agentMentions: { team: { nova: 'U-NOVA' } } });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> can you look at that?', ts: '560.4', thread: '560.1' }));
+  await adapter.stop();
+  // Nova's own diagnostic is kept, labelled unknown; an unlisted bot is not.
+  assert.deepEqual(gateway.dispatches[0]?.earlier?.map((entry) => [entry.message, entry.metadata?.[SENDER_TRUST_METADATA_KEY]]), [
+    ['Dylan: CI is red on main', 'user'],
+    ['Nova: diagnostic: test X times out', 'unknown'],
+  ]);
+});
+
 test('a team agent cannot stop this agent\'s turn, even listed as an approver', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

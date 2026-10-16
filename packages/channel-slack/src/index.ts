@@ -3226,10 +3226,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // as an unlisted person. This fleet's own agents are not: they are
         // the conversation the mention joins — an authenticated peer whose
         // socket failed to start included, since what it said is still its.
+        // Nor is a remote team agent this one answers (card 513): its
+        // mention is admitted, so what it said before the mention is too.
         return admitsSender(connection.config, message.user ?? '')
           || (message.user !== undefined && [...botIdentities.values()].some(
             (peer) => peer.teamId === connection.teamId && peer.botUserId === message.user,
-          ));
+          ))
+          || (message.user !== undefined && connection.teamId !== undefined
+            && answersAgentMention(connection.config.agentId, connection.teamId, message.user));
       }
       return message.user !== undefined
         && isPersonSpeaking({ type: 'message', ts: message.ts, channel, ...(message.subtype ? { subtype: message.subtype } : {}) })
