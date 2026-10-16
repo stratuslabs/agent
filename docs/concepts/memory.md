@@ -205,6 +205,16 @@ the one it was filed under.
 `memory.recall` returns each hit's label, and `memory.remember` reports the
 label it wrote.
 
+**An agent that works through MCP remembers as `external` by default.** A
+server's reply is outside content unless you say otherwise, so one call to
+it lowers the rest of the session, and every fact remembered afterwards
+carries that label, even when the server is your own issue tracker. For a
+server you run yourself, set `"outputTrust": "agent"` on its entry (see the
+[MCP guide](../guides/mcp.md)); its replies then count as the agent's own work.
+Entries written before you did are not relabelled by this. Re-assert them
+by id after reading them (below), and roll a long-lived session over if it
+is already tainted.
+
 Each entry also carries an `origin` — the session it was written in, and
 what tainted that session when something did (a tool name, or `memory`,
 `sender`, `legacy`). It describes; it never decides.
