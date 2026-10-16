@@ -213,6 +213,35 @@ test('a fact written after a producer ran is external, and one written in a clea
   assert.equal((await clean.list('ava')).entries[0]?.trust, 'agent');
 });
 
+test('a fact written after a producer the operator vouched for is still agent', async () => {
+  // The other half of #224's lever: plugin-mcp gives a vouched server's tools
+  // `outputTrust: "agent"` (its own test pins that), and what memory.remember
+  // stores after one of them must be the agent's, not a stranger's.
+  const memory = new InMemoryAgentMemoryStore();
+  const tools = new ToolRegistry();
+  tools.register(createRememberTool(memory));
+  tools.register({
+    name: 'mcp.tracker.get_issue',
+    outputTrust: 'agent',
+    async execute() {
+      return { text: 'ENG-1: ship the release notes' };
+    },
+  });
+  const runner = new AgentRunner({
+    provider: perAgentProvider({
+      ava: [[
+        { id: 'c1', toolName: 'mcp.tracker.get_issue', input: {} },
+        rememberCall('c2', 'ENG-1 is the release notes.'),
+      ]],
+    }),
+    tools,
+    memory,
+  });
+  await runner.run({ sessionId: 'vouched-then-remember', agent: AVA, userMessage: 'look up ENG-1 and note it' });
+  const [entry] = (await memory.list('ava')).entries;
+  assert.equal(entry?.trust, 'agent');
+});
+
 const delegateCall = (id: string, agent: string, prompt: string): ToolCall => ({
   id,
   toolName: DELEGATE_TOOL_NAME,

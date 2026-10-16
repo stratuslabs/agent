@@ -21,6 +21,7 @@ import {
   SESSION_TRUST_METADATA_KEY,
   ToolRegistry,
   resolveToolRisk,
+  sessionWriteTrust,
   type AgentWorkspaces,
   type JsonObject,
   type ModelProvider,
@@ -1310,6 +1311,47 @@ test('a server the operator vouches for carries that label, on its results and o
     const tainted: Session = { ...sessionFor('ava'), metadata: { [SESSION_TRUST_METADATA_KEY]: 'external' } };
     const steered = await vouched.get('mcp.linear.chart')!.execute({}, tainted) as JsonObject;
     assert.equal(await ledger.lookup('ava', (steered.files as string[])[0]!), 'external');
+  } finally {
+    await stranger.dispose?.();
+    await ours.dispose?.();
+  }
+});
+
+test('an agent that works only through a server you vouch for still remembers as itself', async () => {
+  // #224: an agent working through the operator's own MCP server wrote every
+  // later memory as `external`. `outputTrust: "agent"` is the lever; this
+  // pins it end to end, through a real turn, at the label `memory.remember`
+  // writes (`sessionWriteTrust`), so it cannot quietly stop working.
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-memory-trust-'));
+  const defaulted = new ToolRegistry();
+  const stranger = pluginFor(fakeServer({ current: linearTools }), { workspaceRoot });
+  await loadThroughView(stranger, defaulted);
+  const vouched = new ToolRegistry();
+  const ours = createMcpPlugin(
+    { servers: { linear: { url: 'http://127.0.0.1:9/unused', outputTrust: 'agent' } }, workspaceRoot },
+    { transportFor: () => fakeServer({ current: linearTools }).transportFor(), warn: () => {}, log: () => {} },
+  );
+  await loadThroughView(ours, vouched);
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'done' }] };
+      }
+      return {
+        parts: [{ type: 'tool-call', call: { id: 'call-1', toolName: 'mcp.linear.get_issue', input: { id: 'ENG-1' } } }],
+      };
+    },
+  };
+  const agent = { id: 'ava', name: 'Ava', tools: ['mcp.linear.*'] };
+  try {
+    const mine = await new AgentRunner({ provider, tools: vouched }).run({ sessionId: 'vouched', agent, userMessage: 'look up ENG-1' });
+    const theirs = await new AgentRunner({ provider, tools: defaulted }).run({ sessionId: 'default', agent, userMessage: 'look up ENG-1' });
+    assert.equal(mine.messages.find((message) => message.role === 'tool')?.toolResult?.ok, true);
+    assert.equal(theirs.messages.find((message) => message.role === 'tool')?.toolResult?.ok, true);
+
+    assert.equal(sessionWriteTrust(mine), 'agent');
+    assert.equal(sessionWriteTrust(theirs), 'external');
   } finally {
     await stranger.dispose?.();
     await ours.dispose?.();
