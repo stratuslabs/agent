@@ -318,6 +318,19 @@ const EARLIER_THREAD_PAGES = 20;
  * an agent id, so the holder rule reads it as "somebody else's".
  */
 const FOREIGN_SPEAKER_PREFIX = 'slack-bot:';
+
+/**
+ * A thread read for the cold routing question: where each agent first
+ * (`held`) and last (`last`) held the thread, where another app first and
+ * last spoke, and each agent's own messages with whether it had been asked.
+ */
+type ThreadPositions = {
+  held: Map<string, number>;
+  last: Map<string, number>;
+  foreign: number;
+  lastForeign: number;
+  posts: Array<{ agentId: string; at: number; asked: boolean }>;
+};
 /**
  * At the top of a channel, how many of its most recent messages a mention
  * opens with, and how many are read to find them.
@@ -5034,6 +5047,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
       }
     }
+    // A team agent on another gateway that starts a thread owns it, even
+    // when its first message asks an agent here something: that agent
+    // answers the question, and the thread stays the asker's. Recorded
+    // here, ahead of the answer, since `noteForeignSpeaker` leaves out a
+    // bot's question to an agent here.
+    const bot = event.bot_id !== undefined || event.subtype === 'bot_message';
+    if (bot && event.user !== undefined && !isFleetBot(team, event.user) && !startsThreadAsIntegration(team, event.user, event.thread_ts, event.ts)) {
+      rememberAddressee(key, `${FOREIGN_SPEAKER_PREFIX}${event.user}`, event.ts);
+    }
   };
 
   /**
@@ -5128,7 +5150,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     candidates: Array<{ agentId: string; lastSpokeAt?: string }>,
     parts: { team: string; conversation: string; thread: string },
     ts: string,
-  ): Promise<{ held: Map<string, number>; foreign: number } | undefined> => {
+  ): Promise<ThreadPositions | undefined> => {
     const connection = connections.find((candidate) => candidate.config.agentId === candidates[0]?.agentId)
       ?? connections.find((candidate) => candidate.teamId === parts.team);
     const replies = connection?.web.conversations.replies;
@@ -5152,10 +5174,26 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const spoke = candidate.lastSpokeAt === undefined ? Number.NaN : Date.parse(candidate.lastSpokeAt) / 1000;
       held.set(candidate.agentId, Number.isFinite(spoke) ? spoke : Number.POSITIVE_INFINITY);
     }
+    // Where each last held it, for a stop, which is for whoever was asked
+    // last (card 337), not for the thread's owner.
+    const last = new Map<string, number>();
+    for (const [agentId, at] of held) {
+      last.set(agentId, Number.isFinite(at) ? at : 0);
+    }
     const place = (agentId: string, at: number): void => {
       held.set(agentId, Math.min(held.get(agentId) ?? Number.POSITIVE_INFINITY, at));
+      last.set(agentId, Math.max(last.get(agentId) ?? 0, at));
     };
     let foreign = Number.POSITIVE_INFINITY;
+    let lastForeign = 0;
+    // Each of these agents' own messages, and whether the message before it
+    // had asked it anything: one nobody asked for is a judge taking the
+    // thread, or its owner answering in it (card 508).
+    const posts: Array<{ agentId: string; at: number; asked: boolean }> = [];
+    let asked = new Set<string>();
+    const askedIn = (text: string | undefined): Set<string> => new Set(
+      [...byBotUser].filter(([botUserId]) => mentions(text ?? '', botUserId)).map(([, agentId]) => agentId),
+    );
     try {
       let cursor: string | undefined;
       let pages = 0;
@@ -5177,18 +5215,27 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           const own = message.user === undefined ? undefined : byBotUser.get(message.user);
           if (own !== undefined) {
             place(own, at);
+            posts.push({ agentId: own, at, asked: asked.has(own) });
             continue;
           }
           const bot = message.bot_id !== undefined || message.subtype === 'bot_message';
           if (bot) {
             // A bot's mention hands nothing over live (admit ignores bots),
             // so here it is only another app speaking, or a peer's words.
+            // A team agent's question to an agent here is not it taking the
+            // thread, unless it started the thread with it: then the thread
+            // is its own, as it is live.
+            const asks = asksAgentHere(parts.team, message.user, message.text);
+            if (asks) {
+              asked = askedIn(message.text);
+            }
             if (
               !isFleetBot(parts.team, message.user) &&
-              !asksAgentHere(parts.team, message.user, message.text) &&
+              (!asks || message.ts === parts.thread) &&
               !startsThreadAsIntegration(parts.team, message.user, parts.thread, message.ts ?? '')
             ) {
               foreign = Math.min(foreign, at);
+              lastForeign = Math.max(lastForeign, at);
             }
             continue;
           }
@@ -5198,6 +5245,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (sender === undefined) {
             continue;
           }
+          asked = askedIn(message.text);
           const named = agentNamedIn(message.text ?? '', parts.team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
           if (named !== undefined && held.has(named) && botIdentities.get(named)?.botUserId !== undefined) {
             place(named, at);
@@ -5212,7 +5260,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       warn(`slack: could not read thread ${parts.thread} in ${parts.conversation} to see who spoke last, so it is routed as before: ${error instanceof Error ? error.message : String(error)}`);
       return undefined;
     }
-    return { held, foreign };
+    return { held, last, foreign, lastForeign, posts };
   };
 
   /**
@@ -5298,6 +5346,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const resolveFollowUpWinner = async (
     parts: { team: string; conversation: string; thread: string; parentUser?: string },
     ts: string,
+    mode: 'reply' | 'stop' = 'reply',
   ): Promise<string | undefined> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting || !parts.thread) {
@@ -5402,6 +5451,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!read) {
       return engaged.length === 1 ? first.agentId : lastSpeaker(engaged);
     }
+    if (mode === 'stop') {
+      // A stop is for whoever was asked last (card 337), as `holderAt` has
+      // it live: the turn it means is that agent's, not the owner's.
+      let holder: { agentId: string; at: number } | undefined;
+      let tiedLast = false;
+      for (const entry of candidates) {
+        const at = read.last.get(entry.agentId) ?? 0;
+        if (at <= 0) {
+          continue;
+        }
+        if (!holder || at > holder.at) {
+          holder = { agentId: entry.agentId, at };
+          tiedLast = false;
+        } else if (at === holder.at) {
+          tiedLast = true;
+        }
+      }
+      if (!holder) {
+        return read.lastForeign > 0 ? undefined : (engaged.length === 1 ? first.agentId : lastSpeaker(engaged));
+      }
+      return tiedLast || read.lastForeign > holder.at ? undefined : holder.agentId;
+    }
     let owner: { agentId: string; at: number } | undefined;
     let tiedAt = false;
     for (const entry of candidates) {
@@ -5416,14 +5487,31 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         tiedAt = true;
       }
     }
+    // A judging agent that spoke unasked took the thread, and the owner
+    // answering in it took it back, as live (card 508): the latest of those
+    // holds it. The live record of who took it is lost on a restart; the
+    // thread keeps it. Only a judge takes by speaking unasked, as only its
+    // turns are judged live; another agent's post there (a message.send)
+    // takes nothing.
+    const ownerId = owner && !tiedAt && !(read.foreign < owner.at) ? owner.agentId : undefined;
+    let taken: { agentId: string; at: number } | undefined;
+    for (const post of read.posts) {
+      const takes = post.agentId === ownerId || (!post.asked && listensOf(post.agentId) === 'judge');
+      if (takes && (!taken || post.at > taken.at)) {
+        taken = post;
+      }
+    }
+    if (taken && taken.agentId !== ownerId && (ownerId !== undefined || taken.at > read.foreign)) {
+      return taken.agentId;
+    }
     if (!owner) {
       return Number.isFinite(read.foreign) ? undefined : (engaged.length === 1 ? first.agentId : lastSpeaker(engaged));
     }
-    if (tiedAt || read.foreign < owner.at) {
+    if (ownerId === undefined) {
       return undefined;
     }
-    noteOrigin(threadKeyFor(parts), owner.agentId);
-    return owner.agentId;
+    noteOrigin(threadKeyFor(parts), ownerId);
+    return ownerId;
   };
 
   /**
@@ -5470,13 +5558,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const followUpWinner = (
     parts: { team: string; conversation: string; thread: string },
     ts: string,
+    mode: 'reply' | 'stop' = 'reply',
   ): Promise<string | undefined> => {
-    const key = `${threadKeyFor(parts)}:${ts}`;
+    // A stop asks a different question (whoever was asked last), so it
+    // gets its own verdict, the same for every agent that asks it.
+    const key = `${threadKeyFor(parts)}:${ts}${mode === 'stop' ? ':stop' : ''}`;
     const existing = coldVerdicts.get(key);
     if (existing) {
       return existing.verdict;
     }
-    const entry = { verdict: resolveFollowUpWinner(parts, ts), settled: false };
+    const entry = { verdict: resolveFollowUpWinner(parts, ts, mode), settled: false };
     coldVerdicts.set(key, entry);
     void entry.verdict.then(
       () => {
@@ -6102,6 +6193,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (!admitted.settled) {
         // One verdict for this message, shared with whichever other agents
         // are asking about it — see `followUpWinner`.
+        const stop = (connection.config.approvers ?? []).includes(userId) &&
+          isStopRequest(event.text ?? '', connection.botUserId);
         const winner = await followUpWinner(
           {
             team,
@@ -6110,6 +6203,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             ...(event.parent_user_id !== undefined ? { parentUser: event.parent_user_id } : {}),
           },
           event.ts,
+          stop ? 'stop' : 'reply',
         );
         if (winner !== connection.config.agentId) {
           // Not this agent's to answer — and, if it is in the thread,

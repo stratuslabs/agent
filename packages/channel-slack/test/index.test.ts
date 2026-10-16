@@ -11806,3 +11806,132 @@ test('after a restart, a team agent\'s question to another agent here does not t
     ['ava', 'Dylan: and you?'],
   ]);
 });
+
+test('a thread a team agent starts by asking an agent here stays the team agent\'s after the answer (card 508)', async () => {
+  const { socketAva, socketBea, webAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  const clock = stampsAfter();
+  clock.at('600.0');
+  webAva.stamp = clock.stamp;
+  await adapter.start(gateway);
+  for (const type of ['app_mention', 'message'] as const) {
+    await socketAva.deliver(type, botMention({ type, user: 'U-NOVA', text: '<@B-AVA> can you check CI?', ts: '600.0' }));
+    await socketBea.deliver(type, botMention({ type, user: 'U-NOVA', text: '<@B-AVA> can you check CI?', ts: '600.0' }));
+  }
+  const followUp = channelMessage({ text: 'thanks, and the deploy?', ts: '600.2', thread: '600.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, plainAgentLine(dispatch.userMessage)]), [
+    ['ava', 'nova: can you check CI?'],
+  ]);
+});
+
+test('after a restart, a thread a team agent started by asking an agent here is still the team agent\'s', async () => {
+  const socketAva = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:601.0', new Date(601.1 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '601.0', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: '<@B-AVA> can you check CI?' },
+    { ts: '601.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'green' },
+  ];
+  webAva.conversations.replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', principals: ['U-DYLAN', 'U-NOVA'], agentMentions: { team: { nova: 'U-NOVA' } } }],
+    editIntervalMs: 0,
+    createSocketClient: () => socketAva,
+    createWebClient: () => webAva,
+  });
+  await adapter.start(gateway);
+  const base = channelMessage({ text: 'and the deploy?', ts: '601.2', thread: '601.0' });
+  await socketAva.deliver('message', { ...base, event: { ...base.event, parent_user_id: 'U-NOVA' } });
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), []);
+});
+
+test('after a restart, a judge that spoke unasked still holds the thread, so the owner does not answer too', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.agents = () => [{ id: 'ava', name: 'Ava' }, { id: 'bea', name: 'Bea', listens: 'judge' }];
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:602.0', new Date(602.1 * 1000).toISOString()],
+    ['slack:bea:T1:C1:602.0', new Date(602.3 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '602.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '602.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+    { ts: '602.2', user: 'U-DYLAN', text: 'what about the docs?' },
+    { ts: '602.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'I can take the docs' },
+  ];
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const next = channelMessage({ text: 'ok, start with the changelog', ts: '602.4', thread: '602.0' });
+  await socketAva.deliver('message', next);
+  await socketBea.deliver('message', next);
+  await adapter.stop();
+  assert.ok(!gateway.dispatches.some((dispatch) => dispatch.agentId === 'ava'), JSON.stringify(gateway.dispatches.map((dispatch) => dispatch.agentId)));
+});
+
+test('after a restart, an untagged stop goes to the agent asked last, not the thread\'s owner', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:603.0', new Date(603.1 * 1000).toISOString()],
+    ['slack:bea:T1:C1:603.0', new Date(603.3 * 1000).toISOString()],
+  ]));
+  const thread = [
+    { ts: '603.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '603.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+    { ts: '603.2', user: 'U-DYLAN', text: '<@B-BEA> run the long check' },
+    { ts: '603.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'running' },
+  ];
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  webAva.conversations.replies = replies;
+  webBea.conversations.replies = replies;
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', approvers: ['U-DYLAN'] },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', approvers: ['U-DYLAN'] },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  // Nothing is running, so the stop is an ordinary message to whoever it is for.
+  const stop = channelMessage({ text: 'stop', ts: '603.4', thread: '603.0' });
+  await socketAva.deliver('message', stop);
+  await socketBea.deliver('message', stop);
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['bea', 'Dylan: stop'],
+  ]);
+});
