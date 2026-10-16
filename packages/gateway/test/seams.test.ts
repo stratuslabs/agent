@@ -346,7 +346,9 @@ test('message.send hands the thread to the adapter and the posted id back to the
   await gateway.start();
   try {
     const session = await gateway.dispatch({ sessionId: 'thread-ava', agentId: 'ava', userMessage: 'reply under the report' });
-    assert.deepEqual(addresses, [{ agentId: 'ava', to: 'C1', thread: '1791400000.000100' }]);
+    // The speaker is the sending session, at the label its words carry, so
+    // a channel can let the agent hear its own threaded post (card 364).
+    assert.deepEqual(addresses, [{ agentId: 'ava', to: 'C1', thread: '1791400000.000100', speaker: { sessionId: 'thread-ava', trust: 'agent' } }]);
     const result = session.messages.find((message) => message.role === 'tool');
     assert.match(JSON.stringify(result), /1791400000\.000200/);
   } finally {

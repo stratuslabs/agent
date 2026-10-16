@@ -17,6 +17,11 @@ always-on daemon into agents that act on their own:
   schedule can post a summary and put the detail in its thread. The thread
   is where the words go, not a different destination: a schedule approved
   for a channel may reply in that channel's threads, and nowhere else.
+  On Slack, a reply into a thread the agent is already talking in also
+  enters that thread's conversation, marked as the agent's own post, so an
+  untagged answer under the report is read with the report in context. It
+  carries the sending turn's trust label: a report written after reading a
+  web page counts as external content in the thread too.
   Without it a scheduled turn works in silence.
 - **`message.read`** — read a channel's recent messages, or one thread,
   outside the current conversation:

@@ -3830,6 +3830,82 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * An agent's own post into a thread, heard in its own session for that
+   * thread (card 364). A scheduled report or a `message.send` reply is a
+   * bot message, which `admit` drops on purpose, and backfill reads a
+   * thread only when a session for it is first made, so without this an
+   * agent already in the thread never knew it had posted there: a reply
+   * under its report reached a session with the question and not the
+   * report. Through `observe`, so it starts no turn and lands only in a
+   * session that already exists; a thread the agent was never in is read
+   * by backfill when somebody first replies there.
+   *
+   * Labelled as the agent's own post, at the label the SENDING session's
+   * words carry (`speaker.trust`, `sessionWriteTrust` of that session):
+   * a report written by a firing that read a web page carries what that
+   * page said, so it is heard at `external`, and one written from `user`
+   * and `agent` context is heard at `agent`. Never higher, so hearing its
+   * own report cannot launder anything into the thread. A post nobody
+   * vouches for (no speaker) is not heard at all, rather than guessed at.
+   *
+   * Not when the sender IS that thread's session: that turn already holds
+   * the call and what it said. Claimed on the intake chain BEFORE the
+   * first chunk goes to Slack, so a reply typed under the report, even
+   * while a long one is still being sent, is heard after it. `posted`
+   * settles with what Slack accepted: all of it, the chunks before one it
+   * refused (they are in the thread, so they are heard), or nothing. Not
+   * awaited by `post`, only by the shutdown drain, so a long turn running
+   * in the thread never holds up the sender, and two threads posting into
+   * each other cannot wait on each other.
+   */
+  const hearOwnPost = (
+    connection: AgentConnection,
+    channel: string,
+    thread: string,
+    posted: Promise<string | undefined>,
+    speaker: { sessionId: string; trust: TrustLevel },
+  ): void => {
+    const gateway = gatewayRef;
+    if (!gateway?.observe) {
+      return;
+    }
+    const agentId = connection.config.agentId;
+    const team = connection.teamId;
+    const sessionId = channelSessionKey({ channel: 'slack', agentId, team, conversation: channel, thread });
+    if (sessionId === speaker.sessionId) {
+      return;
+    }
+    const metadata = {
+      channel: 'slack',
+      team,
+      slackChannel: channel,
+      slackUser: connection.botUserId,
+      slackThread: thread,
+      [SENDER_TRUST_METADATA_KEY]: leastTrusted('agent', speaker.trust),
+    };
+    const heard = onIntakeChain(sessionId, async () => {
+      const text = await posted;
+      if (text === undefined) {
+        return { observed: undefined };
+      }
+      const author = await displayNameFor(connection, connection.botUserId);
+      const observed = gateway.observe?.({ sessionId, agentId, message: `${author} (your own post, sent from another session): ${text}`, metadata });
+      return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
+    });
+    // Tracked, so stop() drains it: a restart right after a report must not
+    // close the stores while the thread's session is still to hear it.
+    track(
+      heard
+        .then(async ({ observed }) => {
+          await observed;
+        })
+        .catch((error: unknown) => {
+          warn(`slack: ${agentId} could not hear its own post in ${channel} thread ${thread}: ${error instanceof Error ? error.message : String(error)}`);
+        }),
+    );
+  };
+
+  /**
    * The addressable outbound seam — the channel contract's first real
    * `OutboundConnection` implementation. Validate-then-hand-over: every
    * refusal here happens at schedule creation or at the moment of a send,
@@ -3877,15 +3953,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // A reply under a message rather than a post beside it. Every chunk of
     // a long one goes to the same thread, so a split reply stays together.
     const thread = address.thread?.trim() || undefined;
+    const speaker = address.speaker;
     return {
       async post(text: string): Promise<OutboundMessageRef> {
         const chunks = messageChunks(text.trim().length > 0 ? text : '(empty message)');
+        // Heard in the thread's session (card 364): its place is claimed
+        // now, before Slack shows anything, and filled once we know what
+        // Slack accepted.
+        let accepted: (heard: string | undefined) => void = () => {};
+        if (thread && speaker && text.trim().length > 0) {
+          hearOwnPost(connection, channelId, thread, new Promise((resolve) => { accepted = resolve; }), speaker);
+        }
         let first: OutboundMessageRef | undefined;
-        for (const chunk of chunks) {
-          const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
-          if (!first) {
-            first = { channel: posted.channel ?? channelId, ts: posted.ts ?? '' };
+        let sent = 0;
+        try {
+          for (const chunk of chunks) {
+            const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
+            sent += 1;
+            if (!first) {
+              first = { channel: posted.channel ?? channelId, ts: posted.ts ?? '' };
+            }
           }
+        } finally {
+          accepted(sent === chunks.length ? text : sent > 0 ? chunks.slice(0, sent).join('\n') : undefined);
         }
         return first ?? { channel: channelId, ts: '' };
       },

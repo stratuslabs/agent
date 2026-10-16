@@ -61,6 +61,7 @@ import {
   type Session,
   type StratusEvent,
   type ToolRisk,
+  type TrustLevel,
 } from '@stratusagent/core';
 import {
   CREDENTIAL_REQUEST_TOOL_NAME,
@@ -251,7 +252,7 @@ export interface GatewayChannelAdapter {
    * Implementations MUST reject a destination they could not deliver to,
    * with a message fit to show the person who named it.
    */
-  resolveOutbound?(address: { agentId: string; to: string; thread?: string }): Promise<{
+  resolveOutbound?(address: { agentId: string; to: string; thread?: string; speaker?: { sessionId: string; trust: TrustLevel } }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
   /**
@@ -1504,6 +1505,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     agentId: string,
     destination: ScheduleDestination,
     thread?: string,
+    speaker?: { sessionId: string; trust: TrustLevel },
   ): Promise<{ post(text: string): Promise<unknown> }> => {
     const { adapter, carriesOthers } = channelCarrying(destination.channel, agentId, (candidate) => candidate.resolveOutbound !== undefined);
     if (!adapter?.resolveOutbound && carriesOthers) {
@@ -1520,7 +1522,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           : `running channels: ${startedChannels.map((candidate) => candidate.name).join(', ')}.`),
       );
     }
-    return adapter.resolveOutbound({ agentId, to: destination.to, ...(thread !== undefined ? { thread } : {}) });
+    return adapter.resolveOutbound({ agentId, to: destination.to, ...(thread !== undefined ? { thread } : {}), ...(speaker !== undefined ? { speaker } : {}) });
   };
 
   const scheduler = createSchedulerRuntime({
@@ -2368,8 +2370,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   for (const scheduleTool of createScheduleTools(scheduler.handle)) {
     tools.register(scheduleTool);
   }
-  tools.register(createMessageSendTool(async ({ agentId, destination, text, thread }) => {
-    const connection = await outboundFor(agentId, destination, thread);
+  tools.register(createMessageSendTool(async ({ agentId, destination, text, thread, speaker }) => {
+    const connection = await outboundFor(agentId, destination, thread, speaker);
     const posted = await connection.post(text);
     // The channel contract's `OutboundMessageRef`, read structurally: the
     // gateway's mirror of the adapter types `post` loosely, and an adapter

@@ -333,7 +333,7 @@ test('message.send is gated and names its destination for the policy', async () 
     { destination: { channel: 'slack', to: 'C9' }, text: 'all green' },
     sessionFor('ava'),
   ) as JsonObject;
-  assert.deepEqual(sends, [{ agentId: 'ava', destination: { channel: 'slack', to: 'C9' }, text: 'all green' }]);
+  assert.deepEqual(sends, [{ agentId: 'ava', destination: { channel: 'slack', to: 'C9' }, text: 'all green', speaker: { sessionId: 'sess-1', trust: 'unknown' } }]);
   assert.equal(result.destination, 'slack:C9');
   // A messenger that reports no id leaves none in the result, and no thread.
   assert.equal(result.id, undefined);
@@ -458,4 +458,18 @@ test('message.read counts names and file lists against its budget, not only the 
   assert.deepEqual(first.files, ['2000 files, not listed']);
   assert.ok(JSON.stringify(cut.messages).length <= MESSAGE_READ_TEXT_BUDGET);
   assert.equal(cut.more, true);
+});
+
+test('message.send names its session as the speaker, at the label its words carry', async () => {
+  const sends: Array<Parameters<Parameters<typeof createMessageSendTool>[0]>[0]> = [];
+  const tool = createMessageSendTool(async (input) => {
+    sends.push(input);
+  });
+  const operatorOnly = { ...sessionFor('ava', 'schedule:abc:1'), metadata: { sessionTrust: 'user' } };
+  await tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'report', thread: '1.2' }, operatorOnly);
+  // A session that has only seen its operator still speaks as the agent.
+  assert.deepEqual(sends[0]?.speaker, { sessionId: 'schedule:abc:1', trust: 'agent' });
+  const tainted = { ...sessionFor('ava', 'schedule:abc:2'), metadata: { sessionTrust: 'external' } };
+  await tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'report', thread: '1.2' }, tainted);
+  assert.deepEqual(sends[1]?.speaker, { sessionId: 'schedule:abc:2', trust: 'external' });
 });

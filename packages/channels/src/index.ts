@@ -351,6 +351,15 @@ export interface OutboundAddress {
    * pre-authorization compares.
    */
   thread?: string;
+  /**
+   * Who is speaking: the session whose turn asked for the post, and the
+   * label its words carry (`sessionWriteTrust` of that session, so never
+   * above `agent`). An adapter uses it to let the posting agent hear its
+   * own threaded post in that thread's session, so a reply under a report
+   * has the report in context. Absent, nobody vouches for the words and
+   * an adapter observes nothing.
+   */
+  speaker?: { sessionId: string; trust: TrustLevel };
 }
 
 /**
