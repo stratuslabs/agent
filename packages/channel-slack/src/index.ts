@@ -5264,6 +5264,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           if (named !== undefined && held.has(named) && botIdentities.get(named)?.botUserId !== undefined) {
             place(named, at);
           }
+          // A root that names nobody in a home channel is its owner's, as
+          // the live home-channel rule has it.
+          const home = message.ts === parts.thread && named === undefined
+            ? homeOwners.get(`${parts.team}:${parts.conversation}`)
+            : undefined;
+          if (home !== undefined && held.has(home) && admitsSender(agentConfigFor(home), sender)) {
+            place(home, at);
+          }
         }
         cursor = page.response_metadata?.next_cursor || undefined;
       } while (cursor && pages < EARLIER_THREAD_PAGES);

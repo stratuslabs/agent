@@ -12056,3 +12056,82 @@ test('an unlisted sender\'s untagged reply is refused, and logged, by the thread
   await adapter.stop();
   assert.deepEqual(logged.filter((line) => /refused a message from U-STRANGER/.test(line)).map((line) => line.split(' ')[1]), ['ava'], JSON.stringify(logged));
 });
+
+const twoAgentsOverThread = (
+  thread: Array<{ ts: string; user: string; bot_id?: string; text: string }>,
+  sessions: Array<[string, number]>,
+  options: { bea?: 'judge'; homeAva?: boolean; cy?: boolean } = {},
+) => {
+  const sockets = { ava: createFakeSocket(), bea: createFakeSocket(), cy: createFakeSocket() };
+  const webs = { ava: createFakeWeb('B-AVA', 'T1'), bea: createFakeWeb('B-BEA', 'T1'), cy: createFakeWeb('B-CY', 'T1') };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava' },
+    options.bea === 'judge' ? { id: 'bea', name: 'Bea', listens: 'judge' as const } : { id: 'bea', name: 'Bea' },
+    ...(options.cy ? [{ id: 'cy', name: 'Cy' }] : []),
+  ];
+  gateway.sessionRouting = routingOver(new Map(sessions.map(([key, at]) => [key, new Date(at * 1000).toISOString()])));
+  const replies = async (args: { ts: string; latest?: string }) => ({
+    messages: thread.filter((message) => args.latest === undefined || Number(message.ts) < Number(args.latest)),
+    response_metadata: { next_cursor: '' },
+  });
+  for (const web of Object.values(webs)) {
+    web.conversations.replies = replies;
+  }
+  const ids: Array<'ava' | 'bea' | 'cy'> = ['ava', 'bea', ...(options.cy ? ['cy' as const] : [])];
+  const adapter = createSlackChannelAdapter({
+    agents: ids.map((id) => ({
+      agentId: id,
+      appToken: `xapp-${id}`,
+      botToken: `xoxb-${id}`,
+      ...(id === 'ava' && options.homeAva ? { homeChannels: ['C1'] } : {}),
+    })),
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => sockets[appToken.slice(5) as 'ava' | 'bea' | 'cy'],
+    createWebClient: (botToken) => webs[botToken.slice(5) as 'ava' | 'bea' | 'cy'],
+  });
+  const all = async (event: ReturnType<typeof channelMessage>) => {
+    for (const id of ids) {
+      await sockets[id].deliver('message', event);
+    }
+  };
+  return { sockets, webs, gateway, adapter, all };
+};
+
+test('after a restart, the owner a judge took the thread from can still take it back by answering', async () => {
+  const { sockets, gateway, adapter, all } = twoAgentsOverThread([
+    { ts: '608.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '608.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+    { ts: '608.2', user: 'U-DYLAN', text: 'what about the docs?' },
+    { ts: '608.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'I can take the docs' },
+  ], [['slack:ava:T1:C1:608.0', 608.1], ['slack:bea:T1:C1:608.0', 608.3]], { bea: 'judge' });
+  // Bea is attentive: she answered last and has heard nothing since.
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(608.3 * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  await adapter.start(gateway);
+  await all(channelMessage({ text: 'go ahead', ts: '608.4', thread: '608.0' }));
+  await sockets.ava.deliver('app_mention', { body: { team_id: 'T1', event_id: 'evt-608-5' }, event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> actually you take it', ts: '608.5', thread_ts: '608.0', channel: 'C1' } });
+  await all(channelMessage({ text: '<@B-AVA> actually you take it', ts: '608.5', thread: '608.0' }));
+  await all(channelMessage({ text: 'and next', ts: '608.6', thread: '608.0' }));
+  await adapter.stop();
+  // Bea still judges it, as a judge does; Ava, holding it again, is asked.
+  assert.deepEqual(gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('and next') && dispatch.addressed !== false).map((dispatch) => dispatch.agentId), ['ava'], JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])));
+});
+
+test('after a restart, a home channel thread stays its home agent\'s when another was named before it answered', async () => {
+  const { gateway, adapter, all } = twoAgentsOverThread([
+    { ts: '610.0', user: 'U-DYLAN', text: 'the build is red' },
+    { ts: '610.1', user: 'U-DYLAN', text: '<@B-BEA> was it your change?' },
+    { ts: '610.2', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'no' },
+    { ts: '610.3', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'looking' },
+  ], [['slack:ava:T1:C1:610.0', 610.3], ['slack:bea:T1:C1:610.0', 610.2]], { homeAva: true });
+  await adapter.start(gateway);
+  await all(channelMessage({ text: 'any luck?', ts: '610.4', thread: '610.0' }));
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava']);
+});
