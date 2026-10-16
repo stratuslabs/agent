@@ -496,3 +496,56 @@ test('a replacement environment gives the child only what was granted', async (t
   assert.equal(inheritedEnv.GRANTED, 'yes');
   assert.equal(inheritedEnv.STRATUS_TEST_AMBIENT, 'ambient');
 });
+
+test('settleTrust runs after the process exits and labels every outcome; a throwing hook labels external', async () => {
+  const order: string[] = [];
+  const tool = (exit: number, settle: () => Promise<'unknown' | 'external' | undefined>) => defineLocalCommandTool({
+    name: 'demo.settle',
+    createCommand() {
+      return { command: process.execPath, args: ['-e', `process.exitCode = ${exit}`] };
+    },
+    async settleTrust() {
+      order.push('settle');
+      return settle();
+    },
+    parseResult() {
+      order.push('parse');
+      return 'ok';
+    },
+  });
+  const executor = createLocalCommandExecutor();
+  const run = (t: ReturnType<typeof tool>) => executor.execute({ id: 'c', toolName: 'demo.settle', input: {} }, t, session);
+
+  const ok = await run(tool(0, async () => 'external'));
+  assert.equal(ok.ok, true);
+  assert.equal(ok.trust, 'external');
+  assert.deepEqual(order, ['settle', 'parse']);
+
+  const failed = await run(tool(2, async () => 'unknown'));
+  assert.equal(failed.ok, false);
+  assert.equal(failed.trust, 'unknown');
+
+  const unchanged = await run(tool(0, async () => undefined));
+  assert.equal(unchanged.trust, 'agent');
+
+  const threw = await run(tool(0, async () => { throw new Error('ledger gone'); }));
+  assert.equal(threw.ok, true);
+  assert.equal(threw.trust, 'external');
+});
+
+test('a settleTrust that never settles labels external and still returns the result', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'demo.stuck',
+    createCommand() {
+      return { command: process.execPath, args: ['-e', ''] };
+    },
+    settleTrust() {
+      return new Promise<undefined>(() => {});
+    },
+  });
+  const started = Date.now();
+  const result = await createLocalCommandExecutor().execute({ id: 'c', toolName: 'demo.stuck', input: {} }, tool, session);
+  assert.equal(result.ok, true);
+  assert.equal(result.trust, 'external');
+  assert.ok(Date.now() - started < 10_000);
+});
