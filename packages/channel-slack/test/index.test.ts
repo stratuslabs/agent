@@ -12283,3 +12283,25 @@ test('an own post Slack refused is not heard', async () => {
   assert.deepEqual(gateway.observes, []);
   await adapter.stop();
 });
+
+test('stop() waits for an own post still being heard, so a restart right after a report does not lose it', async () => {
+  const { adapter, gateway, web } = await ownPostAdapter();
+  // Hold the name lookup the observation waits on, so it is still pending
+  // when the daemon stops.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const inner = web.users.info.bind(web.users);
+  web.users.info = async (args: { user: string }) => {
+    await held;
+    return inner(args);
+  };
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '500.0', speaker: { sessionId: 'schedule:abc:1', trust: 'agent' } });
+  await connection.post('nightly report');
+  let stopped = false;
+  const stopping = adapter.stop().then(() => { stopped = true; });
+  await settle();
+  assert.equal(stopped, false, 'stop() returned while the own post was still being heard');
+  release();
+  await stopping;
+  assert.equal(gateway.observes.length, 1);
+});

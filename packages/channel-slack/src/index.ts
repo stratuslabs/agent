@@ -3851,7 +3851,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Not when the sender IS that thread's session: that turn already holds
    * the call and what it said. Claimed on the intake chain before `post`
    * returns, so a reply typed under the report is heard after it, and not
-   * awaited, so a long turn running in the thread never holds up the
+   * awaited by `post` (only by the shutdown drain), so a long turn running in the thread never holds up the
    * sender, and two threads posting into each other cannot wait on each
    * other.
    */
@@ -3885,11 +3885,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const observed = gateway.observe?.({ sessionId, agentId, message: `${author} (your own post, sent from another session): ${text}`, metadata });
       return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
     });
-    void heard
-      .then(({ observed }) => observed)
-      .catch((error: unknown) => {
-        warn(`slack: ${agentId} could not hear its own post in ${channel} thread ${thread}: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    // Tracked, so stop() drains it: a restart right after a report must not
+    // close the stores while the thread's session is still to hear it.
+    track(
+      heard
+        .then(async ({ observed }) => {
+          await observed;
+        })
+        .catch((error: unknown) => {
+          warn(`slack: ${agentId} could not hear its own post in ${channel} thread ${thread}: ${error instanceof Error ? error.message : String(error)}`);
+        }),
+    );
   };
 
   /**
