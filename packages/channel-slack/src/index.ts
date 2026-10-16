@@ -5547,25 +5547,37 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // takes nothing.
     const ownerId = owner && !tiedAt && !(read.foreign < owner.at) ? owner.agentId : undefined;
     let taken: { agentId: string; at: number; ts: string } | undefined;
+    const takeovers: Array<{ agentId: string; at: number; ts: string }> = [];
     for (const post of read.posts) {
       const takes = post.agentId === ownerId || (!post.asked && listensOf(post.agentId) === 'judge');
-      if (takes && (!taken || post.at > taken.at)) {
-        taken = post;
+      if (takes) {
+        takeovers.push(post);
+        if (!taken || post.at > taken.at) {
+          taken = post;
+        }
       }
     }
-    if (taken && taken.agentId !== ownerId && (ownerId !== undefined || taken.at > read.foreign)) {
-      // The live record learns both halves, as it would have live: who owns
-      // the thread, and the judge's post that took it. With only the
-      // verdict, the judge's reply to this message became the first claim
-      // this process saw and read as the owner, so the real owner answering
-      // a mention could not take the thread back (Codex 4290051968). The
-      // take is recorded where the judge posted, so a reply typed before
-      // its answer lands still goes to the judge, as this verdict says.
-      if (ownerId !== undefined) {
-        const key = threadKeyFor(parts);
-        noteOrigin(key, ownerId);
-        rememberAddressee(key, taken.agentId, taken.ts, true);
+    // Once the owner is known, the live record learns what the thread read
+    // found, as it would have live: who owns the thread, and every post
+    // that moved it, where it sits. With only the verdict, a judge's reply
+    // to this message became the first claim this process saw and read as
+    // the owner, so the real owner answering a mention could not take the
+    // thread back (Codex 4290051968). Every take rather than the latest, so
+    // a message delivered late is placed where it was typed, and the judge's
+    // take at its own post, so a reply typed before its answer lands still
+    // goes to the judge, as this verdict says.
+    const warm = (): void => {
+      if (ownerId === undefined) {
+        return;
       }
+      const key = threadKeyFor(parts);
+      noteOrigin(key, ownerId);
+      for (const post of takeovers) {
+        rememberAddressee(key, post.agentId, post.ts, true);
+      }
+    };
+    if (taken && taken.agentId !== ownerId && (ownerId !== undefined || taken.at > read.foreign)) {
+      warm();
       return taken.agentId;
     }
     if (!owner) {
@@ -5574,7 +5586,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (ownerId === undefined) {
       return undefined;
     }
-    noteOrigin(threadKeyFor(parts), ownerId);
+    warm();
     return ownerId;
   };
 

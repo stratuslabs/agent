@@ -12258,6 +12258,44 @@ test('after a restart, a reply typed while the judge is still answering stays wi
   );
 });
 
+test('after a restart, a late message from when a judge held the thread is still the judge\'s', async () => {
+  // Codex on #369: the warm record has to carry every handover the thread
+  // read found, not just the latest, or an untagged message delivered late
+  // is placed by the owner record alone. Ava owns it; Bea took it at .3,
+  // Ava took it back at .6, Bea took it again at .8.
+  const { webs, gateway, adapter, all } = twoAgentsOverThread([
+    { ts: '612.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '612.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+    { ts: '612.2', user: 'U-DYLAN', text: 'what about the docs?' },
+    { ts: '612.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'I can take the docs' },
+    { ts: '612.5', user: 'U-DYLAN', text: 'hm' },
+    { ts: '612.6', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'I have the docs too' },
+    { ts: '612.7', user: 'U-DYLAN', text: 'and the changelog?' },
+    { ts: '612.8', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'changelog is mine' },
+  ], [['slack:ava:T1:C1:612.0', 612.6], ['slack:bea:T1:C1:612.0', 612.8]], { bea: 'judge' });
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `612.9${(seq += 1)}`;
+  }
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(612.8 * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  await adapter.start(gateway);
+  await all(channelMessage({ text: 'go on', ts: '612.9', thread: '612.0' }));
+  // Delivered late: typed while Bea held the thread the first time.
+  await all(channelMessage({ text: 'late one', ts: '612.4', thread: '612.0' }));
+  await adapter.stop();
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.agentId === 'ava' && dispatch.addressed !== false).map((dispatch) => dispatch.userMessage),
+    [],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
 test('after a restart, a home channel thread stays its home agent\'s when another was named before it answered', async () => {
   const { gateway, adapter, all } = twoAgentsOverThread([
     { ts: '610.0', user: 'U-DYLAN', text: 'the build is red' },
