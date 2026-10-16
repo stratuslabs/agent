@@ -95,9 +95,30 @@ export interface LocalCommandContext {
   markTrust?: (trust: TrustLevel) => void;
 }
 
+/**
+ * What `createCommand` is handed besides the input: the per-call producer
+ * channel, so a tool that knows before the process starts what its output
+ * can carry labels it once — every result below, the failures included.
+ */
+export interface LocalCommandCreateContext {
+  markTrust?: (trust: TrustLevel) => void;
+}
+
 export interface LocalCommandTool extends Tool {
   runtime: 'local-command';
-  createCommand(input: ToolCall['input'], session: Session): LocalCommandInvocation | Promise<LocalCommandInvocation>;
+  createCommand(
+    input: ToolCall['input'],
+    session: Session,
+    context?: LocalCommandCreateContext,
+  ): LocalCommandInvocation | Promise<LocalCommandInvocation>;
+  /**
+   * Asked once the process has exited — success, failure, timeout or abort
+   * alike — for a label its output may carry that was not knowable when the
+   * command was built: a file it read may have been marked since. Whatever
+   * it returns is marked like `markTrust`; a hook that throws marks
+   * `external`, since that output's provenance is then unvouched for.
+   */
+  settleTrust?(session: Session): TrustLevel | undefined | Promise<TrustLevel | undefined>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
 
@@ -109,7 +130,19 @@ export interface LocalCommandToolDefinition {
   risk?: ToolRisk;
   /** See Tool.outputTrust in @stratusagent/core. Omitted means `agent`. */
   outputTrust?: TrustLevel;
-  createCommand(input: ToolCall['input'], session: Session): LocalCommandInvocation | Promise<LocalCommandInvocation>;
+  createCommand(
+    input: ToolCall['input'],
+    session: Session,
+    context?: LocalCommandCreateContext,
+  ): LocalCommandInvocation | Promise<LocalCommandInvocation>;
+  /**
+   * Asked once the process has exited — success, failure, timeout or abort
+   * alike — for a label its output may carry that was not knowable when the
+   * command was built: a file it read may have been marked since. Whatever
+   * it returns is marked like `markTrust`; a hook that throws marks
+   * `external`, since that output's provenance is then unvouched for.
+   */
+  settleTrust?(session: Session): TrustLevel | undefined | Promise<TrustLevel | undefined>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
 
@@ -154,6 +187,7 @@ export const defineLocalCommandTool = ({
   risk,
   outputTrust,
   createCommand,
+  settleTrust,
   parseResult,
 }: LocalCommandToolDefinition): LocalCommandTool => ({
   name,
@@ -165,6 +199,7 @@ export const defineLocalCommandTool = ({
   ...(outputTrust ? { outputTrust } : {}),
   runtime: 'local-command',
   createCommand,
+  ...(settleTrust ? { settleTrust } : {}),
   ...(parseResult ? { parseResult } : {}),
   async execute() {
     throw new Error(`Local command tool must run through LocalCommandExecutor: ${name}`);
@@ -208,7 +243,7 @@ export class LocalCommandExecutor implements Executor {
       if (signal?.aborted) {
         return failureResult(call, `Command aborted before start: ${call.toolName}`, null, trust());
       }
-      const invocation = await raceWithAbort(tool.createCommand(call.input, session), signal, 'Command construction');
+      const invocation = await raceWithAbort(tool.createCommand(call.input, session, { markTrust: marking.context.markTrust! }), signal, 'Command construction');
       if (signal?.aborted) {
         return failureResult(call, `Command aborted before start: ${call.toolName}`, null, trust());
       }
@@ -219,6 +254,21 @@ export class LocalCommandExecutor implements Executor {
         maxOutputBytes: resolveMaxOutputBytes(invocation.maxOutputBytes, this.maxOutputBytes),
         ...(context?.signal ? { signal: context.signal } : {}),
       });
+      // Before any result is built, so each one below carries it. Not raced
+      // against the signal: an aborted command's partial output still
+      // reaches the model, and must not lose its label to the abort. Bounded
+      // instead: a hook that never settles (a ledger swapped for a FIFO)
+      // labels `external` rather than holding the turn forever.
+      if (tool.settleTrust) {
+        try {
+          const settled = await settleWithin(tool.settleTrust(session), SETTLE_TRUST_TIMEOUT_MS);
+          if (settled !== undefined) {
+            marking.context.markTrust!(settled);
+          }
+        } catch {
+          marking.context.markTrust!('external');
+        }
+      }
 
       if (execution.aborted) {
         return failureResult(
@@ -285,6 +335,27 @@ export class LocalCommandExecutor implements Executor {
     }
   }
 }
+
+/** The longest a tool's `settleTrust` may take before its output is labelled `external`. */
+const SETTLE_TRUST_TIMEOUT_MS = 2_000;
+
+/** The hook's answer, or a rejection once `ms` pass, so the caller's catch labels `external`. */
+const settleWithin = async <T>(value: T | Promise<T>, ms: number): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(value),
+      new Promise<never>((_, reject) => {
+        // Not unref'd: cleared below either way, and an unref'd bound lets a
+        // process with nothing else running exit mid-turn instead of
+        // labelling the result (`stratus run`, or a test on Node 22).
+        timer = setTimeout(() => reject(new Error('settleTrust timed out')), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 export const createLocalCommandExecutor = (
   options: LocalCommandExecutorOptions = {},

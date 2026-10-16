@@ -275,6 +275,20 @@ test('the ledger itself reads at the lowest label it holds: its contents are pat
   assert.deepEqual(listed.marks, []);
 });
 
+test('a ledger that is not a regular file is refused at once, never read', async () => {
+  // A FIFO nothing writes to: a plain read of it never returns, and an
+  // abandoned read keeps a libuv worker busy for good.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-ledger-fifo-'));
+  const { execFileSync } = await import('node:child_process');
+  execFileSync('mkfifo', [path.join(dir, LEDGER_FILENAME)]);
+  const ledger = createFileLedger(() => dir);
+  const started = Date.now();
+  await assert.rejects(ledger.snapshot('ava'), /not a regular file/);
+  await assert.rejects(ledger.recordWrite('ava', path.join(dir, 'notes.txt'), 'external'), /not a regular file/);
+  assert.ok(Date.now() - started < 500, `took ${Date.now() - started}ms`);
+  await rm(dir, { recursive: true, force: true });
+});
+
 test('without a workspace root the ledger is process-local, and still closes the loop inside the process', async () => {
   const { root } = await workspace();
   const tools = await registryFor({ roots: [root] });

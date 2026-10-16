@@ -486,6 +486,21 @@ project-local `stratus.config.json` cannot appoint itself the principal.
 The labels themselves are documented in
 [Memory](../../docs/concepts/memory.md#where-a-fact-came-from).
 
+### Other agents' bots
+
+A bot is never the operator, and by default a bot's message is never a turn.
+An agent with `slack.agentMentions` on (see
+[the guide](../../docs/guides/slack.md#when-agents-tag-each-other)) makes
+one exception: a **team** agent that names it, meaning one of this daemon's
+agents or one listed in `slack.team`, narrowed by `agentMentionsFrom` if
+that's set. That message runs a turn in its thread, labelled `unknown`
+whatever `principals` says, since the other agent's words carry whatever its
+own session was exposed to. It can't stop a turn or answer an approval. It
+doesn't take the thread for the holder rule, and an untagged bot message
+stays nothing. A thread admits at most `AGENT_MENTION_HOP_LIMIT` (4) agent
+mentions in a row per daemon, until a person speaks there again. A refused
+team mention is logged once, with the reason.
+
 ## Reading a channel
 
 The adapter implements the channel contract's `readConversation`, which is

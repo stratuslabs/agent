@@ -163,6 +163,19 @@ export interface AgentSlackConfig {
    * block refuses it, since one channel cannot be every agent's home.
    */
   homeChannels?: string[];
+  /**
+   * Whether this agent answers when another team agent's Slack bot
+   * mentions it (card 513). Off by default. At the top level it turns it
+   * on for every agent on this daemon; per agent it overrides that either
+   * way. A team agent is one of this daemon's own agents or one listed in
+   * `slack.team`; no other bot is ever answered.
+   */
+  agentMentions?: boolean;
+  /**
+   * Per agent only: the team agents (by name) it answers. Unset, it
+   * answers every team agent once `agentMentions` is on.
+   */
+  agentMentionsFrom?: string[];
 }
 
 /**
@@ -173,9 +186,14 @@ export interface AgentSlackConfig {
  * Read only from a **trusted** config, like `principals`: how the daemon
  * posts into the operator's workspace is not a cloned repository's call.
  */
-export interface SlackConfig extends Omit<AgentSlackConfig, 'homeChannels'> {
+export interface SlackConfig extends Omit<AgentSlackConfig, 'homeChannels' | 'agentMentionsFrom'> {
   /** Per-agent overrides, keyed by agent id. */
   agents?: Record<string, AgentSlackConfig>;
+  /**
+   * The team's agents served by other daemons, by name: name -> Slack bot
+   * user id (`U…`). This daemon's own agents are on the team already.
+   */
+  team?: Record<string, string>;
 }
 
 /** The `principals` block of ~/.stratus/config.json. */
