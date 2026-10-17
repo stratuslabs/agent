@@ -451,8 +451,24 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     }
     route.trustedDomains = [...new Set(normalized as string[])];
   }
+  if (source.channels !== undefined) {
+    // Refused rather than dropped, like the lists above: an operator who
+    // wrote a channel name or a bare id expects it to stop asking.
+    const entries = Array.isArray(source.channels) ? source.channels : undefined;
+    const valid = entries?.every((entry) => typeof entry === 'string' && STANDING_CHANNEL_ENTRY.test(entry.trim()));
+    if (!entries || !valid) {
+      throw new Error(
+        `Invalid ${where}.channels in config ${configPath}: expected a list like ["slack:C0123ABCD"] or ["slack:*"], `
+        + 'a channel kind and a conversation id (not a name), or * for every channel the agent\'s app is in.',
+      );
+    }
+    route.channels = [...new Set((entries as string[]).map((entry) => entry.trim()))];
+  }
   return route;
 };
+
+/** `slack:C0123ABCD` or `slack:*`. */
+const STANDING_CHANNEL_ENTRY = /^[a-z][a-z0-9-]*:(\*|[A-Za-z0-9][A-Za-z0-9._-]*)$/;
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
   const route = parseApprovalRoute(raw, configPath, 'approvals');
@@ -532,6 +548,7 @@ export const resolveAgentApprovals = (
   const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
   const branchPrefixes = agent?.branchPrefixes ?? approvals?.branchPrefixes;
   const trustedDomains = [...new Set([...(approvals?.trustedDomains ?? []), ...(agent?.trustedDomains ?? [])])];
+  const channels = [...new Set([...(approvals?.channels ?? []), ...(agent?.channels ?? [])])];
   return {
     ...(autonomy !== undefined ? { autonomy } : {}),
     ...(branchPrefixes !== undefined ? { branchPrefixes } : {}),
@@ -540,6 +557,7 @@ export const resolveAgentApprovals = (
     ...(externalContent !== undefined ? { externalContent } : {}),
     ...(commands.length > 0 ? { commands } : {}),
     ...(trustedDomains.length > 0 ? { trustedDomains } : {}),
+    ...(channels.length > 0 ? { channels } : {}),
   };
 };
 

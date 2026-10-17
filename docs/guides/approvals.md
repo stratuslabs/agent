@@ -427,6 +427,49 @@ agent with `externalContent: "gate"`, downloads always ask: the shell
 doesn't mark what it prints as web content, so a download could never
 close the gate the way `web.fetch` does.
 
+## Channels your agents may read and post in
+
+Agents that work in Slack read and post in channels all day. Instead of
+approving each channel with **Always allow**, you can authorize them in
+config:
+
+```jsonc
+"approvals": {
+  "channels": ["slack:C0C1YV12SLC"],
+  "agents": { "nova": { "channels": ["slack:*"] } }
+}
+```
+
+`message.read` and `message.send` to a listed channel then run without
+asking, in every session: a conversation, a scheduled turn, or a
+delegated one, headless or remote. Because it lives in config, it holds
+through new sessions, restarts, and `stratus update`. An entry is
+`slack:<conversation id>`, or `slack:*` for every channel the agent's own
+Slack app is in. Write the id, not a channel name; anything else is
+refused at startup. An agent's list adds to the top-level one, like
+`commands`, and the daemon names who has what in its startup log.
+
+What it doesn't change:
+
+- **DMs still ask.** Only a conversation the agent's Slack app reports as a
+  channel, public or private, is covered. A DM or group DM asks as before,
+  even when its id is listed, and so does a conversation the app can't look
+  up at that moment. This is decided by asking Slack, not by the id's
+  first letter, since a `G…` id can be either.
+- **Slack still decides access.** The app must be a member of the channel,
+  with the scopes `message.read` and `message.send` already need. A listed
+  channel the app isn't in fails the same way it did before.
+- **Other tools are unaffected.** Only the built-in `message.read` and
+  `message.send` are covered, not a plugin tool with the same name, and
+  every other approval works as before.
+- **The external-content gate still applies.** With
+  `externalContent: "gate"`, a conversation that has read web content asks
+  again, like every other standing grant.
+
+To revoke, remove the entry and restart the daemon. Grants made with
+**Always allow** on one conversation are separate and stay in
+`whitelist.json` until `stratus grants revoke`.
+
 ## Standing grants
 
 Most installed tools are `gated` and name no scope — `fs.write`, a

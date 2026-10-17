@@ -6113,6 +6113,47 @@ test('an agent delegating to itself keeps Always allow, and metadata alone does 
   await gateway.stop();
 });
 
+test('approvals transport asks the agent\'s own channel app whether a destination is a channel or a DM', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
+  const asked: Array<[string, string]> = [];
+  const slack: GatewayChannelAdapter = {
+    name: 'slack',
+    async start() {},
+    async stop() {},
+    async conversationKindFor(agentId, conversation) {
+      asked.push([agentId, conversation]);
+      if (conversation === 'C-BROKEN') {
+        throw new Error('ratelimited');
+      }
+      return conversation.startsWith('D') ? 'direct' : 'channel';
+    },
+  };
+  const plain: GatewayChannelAdapter = { name: 'web', async start() {}, async stop() {} };
+  let kindFor: ((agentId: string, destination: string) => Promise<'channel' | 'direct' | undefined>) | undefined;
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    channels: [slack, plain],
+    warn: () => {},
+    approvals: (given) => {
+      kindFor = given.destinations.conversationKindFor;
+      return { async approve() { return true; } };
+    },
+  });
+  await gateway.start();
+  try {
+    assert.equal(await kindFor?.('ava', 'slack:C0C1YV12SLC'), 'channel');
+    assert.equal(await kindFor?.('ava', 'slack:D0DYLAN'), 'direct');
+    assert.equal(await kindFor?.('ava', 'slack:C-BROKEN'), undefined, 'a failed lookup is unknown, never a channel');
+    assert.equal(await kindFor?.('ava', 'web:C0C1YV12SLC'), undefined, 'a channel that cannot say reports nothing');
+    assert.equal(await kindFor?.('ava', 'nochannel'), undefined);
+    assert.deepEqual(asked, [['ava', 'C0C1YV12SLC'], ['ava', 'D0DYLAN'], ['ava', 'C-BROKEN']]);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('approvals transport reports the workspace of the channel a destination names', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };

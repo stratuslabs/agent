@@ -106,7 +106,7 @@ interface FakeWeb extends SlackWebLike {
   /** Held by chat.postMessage, so a test can act while a post is in flight. */
   postGate?: Promise<void>;
   /** What conversations.info answers for; anything else rejects channel_not_found. */
-  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean; name?: string; num_members?: number; is_ext_shared?: boolean; is_org_shared?: boolean }>;
+  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean; is_channel?: boolean; is_group?: boolean; name?: string; num_members?: number; is_ext_shared?: boolean; is_org_shared?: boolean }>;
   /** What conversations.members answers, one page per entry; unknown channels have no members. */
   conversationMembers: Map<string, string[][]>;
   /**
@@ -10057,6 +10057,26 @@ test('accountFor reports the team each agent\'s app authenticated in, for bindin
   const adapter = await startedAdapterWith(createFakeWeb('B-AVA', 'T1'));
   assert.equal(adapter.accountFor?.('ava'), 'T1');
   assert.equal(adapter.accountFor?.('bea'), undefined);
+  await adapter.stop();
+});
+
+test('conversationKindFor asks Slack, so a G… id can be a channel or a group DM, and unknown stays unknown', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-PUBLIC', { is_channel: true, is_im: false, is_mpim: false, is_member: true });
+  web.knownConversations.set('G-PRIVATE', { is_group: true, is_private: true, is_im: false, is_mpim: false });
+  web.knownConversations.set('G-GROUP', { is_group: true, is_mpim: true, is_im: false });
+  web.knownConversations.set('D-DYLAN', { is_im: true });
+  web.knownConversations.set('X-BARE', {});
+  const adapter = await startedAdapterWith(web);
+  assert.equal(await adapter.conversationKindFor?.('ava', 'C-PUBLIC'), 'channel');
+  assert.equal(await adapter.conversationKindFor?.('ava', 'G-PRIVATE'), 'channel');
+  assert.equal(await adapter.conversationKindFor?.('ava', 'G-GROUP'), 'direct');
+  assert.equal(await adapter.conversationKindFor?.('ava', 'D-DYLAN'), 'direct');
+  // A reply that states nothing, a conversation the app cannot see, and
+  // an agent with no app here are all unknown: the caller asks.
+  assert.equal(await adapter.conversationKindFor?.('ava', 'X-BARE'), undefined);
+  assert.equal(await adapter.conversationKindFor?.('ava', 'C-MISSING'), undefined);
+  assert.equal(await adapter.conversationKindFor?.('bea', 'C-PUBLIC'), undefined);
   await adapter.stop();
 });
 

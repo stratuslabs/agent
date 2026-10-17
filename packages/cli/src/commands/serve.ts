@@ -625,6 +625,8 @@ const serveHeldHome = async (
     const destinations = {
       ...transport.destinations,
       whitelist: grantStore,
+      // The operator's standing channel authorization, read per call.
+      standingChannelsFor: (agentId: string) => resolveAgentApprovals(approvalsConfig, agentId).channels ?? [],
       onGranted: ({ agentId, grant }: { agentId: string; grant: DestinationGrant }) => {
         log(`${agentId}: ${describeDestinationGrant(grant)} now runs without asking, until revoked${grant.grantedBy ? ` (granted by ${grant.grantedBy})` : ''}`);
       },
@@ -653,6 +655,12 @@ const serveHeldHome = async (
     : overrides.filter(([, agent]) => agent.autonomy === 'workspace').map(([agentId]) => agentId).join(', ');
   if (autonomous.length > 0) {
     log(`approvals: autonomy workspace for ${autonomous} (reads inside their own workspace run without asking)`);
+  }
+  const standingChannels = [...new Set([...Object.keys(approvalsConfig.agents ?? {}), ...slackAgents.map(([agentId]) => agentId)])]
+    .map((agentId) => [agentId, resolveAgentApprovals(approvalsConfig, agentId).channels ?? []] as const)
+    .filter(([, channels]) => channels.length > 0);
+  if (standingChannels.length > 0) {
+    log(`approvals: message.read/send run without asking in ${standingChannels.map(([agentId, channels]) => `${channels.join(', ')} for ${agentId}`).join('; ')} (approvals.channels; DMs still ask)`);
   }
   const declared = operatorCommands.describe();
   if (declared) {

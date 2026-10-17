@@ -77,6 +77,19 @@ export interface AgentApprovalConfig {
    * anyone can publish a page (`github.io`, `githubusercontent.com`).
    */
   trustedDomains?: string[];
+  /**
+   * The operator's standing channel authorization: conversations where
+   * `message.read` and `message.send` run without asking, in every
+   * session (interactive, scheduled, delegated) and across restarts and
+   * upgrades. Entries are `channel:to` (`slack:C0123ABCD`) or `channel:*`
+   * (`slack:*`) for every channel the agent's app is in. Channels only: a
+   * DM or group DM still asks, decided by the agent's app rather than the
+   * id. Slack membership and scopes still apply when the tool runs.
+   * Additive like `commands`. Withdrawn, like every grant, when
+   * `externalContent` is `gate` and the conversation has read external
+   * content. Revoke by removing the entry and restarting the daemon.
+   */
+  channels?: string[];
 }
 
 /**

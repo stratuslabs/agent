@@ -1792,6 +1792,22 @@ test('approvals.trustedDomains adds up per agent, normalizes, and refuses anythi
   );
 });
 
+test('approvals.channels adds up per agent and refuses names, bare ids, and anything else', async () => {
+  const config = await loadConfigFile(await writeConfig('channels.json', {
+    approvals: { channels: ['slack:C0C1YV12SLC'], agents: { nova: { channels: ['slack:*', ' slack:C0C1YV12SLC '] } } },
+  }));
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').channels, ['slack:C0C1YV12SLC', 'slack:*']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').channels, ['slack:C0C1YV12SLC']);
+  assert.equal(resolveAgentApprovals({}, 'nova').channels, undefined);
+  for (const bad of [['#stratus-agent'], ['C0C1YV12SLC'], ['slack:'], ['*'], ['slack:#general'], 'slack:*', [3]]) {
+    await assert.rejects(
+      loadConfigFile(await writeConfig('channels-bad.json', { approvals: { agents: { nova: { channels: bad } } } })),
+      /Invalid approvals\.agents\.nova\.channels/,
+      JSON.stringify(bad),
+    );
+  }
+});
+
 test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {
   const configPath = await writeConfig('autonomy.json', {
     approvals: { autonomy: 'workspace', agents: { blair: { autonomy: 'off' }, nova: {} } },
