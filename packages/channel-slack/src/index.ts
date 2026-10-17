@@ -4174,8 +4174,21 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const sameChannel = metadata.channel === 'slack' && typeof metadata.slackChannel === 'string'
       ? metadata.slackChannel
       : undefined;
-    const channel = sameChannel ?? connection.config.approvalChannel;
-    const thread = sameChannel && typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+    // A scheduled firing has no conversation of its own. With no approval
+    // channel configured it used to be denied at its first gated call, seen
+    // only in the daemon log (card 218). Its schedule's destination is a
+    // conversation a person approved as where it speaks, and only approvers
+    // can answer there, so that is where it is asked. A configured approval
+    // channel still wins: the operator chose it for exactly this. Another
+    // channel's destination is not a Slack conversation id.
+    const scheduled = event.scheduleDestination?.channel.trim().toLowerCase() === 'slack'
+      ? event.scheduleDestination
+      : undefined;
+    const viaSchedule = !sameChannel && !connection.config.approvalChannel ? scheduled : undefined;
+    const channel = sameChannel ?? connection.config.approvalChannel ?? viaSchedule?.to;
+    const thread = sameChannel
+      ? (typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined)
+      : viaSchedule?.thread;
 
     // Undeliverable, not decided: nobody was asked, so filing this next to
     // the denials somebody actually made would make the audit record lie

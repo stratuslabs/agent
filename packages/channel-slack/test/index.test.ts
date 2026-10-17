@@ -5083,6 +5083,84 @@ test('a turn outside Slack asks in the configured approval channel', async () =>
   await adapter.stop();
 });
 
+test('a scheduled turn with no approval channel asks in its schedule\'s destination, under its report thread', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  // Card 218: with no approvalChannel, a firing used to be denied
+  // undeliverable at its first gated call, and only the daemon log knew.
+  // The schedule's destination is a conversation a person already approved
+  // as where it speaks, so its approvers are asked there.
+  gateway.pendingApprovals.add('req-3');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-3',
+    sessionId: 'schedule:sched-1:2026-10-16T00:00:00.000Z',
+    metadata: {},
+    scheduleDestination: { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' },
+  }));
+
+  assert.deepEqual(gateway.resolutions, []);
+  assert.equal(web.posts.at(-1)?.channel, 'C-ENG');
+  assert.equal(web.posts.at(-1)?.thread_ts, '1791400000.000100');
+
+  // A schedule that reports at the top level is asked at the top level.
+  gateway.pendingApprovals.add('req-4');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-4',
+    sessionId: 'schedule:sched-2:2026-10-16T00:00:00.000Z',
+    metadata: {},
+    scheduleDestination: { channel: 'slack', to: 'C-ENG' },
+  }));
+  assert.equal(web.posts.at(-1)?.channel, 'C-ENG');
+  assert.equal(web.posts.at(-1)?.thread_ts, undefined);
+
+  await adapter.stop();
+});
+
+test('a configured approval channel still wins over a schedule\'s destination', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'], approvalChannel: 'C-OPS' },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-3');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-3',
+    sessionId: 'schedule:sched-1:2026-10-16T00:00:00.000Z',
+    metadata: {},
+    scheduleDestination: { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' },
+  }));
+
+  assert.equal(web.posts.at(-1)?.channel, 'C-OPS');
+  assert.equal(web.posts.at(-1)?.thread_ts, undefined);
+
+  await adapter.stop();
+});
+
+test('a schedule that reports through another channel is not asked in Slack', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-3');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-3',
+    sessionId: 'schedule:sched-1:2026-10-16T00:00:00.000Z',
+    metadata: {},
+    scheduleDestination: { channel: 'discord', to: 'C-ENG' },
+  }));
+
+  // A Discord channel id posted to as a Slack conversation would at best
+  // fail and at worst land somewhere unrelated.
+  assert.equal(web.posts.length, 0);
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-3', answer: 'deny', reason: 'undeliverable' }]);
+
+  await adapter.stop();
+});
+
 test('a click on a request this daemon never rendered is answered, not dropped', async () => {
   const { socket, web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },

@@ -474,11 +474,12 @@ export const unattendedReachParts = (
   }
   // Approvers with nowhere to be asked outside their own thread. A turn
   // that did not start in Slack — the API, the dashboard, a delegation —
-  // reaches the adapter with no destination and is denied undeliverable,
+  // reaches the adapter with no destination and is denied undeliverable
+  // (a schedule's firing is asked in the destination it reports to),
   // so "approvers set" is only half an answer without a fallback channel.
   if (noFallback.length > 0) {
     parts.push(`${noFallback.join(', ')} ${noFallback.length === 1 ? 'has' : 'have'} no slackChannel, `
-      + 'so only turns already in Slack can be asked');
+      + 'so only turns already in Slack and schedules that report to Slack can be asked');
   }
   // What an "always allow" answer persists depends on what the call names,
   // and mostly it is not the session: `createPermissionPolicy` maps an
