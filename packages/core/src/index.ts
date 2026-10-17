@@ -4610,6 +4610,64 @@ export interface ExecutorRegistrationHandle {
   register(contribution: ExecutorContribution): void;
 }
 
+/**
+ * One task for a sub-agent (roadmap 24): an ephemeral helper that runs as
+ * the calling agent, on its provider and credentials, with only the tools
+ * it is handed and nothing else of the agent's: no persona, no memory, no
+ * channel, and no human to ask.
+ */
+export interface SubAgentRunInput {
+  /**
+   * The session of the turn asking: the very object a tool's `execute`
+   * was handed, while that call is running. The host checks it by
+   * identity, so an id, a copy, or a session from a call that has ended
+   * is refused, and a plugin cannot start sub-agents of a turn that did
+   * not call it. The agent, its allowlist and depth come from the host's
+   * own records, never from this object.
+   */
+  parent: Pick<Session, 'id'>;
+  /** The task, as the sub-agent's only user message. */
+  instruction: string;
+  /**
+   * Tool names the sub-agent may call, each one the parent may call itself.
+   * Exact names, not globs. `agent.spawn`, `agent.delegate`, and `memory.*`
+   * are refused even when the parent holds them.
+   */
+  tools: string[];
+  /** Not supported yet: refused rather than ignored. The parent's model runs. */
+  model?: string;
+  /**
+   * An extra stop. The host already ties the sub-agent to the parent
+   * turn's own cancel, so this is only for a plugin that wants to end it
+   * sooner.
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * How a sub-agent ended. `result` and `empty` both ran to completion; the
+ * difference is whether it said anything. `error` is a run that failed —
+ * a refusal at the start is thrown instead, before anything runs. `trust`
+ * is the sub-agent session's label: what it returns may repeat what it
+ * read, and a caller handing it to its own turn marks that call with it.
+ */
+export type SubAgentOutcome =
+  | { status: 'result'; text: string; sessionId: string; trust: TrustLevel }
+  | { status: 'empty'; sessionId: string; trust: TrustLevel }
+  | { status: 'error'; error: string; sessionId: string; trust: TrustLevel };
+
+/** The host's way to start sub-agents. See `PluginContext.subAgents`. */
+export interface SubAgentHandle {
+  /**
+   * Run one sub-agent to the end. Rejects, naming the reason, when the
+   * request is refused: a parent that is not running a turn or is itself
+   * a sub-agent, the delegation depth limit, a tool outside the parent's
+   * allowlist or never given to a sub-agent, a model. Rejects with the
+   * abort error when `signal` fires.
+   */
+  run(input: SubAgentRunInput): Promise<SubAgentOutcome>;
+}
+
 export interface PluginContext {
   bus: EventBus;
   tools: ToolRegistry;
@@ -4683,6 +4741,14 @@ export interface PluginContext {
    */
   log?: (message: string) => void;
   warn?: (message: string) => void;
+  /**
+   * Starts sub-agents for a running turn (roadmap 24). The host enforces
+   * every limit (the slice, the exclusions, depth, concurrency, no human
+   * asked), so a plugin owns only the fan-out and how results come back.
+   * A host that omits it cannot run sub-agents; a plugin that needs it
+   * must fail its `setup` naming it.
+   */
+  subAgents?: SubAgentHandle;
 }
 
 export interface Plugin {
