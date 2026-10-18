@@ -152,9 +152,10 @@ digits to jump, Esc to go back.
   in one pass, and the screen says the adapter is still coming. Some details
   it gets right so you don't have to:
   - **A fallback channel, not just approvers.** A turn that arrived through
-    Slack is answered in its own thread, but one started by a schedule, a
-    delegation, or the control API reaches the adapter with no destination
-    and is denied undeliverable. Setup asks for the channel to use for those,
+    Slack is answered in its own thread, and a schedule's firing in the
+    Slack conversation it reports to, but one started by a delegation, the
+    control API, or a schedule with no Slack destination reaches the adapter
+    with nowhere to ask and is denied undeliverable. Setup asks for the channel to use for those,
     and says plainly what you lose if you skip it.
   - **Inherited values stay inherited.** An agent with no list of its own
     uses the top-level `approvals.slackApprovers`, and the same goes for

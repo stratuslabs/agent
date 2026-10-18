@@ -7066,7 +7066,7 @@ test('setup says who cannot be asked when approvers have no fallback channel', a
   assert.equal(exitCode, 0);
   // Approvers alone leave a schedule- or API-started call denied
   // undeliverable — the state `stratus plugins` reports, said here instead.
-  assert.match(output.stdout, /only turns already in Slack can be asked/);
+  assert.match(output.stdout, /only turns already in Slack and schedules that report to Slack can be asked/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.deepEqual(config.approvals.agents.ava, { slackApprovers: ['U01ABCDEF'] });
 });
@@ -8317,7 +8317,7 @@ test('setup does not count an agent with no fallback channel as fully covered', 
   await mkdir(agentsDir, { recursive: true });
   await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
   // Approvers but no channel: a turn that started in Slack is answered in
-  // its own thread, and a scheduled or API-started one is denied
+  // its own thread, and a delegated or API-started one is denied
   // undeliverable. The submenu labels that row; the summary counted it as
   // covered and said the route works.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
@@ -13636,7 +13636,7 @@ test('plugins names the served agents no channel can ask for, and approvers with
   );
   // Approvers with nowhere to be asked outside their own thread: a turn
   // that did not start in Slack reaches the adapter with no destination.
-  assert.match(output.stdout, /stratus has no slackChannel, so only turns already in Slack can be asked/);
+  assert.match(output.stdout, /stratus has no slackChannel, so only turns already in Slack and schedules that report to Slack can be asked/);
   // The session-wide answer, which is why "parks and asks" is not the whole
   // story even for a call nothing durable covers.
   assert.match(

@@ -53,9 +53,12 @@ repo, report to #eng" once — cadence, prompt, and destination together. A
 unattended, in headless mode included: it is the decision already made, not
 a new one. Anywhere else — another channel, a DM, a schedule that declared
 no destination — stays gated exactly as in an inbound turn, so under
-`headless` it is refused and under `remote` it asks in Slack (in the
-configured `approvals.slackChannel`, since a scheduled turn has no thread
-of its own). Note that a plain **Allow once** on `schedule.every` therefore
+`headless` it is refused and under `remote` it asks in Slack. A scheduled turn has no thread
+of its own, so it asks in the configured `approvals.slackChannel`, or, with
+none set, in the schedule's own Slack destination (under its report thread,
+if it has one), where only approvers can answer. A schedule with no Slack
+destination and no `slackChannel` is denied at its first such call, and the
+daemon log says why. Note that a plain **Allow once** on `schedule.every` therefore
 mints something durable — the request shows the cadence, prompt, and
 destination, because that is what is being approved. See
 [Approvals](./approvals.md) for the modes.
