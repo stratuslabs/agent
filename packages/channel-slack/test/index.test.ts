@@ -12232,7 +12232,7 @@ test('an unlisted sender\'s untagged reply is refused, and logged, by the thread
 const twoAgentsOverThread = (
   thread: Array<{ ts: string; user: string; bot_id?: string; text: string }>,
   sessions: Array<[string, number]>,
-  options: { bea?: 'judge'; homeAva?: boolean; cy?: boolean } = {},
+  options: { bea?: 'judge'; homeAva?: boolean; cy?: boolean; approvers?: boolean } = {},
 ) => {
   const sockets = { ava: createFakeSocket(), bea: createFakeSocket(), cy: createFakeSocket() };
   const webs = { ava: createFakeWeb('B-AVA', 'T1'), bea: createFakeWeb('B-BEA', 'T1'), cy: createFakeWeb('B-CY', 'T1') };
@@ -12257,6 +12257,7 @@ const twoAgentsOverThread = (
       appToken: `xapp-${id}`,
       botToken: `xoxb-${id}`,
       ...(id === 'ava' && options.homeAva ? { homeChannels: ['C1'] } : {}),
+      ...(options.approvers ? { approvers: ['U-DYLAN'] } : {}),
     })),
     editIntervalMs: 0,
     createSocketClient: (appToken) => sockets[appToken.slice(5) as 'ava' | 'bea' | 'cy'],
@@ -12396,6 +12397,49 @@ test('after a restart, a late message from when a judge held the thread is still
   assert.deepEqual(
     gateway.dispatches.filter((dispatch) => dispatch.agentId === 'ava' && dispatch.addressed !== false).map((dispatch) => dispatch.userMessage),
     [],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
+test('after a restart, a stop is not placed by a live claim older than a post the thread read rebuilt', async () => {
+  // Codex on #369: the warm record holds Bea's take at .3 and Ava's post at
+  // .6, both rebuilt from the thread read. A mention of Bea at .4 is
+  // delivered late, live, and then a stop at .7. Skipping the rebuilt
+  // entries made the .4 mention look like the last word and sent the stop
+  // to Bea; Ava's .6 post came after it. The newest entry before the stop
+  // is rebuilt, so the record cannot say, and the thread is read instead.
+  const { webs, gateway, adapter, all } = twoAgentsOverThread([
+    { ts: '613.0', user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: '613.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
+    { ts: '613.2', user: 'U-DYLAN', text: 'what about the docs?' },
+    { ts: '613.3', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'I can take the docs' },
+    { ts: '613.4', user: 'U-DYLAN', text: '<@B-BEA> and the index' },
+    { ts: '613.6', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'I have the docs and the index' },
+    { ts: '613.7', user: 'U-DYLAN', text: 'stop' },
+    { ts: '613.75', user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'the index is mine' },
+    { ts: '613.8', user: 'U-DYLAN', text: 'go on' },
+  ], [['slack:ava:T1:C1:613.0', 613.6], ['slack:bea:T1:C1:613.0', 613.75]], { bea: 'judge', approvers: true });
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `613.9${(seq += 1)}`;
+  }
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(613.75 * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  await adapter.start(gateway);
+  // Warms the record from the thread read: Bea's takes at .3 and .75, Ava's post at .6.
+  await all(channelMessage({ text: 'go on', ts: '613.8', thread: '613.0' }));
+  // Delivered late and live: the mention of Bea, then the stop after Ava's post.
+  await all(channelMessage({ text: '<@B-BEA> and the index', ts: '613.4', thread: '613.0' }));
+  await all(channelMessage({ text: 'stop', ts: '613.7', thread: '613.0' }));
+  await adapter.stop();
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage === 'Dylan: stop' && dispatch.addressed !== false).map((dispatch) => dispatch.agentId),
+    ['ava'],
     JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
   );
 });

@@ -4993,36 +4993,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * that old, which sends the question to the sessions.
    */
   /**
-   * Whose a stop at `ts` is, from the live record: who was asked last, or,
-   * with no claim at that point, the thread's owner. Undefined when this
-   * process has seen nobody asked here by `ts`, only posts a thread read
-   * rebuilt (card 508): a mention since then would not be among them, so
-   * the stop is left to a fresh read of the thread rather than sent to the
-   * owner.
+   * Whose a stop at `ts` is, from the live record: who was asked last as
+   * of `ts` (`holderAt`). Undefined when the record cannot say, either
+   * because this process has seen nobody asked here by `ts`, or because the
+   * newest entry by then was rebuilt from a thread read (card 508): a
+   * mention since would not be among them. The stop is then left to a
+   * fresh read of the thread, never sent to the owner on a guess.
    */
-  const stopHolderAt = (key: string, ts: string): string | undefined => {
-    const held = holderAt(key, ts);
-    if (held !== undefined) {
-      return held;
-    }
-    // As of `ts`, like every reader of the record: a claim delivered first
-    // but written after the stop says nothing about who had been asked.
-    const seenLive = (threadAddressee.get(key) ?? []).some((handover) => handover.cold !== true && handover.ts <= ts);
-    return seenLive ? ownerAt(key, ts) : undefined;
-  };
+  const stopHolderAt = (key: string, ts: string): string | undefined => holderAt(key, ts);
 
   const holderAt = (key: string, ts: string): string | undefined => {
     const handovers = threadAddressee.get(key);
     if (!handovers) {
       return undefined;
     }
+    // The newest entry at or before `ts` answers, and only if this process
+    // saw it live. A claim rebuilt from a thread read is a post; who was
+    // asked since may be a mention it cannot see, so it leaves the question
+    // to a fresh read. And it is newer than every live entry before it, so
+    // skipping it for one of those would answer with a claim it superseded.
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
-      // A claim rebuilt from a thread read is a post; who was asked since
-      // may be a mention it cannot see, so it leaves the question to a
-      // fresh read rather than answer it.
-      if (handover && handover.ts <= ts && handover.cold !== true) {
-        return handover.agentId;
+      if (handover && handover.ts <= ts) {
+        return handover.cold === true ? undefined : handover.agentId;
       }
     }
     return undefined;
