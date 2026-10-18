@@ -455,11 +455,12 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     // Refused rather than dropped, like the lists above: an operator who
     // wrote a channel name or a bare id expects it to stop asking.
     const entries = Array.isArray(source.channels) ? source.channels : undefined;
-    const valid = entries?.every((entry) => typeof entry === 'string' && STANDING_CHANNEL_ENTRY.test(entry.trim()));
+    const valid = entries?.every((entry) => typeof entry === 'string' && standingChannelEntryValid(entry.trim()));
     if (!entries || !valid) {
       throw new Error(
         `Invalid ${where}.channels in config ${configPath}: expected a list like ["slack:T0123ABCD/C0123ABCD"] or ["slack:*"]: `
-        + 'a channel kind, the workspace id and a conversation id (not a name), or * for every channel the agent\'s app is in.',
+        + 'a channel kind, the workspace id and a conversation id (not a name), or * for every channel the agent\'s app is in. '
+        + 'For Slack, the workspace id starts with T or E and the channel id with C or G, in capitals; DMs (D…) are never covered.',
       );
     }
     route.channels = [...new Set((entries as string[]).map((entry) => entry.trim()))];
@@ -474,6 +475,19 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
  * nothing; the daemon says so at startup.
  */
 const STANDING_CHANNEL_ENTRY = /^[a-z][a-z0-9-]*:(\*|[A-Za-z0-9][A-Za-z0-9._-]*(\/(\*|[A-Za-z0-9][A-Za-z0-9._-]*))?)$/;
+
+/**
+ * Slack's own id shapes, so a channel name that happens to fit the generic
+ * pattern (`slack:T0123/general`) is refused at startup instead of loading
+ * and never matching: `conversations.info` takes ids only. A workspace is
+ * `T…` (or `E…` on Enterprise Grid), a channel `C…` or `G…`. `D…` is
+ * refused because a DM is never covered.
+ */
+const SLACK_STANDING_CHANNEL_ENTRY = /^slack:(\*|([TE][A-Z0-9]+\/)?[CG][A-Z0-9]+|[TE][A-Z0-9]+\/\*)$/;
+
+const standingChannelEntryValid = (entry: string): boolean =>
+  STANDING_CHANNEL_ENTRY.test(entry)
+  && (!entry.startsWith('slack:') || SLACK_STANDING_CHANNEL_ENTRY.test(entry));
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
   const route = parseApprovalRoute(raw, configPath, 'approvals');

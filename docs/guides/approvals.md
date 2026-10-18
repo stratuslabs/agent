@@ -454,7 +454,7 @@ through new sessions, restarts, and `stratus update`. An entry is one of:
 - `slack:*`: every channel the agent's app is in, whatever workspace it is
   connected to.
 
-Write ids, not channel names; anything else is refused at startup. A bare
+Write Slack ids in capitals (a `T…` or `E…` workspace, a `C…` or `G…` channel), not channel names; anything else, a `D…` DM id included, is refused at startup. A bare
 `slack:<channel id>` names no workspace and covers nothing; the daemon
 loads it and says so in its startup log. An agent's list adds to the top-level one, like
 `commands`, and the daemon names who has what in its startup log.
