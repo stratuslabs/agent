@@ -95,6 +95,44 @@ read would not have said so.
 All of them can be set per agent under `agents`.
 
 **`cwd` is a starting directory, not a jail.** An approved command can
-change directory or name an absolute path; what bounds a shell is which
-commands get approved, not where they begin. If you want a filesystem
-boundary, that is [`@stratusagent/tool-fs`](../tool-fs), whose roots are one.
+change directory or name an absolute path. What bounds it is the sandbox
+below, plus which commands get approved.
+
+## The sandbox
+
+Every command runs under an OS sandbox that keeps it out of the Stratus home
+and your credentials, whatever the command says:
+
+- **Readable and writable:** the agent's workspace, its starting directory,
+  temp, and package-manager caches (`~/.npm`, `~/.cache`, `~/Library/Caches`,
+  pnpm, bun, yarn).
+- **Readable:** the rest of the system, so toolchains work as usual.
+- **Not readable or writable:** the Stratus home (`~/.stratus`, or
+  `STRATUS_HOME`) apart from this agent's own workspace, which covers
+  credentials, config, souls, sessions, and other agents' workspaces. Also
+  `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, git
+  credential files, `~/.docker`, `~/.fly`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
+  `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, and the macOS
+  keychains (file and service).
+- **Not writable:** everything else.
+- **Network:** on. A command can send its own workspace somewhere, but not a
+  token it can't read.
+
+macOS uses `sandbox-exec`. Linux uses [bubblewrap](https://github.com/containers/bubblewrap)
+(`bwrap`), with its own pid and IPC namespaces, so a command can't signal
+the daemon or other agents. The denied directories keep their names (`stat`
+and directory listings of the workspace's parent directories still work, so
+git can find its repository), but nothing can be read from inside them.
+
+| Key | Default | What |
+| --- | --- | --- |
+| `sandbox` | `auto` | `auto`: sandboxed where the host can build one; where it can't (no `bwrap`, or a container that forbids user namespaces), commands run unconfined and the daemon logs why, once. `required`: refuse every command when no sandbox can start. `off`: run with the daemon user's full access. |
+| `deniedPaths` | none | More directories or files to hide, added to the list above. A leading `~` is your home directory. |
+| `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). |
+
+All three can be set per agent under `agents`.
+
+A CLI that reads its login from a hidden path (`gh` from `~/.config/gh` or
+the keychain, `fly` from `~/.fly`) can't authenticate inside the sandbox.
+Give that agent a token through `env`, where it's visible in config, or set
+`sandbox: "off"` for it.

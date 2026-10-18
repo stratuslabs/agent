@@ -1,4 +1,5 @@
 import { mkdir, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -26,6 +27,27 @@ import {
   workspaceResolver,
   type TaintedWriteLedger,
 } from '@stratusagent/plugins';
+
+import {
+  DEFAULT_DENIED_HOME_PATHS,
+  DEFAULT_WRITABLE_HOME_PATHS,
+  parseSandboxMode,
+  planSandbox,
+  stratusHomesFor,
+  type SandboxPolicy,
+} from './sandbox.ts';
+
+export {
+  DEFAULT_DENIED_HOME_PATHS,
+  DEFAULT_WRITABLE_HOME_PATHS,
+  bwrapArgs,
+  darwinProfile,
+  planSandbox,
+  resetSandboxProbe,
+  stratusHomesFor,
+  type SandboxMode,
+  type SandboxPolicy,
+} from './sandbox.ts';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -226,10 +248,84 @@ const settingsFor = (
     timeoutMs: asNumber(resolved.timeoutMs, DEFAULT_TIMEOUT_MS),
     maxOutputBytes: asNumber(resolved.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES),
     shell: typeof resolved.shell === 'string' && resolved.shell.length > 0 ? resolved.shell : '/bin/sh',
+    sandbox: parseSandboxMode(resolved.sandbox),
+    // The agent's own workspace, whatever cwd says: it is what the sandbox
+    // leaves writable inside a Stratus home it otherwise hides.
+    workspace: workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id),
+    deniedPaths: asStrings(resolved.deniedPaths, []).map((entry) => expandHome(entry, home)),
+    writablePaths: asStrings(resolved.writablePaths, []).map((entry) => expandHome(entry, home)),
   };
 };
 
+/**
+ * The command to spawn for `shell shellArgs…`, under the sandbox unless the
+ * operator turned it off. `required` refuses when no sandbox can start;
+ * `auto` runs unconfined then, after saying so once per process.
+ */
+const sandboxed = (
+  settings: ReturnType<typeof settingsFor>,
+  shellArgs: string[],
+  options: ShellToolOptions,
+): { command: string; args: string[] } => {
+  const unconfined = { command: settings.shell, args: shellArgs };
+  if (settings.sandbox === 'off') {
+    return unconfined;
+  }
+  const workspace = settings.workspace ?? settings.cwd;
+  if (workspace === undefined) {
+    if (settings.sandbox === 'required') {
+      throw new Error('shell.run is set to sandbox: "required", but this agent has no workspace to confine commands to.');
+    }
+    return unconfined;
+  }
+  const userHome = options.home ?? os.homedir();
+  const processEnv = options.processEnv ?? process.env;
+  const policy: SandboxPolicy = {
+    workspace,
+    ...(settings.cwd && settings.cwd !== workspace ? { cwd: settings.cwd } : {}),
+    denied: [
+      ...stratusHomesFor(workspace, processEnv, userHome),
+      ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
+      ...settings.deniedPaths,
+    ],
+    writable: [
+      ...DEFAULT_WRITABLE_HOME_PATHS.map((entry) => path.join(userHome, entry)),
+      ...settings.writablePaths,
+    ],
+    tmp: os.tmpdir(),
+  };
+  const plan = (options.planSandbox ?? planSandbox)(policy, settings.shell, shellArgs);
+  if (plan.kind === 'sandboxed') {
+    return plan.command;
+  }
+  if (settings.sandbox === 'required') {
+    throw new Error(
+      `shell.run refused: commands must run sandboxed (sandbox: "required"), and ${plan.reason}. `
+      + 'Fix that, or set sandbox to "off" for @stratusagent/tool-shell to run commands with the daemon user\'s full access.',
+    );
+  }
+  if (!unconfinedWarned) {
+    unconfinedWarned = true;
+    (options.warn ?? ((message: string) => process.stderr.write(`${message}\n`)))(
+      `tool-shell: commands run without a sandbox because ${plan.reason}; they can read the Stratus home and your credentials. `
+      + 'Set sandbox to "required" to refuse instead, or "off" to silence this.',
+    );
+  }
+  return unconfined;
+};
+
+let unconfinedWarned = false;
+
+/** For tests: say the unconfined warning again. */
+export const resetSandboxWarning = (): void => {
+  unconfinedWarned = false;
+};
+
 export interface ShellToolOptions {
+  /** Where an unconfined-shell warning goes. Defaults to the plugin context's log, then stderr. */
+  warn?: (message: string) => void;
+  /** For tests: how a sandbox is planned on this host. */
+  planSandbox?: typeof planSandbox;
   /** The environment to grant *from*. Defaults to the daemon's. */
   processEnv?: NodeJS.ProcessEnv;
   /**
@@ -360,9 +456,11 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
           }
         }
       }
+      const shellArgs = [...startupOff(settings.shell), '-c', command];
+      const run = sandboxed(settings, shellArgs, options);
       return {
-        command: settings.shell,
-        args: [...startupOff(settings.shell), '-c', command],
+        command: run.command,
+        args: run.args,
         ...(settings.cwd ? { cwd: settings.cwd } : {}),
         env: settings.env,
         // Required, not preferred. The daemon's environment holds every key
@@ -447,8 +545,10 @@ export const createShellPlugin = (config: JsonObject = {}, options: ShellToolOpt
     const ledgerFor = options.ledger === undefined && context.workspaces !== undefined
       ? workspaceResolver(context.workspaces, undefined)
       : undefined;
+    const warn = options.warn ?? context.log;
     context.tools.register(createShellTool(config, {
       ...options,
+      ...(warn !== undefined ? { warn } : {}),
       ...(workspaces !== undefined ? { workspaces } : {}),
       ...(ledgerFor !== undefined ? { ledger: createFileLedger(ledgerFor) } : {}),
     }));
