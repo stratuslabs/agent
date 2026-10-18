@@ -2884,7 +2884,7 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   webBea.knownConversations.set('C1', { is_member: true });
   const gateway = createStubGateway(({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
-      return sessionWithReply(sessionId, userMessage.includes('help') ? 'Here is help' : '');
+      return sessionWithReply(sessionId, userMessage.includes('help') ? 'Here is help' : userMessage.includes('look') ? 'seen it' : '');
     }
     return sessionWithReply(sessionId, 'ok');
   });
@@ -2895,7 +2895,7 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   const clock = stampsAfter();
   webAva.stamp = clock.stamp;
   webBea.stamp = clock.stamp;
-  // Both in the thread; Bea spoke last, and Ava is attentive.
+  // Both in the thread; Bea spoke last.
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1060.0') {
       return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1060 * 1000).toISOString(), lastAnsweredAt: new Date(1060 * 1000).toISOString(), heardSinceAnswered: 0 };
@@ -2918,16 +2918,22 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
-  // Bea's by the thread rule (she spoke last); Ava judges it and says nothing.
+  // Bea answers first, so the thread is hers; then Dylan names Ava, so
+  // his untagged follow-ups are Ava's to judge (card 541).
+  clock.at('1060.05');
+  await both(channelMessage({ text: '<@B-BEA> start', ts: '1060.05', thread: '1060.0' }));
+  clock.at('1060.07');
+  await both(channelMessage({ text: '<@B-AVA> look', ts: '1060.07', thread: '1060.0' }));
+  // Ava judges it and says nothing: Bea stands down all the same.
   clock.at('1060.1');
   await both(channelMessage({ text: 'say more', ts: '1060.1', thread: '1060.0' }));
-  // Still Bea's — and Ava, judging, has something to add this time, posted
-  // below Bea's placeholder.
+  // Ava, judging, has something to add this time.
   clock.at('1060.2');
   await both(channelMessage({ text: 'help me', ts: '1060.2', thread: '1060.0' }));
-  // Ava is now the voice that just answered: Bea stands down, Ava judges.
+  // Ava spoke on a turn nobody asked for, so the thread is hers: Sam, who
+  // named nobody, is Ava's to judge, and Bea stands down.
   clock.at('1060.3');
-  await both(channelMessage({ text: 'thanks', ts: '1060.3', thread: '1060.0' }));
+  await both(channelMessage({ text: 'thanks', ts: '1060.3', thread: '1060.0', user: 'U-SAM' }));
   // Bea, the thread's owner, is named and answers: that takes it back.
   clock.at('1060.4');
   await both(channelMessage({ text: '<@B-BEA> your view?', ts: '1060.4', thread: '1060.0' }));
@@ -2936,8 +2942,8 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   await adapter.stop();
 
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(of('bea'), ['Dylan: say more', 'Dylan: help me', 'Dylan: your view?', 'Dylan: and then?']);
-  assert.deepEqual(of('ava').slice(0, 3), ['Dylan: say more', 'Dylan: help me', 'Dylan: thanks']);
+  assert.deepEqual(of('bea'), ['Dylan: start', 'Dylan: your view?', 'Dylan: and then?']);
+  assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: say more', 'Dylan: help me', 'name-U-SAM: thanks']);
 });
 
 test('a judge that took the thread still holds it after many exchanges with a third agent (card 508)', async () => {
@@ -2948,7 +2954,7 @@ test('a judge that took the thread still holds it after many exchanges with a th
   }
   const gateway = createStubGateway(({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
-      return sessionWithReply(sessionId, userMessage.includes('help') ? 'Here is help' : '');
+      return sessionWithReply(sessionId, userMessage.includes('help') ? 'Here is help' : userMessage.includes('look') ? 'seen it' : '');
     }
     return sessionWithReply(sessionId, 'ok');
   });
@@ -2961,7 +2967,7 @@ test('a judge that took the thread still holds it after many exchanges with a th
   for (const web of Object.values(webs)) {
     web.stamp = clock.stamp;
   }
-  // Bea's thread; Ava is in it and stays attentive throughout.
+  // Bea's thread; Ava is in it.
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1080.0') {
       return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString(), lastAnsweredAt: new Date(1080 * 1000).toISOString(), heardSinceAnswered: 0 };
@@ -2985,6 +2991,12 @@ test('a judge that took the thread still holds it after many exchanges with a th
 
   const all = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([sockets.a.deliver('message', message), sockets.b.deliver('message', message), sockets.c.deliver('message', message)]);
+  // Bea answers first, so the thread is hers; Dylan names Ava, so his
+  // untagged follow-ups are Ava's to judge (card 541).
+  clock.at('1080.05');
+  await all(channelMessage({ text: '<@B-BEA> start', ts: '1080.05', thread: '1080.0' }));
+  clock.at('1080.07');
+  await all(channelMessage({ text: '<@B-AVA> look', ts: '1080.07', thread: '1080.0' }));
   clock.at('1080.1');
   await all(channelMessage({ text: 'say more', ts: '1080.1', thread: '1080.0' }));
   // Ava, judging, speaks: the thread is hers now.
@@ -2997,15 +3009,16 @@ test('a judge that took the thread still holds it after many exchanges with a th
     clock.at(ts);
     await all(channelMessage({ text: `<@B-CY> aside ${round}`, ts, thread: '1080.0' }));
   }
+  // Sam, who named nobody, is the owner's.
   clock.at('1200.0');
-  await all(channelMessage({ text: 'and then?', ts: '1200.0', thread: '1080.0' }));
+  await all(channelMessage({ text: 'and then?', ts: '1200.0', thread: '1080.0', user: 'U-SAM' }));
   await adapter.stop();
 
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
   assert.equal(of('cy').length, 20);
   // Still Ava's: Bea stands down, and only Ava hears it as a turn.
-  assert.deepEqual(of('bea'), ['Dylan: say more', 'Dylan: help me']);
-  assert.equal(of('ava').at(-1), 'Dylan: and then?');
+  assert.deepEqual(of('bea'), ['Dylan: start']);
+  assert.equal(of('ava').at(-1), 'name-U-SAM: and then?');
 });
 
 test('an untagged reply is for whoever\'s reply sits lowest in the thread, not for the turn that finished last', async () => {
@@ -3029,6 +3042,9 @@ test('an untagged reply is for whoever\'s reply sits lowest in the thread, not f
   });
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('look')) {
+        return sessionWithReply(sessionId, 'seen it');
+      }
       if (!userMessage.includes('first')) {
         return sessionWithReply(sessionId, '');
       }
@@ -3048,11 +3064,10 @@ test('an untagged reply is for whoever\'s reply sits lowest in the thread, not f
     { id: 'ava', name: 'Ava', listens: 'judge' },
     { id: 'bea', name: 'Bea' },
   ];
-  // Bea spoke last; Ava is attentive for the first and third messages.
-  let heard = 7;
+  // Bea spoke last.
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1070.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString(), lastAnsweredAt: new Date(1070 * 1000).toISOString(), heardSinceAnswered: heard };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString(), lastAnsweredAt: new Date(1070 * 1000).toISOString(), heardSinceAnswered: 0 };
     }
     if (sessionId === 'slack:bea:T1:C1:1070.0') {
       return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString(), heardSinceAnswered: 0 };
@@ -3072,28 +3087,32 @@ test('an untagged reply is for whoever\'s reply sits lowest in the thread, not f
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Bea answers first, so the thread is hers; Dylan names Ava, so his
+  // untagged follow-ups are Ava's to judge (card 541), and Sam's are Bea's.
+  clock.at('1070.05');
+  await both(channelMessage({ text: '<@B-BEA> start', ts: '1070.05', thread: '1070.0' }));
+  clock.at('1070.07');
+  await both(channelMessage({ text: '<@B-AVA> look', ts: '1070.07', thread: '1070.0' }));
   clock.at('1070.1');
   await both(channelMessage({ text: 'first', ts: '1070.1', thread: '1070.0' }));
-  heard = 8;
   clock.at('1070.2');
-  await both(channelMessage({ text: 'second', ts: '1070.2', thread: '1070.0' }));
+  await both(channelMessage({ text: 'second', ts: '1070.2', thread: '1070.0', user: 'U-SAM' }));
   // Ava's reply lands below Bea's second placeholder; Bea's edit into that
   // placeholder lands after it, and sits above it.
   releaseAva();
   await tick();
   releaseBea();
   await tick();
-  heard = 7;
   clock.at('1070.3');
-  await both(channelMessage({ text: 'third', ts: '1070.3', thread: '1070.0' }));
+  await both(channelMessage({ text: 'third', ts: '1070.3', thread: '1070.0', user: 'U-SAM' }));
   await adapter.stop();
 
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(webAva.posts.map((post) => post.text), ['Actually, one thing']);
-  // The thread reads: Bea, Bea, Ava — so the reply is Ava's, though Bea
-  // finished last.
-  assert.deepEqual(of('bea'), ['Dylan: first', 'Dylan: second']);
-  assert.deepEqual(of('ava'), ['Dylan: first', 'Dylan: third']);
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['…', 'Actually, one thing']);
+  // The thread reads: Bea, Ava, Bea, Ava, so Sam's reply is Ava's,
+  // though Bea finished last.
+  assert.deepEqual(of('bea'), ['Dylan: start', 'name-U-SAM: second']);
+  assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: first', 'name-U-SAM: third']);
 });
 
 test('a judge whose reply sits above a colleague\'s placeholder does not take the thread by finishing last', async () => {
@@ -3113,6 +3132,9 @@ test('a judge whose reply sits above a colleague\'s placeholder does not take th
   });
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('look')) {
+        return sessionWithReply(sessionId, 'seen it');
+      }
       if (!userMessage.includes('first')) {
         return sessionWithReply(sessionId, '');
       }
@@ -3129,10 +3151,9 @@ test('a judge whose reply sits above a colleague\'s placeholder does not take th
     { id: 'ava', name: 'Ava', listens: 'judge' },
     { id: 'bea', name: 'Bea' },
   ];
-  let heard = 7;
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1080.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString(), lastAnsweredAt: new Date(1080 * 1000).toISOString(), heardSinceAnswered: heard };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString(), lastAnsweredAt: new Date(1080 * 1000).toISOString(), heardSinceAnswered: 0 };
     }
     if (sessionId === 'slack:bea:T1:C1:1080.0') {
       return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1080.05 * 1000).toISOString(), heardSinceAnswered: 0 };
@@ -3152,25 +3173,29 @@ test('a judge whose reply sits above a colleague\'s placeholder does not take th
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Bea answers first, so the thread is hers; Dylan names Ava, so his
+  // untagged follow-ups are Ava's to judge (card 541), and Sam's are Bea's.
+  clock.at('1080.05');
+  await both(channelMessage({ text: '<@B-BEA> start', ts: '1080.05', thread: '1080.0' }));
+  clock.at('1080.07');
+  await both(channelMessage({ text: '<@B-AVA> look', ts: '1080.07', thread: '1080.0' }));
   clock.at('1080.1');
   await both(channelMessage({ text: 'first', ts: '1080.1', thread: '1080.0' }));
-  heard = 8;
   // Bea answers the second message at once, in a placeholder below Ava's.
   clock.at('1080.2');
-  await both(channelMessage({ text: 'second', ts: '1080.2', thread: '1080.0' }));
+  await both(channelMessage({ text: 'second', ts: '1080.2', thread: '1080.0', user: 'U-SAM' }));
   // Ava finishes last, into the placeholder that sits above.
   releaseAva();
   await tick();
-  heard = 7;
   clock.at('1080.3');
-  await both(channelMessage({ text: 'third', ts: '1080.3', thread: '1080.0' }));
+  await both(channelMessage({ text: 'third', ts: '1080.3', thread: '1080.0', user: 'U-SAM' }));
   await adapter.stop();
 
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(webAva.updates.map((update) => update.text), ['Actually', 'Actually, one thing']);
-  // The thread reads: Bea, Ava, Bea — so the reply is Bea's, and Ava judges it.
-  assert.deepEqual(of('bea'), ['Dylan: first', 'Dylan: second', 'Dylan: third']);
-  assert.deepEqual(of('ava'), ['Dylan: first', 'Dylan: third']);
+  assert.deepEqual(webAva.updates.map((update) => update.text), ['seen it', 'Actually', 'Actually, one thing']);
+  // The thread reads: Bea, Ava, Ava, Bea, so Sam's reply is Bea's alone.
+  assert.deepEqual(of('bea'), ['Dylan: start', 'name-U-SAM: second', 'name-U-SAM: third']);
+  assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: first']);
 });
 
 test('a judging agent that posts a file and says nothing has still spoken, for the thread rule', async () => {
