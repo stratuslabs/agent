@@ -10843,16 +10843,20 @@ test('another gateway\'s agent speaking in an agent\'s thread does not take it, 
   // Fly Test spoke last, but the thread is Ava's (card 508).
   await socket.deliver('message', channelMessage({ text: 'and you?', ts: '950.4', thread: '950.0' }));
   // In a thread Fly Test was speaking in before Ava was named, Ava answers
-  // what names her and leaves the rest to Fly Test.
+  // what names her and, from someone who has named nobody, leaves the rest
+  // to Fly Test. Dylan named her, so his untagged follow-up is hers
+  // (card 541).
   await socket.deliver('message', foreignBotMessage({ text: 'Fly Test here', ts: '951.1', thread: '951.0' }));
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> a word?', ts: '951.2', thread: '951.0' }));
   await socket.deliver('message', channelMessage({ text: 'and then?', ts: '951.3', thread: '951.0' }));
+  await socket.deliver('message', channelMessage({ text: 'anyone?', ts: '951.4', thread: '951.0', user: 'U-SAM' }));
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
     'Dylan: first?',
     'Dylan: and you?',
     'Dylan: a word?',
+    'Dylan: and then?',
   ]);
 });
 
@@ -10937,16 +10941,19 @@ test('a thread another app started belongs to the agent named in it, and one a t
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> why?', ts: '995.1', thread: '995.0' }));
   await socket.deliver('message', channelMessage({ text: 'and the logs?', ts: '995.2', thread: '995.0' }));
   // Nova, a team agent on another daemon, posts a report; Dylan asks Ava
-  // one thing under it. The thread is Nova's, so the reply after is too.
+  // one thing under it. The thread is Nova's, but Dylan named Ava, so his
+  // reply after is hers (card 541); Sam, who named nobody, is Nova's.
   await socket.deliver('message', topLevelBot('U-NOVA', 'nightly report', '996.0'));
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> agree?', ts: '996.1', thread: '996.0' }));
   await socket.deliver('message', channelMessage({ text: 'thanks', ts: '996.2', thread: '996.0' }));
+  await socket.deliver('message', channelMessage({ text: 'nice report', ts: '996.3', thread: '996.0', user: 'U-SAM' }));
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
     'Dylan: why?',
     'Dylan: and the logs?',
     'Dylan: agree?',
+    'Dylan: thanks',
   ]);
 });
 

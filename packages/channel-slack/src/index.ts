@@ -6203,9 +6203,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         (connection.config.approvers ?? []).includes(sender) &&
         isStopRequest(text, connection.botUserId);
       const stopHolder = approverStop ? holderAt(threadKey, event.ts) : undefined;
-      // A stop held by another agent is only heard: judging it would let an
-      // attentive agent take a turn on a stop that was never its own.
-      const stopForAnother = stopHolder !== undefined && stopHolder !== connection.config.agentId;
       if (listens === 'judge' && !approverStop && threadKey !== undefined) {
         const target = replyTargetAt(threadKey, sender, event.ts);
         if (target === undefined) {
@@ -6219,10 +6216,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         const reason = senderAddresseeAt(threadKey, sender, event.ts) === target ? 'addressed it last' : 'owner';
         return { ...admission, overhear: true, judge: true, judgeReason: reason };
       }
+      // An approver's stop is never judged (card 541): it stops the turn of
+      // whoever holds the thread, and with nothing to stop it is only heard.
       return {
         ...admission,
         overhear: true,
-        ...(listens === 'judge' && !stopForAnother ? { judge: true } : {}),
         ...(stopHolder === connection.config.agentId ? { holderStop: true } : {}),
         ...(approverStop && stopHolder === undefined ? { settled: false } : {}),
       };
