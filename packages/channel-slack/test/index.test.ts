@@ -12693,7 +12693,11 @@ const judgeV2Pair = async (listens: { ava: 'judge' | 'thread'; bea: 'judge' | 't
   const of = (agentId: string) => gateway.dispatches
     .filter((dispatch) => dispatch.agentId === agentId)
     .map((dispatch) => [dispatch.userMessage, dispatch.addressed ?? true]);
-  return { adapter, gateway, both, of, logged };
+  const one = async (socket: ReturnType<typeof createFakeSocket>, text: string, ts: string, user?: string) => {
+    clock.at(ts);
+    await socket.deliver('message', channelMessage({ text, ts, thread: '5000.0', ...(user ? { user } : {}) }));
+  };
+  return { adapter, gateway, both, one, socketAva, socketBea, of, logged };
 };
 
 test('judge v2: the owner takes a principal\'s untagged instruction an hour after its last answer (Oct 16 Nova thread)', async () => {
@@ -12717,6 +12721,42 @@ test('judge v2: "@Bea your turn" then "and?" goes to Bea, and only Bea', async (
   await adapter.stop();
   assert.deepEqual(of('bea'), [['Dylan: your turn', true], ['Dylan: and?', false]]);
   assert.deepEqual(of('ava'), [['Dylan: kick this off', true]]);
+});
+
+test('judge v2: a lagging socket resolves a continuation against the mention before it, not the newest one', async () => {
+  const { adapter, one, socketAva, socketBea, of } = await judgeV2Pair();
+  // Bea's socket is current: Ava's thread, "@Bea your turn", "and?" (Bea's), then "@Ava back to you".
+  await one(socketBea, '<@B-AVA> kick this off', '5000.0');
+  await one(socketBea, '<@B-BEA> your turn', '5000.1');
+  await one(socketBea, 'and?', '5000.2');
+  await one(socketBea, '<@B-AVA> back to you', '5000.3');
+  // Ava's socket is behind and reaches "and?" only after "@Ava back to you".
+  // That reply followed "@Bea", so it is still Bea's, not the owner's.
+  await one(socketAva, '<@B-AVA> kick this off', '5000.0');
+  await one(socketAva, '<@B-BEA> your turn', '5000.1');
+  await one(socketAva, '<@B-AVA> back to you', '5000.3');
+  await one(socketAva, 'and?', '5000.2');
+  await adapter.stop();
+  assert.deepEqual(of('bea'), [['Dylan: your turn', true], ['Dylan: and?', false]]);
+  assert.deepEqual(of('ava'), [['Dylan: kick this off', true], ['Dylan: back to you', true]]);
+});
+
+test('judge v2: one thread remembers a bounded number of senders, least recently heard out first', async () => {
+  const { adapter, both, one, socketAva, socketBea, of } = await judgeV2Pair();
+  await both('<@B-AVA> kick this off', '5000.0');
+  await both('<@B-BEA> your turn', '5000.1');
+  // 64 other people each name Ava once; the first person is now the least
+  // recently heard sender in the thread and is forgotten.
+  for (let i = 0; i < 64; i += 1) {
+    const ts = `5001.${String(i).padStart(3, '0')}`;
+    await one(socketAva, `<@B-AVA> note ${i}`, ts, `U-P${i}`);
+    await one(socketBea, `<@B-AVA> note ${i}`, ts, `U-P${i}`);
+  }
+  await both('and?', '5002.0');
+  await adapter.stop();
+  // Forgotten, so the reply falls back to the thread's owner.
+  assert.deepEqual(of('bea'), [['Dylan: your turn', true]]);
+  assert.deepEqual(of('ava').at(-1), ['Dylan: and?', false]);
 });
 
 test('judge v2: an aside goes to the owner alone, as a turn it may stay quiet on', async () => {

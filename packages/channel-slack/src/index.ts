@@ -80,6 +80,17 @@ const THREAD_ADDRESSEE_CAPACITY = 2000;
  */
 const COLD_VERDICT_CAPACITY = 256;
 /**
+ * How many of one person's mentions one thread remembers (card 541). Only
+ * has to span the lag between two sockets, like `THREAD_HANDOVER_DEPTH`.
+ */
+const SENDER_ADDRESSEE_DEPTH = 8;
+/**
+ * How many people one thread remembers an addressee for. Past this the
+ * least recently heard is forgotten, and their next untagged reply goes to
+ * the thread's owner, as after a restart.
+ */
+const THREAD_SENDER_CAPACITY = 64;
+/**
  * How many claims on one thread it remembers.
  *
  * A message older than all of them asks the sessions instead, which answer
@@ -3072,15 +3083,30 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * as a handover is, so the sockets agree. Bounded like the addressee map;
    * a lost entry, or a restart, falls back to the owner.
    */
-  const senderAddressees = new Map<string, Map<string, { agentId: string; ts: string }>>();
+  const senderAddressees = new Map<string, Map<string, Array<{ agentId: string; ts: string }>>>();
   const rememberSenderAddressee = (key: string, sender: string, agentId: string, ts: string): void => {
-    const senders = senderAddressees.get(key) ?? new Map<string, { agentId: string; ts: string }>();
-    const known = senders.get(sender);
-    // A late delivery of an older mention does not undo a newer one.
-    if (known && known.ts >= ts) {
-      return;
+    const senders = senderAddressees.get(key) ?? new Map<string, Array<{ agentId: string; ts: string }>>();
+    // Kept in timestamp order, so a socket that is behind can still find the
+    // mention that preceded the reply it is only now reaching. A late
+    // delivery of an older mention slots in where it belongs.
+    const history = (senders.get(sender) ?? []).filter((entry) => entry.ts !== ts);
+    let at = history.length;
+    while (at > 0 && history[at - 1]!.ts > ts) {
+      at -= 1;
     }
-    senders.set(sender, { agentId, ts });
+    history.splice(at, 0, { agentId, ts });
+    if (history.length > SENDER_ADDRESSEE_DEPTH) {
+      history.splice(0, history.length - SENDER_ADDRESSEE_DEPTH);
+    }
+    // Most recently heard sender last, so the first key is the one to drop.
+    senders.delete(sender);
+    senders.set(sender, history);
+    if (senders.size > THREAD_SENDER_CAPACITY) {
+      const oldest = senders.keys().next();
+      if (!oldest.done) {
+        senders.delete(oldest.value);
+      }
+    }
     senderAddressees.delete(key);
     senderAddressees.set(key, senders);
     if (senderAddressees.size > THREAD_ADDRESSEE_CAPACITY) {
@@ -3090,10 +3116,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
     }
   };
-  /** The agent `sender` last addressed in thread `key` before `ts`, if this process saw it. */
+  /**
+   * The agent `sender` last addressed in thread `key` before `ts`, if this
+   * process saw it. A reply older than every mention still remembered for
+   * that sender has nothing to go on, and falls back to the owner.
+   */
   const senderAddresseeAt = (key: string, sender: string, ts: string): string | undefined => {
-    const known = senderAddressees.get(key)?.get(sender);
-    return known !== undefined && known.ts < ts ? known.agentId : undefined;
+    const history = senderAddressees.get(key)?.get(sender);
+    if (!history) {
+      return undefined;
+    }
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i]!.ts < ts) {
+        return history[i]!.agentId;
+      }
+    }
+    return undefined;
   };
   /** Whose an untagged reply from `sender` at `ts` is: who they last addressed, else the owner. */
   const replyTargetAt = (key: string, sender: string, ts: string): string | undefined =>
