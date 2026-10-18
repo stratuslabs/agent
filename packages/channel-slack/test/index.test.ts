@@ -1436,7 +1436,7 @@ test('a mention delivered as both an app_mention and a channel message runs one 
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.sessionId), ['slack:ava:T1:C1:800.1']);
 });
 
-test('in a shared thread a mention gets the named agent\'s answer, and the next untagged reply stays with the agent that had the thread', async () => {
+test('in a shared thread a mention gets the named agent\'s answer, and the same person\'s next untagged reply continues with that agent', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
@@ -1473,8 +1473,8 @@ test('in a shared thread a mention gets the named agent\'s answer, and the next 
     event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> what do you think?', ts: '900.2', thread_ts: '900.0', channel: 'C1' },
   });
 
-  // …and the next untagged reply is still Ava's: a mention asks one
-  // question, it does not move the thread (card 508).
+  // …and Dylan's next untagged reply continues with Bea, whom he just
+  // addressed (card 541). Ava hears it.
   const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
   await socketAva.deliver('message', afterHandover);
   await socketBea.deliver('message', afterHandover);
@@ -1483,7 +1483,7 @@ test('in a shared thread a mention gets the named agent\'s answer, and the next 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
     ['ava', 'Dylan: say more'],
     ['bea', 'Dylan: what do you think?'],
-    ['ava', 'Dylan: go on'],
+    ['bea', 'Dylan: go on'],
   ]);
 });
 
@@ -1522,17 +1522,24 @@ test('in a shared thread an untagged reply stays with the agent the thread belon
     body: { team_id: 'T1', event_id: 'evt-950-2' },
     event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> anything blocking?', ts: '950.2', thread_ts: '950.0', channel: 'C1' },
   });
-  // An untagged reply after that is still Ava's: Bea, who spoke last, stays quiet.
+  // Someone else's untagged reply after that is still Ava's: Sam never
+  // addressed Bea, and Bea, who spoke last, stays quiet (card 508).
   clock.at('950.3');
-  const followUp = channelMessage({ text: 'ok, go ahead', ts: '950.3', thread: '950.0' });
+  const followUp = channelMessage({ text: 'ok, go ahead', ts: '950.3', thread: '950.0', user: 'U-SAM' });
   await socketAva.deliver('message', followUp);
   await socketBea.deliver('message', followUp);
+  // Dylan's own is Bea's: he addressed her last (card 541).
+  clock.at('950.4');
+  const continued = channelMessage({ text: 'and after that?', ts: '950.4', thread: '950.0' });
+  await socketAva.deliver('message', continued);
+  await socketBea.deliver('message', continued);
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
     ['ava', 'Dylan: plan the release'],
     ['bea', 'Dylan: anything blocking?'],
-    ['ava', 'Dylan: ok, go ahead'],
+    ['ava', 'name-U-SAM: ok, go ahead'],
+    ['bea', 'Dylan: and after that?'],
   ]);
 });
 
@@ -1679,16 +1686,16 @@ test('an agent in a shared thread hears what is said to the other one, and posts
     }),
   ]);
 
-  // Warm: the thread is still Ava's (card 508), so the next untagged reply
-  // is hers to answer and Bea's to hear.
-  const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
+  // Warm: the thread is still Ava's (card 508), so an untagged reply from
+  // someone who has not addressed Bea is hers to answer and Bea's to hear.
+  const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0', user: 'U-SAM' });
   await Promise.all([socketAva.deliver('message', afterHandover), socketBea.deliver('message', afterHandover)]);
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
     ['ava', 'Dylan: say more'],
     ['bea', 'Dylan: what do you think?'],
-    ['ava', 'Dylan: go on'],
+    ['ava', 'name-U-SAM: go on'],
   ]);
   // Every message somebody else answered reached the agent that did not,
   // into its own session for the thread, with the speaker named the way a
@@ -1703,7 +1710,7 @@ test('an agent in a shared thread hears what is said to the other one, and posts
       ['bea', 'slack:bea:T1:C1:900.0', 'Ava: ok'],
       ['ava', 'slack:ava:T1:C1:900.0', 'Dylan: <@B-BEA> what do you think?'],
       ['ava', 'slack:ava:T1:C1:900.0', 'Bea: ok'],
-      ['bea', 'slack:bea:T1:C1:900.0', 'Dylan: go on'],
+      ['bea', 'slack:bea:T1:C1:900.0', 'name-U-SAM: go on'],
       ['bea', 'slack:bea:T1:C1:900.0', 'Ava: ok'],
     ],
   );
@@ -3888,21 +3895,21 @@ test('a lagging socket reaching an older mention does not change whose the threa
   await socketBea.deliver('message', channelMessage({ text: '<@B-AVA> look at this', ts: '970.1', thread: '970.0' }));
 
   // The untagged reply lands on Ava's socket while Bea's is still catching
-  // up. The thread is Ava's — she was named first — and a mention of Bea
-  // asked her one question without moving it (card 508).
+  // up. Dylan last addressed Bea (card 541), and the older mention of Ava
+  // that Bea's socket reached late did not undo that: Ava stands down.
   const followUp = channelMessage({ text: 'and?', ts: '970.3', thread: '970.0' });
   await socketAva.deliver('message', followUp);
 
-  // Bea's socket catches up, answers what was hers, and stands down for
-  // the reply that was not.
+  // Bea's socket catches up and answers both: her question, and the reply
+  // that followed it.
   await socketBea.deliver('message', channelMessage({ text: '<@B-BEA> your turn', ts: '970.2', thread: '970.0' }));
   await socketBea.deliver('message', followUp);
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
     ['ava', 'Dylan: look at this'],
-    ['ava', 'Dylan: and?'],
     ['bea', 'Dylan: your turn'],
+    ['bea', 'Dylan: and?'],
   ]);
 });
 
