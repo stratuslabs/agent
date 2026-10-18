@@ -43,9 +43,12 @@ they are the whole model:
 4. **In a thread with several agents, an untagged reply goes to the agent
    the thread belongs to.** That is the first agent to hold it: the one its
    first message named, or the one that posted it. Naming another agent
-   gets that agent's answer to that message, and nothing more: the thread
-   stays where it was, so the next untagged reply goes back to its owner
-   and the agent you pulled in stays quiet unless it is named again. A
+   gets that agent's answer to that message, and makes the untagged
+   replies the same person sends after it that agent's too, until they
+   name someone else (`@Bea your turn`, then `and?`, is Bea's). The thread
+   itself stays where it was: an untagged reply from anyone who has not
+   named an agent in it goes to its owner. Who each person last named is
+   kept in memory, so after a restart it falls back to the owner. A
    message an agent already took stays that agent's: Slack redelivering it
    after a restart goes back to the agent that accepted it — and if that
    agent's app has not come back, the others stand down rather than run it
@@ -63,35 +66,33 @@ they are the whole model:
 5. **How an agent listens is the soul's to say.** Rules 3 and 4 are the
    `thread` mode, the default. A soul with `listens: mentions` takes only
    messages that name it, and hears the rest. One with `listens: judge`
-   hears everything and, while attentive — eight messages or fifteen
-   minutes after it last answered a message that named it, whichever ends
-   first — runs a turn nobody asked for on each untagged message, told it
-   may answer with nothing; past the window a message is heard with no
-   turn at all, and a mention re-arms it. A reply it chose to give on its
-   own does not: it takes the thread for the thread rule, and counts
-   against its own window like any other message. A turn that decides on silence posts nothing: its
+   hears everything and runs a turn nobody asked for, told it may answer
+   with nothing, on each untagged message that is its own by rule 4: the
+   agent the sender last named, else the thread's owner (card 541). There
+   is no window: an owner an hour past its last answer still takes an
+   untagged instruction in its thread, and only one agent takes each
+   message. A judged turn does not take images (they are named, as for a
+   message that was overheard). Each decision is logged as one line with
+   the agent, the message's ts, and the reason (`addressed it last`,
+   `owner`, or whose it was instead), never the text. An approver's
+   untagged stop is never judged: it stops the holder's turn or, with
+   nothing running, is only heard. A turn that decides on silence posts nothing: its
    placeholder is opened only on the first text it streams, never on a
    tool line, and a failed one posts no error note — one the daemon died
    inside, failed at the next start, included, a line it had already
    streamed staying as it was. A line an attempt the
    provider abandoned had already posted is taken back when the retry
-   decides on silence. Neither mode takes
-   part in the holder rule — that rule answers whose an untagged reply is,
-   and for these two the soul already has — so a thread-rule agent stands
-   down in a thread a mentions-only agent owns, or where a judging one has
-   chosen to speak: the judging one decides for itself, and the
-   mentions-only one is being talked to and waits to be named. A judging agent that chooses to speak takes the thread,
-   recorded once its reply has landed — so a message typed while it was
-   still deciding may be answered by both it and a thread-rule colleague
-   that held the thread before — and the owner takes it back by answering
-   in it. Which of the two spoke last is read off the thread, not the
+   decides on silence. A mentions-only agent takes no part in the
+   holder rule: a thread-rule agent stands down in a thread one owns, since
+   that agent is being talked to and waits to be named. A judging agent
+   that chooses to speak on a turn nobody asked for takes the thread,
+   recorded once its reply has landed (a message typed while it was still
+   deciding stays the previous owner's), and the owner takes it back by
+   answering in it. Which of the two spoke last is read off the thread, not the
    clock: whichever reply sits lowest, since that is the one a reader
    answers, and a placeholder posted early and filled in slowly sits above
    a reply posted while it was being written. A colleague's reply is never
    judged, only heard.
-   The window also counts messages this daemon has dispatched that the
-   session does not hold yet, so a burst typed inside one turn is judged
-   up to the window and heard past it.
 6. **Standing down is not leaving.** An agent in a thread hears what is
    said to the other agent in it — the question that named its colleague,
    the untagged replies that were the colleague's to answer, and what the

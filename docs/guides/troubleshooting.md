@@ -158,7 +158,9 @@ a problem.
   `message.*` events too. With scopes and events both in place, check the
   soul's [`listens`](./slack.md#how-an-agent-listens) setting: `mentions`
   hears untagged replies without answering them, and `judge` may choose
-  silence or be past its attention window. Under the default `thread`, a
+  silence, or the reply was another agent's (the one that person last
+  named, or the thread's owner; the daemon log has a `slack: judge:` line
+  for each decision). Under the default `thread`, a
   missing reply usually means the thread belongs to another agent: it was
   there first. Mention the agent you want, or start a new thread with it.
 - **A DM to the app says "Sending messages to this app has been turned
