@@ -3217,6 +3217,9 @@ test('a judging agent that posts a file and says nothing has still spoken, for t
   };
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('look')) {
+        return sessionWithReply(sessionId, 'seen it');
+      }
       if (userMessage.includes('chart')) {
         await gateway.bus.emit({
           type: 'tool.completed',
@@ -3257,18 +3260,25 @@ test('a judging agent that posts a file and says nothing has still spoken, for t
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
-  // Bea's by the thread rule; Ava judges it and answers with a file and
+  // Dylan's, so Ava's to judge; she and answers with a file and
   // no words.
+  // Bea answers first, so the thread is hers; Dylan names Ava, so his
+  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // the owner's.
+  await both(channelMessage({ text: '<@B-BEA> start', ts: '1070.05', thread: '1070.0' }));
+  await both(channelMessage({ text: '<@B-AVA> look', ts: '1070.07', thread: '1070.0' }));
   await both(channelMessage({ text: 'chart please', ts: '1070.1', thread: '1070.0' }));
-  // The file was the last thing said: Bea stands down, Ava judges.
-  await both(channelMessage({ text: 'nice', ts: '1070.2', thread: '1070.0' }));
+  // The file was the last thing said, so the thread is Ava's: Sam's
+  // reply is hers to judge, and Bea stands down.
+  await both(channelMessage({ text: 'nice', ts: '1070.2', thread: '1070.0', user: 'U-SAM' }));
   await adapter.stop();
 
   assert.equal(webAva.uploads.length, 1);
-  assert.deepEqual(webAva.posts, []);
+  // Only the placeholder of the answer Ava was asked for.
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['…']);
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(of('bea'), ['Dylan: chart please']);
-  assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
+  assert.deepEqual(of('bea'), ['Dylan: start']);
+  assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: chart please', 'name-U-SAM: nice']);
 });
 
 test('a file sits where the share Slack answers with says, not where the clock does', async () => {
@@ -3288,6 +3298,9 @@ test('a file sits where the share Slack answers with says, not where the clock d
   webBea.stamp = stamps.stamp;
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('look')) {
+        return sessionWithReply(sessionId, 'seen it');
+      }
       if (userMessage.includes('chart')) {
         await gateway.bus.emit({
           type: 'tool.completed',
@@ -3326,20 +3339,27 @@ test('a file sits where the share Slack answers with says, not where the clock d
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
-  // Bea's by the thread rule; Ava judges it and answers with a file and
+  // Dylan's, so Ava's to judge; she and answers with a file and
   // no words.
+  // Bea answers first, so the thread is hers; Dylan names Ava, so his
+  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // the owner's.
+  await both(channelMessage({ text: '<@B-BEA> start', ts: '1070.05', thread: '1070.0' }));
+  await both(channelMessage({ text: '<@B-AVA> look', ts: '1070.07', thread: '1070.0' }));
   stamps.at('1070.1');
   await both(channelMessage({ text: 'chart please', ts: '1070.1', thread: '1070.0' }));
-  // The file was the last thing said: Bea stands down, Ava judges.
+  // The file was the last thing said, so the thread is Ava's: Sam's
+  // reply is hers to judge, and Bea stands down.
   stamps.at('1070.2');
-  await both(channelMessage({ text: 'nice', ts: '1070.2', thread: '1070.0' }));
+  await both(channelMessage({ text: 'nice', ts: '1070.2', thread: '1070.0', user: 'U-SAM' }));
   await adapter.stop();
 
   assert.equal(webAva.uploads.length, 1);
-  assert.deepEqual(webAva.posts, []);
+  // Only the placeholder of the answer Ava was asked for.
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['…']);
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(of('bea'), ['Dylan: chart please']);
-  assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
+  assert.deepEqual(of('bea'), ['Dylan: start']);
+  assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: chart please', 'name-U-SAM: nice']);
 });
 
 test('a judged turn whose file landed but whose words Slack refused has spoken, and is not heard', async () => {
@@ -3352,12 +3372,11 @@ test('a judged turn whose file landed but whose words Slack refused has spoken, 
   const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-judge-mixed-'));
   const chart = path.join(dir, 'chart.png');
   await writeFile(chart, 'png bytes');
-  // Every text Ava posts is refused; her uploads land.
-  webAva.chat.postMessage = async () => {
-    throw new Error('ratelimited');
-  };
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('look')) {
+        return sessionWithReply(sessionId, 'seen it');
+      }
       if (userMessage.includes('chart')) {
         await gateway.bus.emit({
           type: 'tool.completed',
@@ -3398,21 +3417,31 @@ test('a judged turn whose file landed but whose words Slack refused has spoken, 
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Bea answers first, so the thread is hers; Dylan names Ava, so his
+  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // the owner's.
+  await both(channelMessage({ text: '<@B-BEA> start', ts: '1080.05', thread: '1080.0' }));
+  await both(channelMessage({ text: '<@B-AVA> look', ts: '1080.07', thread: '1080.0' }));
+  // From here every text Ava posts is refused; her uploads land.
+  webAva.chat.postMessage = async () => {
+    throw new Error('ratelimited');
+  };
   await both(channelMessage({ text: 'chart please', ts: '1080.1', thread: '1080.0' }));
   // Who 'nice' is for depends on where Ava's file landed, which her turn
   // records once it has finished — so it waits for that, not for a delay
   // her real file read and upload once outran on a loaded runner.
   await Promise.all([socketAva.settled(), socketBea.settled()]);
-  await both(channelMessage({ text: 'nice', ts: '1080.2', thread: '1080.0' }));
+  await both(channelMessage({ text: 'nice', ts: '1080.2', thread: '1080.0', user: 'U-SAM' }));
   await adapter.stop();
 
   // The file is the last thing said, so Ava holds the thread; the words
   // never landed, so Bea did not hear them.
   assert.equal(webAva.uploads.length, 1);
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(of('bea'), ['Dylan: chart please']);
-  assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
-  assert.equal(gateway.observes.some((observed) => observed.message.startsWith('Ava:')), false);
+  assert.deepEqual(of('bea'), ['Dylan: start']);
+  assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: chart please', 'name-U-SAM: nice']);
+  // Only the answer Ava was asked for reached Bea; the refused words did not.
+  assert.deepEqual(gateway.observes.filter((observed) => observed.message.startsWith('Ava:')).map((observed) => observed.message), ['Ava: seen it']);
 });
 
 test('a judged turn that posted a file and then failed has still spoken, for the thread rule', async () => {
@@ -3427,6 +3456,9 @@ test('a judged turn that posted a file and then failed has still spoken, for the
   await writeFile(chart, 'png bytes');
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('look')) {
+        return sessionWithReply(sessionId, 'seen it');
+      }
       if (userMessage.includes('chart')) {
         await gateway.bus.emit({
           type: 'tool.completed',
@@ -3467,17 +3499,23 @@ test('a judged turn that posted a file and then failed has still spoken, for the
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Bea answers first, so the thread is hers; Dylan names Ava, so his
+  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // the owner's.
+  await both(channelMessage({ text: '<@B-BEA> start', ts: '1100.05', thread: '1100.0' }));
+  await both(channelMessage({ text: '<@B-AVA> look', ts: '1100.07', thread: '1100.0' }));
   await both(channelMessage({ text: 'chart please', ts: '1100.1', thread: '1100.0' }));
-  await both(channelMessage({ text: 'nice', ts: '1100.2', thread: '1100.0' }));
+  await both(channelMessage({ text: 'nice', ts: '1100.2', thread: '1100.0', user: 'U-SAM' }));
   await adapter.stop();
 
   // The file landed before the failure, and is the last thing said: no
   // error note (the turn was nobody's ask), and the thread is Ava's.
   assert.equal(webAva.uploads.length, 1);
-  assert.deepEqual(webAva.posts, []);
+  // Only the placeholder of the answer Ava was asked for.
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['…']);
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(of('bea'), ['Dylan: chart please']);
-  assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
+  assert.deepEqual(of('bea'), ['Dylan: start']);
+  assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: chart please', 'name-U-SAM: nice']);
 });
 
 test('a judged turn whose streamed line landed but whose final edit Slack refused has spoken', async () => {
@@ -3497,6 +3535,9 @@ test('a judged turn whose streamed line landed but whose final edit Slack refuse
   };
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.startsWith('slack:ava:')) {
+      if (userMessage.includes('look')) {
+        return sessionWithReply(sessionId, 'seen it');
+      }
       if (userMessage.includes('think')) {
         await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Thinking' } });
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -3535,19 +3576,25 @@ test('a judged turn whose streamed line landed but whose final edit Slack refuse
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Bea answers first, so the thread is hers; Dylan names Ava, so his
+  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // the owner's.
+  await both(channelMessage({ text: '<@B-BEA> start', ts: '1110.05', thread: '1110.0' }));
+  await both(channelMessage({ text: '<@B-AVA> look', ts: '1110.07', thread: '1110.0' }));
   clock.at('1110.1');
   await both(channelMessage({ text: 'let me think', ts: '1110.1', thread: '1110.0' }));
   clock.at('1110.2');
-  await both(channelMessage({ text: 'well?', ts: '1110.2', thread: '1110.0' }));
+  await both(channelMessage({ text: 'well?', ts: '1110.2', thread: '1110.0', user: 'U-SAM' }));
   await adapter.stop();
 
   // "Thinking" is in the thread under Ava's name, so she spoke and holds
   // it; "Done" never landed, so Bea did not hear it.
-  assert.deepEqual(webAva.updates.map((edit) => edit.text), ['Thinking']);
+  assert.deepEqual(webAva.updates.map((edit) => edit.text), ['seen it', 'Thinking']);
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
-  assert.deepEqual(of('bea'), ['Dylan: let me think']);
-  assert.deepEqual(of('ava'), ['Dylan: let me think', 'Dylan: well?']);
-  assert.equal(gateway.observes.some((observed) => observed.message.startsWith('Ava:')), false);
+  assert.deepEqual(of('bea'), ['Dylan: start']);
+  assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: let me think', 'name-U-SAM: well?']);
+  // Only the answer Ava was asked for reached Bea; the refused words did not.
+  assert.deepEqual(gateway.observes.filter((observed) => observed.message.startsWith('Ava:')).map((observed) => observed.message), ['Ava: seen it']);
 });
 
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
