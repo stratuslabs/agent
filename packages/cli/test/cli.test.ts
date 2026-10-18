@@ -4335,6 +4335,96 @@ test('optional channel packages are never hard dependencies of the CLI', async (
   }
 });
 
+const slackOkFetch = (async (url: any) => new Response(JSON.stringify(
+  String(url).endsWith('/auth.test')
+    ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+    : { ok: true, url: 'wss://x' },
+), { status: 200 })) as typeof fetch;
+
+test('setup re-asks for a malformed member ID and warns when nobody is listed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → tokens → a display name (refused) → Enter (skip) → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', 'dylan\n', '\n', '3\n', '9\n']),
+      fetch: slackOkFetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /✗ dylan is not a member ID \(they look like U0123ABCD\)\. Nothing was saved\./);
+  assert.match(output.stdout, /! Nobody is listed, so Ava will ignore every Slack message until principals\.slackUsers names someone\./);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(saved.principals, undefined);
+});
+
+test('setup leaves an existing principals list alone when connecting another agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { slackUsers: ['U0OPS'] } }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // No member-ID prompt: Ava inherits U0OPS.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
+      fetch: slackOkFetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /Only the Slack users you list/);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { slackUsers: ['U0OPS'] });
+});
+
+test('doctor flags a Slack agent nobody may talk to, and not one that opened its door', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  for (const [id, name] of [['ava', 'Ava'], ['bea', 'Bea'], ['cy', 'Cy']]) {
+    await writeFile(path.join(agentsDir, `${id}.md`), `---\nname: ${name}\n---\n\nYou are ${name}.\n`);
+  }
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'demo',
+    // Ava: nobody listed, closed by default. Bea: opened explicitly. Cy: listed.
+    principals: { agents: { bea: { admit: 'anyone' }, cy: { slackUsers: ['U0DYLAN'] } } },
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    channels: { slack: Object.fromEntries(['ava', 'bea', 'cy'].map((id) => [id, { appToken: 'xapp-t', botToken: 'xoxb-t' }])) },
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.match(output.stdout, /Nobody is listed who may talk to ava in Slack, so it ignores every message\./);
+  assert.doesNotMatch(output.stdout, /may talk to [^\n]*\bbea\b/);
+  assert.doesNotMatch(output.stdout, /may talk to [^\n]*\bcy\b/);
+});
+
 test('setup connects an agent to Slack without touching any file by hand', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
@@ -4354,7 +4444,7 @@ test('setup connects an agent to Slack without touching any file by hand', async
       // Channels → Ava (2; the built-in Stratus agent is 1) → paste both
       // tokens → Back → Save & finish
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0DYLAN\n', '3\n', '9\n']),
       fetch: (async (url: any, init?: any) => {
         slackCalls.push({
           url: String(url),
@@ -4374,6 +4464,12 @@ test('setup connects an agent to Slack without touching any file by hand', async
   assert.equal(slackCalls[0]?.auth, 'Bearer xoxb-tok');
   assert.equal(slackCalls[1]?.auth, 'Bearer xapp-tok');
   assert.match(output.stdout, /✓ Verified — Ava is connected to Slack in Acme \(bot B123\)\./);
+  // Only listed users get a turn, so setup asks who may talk right after
+  // the connect, and the first list on an install is everyone's.
+  assert.match(output.stdout, /Only the Slack users you list can talk to Ava; everyone else is ignored\./);
+  assert.match(output.stdout, /✓ U0DYLAN can talk to Ava\./);
+  const savedConfig = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(savedConfig.principals, { slackUsers: ['U0DYLAN'] });
   // The manifest is printed for pasting, so app creation needs no file hunt.
   assert.match(output.stdout, /"always_online": true/);
   assert.match(output.stdout, /app_mentions:read/);
@@ -4612,7 +4708,7 @@ test('the Channels menu offers a default soul that lives outside the roster', as
       processEnv: {},
       // Channels → Nova → tokens → Back → Save & finish
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B9', team: 'Acme', team_id: 'T9' }
@@ -4675,7 +4771,7 @@ test('setup suggests serve with the same --config it was run with', async () => 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
@@ -6454,7 +6550,7 @@ test('the Channels menu connects the built-in agent on a fresh install', async (
       // connectable here — otherwise Slack is unreachable until you
       // create an agent you may not want.
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '2\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B7', team: 'Acme', team_id: 'T7' }
@@ -14290,9 +14386,19 @@ test('doctor names the soul and systemPrompt an auto-discovered project config a
 });
 
 test('the startup provenance line says which agents refuse unlisted senders, even with nobody listed', () => {
-  assert.match(describePrincipals({}, ['ava', 'bea']), /^no principals configured, so every Slack sender is unknown/);
+  // Closed by default: nothing configured refuses everyone, and says so.
   assert.match(
-    describePrincipals({ slackUsers: ['U1'] }, ['ava', 'bea']),
+    describePrincipals({}, ['ava', 'bea']),
+    /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava, bea until principals\.slackUsers names someone$/,
+  );
+  assert.match(describePrincipals({ slackUsers: ['U1'] }, ['ava', 'bea']), /^principals set for ava, bea; unlisted senders are refused$/);
+  // Opening the door is explicit, and the line says who opened it.
+  assert.match(
+    describePrincipals({ admit: 'anyone' }, ['ava', 'bea']),
+    /^no principals configured, so every Slack sender is unknown/,
+  );
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'], admit: 'anyone' }, ['ava', 'bea']),
     /^principals set for ava, bea; every agent still admits unlisted senders as unknown/,
   );
   assert.match(
@@ -14314,8 +14420,8 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
     /^principals set for ava; none for bea, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused$/,
   );
   assert.match(
-    describePrincipals({ slackUsers: ['U1'], agents: { bea: { slackUsers: [] }, cy: { slackUsers: [], admit: 'principals' } } }, ['ava', 'bea', 'cy']),
-    /^principals set for ava; none for bea, whose Slack senders are all unknown; none for cy, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused by cy and admitted as unknown by the rest$/,
+    describePrincipals({ slackUsers: ['U1'], agents: { bea: { slackUsers: [], admit: 'anyone' }, cy: { slackUsers: [] } } }, ['ava', 'bea', 'cy']),
+    /^principals set for ava; none for bea, whose Slack senders are all unknown; none for cy, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused by ava, cy and admitted as unknown by the rest$/,
   );
 });
 

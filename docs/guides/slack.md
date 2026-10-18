@@ -148,9 +148,9 @@ thread under the message.
   block refuses `homeChannels`.
 - Mentions of people are not mentions of agents, so `@Kai can you look?`
   posted top-level in the channel still goes to the home agent.
-- Under the default `admit: "anyone"`, every member who can post in the
-  channel starts a turn, which costs a model call each. Set
-  `admit: "principals"` for a busy public channel.
+- Only the people listed in `principals.slackUsers` start a turn (the
+  default `admit: "principals"`). Under `admit: "anyone"`, every member
+  who can post in the channel does, which costs a model call each.
 - It uses the same `channels:history` / `groups:history` scopes and
   `message.*` events as thread follow-through, and takes effect on restart.
 
@@ -411,11 +411,12 @@ already turns on for approval buttons; no scope is added.
 - **Name who your agent's operator is.** Any member of the workspace can DM
   an agent or mention it, and the adapter cannot tell them from you. Until
   you list your Slack user id under `principals` in `~/.stratus/config.json`,
-  every message an agent receives in Slack is treated as coming from someone
-  it cannot vouch for, and every fact it remembers there is labelled that
-  way. The label does not refuse anyone; `"admit": "principals"` in the
-  same block does, so an agent with tools answers only the people you
-  listed. How and why is in [Who counts as the
+  the agent answers nobody in Slack: only listed principals get a turn
+  (`"admit": "principals"`, the default). `stratus setup` asks for your
+  member ID when you connect an agent, and `stratus doctor` flags an agent
+  nobody is listed for. `"admit": "anyone"` in the same block opens the
+  door to every workspace member, labelled `unknown`, and every fact the
+  agent remembers from them carries that label. How and why is in [Who counts as the
   operator](../../packages/channel-slack/README.md#who-counts-as-the-operator)
   and [Memory](../concepts/memory.md#where-a-fact-came-from).
 - **Replies are translated to Slack's markup.** Agents write Markdown; Slack

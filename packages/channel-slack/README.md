@@ -447,11 +447,11 @@ and a stranger can mention the agent inside it afterwards — the stranger's
 turn lowers the session, and the authorized member's next turn does not
 raise it back.
 
-The list is a **label** by default: an unlisted sender still gets a turn,
-marked `unknown`. For an agent that holds tools that is not enough — a
+The list is a **door** by default: an unlisted sender gets no turn. A
 stranger's message is not merely uncertain, it is a prompt they chose, and
-`unknown` does not stop `shell.run` from running on it once a listed
-approver clicks. `admit` makes the list a **door**:
+an agent that holds tools should not run on it. `"admit": "anyone"` turns
+the list back into a **label**, where an unlisted sender still gets a turn,
+marked `unknown`. Per agent, as here, where Bea answers anyone:
 
 ```jsonc
 {
@@ -465,7 +465,9 @@ approver clicks. `admit` makes the list a **door**:
 }
 ```
 
-Under `"admit": "principals"` a sender not in `slackUsers` gets no turn:
+Under `"admit": "principals"` (the default; the daemon resolves an absent
+key to it, while an embedder calling the adapter directly without `admit`
+still gets `anyone`) a sender not in `slackUsers` gets no turn:
 the message is refused before it takes a place in the queue, the agent
 does not overhear it into a thread's transcript either, and nothing is
 posted back — a reply is a conversation the operator chose not to have.

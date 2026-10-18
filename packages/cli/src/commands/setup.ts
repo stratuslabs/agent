@@ -43,6 +43,7 @@ import {
   CREDENTIAL_NAME_PATTERN,
   saveConfigFile,
   saveCredentials,
+  resolveAgentPrincipals,
   CREDENTIAL_PROVIDER_NAMES,
   verifyProviderKey,
   type ApiConfig,
@@ -1115,6 +1116,50 @@ export const runSetup = async (
       // daemon report on its first connection attempt.
       const detail = bot.status === 'unreachable' ? bot.detail : (app as { detail?: string }).detail;
       writeLine(streams.stdout, `! Could not reach Slack to verify (${detail}). Saved the tokens anyway — \`${serveCommand()}\` will report on startup.`);
+    }
+    await askSlackPrincipals(agentId, agentName);
+  };
+
+  /**
+   * Only listed Slack users get a turn (`principals.admit` defaults to
+   * `principals`), so an agent connected with nobody listed ignores
+   * everyone. Asked right after the connect, the one moment the operator
+   * is in Slack's settings anyway. Skipped when the agent already has a
+   * list, its own or inherited, so a re-run never overwrites one.
+   */
+  const askSlackPrincipals = async (agentId: string, agentName: string): Promise<void> => {
+    const resolved = resolveAgentPrincipals(state.principals, agentId);
+    if ((resolved.slackUsers ?? []).length > 0) {
+      return;
+    }
+    writeLine(streams.stdout, `Only the Slack users you list can talk to ${agentName}; everyone else is ignored.`);
+    writeLine(streams.stdout, 'Find your member ID in Slack: your profile → ⋯ → Copy member ID.');
+    for (;;) {
+      const answer = (await prompter.ask('Slack member IDs who may talk to it (U…, comma-separated, Enter to skip): ')).trim();
+      if (answer.length === 0) {
+        writeLine(streams.stdout, `! Nobody is listed, so ${agentName} will ignore every Slack message until principals.slackUsers names someone.`);
+        return;
+      }
+      const ids = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      const bad = ids.filter((id) => !/^[UW][A-Z0-9]{2,}$/.test(id));
+      if (bad.length > 0) {
+        writeLine(streams.stdout, `✗ ${bad.join(', ')} ${bad.length === 1 ? 'is not a member ID' : 'are not member IDs'} (they look like U0123ABCD). Nothing was saved.`);
+        continue;
+      }
+      const principals: PrincipalsConfig = { ...(state.principals ?? {}) };
+      if (principals.slackUsers === undefined && principals.agents?.[agentId]?.slackUsers === undefined) {
+        // The first list on this install is everyone's: the operator who
+        // connects a second agent is almost always the same person.
+        principals.slackUsers = ids;
+      } else {
+        principals.agents = {
+          ...(principals.agents ?? {}),
+          [agentId]: { ...(principals.agents?.[agentId] ?? {}), slackUsers: ids },
+        };
+      }
+      state.principals = principals;
+      writeLine(streams.stdout, `✓ ${ids.join(', ')} can talk to ${agentName}. Saved with the rest of setup.`);
+      return;
     }
   };
 

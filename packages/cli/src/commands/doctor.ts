@@ -17,6 +17,7 @@ import {
   readWorkingDirectory,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
+  resolveAgentPrincipals,
   gatewayInfoPath,
   gatewayTokenPath,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
@@ -710,6 +711,22 @@ export const collectDoctorReport = async (
     problems.push(
       `Slack tokens are stored for ${orphans.join(', ')}, which no agent matches — \`stratus serve\` skips them. `
       + 'Clear them from `stratus setup` → Channels.',
+    );
+  }
+
+  // Only listed principals get a turn unless an agent says `admit: "anyone"`,
+  // so a connected agent with nobody listed ignores every Slack message.
+  // Principals come from a trusted config only; a project config's are
+  // ignored by the daemon, so they are ignored here too.
+  const trustedPrincipals = winner?.label === 'project' ? undefined : fileConfig.principals;
+  const unreachable = slackAgents.filter((id) => !orphans.includes(id)).filter((id) => {
+    const resolved = resolveAgentPrincipals(trustedPrincipals, id);
+    return resolved.admit === 'principals' && (resolved.slackUsers ?? []).length === 0;
+  });
+  if (unreachable.length > 0) {
+    problems.push(
+      `Nobody is listed who may talk to ${unreachable.join(', ')} in Slack, so ${unreachable.length === 1 ? 'it ignores' : 'they ignore'} every message. `
+      + 'Add Slack member IDs to principals.slackUsers in ~/.stratus/config.json (or set principals.admit to "anyone"), then `stratus restart`.',
     );
   }
 

@@ -241,13 +241,14 @@ test('the principals block parses like approvals: per-agent overrides, an empty 
 
   // Ava has her own list; Bea is deliberately excluded from the shared one;
   // Cy and everyone unnamed inherit it; nobody at all is a real answer.
-  assert.deepEqual(resolveAgentPrincipals(config.principals, 'ava'), { slackUsers: ['U01OPS'] });
-  assert.deepEqual(resolveAgentPrincipals(config.principals, 'bea'), { slackUsers: [] });
-  assert.deepEqual(resolveAgentPrincipals(config.principals, 'cy'), { slackUsers: ['U01DYLAN'] });
-  assert.deepEqual(resolveAgentPrincipals(config.principals, 'dee'), { slackUsers: ['U01DYLAN'] });
-  assert.deepEqual(resolveAgentPrincipals(undefined, 'ava'), {});
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'ava'), { slackUsers: ['U01OPS'], admit: 'principals' });
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'bea'), { slackUsers: [], admit: 'principals' });
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'cy'), { slackUsers: ['U01DYLAN'], admit: 'principals' });
+  assert.deepEqual(resolveAgentPrincipals(config.principals, 'dee'), { slackUsers: ['U01DYLAN'], admit: 'principals' });
+  // Nothing configured is the closed door: only listed principals get a turn.
+  assert.deepEqual(resolveAgentPrincipals(undefined, 'ava'), { admit: 'principals' });
   // A block that is not an object is refused, not dropped: dropped, it
-  // would be the default `anyone` — see the admit test below.
+  // would silently mean the default — see the admit test below.
   assert.throws(
     () => validateConfigFile({ principals: 'U01DYLAN' }, 'test-config'),
     /Invalid principals in config test-config: expected an object, received "U01DYLAN"\./,
@@ -453,7 +454,8 @@ test('principals.admit is inherited like slackUsers, and a misspelling is refuse
   assert.deepEqual(resolveAgentPrincipals(config.principals, 'ava'), { slackUsers: ['U01DYLAN'], admit: 'anyone' });
   assert.deepEqual(resolveAgentPrincipals(config.principals, 'bea'), { slackUsers: ['U01OPS'], admit: 'principals' });
   assert.deepEqual(resolveAgentPrincipals(config.principals, 'cy'), { slackUsers: ['U01DYLAN'], admit: 'principals' });
-  assert.deepEqual(resolveAgentPrincipals(undefined, 'ava'), {});
+  // Nothing configured is the closed door: only listed principals get a turn.
+  assert.deepEqual(resolveAgentPrincipals(undefined, 'ava'), { admit: 'principals' });
 
   // The one setting here whose failure would open the door: a value that
   // is neither word is an error naming the key, never "anyone".
@@ -479,7 +481,7 @@ test('principals.admit is inherited like slackUsers, and a misspelling is refuse
   // An empty list is still how an agent is excluded from the shared one.
   assert.deepEqual(
     resolveAgentPrincipals(validateConfigFile({ principals: { slackUsers: ['U01DYLAN'], agents: { bea: { slackUsers: [] } } } }, 'test-config').principals, 'bea'),
-    { slackUsers: [] },
+    { slackUsers: [], admit: 'principals' },
   );
   // And so is the block itself, or an override, in the wrong shape: a
   // dropped block is the default `anyone`, a dropped override the shared
