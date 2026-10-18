@@ -210,11 +210,11 @@ test('headless: a safe scope and a safe pipeline run through a real pack, a cont
   // The safe scope ran, unattended, and produced real output.
   assert.equal(results[0]?.toolResult?.ok, true);
   assert.match(String((results[0]?.toolResult?.output as JsonObject).stdout), new RegExp(os.tmpdir()));
-  // The chain is refused despite `pwd` being safe-listed — which is the
-  // whole point of the operator rule.
+  // The chain is refused despite `pwd` being safe-listed: a chain runs
+  // only when every command in it would, and `curl` is covered by nothing.
   assert.equal(results[1]?.toolResult?.ok, false);
   assert.match(results[1]?.toolResult?.error ?? '', /denied by approval policy/);
-  assert.match(decisions[1]?.reason ?? '', /cannot run unattended: it contains an ampersand/);
+  assert.match(decisions[1]?.reason ?? '', /outside every approved scope/);
   // And a `git` subcommand outside the safe scopes, which listing the
   // executable would have covered.
   assert.equal(results[2]?.toolResult?.ok, false);
@@ -230,6 +230,60 @@ test('headless: a safe scope and a safe pipeline run through a real pack, a cont
   // without naming it.
   assert.equal(results[4]?.toolResult?.ok, false);
   assert.match(decisions[4]?.reason ?? '', /outside every approved scope \(a pipeline\)/);
+});
+
+test('headless: a by-name grep grant runs a chained, piped, redirected grep through a real pack', async () => {
+  const workspace = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-names-')));
+  await mkdir(path.join(workspace, 'app'), { recursive: true });
+  await writeFile(path.join(workspace, 'app', 'notes.md'), 'one todo\ntwo\nthree todo\n');
+  const decisions: PermissionDecision[] = [];
+  const tools = await registryFor({ cwd: workspace });
+
+  let turn = 0;
+  const commands = [
+    'cd app && grep -rn todo . 2>/dev/null | head -1 > hit.txt; cat hit.txt',
+    'cd app && grep -rn todo /etc/hosts',
+  ];
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate() {
+      const command = commands[turn];
+      turn += 1;
+      if (command === undefined) {
+        return { parts: [{ type: 'text', text: 'done' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `c${turn}`, toolName: 'shell.run', input: { command } } }] };
+    },
+  };
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    executor: createLocalCommandExecutor(),
+    approvals: createPermissionPolicy({
+      mode: 'headless',
+      onDecision: (decision) => decisions.push(decision),
+      commands: {
+        grantRootFor: () => workspace,
+        names: { commandNamesFor: async () => [{ command: 'grep', grantedAt: '2026-10-18T00:00:00.000Z' }], rememberCommandName: async () => {} },
+      },
+    }),
+    store: new InMemorySessionStore(),
+    maxTurns: 6,
+  });
+  await runner.initialize();
+  const finished = await runner.run({
+    sessionId: 'shell-names',
+    agent: { id: 'ava', name: 'Ava', tools: ['shell.*'] },
+    userMessage: 'find the todos',
+  });
+  const results = finished.messages.filter((message) => message.role === 'tool');
+  // The shell agreed with the reader: the cd held, the pipe and both
+  // redirections happened, and the file landed in the workspace.
+  assert.equal(results[0]?.toolResult?.ok, true, decisions[0]?.reason);
+  assert.equal(String((results[0]?.toolResult?.output as JsonObject).stdout).trim(), './notes.md:1:one todo');
+  assert.equal(existsSync(path.join(workspace, 'app', 'hit.txt')), true);
+  // The same grant does not reach outside the workspace.
+  assert.equal(results[1]?.toolResult?.ok, false);
 });
 
 test('the pack hands the engine the command and nothing else', () => {

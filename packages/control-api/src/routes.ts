@@ -1245,6 +1245,7 @@ export const routes: Route[] = [
         agentId,
         configCommands: context.configCommands?.(agentId) ?? [],
         scopes: listing.scopes,
+        commands: listing.commands,
         origins: listing.origins,
         destinations: listing.destinations.map(marked),
         tools: listing.tools.map(marked),

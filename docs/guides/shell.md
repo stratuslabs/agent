@@ -25,7 +25,8 @@ pack for a daemon and this page is the whole story; run it yourself and
    [browser actions](./browser.md), and `tools` holds the
    [standing grants](./approvals.md#standing-grants) of every other gated
    tool — then
-3. **the built-in safe list**: `pwd`, `whoami`, and `uname`, with the
+3. **the built-in safe list**: `cd`, `pwd`, `whoami`, `uname`, `true`,
+   `false`, and `echo` (with nothing the shell would expand), with the
    filters `grep`, `head`, `tail`, `wc`, `sort`, and `uniq` in shapes that
    read only what is piped to them (see below). No `git` command is on it
    (see [Why the safe list is short](#why-the-safe-list-is-short)).
@@ -48,10 +49,14 @@ scope from the whitelist composes the same way, so an approved
 unattended too. A pipeline is approved once and never stored as a scope:
 **Always allow** on one counts once.
 
+**A chain is judged command by command too**: `&&`, `||`, and `;` join
+commands that each have to run on their own, and redirections are allowed
+where the agent may write — see
+[Chains, redirections, and grants by name](#chains-redirections-and-grants-by-name).
 **Every other control operator disqualifies the whole command**, whatever
-it starts with: `||`, `|&`, `&`, `;`, a newline, backticks, `$( )`,
-subshells, redirection. `git log | grep x > out.txt` is refused, and so is
-a two-line command whose first line is innocent. Operators are looked for
+it starts with: `|&`, a background `&`, a newline, backticks, `$( )`,
+subshells, a heredoc. A two-line command whose first line is innocent is
+refused. Operators are looked for
 where the shell reads them: inside quotes, `(`, `;`, `&`, `|`, `<`, `>`,
 and a newline are text, so `git commit -m "Fix the hang (Mac mini)"` and
 `git diff | grep -E 'TODO|FIXME'` are judged as the commands they are.
@@ -123,6 +128,70 @@ in the daemon's log, and no "always" answer is written over it until it is
 fixed and the daemon restarted: the answer still holds the way any "always"
 does until then — for that agent, for the life of the daemon — and the log
 line says it was not saved.
+
+## Chains, redirections, and grants by name
+
+An agent rarely runs one bare command. It runs `cd app && grep -rn TODO .
+| head`, and before this every line like that asked, whatever had been
+approved. Now such a line is read the way the shell reads it — pipelines
+joined by `&&`, `||`, and `;`, each command with its redirections — and it
+runs unattended when every command in it would run on its own:
+
+- `cd`, `pwd`, `echo`, `true`, and `false` never ask. `cd` is followed:
+  the commands after it are judged in the directory it moves to, and in the
+  one it started from, since a `cd` that fails leaves the line where it was.
+- `cat`, `head`, `tail`, and `ls` of files inside the agent's workspace never
+  ask, with or without [workspace autonomy](./approvals.md#workspace-autonomy).
+- A command **granted by name** runs with any flags and arguments, as long
+  as the line runs inside the agent's workspace and every argument that
+  could be a path resolves inside it, symlinks followed. That includes paths
+  inside a word (`--file=…`, `file=@…`) and what a glob expands to.
+- A scope from the whitelist covers its command as it always has, alone in
+  its pipeline or in a pipeline of other scopes.
+- Under workspace autonomy, its reads, local git, downloads, and pushes.
+
+Output may be redirected into the workspace or to `/dev/null`, and input
+read from the workspace. A redirection anywhere else, or one through a
+symlink that leaves the workspace, asks.
+
+**Always allow on a command grants it by name.** Approving `grep -rn TODO
+src` once stores `grep`, so every later `grep` inside the workspace runs:
+`cd app && grep -r export . | head` included. A granted command still asks
+when it points outside the workspace — `grep token ~/.ssh/config`, `rm -rf
+/tmp/x`, a `cd ..` out of it first — and in these forms whatever its grant:
+
+- a flag that follows links below the paths it was given (`grep -R`,
+  `rg -L`, `cp -L`, `--dereference`), which a check of those paths
+  cannot see;
+- a token the shell would expand that has no literal reading (`$HOME`,
+  `~`, braces).
+
+Always allow on a line grants each command it was missing, so approving
+`cd app && wc -c main.ts && git push origin nova/fix` once stores `wc` by
+name and the `git push` scope. The prompt says which before you answer.
+
+**Some commands are never granted by name**, because their arguments are
+not only paths: shells and interpreters (`sh`, `python3`, `node`, `awk`,
+`sed`), wrappers that run another program (`xargs`, `env`, `sudo`, `find`,
+`timeout`), commands that act on another machine (`ssh`, `rsync`), and
+commands that change the machine itself (`launchctl`, `chmod`, `kill`,
+`security`, `stratus`). Alone, **Always allow** on one still stores the
+narrow scope described above; in a line with other commands, it counts once.
+Commands with subcommands (`git`, `gh`, `pnpm`, `npm`, `cargo`, `make`,
+`agentboard`) keep the command-plus-subcommand scope, so `gh pr` is never
+`gh repo delete`.
+
+This is argument-level policy, not a sandbox. A by-name grant judges the
+paths a command is given and the directory it runs in, not files it opens
+on its own (a config file in your home directory, say), and not symlinks a
+recursive walk meets below a directory it was given, beyond refusing the
+flags above that follow them. Grant by name the commands whose arguments
+say what they touch.
+
+By-name grants live in the `commands` array of the whitelist file, beside
+`scopes`. `stratus grants nova` lists them, and `stratus grants revoke nova
+--scope grep` takes one back. A daemon from before this ignores the array,
+so rolling back costs the grants rather than widening them.
 
 ## What the log records about a command
 

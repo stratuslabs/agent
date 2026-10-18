@@ -18,10 +18,22 @@ export const autonomyDirectory = (
   plugins: Record<string, unknown>,
   env: StateEnvironment,
   agentId: string,
-): string | undefined => {
-  if (resolveAgentApprovals(approvals, agentId).autonomy !== 'workspace') {
-    return undefined;
-  }
+): string | undefined =>
+  resolveAgentApprovals(approvals, agentId).autonomy === 'workspace'
+    ? agentShellWorkspace(plugins, env, agentId)
+    : undefined;
+
+/**
+ * The directory the shell resolves for the agent, whether or not autonomy
+ * is on: where a command granted by name may point, and where a compound
+ * command may write its output (see `compound.ts` in
+ * `@stratusagent/permissions`).
+ */
+export const agentShellWorkspace = (
+  plugins: Record<string, unknown>,
+  env: StateEnvironment,
+  agentId: string,
+): string => {
   const shell = plugins['@stratusagent/tool-shell'];
   const root = shell !== null && typeof shell === 'object' && !Array.isArray(shell)
     ? resolvePluginAgentConfig(shell as JsonObject, agentId).workspaceRoot

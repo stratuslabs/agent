@@ -33,7 +33,7 @@ what moves when you rename an agent.
 | --- | --- |
 | `agents/<id>/sessions.db` | Its conversations, whole: messages, status, and the provider replay state a resumed turn needs. `0600`. |
 | `agents/<id>/memory.jsonl` | What it [remembers](../concepts/memory.md), one JSON record per line, plus the derived `memory.jsonl.index` beside it. `0600`. |
-| `agents/<id>/whitelist.json` | What it may do unattended: command scopes, origins, and standing tool grants. See [Approvals](../guides/approvals.md#standing-grants). `0600`. An install still waiting on the upgrade move has this as `agents/<id>.whitelist.json`, and that file is the one both read and written until it moves. |
+| `agents/<id>/whitelist.json` | What it may do unattended: command scopes, commands granted by name, origins, and standing tool grants. See [Approvals](../guides/approvals.md#standing-grants). `0600`. An install still waiting on the upgrade move has this as `agents/<id>.whitelist.json`, and that file is the one both read and written until it moves. |
 | `agents/<id>/workspace/` | A link to `~/Agents/<id>/workspace/` (see [the agents folder](#the-agents-folder)). Where its tools put the files they produce — a screenshot a channel uploads, a report it wrote, an image an MCP server returned — plus `fs-provenance.jsonl`, the ledger that remembers which of those files came from outside (see [Tools](../guides/tools.md)). `0700`. An install still waiting on the upgrade move has this as `workspaces/<id>/`. |
 
 The agent's **soul is named in `agents/`**, not in this directory: a

@@ -51,7 +51,17 @@ import {
   type DestinationGrant,
 } from './destinations.ts';
 import {
+  analyzeCompound,
+  compoundCommandNames,
+  grantableByName,
+  judgeCompound,
+  NOT_GRANTABLE_BY_NAME,
+  type CommandNameGrant,
+  type CompoundJudgement,
+} from './compound.ts';
+import {
   WhitelistUnreadableError,
+  type CommandNameStore,
   type CommandWhitelistStore,
   type DestinationWhitelistStore,
   type OriginWhitelistStore,
@@ -113,11 +123,25 @@ export {
   type AgentGrants,
   type AgentGrantsListing,
   type AgentGrantStore,
+  type CommandNameStore,
   type CommandWhitelistStore,
   type DestinationWhitelistStore,
   type OriginWhitelistStore,
   type ToolGrantStore,
 } from './whitelist.ts';
+export {
+  analyzeCompound,
+  grantableByName,
+  judgeCompound,
+  NOT_GRANTABLE_BY_NAME,
+  parseCommandNameGrant,
+  SUBCOMMAND_COMMANDS,
+  type CommandNameGrant,
+  type CompoundCommand,
+  type CompoundJudgement,
+  type CompoundStage,
+  type Redirect,
+} from './compound.ts';
 
 /**
  * How a policy reaches a human — or admits that it cannot.
@@ -397,6 +421,21 @@ export interface CommandScopeOptions {
   /** Where "always allow" persists a scope, and where one is read back. */
   whitelist?: CommandWhitelistStore;
   /**
+   * Where "always allow" persists a grant on a command by name (`grep`),
+   * and where one is read back. Omitted, such a grant lasts for this
+   * process. Only used with `grantRootFor`, since a by-name grant means
+   * nothing without a workspace to keep it in.
+   */
+  names?: CommandNameStore;
+  /**
+   * The agent's workspace, whether or not autonomy is on for it: where a
+   * by-name grant may point, where a compound command may redirect output,
+   * and where `cat`, `head`, `tail` and `ls` read without asking. Undefined
+   * for an agent turns all of that off, and "always" stores the narrower
+   * scope it did before.
+   */
+  grantRootFor?(agentId: string): string | undefined;
+  /**
    * Workspace autonomy. Answers the directory an agent may read in without
    * asking, or undefined when autonomy is off for it. With an answer, a
    * command (or pipeline stage) that only reads, and only inside that
@@ -417,6 +456,8 @@ export interface CommandScopeOptions {
    * decision that must not be the one leaving no trace.
    */
   onScopeRemembered?: (event: { agentId: string; scope: CommandScope }) => void;
+  /** Called when a command is granted by name, for the same reason. */
+  onCommandNameRemembered?: (event: { agentId: string; grant: CommandNameGrant }) => void;
 }
 
 export interface OriginScopeOptions {
@@ -726,6 +767,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
   // grant lives, so revoking it there is the next call's answer, rather
   // than a promise the daemon keeps only until its next restart.
   const sessionScopes = new Map<string, CommandScope[]>();
+  /** The same tier for commands granted by name. */
+  const sessionNames = new Map<string, CommandNameGrant[]>();
   /** The same tier for origins, and for the same reason. */
   const sessionOrigins = new Map<string, OriginScope[]>();
   /** And for standing tool grants. */
@@ -844,6 +887,36 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       const externalGate = sessionTrustOf(session) === 'external'
         && gateExternalContent?.(session.agent.id) === true;
 
+      /**
+       * Workspace autonomy for one command in one directory: a read inside
+       * it, local git, a plain download from a readable site, or a push of
+       * the agent's own branch. Shared by the single-command path and the
+       * compound one, so the two cannot drift.
+       */
+      const autonomousStage = async (stage: CommandAnalysis, cwd: string, workspace: string): Promise<boolean> => {
+        if (await readsInsideWorkspace(stage, cwd, workspace)) {
+          return true;
+        }
+        // Local git changes things, so it's a grant like any other
+        // to a conversation the external-content gate has closed.
+        if (!externalGate && await gitInsideWorkspace(stage, cwd, workspace)) {
+          return true;
+        }
+        // A plain download from a site the agent may already read:
+        // a trusted domain, or one approved for `web.fetch`. Granted
+        // trust, so not to a conversation the gate has closed.
+        // And not for an agent the gate is on for at all: the shell
+        // marks its output `unknown`, not `external`, so a page read
+        // this way would never close the gate it exists to close.
+        const gated = gateExternalContent?.(session.agent.id) === true;
+        const site = gated ? undefined : await downloadInsideWorkspace(stage, cwd, workspace);
+        if (site !== undefined && await readableSite(session.agent.id, site)) {
+          return true;
+        }
+        const prefixes = commands?.workspace?.branchPrefixesFor?.(session.agent.id) ?? [`${session.agent.id}/`];
+        return !externalGate && await gitPushInsideWorkspace(stage, cwd, workspace, prefixes);
+      };
+
       const command = risk === 'gated' && singlyScoped
         ? context.tool.commandFor?.(call.input)
         : undefined;
@@ -895,19 +968,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         ? context.tool.destinationFor?.(call.input)
         : undefined;
 
+      // The agent's workspace for by-name grants and compound commands, and
+      // how a compound reading of this command was judged. Kept for the
+      // question below: what "always" would grant depends on which of its
+      // commands nothing covered.
+      const grantRoot = analysis ? commands?.grantRootFor?.(session.agent.id) : undefined;
+      let judgement: CompoundJudgement | undefined;
       if (analysis) {
-        if (analysis.disqualifiedBy) {
-          // Never auto-approved, whatever the base command is: a safe scope
-          // in front of a pipe is the exact shape this rule exists for.
-          if (mode === 'headless') {
-            return report(
-              context,
-              false,
-              `${call.toolName} cannot run unattended: ${analysis.disqualifiedBy}`,
-              command,
-            );
-          }
-        } else {
+        if (!analysis.disqualifiedBy) {
           // The built-in safe scopes survive the gate and granted ones do
           // not: `git status` was judged safe for any caller, while a
           // granted `git push` was judged for an agent nobody else was
@@ -958,30 +1026,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               if (findMatchingScope(stage, intrinsic)) {
                 continue;
               }
-              if (await readsInsideWorkspace(stage, cwd, workspace)) {
-                read = true;
-                continue;
-              }
-              // Local git changes things, so it's a grant like any other
-              // to a conversation the external-content gate has closed.
-              if (!externalGate && await gitInsideWorkspace(stage, cwd, workspace)) {
-                read = true;
-                continue;
-              }
-              // A plain download from a site the agent may already read:
-              // a trusted domain, or one approved for `web.fetch`. Granted
-              // trust, so not to a conversation the gate has closed.
-              // And not for an agent the gate is on for at all: the shell
-              // marks its output `unknown`, not `external`, so a page read
-              // this way would never close the gate it exists to close.
-              const gated = gateExternalContent?.(session.agent.id) === true;
-              const site = gated ? undefined : await downloadInsideWorkspace(stage, cwd, workspace);
-              if (site !== undefined && await readableSite(session.agent.id, site)) {
-                read = true;
-                continue;
-              }
-              const prefixes = commands?.workspace?.branchPrefixesFor?.(session.agent.id) ?? [`${session.agent.id}/`];
-              if (!externalGate && await gitPushInsideWorkspace(stage, cwd, workspace, prefixes)) {
+              if (await autonomousStage(stage, cwd, workspace)) {
                 read = true;
                 continue;
               }
@@ -997,6 +1042,62 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               );
             }
           }
+        }
+        // A compound reading: a chain, redirections, a command granted by
+        // name. Every command must run on its own terms; see `compound.ts`.
+        const compound = analyzeCompound(command as string);
+        if (!compound.disqualifiedBy) {
+          const intrinsic = commands?.safeScopes === undefined
+            ? SAFE_COMMAND_SCOPES
+            : commands.safeScopes.filter((scope) => SAFE_COMMAND_SCOPES.includes(scope));
+          // A host's additions to the safe list survive the gate, as they do
+          // above, but compose like a grant: alone, or among scopes.
+          const hostScopes = (commands?.safeScopes ?? []).filter((scope) => !SAFE_COMMAND_SCOPES.includes(scope));
+          const autonomy = commands?.workspace?.directoryFor(session.agent.id);
+          judgement = await judgeCompound(compound, {
+            cwd: context.tool.cwdFor?.(session),
+            root: grantRoot,
+            safeScopes: intrinsic,
+            scopes: [
+              ...(externalGate
+                ? []
+                : [
+                    ...(sessionScopes.get(session.agent.id) ?? []),
+                    ...(commands?.whitelist ? await commands.whitelist.scopesFor(session.agent.id) : []),
+                  ]),
+              ...hostScopes,
+            ],
+            // Granted, so withdrawn by the gate like any other grant.
+            names: externalGate || grantRoot === undefined
+              ? []
+              : [
+                  ...(sessionNames.get(session.agent.id) ?? []),
+                  ...(commands?.names ? await commands.names.commandNamesFor(session.agent.id) : []),
+                ].map((grant) => grant.command),
+            ...(autonomy !== undefined
+              ? { autonomous: (stage: CommandAnalysis, cwd: string) => autonomousStage(stage, cwd, autonomy) }
+              : {}),
+            reads: readsInsideWorkspace,
+          });
+          if (judgement.covered) {
+            const names = compoundCommandNames(compound.pipelines.flat());
+            return report(
+              context,
+              true,
+              `${call.toolName} ran ${names.join(', ')}, each inside what ${session.agent.id} may run unattended`,
+              command,
+            );
+          }
+        } else if (analysis.disqualifiedBy && mode === 'headless') {
+          // Never auto-approved, whatever the base command is: a safe scope
+          // in front of a backgrounding `&` is the exact shape this rule
+          // exists for.
+          return report(
+            context,
+            false,
+            `${call.toolName} cannot run unattended: ${analysis.disqualifiedBy}`,
+            command,
+          );
         }
       } else if (risk === 'gated' && unscoped && !externalGate) {
         // The standing grant: this process's answers first, then the file.
@@ -1158,6 +1259,41 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // after the answer so the question can say so; it is a pure function
       // of the analysis, and the branch below reuses this exact value.
       const commandScope = analysis ? normalizeCommandScope(analysis) : undefined;
+      // With a workspace to hold them, "always" grants what this line was
+      // missing instead: each command nothing covered, by name where that
+      // is safe (`grep`) and as the narrower scope where it is not (`git
+      // push`). Nothing, when one of them cannot be granted either way or
+      // what blocked the line was not a command — output sent outside the
+      // workspace, a directory this reader could not follow — since a grant
+      // that would not make the line run is not one to offer.
+      const plan = ((): { names: string[]; scopes: CommandScope[] } | undefined => {
+        if (judgement === undefined || grantRoot === undefined || judgement.unfixable || judgement.uncovered.length === 0) {
+          return undefined;
+        }
+        const names: string[] = [];
+        const scopes: CommandScope[] = [];
+        // A command alone keeps the narrower scope it always could (`python3
+        // scripts/check.py`). In a line with others, a shell, interpreter or
+        // wrapper gets nothing: `… | sh` is the shape a grant must not learn.
+        const alone = analyzeCompound(command as string).pipelines.flat().length === 1;
+        for (const stage of judgement.uncovered) {
+          const base = stage.analysis.base;
+          if (base !== undefined && grantableByName(base)) {
+            names.push(base);
+            continue;
+          }
+          if (!alone && base !== undefined && NOT_GRANTABLE_BY_NAME.has(base)) {
+            return undefined;
+          }
+          const scope = normalizeCommandScope(stage.analysis);
+          if (scope === undefined) {
+            return undefined;
+          }
+          scopes.push(scope);
+        }
+        return { names: [...new Set(names)], scopes };
+      })();
+      const usePlan = judgement !== undefined && grantRoot !== undefined;
       // A gated conversation cannot mint a grant either: the request in
       // front of the approver was composed after a page had its say, and
       // "always" there would let the page talk a person into exactly the
@@ -1166,7 +1302,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         || externalGate
         || multiplyScoped
         || (scopedByOrigin && origin === undefined)
-        || (analysis !== undefined && commandScope === undefined);
+        || (analysis !== undefined && (usePlan ? plan === undefined : commandScope === undefined));
       // Which kind of grant `always` creates, as data for the transport and
       // as words for the prompt — the same decision, made once, so the two
       // surfaces cannot promise different lifetimes for the same answer.
@@ -1192,7 +1328,10 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
                 ? 'not remembered — this command cannot be reduced to a scope'
                 : 'not remembered — there is no page to grant'
         : always === 'scope'
-          ? 'always this scope'
+          ? usePlan && plan !== undefined
+            ? `always ${[...plan.names, ...plan.scopes.map(describeCommandScope)].join(', ')} for ${session.agent.name}`
+              + `${plan.names.length > 0 ? ', inside its workspace' : ''}, until revoked`
+            : 'always this scope'
           : always === 'origin'
             ? 'always this site'
             : always === 'tool'
@@ -1314,6 +1453,63 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           }
           return allowUnlessMoved(
             `${call.toolName} was approved, and ${describeOriginScope(grant)} is now acted on without asking`,
+          );
+        }
+        if (usePlan) {
+          if (plan === undefined) {
+            return allowUnlessMoved(
+              `${call.toolName} was approved once; it cannot be reduced to grants, so it will ask again`,
+              command,
+            );
+          }
+          const agentId = session.agent.id;
+          const saved: string[] = [];
+          let unsaved: string | undefined;
+          for (const name of plan.names) {
+            const grant: CommandNameGrant = {
+              command: name,
+              grantedAt: new Date().toISOString(),
+              ...(actor !== undefined ? { grantedBy: actor } : {}),
+            };
+            if (commands?.names && unsaved === undefined) {
+              try {
+                await commands.names.rememberCommandName(agentId, grant);
+                commands.onCommandNameRemembered?.({ agentId, grant });
+                saved.push(name);
+                continue;
+              } catch (error) {
+                if (!(error instanceof WhitelistUnreadableError)) {
+                  throw error;
+                }
+                unsaved = error.message;
+              }
+            }
+            rememberForProcess(sessionNames, agentId, grant);
+            saved.push(name);
+          }
+          for (const scope of plan.scopes) {
+            if (commands?.whitelist && unsaved === undefined) {
+              try {
+                await commands.whitelist.remember(agentId, scope);
+                commands.onScopeRemembered?.({ agentId, scope });
+                saved.push(describeCommandScope(scope));
+                continue;
+              } catch (error) {
+                if (!(error instanceof WhitelistUnreadableError)) {
+                  throw error;
+                }
+                unsaved = error.message;
+              }
+            }
+            rememberForProcess(sessionScopes, agentId, scope);
+            saved.push(describeCommandScope(scope));
+          }
+          const list = saved.map((entry) => `"${entry}"`).join(', ');
+          return allowUnlessMoved(
+            unsaved === undefined
+              ? `${call.toolName} was approved, and ${list} now run${saved.length === 1 ? 's' : ''} without asking`
+              : `${call.toolName} was approved, and ${list} run without asking for ${agentId} until the daemon restarts — not saved: ${unsaved}`,
+            command,
           );
         }
         const scope = commandScope;

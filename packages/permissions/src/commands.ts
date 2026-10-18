@@ -274,6 +274,16 @@ export const SAFE_COMMAND_SCOPES: CommandScope[] = [
   { command: 'pwd' },
   { command: 'whoami' },
   { command: 'uname' },
+  // Navigation and the shell's no-ops. `cd` changes only where the rest of
+  // the line runs, which the compound judge tracks (`judgeCompound`), and a
+  // `cd` on its own changes nothing a later call sees: every call starts a
+  // new shell. `echo` prints its arguments and nothing else, so it may
+  // expand nothing: `echo $TOKEN` is an environment read, and `echo *` a
+  // directory listing.
+  { command: 'cd' },
+  { command: 'echo', literal: true },
+  { command: 'true' },
+  { command: 'false' },
 ];
 
 /**

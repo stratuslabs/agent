@@ -272,7 +272,7 @@ const readPaths = (base: string, args: string[]): string[] | undefined => {
 };
 
 /** Whether `child` is `parent` or inside it, both already resolved. */
-const within = (parent: string, child: string): boolean => {
+export const within = (parent: string, child: string): boolean => {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 };
@@ -283,7 +283,7 @@ const within = (parent: string, child: string): boolean => {
  * doesn't exist reads nothing, but `ls missing/../../..` still has to be
  * judged by where it points.
  */
-const resolveReal = async (target: string): Promise<string | undefined> => {
+export const resolveReal = async (target: string): Promise<string | undefined> => {
   let existing = target;
   const missing: string[] = [];
   for (;;) {
@@ -306,7 +306,7 @@ const resolveReal = async (target: string): Promise<string | undefined> => {
  * way `path.resolve` does, would cancel `link/..` lexically, while the
  * kernel follows `link` and then takes the parent of wherever it pointed.
  */
-const walk = async (base: string, target: string): Promise<string | undefined> => {
+export const walk = async (base: string, target: string): Promise<string | undefined> => {
   let current = path.isAbsolute(target) ? await resolveReal(path.parse(target).root) : await resolveReal(base);
   if (current === undefined) {
     return undefined;

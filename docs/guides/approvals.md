@@ -506,6 +506,7 @@ than scoping choices:
 stratus grants blair                                # everything blair may do unattended, every kind
 stratus grants revoke blair --tool fs.write           # a standing grant
 stratus grants revoke blair --scope "git push"        # a command scope, by the line the listing shows
+stratus grants revoke blair --scope grep              # a command granted by name
 stratus grants revoke blair --origin https://app.example.com
 stratus grants revoke blair --destination slack:C0123ABCD   # every tool granted on that conversation
 ```
