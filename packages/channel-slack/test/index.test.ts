@@ -2306,14 +2306,10 @@ test('an agent that listens to mentions answers only when named, and hears the r
   );
 });
 
-test('an agent that judges takes a turn nobody asked for while attentive, hears for free past that, and a mention re-arms it', async () => {
+test('an agent that judges takes a turn nobody asked for on every untagged reply in a thread it owns, however long since it answered (card 541)', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C1', { is_member: true });
-  // The session as the gateway would report it: when Ava last spoke in the
-  // thread, and how many messages she has heard since.
-  const attention: { lastAnsweredAt?: string; heard: number } = { heard: 0 };
-  const spokeAt = (ts: string): string => new Date(Number(ts) * 1000).toISOString();
   const gateway = createStubGateway(({ sessionId, userMessage }) => {
     if (userMessage.includes('help')) {
       return sessionWithReply(sessionId, 'Here is help');
@@ -2321,13 +2317,9 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
     return sessionWithReply(sessionId, userMessage.endsWith('Dylan: hi') ? 'hi there' : '');
   });
   gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  // Ava is the only agent in the thread, so it is hers.
   gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C1:980.0'
-    ? {
-      agentId: 'ava',
-      metadata: {},
-      heardSinceAnswered: attention.heard,
-      ...(attention.lastAnsweredAt !== undefined ? { lastSpokeAt: attention.lastAnsweredAt, lastAnsweredAt: attention.lastAnsweredAt } : {}),
-    }
+    ? { agentId: 'ava', metadata: {}, heardSinceAnswered: 0 }
     : undefined);
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -2337,94 +2329,48 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
   });
   await adapter.start(gateway);
 
-  // In the thread but never spoke in it: not attentive. Heard, no turn.
+  // Her thread, though she has not spoken in it: a turn nobody asked for.
   await socket.deliver('message', channelMessage({ text: 'kicking off', ts: '980.1', thread: '980.0' }));
-  attention.heard += 1;
-  // A mention runs a turn somebody asked for — placeholder and all — and
-  // her answer to it arms attention.
+  // A mention runs a turn somebody asked for, placeholder and all.
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> hi', ts: '980.2', thread: '980.0' }));
-  attention.lastAnsweredAt = spokeAt('980.2');
-  attention.heard = 0;
-  // Attentive: a turn nobody asked for. It says nothing, and nothing is
-  // posted — no placeholder, no `(no reply)`.
+  // Untagged: a turn nobody asked for. It says nothing, and nothing is
+  // posted: no placeholder, no `(no reply)`.
   await socket.deliver('message', channelMessage({ text: 'and then', ts: '980.3', thread: '980.0' }));
-  attention.heard += 1;
-  // Attentive, and this time it has something to add: posted, with no
-  // placeholder having been shown while it decided. Speaking on a turn
-  // nobody asked for does not re-arm attention — the anchor stays at the
-  // mention, and this message counts against the window like any other.
+  // This time it has something to add: posted, with no placeholder having
+  // been shown while it decided.
   await socket.deliver('message', channelMessage({ text: 'help me', ts: '980.4', thread: '980.0' }));
-  attention.heard += 1;
-  // Eight messages heard since she was asked: attention has run out.
-  // Heard, no turn — and the provider is never called.
-  attention.heard = 8;
+  // No window: many messages on, and an hour after her last answer, an
+  // untagged message in her thread is still hers to judge (the Oct 16 case).
   await socket.deliver('message', channelMessage({ text: 'still there?', ts: '980.5', thread: '980.0' }));
-  // Fifteen minutes since she was asked, whatever the count: the same.
-  attention.heard = 0;
-  await socket.deliver('message', channelMessage({ text: 'much later', ts: '2000.0', thread: '980.0' }));
-  // A mention re-arms it. Then a message carrying a screenshot: a turn
-  // nobody asked for takes no images — the kernel refuses them — so it is
-  // named the way an overheard message's attachment is.
-  await socket.deliver('message', channelMessage({ text: '<@B-AVA> back?', ts: '2000.05', thread: '980.0' }));
-  attention.lastAnsweredAt = spokeAt('2000.05');
-  attention.heard = 0;
-  const withShot = channelMessage({ text: 'what about this', ts: '2000.1', thread: '980.0' });
+  await socket.deliver('message', channelMessage({ text: 'much later', ts: '4600.0', thread: '980.0' }));
+  // A mention, then a message carrying a screenshot: a turn nobody asked
+  // for takes no images (the kernel refuses them), so it is named the way
+  // an overheard message's attachment is.
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> back?', ts: '4600.05', thread: '980.0' }));
+  const withShot = channelMessage({ text: 'what about this', ts: '4600.1', thread: '980.0' });
   await socket.deliver('message', {
     ...withShot,
     event: { ...withShot.event, files: [{ id: 'F1', name: 'shot.png', mimetype: 'image/png', url_private_download: 'https://files.example/shot.png' }] },
   });
   await adapter.stop();
 
-  // Cost, stated: one call per mention plus one per message judged inside
-  // the window — five here, of eight messages.
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.addressed, dispatch.images]), [
+    ['Dylan: kicking off', false, undefined],
     ['Dylan: hi', undefined, undefined],
     ['Dylan: and then', false, undefined],
     ['Dylan: help me', false, undefined],
+    ['Dylan: still there?', false, undefined],
+    ['Dylan: much later', false, undefined],
     ['Dylan: back?', undefined, undefined],
     ['Dylan: what about this\n[Attached, name only: shot.png (not opened, since this message was not addressed to you). You have only the names, so say so rather than guessing at what is in them.]', false, undefined],
   ]);
-  assert.deepEqual(gateway.observes.map((observed) => observed.message), [
-    'Dylan: kicking off',
-    'Dylan: still there?',
-    'Dylan: much later',
-  ]);
+  assert.deepEqual(gateway.observes.map((observed) => observed.message), []);
   // The thread saw exactly three things from Ava: the two answers she was
   // asked for, in their placeholders, and the one she chose to give, as a
-  // message of its own — and no `…` or `(no reply)` for the turns that
+  // message of its own, and no `…` or `(no reply)` for the turns that
   // said nothing.
   assert.deepEqual(web.posts.map((post) => post.text), ['…', 'Here is help', '…']);
   assert.deepEqual(web.updates.map((update) => update.text), ['hi there', '(no reply)']);
-});
-
-test('a message said before the answer the window starts from is heard, not judged', async () => {
-  const socket = createFakeSocket();
-  const web = createFakeWeb('B-AVA', 'T1');
-  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
-  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
-  // Ava answered a mention at 1000s; Slack redelivers, after a restart,
-  // a message typed at 999.5s that her answer already came after.
-  gateway.sessionRouting = async () => ({
-    agentId: 'ava',
-    metadata: {},
-    lastSpokeAt: new Date(1000 * 1000).toISOString(),
-    lastAnsweredAt: new Date(1000 * 1000).toISOString(),
-    heardSinceAnswered: 0,
-  });
-  const adapter = createSlackChannelAdapter({
-    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
-    editIntervalMs: 0,
-    createSocketClient: () => socket,
-    createWebClient: () => web,
-  });
-  await adapter.start(gateway);
-
-  await socket.deliver('message', channelMessage({ text: 'before the answer', ts: '999.5', thread: '990.0' }));
-  await socket.deliver('message', channelMessage({ text: 'after it', ts: '1000.5', thread: '990.0' }));
-  await adapter.stop();
-
-  assert.deepEqual(gateway.observes.map((observe) => observe.message), ['Dylan: before the answer']);
-  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.addressed]), [['Dylan: after it', false]]);
 });
 
 test('a turn nobody asked for that the daemon died inside is failed quietly after the restart', async () => {
@@ -2526,9 +2472,12 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   const webBea = createFakeWeb('B-BEA', 'T1');
   const warnings: string[] = [];
   const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
-  const gateway = createStubGateway(async ({ sessionId }) => {
+  const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (sessionId.includes(':bea:')) {
       return sessionWithReply(sessionId, 'sure');
+    }
+    if (userMessage.includes('look at this')) {
+      return sessionWithReply(sessionId, 'seen it');
     }
     // Ava's primary provider streams a line, fails mid-stream, and the
     // fallback that takes over answers with nothing.
@@ -2542,7 +2491,7 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   gateway.sessionRouting = async (sessionId) => ({
     agentId: sessionId.includes(':ava:') ? 'ava' : 'bea',
     metadata: {},
-    // Bea spoke last; Ava is attentive.
+    // Bea spoke last: the thread is hers.
     lastSpokeAt: new Date((sessionId.includes(':ava:') ? 990 : 991) * 1000).toISOString(),
     lastAnsweredAt: new Date(990 * 1000).toISOString(),
     heardSinceAnswered: 0,
@@ -2564,24 +2513,33 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   });
   await adapter.start(gateway);
 
+  // Bea answers first in this process, so it knows the thread is hers.
+  clock.at('990.5');
+  await socket.deliver('message', channelMessage({ text: '<@B-BEA> start', ts: '990.5', thread: '990.0' }));
+  // Dylan names Ava once: she answers, and the thread stays Bea's, but
+  // Dylan's untagged follow-ups are Ava's to judge (card 541).
+  clock.at('991.5');
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> look at this', ts: '991.5', thread: '990.0' }));
   clock.at('992.1');
   await socket.deliver('message', channelMessage({ text: 'so what do we do', ts: '992.1', thread: '990.0' }));
   // The placeholder the abandoned line opened is gone, not edited into
-  // `(no reply)`, and nothing of Ava's stands in the thread; Bea answered.
-  assert.deepEqual(webAva.posts.map((post) => post.text), ['…']);
-  assert.deepEqual(webAva.deletes, [{ channel: 'C1', ts: '992.102' }]);
+  // `(no reply)`, and nothing of Ava's judged turn stands in the thread.
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['…', '…']);
+  assert.deepEqual(webAva.deletes, [{ channel: 'C1', ts: '992.101' }]);
   assert.ok(!webAva.updates.some((update) => update.text === '(no reply)'), webAva.updates.map((update) => update.text).join(' | '));
   assert.deepEqual(webBea.updates.map((update) => update.text), ['sure']);
-  // Ava did not speak, so the thread is still Bea's: the follow-up runs
-  // Bea's turn under the thread rule and Ava's judgement, not Ava's alone.
+  // Ava did not speak, so the thread is still Bea's: Sam, who has named
+  // nobody, is answered by Bea, and Ava only hears it.
   clock.at('992.2');
-  await socket.deliver('message', channelMessage({ text: 'and then?', ts: '992.2', thread: '990.0' }));
+  await socket.deliver('message', channelMessage({ text: 'and then?', ts: '992.2', thread: '990.0', user: 'U-SAM' }));
   const followUps = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('and then?'));
-  assert.deepEqual(followUps.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]).sort(), [['ava', false], ['bea', true]]);
+  assert.deepEqual(followUps.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]), [['bea', true]]);
+  assert.deepEqual(webBea.updates.map((update) => update.text), ['sure', 'sure']);
 
   // Slack refusing the delete leaves the line standing, and a standing
-  // message finishes the ordinary way: it says `(no reply)` and is the
-  // last thing said, so the next follow-up is Ava's and Bea stands down.
+  // message finishes the ordinary way: it says `(no reply)`, and a judged
+  // turn that spoke takes the thread, so Sam's next message is Ava's and
+  // Bea stands down.
   webAva.chat.delete = async () => {
     throw new Error('cant_delete_message');
   };
@@ -2590,9 +2548,9 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   assert.ok(webAva.updates.some((update) => update.text === '(no reply)'), webAva.updates.map((update) => update.text).join(' | '));
   assert.equal(warnings.filter((line) => /chat\.delete failed: cant_delete_message/.test(line)).length, 1, warnings.join('\n'));
   clock.at('992.4');
-  await socket.deliver('message', channelMessage({ text: 'ok', ts: '992.4', thread: '990.0' }));
+  await socket.deliver('message', channelMessage({ text: 'ok', ts: '992.4', thread: '990.0', user: 'U-SAM' }));
   await adapter.stop();
-  const last = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('ok'));
+  const last = gateway.dispatches.filter((dispatch) => dispatch.userMessage.endsWith(': ok'));
   assert.deepEqual(last.map((dispatch) => [dispatch.agentId, dispatch.addressed]), [['ava', false]]);
 });
 
@@ -2605,10 +2563,6 @@ test('a turn nobody asked for whose placeholder opened but took no edit takes it
   const clock = stampsAfter();
   webAva.stamp = clock.stamp;
   webBea.stamp = clock.stamp;
-  // The placeholder posts; nothing Ava says ever lands in it.
-  webAva.chat.update = async () => {
-    throw new Error('ratelimited');
-  };
   const gateway = createStubGateway(async ({ sessionId }) => {
     if (sessionId.includes(':bea:')) {
       return sessionWithReply(sessionId, 'ok');
@@ -2639,15 +2593,26 @@ test('a turn nobody asked for whose placeholder opened but took no edit takes it
   });
   await adapter.start(gateway);
 
+  // Bea answers first in this process, so it knows the thread is hers;
+  // then Dylan names Ava, which makes his untagged follow-ups Ava's to
+  // judge (card 541) without moving the thread.
+  clock.at('1121.5');
+  await socket.deliver('message', channelMessage({ text: '<@B-BEA> start', ts: '1121.5', thread: '1120.0' }));
+  clock.at('1121.7');
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> look', ts: '1121.7', thread: '1120.0' }));
+  // From here the placeholder posts; nothing Ava says ever lands in it.
+  webAva.chat.update = async () => {
+    throw new Error('ratelimited');
+  };
   clock.at('1122.1');
   await socket.deliver('message', channelMessage({ text: 'so?', ts: '1122.1', thread: '1120.0' }));
   // The stranded placeholder is gone, and Ava did not speak: the thread
-  // is still Bea's, and Ava judges the next message beside her.
+  // is still Bea's, so Sam, who named nobody, is answered by Bea alone.
   assert.equal(webAva.deletes.length, 1, warnings.join('\n'));
   clock.at('1122.2');
-  await socket.deliver('message', channelMessage({ text: 'next', ts: '1122.2', thread: '1120.0' }));
+  await socket.deliver('message', channelMessage({ text: 'next', ts: '1122.2', thread: '1120.0', user: 'U-SAM' }));
   const next = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('next'));
-  assert.deepEqual(next.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]).sort(), [['ava', false], ['bea', true]]);
+  assert.deepEqual(next.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]), [['bea', true]]);
 
   // Slack refusing the delete leaves the `…` standing under Ava's name,
   // and a standing message is the last thing said: the thread is hers.
@@ -2657,7 +2622,7 @@ test('a turn nobody asked for whose placeholder opened but took no edit takes it
   clock.at('1122.3');
   await socket.deliver('message', channelMessage({ text: 'again', ts: '1122.3', thread: '1120.0' }));
   clock.at('1122.4');
-  await socket.deliver('message', channelMessage({ text: 'more', ts: '1122.4', thread: '1120.0' }));
+  await socket.deliver('message', channelMessage({ text: 'more', ts: '1122.4', thread: '1120.0', user: 'U-SAM' }));
   await adapter.stop();
   const more = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('more'));
   assert.deepEqual(more.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]), [['ava', false]]);
@@ -2707,59 +2672,6 @@ test('text streamed to a turn nobody asked for before it begins does not open it
   // then said nothing — posted nothing of its own.
   assert.equal(web.posts.length, 0);
   assert.equal(web.updates.length, 0);
-});
-
-test('a burst of messages typed inside one turn is judged only up to the window', async () => {
-  const socket = createFakeSocket();
-  const web = createFakeWeb('B-AVA', 'T1');
-  // Every turn waits before it starts: the session never absorbs a judged
-  // message before the next one arrives, so the store's count stays at
-  // zero throughout and nothing has reported `running`.
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
-  const stubDispatch = gateway.dispatch;
-  gateway.dispatch = async (input) => {
-    await gate;
-    return stubDispatch.call(gateway, input);
-  };
-  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
-  gateway.sessionRouting = async () => ({
-    agentId: 'ava',
-    metadata: {},
-    lastSpokeAt: new Date(1000 * 1000).toISOString(),
-    lastAnsweredAt: new Date(1000 * 1000).toISOString(),
-    heardSinceAnswered: 0,
-  });
-  const adapter = createSlackChannelAdapter({
-    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
-    editIntervalMs: 0,
-    createSocketClient: () => socket,
-    createWebClient: () => web,
-  });
-  await adapter.start(gateway);
-
-  const deliveries: Promise<void>[] = [];
-  for (let index = 1; index <= 12; index += 1) {
-    deliveries.push(socket.deliver('message', channelMessage({ text: `burst ${index}`, ts: `1000.${index}`, thread: '1000.0' })));
-  }
-  await Promise.all(deliveries);
-  release();
-  await adapter.stop();
-
-  // Eight judged — the window — and the rest heard for free, whatever the
-  // store had counted by then. Once a turn has started the store holds its
-  // message and it is counted there instead, never twice (a running turn
-  // that is still pending in the queue is not a second message).
-  assert.equal(gateway.dispatches.length, 8);
-  assert.deepEqual(gateway.observes.map((observed) => observed.message), [
-    'Dylan: burst 9',
-    'Dylan: burst 10',
-    'Dylan: burst 11',
-    'Dylan: burst 12',
-  ]);
 });
 
 test('a turn nobody asked for that ends while its placeholder is still opening fills that placeholder', async () => {
@@ -3476,58 +3388,6 @@ test('a judged turn whose file landed but whose words Slack refused has spoken, 
   assert.deepEqual(of('bea'), ['Dylan: chart please']);
   assert.deepEqual(of('ava'), ['Dylan: chart please', 'Dylan: nice']);
   assert.equal(gateway.observes.some((observed) => observed.message.startsWith('Ava:')), false);
-});
-
-test('a message to a colleague still waiting to be heard counts toward the window', async () => {
-  const socket = createFakeSocket();
-  const socketBea = createFakeSocket();
-  const web = createFakeWeb('B-AVA', 'T1');
-  const webBea = createFakeWeb('B-BEA', 'T1');
-  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
-  gateway.agents = () => [
-    { id: 'ava', name: 'Ava', listens: 'judge' },
-    { id: 'bea', name: 'Bea' },
-  ];
-  let heard = 6;
-  gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C1:1090.0'
-    ? { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1090 * 1000).toISOString(), lastAnsweredAt: new Date(1090 * 1000).toISOString(), heardSinceAnswered: heard }
-    : undefined);
-  // Overhears wait: the gateway's chain is held by a turn, so what Ava
-  // hears is not in the store until it ends.
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const stubObserve = gateway.observe!;
-  gateway.observe = async (input) => {
-    await held;
-    return stubObserve.call(gateway, input);
-  };
-  const adapter = createSlackChannelAdapter({
-    agents: [
-      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
-      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
-    ],
-    editIntervalMs: 0,
-    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socket : socketBea),
-    createWebClient: (botToken) => (botToken === 'xoxb-a' ? web : webBea),
-  });
-  await adapter.start(gateway);
-
-  // Six heard. A message to Bea is Ava's to hear — placed, not yet written.
-  const toBea = socket.deliver('message', channelMessage({ text: '<@B-BEA> your turn', ts: '1090.1', thread: '1090.0' }));
-  // Seven with it: still inside the window, judged.
-  await socket.deliver('message', channelMessage({ text: 'and?', ts: '1090.2', thread: '1090.0' }));
-  // The store now holds that judged message; the message to Bea is still
-  // pending. Eight: the window is spent, and this one is heard, not judged.
-  heard = 7;
-  const ninth = socket.deliver('message', channelMessage({ text: 'more?', ts: '1090.3', thread: '1090.0' }));
-  release();
-  await Promise.all([toBea, ninth]);
-  await adapter.stop();
-
-  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: and?']);
-  assert.deepEqual(gateway.observes.map((observed) => observed.message).sort(), ['Dylan: <@B-BEA> your turn', 'Dylan: more?']);
 });
 
 test('a judged turn that posted a file and then failed has still spoken, for the thread rule', async () => {
