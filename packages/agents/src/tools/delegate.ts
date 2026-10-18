@@ -147,7 +147,7 @@ export type DelegateToolOptions = {
   maxDepth?: number;
 } & ({ runner: AgentRunner; dispatch?: never } | { dispatch: DelegateDispatch; runner?: never });
 
-const DEFAULT_MAX_DELEGATION_DEPTH = 3;
+export const DEFAULT_MAX_DELEGATION_DEPTH = 3;
 
 /**
  * The orchestrator primitive: a tool that runs another agent in its own

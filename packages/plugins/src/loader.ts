@@ -10,6 +10,7 @@ import type {
   Plugin,
   PluginStateDirectory,
   ProtectedPaths,
+  SubAgentHandle,
   Skill,
   SkillRegistry,
   ToolRegistry,
@@ -298,6 +299,8 @@ export interface LoadPluginsOptions {
   /** Handed to every plugin's `setup` as `PluginContext.log` / `.warn`. */
   log?: (message: string) => void;
   warn?: (message: string) => void;
+  /** Handed to every plugin's `setup` as `PluginContext.subAgents`. */
+  subAgents?: SubAgentHandle;
 }
 
 export interface LoadPluginsResult {
@@ -548,6 +551,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         ...(options.protectedPaths !== undefined ? { protectedPaths: options.protectedPaths } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
         ...(options.warn !== undefined ? { warn: options.warn } : {}),
+        ...(options.subAgents !== undefined ? { subAgents: options.subAgents } : {}),
       });
 
       // Everything that can refuse happens before anything commits, so a

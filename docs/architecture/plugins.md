@@ -217,6 +217,35 @@ are the operator's choice of where an agent works, and a broad one such as
 or the agent's own soul. A host that omits it protects nothing beyond each
 plugin's own configuration. `tool-fs` is the first consumer.
 
+**Starting sub-agents is the host's too.** `setup` receives
+`context.subAgents`, whose `run()` starts one sub-agent for a running turn
+(roadmap 24): an ephemeral helper that runs as the calling agent, on its
+provider and credentials, with the tools it is handed and nothing else of
+the agent's: no persona, no memory, no skills, no channel. A plugin passes
+the session object its tool was handed, an instruction, and exact tool
+names. The host accepts that object only while the call it was handed to
+is running, checked by identity: an id or a copy is refused, so a plugin
+cannot start sub-agents of a turn that did not call it. The agent and its
+allowlist come from the host's own records rather than from that object,
+so a plugin cannot widen anything by building one. The host also refuses,
+before anything runs and naming the reason, a parent
+that is not running a turn or is itself a sub-agent, the delegation depth
+limit, a tool outside the parent's allowlist, a pattern instead of a name,
+and `agent.spawn`, `agent.delegate`, `memory.*`, and `credential.request`
+whatever the parent holds. A sub-agent never asks a person: a gated call it
+has no standing grant for is denied inside it, and the parent's turn gets
+that back as a result. The parent's standing grants and command scopes do
+apply to the tools in the slice. One parent turn runs at most four at once
+and the rest wait for a slot. The parent turn's cancel stops them whether
+or not the plugin passes a signal; a plugin's `signal` is an extra stop. `run()`
+resolves with `result`, `empty` (ran and said nothing), or `error`, each
+with the sub-agent's session id and trust label: what it returns may repeat
+what it read, so a tool handing it to its own turn marks the call with that
+label (`context.markTrust`). How many sub-agents a call fans out to, and
+how their answers come back, is the plugin's. Each sub-agent's session is
+durable, a child of the parent's (`<parent>:subagent:<depth>:<n>`), with
+the delegation markers that trace it to its root.
+
 **`ledgerRoot` is the host's key and is stripped**, the way `toolRisks` is,
 so a plugin's code never sees it. Two plugins write the filesystem
 provenance ledger (`tool-fs` and `plugin-mcp`), and an operator who

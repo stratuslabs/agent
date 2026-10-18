@@ -86,6 +86,7 @@ export {
   ROOT_SESSION_ID_METADATA_KEY,
   DELEGATION_DEPTH_METADATA_KEY,
   DELEGATED_SESSION_ID_MARKER,
+  DEFAULT_MAX_DELEGATION_DEPTH,
   isDelegatedSession,
   delegatingSessionIdOf,
   outstandingDelegationFor,
