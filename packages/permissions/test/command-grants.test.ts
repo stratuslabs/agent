@@ -384,3 +384,28 @@ test('a by-name grant is only for commands that read and write paths, never ones
     assert.equal(grantableByName(name), true, name);
   }
 });
+
+test('a glob a by-name grant covers never expands into a flag, and nothing granted by name changes the shell', async () => {
+  const { workspace, repo } = await layout();
+  // Codex P1 4309067076: files named like flags, so `rg *` hands ripgrep `--pre=sh`.
+  await writeFile(path.join(repo, '--pre=sh'), '');
+  await writeFile(path.join(repo, 'needle'), '');
+  await mkdir(path.join(repo, 'docs'), { recursive: true });
+  await writeFile(path.join(repo, 'docs', '-n'), '');
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => workspace, names: namesStore(['rg', 'cat', 'printf']) },
+  });
+  const allowed = (command: string, cwd = repo) => policy.approve(contextFor(cwd, command));
+  assert.equal(await allowed('rg *'), false, 'rg * would expand to --pre=sh');
+  assert.equal(await allowed('rg x -- *'), false, 'still a word the shell globs into a flag-shaped name');
+  // A glob in a directory with no flag-shaped names still runs, and one
+  // whose matches carry a directory prefix can never be read as a flag.
+  assert.equal(await allowed('rg x src/*.ts'), true);
+  assert.equal(await allowed('cat docs/*'), true);
+  assert.equal(await allowed('cat *', path.join(repo, 'src')), true);
+  // Codex P1 4309067080: bash's builtin printf -v assigns a variable.
+  assert.equal(await allowed('printf -v PATH .; uname'), false);
+  assert.equal(await allowed('printf hello > out.txt'), false);
+  assert.equal(grantableByName('printf'), false);
+});

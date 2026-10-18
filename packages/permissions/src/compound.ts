@@ -315,7 +315,8 @@ export const analyzeCompound = (command: string): CompoundCommand => {
  * is given and nothing else, so a check of those paths is a check of what
  * it does. Network clients, archivers, test runners, linters, build tools
  * and `jq` (whose `env` reads the daemon's environment) are not on it;
- * they keep the narrower scope. Adding one means reading its manual for
+ * they keep the narrower scope. Neither is `printf`, whose bash builtin
+ * assigns a variable with `-v`. Adding one means reading its manual for
  * flags that run a program or read paths from a file, and denying them in
  * `NAME_GRANT_DENIED_BY_COMMAND`.
  */
@@ -325,7 +326,7 @@ export const GRANTABLE_BY_NAME: ReadonlySet<string> = new Set([
   'diff', 'cmp', 'ls', 'stat', 'file', 'du', 'tree', 'realpath', 'readlink', 'basename', 'dirname',
   'mkdir', 'touch', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'tee',
   'md5', 'md5sum', 'shasum', 'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'od', 'xxd', 'hexdump', 'strings',
-  'gzip', 'gunzip', 'zcat', 'printf', 'test',
+  'gzip', 'gunzip', 'zcat', 'test',
 ]);
 
 /**
@@ -533,7 +534,8 @@ const segmentPattern = (pattern: string): RegExp => {
  * from each of `cwds`. Only a pattern in the last segment is judged, so the
  * directory it matches in is known; each entry it matches must stay inside,
  * symlinks followed, since `cat src/*` follows a link in `src` like a file.
- * A pattern matching nothing is passed through as text, which is the
+ * A bare pattern (no directory) that matches a name starting with `-` is
+ * refused, since the command would read that name as a flag. A pattern matching nothing is passed through as text, which is the
  * caller's to judge.
  */
 const globLandsInside = async (word: string, cwds: readonly string[], root: string): Promise<boolean> => {
@@ -561,6 +563,11 @@ const globLandsInside = async (word: string, cwds: readonly string[], root: stri
       }
       if (!matcher.test(entry)) {
         continue;
+      }
+      // A bare pattern expands to the names themselves, so a file named
+      // `--pre=sh` reaches the command as that flag, past every flag check.
+      if (slash === -1 && entry.startsWith('-')) {
+        return false;
       }
       const landed = await walk(resolved, entry);
       if (landed === undefined || !within(root, landed)) {
