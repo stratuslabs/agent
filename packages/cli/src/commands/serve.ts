@@ -19,6 +19,7 @@ import {
   type PermissionDecision,
   type DestinationGrant,
   type ToolGrant,
+  unboundStandingChannels,
 } from '@stratusagent/permissions';
 import {
   agentsDirPath,
@@ -661,6 +662,13 @@ const serveHeldHome = async (
     .filter(([, channels]) => channels.length > 0);
   if (standingChannels.length > 0) {
     log(`approvals: message.read/send run without asking in ${standingChannels.map(([agentId, channels]) => `${channels.join(', ')} for ${agentId}`).join('; ')} (approvals.channels; DMs still ask)`);
+    // A bare id names no workspace, so it covers nothing (see
+    // matchesStandingChannel). Said once here rather than refused, so a
+    // config written before the workspace was required still starts.
+    const unbound = [...new Set(standingChannels.flatMap(([, channels]) => unboundStandingChannels(channels)))];
+    if (unbound.length > 0) {
+      log(`approvals: ${unbound.join(', ')} in approvals.channels name${unbound.length === 1 ? 's' : ''} no workspace and cover${unbound.length === 1 ? 's' : ''} nothing; write slack:<workspace id>/<channel id> (the workspace id is the T… id), or slack:*`);
+    }
   }
   const declared = operatorCommands.describe();
   if (declared) {

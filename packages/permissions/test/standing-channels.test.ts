@@ -14,6 +14,7 @@ import {
 import {
   createPermissionPolicy,
   matchesStandingChannel,
+  unboundStandingChannels,
   type ApprovalRequest,
   type ConversationKind,
   type DestinationScopeOptions,
@@ -73,9 +74,11 @@ const KINDS: Record<string, ConversationKind> = {
 const destinations = (
   channels: () => readonly string[],
   kindFor: DestinationScopeOptions['conversationKindFor'] = (_agentId, destination) => KINDS[destination],
+  account: () => string | undefined = () => 'T1',
 ): DestinationScopeOptions => ({
   isPreauthorized: () => false,
   standingChannelsFor: () => channels(),
+  accountFor: () => account(),
   ...(kindFor ? { conversationKindFor: kindFor } : {}),
 });
 
@@ -91,7 +94,7 @@ const headless = (options: DestinationScopeOptions, extra: Partial<Parameters<ty
 };
 
 test('a configured channel reads and posts without asking, in any session, with the reason named', async () => {
-  const { policy, decisions } = headless(destinations(() => ['slack:C0C1YV12SLC']));
+  const { policy, decisions } = headless(destinations(() => ['slack:T1/C0C1YV12SLC']));
   // Interactive, scheduled, and delegated turns are all sessions of the
   // same agent; the authorization is the agent's, not one session's.
   for (const sessionId of ['slack:T1:C0C1YV12SLC:1792.1', 'schedule:abc:2026-10-17T23:05:00Z', 'delegate:xyz']) {
@@ -122,7 +125,7 @@ test('a DM named outright in the config still asks', async () => {
       requests.push(request);
       return { answer: 'deny' };
     },
-    destinations: destinations(() => ['slack:D0DIRECT']),
+    destinations: destinations(() => ['slack:T1/D0DIRECT']),
   });
   assert.equal(await policy.approve(call(send, 'D0DIRECT')), false);
   assert.equal(requests.length, 1, 'the approver was asked, as before');
@@ -140,7 +143,7 @@ test('a conversation the app cannot describe asks, and so does a host that canno
 });
 
 test('removing the entry revokes it on the next call', async () => {
-  let channels: string[] = ['slack:C0C1YV12SLC'];
+  let channels: string[] = ['slack:T1/C0C1YV12SLC'];
   const { policy } = headless(destinations(() => channels));
   assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), true);
   channels = [];
@@ -172,12 +175,43 @@ test('withdrawn under the external-content gate, like every standing yes', async
   assert.equal(await ungated.policy.approve(call(send, 'C0C1YV12SLC', { trust: 'external' })), true);
 });
 
-test('matchesStandingChannel: exact id or the kind wildcard, nothing looser', () => {
-  assert.equal(matchesStandingChannel('slack:C1', ['slack:C1']), true);
-  assert.equal(matchesStandingChannel('slack:C1', ['slack:*']), true);
-  assert.equal(matchesStandingChannel('slack:C1', ['slack:C2', 'discord:*']), false);
-  assert.equal(matchesStandingChannel('slack:C1', ['*']), false);
-  assert.equal(matchesStandingChannel('slack:C1', ['slack:c1']), false);
-  assert.equal(matchesStandingChannel('slack', ['slack:*']), false);
-  assert.equal(matchesStandingChannel('slack:', ['slack:*']), false);
+test('matchesStandingChannel: an id only in its workspace, the workspace wildcard, or the kind wildcard', () => {
+  assert.equal(matchesStandingChannel('slack:C1', 'T1', ['slack:T1/C1']), true);
+  assert.equal(matchesStandingChannel('slack:C1', 'T1', ['slack:T1/*']), true);
+  assert.equal(matchesStandingChannel('slack:C1', 'T1', ['slack:*']), true);
+  assert.equal(matchesStandingChannel('slack:C1', undefined, ['slack:*']), true);
+  // Bound to the workspace: the same id elsewhere, or with no workspace known, is not covered.
+  assert.equal(matchesStandingChannel('slack:C1', 'T2', ['slack:T1/C1', 'slack:T1/*']), false);
+  assert.equal(matchesStandingChannel('slack:C1', undefined, ['slack:T1/C1', 'slack:T1/*']), false);
+  assert.equal(matchesStandingChannel('slack:C1', '', ['slack:T1/C1']), false);
+  // A bare id names no workspace and covers nothing.
+  assert.equal(matchesStandingChannel('slack:C1', 'T1', ['slack:C1']), false);
+  assert.equal(matchesStandingChannel('slack:C1', 'T1', ['slack:T1/C2', 'discord:*', 'discord:T1/C1']), false);
+  assert.equal(matchesStandingChannel('slack:C1', 'T1', ['*']), false);
+  assert.equal(matchesStandingChannel('slack:C1', 'T1', ['slack:T1/c1', 'slack:t1/C1', 'slack:/C1']), false);
+  assert.equal(matchesStandingChannel('slack', 'T1', ['slack:*']), false);
+  assert.equal(matchesStandingChannel('slack:', 'T1', ['slack:*']), false);
+});
+
+test('unboundStandingChannels names the bare ids and nothing else', () => {
+  assert.deepEqual(unboundStandingChannels(['slack:C1', 'slack:*', 'slack:T1/C2', 'slack:T1/*', 'slack:G3']), ['slack:C1', 'slack:G3']);
+});
+
+test('a channel id granted in one workspace is not covered once the app is in another', async () => {
+  let account: string | undefined = 'T1';
+  const { policy } = headless(destinations(() => ['slack:T1/C0C1YV12SLC'], undefined, () => account));
+  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), true);
+  account = 'T2';
+  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), false, 'same id, another workspace');
+  account = undefined;
+  assert.equal(await policy.approve(call(read, 'C0C1YV12SLC')), false, 'workspace not known');
+  // slack:* is app-wide on purpose: whatever channels the app can reach.
+  const wide = headless(destinations(() => ['slack:*'], undefined, () => 'T2'));
+  assert.equal(await wide.policy.approve(call(send, 'C0C1YV12SLC')), true);
+});
+
+test('a bare channel id from an older config loads but covers nothing, so the call asks as before', async () => {
+  const { policy } = headless(destinations(() => ['slack:C0C1YV12SLC']));
+  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), false);
+  assert.equal(await policy.approve(call(read, 'C0C1YV12SLC')), false);
 });

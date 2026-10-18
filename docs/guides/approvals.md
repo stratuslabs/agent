@@ -435,7 +435,7 @@ config:
 
 ```jsonc
 "approvals": {
-  "channels": ["slack:C0C1YV12SLC"],
+  "channels": ["slack:T0123ABCD/C0C1YV12SLC"],
   "agents": { "nova": { "channels": ["slack:*"] } }
 }
 ```
@@ -443,10 +443,20 @@ config:
 `message.read` and `message.send` to a listed channel then run without
 asking, in every session: a conversation, a scheduled turn, or a
 delegated one, headless or remote. Because it lives in config, it holds
-through new sessions, restarts, and `stratus update`. An entry is
-`slack:<conversation id>`, or `slack:*` for every channel the agent's own
-Slack app is in. Write the id, not a channel name; anything else is
-refused at startup. An agent's list adds to the top-level one, like
+through new sessions, restarts, and `stratus update`. An entry is one of:
+
+- `slack:<workspace id>/<channel id>`: one channel. The workspace id is
+  the `T…` id. A channel id is unique only within its workspace, so the
+  entry covers that channel only while the agent's app is connected to
+  that workspace, the same way an **Always allow** grant does.
+- `slack:<workspace id>/*`: every channel the agent's app is in, in that
+  workspace.
+- `slack:*`: every channel the agent's app is in, whatever workspace it is
+  connected to.
+
+Write ids, not channel names; anything else is refused at startup. A bare
+`slack:<channel id>` names no workspace and covers nothing; the daemon
+loads it and says so in its startup log. An agent's list adds to the top-level one, like
 `commands`, and the daemon names who has what in its startup log.
 
 What it doesn't change:

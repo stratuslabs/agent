@@ -1794,12 +1794,13 @@ test('approvals.trustedDomains adds up per agent, normalizes, and refuses anythi
 
 test('approvals.channels adds up per agent and refuses names, bare ids, and anything else', async () => {
   const config = await loadConfigFile(await writeConfig('channels.json', {
-    approvals: { channels: ['slack:C0C1YV12SLC'], agents: { nova: { channels: ['slack:*', ' slack:C0C1YV12SLC '] } } },
+    approvals: { channels: ['slack:T1/C0C1YV12SLC'], agents: { nova: { channels: ['slack:*', ' slack:T1/C0C1YV12SLC ', 'slack:T2/*', 'slack:C0BARE'] } } },
   }));
-  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').channels, ['slack:C0C1YV12SLC', 'slack:*']);
-  assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').channels, ['slack:C0C1YV12SLC']);
+  // A bare id still loads (it covers nothing, and the daemon says so), so an older config never stops startup.
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').channels, ['slack:T1/C0C1YV12SLC', 'slack:*', 'slack:T2/*', 'slack:C0BARE']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').channels, ['slack:T1/C0C1YV12SLC']);
   assert.equal(resolveAgentApprovals({}, 'nova').channels, undefined);
-  for (const bad of [['#stratus-agent'], ['C0C1YV12SLC'], ['slack:'], ['*'], ['slack:#general'], 'slack:*', [3]]) {
+  for (const bad of [['#stratus-agent'], ['C0C1YV12SLC'], ['slack:'], ['*'], ['slack:#general'], ['slack:T1/'], ['slack:/C1'], ['slack:T1/C1/x'], ['slack:*/C1'], 'slack:*', [3]]) {
     await assert.rejects(
       loadConfigFile(await writeConfig('channels-bad.json', { approvals: { agents: { nova: { channels: bad } } } })),
       /Invalid approvals\.agents\.nova\.channels/,

@@ -458,8 +458,8 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     const valid = entries?.every((entry) => typeof entry === 'string' && STANDING_CHANNEL_ENTRY.test(entry.trim()));
     if (!entries || !valid) {
       throw new Error(
-        `Invalid ${where}.channels in config ${configPath}: expected a list like ["slack:C0123ABCD"] or ["slack:*"], `
-        + 'a channel kind and a conversation id (not a name), or * for every channel the agent\'s app is in.',
+        `Invalid ${where}.channels in config ${configPath}: expected a list like ["slack:T0123ABCD/C0123ABCD"] or ["slack:*"]: `
+        + 'a channel kind, the workspace id and a conversation id (not a name), or * for every channel the agent\'s app is in.',
       );
     }
     route.channels = [...new Set((entries as string[]).map((entry) => entry.trim()))];
@@ -467,8 +467,13 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
   return route;
 };
 
-/** `slack:C0123ABCD` or `slack:*`. */
-const STANDING_CHANNEL_ENTRY = /^[a-z][a-z0-9-]*:(\*|[A-Za-z0-9][A-Za-z0-9._-]*)$/;
+/**
+ * `slack:T0123ABCD/C0123ABCD`, `slack:T0123ABCD/*`, or `slack:*`. A bare
+ * `slack:C0123ABCD` still loads, so a config written for the first form of
+ * this setting never stops the daemon, but it names no workspace and covers
+ * nothing; the daemon says so at startup.
+ */
+const STANDING_CHANNEL_ENTRY = /^[a-z][a-z0-9-]*:(\*|[A-Za-z0-9][A-Za-z0-9._-]*(\/(\*|[A-Za-z0-9][A-Za-z0-9._-]*))?)$/;
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
   const route = parseApprovalRoute(raw, configPath, 'approvals');

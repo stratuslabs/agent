@@ -389,9 +389,10 @@ export interface DestinationScopeOptions {
   /**
    * The operator's standing channel authorization for this agent
    * (`approvals.channels`): destinations where `message.read` and
-   * `message.send` run without asking, as `channel:to` (`slack:C0123ABCD`)
-   * or `channel:*` for every channel of that kind the agent's app can
-   * reach. Read per call. See `matchesStandingChannel`.
+   * `message.send` run without asking: `channel:<workspace>/<id>`
+   * (`slack:T0123ABCD/C0123ABCD`), `channel:<workspace>/*`, or `channel:*`
+   * for every channel of that kind the agent's app can reach. Read per
+   * call. See `matchesStandingChannel`.
    */
   standingChannelsFor?(agentId: string): readonly string[];
   /**
@@ -416,18 +417,58 @@ export type ConversationKind = 'channel' | 'direct';
 export const STANDING_CHANNEL_TOOLS: readonly string[] = ['message.read', 'message.send'];
 
 /**
- * Whether a configured `approvals.channels` entry covers a destination:
- * the exact `channel:to`, or `channel:*` for every conversation of that
- * channel kind. The kind check (channels yes, DMs no) is the caller's.
+ * Whether a configured `approvals.channels` entry covers a destination in
+ * the workspace the agent's app is connected to right now (`account`, see
+ * `DestinationScopeOptions.accountFor`):
+ *
+ * - `channel:*`: every conversation of that kind the app can reach, in
+ *   whatever workspace it is in.
+ * - `channel:<workspace>/<id>`: that conversation, only while the app is in
+ *   that workspace. A conversation id is unique only within its workspace,
+ *   so an id is bound to one, the same way an Always-allow grant is.
+ * - `channel:<workspace>/*`: every conversation of that kind in that
+ *   workspace.
+ *
+ * A bare `channel:<id>` names no workspace and covers nothing; the daemon
+ * says so at startup (`unboundStandingChannels`). The kind check (channels
+ * yes, DMs no) is the caller's.
  */
-export const matchesStandingChannel = (destination: string, entries: readonly string[]): boolean => {
+export const matchesStandingChannel = (
+  destination: string,
+  account: string | undefined,
+  entries: readonly string[],
+): boolean => {
   const separator = destination.indexOf(':');
   if (separator <= 0 || separator === destination.length - 1) {
     return false;
   }
-  const wildcard = `${destination.slice(0, separator)}:*`;
-  return entries.some((entry) => entry === destination || entry === wildcard);
+  const kind = destination.slice(0, separator);
+  const to = destination.slice(separator + 1);
+  return entries.some((entry) => {
+    if (entry === `${kind}:*`) {
+      return true;
+    }
+    if (!entry.startsWith(`${kind}:`) || account === undefined || account.length === 0) {
+      return false;
+    }
+    const scoped = entry.slice(kind.length + 1);
+    const slash = scoped.indexOf('/');
+    if (slash <= 0) {
+      return false;
+    }
+    const workspace = scoped.slice(0, slash);
+    const id = scoped.slice(slash + 1);
+    return workspace === account && (id === '*' || id === to);
+  });
 };
+
+/** Entries that name a conversation without its workspace, which `matchesStandingChannel` never matches. */
+export const unboundStandingChannels = (entries: readonly string[]): string[] =>
+  entries.filter((entry) => {
+    const separator = entry.indexOf(':');
+    const rest = entry.slice(separator + 1);
+    return separator > 0 && rest !== '*' && !rest.includes('/');
+  });
 
 export interface CommandScopeOptions {
   /**
@@ -1105,7 +1146,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         && contributor === undefined
         && context.tool.name === call.toolName
         && STANDING_CHANNEL_TOOLS.includes(call.toolName)
-        && matchesStandingChannel(destination, destinations?.standingChannelsFor?.(session.agent.id) ?? [])
+        && matchesStandingChannel(destination, account, destinations?.standingChannelsFor?.(session.agent.id) ?? [])
         && await destinations?.conversationKindFor?.(session.agent.id, destination) === 'channel') {
         return report(
           context,
