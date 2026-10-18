@@ -6397,6 +6397,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           }
         }
       }
+      // One line per decision a judging agent makes on an untagged reply
+      // (card 541): whether it took the turn, and why. Never the text.
+      if (admitted.judgeReason !== undefined) {
+        const reason = admitted.settled || judged ? admitted.judgeReason : 'another agent\'s, from the thread read';
+        log(`slack: judge: ${connection.config.agentId} ${judged ? 'took' : 'heard'} ${event.ts} in ${event.channel} (${reason})`);
+      }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
       // Fetched inside the chain, like the lookups below: it is network
       // I/O, and a message whose screenshot is slow to arrive must not lose

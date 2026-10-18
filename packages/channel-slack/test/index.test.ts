@@ -12671,12 +12671,16 @@ const judgeV2Pair = async (listens: { ava: 'judge' | 'thread'; bea: 'judge' | 't
   const clock = stampsAfter();
   webAva.stamp = clock.stamp;
   webBea.stamp = clock.stamp;
+  const logged: string[] = [];
   const adapter = createSlackChannelAdapter({
     agents: [
       { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
       { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
     ],
     editIntervalMs: 0,
+    log: (line) => {
+      logged.push(line);
+    },
     createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
     createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
   });
@@ -12689,7 +12693,7 @@ const judgeV2Pair = async (listens: { ava: 'judge' | 'thread'; bea: 'judge' | 't
   const of = (agentId: string) => gateway.dispatches
     .filter((dispatch) => dispatch.agentId === agentId)
     .map((dispatch) => [dispatch.userMessage, dispatch.addressed ?? true]);
-  return { adapter, gateway, both, of };
+  return { adapter, gateway, both, of, logged };
 };
 
 test('judge v2: the owner takes a principal\'s untagged instruction an hour after its last answer (Oct 16 Nova thread)', async () => {
@@ -12750,4 +12754,21 @@ test('judge v2: a thread-rule owner and a judging colleague agree on the continu
   await adapter.stop();
   const andTakers = gateway.dispatches.filter((dispatch) => dispatch.userMessage === 'Dylan: and?').map((dispatch) => dispatch.agentId);
   assert.deepEqual(andTakers, ['bea']);
+});
+
+test('judge v2: each judging decision is logged once per agent, with who and why but never the text', async () => {
+  const { adapter, both, logged } = await judgeV2Pair();
+  await both('<@B-AVA> start', '5000.0');
+  await both('secret plan details', '5000.1');
+  await both('<@B-BEA> thoughts?', '5000.2');
+  await both('more secret words', '5000.3');
+  await adapter.stop();
+  const judgeLines = logged.filter((line) => line.startsWith('slack: judge:'));
+  assert.deepEqual(judgeLines.sort(), [
+    "slack: judge: ava heard 5000.3 in C1 (bea's reply)",
+    'slack: judge: ava took 5000.1 in C1 (addressed it last)',
+    "slack: judge: bea heard 5000.1 in C1 (ava's reply)",
+    'slack: judge: bea took 5000.3 in C1 (addressed it last)',
+  ]);
+  assert.ok(logged.every((line) => !/secret/.test(line)), logged.join('\n'));
 });
