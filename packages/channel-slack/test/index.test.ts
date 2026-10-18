@@ -12697,3 +12697,111 @@ test('the chunks of an own post Slack accepted are heard even when a later chunk
   assert.match(gateway.observes[0]!.message, /a{3500}/);
   assert.doesNotMatch(gateway.observes[0]!.message, /b{10}/);
 });
+
+// Judge v2 (card 541): who an untagged thread reply is for, decided from the
+// thread rather than a 15-minute window. Explicit address first; then the
+// agent the same person last addressed; then the thread's owner.
+const judgeV2Pair = async (listens: { ava: 'judge' | 'thread'; bea: 'judge' | 'thread' } = { ava: 'judge', bea: 'judge' }) => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway = createStubGateway(({ sessionId, userMessage }) =>
+    sessionWithReply(sessionId, userMessage.includes('aside') ? '' : `${sessionId.split(':')[1]} answers`));
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: listens.ava },
+    { id: 'bea', name: 'Bea', listens: listens.bea },
+  ];
+  // Both sessions say they last answered long ago: no window would let either judge.
+  gateway.sessionRouting = async (sessionId) => {
+    const agentId = sessionId.split(':')[1]!;
+    if (!sessionId.endsWith(':5000.0')) {
+      return undefined;
+    }
+    return { agentId, metadata: {}, lastSpokeAt: new Date(5000 * 1000).toISOString(), lastAnsweredAt: new Date(5000 * 1000).toISOString(), heardSinceAnswered: 0 };
+  };
+  const clock = stampsAfter();
+  webAva.stamp = clock.stamp;
+  webBea.stamp = clock.stamp;
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const both = async (text: string, ts: string) => {
+    clock.at(ts);
+    const message = channelMessage({ text, ts, thread: '5000.0' });
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  };
+  const of = (agentId: string) => gateway.dispatches
+    .filter((dispatch) => dispatch.agentId === agentId)
+    .map((dispatch) => [dispatch.userMessage, dispatch.addressed ?? true]);
+  return { adapter, gateway, both, of };
+};
+
+test('judge v2: the owner takes a principal\'s untagged instruction an hour after its last answer (Oct 16 Nova thread)', async () => {
+  const { adapter, both, of } = await judgeV2Pair();
+  await both('<@B-AVA> can you look at the release list', '5000.0');
+  // An hour later, untagged, in Ava's thread.
+  await both('just do this list and complete it', '8600.0');
+  await adapter.stop();
+  assert.deepEqual(of('ava'), [
+    ['Dylan: can you look at the release list', true],
+    ['Dylan: just do this list and complete it', false],
+  ]);
+  assert.deepEqual(of('bea'), []);
+});
+
+test('judge v2: "@Bea your turn" then "and?" goes to Bea, and only Bea', async () => {
+  const { adapter, both, of } = await judgeV2Pair();
+  await both('<@B-AVA> kick this off', '5000.0');
+  await both('<@B-BEA> your turn', '5000.1');
+  await both('and?', '5000.2');
+  await adapter.stop();
+  assert.deepEqual(of('bea'), [['Dylan: your turn', true], ['Dylan: and?', false]]);
+  assert.deepEqual(of('ava'), [['Dylan: kick this off', true]]);
+});
+
+test('judge v2: an aside goes to the owner alone, as a turn it may stay quiet on', async () => {
+  const { adapter, gateway, both, of } = await judgeV2Pair();
+  await both('<@B-AVA> start', '5000.0');
+  await both('aside: lunch is here', '5000.1');
+  await adapter.stop();
+  assert.deepEqual(of('ava'), [['Dylan: start', true], ['Dylan: aside: lunch is here', false]]);
+  assert.deepEqual(of('bea'), []);
+  assert.ok(gateway.observes.some((observed) => observed.message === 'Dylan: aside: lunch is here'), 'Bea hears it');
+});
+
+test('judge v2: two judging agents in one thread never both take one message', async () => {
+  const { adapter, gateway, both } = await judgeV2Pair();
+  await both('<@B-AVA> start', '5000.0');
+  await both('<@B-BEA> thoughts?', '5000.1');
+  for (const [index, text] of ['ok', 'what next', 'go on', 'thanks'].entries()) {
+    await both(text, `5000.${index + 2}`);
+  }
+  await adapter.stop();
+  const takers = new Map<string, string[]>();
+  for (const dispatch of gateway.dispatches) {
+    takers.set(dispatch.userMessage ?? "", [...(takers.get(dispatch.userMessage ?? "") ?? []), dispatch.agentId ?? ""]);
+  }
+  for (const [message, agents] of takers) {
+    assert.equal(agents.length, 1, `${message} taken by ${agents.join(', ')}`);
+  }
+});
+
+test('judge v2: a thread-rule owner and a judging colleague agree on the continuation', async () => {
+  const { adapter, gateway, both } = await judgeV2Pair({ ava: 'thread', bea: 'judge' });
+  await both('<@B-AVA> start', '5000.0');
+  await both('<@B-BEA> your turn', '5000.1');
+  await both('and?', '5000.2');
+  await adapter.stop();
+  const andTakers = gateway.dispatches.filter((dispatch) => dispatch.userMessage === 'Dylan: and?').map((dispatch) => dispatch.agentId);
+  assert.deepEqual(andTakers, ['bea']);
+});

@@ -126,18 +126,6 @@ const toolStatus = (toolName: string): string => `is running ${toolName}…`;
 const STATUS_REFRESH_MS = 60_000;
 
 /**
- * How long an agent that judges stays attentive after it last answered a
- * message that addressed it: this many messages, or this many minutes,
- * whichever ends first. Judging costs
- * a model call per message, and two people talking for an hour is a
- * hundred of them for one "no" — so attention decays the way a person's
- * does. Outside the window a message is overheard for free, and a mention
- * re-arms it, which is what a mention has always meant.
- */
-const ATTENTION_MESSAGES = 8;
-const ATTENTION_MS = 15 * 60 * 1000;
-
-/**
  * A 5 MB image over a slow link is seconds, not minutes. Past this the
  * downloads are abandoned and the turn runs with the attachments named as
  * unreadable, rather than the thread waiting on them. One deadline for
@@ -2891,12 +2879,15 @@ interface Admission {
    */
   overhear: boolean;
   /**
-   * An untagged message reaching an agent that judges (`listens: judge`):
-   * heard in any case, and answered by a turn nobody asked for if the
-   * agent is still attentive — which only the session can say, so the
-   * intake decides it.
+   * An untagged message reaching an agent that judges (`listens: judge`)
+   * that is this agent's to judge (card 541): the person last addressed it
+   * by name, or else it owns the thread. It runs a turn nobody asked for,
+   * which may stay quiet. With `settled: false` only the sessions can say
+   * whose the thread is, and the intake decides.
    */
   judge: boolean;
+  /** Why a judging agent took or left an untagged reply, for the log line. No message text. */
+  judgeReason?: string;
   /**
    * An approver's untagged stop in a thread this agent holds, reaching an
    * agent that listens to mentions or judges (card 337). Still heard if
@@ -3072,6 +3063,41 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * the addressee map; a lost entry costs a lookup.
    */
   const threadOrigins = new Map<string, true | string>();
+  /**
+   * Per thread, the agent each person last addressed by name, and when
+   * (card 541). An untagged reply from that person is that agent's —
+   * `@Bea your turn`, then `and?`, is Bea's — ahead of the thread's owner,
+   * who keeps every reply from someone who has not addressed anyone else.
+   * Recorded by every socket from the message itself, before any refusal,
+   * as a handover is, so the sockets agree. Bounded like the addressee map;
+   * a lost entry, or a restart, falls back to the owner.
+   */
+  const senderAddressees = new Map<string, Map<string, { agentId: string; ts: string }>>();
+  const rememberSenderAddressee = (key: string, sender: string, agentId: string, ts: string): void => {
+    const senders = senderAddressees.get(key) ?? new Map<string, { agentId: string; ts: string }>();
+    const known = senders.get(sender);
+    // A late delivery of an older mention does not undo a newer one.
+    if (known && known.ts >= ts) {
+      return;
+    }
+    senders.set(sender, { agentId, ts });
+    senderAddressees.delete(key);
+    senderAddressees.set(key, senders);
+    if (senderAddressees.size > THREAD_ADDRESSEE_CAPACITY) {
+      const oldest = senderAddressees.keys().next();
+      if (!oldest.done) {
+        senderAddressees.delete(oldest.value);
+      }
+    }
+  };
+  /** The agent `sender` last addressed in thread `key` before `ts`, if this process saw it. */
+  const senderAddresseeAt = (key: string, sender: string, ts: string): string | undefined => {
+    const known = senderAddressees.get(key)?.get(sender);
+    return known !== undefined && known.ts < ts ? known.agentId : undefined;
+  };
+  /** Whose an untagged reply from `sender` at `ts` is: who they last addressed, else the owner. */
+  const replyTargetAt = (key: string, sender: string, ts: string): string | undefined =>
+    senderAddresseeAt(key, sender, ts) ?? ownerAt(key, ts);
   /**
    * One cold verdict per message — see `followUpWinner`. Bounded, because
    * an entry outlives its own resolution on purpose; an entry that has not
@@ -3626,72 +3652,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     gatewayRef?.agents().find((agent) => agent.id === agentId)?.listens ?? 'thread';
 
   /**
-   * Whether an agent that judges is still paying attention to a thread:
-   * within `ATTENTION_MESSAGES` and `ATTENTION_MS` of when it last
-   * answered a message that addressed it, both read from the session
-   * rather than remembered here, so a restart forgets nothing. Anchored
-   * to an addressed answer and not to any reply: a reply the agent chose
-   * to give on a turn nobody asked for does not re-arm it, or a talkative
-   * judge would keep itself attentive for good and cost a call per message
-   * — the self-extension the spec declined. An agent never addressed in
-   * the thread is not attentive: it was mentioned and its first turn has
-   * not answered yet, or answered with nothing. Measured against the
-   * message's own timestamp, not the clock, so a delivery that ran late is
-   * judged as of when it was said. Bounded below as well as above: a
-   * message said before the answer the window starts from is outside it
-   * — Slack redelivers events a restarted daemon has no memory of, and a
-   * negative age would otherwise pass the minutes bound however old the
-   * message, on a turn the agent's answer already came after.
-   */
-  const attentive = (routing: SessionRouting, messageTs: string, pending: number): boolean => {
-    if (routing.lastAnsweredAt === undefined) {
-      return false;
-    }
-    const answeredAt = Date.parse(routing.lastAnsweredAt);
-    const saidAt = Number(messageTs) * 1000;
-    if (Number.isNaN(answeredAt) || Number.isNaN(saidAt) || saidAt < answeredAt || saidAt - answeredAt > ATTENTION_MS) {
-      return false;
-    }
-    return (routing.heardSinceAnswered ?? 0) + pending < ATTENTION_MESSAGES;
-  };
-
-  /**
-   * Messages this adapter has dispatched to a session that the session
-   * does not hold yet. The store counts what it holds, and a burst of
-   * messages typed inside one second would each read the same count and
-   * each be judged — the bound the window exists to give, blown by exactly
-   * the thread that needs it. The renderer queue already knows: a renderer
-   * is queued at dispatch and its turn starts (`turnStarted`) only once
-   * the runner has saved the message — the same moment the store's count
-   * takes it over — so the two never count one message twice.
-   */
-  const pendingFor = (sessionId: string): number =>
-    (renderers.get(sessionId) ?? []).filter((renderer) => !renderer.turnStarted).length
-    + (pendingObserves.get(sessionId) ?? 0);
-
-  /**
-   * Overhears placed on the gateway's chain and not yet written, per
-   * session: the other kind of message the store does not hold yet. An
-   * observe queued behind a running turn is heard only when the turn ends,
-   * and a burst of messages to a colleague would otherwise count toward
-   * nothing until then. Counted from placement to settlement.
-   */
-  const pendingObserves = new Map<string, number>();
-  const placeObserve = <T>(sessionId: string, observed: Promise<T>): Promise<T> => {
-    pendingObserves.set(sessionId, (pendingObserves.get(sessionId) ?? 0) + 1);
-    const release = (): void => {
-      const left = (pendingObserves.get(sessionId) ?? 1) - 1;
-      if (left > 0) {
-        pendingObserves.set(sessionId, left);
-      } else {
-        pendingObserves.delete(sessionId);
-      }
-    };
-    void observed.then(release, release);
-    return observed;
-  };
-
-  /**
    * Run `work` after everything already queued for this session's intake,
    * and hold the next link until it settles. The link is claimed
    * synchronously, so a message's place is fixed by when the adapter
@@ -3824,7 +3784,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           // whoever installed it.
           const author = await displayNameFor(hearer, speaker.botUserId);
           const observed = gateway.observe?.({ sessionId, agentId: hearer.config.agentId, message: `${author}: ${text}`, metadata: { ...metadata, [SENDER_TRUST_METADATA_KEY]: trust } });
-          return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
+          return { observed };
         });
         await observed;
       } catch (error) {
@@ -3894,7 +3854,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
       const author = await displayNameFor(connection, connection.botUserId);
       const observed = gateway.observe?.({ sessionId, agentId, message: `${author} (your own post, sent from another session): ${text}`, metadata });
-      return { observed: observed === undefined ? undefined : placeObserve(sessionId, observed) };
+      return { observed };
     });
     // Tracked, so stop() drains it: a restart right after a report must not
     // close the stores while the thread's session is still to hear it.
@@ -6069,6 +6029,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Ava's transcript; only the map learns who holds the thread.
     if (threadKey && handoverTo) {
       rememberAddressee(threadKey, handoverTo, event.ts);
+      rememberSenderAddressee(threadKey, sender, handoverTo, event.ts);
     }
     // A home-channel message hands its new thread to the channel's owner
     // the way a mention would, and is recorded by every socket for the same
@@ -6133,7 +6094,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const refusedStop = (connection.config.approvers ?? []).includes(sender) && isStopRequest(text, connection.botUserId);
       const held = threadKey === undefined
         ? undefined
-        : refusedStop ? stopHolderAt(threadKey, event.ts) : ownerAt(threadKey, event.ts);
+        : refusedStop ? stopHolderAt(threadKey, event.ts) : replyTargetAt(threadKey, sender, event.ts);
       if (addressed || held === connection.config.agentId) {
         if (!alreadySeen(eventKey)) {
           log(refusal);
@@ -6226,12 +6187,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
 
     // An untagged reply. How this agent listens decides what it is: an
-    // agent that answers only mentions hears it and nothing more, and one
-    // that judges hears it and, if still attentive, takes a turn nobody
-    // asked for on it — decided in the intake, since only the session can
-    // say. Neither takes part in the holder rule below: that rule answers
-    // "whose is an untagged reply", and for these two agents the soul has
-    // already answered.
+    // agent that answers only mentions hears it and nothing more. One that
+    // judges takes a turn nobody asked for on it — one it may stay quiet
+    // on — when the reply is its own by the rule every agent shares (card
+    // 541): the agent this person last addressed, else the thread's owner.
+    // No window: an owner an hour past its last answer still hears an
+    // instruction as its own, and exactly one agent takes each reply.
     const listens = listensOf(connection.config.agentId);
     if (listens === 'mentions' || listens === 'judge') {
       // Except a stop (card 337): the holder rule decides whose it is, as
@@ -6245,6 +6206,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // A stop held by another agent is only heard: judging it would let an
       // attentive agent take a turn on a stop that was never its own.
       const stopForAnother = stopHolder !== undefined && stopHolder !== connection.config.agentId;
+      if (listens === 'judge' && !approverStop && threadKey !== undefined) {
+        const target = replyTargetAt(threadKey, sender, event.ts);
+        if (target === undefined) {
+          // Nothing seen here says whose thread this is: the sessions and
+          // the thread read decide, as for any agent.
+          return { ...admission, overhear: true, judge: true, settled: false, judgeReason: 'owner, from the thread read' };
+        }
+        if (target !== connection.config.agentId) {
+          return { ...admission, overhear: true, judgeReason: `${target}'s reply` };
+        }
+        const reason = senderAddresseeAt(threadKey, sender, event.ts) === target ? 'addressed it last' : 'owner';
+        return { ...admission, overhear: true, judge: true, judgeReason: reason };
+      }
       return {
         ...admission,
         overhear: true,
@@ -6264,7 +6238,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       isStopRequest(text, connection.botUserId);
     const holder = threadKey === undefined
       ? undefined
-      : stopRequest ? stopHolderAt(threadKey, event.ts) : ownerAt(threadKey, event.ts);
+      : stopRequest ? stopHolderAt(threadKey, event.ts) : replyTargetAt(threadKey, sender, event.ts);
     if (holder !== undefined && threadKey !== undefined) {
       if (holder !== connection.config.agentId) {
         // Standing down for the holder, whether or not the holder can still
@@ -6373,28 +6347,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not to be this agent's leaves an empty link behind, which is all it
       // should cost.
       let overhear = admitted.overhear;
-      // Judged, not ruled: a turn nobody asked for, while the agent is
-      // still attentive, and a free overhear past that. Read off the
-      // chain — a session the invitation is still creating reads as not
-      // there, and the message is heard rather than judged, which is the
-      // safe side. A host that cannot say leaves the agent hearing.
+      // Judged, not ruled (card 541): the intake already placed this reply
+      // with this agent, so it runs a turn nobody asked for, which may stay
+      // quiet. A reply only the sessions can place waits for them below.
       let judged = false;
-      if (admitted.judge && gateway.sessionRouting) {
-        // The pending count is taken BEFORE the store is read: a message
-        // that settles between the two would be counted by neither the
-        // other way round, and a window that runs one message short in a
-        // race is a bound kept; one that runs a message long is not.
-        const pending = pendingFor(sessionId);
-        let routing: SessionRouting | undefined;
-        try {
-          routing = await gateway.sessionRouting(sessionId);
-        } catch (error) {
-          warn(`slack: could not read whether ${connection.config.agentId} is attentive in ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-        if (routing && attentive(routing, event.ts, pending)) {
-          judged = true;
-          overhear = false;
-        }
+      if (admitted.judge && admitted.settled) {
+        judged = true;
+        overhear = false;
       }
       if (!admitted.settled) {
         // One verdict for this message, shared with whichever other agents
@@ -6419,6 +6378,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           judged = false;
           overhear = true;
         } else {
+          if (admitted.judge) {
+            judged = true;
+            overhear = false;
+          }
           if (threadKey) {
             // Answered from the store rather than from memory: hold it, so
             // the rest of the thread is ordered by receipt like any other.
@@ -6557,7 +6520,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // an overhear queued behind a long turn would hold the next
         // message's place in this chain hostage to that turn.
         return {
-          observed: placeObserve(sessionId, gateway.observe({ sessionId, agentId: connection.config.agentId, message: userMessage, metadata })),
+          observed: gateway.observe({ sessionId, agentId: connection.config.agentId, message: userMessage, metadata }),
         };
       }
 
@@ -7083,8 +7046,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connections.length = 0;
       approvalPosts.clear();
       threadAddressee.clear();
+      senderAddressees.clear();
       coldVerdicts.clear();
-      pendingObserves.clear();
       botIdentities.clear();
       homeOwners.clear();
       rendering.clear();
