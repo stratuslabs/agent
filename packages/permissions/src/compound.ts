@@ -19,12 +19,13 @@ import { resolveReal, walk, within } from './workspace.ts';
  * name*. Approving `grep` once covers every `grep`, whatever its flags and
  * pattern, as long as everything it is pointed at is inside the agent's
  * workspace. The arguments are no longer what the grant is about; where they
- * lead is. A by-name grant is therefore never an answer for a command that
- * can be pointed at something other than paths: a shell or interpreter, a
- * wrapper that runs another program, or a command that changes the machine
- * rather than files (`NOT_GRANTABLE_BY_NAME`). Those, and the commands that
- * take a subcommand (`git`, `gh`, `pnpm`), keep the narrower scopes the
- * engine has always stored.
+ * lead is. So a by-name grant is offered only for the commands on a short
+ * list whose every effect is reading and writing the paths they are given
+ * (`GRANTABLE_BY_NAME`), less any flag that runs a program or reads a list
+ * of further paths. Everything else keeps the narrower scopes the engine
+ * has always stored: a list of what may not be granted could never be
+ * finished, since a test runner, a linter or `tar --checkpoint-action` runs
+ * code no path check sees.
  *
  * Still argument-level policy, not a sandbox, and still failing toward a
  * prompt: an operator, a quote or an expansion this reader does not model
@@ -59,6 +60,12 @@ export interface CompoundCommand {
 
 const disqualified = (command: string, reason: string): CompoundCommand => ({ command, pipelines: [], disqualifiedBy: reason });
 
+/** Words the shell reads as syntax when they start a command. */
+const SHELL_KEYWORDS: ReadonlySet<string> = new Set([
+  'if', 'then', 'else', 'elif', 'fi', 'case', 'esac', 'for', 'select', 'while', 'until', 'do', 'done', 'in',
+  'function', 'time', 'coproc', '!', '{', '}', '[[', ']]',
+]);
+
 /** A redirection target the shell would expand, or that this reader would get wrong. */
 const UNREADABLE_TARGET = /[*?[\]{}~$`\\#]/;
 
@@ -90,6 +97,12 @@ export const analyzeCompound = (command: string): CompoundCommand => {
     const analysis = analyzeCommand(trimmed);
     if (analysis.disqualifiedBy) {
       return analysis.disqualifiedBy;
+    }
+    // `if true; then sh -c id; fi` split on `;` is not three commands named
+    // `if`, `then` and `fi`: the keyword is syntax, and the command it
+    // carries is the next word. This reader does not model it.
+    if (SHELL_KEYWORDS.has(analysis.tokens[0] ?? '')) {
+      return 'it contains shell syntax (if, for, while, case, braces)';
     }
     if (analysis.pipeline) {
       // `analyzeCommand` split on a pipe this reader did not see.
@@ -298,8 +311,27 @@ export const analyzeCompound = (command: string): CompoundCommand => {
 };
 
 /**
- * Commands a grant by name is never offered for, and never honored for if a
- * file says otherwise. Each one can be pointed at something no path check
+ * Commands that may be granted by name: each reads or writes the paths it
+ * is given and nothing else, so a check of those paths is a check of what
+ * it does. Network clients, archivers, test runners, linters, build tools
+ * and `jq` (whose `env` reads the daemon's environment) are not on it;
+ * they keep the narrower scope. Adding one means reading its manual for
+ * flags that run a program or read paths from a file, and denying them in
+ * `NAME_GRANT_DENIED_BY_COMMAND`.
+ */
+export const GRANTABLE_BY_NAME: ReadonlySet<string> = new Set([
+  'grep', 'egrep', 'fgrep', 'rg',
+  'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'tr', 'paste', 'join', 'comm', 'fold', 'nl', 'column', 'rev', 'tac',
+  'diff', 'cmp', 'ls', 'stat', 'file', 'du', 'tree', 'realpath', 'readlink', 'basename', 'dirname',
+  'mkdir', 'touch', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'tee',
+  'md5', 'md5sum', 'shasum', 'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'od', 'xxd', 'hexdump', 'strings',
+  'gzip', 'gunzip', 'zcat', 'printf', 'test',
+]);
+
+/**
+ * Commands no grant may ever cover by name, and which get no scope either
+ * when they appear in a line with others (`… | sh`). Each one can be
+ * pointed at something no path check
  * sees: a program to run (`sh`, `python`, `xargs`, `env`, `find -exec`), a
  * privilege (`sudo`), a remote machine (`ssh`), or the machine's own
  * configuration (`launchctl`, `networksetup`, `security`, `chmod`). They
@@ -346,7 +378,7 @@ export const SUBCOMMAND_COMMANDS: ReadonlySet<string> = new Set([
 
 /** Whether "always" on this command may grant it by name. */
 export const grantableByName = (base: string): boolean =>
-  /^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(base)
+  GRANTABLE_BY_NAME.has(base)
   && !NOT_GRANTABLE_BY_NAME.has(base)
   && !SUBCOMMAND_COMMANDS.has(base);
 
@@ -357,6 +389,41 @@ export const grantableByName = (base: string): boolean =>
  * `--bytes` to the commands a by-name grant is for; git never gets one.
  */
 const NAME_GRANT_DENIED_FLAGS = ['--exec', '--exec-path', '--config', '--config-env', '--upload-pack', '--receive-pack', '--ext-diff', '--open-files-in-pager'];
+
+/**
+ * Per command, the flags a by-name grant does not cover: a long name, or a
+ * short letter anywhere in a bundle. They run a program (`rg --pre`, `sort
+ * --compress-program`), read the paths to act on from a file this check
+ * never opens (`--files0-from`, `file -f`, `md5sum -c`), or walk links
+ * below the given paths by default (`diff -r`).
+ */
+const NAME_GRANT_DENIED_BY_COMMAND: Record<string, string[]> = {
+  rg: ['--pre', '--pre-glob'],
+  sort: ['--compress-program', '--files0-from'],
+  wc: ['--files0-from'],
+  du: ['--files0-from'],
+  diff: ['--recursive', 'r'],
+  file: ['--files-from', 'f'],
+  md5sum: ['--check', 'c'],
+  shasum: ['--check', 'c'],
+  sha1sum: ['--check', 'c'],
+  sha256sum: ['--check', 'c'],
+  sha512sum: ['--check', 'c'],
+};
+
+const deniedFor = (base: string, args: readonly string[]): boolean => {
+  const denied = NAME_GRANT_DENIED_BY_COMMAND[base] ?? [];
+  return args.some((token) => {
+    if (token === '--') {
+      return false;
+    }
+    if (token.startsWith('--')) {
+      const spelled = token.split('=')[0] ?? token;
+      return NAME_GRANT_DENIED_FLAGS.includes(spelled) || denied.includes(spelled);
+    }
+    return token.startsWith('-') && [...token.slice(1)].some((letter) => denied.includes(letter));
+  });
+};
 
 /**
  * Short flags that make a command follow symlinks it meets *below* the
@@ -370,10 +437,9 @@ const FOLLOWS_LINKS: Record<string, string[]> = {
   fgrep: ['R'],
   rg: ['L'],
   cp: ['L', 'H'],
-  tar: ['h', 'L'],
   du: ['L'],
   ls: ['L'],
-  chmod: ['L', 'H'],
+  tree: ['l'],
 };
 const FOLLOWS_LINKS_LONG = ['--dereference-recursive', '--dereference', '--follow', '--dereference-command-line'];
 
@@ -538,10 +604,7 @@ const coveredByName = async (
     return false;
   }
   const args = stage.tokens.slice(1);
-  if (args.some((token) => {
-    const [spelled] = token.split('=');
-    return token.startsWith('--') && NAME_GRANT_DENIED_FLAGS.includes(spelled ?? token);
-  })) {
+  if (deniedFor(base, args)) {
     return false;
   }
   if (stage.tokens.some((token) => /[$`]/.test(token))) {

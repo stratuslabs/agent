@@ -8,6 +8,7 @@ import { SESSION_TRUST_METADATA_KEY, type ApprovalContext, type Session, type To
 
 import {
   analyzeCompound,
+  grantableByName,
   createFileCommandWhitelist,
   createPermissionPolicy,
   describeAgentGrants,
@@ -175,7 +176,6 @@ test('a granted command still asks when it points outside the workspace', async 
     'cp src/main.ts src/copy.ts',
     'grep x src/*.ts',
     'cat src/main.ts | grep x',
-    'curl -sSL https://example.com/a?b=c -o src/page.html',
     'grep -rn --include=*.ts x .',
   ]) {
     assert.equal(await allowed(command), true, `should run: ${command}`);
@@ -313,4 +313,74 @@ test('by-name grants persist in their own key, list beside scopes, and revoke by
   assert.equal(await policy.approve(contextFor(repo, 'cd src && grep -r x .')), false, 'a revoke is the next call\'s answer');
   assert.equal(await store.forgetScope('nova', 'grep'), false);
   assert.deepEqual((await store.grantsFor('nova')).scopes.map((scope) => scope.command), ['git'], 'the scope beside it is untouched');
+});
+
+test('shell keywords are syntax, not commands: a line with them is never read or granted as commands', async () => {
+  for (const command of [
+    'if true; then echo ok; fi',
+    'if true; then sh -c id; fi',
+    'for f in a b; do cat $f; done',
+    'while true; do ls; done',
+    'case x in x) ls;; esac',
+    '{ ls; }',
+    '! grep x src',
+    '[[ -f a ]] && ls',
+    'function f { ls; }',
+  ]) {
+    assert.ok(analyzeCompound(command).disqualifiedBy, `should not read as commands: ${command}`);
+  }
+  const { workspace, repo } = await layout();
+  // Even a hand-edited store naming every keyword grants none of them.
+  const names = namesStore(['if', 'then', 'fi', 'else', 'elif', 'do', 'done', 'for', 'while', 'until', 'case', 'esac', 'in', 'select', 'function', 'coproc']);
+  const policy = createPermissionPolicy({ mode: 'headless', commands: { grantRootFor: () => workspace, names } });
+  assert.equal(await policy.approve(contextFor(repo, 'if true; then sh -c id; fi')), false);
+  for (const keyword of ['if', 'then', 'fi', 'do', 'done', 'while', 'case', 'in']) {
+    assert.equal(grantableByName(keyword), false, keyword);
+  }
+});
+
+test('a by-name grant is only for commands that read and write paths, never ones that run another program', async () => {
+  const { workspace, repo } = await layout();
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: {
+      grantRootFor: () => workspace,
+      // A hand-edited store: none of these may be honored by name.
+      names: namesStore(['tar', 'vitest', 'eslint', 'prettier', 'jest', 'tsc', 'pytest', 'curl', 'wget', 'patch', 'split', 'jq', 'rg', 'sort', 'wc', 'diff', 'md5sum', 'file']),
+    },
+  });
+  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  for (const command of [
+    // Codex P1 4309037777: tar runs its checkpoint action.
+    "tar -cf archive.tar --checkpoint=1 --checkpoint-action='exec=touch pwned' .",
+    'tar -cf archive.tar src',
+    // Test runners, linters and compilers run the workspace's own code and config.
+    'vitest run',
+    'eslint src',
+    'prettier --write src',
+    'tsc -p .',
+    // Network clients reach outside the workspace whatever their paths.
+    'curl -sSL https://example.com -o src/page.html',
+    'wget https://example.com',
+    // Flags of granted commands that run a program or read a list of paths.
+    'rg --pre ./x foo src',
+    'rg --pre=./x foo src',
+    'sort --compress-program=./x src/main.ts',
+    'sort --files0-from=src/list src/main.ts',
+    'wc --files0-from=src/list',
+    'diff -r src src',
+    'md5sum -c src/sums',
+    'file -f src/list',
+  ]) {
+    assert.equal(await allowed(command), false, `should ask: ${command}`);
+  }
+  for (const command of ['rg foo src', 'sort src/main.ts', 'wc -l src/main.ts', 'diff src/main.ts src/main.ts', 'md5sum src/main.ts', 'file src/main.ts']) {
+    assert.equal(await allowed(command), true, `should run: ${command}`);
+  }
+  for (const name of ['tar', 'vitest', 'curl', 'jq', 'patch', 'make', 'sh']) {
+    assert.equal(grantableByName(name), false, name);
+  }
+  for (const name of ['grep', 'rg', 'cat', 'wc', 'cp', 'mv', 'rm', 'mkdir']) {
+    assert.equal(grantableByName(name), true, name);
+  }
 });

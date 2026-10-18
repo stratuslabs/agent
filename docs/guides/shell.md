@@ -170,13 +170,20 @@ Always allow on a line grants each command it was missing, so approving
 `cd app && wc -c main.ts && git push origin nova/fix` once stores `wc` by
 name and the `git push` scope. The prompt says which before you answer.
 
-**Some commands are never granted by name**, because their arguments are
-not only paths: shells and interpreters (`sh`, `python3`, `node`, `awk`,
-`sed`), wrappers that run another program (`xargs`, `env`, `sudo`, `find`,
-`timeout`), commands that act on another machine (`ssh`, `rsync`), and
-commands that change the machine itself (`launchctl`, `chmod`, `kill`,
-`security`, `stratus`). Alone, **Always allow** on one still stores the
-narrow scope described above; in a line with other commands, it counts once.
+**Only commands that act on the paths they are given are granted by
+name**: searching and reading (`grep`, `rg`, `cat`, `wc`, `sort`, `diff`,
+`ls`, `stat`, `du`), moving files (`mkdir`, `touch`, `cp`, `mv`, `rm`,
+`ln`, `tee`), and a few converters (`base64`, `gzip`, `xxd`, the checksum
+tools). Each still refuses the flags that make it run a program or read
+the paths to act on from a file (`rg --pre`, `sort --compress-program`,
+`--files0-from`, `md5sum -c`, `diff -r`). Everything else keeps the
+narrow scope: network clients (`curl`, `wget`), archivers (`tar`, `zip`),
+`jq`, test runners, linters, compilers, and build tools, which run code no
+path check sees, or reach past the workspace. Shells, interpreters, and wrappers that run another
+program (`sh`, `python3`, `xargs`, `env`, `sudo`, `find`) get no grant at
+all in a line with other commands; alone, **Always allow** on one still
+stores the narrow scope described above. A line using shell keywords
+(`if`, `for`, `while`, `case`, braces) is not read as commands and asks.
 Commands with subcommands (`git`, `gh`, `pnpm`, `npm`, `cargo`, `make`,
 `agentboard`) keep the command-plus-subcommand scope, so `gh pr` is never
 `gh repo delete`.

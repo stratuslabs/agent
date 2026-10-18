@@ -131,6 +131,7 @@ export {
 } from './whitelist.ts';
 export {
   analyzeCompound,
+  GRANTABLE_BY_NAME,
   grantableByName,
   judgeCompound,
   NOT_GRANTABLE_BY_NAME,
