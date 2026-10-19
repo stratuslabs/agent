@@ -14839,7 +14839,7 @@ test('the open-posture startup lines name the agents whose external-content gate
   );
   assert.match(
     describeRemoteMode({ mode: 'remote', posture: 'guarded', agents: { bea: { posture: 'open', externalContent: 'gate' } } }, ['bea']),
-    /except bea's, which run without asking, except in bea's conversations that read external content \(externalContent: gate\) \(only dangerous/,
+    /except bea's, which run without asking, except in bea's conversations that read external content \(externalContent: gate\) \(/,
   );
   // A guarded agent asks anyway, so its gate changes nothing there.
   assert.doesNotMatch(describePosture({ agents: { bea: { posture: 'guarded', externalContent: 'gate' } } }, 'remote'), /external content/);
@@ -15812,4 +15812,22 @@ test('template add --force that cannot write the new soul keeps the agent it was
 
   assert.equal(await readFile(roster, 'utf8'), EXAMPLE_SOUL, 'the roster still serves the agent');
   assert.deepEqual((await readdir(path.dirname(roster))).filter((name) => name.endsWith('.replaced')), []);
+});
+
+test('the startup lines count external-content gated calls among those that ask, for served agents only', () => {
+  // Codex P2 4314770745: all open with externalContent gate still asks gated calls after external content.
+  assert.match(describeUnreachable({ mode: 'remote', externalContent: 'gate' }, ['ava']), /their calls that would ask will wait/);
+  assert.match(describeUnreachable({ mode: 'remote', agents: { ava: { externalContent: 'gate' } } }, ['ava', 'bea']), /their calls that would ask will wait/);
+  assert.match(describeUnreachable({ mode: 'remote', agents: { ghost: { externalContent: 'gate' } } }, ['ava']), /their dangerous calls will wait/);
+  assert.match(describeRemoteMode({ mode: 'remote', externalContent: 'gate' }, ['ava']), /so every call that would ask is denied on arrival/);
+  // Codex P2 4314770756: an override for an agent that is not served is not reported.
+  const ghost = { mode: 'remote' as const, agents: { ghost: { externalContent: 'gate' as const } } };
+  assert.doesNotMatch(describePosture(ghost, 'remote', ['ava']), /ghost|external content/);
+  assert.doesNotMatch(describeRemoteMode(ghost, ['ava'], ['ava']), /ghost|external content/);
+  assert.match(describePosture(ghost, 'remote', ['ava', 'ghost']), /ghost's conversations that read external content/);
+  // Codex P2 4314770779: an open agent with the gate parks gated calls too, so not "only dangerous ones".
+  const mixed = { mode: 'remote' as const, posture: 'guarded' as const, agents: { bea: { posture: 'open' as const, externalContent: 'gate' as const } } };
+  const line = describeRemoteMode(mixed, ['ava', 'bea'], ['ava', 'bea']);
+  assert.match(line, /except bea's, which run without asking, except in bea's conversations that read external content/);
+  assert.doesNotMatch(line, /only dangerous ones are parked/);
 });

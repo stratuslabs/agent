@@ -238,10 +238,13 @@ const listKeyFor = (principals: PrincipalsConfig, agentIds: string[]): string =>
  * conversation that read external content back to asking. Says so, for
  * every agent or naming the open agents it applies to; empty when none.
  */
-const externalGateNote = (approvals: ApprovalsConfig): string => {
+const externalGateNote = (approvals: ApprovalsConfig, servedAgentIds?: readonly string[]): string => {
   const resolved = (agentId: string) => resolveAgentApprovals(approvals, agentId);
   const gates = (agentId: string) => resolved(agentId).posture === 'open' && resolved(agentId).externalContent === 'gate';
-  const named = Object.keys(approvals.agents ?? {});
+  // Only served agents, like the posture exceptions beside it: a stale
+  // override for a removed agent is not an exception anyone will meet.
+  const named = Object.keys(approvals.agents ?? {})
+    .filter((agentId) => servedAgentIds === undefined || servedAgentIds.includes(agentId));
   if (gates('')) {
     const not = named.filter((agentId) => resolved(agentId).posture === 'open' && !gates(agentId));
     return `, except in a conversation that read external content (externalContent: gate${not.length > 0 ? `; not for ${not.join(', ')}` : ''})`;
@@ -268,7 +271,7 @@ export const describePosture = (
   const except = exceptions.length > 0 ? ` except ${exceptions.join(', ')}` : '';
   // Headless asks nobody: what the posture would ask about is refused.
   return top === 'open'
-    ? `posture open for every agent${except} (gated tools run without asking${externalGateNote(approvals)}; dangerous ones ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'still ask'})`
+    ? `posture open for every agent${except} (gated tools run without asking${externalGateNote(approvals, servedAgentIds)}; dangerous ones ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'still ask'})`
     : `posture guarded for every agent${except} (gated tools ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'ask, or are refused with nobody to ask'})`;
 };
 
@@ -331,15 +334,19 @@ const classifyApprovers = (
 /**
  * Which calls reach the approval path for these agents (every configured
  * one when none is named): gated ones when all are guarded, dangerous ones
- * when all are open, and, mixed, the calls that would ask.
+ * when all are open with no external-content gate, and otherwise (mixed, or
+ * an open agent whose `externalContent: "gate"` sends gated calls back to
+ * asking after external content) the calls that would ask.
  */
 export const askingCalls = (approvals: ApprovalsConfig, agentIds: readonly string[]): { call: string; calls: string } => {
   const ids = agentIds.length > 0 ? agentIds : ['', ...Object.keys(approvals.agents ?? {})];
-  const postures = new Set(ids.map((agentId) => resolveAgentApprovals(approvals, agentId).posture));
+  const resolved = ids.map((agentId) => resolveAgentApprovals(approvals, agentId));
+  const postures = new Set(resolved.map((agent) => agent.posture));
   if (!postures.has('open')) {
     return { call: 'gated call', calls: 'gated calls' };
   }
-  return postures.size === 1
+  const externalGate = resolved.some((agent) => agent.posture === 'open' && agent.externalContent === 'gate');
+  return postures.size === 1 && !externalGate
     ? { call: 'dangerous call', calls: 'dangerous calls' }
     : { call: 'call that would ask', calls: 'calls that would ask' };
 };
@@ -376,10 +383,13 @@ export const describeRemoteMode = (approvals: ApprovalsConfig, askable: string[]
   const who = `(${describeApprovers(approvals, askable)})`;
   if (top === 'open') {
     const guarded = differing.length > 0 ? `, except ${differing.join(', ')}'s, whose gated calls are parked too` : '';
-    return `approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture${externalGateNote(approvals)}${guarded} ${who}`;
+    return `approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture${externalGateNote(approvals, servedAgentIds)}${guarded} ${who}`;
   }
+  // "Only dangerous ones" holds only when no open agent gates on external
+  // content; otherwise the note before it already says what else is parked.
+  const gateNote = externalGateNote(approvals, servedAgentIds);
   const open = differing.length > 0
-    ? `, except ${differing.join(', ')}'s, which run without asking${externalGateNote(approvals)} (only dangerous ones are parked)`
+    ? `, except ${differing.join(', ')}'s, which run without asking${gateNote}${gateNote === '' ? ' (only dangerous ones are parked)' : ''}`
     : '';
   return `approvals: remote — gated calls are parked and asked in Slack${open} ${who}`;
 };
