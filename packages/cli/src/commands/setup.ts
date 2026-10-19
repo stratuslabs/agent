@@ -1150,9 +1150,13 @@ export const runSetup = async (
         continue;
       }
       const principals: PrincipalsConfig = { ...(state.principals ?? {}) };
-      if (principals.slackUsers === undefined && principals.agents?.[agentId]?.slackUsers === undefined) {
+      const anyList = principals.slackUsers !== undefined
+        || Object.values(principals.agents ?? {}).some((entry) => entry?.slackUsers !== undefined);
+      if (!anyList) {
         // The first list on this install is everyone's: the operator who
-        // connects a second agent is almost always the same person.
+        // connects a second agent is almost always the same person. Once
+        // any agent has a list, a new one is that agent's alone, so it
+        // never opens an agent left unlisted on purpose.
         principals.slackUsers = ids;
       } else {
         principals.agents = {
