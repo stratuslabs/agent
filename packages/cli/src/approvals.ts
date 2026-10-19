@@ -328,13 +328,34 @@ const classifyApprovers = (
   return { covered, uncovered: agentIds.filter((agentId) => !covered.includes(agentId)) };
 };
 
+/**
+ * Which calls reach the approval path for these agents (every configured
+ * one when none is named): gated ones when all are guarded, dangerous ones
+ * when all are open, and, mixed, the calls that would ask.
+ */
+export const askingCalls = (approvals: ApprovalsConfig, agentIds: readonly string[]): { call: string; calls: string } => {
+  const ids = agentIds.length > 0 ? agentIds : ['', ...Object.keys(approvals.agents ?? {})];
+  const postures = new Set(ids.map((agentId) => resolveAgentApprovals(approvals, agentId).posture));
+  if (!postures.has('open')) {
+    return { call: 'gated call', calls: 'gated calls' };
+  }
+  return postures.size === 1
+    ? { call: 'dangerous call', calls: 'dangerous calls' }
+    : { call: 'call that would ask', calls: 'calls that would ask' };
+};
+
+/** The startup warning for served agents no running channel can ask for. */
+export const describeUnreachable = (approvals: ApprovalsConfig, unreachable: readonly string[]): string =>
+  `no channel can ask for ${unreachable.join(', ')}, so their ${askingCalls(approvals, unreachable).calls} will wait out the `
+  + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.';
+
 export const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]): string => {
   if (agentIds.length === 0) {
-    return 'but no channel is running to ask through, so gated calls will wait out the approval timeout and then be denied';
+    return `but no channel is running to ask through, so ${askingCalls(approvals, agentIds).calls} will wait out the approval timeout and then be denied`;
   }
   const { covered, uncovered } = classifyApprovers(approvals, agentIds);
   if (covered.length === 0) {
-    return 'but no approvers are configured, so every gated call is denied on arrival';
+    return `but no approvers are configured, so every ${askingCalls(approvals, agentIds).call} is denied on arrival`;
   }
   return uncovered.length === 0
     ? `approvers set for ${covered.join(', ')}`

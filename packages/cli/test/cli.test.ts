@@ -32,6 +32,7 @@ import {
   describePrincipals,
   describePosture,
   describeRemoteMode,
+  describeUnreachable,
   loadServeApprovals,
   defaultPosture,
   unflaggedApprovals,
@@ -14794,6 +14795,17 @@ test('the startup posture lines leave out overrides for agents that are not serv
   assert.match(describeRemoteMode(approvals, ['ava']), /except ghost's/, 'without a roster every override still counts');
   assert.doesNotMatch(describePosture(approvals, 'remote', ['ava']), /ghost/);
   assert.match(describePosture(approvals, 'remote', ['ava', 'ghost']), /except ghost/);
+});
+
+test('the unreachable-agent warning and the approver clause name the calls that actually ask', () => {
+  // Codex P2 4310693967: under the default open posture gated calls run, so
+  // the warning must not say they wait out the timeout.
+  assert.match(describeUnreachable({ mode: 'remote' }, ['ava']), /^no channel can ask for ava, so their dangerous calls will wait out the approval timeout/);
+  assert.match(describeUnreachable({ mode: 'remote', posture: 'guarded' }, ['ava']), /their gated calls will wait/);
+  assert.match(describeUnreachable({ mode: 'remote', posture: 'guarded', agents: { bea: { posture: 'open' } } }, ['ava', 'bea']), /their calls that would ask will wait/);
+  assert.match(describeRemoteMode({ mode: 'remote' }, ['ava']), /no approvers are configured, so every dangerous call is denied on arrival/);
+  assert.match(describeRemoteMode({ mode: 'remote' }, []), /so dangerous calls will wait out the approval timeout/);
+  assert.match(describeRemoteMode({ mode: 'remote', posture: 'guarded' }, ['ava']), /every gated call is denied on arrival/);
 });
 
 test('the remote-mode startup line says what is actually parked under each posture', () => {

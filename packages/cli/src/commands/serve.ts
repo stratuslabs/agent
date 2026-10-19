@@ -41,7 +41,7 @@ import {
   grantWriteSerializer,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
-import { describePrincipals, describePosture, describeRemoteMode } from '../approvals.ts';
+import { describePrincipals, describePosture, describeRemoteMode, describeUnreachable } from '../approvals.ts';
 import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
@@ -841,10 +841,7 @@ const serveHeldHome = async (
       const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
       const unreachable = served.filter((id) => !askable.has(id));
       if (unreachable.length > 0) {
-        warn(
-          `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
-          + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
-        );
+        warn(describeUnreachable(approvalsConfig, unreachable));
       }
     }
 
