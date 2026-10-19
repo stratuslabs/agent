@@ -296,6 +296,8 @@ home directory, and in a linked worktree's git directory.
 `GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
 they add options the command line doesn't show. Nor are shell startup variables passed (`BASH_ENV`, `ENV`, `ZDOTDIR`,
 exported `BASH_FUNC_*` functions), since they run code before the command,
+or `CDPATH`, which sends a relative `cd` somewhere other than where the line
+is judged,
 and zsh, tcsh, csh, and fish are started without their user startup
 files (`-f`, or `fish --no-config`) for the same reason.
 Nor does `PATH` keep an

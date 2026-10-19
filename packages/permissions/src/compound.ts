@@ -340,7 +340,8 @@ export const analyzeCompound = (command: string): CompoundCommand => {
  * it does. Network clients, archivers, test runners, linters, build tools
  * and `jq` (whose `env` reads the daemon's environment) are not on it;
  * they keep the narrower scope. Neither is `printf`, whose bash builtin
- * assigns a variable with `-v`. Adding one means reading its manual and
+ * assigns a variable with `-v`, nor binutils `strings`, which reads more
+ * arguments from the file an `@file` names. Adding one means reading its manual and
  * listing, in `NAME_GRANT_FLAGS`, only the flags that act on the paths
  * given and nothing else.
  */
@@ -349,7 +350,7 @@ export const GRANTABLE_BY_NAME: ReadonlySet<string> = new Set([
   'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'tr', 'paste', 'join', 'comm', 'fold', 'nl', 'column', 'rev', 'tac',
   'diff', 'cmp', 'ls', 'stat', 'file', 'du', 'tree', 'realpath', 'readlink', 'basename', 'dirname',
   'mkdir', 'touch', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'tee',
-  'md5', 'md5sum', 'shasum', 'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'od', 'xxd', 'hexdump', 'strings',
+  'md5', 'md5sum', 'shasum', 'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'od', 'xxd', 'hexdump',
   'gzip', 'gunzip', 'zcat', 'test',
 ]);
 
@@ -528,7 +529,6 @@ const NAME_GRANT_FLAGS: Record<string, NameGrantFlags> = {
   od: { short: 'cxbdov', value: 'AtNjw' },
   xxd: { short: 'rpiuEe', value: 'lcgos' },
   hexdump: { short: 'Cbcdovx', value: 'nsef' },
-  strings: { short: 'a', value: 'nto' },
   gzip: GZIP_FLAGS,
   gunzip: GZIP_FLAGS,
   zcat: GZIP_FLAGS,

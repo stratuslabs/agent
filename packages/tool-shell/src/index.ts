@@ -120,8 +120,13 @@ const GIT_REPOSITORY_VARIABLES: readonly string[] = [
   'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
 ];
 
-/** Variables that make a shell run code before the command. Never passed. */
-const SHELL_STARTUP_VARIABLES: readonly string[] = ['BASH_ENV', 'ENV', 'ZDOTDIR'];
+/**
+ * Variables that make a shell run code before the command, or read it
+ * differently from the permission engine. Never passed. `CDPATH` sends a
+ * relative `cd` somewhere other than the working directory the engine
+ * follows it from.
+ */
+const SHELL_STARTUP_VARIABLES: readonly string[] = ['BASH_ENV', 'ENV', 'ZDOTDIR', 'CDPATH'];
 
 const settingsFor = (
   config: JsonObject,

@@ -408,6 +408,9 @@ test('a glob a by-name grant covers never expands into a flag, and nothing grant
   assert.equal(await allowed('printf -v PATH .; uname'), false);
   assert.equal(await allowed('printf hello > out.txt'), false);
   assert.equal(grantableByName('printf'), false);
+  // Codex P1 4309568551: binutils `strings @opts` reads more arguments,
+  // paths included, from a file no path check looks inside.
+  assert.equal(grantableByName('strings'), false);
 });
 
 test('a by-name grant covers only the flags it lists, spelled out in full', async () => {
