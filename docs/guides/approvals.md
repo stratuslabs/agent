@@ -46,8 +46,11 @@ At a terminal, `stratus chat` and `stratus run` follow the same posture when
 dangerous one. `--approvals` still chooses explicitly: `always`, `open`,
 `ask` (a y/N prompt on every call), `gated` (`safe` tools run, everything
 else asks), or `never`. Under `guarded`, `gated` is the default at a
-terminal, and `always` when stdin is a pipe or a script (said once on
-stderr).
+terminal, and `never` when stdin is a pipe or a script, since nobody is
+there to ask (said once on stderr); pass `--approvals always` for an
+unattended script that should run everything. A config the posture can't
+be read from counts as `guarded`, and a project-local `approvals` block is
+ignored for the global one, as it is by the daemon.
 
 ## What the daemon will do on its own
 

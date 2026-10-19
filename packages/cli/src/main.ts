@@ -8,7 +8,7 @@ import {
   NoProviderConfiguredError,
   DEFAULT_STRATUS_AGENT,
 } from '@stratusagent/state';
-import { defaultPostureIsOpen } from './trusted-config.ts';
+import { defaultPosture, unflaggedApprovals } from './trusted-config.ts';
 import { runAgentNew } from './commands/agent-new.ts';
 import { runAgents } from './commands/agents.ts';
 import { runChat } from './commands/chat.ts';
@@ -280,12 +280,12 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
       // Unflagged, the trusted config's posture decides: open runs gated
       // tools without asking (and says nothing, since the operator chose
       // it); guarded keeps the terminal's y/N.
-      ...(command.approvals === undefined && await defaultPostureIsOpen(resolvedEnv, command.configPath, runtime.soul?.agent.id ?? DEFAULT_STRATUS_AGENT.id)
-        ? { approvals: 'open' as const }
-        : {
-          approvals: command.approvals ?? defaultApprovalMode(resolvedEnv, argv.includes('--stdin')),
-          approvalsDefaulted: command.approvals === undefined,
-        }),
+      ...(command.approvals !== undefined
+        ? { approvals: command.approvals }
+        : unflaggedApprovals(
+          await defaultPosture(resolvedEnv, command.configPath, runtime.soul?.agent.id ?? DEFAULT_STRATUS_AGENT.id),
+          defaultApprovalMode(resolvedEnv, argv.includes('--stdin')),
+        )),
       ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
       ...(command.configPath ? { configPath: command.configPath } : {}),
       env: resolvedEnv,

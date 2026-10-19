@@ -33,7 +33,8 @@ import {
   describePosture,
   describeRemoteMode,
   loadServeApprovals,
-  defaultPostureIsOpen,
+  defaultPosture,
+  unflaggedApprovals,
   externalContentGated,
   loadServePrincipals,
   loadServeSlack,
@@ -14629,6 +14630,15 @@ test('the open-posture startup lines name the agents whose external-content gate
   assert.doesNotMatch(describePosture({ agents: { bea: { posture: 'guarded', externalContent: 'gate' } } }), /external content/);
 });
 
+test('an unflagged chat or run is never more permissive than open, whatever the posture', () => {
+  // Codex P1 4309856143: guarded or unreadable fell through to the
+  // unattended default, which approves dangerous calls too.
+  assert.deepEqual(unflaggedApprovals('open', 'always'), { approvals: 'open' });
+  assert.deepEqual(unflaggedApprovals('guarded', 'always'), { approvals: 'never', approvalsDefaulted: true });
+  assert.deepEqual(unflaggedApprovals('unreadable', 'always'), { approvals: 'never', approvalsDefaulted: true });
+  assert.deepEqual(unflaggedApprovals('guarded', 'gated'), { approvals: 'gated', approvalsDefaulted: true });
+});
+
 test('an approvals block that cannot be trusted or read leaves the daemon guarded, never open', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -14638,19 +14648,23 @@ test('an approvals block that cannot be trusted or read leaves the daemon guarde
   const untrusted = await loadServeApprovals({ cwd: project, homeDir: home, processEnv: {} }, undefined, (line) => warnings.push(line));
   assert.equal(untrusted.posture, 'guarded');
   assert.match(warnings[0] ?? '', /Gated calls ask until then \(posture guarded\)/);
-  assert.equal(await defaultPostureIsOpen({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
+  // Codex P1 4309856143: the clone's block is ignored for chat/run too; the
+  // global file (absent here, so the open default) decides.
+  assert.equal(await defaultPosture({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'open');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { posture: 'guarded' } }));
+  assert.equal(await defaultPosture({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'guarded');
 
   await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
   const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
   const unreadable = await loadServeApprovals({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, () => {});
   assert.equal(unreadable.posture, 'guarded');
-  assert.equal(await defaultPostureIsOpen({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
+  assert.equal(await defaultPosture({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'unreadable');
 
   // And with a readable config that says nothing, chat and run default open.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
-  assert.equal(await defaultPostureIsOpen({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), true);
+  assert.equal(await defaultPosture({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'open');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { agents: { stratus: { posture: 'guarded' } } } }));
-  assert.equal(await defaultPostureIsOpen({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
+  assert.equal(await defaultPosture({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'guarded');
 
   // The external-content gate an open terminal session honors.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { externalContent: 'gate' } }));

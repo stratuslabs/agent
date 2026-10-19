@@ -9,6 +9,7 @@ import {
   type SlackConfig,
 } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
+import type { CliApprovalMode } from './parse.ts';
 
 /**
  * A credential that exists only in this shell cannot reach the daemon: a
@@ -61,20 +62,46 @@ export const loadServeApprovals = async (
 };
 
 /**
- * Whether `stratus chat`/`run` should run gated tools without asking when
- * `--approvals` was not given: the trusted config's posture for this
- * agent, open by default, guarded when the policy can't be read.
+ * The trusted config's posture for this agent, for `stratus chat`/`run`
+ * without `--approvals`: open by default. A cloned repo's block is ignored
+ * in favor of the global file, as for principals, so it can neither open
+ * nor close the operator's posture. `unreadable` when the policy can't be
+ * read, which the caller must not treat as permission.
  */
-export const defaultPostureIsOpen = async (
+export const defaultPosture = async (
   env: CliEnvironment,
   configPath: string | undefined,
   agentId: string,
-): Promise<boolean> => {
-  const block = await readTrustedConfigBlock('approvals', env, configPath).catch(() => ({ status: 'unreadable' as const }));
-  if (block.status === 'untrusted' || block.status === 'unreadable') {
-    return false;
+): Promise<'open' | 'guarded' | 'unreadable'> => {
+  let block = await readTrustedConfigBlock('approvals', env, configPath).catch(() => ({ status: 'unreadable' as const }));
+  if (block.status === 'untrusted') {
+    block = await readGlobalConfigBlock('approvals', env).catch(() => ({ status: 'unreadable' as const }));
   }
-  return resolveAgentApprovals(block.status === 'present' ? block.value : undefined, agentId).posture === 'open';
+  if (block.status === 'unreadable' || block.status === 'untrusted') {
+    return 'unreadable';
+  }
+  return resolveAgentApprovals(block.status === 'present' ? block.value : undefined, agentId).posture === 'guarded' ? 'guarded' : 'open';
+};
+
+/**
+ * The approval options an unflagged chat/run starts with. Open runs gated
+ * tools without asking and asks about dangerous ones. Guarded (and an
+ * unreadable policy, which fails closed to it) asks at a terminal and,
+ * with nobody to ask, refuses gated calls, as the posture says. Never the
+ * old unattended `always`, which would make guarded, or a policy that
+ * could not be read, more permissive than open.
+ */
+export const unflaggedApprovals = (
+  posture: 'open' | 'guarded' | 'unreadable',
+  fallback: CliApprovalMode,
+): { approvals: CliApprovalMode; approvalsDefaulted?: true } => {
+  if (posture === 'open') {
+    return { approvals: 'open' };
+  }
+  if (fallback === 'always') {
+    return { approvals: 'never', approvalsDefaulted: true };
+  }
+  return { approvals: fallback, approvalsDefaulted: true };
 };
 
 /**

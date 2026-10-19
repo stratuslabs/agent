@@ -133,8 +133,19 @@ export const createApprovalPolicy = (
   }
 
   if (mode === 'never') {
+    // Defaulted here only when the posture is guarded (or its config could
+    // not be read) and nobody can be asked: say why, once.
+    let noted = !defaulted;
     return {
-      async approve() {
+      async approve(context) {
+        if (!noted && context.risk !== 'safe') {
+          noted = true;
+          writeLine(
+            streams.stderr,
+            `Note: refusing ${context.call.toolName} — the approvals posture is guarded (or its config could not be read) and stdin is not a terminal. `
+            + 'Pass --approvals open or always to run gated tools.',
+          );
+        }
         return false;
       },
     };
