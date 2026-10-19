@@ -368,6 +368,13 @@ const tokenize = (command: string): { tokens: string[]; expands: boolean[] } | u
       if (char === quote) {
         quote = undefined;
       } else {
+        // Double quotes stop globbing and `~`, not parameter expansion:
+        // `echo "$TOKEN"` prints the variable as surely as `echo $TOKEN`.
+        // An escaped `\$` was taken above and is text, and so is a `$`
+        // that starts no expansion (`grep "x$"`), as it is to `sh`.
+        if (quote === '"' && char === '$' && /[A-Za-z0-9_@*#?!${(-]/.test(command[index + 1] ?? '')) {
+          expanding = true;
+        }
         current += char;
       }
       continue;

@@ -127,6 +127,14 @@ test('one grep grant runs a chained, piped grep inside the workspace, and cd nev
   }
   // But echo may not expand anything, and grep still needs its grant.
   assert.equal(await bare.approve(contextFor(repo, 'echo $HOME')), false);
+  // Double quotes don't stop `$`: `echo "$TOKEN"` prints the variable too.
+  for (const command of ['echo "$HOME"', 'echo "token=$HOME"', 'cat "$HOME/x"', 'echo "$1"', 'echo "$$"', 'echo "$_x"']) {
+    assert.equal(await bare.approve(contextFor(repo, command)), false, command);
+  }
+  // An escaped `\$` and single quotes are text.
+  for (const command of ['echo "cost \\$5"', "echo '$HOME'", 'echo "costs $ 5"', 'echo "end$"']) {
+    assert.equal(await bare.approve(contextFor(repo, command)), true, command);
+  }
   assert.equal(await bare.approve(contextFor(repo, 'cd src && grep -r x .')), false);
 });
 
