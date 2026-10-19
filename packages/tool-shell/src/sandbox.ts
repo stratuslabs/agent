@@ -44,6 +44,21 @@ export const DEFAULT_DENIED_HOME_PATHS: readonly string[] = [
 ];
 
 /**
+ * Control sockets of container runtimes. A read-only view of a socket still
+ * accepts a connection, and any of these hands out the whole host (`docker
+ * run -v /:/host`), so they are refused like the credential stores. Docker
+ * Desktop's own socket lives under `~/.docker`, which is denied already.
+ */
+export const DEFAULT_DENIED_SOCKETS: readonly string[] = [
+  '/var/run/docker.sock',
+  '/run/docker.sock',
+  '/run/containerd/containerd.sock',
+  '/run/podman/podman.sock',
+  '/var/run/crio/crio.sock',
+  '/run/buildkit/buildkitd.sock',
+];
+
+/**
  * Package-manager caches a build writes outside the workspace. Writable so
  * `npm install` and friends work; nothing in them is a credential.
  */
@@ -80,7 +95,7 @@ export type SandboxPlan =
   | { kind: 'unavailable'; reason: string };
 
 /** Both spellings of a path: as given, and resolved through its symlinks when it exists. */
-const spellings = (target: string): string[] => {
+export const spellings = (target: string): string[] => {
   const absolute = path.resolve(target);
   try {
     const real = realpathSync(absolute);
@@ -143,7 +158,13 @@ export const darwinProfile = (policy: SandboxPolicy): string => {
     '(allow default)',
     '(deny file-write* (subpath "/"))',
     `(allow file-write* ${subpaths(writable)} (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))`,
-    ...(policy.denied.length > 0 ? [`(deny file-read-data file-read-xattr file-write* ${subpaths(policy.denied)})`] : []),
+    ...(policy.denied.length > 0 ? [
+      `(deny file-read-data file-read-xattr file-write* ${subpaths(policy.denied)})`,
+      // A file deny does not cover connect(2) on a socket inside it. One
+      // `remote unix-socket` form per path: given several paths, one form
+      // matches only its first (measured on macOS 15.3).
+      `(deny network-outbound ${[...new Set(policy.denied.flatMap(spellings))].map((p) => `(remote unix-socket (subpath ${sbplString(p)}))`).join(' ')})`,
+    ] : []),
     '(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc"))',
     // The workspace's ancestors may be listed (not read into), or getcwd
     // and git's repository discovery fail when the workspace sits inside

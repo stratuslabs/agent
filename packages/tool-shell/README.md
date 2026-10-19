@@ -109,11 +109,16 @@ and your credentials, whatever the command says:
 - **Readable:** the rest of the system, so toolchains work as usual.
 - **Not readable or writable:** the Stratus home (`~/.stratus`, or
   `STRATUS_HOME`) apart from this agent's own workspace, which covers
-  credentials, config, souls, sessions, and other agents' workspaces. Also
+  credentials, config, souls, sessions, and other agents' workspaces, each
+  also by the real path it links to (the visible `~/Agents` or `~/Stratus`
+  folder holds the souls and workspaces the home links to). Also
   `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, git
   credential files, `~/.docker`, `~/.fly`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
   `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, and the macOS
   keychains (file and service).
+- **No connection:** container runtime sockets (`/var/run/docker.sock`,
+  containerd, podman, CRI-O, BuildKit), which hand out the whole host, and any
+  socket under a denied path.
 - **Not writable:** everything else.
 - **Network:** on. A command can send its own workspace somewhere, but not a
   token it can't read.

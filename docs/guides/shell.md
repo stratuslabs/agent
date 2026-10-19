@@ -20,9 +20,10 @@ pack for a daemon and this page is the whole story; run it yourself and
 
 Every command runs in an OS sandbox (`sandbox-exec` on macOS, `bwrap` on
 Linux). It can write only the agent's workspace, temp, and package caches.
-It can't read the Stratus home outside that workspace, or your credential
-files (`~/.ssh`, cloud CLIs, `gh`, `~/.npmrc`, the macOS keychain). The
-network stays on. Where the host can't build a sandbox, commands run
+It can't read the Stratus home outside that workspace, other agents' souls
+and workspaces in the visible agents folder, or your credential files
+(`~/.ssh`, cloud CLIs, `gh`, `~/.npmrc`, the macOS keychain), and it can't
+connect to a container runtime's socket. The network stays on. Where the host can't build a sandbox, commands run
 unconfined and the daemon says so once. `sandbox: "required"` refuses
 instead, and `sandbox: "off"` turns it off. The full list and settings are in
 [the package README](../../packages/tool-shell/README.md#the-sandbox).
