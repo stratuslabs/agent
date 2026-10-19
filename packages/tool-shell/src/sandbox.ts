@@ -41,6 +41,9 @@ export const DEFAULT_DENIED_HOME_PATHS: readonly string[] = [
   '.password-store',
   '.pypirc',
   'Library/Keychains',
+  // Tokens kept inside a cache directory that is otherwise writable.
+  '.cache/huggingface/token',
+  '.cache/huggingface/stored_tokens',
 ];
 
 /**
@@ -120,6 +123,24 @@ export const stratusHomesFor = (workspace: string, processEnv: NodeJS.ProcessEnv
   return [...homes];
 };
 
+/** Whether `child` is `parent` or beneath it. */
+const isWithin = (parent: string, child: string): boolean => {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+};
+
+/**
+ * The denied paths that sit inside the workspace, every spelling. The
+ * workspace is given back after the denials (it may sit inside the hidden
+ * Stratus home), so these are denied once more after it: a workspace that
+ * is an ancestor of something hidden (a fallback of `~` or `/`, or an
+ * operator's `deniedPaths` entry inside it) must not show it again.
+ */
+const deniedInside = (policy: SandboxPolicy): string[] => {
+  const workspace = spellings(policy.workspace);
+  return [...new Set(policy.denied.flatMap(spellings))].filter((denied) => workspace.some((dir) => isWithin(dir, denied)));
+};
+
 const SBPL_UNSAFE = /["\\\n\r\0]/;
 
 const sbplString = (value: string): string => {
@@ -131,6 +152,15 @@ const sbplString = (value: string): string => {
 
 const subpaths = (paths: string[]): string =>
   [...new Set(paths.flatMap(spellings))].map((p) => `(subpath ${sbplString(p)})`).join(' ');
+
+/** Deny reading, writing, and connecting to sockets under `paths`. */
+const denyRules = (paths: string[]): string[] => paths.length === 0 ? [] : [
+  `(deny file-read-data file-read-xattr file-write* ${subpaths(paths)})`,
+  // A file deny does not cover connect(2) on a socket inside it. One
+  // `remote unix-socket` form per path: given several paths, one form
+  // matches only its first (measured on macOS 15.3).
+  `(deny network-outbound ${[...new Set(paths.flatMap(spellings))].map((p) => `(remote unix-socket (subpath ${sbplString(p)}))`).join(' ')})`,
+];
 
 /**
  * The macOS profile. Rules are evaluated in order and the last match wins,
@@ -158,13 +188,7 @@ export const darwinProfile = (policy: SandboxPolicy): string => {
     '(allow default)',
     '(deny file-write* (subpath "/"))',
     `(allow file-write* ${subpaths(writable)} (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))`,
-    ...(policy.denied.length > 0 ? [
-      `(deny file-read-data file-read-xattr file-write* ${subpaths(policy.denied)})`,
-      // A file deny does not cover connect(2) on a socket inside it. One
-      // `remote unix-socket` form per path: given several paths, one form
-      // matches only its first (measured on macOS 15.3).
-      `(deny network-outbound ${[...new Set(policy.denied.flatMap(spellings))].map((p) => `(remote unix-socket (subpath ${sbplString(p)}))`).join(' ')})`,
-    ] : []),
+    ...denyRules(policy.denied),
     '(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc"))',
     // The workspace's ancestors may be listed (not read into), or getcwd
     // and git's repository discovery fail when the workspace sits inside
@@ -173,6 +197,7 @@ export const darwinProfile = (policy: SandboxPolicy): string => {
     // Named operation by operation: an allow of the `file-read*` wildcard
     // does not undo a deny that named `file-read-data`.
     `(allow file-read-data file-read-xattr file-read* file-write* ${subpaths([policy.workspace])})`,
+    ...denyRules(deniedInside(policy)),
     '',
   ].join('\n');
 };
@@ -205,6 +230,11 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
   const workspaceSource = workspaceSpellings.at(-1)!;
   for (const spelling of workspaceSpellings) {
     args.push('--bind', workspaceSource, spelling);
+  }
+  for (const denied of deniedInside(policy)) {
+    if (existsSync(denied)) {
+      args.push(statSync(denied).isDirectory() ? '--tmpfs' : '--ro-bind', ...(statSync(denied).isDirectory() ? [denied] : ['/dev/null', denied]));
+    }
   }
   args.push('--unshare-pid', '--unshare-ipc', '--die-with-parent', '--new-session');
   if (policy.cwd) {

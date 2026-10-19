@@ -114,8 +114,9 @@ and your credentials, whatever the command says:
   folder holds the souls and workspaces the home links to). Also
   `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, git
   credential files, `~/.docker`, `~/.fly`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
-  `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, and the macOS
-  keychains (file and service).
+  `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, the Hugging
+  Face token under `~/.cache/huggingface`, and the macOS keychains (file and
+  service). With a `workspaceRoot`, the other agents' workspaces under it.
 - **No connection:** container runtime sockets (`/var/run/docker.sock`,
   containerd, podman, CRI-O, BuildKit), which hand out the whole host, and any
   socket under a denied path.
@@ -131,8 +132,8 @@ git can find its repository), but nothing can be read from inside them.
 
 | Key | Default | What |
 | --- | --- | --- |
-| `sandbox` | `auto` | `auto`: sandboxed where the host can build one; where it can't (no `bwrap`, or a container that forbids user namespaces), commands run unconfined and the daemon logs why, once. `required`: refuse every command when no sandbox can start. `off`: run with the daemon user's full access. |
-| `deniedPaths` | none | More directories or files to hide, added to the list above. A leading `~` is your home directory. |
+| `sandbox` | `auto` | `auto`: sandboxed where the host can build one; where it can't (no `bwrap`, a container that forbids user namespaces, or no workspace to confine to), commands run unconfined and the daemon logs why, once. `required`: refuse every command when no sandbox can start. `off`: run with the daemon user's full access. |
+| `deniedPaths` | none | More directories or files to hide, added to the list above, including ones inside the workspace (a repository's `.env`). A leading `~` is your home directory. |
 | `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). |
 
 All three can be set per agent under `agents`.
