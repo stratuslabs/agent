@@ -44,6 +44,9 @@ const fixtureHome = async () => {
   await writeFile(path.join(otherWorkspace, 'notes.md'), 'bea-private');
   await writeFile(path.join(userHome, '.ssh', 'id_ed25519'), 'PRIVATE KEY');
   await writeFile(path.join(userHome, 'outside.txt'), 'outside');
+  // A token a CLI keeps inside an otherwise writable cache.
+  await mkdir(path.join(userHome, '.cache', 'huggingface'), { recursive: true });
+  await writeFile(path.join(userHome, '.cache', 'huggingface', 'token'), 'hf_SECRET');
   // The visible agents folder, the way the daemon surfaces it: the hidden
   // workspace and soul paths are links into ~/Stratus/<id>/.
   const visible = path.join(userHome, 'Stratus');
@@ -108,6 +111,8 @@ const ESCAPES: Array<[string, (f: Awaited<ReturnType<typeof fixtureHome>>) => st
   // Codex P1 4309344603: the visible spellings of what the home links to.
   ["another agent's workspace by its visible path", (f) => `cat ${path.join(f.visible, 'carl', 'workspace', 'notes.md')}`],
   ["another agent's soul by its visible path", (f) => `cat ${path.join(f.visible, 'carl', 'soul.md')}`],
+  // Codex P1 4309587628.
+  ['a token inside the writable cache', (f) => `cat ${path.join(f.userHome, '.cache', 'huggingface', 'token')}`],
 ];
 
 for (const [what, command] of ESCAPES) {
@@ -115,7 +120,7 @@ for (const [what, command] of ESCAPES) {
     const fixture = await fixtureHome();
     const confined = await run({}, fixture, command(fixture));
     assert.equal(confined.ok, false, `sandboxed ${what} read should fail`);
-    assert.doesNotMatch(output(confined).stdout, /sk-secret|anthropic|bea-private|carl-private|carl-soul|PRIVATE KEY/);
+    assert.doesNotMatch(output(confined).stdout, /sk-secret|anthropic|bea-private|carl-private|carl-soul|PRIVATE KEY|hf_SECRET/);
     const unconfined = await run({ sandbox: 'off' }, fixture, command(fixture));
     assert.equal(unconfined.ok, true, `unconfined ${what} read should work, or the case proves nothing: ${JSON.stringify(unconfined.output)}`);
   });
@@ -316,8 +321,35 @@ test('a workspace that holds a denied path does not give it back', { skip: !sand
   assert.equal(output(ok).stdout, "outsidehi\n");
 });
 
+test('an operator denied path inside the workspace stays denied', { skip: !sandboxedHere && NEEDS }, async () => {
+  // Codex P1 4309587626: the workspace was given back after the denials.
+  const fixture = await fixtureHome();
+  await writeFile(path.join(fixture.workspace, '.env'), 'DB_PASSWORD=hunter2');
+  const confined = await run({ deniedPaths: [path.join(fixture.workspace, '.env')] }, fixture, 'cat .env');
+  assert.equal(confined.ok, false, JSON.stringify(confined.output));
+  assert.doesNotMatch(output(confined).stdout, /hunter2/);
+  const rest = await run({ deniedPaths: [path.join(fixture.workspace, '.env')] }, fixture, 'echo ok > x && cat x');
+  assert.equal(output(rest).stdout, 'ok\n');
+});
+
 test('bwrap covers a denied path inside the workspace again after binding the workspace', async () => {
   const fixture = await fixtureHome();
   const joined = bwrapArgs({ workspace: fixture.userHome, denied: [fixture.stratusHome], writable: [] }, '/bin/sh', []).join(' ');
   assert.ok(joined.lastIndexOf(`--tmpfs ${fixture.stratusHome}`) > joined.indexOf(`--bind ${fixture.userHome} ${fixture.userHome}`), joined);
 });
+
+test('with a workspaceRoot, the other agents\' workspaces under it are denied', { skip: !sandboxedHere && NEEDS }, async () => {
+  // Codex P1 4309587619: siblings came only from the host seam.
+  const fixture = await fixtureHome();
+  const root = path.join(fixture.userHome, 'work');
+  await mkdir(path.join(root, 'ava'), { recursive: true });
+  await mkdir(path.join(root, 'bea'), { recursive: true });
+  await writeFile(path.join(root, 'bea', 'notes.md'), 'bea-private');
+  const command = `cat ${path.join(root, 'bea', 'notes.md')}`;
+  const confined = await run({ workspaceRoot: root }, fixture, command);
+  assert.equal(confined.ok, false, JSON.stringify(confined.output));
+  assert.doesNotMatch(output(confined).stdout, /bea-private/);
+  const own = await run({ workspaceRoot: root }, fixture, 'echo mine > m && cat m');
+  assert.equal(output(own).stdout, 'mine\n');
+});
+

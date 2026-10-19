@@ -1,4 +1,4 @@
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -256,6 +256,7 @@ const settingsFor = (
     // The agent's own workspace, whatever cwd says: it is what the sandbox
     // leaves writable inside a Stratus home it otherwise hides.
     workspace: workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id),
+    workspaceRoot,
     deniedPaths: asStrings(resolved.deniedPaths, []).map((entry) => expandHome(entry, home)),
     writablePaths: asStrings(resolved.writablePaths, []).map((entry) => expandHome(entry, home)),
   };
@@ -285,7 +286,15 @@ const sandboxed = async (
   // surfaced layout those are links into a visible folder (`~/Stratus/<id>/`)
   // that hiding the home by name leaves readable.
   const own = new Set(spellings(workspace));
-  const others = (await options.workspaces?.all() ?? []).filter((dir) => !spellings(dir).some((spelling) => own.has(spelling)));
+  // A configured `workspaceRoot` puts every agent's workspace under it,
+  // outside the host's seam, so its other entries are listed from disk.
+  const underRoot = settings.workspaceRoot === undefined
+    ? []
+    : (await readdir(settings.workspaceRoot, { withFileTypes: true }).catch(() => []))
+      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+      .map((entry) => path.join(settings.workspaceRoot!, entry.name));
+  const others = [...await options.workspaces?.all() ?? [], ...underRoot]
+    .filter((dir) => !spellings(dir).some((spelling) => own.has(spelling)));
   const hostProtected = await options.protectedPaths?.all() ?? [];
   const policy: SandboxPolicy = {
     workspace,
@@ -314,14 +323,20 @@ const sandboxed = async (
       + 'Fix that, or set sandbox to "off" for @stratusagent/tool-shell to run commands with the daemon user\'s full access.',
     );
   }
-  if (!unconfinedWarned) {
-    unconfinedWarned = true;
-    (options.warn ?? ((message: string) => process.stderr.write(`${message}\n`)))(
-      `tool-shell: commands run without a sandbox because ${plan.reason}; they can read the Stratus home and your credentials. `
-      + 'Set sandbox to "required" to refuse instead, or "off" to silence this.',
-    );
-  }
+  warnUnconfined(options, plan.reason);
   return unconfined;
+};
+
+/** The one line `auto` owes before running unconfined, once per process. */
+const warnUnconfined = (options: ShellToolOptions, reason: string): void => {
+  if (unconfinedWarned) {
+    return;
+  }
+  unconfinedWarned = true;
+  (options.warn ?? ((message: string) => process.stderr.write(`${message}\n`)))(
+    `tool-shell: commands run without a sandbox because ${reason}; they can read the Stratus home and your credentials. `
+    + 'Set sandbox to "required" to refuse instead, or "off" to silence this.',
+  );
 };
 
 let unconfinedWarned = false;

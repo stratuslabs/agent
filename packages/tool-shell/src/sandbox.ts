@@ -41,6 +41,9 @@ export const DEFAULT_DENIED_HOME_PATHS: readonly string[] = [
   '.password-store',
   '.pypirc',
   'Library/Keychains',
+  // Tokens kept inside a cache directory that is otherwise writable.
+  '.cache/huggingface/token',
+  '.cache/huggingface/stored_tokens',
 ];
 
 /**
