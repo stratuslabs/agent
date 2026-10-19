@@ -1125,20 +1125,27 @@ export const runSetup = async (
    * list in workspace `teamId`. Member IDs are workspace-scoped, so a list
    * nobody can place there may name nobody this agent will ever hear from.
    */
-  const inheritedListConfirmedIn = async (agentId: string, teamId: string | undefined, fetchImpl: typeof fetch | undefined): Promise<boolean> => {
-    if (teamId === undefined) {
-      return false;
-    }
+  const inheritingSlackTeams = async (agentId: string, fetchImpl: typeof fetch | undefined): Promise<Array<string | undefined>> => {
+    const teams: Array<string | undefined> = [];
     for (const [otherId, tokens] of Object.entries(state.channels.slack ?? {})) {
       if (otherId === agentId || !tokens?.botToken || state.principals?.agents?.[otherId]?.slackUsers !== undefined) {
         continue;
       }
       const other = await verifySlackBotToken(tokens.botToken, fetchImpl);
-      if (other.status === 'ok' && other.identity.teamId === teamId) {
-        return true;
-      }
+      // Unverifiable counts as another workspace: it can't be placed.
+      teams.push(other.status === 'ok' ? other.identity.teamId : undefined);
     }
-    return false;
+    return teams;
+  };
+  const inheritedListConfirmedIn = async (agentId: string, teamId: string | undefined, fetchImpl: typeof fetch | undefined): Promise<boolean> =>
+    teamId !== undefined && (await inheritingSlackTeams(agentId, fetchImpl)).includes(teamId);
+  /**
+   * Whether a first list can be everyone's: every other Slack agent that
+   * would inherit it is verified into the same workspace (or there is none).
+   */
+  const allInheritorsIn = async (agentId: string, teamId: string | undefined, fetchImpl: typeof fetch | undefined): Promise<boolean> => {
+    const teams = await inheritingSlackTeams(agentId, fetchImpl);
+    return teams.length === 0 || (teamId !== undefined && teams.every((team) => team === teamId));
   };
 
   /**
@@ -1192,11 +1199,13 @@ export const runSetup = async (
       const principals: PrincipalsConfig = { ...(state.principals ?? {}) };
       const anyList = principals.slackUsers !== undefined
         || Object.values(principals.agents ?? {}).some((entry) => entry?.slackUsers !== undefined);
-      if (!anyList) {
+      if (!anyList && await allInheritorsIn(agentId, teamId, fetchImpl)) {
         // The first list on this install is everyone's: the operator who
         // connects a second agent is almost always the same person. Once
         // any agent has a list, a new one is that agent's alone, so it
-        // never opens an agent left unlisted on purpose.
+        // never opens an agent left unlisted on purpose; so is a first one
+        // when another Slack agent is in (or can't be placed in) a
+        // different workspace, since member IDs only mean something there.
         principals.slackUsers = ids;
       } else {
         principals.agents = {

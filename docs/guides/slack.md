@@ -418,7 +418,9 @@ already turns on for approval buttons; no scope is added.
   (`"admit": "principals"`, the default). `stratus setup` asks for your
   member ID when you connect an agent (and, since member IDs belong to one
   workspace, asks again when no other agent on Slack confirms the list it
-  would inherit is for this one; Enter keeps it), and `stratus doctor` flags
+  would inherit is for this one, Enter keeping it, and saves a first list
+  for this agent alone while another Slack agent is in a different
+  workspace), and `stratus doctor` flags
   an agent nobody is listed for. `"admit": "anyone"` in the same block opens the
   door to every workspace member, labelled `unknown`, and every fact the
   agent remembers from them carries that label. How and why is in [Who counts as the
