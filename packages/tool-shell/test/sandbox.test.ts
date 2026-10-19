@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync, mkdirSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -334,4 +334,98 @@ test('sandbox "auto" with no workspace to confine to says so before running unco
   assert.equal(result.ok, true, JSON.stringify(result.output));
   assert.equal(warnings.length, 1);
   assert.match(warnings[0]!, /without a sandbox because this agent has no workspace/);
+});
+
+const capture = async (
+  config: JsonObject,
+  fixture: Awaited<ReturnType<typeof fixtureHome>>,
+  extra: Omit<Parameters<typeof createShellTool>[1], 'planSandbox'> = {},
+) => {
+  let seen: Parameters<typeof planSandbox>[0] | undefined;
+  let workspaceExisted: boolean | undefined;
+  const tool = createShellTool(config, {
+    workspaces: fixture.workspaces,
+    protectedPaths: fixture.protectedPaths,
+    home: fixture.userHome,
+    processEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+    warn: () => {},
+    ...extra,
+    planSandbox: (policy, shell, args) => {
+      seen = policy;
+      workspaceExisted = existsSync(policy.workspace);
+      return unavailable(policy, shell, args);
+    },
+  });
+  const result = await createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command: 'true' } }, tool, session('ava'));
+  return { result, seen, workspaceExisted };
+};
+
+test('per-user service manager and rootless container sockets are denied', async () => {
+  // Codex P1 4314782586: /run/user/$UID/bus reaches the user's systemd, and
+  // rootless Docker and Podman listen there too.
+  const fixture = await fixtureHome();
+  const runtime = path.join(fixture.userHome, 'xdg-runtime');
+  const { seen } = await capture({}, fixture, { processEnv: { PATH: '/usr/bin:/bin', XDG_RUNTIME_DIR: runtime } });
+  const uidDir = `/run/user/${process.getuid?.() ?? 0}`;
+  for (const dir of [runtime, uidDir]) {
+    for (const entry of ['bus', 'systemd', 'docker.sock', 'podman']) {
+      assert.ok(seen!.denied.includes(path.join(dir, entry)), path.join(dir, entry));
+    }
+  }
+});
+
+test('a workspaceRoot that cannot be listed refuses the command rather than hiding no siblings', { skip: process.getuid?.() === 0 && 'root lists anything' }, async () => {
+  // Codex P1 4314782600: EACCES was read as "no other agents".
+  const fixture = await fixtureHome();
+  const root = path.join(fixture.userHome, 'work');
+  await mkdir(path.join(root, 'ava'), { recursive: true });
+  await mkdir(path.join(root, 'bea'), { recursive: true });
+  await chmod(root, 0o100);
+  try {
+    const { result, seen } = await capture({ workspaceRoot: root }, fixture);
+    assert.equal(result.ok, false, JSON.stringify(result.output));
+    assert.equal(seen, undefined, 'never planned');
+  } finally {
+    await chmod(root, 0o755);
+  }
+  // A root that is not there yet holds no siblings, and the command runs.
+  const missing = await capture({ workspaceRoot: path.join(fixture.userHome, 'nowhere') }, fixture);
+  assert.ok(missing.seen, JSON.stringify(missing.result.output));
+});
+
+test('the workspace is prepared before it is bound, even when a configured cwd wins', async () => {
+  // Codex P1 4314782607: bwrap --bind needs the source to exist.
+  const fixture = await fixtureHome();
+  await rm(fixture.workspace, { recursive: true });
+  const project = path.join(fixture.userHome, 'project');
+  await mkdir(project);
+  const workspaces: AgentWorkspaces = {
+    ...fixture.workspaces,
+    prepare: (agentId) => {
+      const dir = fixture.workspaces.forAgent(agentId);
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    },
+  };
+  const { seen, workspaceExisted } = await capture({ cwd: project }, { ...fixture, workspaces }, { workspaces });
+  assert.equal(seen!.workspace, fixture.workspace);
+  assert.equal(workspaceExisted, true);
+});
+
+test('on Linux, missing writable caches are created before bwrap starts, and no macOS Library folders', async () => {
+  // Codex P2 4314782623: the root is read-only, so a cache bwrap skipped could never be made.
+  const fixture = await fixtureHome();
+  const extra = path.join(fixture.userHome, 'opt-cache');
+  await capture({ writablePaths: [extra] }, fixture, { platform: 'linux' });
+  assert.ok(existsSync(extra));
+  assert.ok(existsSync(path.join(fixture.userHome, '.pnpm-store')));
+  assert.ok(existsSync(path.join(fixture.userHome, '.bun', 'install', 'cache')));
+  assert.ok(!existsSync(path.join(fixture.userHome, 'Library')));
+});
+
+test('a sandboxed command can fill a writable cache that did not exist yet', { skip: !sandboxedHere && NEEDS }, async () => {
+  const fixture = await fixtureHome();
+  const cache = path.join(fixture.userHome, 'fresh-cache');
+  const result = await run({ writablePaths: [cache] }, fixture, `mkdir -p ${cache}/pkg && echo ok > ${cache}/pkg/f && cat ${cache}/pkg/f`);
+  assert.equal(output(result).stdout, 'ok\n', JSON.stringify(result.output));
 });

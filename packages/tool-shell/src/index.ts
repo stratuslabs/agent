@@ -1,4 +1,4 @@
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -21,6 +21,7 @@ import {
   type LocalCommandTool,
 } from '@stratusagent/executor-local';
 import {
+  allAgentWorkspaces,
   createFileLedger,
   expandHome,
   resolvePluginAgentConfig,
@@ -32,11 +33,12 @@ import {
 import {
   DEFAULT_DENIED_HOME_PATHS,
   DEFAULT_DENIED_SOCKETS,
-  DEFAULT_WRITABLE_HOME_PATHS,
   parseSandboxMode,
   planSandbox,
   spellings,
   stratusHomesFor,
+  userRuntimeEndpoints,
+  writableHomePathsFor,
   type SandboxPolicy,
 } from './sandbox.ts';
 
@@ -49,6 +51,7 @@ export {
   planSandbox,
   resetSandboxProbe,
   stratusHomesFor,
+  userRuntimeEndpoints,
   type SandboxMode,
   type SandboxPolicy,
 } from './sandbox.ts';
@@ -256,6 +259,10 @@ const settingsFor = (
     // The agent's own workspace, whatever cwd says: it is what the sandbox
     // leaves writable inside a Stratus home it otherwise hides.
     workspace: workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id),
+    // Creates it (owner-only, through the host) for the sandbox to bind.
+    // Only needed when a configured cwd won: otherwise the cwd *is* the
+    // prepared workspace, and it is prepared once per call.
+    prepareWorkspace: configuredCwd !== undefined && workspaceFor ? () => workspaceFor(session.agent.id) : undefined,
     workspaceRoot,
     deniedPaths: asStrings(resolved.deniedPaths, []).map((entry) => expandHome(entry, home)),
     writablePaths: asStrings(resolved.writablePaths, []).map((entry) => expandHome(entry, home)),
@@ -286,6 +293,12 @@ const sandboxed = async (
   }
   const userHome = options.home ?? os.homedir();
   const processEnv = options.processEnv ?? process.env;
+  const platform = options.platform ?? process.platform;
+  // The workspace is bound into the sandbox, and bwrap refuses a source
+  // that does not exist; a configured cwd means nothing prepared it yet.
+  if (settings.workspace !== undefined && settings.prepareWorkspace) {
+    await mkdir(settings.prepareWorkspace(), { recursive: true });
+  }
   // What the host protects (its home, the credential files, every soul) and
   // every other agent's workspace, each also by its real path: in the
   // surfaced layout those are links into a visible folder (`~/Stratus/<id>/`)
@@ -293,11 +306,12 @@ const sandboxed = async (
   const own = new Set(spellings(workspace));
   // A configured `workspaceRoot` puts every agent's workspace under it,
   // outside the host's seam, so its other entries are listed from disk.
+  // Listed the way every guard lists them: a root that is not there holds
+  // no siblings, and any other failure (EACCES, EMFILE) fails the call,
+  // since an empty list would leave every sibling readable.
   const underRoot = settings.workspaceRoot === undefined
     ? []
-    : (await readdir(settings.workspaceRoot, { withFileTypes: true }).catch(() => []))
-      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-      .map((entry) => path.join(settings.workspaceRoot!, entry.name));
+    : await allAgentWorkspaces(undefined, settings.workspaceRoot);
   const others = [...await options.workspaces?.all() ?? [], ...underRoot]
     .filter((dir) => !spellings(dir).some((spelling) => own.has(spelling)));
   const hostProtected = await options.protectedPaths?.all() ?? [];
@@ -310,14 +324,23 @@ const sandboxed = async (
       ...others,
       ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
       ...DEFAULT_DENIED_SOCKETS,
+      ...userRuntimeEndpoints(processEnv, process.getuid?.()),
       ...settings.deniedPaths,
     ].flatMap(spellings))],
     writable: [
-      ...DEFAULT_WRITABLE_HOME_PATHS.map((entry) => path.join(userHome, entry)),
+      ...writableHomePathsFor(platform).map((entry) => path.join(userHome, entry)),
       ...settings.writablePaths,
     ],
     tmp: os.tmpdir(),
   };
+  // bwrap binds only what exists, under a read-only root, so a cache
+  // missing now could never be created by the command. macOS's profile
+  // allows creating it, so nothing is made there ahead of use.
+  if (platform === 'linux') {
+    for (const dir of policy.writable) {
+      await mkdir(dir, { recursive: true }).catch(() => undefined);
+    }
+  }
   const plan = (options.planSandbox ?? planSandbox)(policy, settings.shell, shellArgs);
   if (plan.kind === 'sandboxed') {
     return plan.command;
@@ -356,6 +379,8 @@ export interface ShellToolOptions {
   warn?: (message: string) => void;
   /** For tests: how a sandbox is planned on this host. */
   planSandbox?: typeof planSandbox;
+  /** For tests: the platform the sandbox is prepared for. Defaults to this one. */
+  platform?: NodeJS.Platform;
   /** The environment to grant *from*. Defaults to the daemon's. */
   processEnv?: NodeJS.ProcessEnv;
   /**

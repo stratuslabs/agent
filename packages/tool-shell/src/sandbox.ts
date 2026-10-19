@@ -62,6 +62,27 @@ export const DEFAULT_DENIED_SOCKETS: readonly string[] = [
 ];
 
 /**
+ * The same kind of endpoint in the user's runtime directory: the user's
+ * D-Bus and systemd manager (`bus`, `systemd/private`), either of which can
+ * start a same-user process outside the sandbox, and rootless Docker and
+ * Podman. Listed under `$XDG_RUNTIME_DIR` and `/run/user/<uid>`, whichever
+ * exist. An abstract-namespace socket has no path to cover; the network is
+ * not unshared, so one listening there stays reachable.
+ */
+export const USER_RUNTIME_ENDPOINTS: readonly string[] = ['bus', 'systemd', 'docker.sock', 'podman'];
+
+export const userRuntimeEndpoints = (processEnv: NodeJS.ProcessEnv, uid: number | undefined): string[] => {
+  const dirs = new Set<string>();
+  if (processEnv.XDG_RUNTIME_DIR && path.isAbsolute(processEnv.XDG_RUNTIME_DIR)) {
+    dirs.add(processEnv.XDG_RUNTIME_DIR);
+  }
+  if (uid !== undefined) {
+    dirs.add(`/run/user/${uid}`);
+  }
+  return [...dirs].flatMap((dir) => USER_RUNTIME_ENDPOINTS.map((entry) => path.join(dir, entry)));
+};
+
+/**
  * Package-manager caches a build writes outside the workspace. Writable so
  * `npm install` and friends work; nothing in them is a credential.
  */
@@ -74,6 +95,13 @@ export const DEFAULT_WRITABLE_HOME_PATHS: readonly string[] = [
   'Library/Caches',
   'Library/pnpm',
 ];
+
+/**
+ * Whether a default writable path is one this platform uses. `Library` is
+ * macOS's; elsewhere it would only be a folder created for nothing.
+ */
+export const writableHomePathsFor = (platform: NodeJS.Platform): string[] =>
+  DEFAULT_WRITABLE_HOME_PATHS.filter((entry) => platform === 'darwin' || !entry.startsWith('Library/'));
 
 export interface SandboxPolicy {
   /** The agent's workspace: readable and writable. */

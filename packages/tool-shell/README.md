@@ -116,10 +116,15 @@ and your credentials, whatever the command says:
   credential files, `~/.docker`, `~/.fly`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
   `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, the Hugging
   Face token under `~/.cache/huggingface`, and the macOS keychains (file and
-  service). With a `workspaceRoot`, the other agents' workspaces under it.
+  service). With a `workspaceRoot`, the other agents' workspaces under it;
+  a root that exists but can't be listed refuses the command.
 - **No connection:** container runtime sockets (`/var/run/docker.sock`,
-  containerd, podman, CRI-O, BuildKit), which hand out the whole host, and any
-  socket under a denied path.
+  containerd, podman, CRI-O, BuildKit), which hand out the whole host; in
+  the user's runtime directory (`$XDG_RUNTIME_DIR`, `/run/user/<uid>`) the
+  user's D-Bus and systemd manager, which can start a process outside the
+  sandbox, and rootless Docker and Podman; and any socket under a denied
+  path. A socket in the abstract namespace has no path to cover and stays
+  reachable.
 - **Not writable:** everything else.
 - **Network:** on. A command can send its own workspace somewhere, but not a
   token it can't read.
@@ -134,7 +139,7 @@ git can find its repository), but nothing can be read from inside them.
 | --- | --- | --- |
 | `sandbox` | `auto` | `auto`: sandboxed where the host can build one; where it can't (no `bwrap`, a container that forbids user namespaces, or no workspace to confine to), commands run unconfined and the daemon logs why, once. `required`: refuse every command when no sandbox can start. `off`: run with the daemon user's full access. |
 | `deniedPaths` | none | More directories or files to hide, added to the list above, including ones inside the workspace (a repository's `.env`). A leading `~` is your home directory. |
-| `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). |
+| `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). On Linux, these and the default caches are created before the command if missing, since nothing under the read-only root can be. |
 
 All three can be set per agent under `agents`.
 
