@@ -720,7 +720,11 @@ export const collectDoctorReport = async (
   // Read the way `serve` reads them (`loadServePrincipals`): from a trusted
   // config only, falling back to the global file when an auto-discovered
   // project config wins discovery, and closed when unreadable.
-  const trustedPrincipals = await loadServePrincipals(env, command.configPath, () => {});
+  // Its warnings are what serve would log at start, and the only place that
+  // says why a shadowed global file's list did not take effect.
+  const trustedPrincipals = await loadServePrincipals(env, command.configPath, (line) => {
+    problems.push(`At start, serve would warn: ${line.replace(/\.$/, '')}.`);
+  });
   const unreachable = slackAgents.filter((id) => !orphans.includes(id)).filter((id) => {
     const resolved = resolveAgentPrincipals(trustedPrincipals, id);
     return resolved.admit === 'principals' && (resolved.slackUsers ?? []).length === 0;

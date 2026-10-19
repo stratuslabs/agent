@@ -4478,6 +4478,22 @@ test('doctor reads the global principals when a project config wins discovery, a
   assert.doesNotMatch(output.stdout, /Nobody is listed who may talk to ava/);
 });
 
+test('doctor says why the global principals could not be read when a project config shadows it', async () => {
+  // Codex P2 4309769295: the fallback's warning was the only explanation.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ "principals": { "slackUsers": ["U0DYLAN"] ');
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor'], streams, env: { cwd: project, homeDir: home, processEnv: {} } });
+  assert.match(output.stdout, /principals config could not be read/);
+});
+
 test('doctor names the config serve would read when it says to list someone', async () => {
   // Codex P2 4309644046: with --config, editing ~/.stratus/config.json changes nothing.
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
