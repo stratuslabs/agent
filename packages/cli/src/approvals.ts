@@ -347,9 +347,10 @@ export const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]
  * conversation that read external content) reach Slack, so it must not
  * promise that gated calls are parked.
  */
-export const describeRemoteMode = (approvals: ApprovalsConfig, askable: string[]): string => {
+export const describeRemoteMode = (approvals: ApprovalsConfig, askable: string[], servedAgentIds?: readonly string[]): string => {
   const top = resolveAgentApprovals(approvals, '').posture;
   const differing = Object.keys(approvals.agents ?? {})
+    .filter((agentId) => servedAgentIds === undefined || servedAgentIds.includes(agentId))
     .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
   const who = `(${describeApprovers(approvals, askable)})`;
   if (top === 'open') {

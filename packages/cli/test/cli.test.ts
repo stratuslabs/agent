@@ -14787,6 +14787,15 @@ test('the startup posture line names the default and the agents that differ', ()
   );
 });
 
+test('the startup posture lines leave out overrides for agents that are not served', () => {
+  // Codex P2 4310622987: a stale override named a nonexistent agent as the exception.
+  const approvals = { mode: 'remote' as const, posture: 'guarded' as const, agents: { ghost: { posture: 'open' as const } } };
+  assert.doesNotMatch(describeRemoteMode(approvals, ['ava'], ['ava']), /ghost|run without asking/);
+  assert.match(describeRemoteMode(approvals, ['ava']), /except ghost's/, 'without a roster every override still counts');
+  assert.doesNotMatch(describePosture(approvals, 'remote', ['ava']), /ghost/);
+  assert.match(describePosture(approvals, 'remote', ['ava', 'ghost']), /except ghost/);
+});
+
 test('the remote-mode startup line says what is actually parked under each posture', () => {
   // Codex P2 4309648332: it said gated calls are parked even when the open posture runs them.
   assert.match(
