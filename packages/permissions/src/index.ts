@@ -386,7 +386,89 @@ export interface DestinationScopeOptions {
   accountFor?(agentId: string, destination: string): string | undefined | Promise<string | undefined>;
   /** Called when a destination grant is persisted, for the daemon's log. */
   onGranted?: (event: { agentId: string; grant: DestinationGrant }) => void;
+  /**
+   * The operator's standing channel authorization for this agent
+   * (`approvals.channels`): destinations where `message.read` and
+   * `message.send` run without asking: `channel:<workspace>/<id>`
+   * (`slack:T0123ABCD/C0123ABCD`), `channel:<workspace>/*`, or `channel:*`
+   * for every channel of that kind the agent's app can reach. Read per
+   * call. See `matchesStandingChannel`.
+   */
+  standingChannelsFor?(agentId: string): readonly string[];
+  /**
+   * What kind of conversation a destination is, asked of the agent's own
+   * channel app: `channel` for a public or private channel, `direct` for a
+   * DM or group DM. Undefined when the channel cannot say (not connected,
+   * not visible to the app, a lookup that failed). The standing channel
+   * authorization covers `channel` only, so a DM, and anything unknown,
+   * still asks.
+   */
+  conversationKindFor?(agentId: string, destination: string): ConversationKind | undefined | Promise<ConversationKind | undefined>;
 }
+
+/** See `DestinationScopeOptions.conversationKindFor`. */
+export type ConversationKind = 'channel' | 'direct';
+
+/**
+ * The tools an operator's standing channel authorization covers. Kernel
+ * tools only: a plugin tool registered under the same name is a different
+ * tool and is judged the usual way.
+ */
+export const STANDING_CHANNEL_TOOLS: readonly string[] = ['message.read', 'message.send'];
+
+/**
+ * Whether a configured `approvals.channels` entry covers a destination in
+ * the workspace the agent's app is connected to right now (`account`, see
+ * `DestinationScopeOptions.accountFor`):
+ *
+ * - `channel:*`: every conversation of that kind the app can reach, in
+ *   whatever workspace it is in.
+ * - `channel:<workspace>/<id>`: that conversation, only while the app is in
+ *   that workspace. A conversation id is unique only within its workspace,
+ *   so an id is bound to one, the same way an Always-allow grant is.
+ * - `channel:<workspace>/*`: every conversation of that kind in that
+ *   workspace.
+ *
+ * A bare `channel:<id>` names no workspace and covers nothing; the daemon
+ * says so at startup (`unboundStandingChannels`). The kind check (channels
+ * yes, DMs no) is the caller's.
+ */
+export const matchesStandingChannel = (
+  destination: string,
+  account: string | undefined,
+  entries: readonly string[],
+): boolean => {
+  const separator = destination.indexOf(':');
+  if (separator <= 0 || separator === destination.length - 1) {
+    return false;
+  }
+  const kind = destination.slice(0, separator);
+  const to = destination.slice(separator + 1);
+  return entries.some((entry) => {
+    if (entry === `${kind}:*`) {
+      return true;
+    }
+    if (!entry.startsWith(`${kind}:`) || account === undefined || account.length === 0) {
+      return false;
+    }
+    const scoped = entry.slice(kind.length + 1);
+    const slash = scoped.indexOf('/');
+    if (slash <= 0) {
+      return false;
+    }
+    const workspace = scoped.slice(0, slash);
+    const id = scoped.slice(slash + 1);
+    return workspace === account && (id === '*' || id === to);
+  });
+};
+
+/** Entries that name a conversation without its workspace, which `matchesStandingChannel` never matches. */
+export const unboundStandingChannels = (entries: readonly string[]): string[] =>
+  entries.filter((entry) => {
+    const separator = entry.indexOf(':');
+    const rest = entry.slice(separator + 1);
+    return separator > 0 && rest !== '*' && !rest.includes('/');
+  });
 
 export interface CommandScopeOptions {
   /**
@@ -1049,6 +1131,30 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             standing,
           );
         }
+      }
+
+      // The operator's standing channel authorization (`approvals.channels`):
+      // a read or a post in a channel the config names runs without asking,
+      // in every session, interactive, scheduled, or delegated. Only a
+      // conversation the agent's own app reports as a channel: a DM or group
+      // DM, or one it cannot describe, falls through and asks as before.
+      // Membership and scopes are still the channel's to enforce when the
+      // tool runs. Withdrawn by the external-content gate like every other
+      // standing yes, so a page the conversation read cannot steer a post.
+      if (destination !== undefined
+        && !externalGate
+        && contributor === undefined
+        && context.tool.name === call.toolName
+        && STANDING_CHANNEL_TOOLS.includes(call.toolName)
+        && matchesStandingChannel(destination, account, destinations?.standingChannelsFor?.(session.agent.id) ?? [])
+        && await destinations?.conversationKindFor?.(session.agent.id, destination) === 'channel') {
+        return report(
+          context,
+          true,
+          `${call.toolName} to ${destination} ran under the operator's standing channel authorization (approvals.channels)`,
+          undefined,
+          destination,
+        );
       }
 
       if (origin !== undefined) {

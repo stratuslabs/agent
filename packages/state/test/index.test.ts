@@ -1792,6 +1792,28 @@ test('approvals.trustedDomains adds up per agent, normalizes, and refuses anythi
   );
 });
 
+test('approvals.channels adds up per agent and refuses names, bare ids, and anything else', async () => {
+  const config = await loadConfigFile(await writeConfig('channels.json', {
+    approvals: { channels: ['slack:T1/C0C1YV12SLC'], agents: { nova: { channels: ['slack:*', ' slack:T1/C0C1YV12SLC ', 'slack:T2/*', 'slack:C0BARE'] } } },
+  }));
+  // A bare id still loads (it covers nothing, and the daemon says so), so an older config never stops startup.
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').channels, ['slack:T1/C0C1YV12SLC', 'slack:*', 'slack:T2/*', 'slack:C0BARE']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').channels, ['slack:T1/C0C1YV12SLC']);
+  assert.equal(resolveAgentApprovals({}, 'nova').channels, undefined);
+  for (const bad of [['#stratus-agent'], ['C0C1YV12SLC'], ['slack:'], ['*'], ['slack:#general'], ['slack:T1/'], ['slack:/C1'], ['slack:T1/C1/x'], ['slack:*/C1'], ['slack:T0123/general'], ['slack:t0123/C0123'], ['slack:T0123/c0c1yv12slc'], ['slack:general'], ['slack:T0123/D0DM'], ['slack:U0123/C0123'], ['slack:E0123/C0123'], ['slack:E0123/*'], 'slack:*', [3]]) {
+    await assert.rejects(
+      loadConfigFile(await writeConfig('channels-bad.json', { approvals: { agents: { nova: { channels: bad } } } })),
+      /Invalid approvals\.agents\.nova\.channels/,
+      JSON.stringify(bad),
+    );
+  }
+  // The message names only what is accepted (Codex P2 4309652293).
+  await assert.rejects(
+    loadConfigFile(await writeConfig('channels-e.json', { approvals: { channels: ['slack:E0123/C0123'] } })),
+    (error: Error) => /workspace id starts with T\b/.test(error.message) && !/ or E\b/.test(error.message) && /not the organization's E/.test(error.message),
+  );
+});
+
 test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {
   const configPath = await writeConfig('autonomy.json', {
     approvals: { autonomy: 'workspace', agents: { blair: { autonomy: 'off' }, nova: {} } },

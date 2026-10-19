@@ -485,6 +485,10 @@ export interface SlackWebLike {
         is_im?: boolean;
         is_private?: boolean;
         is_mpim?: boolean;
+        /** A channel, public or private, as Slack states it. */
+        is_channel?: boolean;
+        /** A private channel in Slack's older model (group DMs set `is_mpim` too). */
+        is_group?: boolean;
         num_members?: number;
         /** Shared with another organization through Slack Connect. */
         is_ext_shared?: boolean;
@@ -4001,6 +4005,55 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * Channel or DM, as this agent's app sees a conversation, for the
+   * operator's standing channel authorization (`approvals.channels`), which
+   * covers channels only. Asked of Slack (`conversations.info`), never read
+   * off the id: a `G…` id is a private channel or a group DM depending on
+   * its age. A definite answer is kept, since a conversation never turns
+   * from one into the other; a failed lookup is not, and reads as unknown,
+   * so the call asks.
+   */
+  const conversationKinds = new Map<string, 'channel' | 'direct'>();
+  const CONVERSATION_KIND_CACHE_LIMIT = 1000;
+  const conversationKindFor = async (agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined> => {
+    const id = conversation.trim();
+    const connection = connectionFor(agentId);
+    if (!id || !connection) {
+      return undefined;
+    }
+    const key = `${agentId}:${botIdentities.get(agentId)?.teamId ?? ''}:${id}`;
+    const known = conversationKinds.get(key);
+    if (known !== undefined) {
+      return known;
+    }
+    let info: { id?: string; is_im?: boolean; is_mpim?: boolean; is_channel?: boolean; is_group?: boolean } | undefined;
+    try {
+      info = (await connection.web.conversations.info({ channel: id })).channel;
+    } catch {
+      return undefined;
+    }
+    if (!info?.id) {
+      return undefined;
+    }
+    // A DM flag wins. Otherwise a channel only when Slack says so, by a
+    // channel flag or by stating it is not a DM: a reply with none of
+    // them is no proof of a channel.
+    const kind = info.is_im === true || info.is_mpim === true
+      ? 'direct'
+      : info.is_channel === true || info.is_group === true || (info.is_im === false && info.is_mpim === false) ? 'channel' : undefined;
+    if (kind !== undefined) {
+      if (conversationKinds.size >= CONVERSATION_KIND_CACHE_LIMIT) {
+        const oldest = conversationKinds.keys().next().value;
+        if (oldest !== undefined) {
+          conversationKinds.delete(oldest);
+        }
+      }
+      conversationKinds.set(key, kind);
+    }
+    return kind;
+  };
+
+  /**
    * The read side of the same boundary `resolveOutbound` draws: a channel
    * the agent's own app is a member of, public or private. DMs and group
    * DMs are refused outright, member or not. Their only members are the
@@ -6865,6 +6918,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // A channel id is unique only within its workspace, so a standing
     // grant on one is bound to the team the agent's app authenticated in.
     accountFor: (agentId: string) => botIdentities.get(agentId)?.teamId || undefined,
+    conversationKindFor,
     requestCredential,
 
     async start(gateway) {
