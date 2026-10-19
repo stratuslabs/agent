@@ -103,6 +103,16 @@
           "items": {
             "type": "string"
           }
+        },
+        "home": {
+          "type": "string",
+          "enum": ["hidden", "visible"]
+        },
+        "readablePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

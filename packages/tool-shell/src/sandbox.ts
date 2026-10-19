@@ -160,6 +160,48 @@ export const DEFAULT_WRITABLE_HOME_PATHS: readonly string[] = [
 ];
 
 /**
+ * What stays readable when the home is hidden (the default): the tools a
+ * command runs and the config they read, read-only. The credential files
+ * inside them (`~/.cargo/credentials.toml`, `~/.gradle/gradle.properties`)
+ * stay denied; the writable caches are visible too. Everything else under
+ * the home (documents, other projects, browser and app data) is hidden.
+ */
+export const DEFAULT_VISIBLE_HOME_PATHS: readonly string[] = [
+  // Git and shell config a command reads.
+  '.gitconfig',
+  '.gitignore_global',
+  '.config/git',
+  '.editorconfig',
+  // Language toolchains and version managers.
+  '.nvm',
+  '.volta',
+  '.fnm',
+  '.bun',
+  '.deno',
+  '.rustup',
+  '.cargo',
+  '.pyenv',
+  '.rbenv',
+  '.rye',
+  '.asdf',
+  '.tool-versions',
+  '.sdkman',
+  '.gradle',
+  '.m2',
+  '.gem',
+  'go',
+  '.nix-profile',
+  '.local/bin',
+  '.local/lib',
+  '.local/share/mise',
+  '.local/share/fnm',
+  '.local/share/pnpm',
+  '.local/share/uv',
+  '.config/mise',
+  '.config/uv',
+];
+
+/**
  * Whether a default writable path is one this platform uses. `Library` is
  * macOS's; elsewhere it would only be a folder created for nothing.
  */
@@ -177,6 +219,11 @@ export interface SandboxPolicy {
   writable: string[];
   /** The daemon user's own temp directory (macOS keeps one per user under /var/folders). */
   tmp?: string;
+  /**
+   * The user's home, hidden except `visible` (read-only unless also in
+   * `writable`). Absent: the home stays readable apart from `denied`.
+   */
+  home?: { path: string; visible: string[] };
 }
 
 export interface SandboxedCommand {
@@ -254,6 +301,23 @@ const denyRules = (paths: string[]): string[] => paths.length === 0 ? [] : [
 ];
 
 /**
+ * Hide the home: its contents and any socket under it, then give the
+ * visible entries back for reading. Comes before the denials, so a
+ * credential inside a visible toolchain stays hidden.
+ */
+const hideHomeRules = (policy: SandboxPolicy): string[] => {
+  if (!policy.home) {
+    return [];
+  }
+  const visible = [...new Set([...policy.home.visible, ...policy.writable])];
+  return [
+    `(deny file-read-data file-read-xattr ${subpaths([policy.home.path])})`,
+    ...[...new Set(spellings(policy.home.path))].map((p) => `(deny network-outbound (remote unix-socket (subpath ${sbplString(p)})))`),
+    ...(visible.length > 0 ? [`(allow file-read-data file-read-xattr ${subpaths(visible)})`] : []),
+  ];
+};
+
+/**
  * The macOS profile. Rules are evaluated in order and the last match wins,
  * so it allows everything, takes writes away, gives back the workspace and
  * temp, takes the denied trees away entirely, and gives the workspace back
@@ -279,6 +343,7 @@ export const darwinProfile = (policy: SandboxPolicy): string => {
     '(allow default)',
     '(deny file-write* (subpath "/"))',
     `(allow file-write* ${subpaths(writable)} (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))`,
+    ...hideHomeRules(policy),
     ...denyRules(policy.denied),
     '(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc"))',
     // The workspace's ancestors may be listed (not read into), or getcwd
@@ -321,6 +386,21 @@ const privateTmpFor = (policy: SandboxPolicy): string | undefined => {
 
 export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: string[]): string[] => {
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
+  // The hidden home first: an empty tmpfs over it, the visible entries
+  // bound back read-only. Everything after binds over this.
+  if (policy.home && existsSync(policy.home.path)) {
+    const home = policy.home.path;
+    for (const spelling of new Set(spellings(home))) {
+      args.push('--tmpfs', spelling);
+    }
+    for (const entry of new Set(policy.home.visible)) {
+      if (existsSync(entry)) {
+        for (const spelling of new Set(spellings(entry))) {
+          args.push('--ro-bind', spellings(entry).at(-1)!, spelling);
+        }
+      }
+    }
+  }
   const tmp = privateTmpFor(policy);
   if (tmp) {
     args.push('--tmpfs', tmp);
@@ -406,6 +486,18 @@ export const planSandbox = (
     return { kind: 'sandboxed', command: { command: probe.path, args: bwrapArgs(policy, shell, shellArgs) } };
   }
   return { kind: 'unavailable', reason: `no sandbox is implemented for ${platform}` };
+};
+
+export type HomeMode = 'hidden' | 'visible';
+
+export const parseHomeMode = (value: unknown): HomeMode => {
+  if (value === undefined) {
+    return 'hidden';
+  }
+  if (value === 'hidden' || value === 'visible') {
+    return value;
+  }
+  throw new Error(`home must be "hidden" or "visible"; got ${JSON.stringify(value)}.`);
 };
 
 export const parseSandboxMode = (value: unknown): SandboxMode => {
