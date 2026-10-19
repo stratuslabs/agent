@@ -128,11 +128,20 @@ and your credentials, whatever the command says:
   `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, `~/.1password`,
   1Password's group container and Secretive's container on macOS, the
   tokens developer CLIs store after a login (Cargo's `credentials.toml`,
-  also under `$CARGO_HOME`, RubyGems, hub, glab, Terraform, Vault, Pulumi,
+  RubyGems, hub, glab, Terraform, Vault, Pulumi,
   Maven and Gradle settings, Composer, Databricks, doctl, OCI, hcloud,
   Claude Code's `~/.claude/.credentials.json`, Codex's `~/.codex/auth.json`), the Hugging
   Face token under `~/.cache/huggingface`, and the macOS keychains (file and
-  service). Any credential file not listed stays readable: add it to
+  service). Where the daemon's environment moves one of these stores
+  (`GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `DOCKER_CONFIG`,
+  `KUBECONFIG`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `GNUPGHOME`,
+  `CLOUDSDK_CONFIG`, `AZURE_CONFIG_DIR`, `NPM_CONFIG_USERCONFIG`,
+  `PASSWORD_STORE_DIR`, `CARGO_HOME`, `PULUMI_HOME`, `TF_CLI_CONFIG_FILE`,
+  `GRADLE_USER_HOME`, `COMPOSER_HOME`, `DATABRICKS_CONFIG_FILE`,
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HF_HOME`, `HF_TOKEN_PATH`,
+  `GLAB_CONFIG_DIR`, `HUB_CONFIG`, `OP_CONFIG_DIR`), the moved location is
+  denied too, unless it is relative or holds the home or the workspace.
+  Any credential file not listed stays readable: add it to
   `deniedPaths`. With a `workspaceRoot`, the other agents' workspaces under it;
   a root that exists but can't be listed refuses the command.
 - **No connection:** container runtime sockets (`/var/run/docker.sock`,
@@ -141,7 +150,8 @@ and your credentials, whatever the command says:
   whole, which holds the user's D-Bus and systemd manager (either can start
   a process outside the sandbox), rootless Docker and Podman, gpg-agent and
   systemd's ssh-agent; SSH agents, which sign with keys whose files are
-  hidden: the socket `$SSH_AUTH_SOCK` names, launchd's session directories
+  hidden: the socket `$SSH_AUTH_SOCK` names, a `unix://` socket
+  `DOCKER_HOST` or `CONTAINER_HOST` names, launchd's session directories
   in `/private/tmp` on macOS, 1Password's and Secretive's agent folders;
   and any socket under a denied path. Any other local service listening on
   a socket path stays reachable (a database in `/tmp` on macOS, a daemon

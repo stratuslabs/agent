@@ -31,7 +31,7 @@ import {
 } from '@stratusagent/plugins';
 
 import {
-  cargoHomeCredentials,
+  relocatedCredentials,
   credentialAgentEndpoints,
   DEFAULT_DENIED_HOME_PATHS,
   DEFAULT_DENIED_SOCKETS,
@@ -48,6 +48,7 @@ import {
 
 export {
   credentialAgentEndpoints,
+  relocatedCredentials,
   DEFAULT_DENIED_HOME_PATHS,
   DEFAULT_DENIED_SOCKETS,
   DEFAULT_WRITABLE_HOME_PATHS,
@@ -335,7 +336,7 @@ const sandboxed = async (
       ...DEFAULT_DENIED_SOCKETS,
       ...userRuntimeEndpoints(processEnv, process.getuid?.()),
       ...credentialAgentEndpoints(processEnv, platform),
-      ...cargoHomeCredentials(processEnv),
+      ...relocatedCredentials(processEnv, userHome, workspace),
       ...settings.deniedPaths,
     ].flatMap(spellings))],
     writable: [
