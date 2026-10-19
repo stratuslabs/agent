@@ -198,7 +198,14 @@ export const describePrincipals = (principals: PrincipalsConfig, agentIds: strin
   if (covered.length === 0) {
     return closed.length === 0
       ? 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json'
-      : `no principals listed, so every Slack sender is unknown${door} — nobody at all can talk to ${closed.join(', ')} until ${listKeyFor(principals, closed)} names someone`;
+      // Codex P2 4310107914: a refused sender never becomes a turn and never
+      // gets a trust label, so only the agents that admit them may call
+      // their senders unknown.
+      : `no principals listed, so every Slack sender is refused${
+        closed.length === agentIds.length
+          ? ''
+          : ` by ${closed.join(', ')} and unknown to ${agentIds.filter((agentId) => !closed.includes(agentId)).join(', ')}`
+      } — nobody at all can talk to ${closed.join(', ')} until ${listKeyFor(principals, closed)} names someone`;
   }
   // An uncovered agent's senders are all unknown only if it admits them: a
   // closed agent with nobody listed refuses everyone, and saying its
