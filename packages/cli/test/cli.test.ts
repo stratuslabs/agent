@@ -4430,6 +4430,52 @@ test('doctor flags a Slack agent nobody may talk to, and not one that opened its
   assert.doesNotMatch(output.stdout, /may talk to [^\n]*\bcy\b/);
 });
 
+test('doctor reads the global principals when a project config wins discovery, as serve does', async () => {
+  // Codex P2 4309308061.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { slackUsers: ['U0DYLAN'] } }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor'], streams, env: { cwd: project, homeDir: home, processEnv: {} } });
+  assert.doesNotMatch(output.stdout, /Nobody is listed who may talk to ava/);
+});
+
+test('setup asks for nobody when the agent already admits anyone', async () => {
+  // Codex P2 4309308066: with admit "anyone", a list labels trust and
+  // closes no door, so the closed-door prompt would say something false.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { admit: 'anyone' } }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
+      fetch: slackOkFetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /Only the Slack users you list/);
+  assert.doesNotMatch(output.stdout, /will ignore every Slack message/);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { admit: 'anyone' });
+});
+
 test('setup connects an agent to Slack without touching any file by hand', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');

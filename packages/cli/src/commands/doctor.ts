@@ -46,6 +46,7 @@ import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { harnessesMissingMessage, missingHarnessPackages } from '../harness-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
+import { loadServePrincipals } from '../trusted-config.ts';
 
 export interface DoctorKeyCheck {
   provider: CredentialProviderName;
@@ -716,9 +717,10 @@ export const collectDoctorReport = async (
 
   // Only listed principals get a turn unless an agent says `admit: "anyone"`,
   // so a connected agent with nobody listed ignores every Slack message.
-  // Principals come from a trusted config only; a project config's are
-  // ignored by the daemon, so they are ignored here too.
-  const trustedPrincipals = winner?.label === 'project' ? undefined : fileConfig.principals;
+  // Read the way `serve` reads them (`loadServePrincipals`): from a trusted
+  // config only, falling back to the global file when an auto-discovered
+  // project config wins discovery, and closed when unreadable.
+  const trustedPrincipals = await loadServePrincipals(env, command.configPath, () => {});
   const unreachable = slackAgents.filter((id) => !orphans.includes(id)).filter((id) => {
     const resolved = resolveAgentPrincipals(trustedPrincipals, id);
     return resolved.admit === 'principals' && (resolved.slackUsers ?? []).length === 0;

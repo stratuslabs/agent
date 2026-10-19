@@ -1125,11 +1125,14 @@ export const runSetup = async (
    * `principals`), so an agent connected with nobody listed ignores
    * everyone. Asked right after the connect, the one moment the operator
    * is in Slack's settings anyway. Skipped when the agent already has a
-   * list, its own or inherited, so a re-run never overwrites one.
+   * list, its own or inherited, so a re-run never overwrites one, and when
+   * it admits anyone.
    */
   const askSlackPrincipals = async (agentId: string, agentName: string): Promise<void> => {
     const resolved = resolveAgentPrincipals(state.principals, agentId);
-    if ((resolved.slackUsers ?? []).length > 0) {
+    // `admit: "anyone"` opened the door on purpose: a list would only label
+    // trust there, and the closed-door wording below would be false.
+    if ((resolved.slackUsers ?? []).length > 0 || resolved.admit === 'anyone') {
       return;
     }
     writeLine(streams.stdout, `Only the Slack users you list can talk to ${agentName}; everyone else is ignored.`);
