@@ -99,7 +99,9 @@ const output = (result: Awaited<ReturnType<typeof run>>): { stdout: string; stde
 // ---- the escape suite: every read must fail sandboxed and work unconfined ----
 
 // Real walls only where this host can build them: macOS, or Linux with a
-// working bwrap (CI installs it). Elsewhere the suite is skipped, and says so.
+// working bwrap. Elsewhere the suite is skipped, and says so. CI does not
+// install bwrap yet, so on CI the Linux backend is covered only at the
+// argument level (bwrapArgs).
 const sandboxedHere = realPlanSandbox({ workspace: os.tmpdir(), denied: [], writable: [] }, '/bin/sh', []).kind === 'sandboxed';
 const NEEDS = 'needs a working sandbox here (macOS sandbox-exec, or bwrap on Linux)';
 
