@@ -416,8 +416,10 @@ already turns on for approval buttons; no scope is added.
   you list your Slack user id under `principals` in `~/.stratus/config.json`,
   the agent answers nobody in Slack: only listed principals get a turn
   (`"admit": "principals"`, the default). `stratus setup` asks for your
-  member ID when you connect an agent, and `stratus doctor` flags an agent
-  nobody is listed for. `"admit": "anyone"` in the same block opens the
+  member ID when you connect an agent (and, since member IDs belong to one
+  workspace, asks again when no other agent on Slack confirms the list it
+  would inherit is for this one; Enter keeps it), and `stratus doctor` flags
+  an agent nobody is listed for. `"admit": "anyone"` in the same block opens the
   door to every workspace member, labelled `unknown`, and every fact the
   agent remembers from them carries that label. How and why is in [Who counts as the
   operator](../../packages/channel-slack/README.md#who-counts-as-the-operator)

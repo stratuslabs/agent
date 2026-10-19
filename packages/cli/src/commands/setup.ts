@@ -1117,30 +1117,67 @@ export const runSetup = async (
       const detail = bot.status === 'unreachable' ? bot.detail : (app as { detail?: string }).detail;
       writeLine(streams.stdout, `! Could not reach Slack to verify (${detail}). Saved the tokens anyway — \`${serveCommand()}\` will report on startup.`);
     }
-    await askSlackPrincipals(agentId, agentName);
+    await askSlackPrincipals(agentId, agentName, bot.status === 'ok' ? bot.identity.teamId : undefined, fetchImpl);
+  };
+
+  /**
+   * Whether another agent already on Slack uses the inherited top-level
+   * list in workspace `teamId`. Member IDs are workspace-scoped, so a list
+   * nobody can place there may name nobody this agent will ever hear from.
+   */
+  const inheritedListConfirmedIn = async (agentId: string, teamId: string | undefined, fetchImpl: typeof fetch | undefined): Promise<boolean> => {
+    if (teamId === undefined) {
+      return false;
+    }
+    for (const [otherId, tokens] of Object.entries(state.channels.slack ?? {})) {
+      if (otherId === agentId || !tokens?.botToken || state.principals?.agents?.[otherId]?.slackUsers !== undefined) {
+        continue;
+      }
+      const other = await verifySlackBotToken(tokens.botToken, fetchImpl);
+      if (other.status === 'ok' && other.identity.teamId === teamId) {
+        return true;
+      }
+    }
+    return false;
   };
 
   /**
    * Only listed Slack users get a turn (`principals.admit` defaults to
    * `principals`), so an agent connected with nobody listed ignores
    * everyone. Asked right after the connect, the one moment the operator
-   * is in Slack's settings anyway. Skipped when the agent already has a
-   * list, its own or inherited, so a re-run never overwrites one, and when
-   * it admits anyone.
+   * is in Slack's settings anyway. Skipped when the agent has a list of
+   * its own, so a re-run never overwrites one, when it admits anyone, and
+   * when it inherits a list another agent uses in the same workspace. An
+   * inherited list nobody can place in this workspace is offered with
+   * Enter to keep it, since member IDs are workspace-scoped.
    */
-  const askSlackPrincipals = async (agentId: string, agentName: string): Promise<void> => {
+  const askSlackPrincipals = async (agentId: string, agentName: string, teamId?: string, fetchImpl?: typeof fetch): Promise<void> => {
     const resolved = resolveAgentPrincipals(state.principals, agentId);
     // `admit: "anyone"` opened the door on purpose: a list would only label
     // trust there, and the closed-door wording below would be false.
-    if ((resolved.slackUsers ?? []).length > 0 || resolved.admit === 'anyone') {
+    if (resolved.admit === 'anyone') {
       return;
     }
+    const listed = resolved.slackUsers ?? [];
+    const own = state.principals?.agents?.[agentId]?.slackUsers !== undefined;
+    if (listed.length > 0 && (own || await inheritedListConfirmedIn(agentId, teamId, fetchImpl))) {
+      return;
+    }
+    const inherited = listed.length > 0 ? listed.join(', ') : undefined;
     writeLine(streams.stdout, `Only the Slack users you list can talk to ${agentName}; everyone else is ignored.`);
+    if (inherited !== undefined) {
+      writeLine(streams.stdout, `The Slack list other agents inherit (${inherited}) is not confirmed for this workspace, and member IDs only work in their own.`);
+    }
     writeLine(streams.stdout, 'Find your member ID in Slack: your profile → ⋯ → Copy member ID.');
     for (;;) {
-      const answer = (await prompter.ask('Slack member IDs who may talk to it (U…, comma-separated, Enter to skip): ')).trim();
+      const answer = (await prompter.ask(inherited !== undefined
+        ? `Slack member IDs who may talk to it here (U…, comma-separated, Enter to keep ${inherited}): `
+        : 'Slack member IDs who may talk to it (U…, comma-separated, Enter to skip): ')).trim();
       // Separators alone (`, ,`) name nobody, the same as Enter.
       const ids = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      if (ids.length === 0 && inherited !== undefined) {
+        return;
+      }
       if (ids.length === 0) {
         // The key that decides this agent's list: its own, where it has one.
         const key = state.principals?.agents?.[agentId]?.slackUsers !== undefined ? `principals.agents.${agentId}.slackUsers` : 'principals.slackUsers';
