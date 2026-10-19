@@ -401,7 +401,7 @@ test('a by-name grant is only for commands that read and write paths, never ones
   ]) {
     assert.equal(await allowed(command), false, `should ask: ${command}`);
   }
-  for (const command of ['rg foo src', 'sort src/main.ts', 'wc -l src/main.ts', 'diff src/main.ts src/main.ts', 'md5sum src/main.ts', 'file src/main.ts']) {
+  for (const command of ['rg foo src', 'sort src/main.ts', 'wc -l src/main.ts', 'md5sum src/main.ts', 'file src/main.ts']) {
     assert.equal(await allowed(command), true, `should run: ${command}`);
   }
   for (const name of ['tar', 'vitest', 'curl', 'jq', 'patch', 'make', 'sh']) {
@@ -501,6 +501,26 @@ test('cp is never granted by name, since it writes destinations no operand names
   assert.equal(await allowed('cp source dest'), false);
   assert.equal(await allowed('cp -r src dest'), false);
   assert.equal(await allowed('cp src/main.ts src/copy.ts'), false);
+});
+
+test('diff is never granted by name, since comparing directories reads children no operand names', async () => {
+  const { workspace, repo, outside } = await layout();
+  // Codex P1 4315296537: `diff a b` with two directories compares their
+  // children and follows a child symlink out of the workspace; `diff dir file`
+  // reads `dir/file`. Only the two operands were checked.
+  await mkdir(path.join(repo, 'a'), { recursive: true });
+  await mkdir(path.join(repo, 'b'), { recursive: true });
+  await symlink(outside, path.join(repo, 'a', 'f'));
+  await writeFile(path.join(repo, 'b', 'f'), 'x\n');
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => workspace, names: namesStore(['diff']) },
+  });
+  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  assert.equal(grantableByName('diff'), false);
+  assert.equal(await allowed('diff a b'), false);
+  assert.equal(await allowed('diff a b/f'), false);
+  assert.equal(await allowed('diff b/f b/f'), false);
 });
 
 test('a redirection operator this reader does not know, like zsh and tcsh >!, is not read as a target', () => {

@@ -376,14 +376,16 @@ export const analyzeCompound = (command: string): CompoundCommand => {
  * assigns a variable with `-v`, nor binutils `strings`, which reads more
  * arguments from the file an `@file` names, nor `cp`, which writes
  * `dest/source` for `cp source dest` and follows a symlink already there,
- * so its real destinations are paths no operand names. Adding one means reading its manual and
+ * so its real destinations are paths no operand names, nor `diff`, which
+ * for two directories (or a directory and a file) reads their children and
+ * follows a child symlink, paths no operand names either. Adding one means reading its manual and
  * listing, in `NAME_GRANT_FLAGS`, only the flags that act on the paths
  * given and nothing else.
  */
 export const GRANTABLE_BY_NAME: ReadonlySet<string> = new Set([
   'grep', 'egrep', 'fgrep', 'rg',
   'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'tr', 'paste', 'join', 'comm', 'fold', 'nl', 'column', 'rev', 'tac',
-  'diff', 'cmp', 'ls', 'stat', 'file', 'du', 'tree', 'realpath', 'readlink', 'basename', 'dirname',
+  'cmp', 'ls', 'stat', 'file', 'du', 'tree', 'realpath', 'readlink', 'basename', 'dirname',
   'mkdir', 'touch', 'mv', 'rm', 'rmdir', 'ln', 'tee',
   'md5', 'md5sum', 'shasum', 'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'od', 'xxd', 'hexdump',
   'gzip', 'gunzip', 'zcat', 'test',
@@ -527,15 +529,6 @@ const NAME_GRANT_FLAGS: Record<string, NameGrantFlags> = {
   column: { short: 'tx', value: 'sco' },
   rev: {},
   tac: { short: 'br', value: 's' },
-  diff: {
-    short: 'uqiwbBaNsyt',
-    value: 'UCL',
-    long: [
-      '--unified', '--brief', '--ignore-case', '--ignore-all-space', '--ignore-space-change', '--ignore-blank-lines',
-      '--text', '--new-file', '--report-identical-files', '--side-by-side', '--expand-tabs', '--color', '--label',
-      '--context',
-    ],
-  },
   cmp: { short: 'lsb', value: 'in', long: ['--verbose', '--silent', '--quiet', '--print-bytes'] },
   ls: { short: '1aAlhtrSRdFpiGnosucfgkT', long: ['--all', '--almost-all', '--human-readable', '--recursive', '--directory', '--color', '--classify'] },
   stat: { short: 'xsrnql', value: 'fct' },

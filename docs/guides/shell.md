@@ -194,7 +194,7 @@ Always allow on a line grants each command it was missing, so approving
 name and the `git push` scope. The prompt says which before you answer.
 
 **Only commands that act on the paths they are given are granted by
-name**: searching and reading (`grep`, `rg`, `cat`, `wc`, `sort`, `diff`,
+name**: searching and reading (`grep`, `rg`, `cat`, `wc`, `sort`, `cmp`,
 `ls`, `stat`, `du`), moving files (`mkdir`, `touch`, `mv`, `rm`, `ln`,
 `tee`), and a few converters (`base64`, `gzip`, `xxd`, the checksum
 tools). A by-name grant covers only the flags listed for each command,
@@ -203,10 +203,12 @@ spelled out in full: the common ones that act on the given paths (`grep
 flag asks, including an abbreviation GNU tools would accept (`sort
 --files0-f`) and the ones that run a program or read the paths to act on
 from a file (`rg --pre`, `sort --compress-program`, `--files0-from`,
-`md5sum -c`, `diff -r`). `printf` is not on the list: bash's
+`md5sum -c`). `printf` is not on the list: bash's
 builtin assigns a variable with `-v`. Neither is `cp`: `cp source dir`
 writes `dir/source` and follows a symlink already there, a path no
-argument names. Everything else keeps the
+argument names. Nor is `diff`: given two directories, or a directory and
+a file, it reads the files inside and follows a symlink among them, paths
+no argument names either. Everything else keeps the
 narrow scope: network clients (`curl`, `wget`), archivers (`tar`, `zip`),
 `jq`, test runners, linters, compilers, and build tools, which run code no
 path check sees, or reach past the workspace. Shells, interpreters, and wrappers that run another
