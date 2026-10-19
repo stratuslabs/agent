@@ -4423,15 +4423,67 @@ test('setup leaves an existing principals list alone when connecting another age
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // No member-ID prompt: Ava inherits U0OPS.
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
+      // No agent on Slack confirms which workspace U0OPS is in, so Ava is
+      // asked (Codex P2 4310305742); Enter keeps the inherited list.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: slackOkFetch,
     },
   });
 
   assert.equal(exitCode, 0);
-  assert.doesNotMatch(output.stdout, /Only the Slack users you list/);
+  assert.match(output.stdout, /Enter to keep U0OPS/);
+  assert.doesNotMatch(output.stdout, /! Nobody is listed/);
   const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { slackUsers: ['U0OPS'] });
+});
+
+// Bea's bot is in the workspace named by `beaTeam`; every other token is in T1.
+const slackTeamsFetch = (beaTeam: string) => (async (url: any, init: any) => {
+  const token = String(init?.headers?.authorization ?? '').replace(/^Bearer /, '');
+  return new Response(JSON.stringify(
+    String(url).endsWith('/auth.test')
+      ? { ok: true, user_id: 'B1', team: 'Acme', team_id: token === 'xoxb-bea' ? beaTeam : 'T1' }
+      : { ok: true, url: 'wss://x' },
+  ), { status: 200 });
+}) as typeof fetch;
+
+const connectAvaBesideBea = async (beaTeam: string, answers: string[]) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { slackUsers: ['U0OPS'] } }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { bea: { appToken: 'xapp-bea', botToken: 'xoxb-bea' } } } }));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '3\n', '9\n']),
+      fetch: slackTeamsFetch(beaTeam),
+    },
+  });
+  assert.equal(exitCode, 0);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  return { output, saved };
+};
+
+test('setup asks for a list of its own when the inherited one belongs to another Slack workspace', async () => {
+  // Codex P2 4310305742: member IDs are workspace-scoped, so a list from
+  // Bea's workspace would leave Ava, closed by default, ignoring everyone.
+  const { output, saved } = await connectAvaBesideBea('T2', ['U0AVA\n']);
+  assert.match(output.stdout, /The Slack list other agents inherit \(U0OPS\) is not confirmed for this workspace/);
+  assert.match(output.stdout, /✓ U0AVA can talk to Ava\./);
+  assert.deepEqual(saved.principals, { slackUsers: ['U0OPS'], agents: { ava: { slackUsers: ['U0AVA'] } } });
+});
+
+test('setup keeps the inherited list without asking when another agent uses it in the same workspace', async () => {
+  const { output, saved } = await connectAvaBesideBea('T1', []);
+  assert.doesNotMatch(output.stdout, /Only the Slack users you list|Enter to keep/);
   assert.deepEqual(saved.principals, { slackUsers: ['U0OPS'] });
 });
 
