@@ -120,7 +120,25 @@ export const createApprovalPolicy = (
   // gated call in a conversation that read external content, under
   // `externalContent: "gate"`, the same rule the daemon's policy applies.
   if (mode === 'open') {
-    const asking = createApprovalPolicy('ask', streams, env, ask);
+    // Defaulted means nobody can answer (a pipe, `--stdin`): what would
+    // ask is refused, never read from consumed stdin or taken from the
+    // next piped chat line, and said once.
+    let noted = false;
+    const asking: ApprovalPolicy = defaulted
+      ? {
+        async approve(context) {
+          if (!noted) {
+            noted = true;
+            writeLine(
+              streams.stderr,
+              `Note: refusing ${context.call.toolName} — it would ask for approval, and stdin is not a terminal. `
+              + 'Pass --approvals always to run it unattended.',
+            );
+          }
+          return false;
+        },
+      }
+      : createApprovalPolicy('ask', streams, env, ask);
     return {
       async approve(context) {
         if (context.risk === 'safe') {

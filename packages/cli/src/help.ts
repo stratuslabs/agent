@@ -272,7 +272,8 @@ Options:
   --no-events      Hide event-by-event progress lines in text mode
   --approvals      run/chat: tool approval mode — always, open (gated tools run, dangerous
                    ones ask), ask (every call), gated (safe tools run, the rest ask), or
-                   never. Default: open, from approvals.posture; with posture guarded
+                   never. Default: open, from approvals.posture (with no terminal,
+                   a call that would ask is refused, said once on stderr); with posture guarded
                    (or an unreadable config), gated at a terminal and never otherwise:
                    gated calls are refused, said once on stderr
                    serve: how the daemon reaches a human — headless (refuse every

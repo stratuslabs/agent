@@ -96,7 +96,10 @@ export const unflaggedApprovals = (
   fallback: CliApprovalMode,
 ): { approvals: CliApprovalMode; approvalsDefaulted?: true } => {
   if (posture === 'open') {
-    return { approvals: 'open' };
+    // With nobody to ask, open still runs gated calls but refuses what
+    // would ask (dangerous, or gated after external content) rather than
+    // waiting on a y/N nobody can type.
+    return fallback === 'always' ? { approvals: 'open', approvalsDefaulted: true } : { approvals: 'open' };
   }
   if (fallback === 'always') {
     return { approvals: 'never', approvalsDefaulted: true };

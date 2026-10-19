@@ -14416,6 +14416,26 @@ test('gated runs a safe tool without asking and asks about the rest; a defaulted
   assert.equal(await gatedOpen.approve(externalCall), false);
   assert.equal(openAsks, 2);
 
+  // Codex P2 4310305238: `open` defaulted with nobody to ask never asks,
+  // even when the caller supplies an asker (piped chat's readline would
+  // take the next queued message as the answer). Gated runs; what would
+  // ask is refused, with one note on stderr.
+  const headless = createStreams();
+  let headlessAsks = 0;
+  const headlessOpen = createApprovalPolicy('open', headless.streams, {}, async () => {
+    headlessAsks += 1;
+    return 'y';
+  }, true, { gateExternalContent: true });
+  assert.equal(await headlessOpen.approve(safeCall), true);
+  assert.equal(await headlessOpen.approve(gatedCall), true);
+  assert.equal(await headlessOpen.approve({ ...gatedCall, risk: 'dangerous' as const }), false);
+  assert.equal(await headlessOpen.approve(externalCall), false);
+  assert.equal(headlessAsks, 0);
+  assert.equal(
+    (headless.output.stderr.match(/Note: refusing shell\.run — it would ask for approval, and stdin is not a terminal/g) ?? []).length,
+    1,
+  );
+
   // `ask` still means every call — the word says so.
   const asking = createStreams();
   const askPolicy = createApprovalPolicy('ask', asking.streams, {}, async () => {
@@ -14638,7 +14658,11 @@ test('the open-posture startup lines name the agents whose external-content gate
 test('an unflagged chat or run is never more permissive than open, whatever the posture', () => {
   // Codex P1 4309856143: guarded or unreadable fell through to the
   // unattended default, which approves dangerous calls too.
-  assert.deepEqual(unflaggedApprovals('open', 'always'), { approvals: 'open' });
+  // Codex P2 4310305238: open with nobody to ask (a pipe, --stdin) is
+  // marked defaulted, so the policy refuses what would ask instead of
+  // reading a y/N from consumed stdin or the next piped chat line.
+  assert.deepEqual(unflaggedApprovals('open', 'always'), { approvals: 'open', approvalsDefaulted: true });
+  assert.deepEqual(unflaggedApprovals('open', 'gated'), { approvals: 'open' });
   assert.deepEqual(unflaggedApprovals('guarded', 'always'), { approvals: 'never', approvalsDefaulted: true });
   assert.deepEqual(unflaggedApprovals('unreadable', 'always'), { approvals: 'never', approvalsDefaulted: true });
   assert.deepEqual(unflaggedApprovals('guarded', 'gated'), { approvals: 'gated', approvalsDefaulted: true });
