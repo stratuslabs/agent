@@ -1139,11 +1139,14 @@ export const runSetup = async (
     writeLine(streams.stdout, 'Find your member ID in Slack: your profile → ⋯ → Copy member ID.');
     for (;;) {
       const answer = (await prompter.ask('Slack member IDs who may talk to it (U…, comma-separated, Enter to skip): ')).trim();
-      if (answer.length === 0) {
-        writeLine(streams.stdout, `! Nobody is listed, so ${agentName} will ignore every Slack message until principals.slackUsers names someone.`);
+      // Separators alone (`, ,`) name nobody, the same as Enter.
+      const ids = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      if (ids.length === 0) {
+        // The key that decides this agent's list: its own, where it has one.
+        const key = state.principals?.agents?.[agentId]?.slackUsers !== undefined ? `principals.agents.${agentId}.slackUsers` : 'principals.slackUsers';
+        writeLine(streams.stdout, `! Nobody is listed, so ${agentName} will ignore every Slack message until ${key} names someone.`);
         return;
       }
-      const ids = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
       const bad = ids.filter((id) => !/^[UW][A-Z0-9]{2,}$/.test(id));
       if (bad.length > 0) {
         writeLine(streams.stdout, `✗ ${bad.join(', ')} ${bad.length === 1 ? 'is not a member ID' : 'are not member IDs'} (they look like U0123ABCD). Nothing was saved.`);
