@@ -134,7 +134,7 @@ git can find its repository), but nothing can be read from inside them.
 
 | Key | Default | What |
 | --- | --- | --- |
-| `sandbox` | `required` | `required`: refuse every command when no sandbox can start (no `bwrap`, or a container that forbids user namespaces), with the reason. `auto`: run unconfined there instead, and log why, once. `off`: run with the daemon user's full access. |
+| `sandbox` | `required` | `required`: refuse every command when no sandbox can start (no `bwrap`, or a container that forbids user namespaces), with the reason. A host wired by hand with no workspace and no `cwd` has nothing to confine commands to, so `required` refuses there too. `auto`: run unconfined there instead, and log why, once. `off`: run with the daemon user's full access. |
 | `deniedPaths` | none | More directories or files to hide, added to the list above, including ones inside the workspace (a repository's `.env`). A leading `~` is your home directory. |
 | `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). |
 

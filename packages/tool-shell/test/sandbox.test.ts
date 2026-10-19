@@ -353,3 +353,38 @@ test('with a workspaceRoot, the other agents\' workspaces under it are denied', 
   assert.equal(output(own).stdout, 'mine\n');
 });
 
+
+test('with no workspace and no cwd, required refuses instead of granting the process directory', async () => {
+  // Codex P1 4310573233 / 4310550266: falling back to process.cwd() made
+  // wherever the host started (a home, `/`, a repository with
+  // node_modules/.bin on PATH) writable inside a "required" sandbox.
+  const fixture = await fixtureHome();
+  let planned = false;
+  const tool = createShellTool({}, {
+    home: fixture.userHome,
+    processEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+    planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); },
+  });
+  const result = await createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command: 'echo hi' } }, tool, session('ava'));
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /no workspace to confine commands to/);
+  assert.match(result.error ?? '', /cwd/);
+  assert.equal(planned, false, 'no sandbox is planned around the process directory');
+});
+
+test('with no workspace and no cwd, auto runs unconfined and says so once', async () => {
+  resetSandboxWarning();
+  const fixture = await fixtureHome();
+  const warnings: string[] = [];
+  const tool = createShellTool({ sandbox: 'auto' }, {
+    home: fixture.userHome,
+    processEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+    planSandbox: () => { throw new Error('should not plan'); },
+    warn: (m) => warnings.push(m),
+  });
+  const exec = (command: string) => createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command } }, tool, session('ava'));
+  assert.equal((await exec('echo one')).ok, true);
+  assert.equal((await exec('echo two')).ok, true);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /no workspace/);
+});
