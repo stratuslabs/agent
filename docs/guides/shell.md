@@ -168,7 +168,9 @@ nothing, and a relinking command last in a line runs as before.
 A line that changes the shell itself in front of other commands asks:
 `export`, `alias`, `set`, `unset`, `hash`, `trap`, `read`, `printf -v`, and
 the other builtins that change what a later command in the same shell runs
-(`export PATH=.; uname` would run a workspace `uname`). Alone, each still
+(`export PATH=.; uname` would run a workspace `uname`). The same goes for
+them behind `command` or `builtin` (`command export PATH=.`), and for `eval`,
+`source`, and `.`, which run text the line does not show. Alone, each still
 runs or asks as it always has.
 
 **Always allow on a command grants it by name.** Approving `grep -rn TODO

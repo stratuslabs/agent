@@ -539,6 +539,23 @@ test('a path checked before the line runs is not trusted after a command that ca
   assert.equal(await allowed('rm -rf build && mkdir build && cat safe/link'), true);
 });
 
+test('a shell-state builtin reached through a wrapper never runs in a line with others', async () => {
+  // Codex P1 4310901679: `command export PATH=.` runs the export in the
+  // current shell (sh, bash and dash), so the wrapper is not the command.
+  // `eval` and `source` run text the line does not show.
+  for (const command of [
+    'command export PATH=.; uname', 'command -p export PATH=.; uname', 'command -- export PATH=.; uname',
+    'builtin export PATH=.; uname', 'command builtin export PATH=.; uname', 'noglob export PATH=.; uname',
+    "eval 'export PATH=.'; uname", '. ./env.sh; uname', 'source ./env.sh && uname', 'PATH=.; uname', 'PATH=. && uname',
+  ]) {
+    assert.ok(analyzeCompound(command).disqualifiedBy, `should not read as commands: ${command}`);
+  }
+  // Looking a name up changes nothing.
+  for (const command of ['command -v git && git status', 'command -V ls; ls']) {
+    assert.equal(analyzeCompound(command).disqualifiedBy, undefined, command);
+  }
+});
+
 test('a command that changes the shell itself never runs in a line with others', async () => {
   const { workspace, repo } = await layout();
   // Codex P1 4309461027: `export PATH=.` changes what the next command

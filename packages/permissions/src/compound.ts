@@ -81,9 +81,37 @@ const SHELL_STATE: ReadonlySet<string> = new Set([
   'functions', 'unfunction', 'emulate', 'setenv', 'unsetenv',
 ]);
 
-const changesShell = (analysis: CommandAnalysis): boolean =>
-  SHELL_STATE.has(analysis.base ?? '')
-  || (analysis.base === 'printf' && analysis.tokens.slice(1).some((token) => /^-[^-]*v/.test(token)));
+/**
+ * Builtins that run their first argument as a command in the current shell:
+ * `command export PATH=.` is an export. Looked through to the command named.
+ */
+const SHELL_WRAPPERS: ReadonlySet<string> = new Set(['command', 'builtin', 'noglob', 'nocorrect']);
+
+/** Builtins that run text the line does not show, in the current shell. */
+const SHELL_EVALUATORS: ReadonlySet<string> = new Set(['eval', 'source', '.']);
+
+const changesShell = (analysis: CommandAnalysis): boolean => {
+  const tokens = analysis.tokens;
+  let index = 0;
+  while (index < tokens.length && SHELL_WRAPPERS.has(tokens[index]!)) {
+    const wrapper = tokens[index]!;
+    index += 1;
+    for (; index < tokens.length && tokens[index]!.startsWith('-'); index += 1) {
+      if (tokens[index] === '--') {
+        index += 1;
+        break;
+      }
+      // `command -v`/`-V` only says what a name is; nothing runs.
+      if (wrapper === 'command' && /^-[^-]*[vV]/.test(tokens[index]!)) {
+        return false;
+      }
+    }
+  }
+  const base = tokens[index];
+  if (base === undefined) return false;
+  return SHELL_STATE.has(base) || SHELL_EVALUATORS.has(base)
+    || (base === 'printf' && tokens.slice(index + 1).some((token) => /^-[^-]*v/.test(token)));
+};
 
 /**
  * A redirection target the shell would expand, or that this reader would get
