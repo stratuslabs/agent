@@ -4369,6 +4369,35 @@ test('setup re-asks for a malformed member ID and warns when nobody is listed', 
   assert.equal(saved.principals, undefined);
 });
 
+test('setup treats a separators-only answer as no answer, and names the agent\'s own empty list', async () => {
+  // Codex P2s 4309740884 (", ," saved an empty list as success) and 4309740885 (advice named the overridden key).
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { agents: { ava: { slackUsers: [] } } } }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', ', ,\n', '3\n', '9\n']),
+      fetch: slackOkFetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /can talk to Ava\./);
+  assert.match(output.stdout, /! Nobody is listed, so Ava will ignore every Slack message until principals\.agents\.ava\.slackUsers names someone\./);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { agents: { ava: { slackUsers: [] } } });
+});
+
 test('setup leaves an existing principals list alone when connecting another agent', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
