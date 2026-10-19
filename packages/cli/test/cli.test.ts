@@ -4463,6 +4463,29 @@ test('doctor names the config serve would read when it says to list someone', as
   assert.ok(output.stdout.includes(`principals.slackUsers in ${chosen}`), output.stdout);
 });
 
+test('doctor points an unreachable agent at its own override when it has one', async () => {
+  // Codex P2 4309690211: per-agent keys win, so top-level advice changes nothing.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  for (const [id, name] of [['ava', 'Ava'], ['bea', 'Bea']]) {
+    await writeFile(path.join(agentsDir, `${id}.md`), `---\nname: ${name}\n---\n\nYou are ${name}.\n`);
+  }
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'demo',
+    principals: { agents: { ava: { slackUsers: [], admit: 'principals' } } },
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    channels: { slack: Object.fromEntries(['ava', 'bea'].map((id) => [id, { appToken: 'xapp-t', botToken: 'xoxb-t' }])) },
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor'], streams, env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} } });
+  assert.match(output.stdout, /Nobody is listed who may talk to ava in Slack[^\n]*principals\.agents\.ava\.slackUsers[^\n]*principals\.agents\.ava\.admit/);
+  // Bea has no override, so the top-level keys are the ones that reach her.
+  assert.match(output.stdout, /Nobody is listed who may talk to bea in Slack[^\n]*Add Slack member IDs to principals\.slackUsers [^\n]*principals\.admit to "anyone"/);
+});
+
 test('setup asks for nobody when the agent already admits anyone', async () => {
   // Codex P2 4309308066: with admit "anyone", a list labels trust and
   // closes no door, so the closed-door prompt would say something false.
@@ -4550,6 +4573,45 @@ test('setup connects an agent to Slack without touching any file by hand', async
 
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials.channels, { slack: { ava: { appToken: 'xapp-tok', botToken: 'xoxb-tok' } } });
+});
+
+test('setup keeps a later agent\'s Slack list to that agent when another agent has its own list', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(agentsDir, 'bea.md'), '---\nname: Bea\n---\n\nYou are Bea.\n');
+  // Ava has her own list and nothing is listed at the top, so a top-level
+  // write for Bea would admit her users to every agent without a list.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ principals: { agents: { ava: { slackUsers: ['U0AVA'] } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      // Channels → Bea (3) → paste both tokens → member ID → Back → Save & finish
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '3\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0BEA\n', '4\n', '9\n']),
+      fetch: (async (url: any) => {
+        if (String(url).endsWith('/auth.test')) {
+          return new Response(JSON.stringify({ ok: true, user_id: 'B456', team: 'Acme', team_id: 'T1' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true, url: 'wss://slack' }), { status: 200 });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /✓ U0BEA can talk to Bea\./);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { agents: { ava: { slackUsers: ['U0AVA'] }, bea: { slackUsers: ['U0BEA'] } } });
 });
 
 test('setup refuses to store Slack tokens the API rejects', async () => {

@@ -725,11 +725,24 @@ export const collectDoctorReport = async (
     const resolved = resolveAgentPrincipals(trustedPrincipals, id);
     return resolved.admit === 'principals' && (resolved.slackUsers ?? []).length === 0;
   });
-  if (unreachable.length > 0) {
+  // The keys that would change each agent's answer: its own entry wins
+  // over the top level key by key (`resolveAgentPrincipals`), so advice to
+  // edit the top level does nothing for an agent that overrides it.
+  const remedies = new Map<string, { ids: string[]; list: string; admit: string }>();
+  for (const id of unreachable) {
+    const own = trustedPrincipals?.agents?.[id];
+    const list = own?.slackUsers !== undefined ? `principals.agents.${id}.slackUsers` : 'principals.slackUsers';
+    const admit = own?.admit !== undefined ? `principals.agents.${id}.admit` : 'principals.admit';
+    const key = `${list} ${admit}`;
+    const entry = remedies.get(key) ?? { ids: [], list, admit };
+    entry.ids.push(id);
+    remedies.set(key, entry);
+  }
+  for (const { ids, list, admit } of remedies.values()) {
     problems.push(
-      `Nobody is listed who may talk to ${unreachable.join(', ')} in Slack, so ${unreachable.length === 1 ? 'it ignores' : 'they ignore'} every message. `
-      + `Add Slack member IDs to principals.slackUsers in ${explicitSource ? path.resolve(cwd, explicitSource.value) : '~/.stratus/config.json'} `
-      + '(or set principals.admit to "anyone"), then `stratus restart`.',
+      `Nobody is listed who may talk to ${ids.join(', ')} in Slack, so ${ids.length === 1 ? 'it ignores' : 'they ignore'} every message. `
+      + `Add Slack member IDs to ${list} in ${explicitSource ? path.resolve(cwd, explicitSource.value) : '~/.stratus/config.json'} `
+      + `(or set ${admit} to "anyone"), then \`stratus restart\`.`,
     );
   }
 
