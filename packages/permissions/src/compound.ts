@@ -34,7 +34,7 @@ import { resolveReal, walk, within } from './workspace.ts';
 
 /** One redirection: where a command's output goes or its input comes from. */
 export interface Redirect {
-  /** `out` for `>`, `>>`, `&>`; `in` for `<`. A descriptor copy (`2>&1`) is not recorded. */
+  /** `out` for `>` and `>>`; `in` for `<`. A descriptor copy (`2>&1`) is not recorded. */
   direction: 'out' | 'in';
   /** The path as written, unquoted. */
   target: string;
@@ -77,8 +77,8 @@ const UNREADABLE_TARGET = /[*?[\]{}~$`\\#!]/;
  * Read a command line as a list of pipelines.
  *
  * Splits on `&&`, `||`, `;` and `|` outside quotes, and lifts `>`, `>>`,
- * `&>`, `<` and descriptor copies out of each command. Everything else the
- * shell treats as syntax refuses the line: a lone `&` (a background job that
+ * `<` and descriptor copies out of each command. Everything else the
+ * shell treats as syntax refuses the line: a lone `&` or `&>` (a background job that
  * outlives the call), a newline, parentheses, `$( )`, backticks, a heredoc,
  * an unquoted backslash or `#`. What is left of each command is then read by
  * `analyzeCommand`, which refuses whatever it would refuse on its own.
@@ -251,12 +251,9 @@ export const analyzeCompound = (command: string): CompoundCommand => {
       let at = index;
       let direction: 'out' | 'in';
       if (char === '&') {
-        // `&>` and `&>>`: both streams to one file.
-        at += 1;
-        direction = 'out';
-        if (command[at + 1] === '>') {
-          at += 1;
-        }
+        // `&>` is bash's both-streams redirection, but dash and POSIX sh
+        // read `a &> out` as `a &` (a background job) and then `> out`.
+        return disqualified(command, 'it uses &>, which sh reads as a background job (write >out 2>&1)');
       } else if (char === '>') {
         direction = 'out';
         if (next === '>') {
@@ -516,10 +513,11 @@ const NAME_GRANT_FLAGS: Record<string, NameGrantFlags> = {
 
 /**
  * Whether every flag in the arguments is one `NAME_GRANT_FLAGS` lists for
- * this command. Every word that starts with `-` is read as a flag until
- * `--`, even a word that follows a flag taking a value: reading `grep -e
- * -R` as asking costs a prompt, where reading a flag as a value would cost
- * a read nobody approved.
+ * this command. Every word that starts with `-` is read as a flag, even a
+ * word that follows a flag taking a value, and even after `--`: in `rg -e
+ * -- --pre=x` the `--` is the pattern, not the end of the options. Reading
+ * `grep -- -R` as asking costs a prompt, where reading a flag as a value
+ * would cost a read nobody approved.
  */
 const flagsCovered = (base: string, args: readonly string[]): boolean => {
   // `test` reads its operators (`-f`, `-nt`) as tests, never as options.
@@ -531,10 +529,7 @@ const flagsCovered = (base: string, args: readonly string[]): boolean => {
     return false;
   }
   for (const token of args) {
-    if (token === '--') {
-      return true;
-    }
-    if (token === '-' || !token.startsWith('-')) {
+    if (token === '-' || token === '--' || !token.startsWith('-')) {
       continue;
     }
     if (token.startsWith('--')) {
@@ -563,8 +558,10 @@ const WORKSPACE_READERS = new Set(['cat', 'head', 'tail', 'ls']);
 
 /**
  * Every string in a command's arguments that could name a path: each
- * positional, the value of `--flag=value`, and the tail of a short flag
- * that carries one (`-o/tmp/x`, `-I../include`). Over-inclusive on purpose:
+ * positional, the value of `--flag=value`, and every tail of a short-flag
+ * bundle, since any letter in it may be the one that takes the rest as its
+ * value (`-o/tmp/x`, `-ro/tmp/x`, and BSD and GNU disagree on which letters
+ * do). Over-inclusive on purpose:
  * a grep pattern is checked as though it were a path, which costs a prompt
  * for a pattern like `/etc/` and never a read nobody approved.
  */
@@ -585,8 +582,10 @@ const pathCandidates = (args: string[]): string[] => {
       const at = token.indexOf('=');
       if (at !== -1) {
         candidates.push(token.slice(at + 1));
-      } else if (token.length > 2) {
-        candidates.push(token.slice(2));
+      } else {
+        for (let at = 2; at < token.length; at += 1) {
+          candidates.push(token.slice(at));
+        }
       }
       continue;
     }

@@ -430,6 +430,12 @@ test('a by-name grant covers only the flags it lists, spelled out in full', asyn
     'cp -L src copy',
     // A word after a flag that takes a value is still read as a flag: a prompt, never a read nobody approved.
     'grep -e -R src/main.ts',
+    // Codex P1 4309377616: `--` may be the value of a flag (`-e --`), so it never ends flag checking.
+    'rg -e -- --pre=./payload src',
+    'grep -- -R src/main.ts',
+    // Codex P1 4309377621: in `-ro/tmp/out` the value starts after `o`, not after `r`.
+    'sort -ro/tmp/out src/main.ts',
+    'sort -ro../../outside src/main.ts',
   ]) {
     assert.equal(await allowed(command), false, `should ask: ${command}`);
   }
@@ -444,7 +450,7 @@ test('a by-name grant covers only the flags it lists, spelled out in full', asyn
     'rm -rf copy',
     'mkdir -p a/b',
     'test -f src/main.ts',
-    'grep -- -R src/main.ts',
+    'sort -ro src/sorted.txt src/main.ts',
   ]) {
     assert.equal(await allowed(command), true, `should run: ${command}`);
   }
@@ -453,6 +459,13 @@ test('a by-name grant covers only the flags it lists, spelled out in full', asyn
 test('a redirection operator this reader does not know, like zsh and tcsh >!, is not read as a target', () => {
   // Codex P1 4309280000: `>! /tmp/out` writes /tmp/out in tcsh and zsh.
   for (const command of ['echo ok >! /tmp/out', 'echo ok >>! /tmp/out', 'echo ok >!/tmp/out']) {
+    assert.ok(analyzeCompound(command).disqualifiedBy, command);
+  }
+});
+
+test('&> is not read as a redirection, since dash and POSIX sh run the command in the background', () => {
+  // Codex P1 4309377629: under dash, `a &> out` is `a &` then `> out`.
+  for (const command of ['sleep 100 &> out', 'grep x src &>> out', 'grep x src&>out']) {
     assert.ok(analyzeCompound(command).disqualifiedBy, command);
   }
 });

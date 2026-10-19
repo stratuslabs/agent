@@ -152,7 +152,9 @@ runs unattended when every command in it would run on its own:
 
 Output may be redirected into the workspace or to `/dev/null`, and input
 read from the workspace. A redirection anywhere else, or one through a
-symlink that leaves the workspace, asks.
+symlink that leaves the workspace, asks. So does `&>`, which
+`sh` and `dash` read as running the command in the background; write `>out
+2>&1` instead.
 
 **Always allow on a command grants it by name.** Approving `grep -rn TODO
 src` once stores `grep`, so every later `grep` inside the workspace runs:
@@ -167,6 +169,8 @@ when it points outside the workspace — `grep token ~/.ssh/config`, `rm -rf
   `~`, braces);
 - a bare glob (`rg *`) in a directory holding a name that starts with `-`,
   which the command would read as a flag.
+- a word starting with `-` after `--`, since `--` may be a flag's value
+  (`rg -e -- --pre=x`) rather than the end of the options.
 
 Always allow on a line grants each command it was missing, so approving
 `cd app && wc -c main.ts && git push origin nova/fix` once stores `wc` by
