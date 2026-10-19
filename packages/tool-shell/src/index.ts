@@ -245,23 +245,31 @@ const isWithin = (dir: string, candidate: string): boolean => {
 };
 
 /**
- * Where a path really is, symlinks resolved. A path that does not exist yet
- * resolves through its nearest existing ancestor, so a `bin` the agent could
- * still create under an aliased workspace is placed where it would land.
+ * Where a path really is, symlinks resolved. Walked one component at a time
+ * in the order the kernel does: a symlink is followed before the `..` after
+ * it, so `/alias/../bin` lands beside the link's target, not beside the link
+ * (collapsing `..` first would get that wrong). A path that does not exist
+ * yet resolves through its nearest existing ancestor, so a `bin` the agent
+ * could still create under an aliased workspace is placed where it would land.
  */
 const canonicalPath = (target: string): string => {
-  let current = path.resolve(target);
-  const rest: string[] = [];
-  for (;;) {
+  const parts = (path.isAbsolute(target) ? target : `${process.cwd()}/${target}`).split('/');
+  let current = '/';
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index]!;
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      current = path.dirname(current);
+      continue;
+    }
+    const next = path.join(current, part);
     try {
-      return path.join(realpathSync(current), ...rest);
+      current = realpathSync(next);
     } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return path.resolve(target);
-      rest.unshift(path.basename(current));
-      current = parent;
+      return path.join(next, ...parts.slice(index + 1));
     }
   }
+  return current;
 };
 
 export interface ShellToolOptions {

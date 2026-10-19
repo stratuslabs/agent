@@ -447,6 +447,25 @@ test('PATH keeps out the workspace when either side is reached through a symlink
   }
 });
 
+test('PATH resolves a symlink before the .. that follows it, as the kernel does', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-dotdot-')));
+  const workspace = path.join(root, 'agents', 'ava', 'workspace');
+  await mkdir(path.join(workspace, 'sub'), { recursive: true });
+  await mkdir(path.join(workspace, 'bin'), { recursive: true });
+  await mkdir(path.join(root, 'aliases'), { recursive: true });
+  // /aliases/a -> <workspace>/sub, so /aliases/a/../bin is <workspace>/bin
+  // to the shell, though collapsing `..` first reads it as /aliases/bin.
+  await symlink(path.join(workspace, 'sub'), path.join(root, 'aliases', 'a'));
+  const entry = `${root}/aliases/a/../bin`;
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(root, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(root, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  };
+  const tools = await registryFor({ passEnv: [], env: { PATH: `${entry}:/usr/bin:/bin` } }, {}, workspaces);
+  assert.equal(String((await runCommand(tools, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
+});
+
 test('nothing a shell runs before the command is passed to it', async () => {
   const tools = await registryFor(
     { passEnv: ['PATH'], env: { BASH_ENV: '/tmp/x', ENV: '/tmp/y', ZDOTDIR: '/tmp/z', 'BASH_FUNC_cat%%': '() { echo pwned; }', KEEP: 'kept' } },
