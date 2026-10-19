@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises';
 
-import { analyzeCommand, findMatchingScope, type CommandAnalysis, type CommandScope } from './commands.ts';
+import { analyzeCommand, findMatchingScope, SAFE_COMMAND_SCOPES, type CommandAnalysis, type CommandScope } from './commands.ts';
 import { resolveReal, walk, within } from './workspace.ts';
 
 /**
@@ -65,6 +65,25 @@ const SHELL_KEYWORDS: ReadonlySet<string> = new Set([
   'if', 'then', 'else', 'elif', 'fi', 'case', 'esac', 'for', 'select', 'while', 'until', 'do', 'done', 'in',
   'function', 'time', 'coproc', '!', '{', '}', '[[', ']]',
 ]);
+
+/**
+ * Builtins that change the shell they run in: what a later command finds on
+ * `PATH`, what a name means, what happens on exit. On its own each changes a
+ * shell that ends with the call; in a line with others it changes what the
+ * rest of the line runs (`export PATH=.; uname` runs a workspace `uname`),
+ * which no check of the later command sees. `cd` is the one this reader
+ * follows. `printf -v` assigns too, and is caught by its flag.
+ */
+const SHELL_STATE: ReadonlySet<string> = new Set([
+  'export', 'readonly', 'declare', 'typeset', 'local', 'set', 'unset', 'alias', 'unalias', 'hash', 'rehash',
+  'shopt', 'setopt', 'unsetopt', 'enable', 'disable', 'trap', 'umask', 'ulimit', 'limit', 'pushd', 'popd',
+  'read', 'mapfile', 'readarray', 'let', 'shift', 'getopts', 'bind', 'fc', 'history', 'autoload', 'zmodload',
+  'functions', 'unfunction', 'emulate', 'setenv', 'unsetenv',
+]);
+
+const changesShell = (analysis: CommandAnalysis): boolean =>
+  SHELL_STATE.has(analysis.base ?? '')
+  || (analysis.base === 'printf' && analysis.tokens.slice(1).some((token) => /^-[^-]*v/.test(token)));
 
 /**
  * A redirection target the shell would expand, or that this reader would get
@@ -307,6 +326,10 @@ export const analyzeCompound = (command: string): CompoundCommand => {
   const failed = endPipeline();
   if (failed) {
     return disqualified(command, failed);
+  }
+  const all = pipelines.flat();
+  if (all.length > 1 && all.some((stage) => changesShell(stage.analysis))) {
+    return disqualified(command, 'it changes the shell the rest of the line runs in (export, alias, set)');
   }
   return { command, pipelines };
 };
@@ -745,6 +768,24 @@ const coveredByName = async (
   return true;
 };
 
+/**
+ * Commands that may leave a path resolving somewhere it did not before,
+ * by moving a directory entry or making a link. Every path in a line is
+ * checked against the filesystem as it is before the line runs, so after one
+ * of these (or alongside one, in a pipeline) a later path check proves
+ * nothing: `mv staged safe && cat safe/link` reads whatever `staged/link`
+ * pointed at. Removing and creating plain files and directories relinks
+ * nothing, so `rm` and `mkdir` are not here. Any command this reader does
+ * not know the effects of counts, since a granted `git checkout` can write
+ * a symlink as easily as `ln`.
+ */
+const RELINKS: ReadonlySet<string> = new Set(['mv', 'cp', 'ln']);
+const KNOWN_NOT_TO_RELINK: ReadonlySet<string> = new Set([
+  ...[...GRANTABLE_BY_NAME].filter((base) => !RELINKS.has(base)),
+  ...SAFE_COMMAND_SCOPES.map((scope) => scope.command),
+]);
+const mayRelink = (stage: CompoundStage): boolean => !KNOWN_NOT_TO_RELINK.has(stage.analysis.base ?? '');
+
 /** What the judge needs to know about the agent and its grants. */
 export interface CompoundJudgeOptions {
   /** Where the shell starts. Undefined: nothing that depends on it is covered. */
@@ -782,12 +823,12 @@ export interface CompoundJudgement {
 }
 
 /** Where a redirection may point: the workspace, or `/dev/null`. */
-const redirectsInside = async (redirects: readonly Redirect[], cwds: readonly string[] | undefined, root: string | undefined): Promise<boolean> => {
+const redirectsInside = async (redirects: readonly Redirect[], cwds: readonly string[] | undefined, root: string | undefined, stale = false): Promise<boolean> => {
   for (const redirect of redirects) {
     if (redirect.direction === 'out' && redirect.target === '/dev/null') {
       continue;
     }
-    if (root === undefined || cwds === undefined || !(await landsInside(redirect.target, cwds, root))) {
+    if (stale || root === undefined || cwds === undefined || !(await landsInside(redirect.target, cwds, root))) {
       return false;
     }
   }
@@ -815,7 +856,16 @@ export const judgeCompound = async (compound: CompoundCommand, options: Compound
   const insideRoot = (): boolean =>
     root !== undefined && cwds !== undefined && cwds.every((cwd) => within(root, cwd));
 
+  // Set once a command that may relink a path could have run (`mayRelink`):
+  // from then on no path check made before the line ran covers anything.
+  let stale = false;
+
   for (const pipeline of compound.pipelines) {
+    // The commands of a pipeline run at once, so one that relinks may run
+    // before any of the others.
+    if (pipeline.length > 1 && pipeline.some(mayRelink)) {
+      stale = true;
+    }
     // A granted scope composes in a pipe only with other scopes, as it
     // does on its own (`findCoveringScopes`): a `gh api` scope must not
     // become the far end of `cat notes | gh api … --input -` because the
@@ -827,7 +877,7 @@ export const judgeCompound = async (compound: CompoundCommand, options: Compound
     for (const stage of pipeline) {
       const { analysis } = stage;
       if (analysis.base === 'cd') {
-        if (!(await redirectsInside(stage.redirects, cwds, root))) {
+        if (!(await redirectsInside(stage.redirects, cwds, root, stale))) {
           uncovered.push(stage);
           unfixable = true;
           continue;
@@ -854,23 +904,27 @@ export const judgeCompound = async (compound: CompoundCommand, options: Compound
       }
       let covered = findMatchingScope(analysis, options.safeScopes) !== undefined
         || (alone && findMatchingScope(analysis, options.scopes) !== undefined);
-      if (!covered && cwds !== undefined && root !== undefined && insideRoot()) {
+      if (!covered && !stale && cwds !== undefined && root !== undefined && insideRoot()) {
         covered = await coveredByName(analysis, names, cwds, root);
         if (!covered && WORKSPACE_READERS.has(analysis.base ?? '')) {
           covered = (await Promise.all(cwds.map((cwd) => options.reads(analysis, cwd, root)))).every(Boolean);
         }
       }
-      if (!covered && cwds !== undefined && options.autonomous) {
+      if (!covered && !stale && cwds !== undefined && options.autonomous) {
         covered = (await Promise.all(cwds.map((cwd) => options.autonomous!(analysis, cwd)))).every(Boolean);
       }
-      if (!(await redirectsInside(stage.redirects, cwds, root))) {
+      const wasStale = stale;
+      if (mayRelink(stage)) {
+        stale = true;
+      }
+      if (!(await redirectsInside(stage.redirects, cwds, root, wasStale))) {
         uncovered.push(stage);
         unfixable = true;
         continue;
       }
       if (!covered) {
         uncovered.push(stage);
-        if (cwds === undefined || !insideRoot()) {
+        if (cwds === undefined || !insideRoot() || wasStale) {
           unfixable = true;
         }
       }

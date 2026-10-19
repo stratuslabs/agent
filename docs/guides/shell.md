@@ -156,6 +156,21 @@ symlink that leaves the workspace, asks. So does `&>`, which
 `sh` and `dash` read as running the command in the background; write `>out
 2>&1` instead.
 
+Every path is checked against the filesystem as it is before the line
+runs. So once a command that can move a directory entry or make a link has
+run (`mv`, `cp`, `ln`, or any command not known to leave links alone, such as
+a granted `git checkout`), nothing later in the line is covered by a path
+check: `mv staged safe && cat safe/link` asks, since `staged/link` may point
+anywhere. In a pipeline the commands run at once, so a relinking command
+anywhere in it counts for all of them. `rm`, `mkdir`, and the readers relink
+nothing, and a relinking command last in a line runs as before.
+
+A line that changes the shell itself in front of other commands asks:
+`export`, `alias`, `set`, `unset`, `hash`, `trap`, `read`, `printf -v`, and
+the other builtins that change what a later command in the same shell runs
+(`export PATH=.; uname` would run a workspace `uname`). Alone, each still
+runs or asks as it always has.
+
 **Always allow on a command grants it by name.** Approving `grep -rn TODO
 src` once stores `grep`, so every later `grep` inside the workspace runs:
 `cd app && grep -r export . | head` included. A granted command still asks

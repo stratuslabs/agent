@@ -469,3 +469,59 @@ test('&> is not read as a redirection, since dash and POSIX sh run the command i
     assert.ok(analyzeCompound(command).disqualifiedBy, command);
   }
 });
+
+test('a path checked before the line runs is not trusted after a command that can relink it', async () => {
+  const { workspace, repo, outside } = await layout();
+  // Codex P1 4309461022: every stage was checked against the filesystem as
+  // it was before the line ran, so an earlier mv could swap in a symlink a
+  // later reader then followed out of the workspace.
+  await mkdir(path.join(repo, 'safe'), { recursive: true });
+  await writeFile(path.join(repo, 'safe', 'link'), 'inside\n');
+  await mkdir(path.join(repo, 'staged'), { recursive: true });
+  await symlink(outside, path.join(repo, 'staged', 'link'));
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => workspace, names: namesStore(['rm', 'mv', 'cp', 'ln', 'cat', 'mkdir', 'grep']) },
+  });
+  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  assert.equal(await allowed('rm -rf safe && mv staged safe && cat safe/link'), false);
+  assert.equal(await allowed('mv staged safe; cat safe/link'), false);
+  assert.equal(await allowed('cp -R staged safe2 && cat safe2/link'), false);
+  assert.equal(await allowed('ln -s staged/link here && cat here'), false);
+  // A redirection is a path too, even on a command that needs no grant.
+  assert.equal(await allowed('echo x > safe/new'), true);
+  assert.equal(await allowed('mv staged other && echo x > other/link'), false);
+  // In a pipeline the stages run at once, so the order gives no protection.
+  assert.equal(await allowed('cat safe/link | mv staged safe'), false);
+  // A relinking command is still fine last, and rm and mkdir relink nothing.
+  assert.equal(await allowed('cat safe/link && mv staged moved'), true);
+  assert.equal(await allowed('rm -rf build && mkdir build && cat safe/link'), true);
+});
+
+test('a command that changes the shell itself never runs in a line with others', async () => {
+  const { workspace, repo } = await layout();
+  // Codex P1 4309461027: `export PATH=.` changes what the next command
+  // in the same shell runs, so a scope for it must not compose.
+  for (const command of ['export PATH=.; uname', 'uname && export PATH=.', 'readonly X=1; ls', 'set -o x && ls', 'alias ls=sh; ls', 'unset PATH; ls', 'printf -v PATH .; ls', 'hash -p ./sh ls; ls', 'trap x EXIT; ls']) {
+    assert.ok(analyzeCompound(command).disqualifiedBy, `should not read as commands: ${command}`);
+  }
+  const scopes: CommandScope[] = [{ command: 'export', args: ['PATH=.'] }];
+  const headless = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => workspace, names: namesStore(['export']), whitelist: { scopesFor: async () => scopes, remember: async () => {} } },
+  });
+  assert.equal(await headless.approve(contextFor(repo, 'export PATH=.; uname')), false);
+  const remembered: CommandScope[] = [];
+  const asked: string[] = [];
+  const interactive = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'a';
+    },
+    commands: { grantRootFor: () => workspace, names: namesStore(), whitelist: { scopesFor: async () => [], remember: async (_a, scope) => { remembered.push(scope); } } },
+  });
+  assert.equal(await interactive.approve(contextFor(repo, 'export PATH=.; uname')), true);
+  assert.match(asked[0]!, /not remembered/);
+  assert.deepEqual(remembered, []);
+});
