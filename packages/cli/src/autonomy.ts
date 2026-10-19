@@ -40,3 +40,31 @@ export const agentShellWorkspace = (
     : undefined;
   return typeof root === 'string' && root.length > 0 ? path.join(root, agentId) : agentWorkspacePath(env, agentId);
 };
+
+/**
+ * Shells whose syntax the compound reader in `@stratusagent/permissions`
+ * models: POSIX `sh` and the shells that run it as written. zsh, tcsh, csh,
+ * fish and ksh each read some line differently (`>!` is a redirection to
+ * zsh and tcsh, `=ls` a path to zsh), so for them a line is never read as a
+ * compound command and no grant applies by name.
+ */
+const POSIX_SHELLS = new Set(['sh', 'bash', 'dash']);
+
+/**
+ * The workspace a by-name grant or a compound command may use for this
+ * agent (`agentShellWorkspace`), or undefined when its configured shell is
+ * not one `POSIX_SHELLS` names, which keeps every command to the scopes
+ * judged one at a time.
+ */
+export const agentShellGrantRoot = (
+  plugins: Record<string, unknown>,
+  env: StateEnvironment,
+  agentId: string,
+): string | undefined => {
+  const shell = plugins['@stratusagent/tool-shell'];
+  const configured = shell !== null && typeof shell === 'object' && !Array.isArray(shell)
+    ? resolvePluginAgentConfig(shell as JsonObject, agentId).shell
+    : undefined;
+  const binary = typeof configured === 'string' && configured.length > 0 ? configured : '/bin/sh';
+  return POSIX_SHELLS.has(path.basename(binary)) ? agentShellWorkspace(plugins, env, agentId) : undefined;
+};

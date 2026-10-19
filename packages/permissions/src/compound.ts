@@ -66,8 +66,12 @@ const SHELL_KEYWORDS: ReadonlySet<string> = new Set([
   'function', 'time', 'coproc', '!', '{', '}', '[[', ']]',
 ]);
 
-/** A redirection target the shell would expand, or that this reader would get wrong. */
-const UNREADABLE_TARGET = /[*?[\]{}~$`\\#]/;
+/**
+ * A redirection target the shell would expand, or that this reader would get
+ * wrong. `!` is there for zsh and tcsh, which read `>!` as an operator: the
+ * target is the next word, not `!`.
+ */
+const UNREADABLE_TARGET = /[*?[\]{}~$`\\#!]/;
 
 /**
  * Read a command line as a list of pipelines.
@@ -316,9 +320,9 @@ export const analyzeCompound = (command: string): CompoundCommand => {
  * it does. Network clients, archivers, test runners, linters, build tools
  * and `jq` (whose `env` reads the daemon's environment) are not on it;
  * they keep the narrower scope. Neither is `printf`, whose bash builtin
- * assigns a variable with `-v`. Adding one means reading its manual for
- * flags that run a program or read paths from a file, and denying them in
- * `NAME_GRANT_DENIED_BY_COMMAND`.
+ * assigns a variable with `-v`. Adding one means reading its manual and
+ * listing, in `NAME_GRANT_FLAGS`, only the flags that act on the paths
+ * given and nothing else.
  */
 export const GRANTABLE_BY_NAME: ReadonlySet<string> = new Set([
   'grep', 'egrep', 'fgrep', 'rg',
@@ -384,65 +388,175 @@ export const grantableByName = (base: string): boolean =>
   && !SUBCOMMAND_COMMANDS.has(base);
 
 /**
- * Flags a by-name grant still refuses: those that turn a command into
- * another program or a configuration change. Not `-c`, which the scope
- * engine refuses everywhere for `git -c` and which is `--count` or
- * `--bytes` to the commands a by-name grant is for; git never gets one.
+ * The flags a by-name grant covers, per command: nothing but these. A
+ * list of what to refuse could never be finished, since GNU tools take any
+ * unambiguous abbreviation of a long option (`sort --files0-f` is
+ * `--files0-from`) and every release can add one. So a flag that is not
+ * listed here, spelled out in full, leaves the call to a person.
+ *
+ * `short` are letters that may appear in a bundle (`-rn`). `value` are
+ * letters that take an argument, either the rest of the bundle (`-A3`) or
+ * the next word, which is then checked as a path like any other. `long` are
+ * exact long names, with or without `=value`. `numeric` allows `-5`.
+ *
+ * Left off on purpose: flags that run a program (`rg --pre`, `rg -z`,
+ * `sort --compress-program`), read the paths to act on from a file this
+ * check never opens (`--files0-from`, `file -f`, `md5sum -c`, `grep -d`),
+ * or follow symlinks met below the given paths (`grep -R`, `rg -L`, `cp -L`,
+ * `diff -r`, `tree -l`, `gzip -r`).
  */
-const NAME_GRANT_DENIED_FLAGS = ['--exec', '--exec-path', '--config', '--config-env', '--upload-pack', '--receive-pack', '--ext-diff', '--open-files-in-pager'];
+interface NameGrantFlags {
+  short?: string;
+  value?: string;
+  long?: readonly string[];
+  numeric?: boolean;
+}
 
-/**
- * Per command, the flags a by-name grant does not cover: a long name, or a
- * short letter anywhere in a bundle. They run a program (`rg --pre`, `sort
- * --compress-program`), read the paths to act on from a file this check
- * never opens (`--files0-from`, `file -f`, `md5sum -c`), or walk links
- * below the given paths by default (`diff -r`).
- */
-const NAME_GRANT_DENIED_BY_COMMAND: Record<string, string[]> = {
-  rg: ['--pre', '--pre-glob'],
-  sort: ['--compress-program', '--files0-from'],
-  wc: ['--files0-from'],
-  du: ['--files0-from'],
-  diff: ['--recursive', 'r'],
-  file: ['--files-from', 'f'],
-  md5sum: ['--check', 'c'],
-  shasum: ['--check', 'c'],
-  sha1sum: ['--check', 'c'],
-  sha256sum: ['--check', 'c'],
-  sha512sum: ['--check', 'c'],
+const GREP_FLAGS: NameGrantFlags = {
+  short: 'ivnlLcwxhHoqsrEFGPzZabUT',
+  value: 'efmABC',
+  long: [
+    '--ignore-case', '--no-ignore-case', '--invert-match', '--line-number', '--files-with-matches',
+    '--files-without-match', '--count', '--word-regexp', '--line-regexp', '--no-filename', '--with-filename',
+    '--only-matching', '--quiet', '--silent', '--no-messages', '--recursive', '--extended-regexp',
+    '--fixed-strings', '--basic-regexp', '--perl-regexp', '--null', '--null-data', '--text', '--binary-files',
+    '--include', '--exclude', '--exclude-dir', '--regexp', '--file', '--max-count', '--after-context',
+    '--before-context', '--context', '--color', '--colour', '--byte-offset', '--initial-tab',
+  ],
+};
+const SUM_FLAGS: NameGrantFlags = { short: 'btz', long: ['--binary', '--text', '--tag', '--zero'] };
+const GZIP_FLAGS: NameGrantFlags = {
+  short: 'dckfnNqvtl123456789',
+  value: 'S',
+  long: ['--decompress', '--stdout', '--keep', '--force', '--quiet', '--verbose', '--test', '--list', '--suffix', '--fast', '--best'],
 };
 
-const deniedFor = (base: string, args: readonly string[]): boolean => {
-  const denied = NAME_GRANT_DENIED_BY_COMMAND[base] ?? [];
-  return args.some((token) => {
+const NAME_GRANT_FLAGS: Record<string, NameGrantFlags> = {
+  grep: GREP_FLAGS,
+  egrep: GREP_FLAGS,
+  fgrep: GREP_FLAGS,
+  rg: {
+    short: 'ivnNlcwxHIoqsSFuU0',
+    value: 'egtTmABCjM',
+    long: [
+      '--ignore-case', '--smart-case', '--case-sensitive', '--invert-match', '--line-number', '--no-line-number',
+      '--files-with-matches', '--files-without-match', '--count', '--count-matches', '--word-regexp',
+      '--line-regexp', '--with-filename', '--no-filename', '--only-matching', '--quiet', '--fixed-strings',
+      '--hidden', '--no-ignore', '--glob', '--iglob', '--type', '--type-not', '--max-count', '--after-context',
+      '--before-context', '--context', '--files', '--json', '--color', '--heading', '--no-heading', '--sort',
+      '--max-depth', '--multiline', '--regexp', '--vimgrep', '--trim', '--column', '--null', '--max-columns',
+    ],
+  },
+  cat: { short: 'nbsvetAETu', long: ['--number', '--number-nonblank', '--squeeze-blank', '--show-all', '--show-ends', '--show-tabs', '--show-nonprinting'] },
+  head: { short: 'qv', value: 'nc', long: ['--lines', '--bytes', '--quiet', '--silent', '--verbose'], numeric: true },
+  tail: { short: 'qvr', value: 'nc', long: ['--lines', '--bytes', '--quiet', '--silent', '--verbose'], numeric: true },
+  wc: { short: 'lwcmL', long: ['--lines', '--words', '--bytes', '--chars', '--max-line-length'] },
+  sort: {
+    short: 'rnuhfbdgiMRVsczm',
+    value: 'tkoS',
+    long: [
+      '--reverse', '--numeric-sort', '--unique', '--human-numeric-sort', '--ignore-case', '--key',
+      '--field-separator', '--output', '--stable', '--version-sort', '--general-numeric-sort', '--month-sort',
+      '--random-sort', '--dictionary-order', '--ignore-leading-blanks', '--check', '--merge', '--zero-terminated',
+    ],
+  },
+  uniq: { short: 'cdDiuz', value: 'fsw', long: ['--count', '--repeated', '--ignore-case', '--unique', '--skip-fields', '--skip-chars'] },
+  cut: { short: 'sz', value: 'bcfd', long: ['--bytes', '--characters', '--fields', '--delimiter', '--only-delimited', '--complement', '--output-delimiter'] },
+  tr: { short: 'cCdsu' },
+  paste: { short: 'sz', value: 'd', long: ['--serial', '--delimiters'] },
+  join: { short: 'i', value: '12jtoeav', long: ['--ignore-case'] },
+  comm: { short: '123i', long: ['--check-order', '--nocheck-order', '--output-delimiter'] },
+  fold: { short: 'bs', value: 'w', long: ['--bytes', '--spaces', '--width'] },
+  nl: { value: 'bnsvwi' },
+  column: { short: 'tx', value: 'sco' },
+  rev: {},
+  tac: { short: 'br', value: 's' },
+  diff: {
+    short: 'uqiwbBaNsyt',
+    value: 'UCL',
+    long: [
+      '--unified', '--brief', '--ignore-case', '--ignore-all-space', '--ignore-space-change', '--ignore-blank-lines',
+      '--text', '--new-file', '--report-identical-files', '--side-by-side', '--expand-tabs', '--color', '--label',
+      '--context',
+    ],
+  },
+  cmp: { short: 'lsb', value: 'in', long: ['--verbose', '--silent', '--quiet', '--print-bytes'] },
+  ls: { short: '1aAlhtrSRdFpiGnosucfgkT', long: ['--all', '--almost-all', '--human-readable', '--recursive', '--directory', '--color', '--classify'] },
+  stat: { short: 'xsrnql', value: 'fct' },
+  file: { short: 'bhiI', long: ['--brief', '--mime', '--mime-type', '--mime-encoding'] },
+  du: { short: 'shackmx', value: 'd', long: ['--summarize', '--human-readable', '--all', '--max-depth', '--total', '--apparent-size'] },
+  tree: { short: 'adfFgpusDhCnJ', value: 'LIPo' },
+  realpath: { short: 'qsezmP' },
+  readlink: { short: 'fenqsvzm' },
+  basename: { short: 'az', value: 's' },
+  dirname: { short: 'z' },
+  mkdir: { short: 'pv', value: 'm', long: ['--parents', '--verbose'] },
+  touch: { short: 'acmh', value: 'dtr' },
+  cp: { short: 'rRpafivnPX', long: ['--recursive', '--force', '--interactive', '--no-clobber', '--verbose', '--archive'] },
+  mv: { short: 'fivn', long: ['--force', '--interactive', '--no-clobber', '--verbose'] },
+  rm: { short: 'rRfivd', long: ['--recursive', '--force', '--interactive', '--verbose', '--dir'] },
+  rmdir: { short: 'pv', long: ['--parents', '--verbose'] },
+  ln: { short: 'sfnvhi', long: ['--symbolic', '--force', '--no-dereference', '--verbose'] },
+  tee: { short: 'ai', long: ['--append', '--ignore-interrupts'] },
+  md5: { short: 'qrn', value: 's' },
+  md5sum: SUM_FLAGS,
+  shasum: { ...SUM_FLAGS, short: 'btp0', value: 'a', long: ['--binary', '--text', '--portable', '--algorithm', '--tag'] },
+  sha1sum: SUM_FLAGS,
+  sha256sum: SUM_FLAGS,
+  sha512sum: SUM_FLAGS,
+  base64: { short: 'dD', value: 'iowb', long: ['--decode', '--wrap'] },
+  od: { short: 'cxbdov', value: 'AtNjw' },
+  xxd: { short: 'rpiuEe', value: 'lcgos' },
+  hexdump: { short: 'Cbcdovx', value: 'nsef' },
+  strings: { short: 'a', value: 'nto' },
+  gzip: GZIP_FLAGS,
+  gunzip: GZIP_FLAGS,
+  zcat: GZIP_FLAGS,
+};
+
+/**
+ * Whether every flag in the arguments is one `NAME_GRANT_FLAGS` lists for
+ * this command. Every word that starts with `-` is read as a flag until
+ * `--`, even a word that follows a flag taking a value: reading `grep -e
+ * -R` as asking costs a prompt, where reading a flag as a value would cost
+ * a read nobody approved.
+ */
+const flagsCovered = (base: string, args: readonly string[]): boolean => {
+  // `test` reads its operators (`-f`, `-nt`) as tests, never as options.
+  if (base === 'test') {
+    return true;
+  }
+  const flags = NAME_GRANT_FLAGS[base];
+  if (!flags) {
+    return false;
+  }
+  for (const token of args) {
     if (token === '--') {
-      return false;
+      return true;
+    }
+    if (token === '-' || !token.startsWith('-')) {
+      continue;
     }
     if (token.startsWith('--')) {
-      const spelled = token.split('=')[0] ?? token;
-      return NAME_GRANT_DENIED_FLAGS.includes(spelled) || denied.includes(spelled);
+      if (!(flags.long ?? []).includes(token.split('=')[0]!)) {
+        return false;
+      }
+      continue;
     }
-    return token.startsWith('-') && [...token.slice(1)].some((letter) => denied.includes(letter));
-  });
+    if (flags.numeric && /^-\d+$/.test(token)) {
+      continue;
+    }
+    for (const letter of token.slice(1)) {
+      if ((flags.value ?? '').includes(letter)) {
+        break;
+      }
+      if (!(flags.short ?? '').includes(letter)) {
+        return false;
+      }
+    }
+  }
+  return true;
 };
-
-/**
- * Short flags that make a command follow symlinks it meets *below* the
- * paths it was given, which a check of those paths cannot see: `grep -R`
- * walks a link to `/` like any directory, where `grep -r` does not. A
- * by-name grant does not cover them; the call asks.
- */
-const FOLLOWS_LINKS: Record<string, string[]> = {
-  grep: ['R'],
-  egrep: ['R'],
-  fgrep: ['R'],
-  rg: ['L'],
-  cp: ['L', 'H'],
-  du: ['L'],
-  ls: ['L'],
-  tree: ['l'],
-};
-const FOLLOWS_LINKS_LONG = ['--dereference-recursive', '--dereference', '--follow', '--dereference-command-line'];
 
 /** The readers that never ask inside the workspace, with or without autonomy. */
 const WORKSPACE_READERS = new Set(['cat', 'head', 'tail', 'ls']);
@@ -611,19 +725,10 @@ const coveredByName = async (
     return false;
   }
   const args = stage.tokens.slice(1);
-  if (deniedFor(base, args)) {
+  if (!flagsCovered(base, args)) {
     return false;
   }
   if (stage.tokens.some((token) => /[$`]/.test(token))) {
-    return false;
-  }
-  const follows = FOLLOWS_LINKS[base] ?? [];
-  if (args.some((token) => {
-    if (token.startsWith('--')) {
-      return FOLLOWS_LINKS_LONG.includes(token.split('=')[0] ?? token);
-    }
-    return token.startsWith('-') && [...token.slice(1)].some((letter) => follows.includes(letter));
-  })) {
     return false;
   }
   for (const [index, token] of args.entries()) {

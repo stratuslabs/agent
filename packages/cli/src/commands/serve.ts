@@ -1,6 +1,6 @@
 import type { ApprovalPolicy } from '@stratusagent/core';
 import { createFileLedger } from '@stratusagent/plugins';
-import { agentShellWorkspace, autonomyDirectory } from '../autonomy.ts';
+import { agentShellGrantRoot, autonomyDirectory } from '../autonomy.ts';
 import type {
   ApprovalTransport,
   GatewayChannelAdapter,
@@ -579,7 +579,7 @@ const serveHeldHome = async (
     },
     // Commands granted by name, kept inside the agent's workspace.
     names: grantStore,
-    grantRootFor: (agentId: string) => agentShellWorkspace(pluginsConfig, env, agentId),
+    grantRootFor: (agentId: string) => agentShellGrantRoot(pluginsConfig, env, agentId),
     // Workspace autonomy: the agent's own workspace, for the agents config
     // turns it on for. Resolved per call so the answer always matches the
     // config this daemon started with.

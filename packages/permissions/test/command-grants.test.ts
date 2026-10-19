@@ -409,3 +409,50 @@ test('a glob a by-name grant covers never expands into a flag, and nothing grant
   assert.equal(await allowed('printf hello > out.txt'), false);
   assert.equal(grantableByName('printf'), false);
 });
+
+test('a by-name grant covers only the flags it lists, spelled out in full', async () => {
+  const { workspace, repo } = await layout();
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => workspace, names: namesStore(['grep', 'rg', 'sort', 'wc', 'cp', 'rm', 'mkdir', 'diff', 'test']) },
+  });
+  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  for (const command of [
+    // Codex P1 4309279991: GNU takes an unambiguous abbreviation of a long option.
+    'sort --files0-f=src/list src/main.ts',
+    'sort --compress-prog=./x src/main.ts',
+    'rg --pr=./x foo src',
+    'grep --dereference-rec token .',
+    'diff --recur src src',
+    // A flag nobody has read the manual for asks, rather than runs.
+    'grep --some-future-flag token src',
+    'rg -z token src',
+    'cp -L src copy',
+    // A word after a flag that takes a value is still read as a flag: a prompt, never a read nobody approved.
+    'grep -e -R src/main.ts',
+  ]) {
+    assert.equal(await allowed(command), false, `should ask: ${command}`);
+  }
+  for (const command of [
+    'grep -rn TODO src',
+    'grep -A3 -i --include=*.ts token src',
+    'grep -e-R src/main.ts',
+    'rg -n --hidden -g *.ts foo src',
+    'sort -k2 -t, -o src/sorted.txt src/main.ts',
+    'wc -l src/main.ts',
+    'cp -r src copy',
+    'rm -rf copy',
+    'mkdir -p a/b',
+    'test -f src/main.ts',
+    'grep -- -R src/main.ts',
+  ]) {
+    assert.equal(await allowed(command), true, `should run: ${command}`);
+  }
+});
+
+test('a redirection operator this reader does not know, like zsh and tcsh >!, is not read as a target', () => {
+  // Codex P1 4309280000: `>! /tmp/out` writes /tmp/out in tcsh and zsh.
+  for (const command of ['echo ok >! /tmp/out', 'echo ok >>! /tmp/out', 'echo ok >!/tmp/out']) {
+    assert.ok(analyzeCompound(command).disqualifiedBy, command);
+  }
+});

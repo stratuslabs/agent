@@ -176,9 +176,13 @@ name and the `git push` scope. The prompt says which before you answer.
 name**: searching and reading (`grep`, `rg`, `cat`, `wc`, `sort`, `diff`,
 `ls`, `stat`, `du`), moving files (`mkdir`, `touch`, `cp`, `mv`, `rm`,
 `ln`, `tee`), and a few converters (`base64`, `gzip`, `xxd`, the checksum
-tools). Each still refuses the flags that make it run a program or read
-the paths to act on from a file (`rg --pre`, `sort --compress-program`,
-`--files0-from`, `md5sum -c`, `diff -r`). `printf` is not on the list: bash's
+tools). A by-name grant covers only the flags listed for each command,
+spelled out in full: the common ones that act on the given paths (`grep
+-rn`, `rg --hidden -g`, `sort -k2 -o out`, `cp -r`, `rm -rf`). Any other
+flag asks, including an abbreviation GNU tools would accept (`sort
+--files0-f`) and the ones that run a program or read the paths to act on
+from a file (`rg --pre`, `sort --compress-program`, `--files0-from`,
+`md5sum -c`, `diff -r`). `printf` is not on the list: bash's
 builtin assigns a variable with `-v`. Everything else keeps the
 narrow scope: network clients (`curl`, `wget`), archivers (`tar`, `zip`),
 `jq`, test runners, linters, compilers, and build tools, which run code no
@@ -190,6 +194,12 @@ stores the narrow scope described above. A line using shell keywords
 Commands with subcommands (`git`, `gh`, `pnpm`, `npm`, `cargo`, `make`,
 `agentboard`) keep the command-plus-subcommand scope, so `gh pr` is never
 `gh repo delete`.
+
+By-name grants and compound lines apply only when the shell tool runs a
+POSIX shell: `/bin/sh` (the default), `bash`, or `dash`. With `shell` set
+to `zsh`, `tcsh`, `csh`, `fish`, or `ksh`, each of which reads some lines
+differently (`>!` is a redirection to zsh and tcsh), every command is
+judged on its own against the narrow scopes, as before.
 
 This is argument-level policy, not a sandbox. A by-name grant judges the
 paths a command is given and the directory it runs in, not files it opens
