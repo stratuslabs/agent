@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node
 import os from 'node:os';
 import path from 'node:path';
 
-import type { AgentWorkspaces, JsonObject, Session } from '@stratusagent/core';
+import type { AgentWorkspaces, JsonObject, ProtectedPaths, Session } from '@stratusagent/core';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 
 import {
@@ -44,12 +44,30 @@ const fixtureHome = async () => {
   await writeFile(path.join(otherWorkspace, 'notes.md'), 'bea-private');
   await writeFile(path.join(userHome, '.ssh', 'id_ed25519'), 'PRIVATE KEY');
   await writeFile(path.join(userHome, 'outside.txt'), 'outside');
+  // The visible agents folder, the way the daemon surfaces it: the hidden
+  // workspace and soul paths are links into ~/Stratus/<id>/.
+  const visible = path.join(userHome, 'Stratus');
+  const carlVisible = path.join(visible, 'carl', 'workspace');
+  await mkdir(carlVisible, { recursive: true });
+  await writeFile(path.join(carlVisible, 'notes.md'), 'carl-private');
+  await mkdir(path.join(stratusHome, 'agents', 'carl'), { recursive: true });
+  await symlink(carlVisible, path.join(stratusHome, 'agents', 'carl', 'workspace'));
+  await writeFile(path.join(visible, 'carl', 'soul.md'), 'carl-soul');
+  await symlink(path.join(visible, 'carl', 'soul.md'), path.join(stratusHome, 'agents', 'carl.md'));
+  // A control socket of the kind a container runtime leaves on a host.
+  const socket = path.join(userHome, 'run', 'ctl.sock');
+  await mkdir(path.dirname(socket), { recursive: true });
+  const carlWorkspace = path.join(stratusHome, 'agents', 'carl', 'workspace');
+  const protectedPaths: ProtectedPaths = {
+    all: async () => [stratusHome, path.join(stratusHome, 'credentials.json'), path.join(stratusHome, 'agents', 'carl.md')],
+    exempt: async () => [workspace, otherWorkspace, carlWorkspace],
+  };
   const workspaces: AgentWorkspaces = {
     forAgent: (agentId) => path.join(stratusHome, 'agents', agentId, 'workspace'),
     prepare: (agentId) => path.join(stratusHome, 'agents', agentId, 'workspace'),
-    all: async () => [workspace, otherWorkspace],
+    all: async () => [workspace, otherWorkspace, carlWorkspace],
   };
-  return { userHome, stratusHome, workspace, otherWorkspace, workspaces };
+  return { userHome, stratusHome, workspace, otherWorkspace, workspaces, protectedPaths, visible, socket };
 };
 
 const run = async (
@@ -60,6 +78,7 @@ const run = async (
 ) => {
   const tool = createShellTool(config, {
     workspaces: fixture.workspaces,
+    protectedPaths: fixture.protectedPaths,
     home: fixture.userHome,
     processEnv: extra.processEnv ?? { PATH: process.env.PATH ?? '/usr/bin:/bin', SECRET_TOKEN: 'env-secret' },
     ...(extra.planSandbox ? { planSandbox: extra.planSandbox } : {}),
@@ -86,6 +105,9 @@ const ESCAPES: Array<[string, (f: Awaited<ReturnType<typeof fixtureHome>>) => st
   ["another agent's workspace", (f) => `cat ${path.join(f.otherWorkspace, 'notes.md')}`],
   ['an ssh key', (f) => `cat ${path.join(f.userHome, '.ssh', 'id_ed25519')}`],
   ['the credential store through a workspace symlink', () => 'ln -sf ../../../credentials.json link && cat link'],
+  // Codex P1 4309344603: the visible spellings of what the home links to.
+  ["another agent's workspace by its visible path", (f) => `cat ${path.join(f.visible, 'carl', 'workspace', 'notes.md')}`],
+  ["another agent's soul by its visible path", (f) => `cat ${path.join(f.visible, 'carl', 'soul.md')}`],
 ];
 
 for (const [what, command] of ESCAPES) {
@@ -93,7 +115,7 @@ for (const [what, command] of ESCAPES) {
     const fixture = await fixtureHome();
     const confined = await run({}, fixture, command(fixture));
     assert.equal(confined.ok, false, `sandboxed ${what} read should fail`);
-    assert.doesNotMatch(output(confined).stdout, /sk-secret|anthropic|bea-private|PRIVATE KEY/);
+    assert.doesNotMatch(output(confined).stdout, /sk-secret|anthropic|bea-private|carl-private|carl-soul|PRIVATE KEY/);
     const unconfined = await run({ sandbox: 'off' }, fixture, command(fixture));
     assert.equal(unconfined.ok, true, `unconfined ${what} read should work, or the case proves nothing: ${JSON.stringify(unconfined.output)}`);
   });
@@ -209,6 +231,9 @@ test('the macOS profile gives the workspace back after hiding the home, and refu
   assert.match(profile, /\(deny mach-lookup \(global-name "com\.apple\.SecurityServer"\)/);
   assert.match(profile, /\(allow file-read-data [^\n]*\(literal "\/nonexistent\/h\/\.stratus\/agents"\)/);
   assert.throws(() => darwinProfile({ workspace: '/w"x', denied: [], writable: [] }), /quote, backslash, or newline/);
+  // A socket under a denied path refuses connect(2), one form per path.
+  const two = darwinProfile({ workspace: '/nonexistent/w', denied: ['/nonexistent/a', '/nonexistent/b'], writable: [] });
+  assert.match(two, /\(deny network-outbound \(remote unix-socket \(subpath "\/nonexistent\/a"\)\) \(remote unix-socket \(subpath "\/nonexistent\/b"\)\)\)/);
 });
 
 test('bwrap binds the root read-only, covers denied paths, and binds the workspace back last', async () => {
@@ -231,4 +256,41 @@ test('a workspace that is a symlink is bound from its real path under both names
   const joined = bwrapArgs({ workspace: linked, denied: [], writable: [] }, '/bin/sh', []).join(' ');
   assert.ok(joined.includes(`--bind ${real} ${linked}`));
   assert.ok(joined.includes(`--bind ${real} ${real}`));
+});
+
+test('a sandboxed command cannot connect to a denied control socket, and an unconfined one can', { skip: !sandboxedHere && NEEDS }, async () => {
+  // Codex P1 4309344608: a read-only view of a socket still accepts a
+  // connection, and a container runtime's socket is the whole host.
+  const fixture = await fixtureHome();
+  const net = await import('node:net');
+  const server = net.createServer((client) => client.end());
+  await new Promise<void>((resolve) => server.listen(fixture.socket, resolve));
+  try {
+    const connect = `${process.execPath} -e "require('net').connect('${fixture.socket}').on('connect',()=>{console.log('CONNECTED');process.exit(0)}).on('error',(e)=>{console.log(e.code);process.exit(3)})"`;
+    const confined = await run({ deniedPaths: [fixture.socket] }, fixture, connect);
+    assert.doesNotMatch(output(confined).stdout, /CONNECTED/, JSON.stringify(confined.output));
+    const unconfined = await run({ sandbox: 'off' }, fixture, connect);
+    assert.match(output(unconfined).stdout, /CONNECTED/, JSON.stringify(unconfined.output));
+  } finally {
+    server.close();
+  }
+});
+
+test('container runtime sockets are denied by default', async () => {
+  const fixture = await fixtureHome();
+  let seen: Parameters<typeof planSandbox>[0] | undefined;
+  await run({}, fixture, 'true', { planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
+  for (const socket of ['/var/run/docker.sock', '/run/containerd/containerd.sock', '/run/podman/podman.sock']) {
+    assert.ok(seen!.denied.includes(socket), socket);
+  }
+});
+
+test('the policy denies what the host protects and every other agent\'s workspace, by their real paths too', async () => {
+  const fixture = await fixtureHome();
+  let seen: Parameters<typeof planSandbox>[0] | undefined;
+  await run({}, fixture, 'true', { planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
+  assert.ok(seen!.denied.includes(path.join(fixture.stratusHome, 'agents', 'carl.md')));
+  assert.ok(seen!.denied.includes(path.join(fixture.stratusHome, 'agents', 'carl', 'workspace')));
+  assert.ok(seen!.denied.includes(fixture.otherWorkspace));
+  assert.ok(!seen!.denied.includes(fixture.workspace), 'never its own workspace');
 });

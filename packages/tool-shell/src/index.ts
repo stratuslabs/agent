@@ -9,6 +9,7 @@ import {
   type JsonObject,
   type JsonValue,
   type Plugin,
+  type ProtectedPaths,
   type Session,
   type TrustLevel,
 } from '@stratusagent/core';
@@ -30,15 +31,18 @@ import {
 
 import {
   DEFAULT_DENIED_HOME_PATHS,
+  DEFAULT_DENIED_SOCKETS,
   DEFAULT_WRITABLE_HOME_PATHS,
   parseSandboxMode,
   planSandbox,
+  spellings,
   stratusHomesFor,
   type SandboxPolicy,
 } from './sandbox.ts';
 
 export {
   DEFAULT_DENIED_HOME_PATHS,
+  DEFAULT_DENIED_SOCKETS,
   DEFAULT_WRITABLE_HOME_PATHS,
   bwrapArgs,
   darwinProfile,
@@ -262,11 +266,11 @@ const settingsFor = (
  * operator turned it off. `required` refuses when no sandbox can start;
  * `auto` runs unconfined then, after saying so once per process.
  */
-const sandboxed = (
+const sandboxed = async (
   settings: ReturnType<typeof settingsFor>,
   shellArgs: string[],
   options: ShellToolOptions,
-): { command: string; args: string[] } => {
+): Promise<{ command: string; args: string[] }> => {
   const unconfined = { command: settings.shell, args: shellArgs };
   if (settings.sandbox === 'off') {
     return unconfined;
@@ -276,14 +280,24 @@ const sandboxed = (
   const workspace = settings.workspace ?? settings.cwd ?? process.cwd();
   const userHome = options.home ?? os.homedir();
   const processEnv = options.processEnv ?? process.env;
+  // What the host protects (its home, the credential files, every soul) and
+  // every other agent's workspace, each also by its real path: in the
+  // surfaced layout those are links into a visible folder (`~/Stratus/<id>/`)
+  // that hiding the home by name leaves readable.
+  const own = new Set(spellings(workspace));
+  const others = (await options.workspaces?.all() ?? []).filter((dir) => !spellings(dir).some((spelling) => own.has(spelling)));
+  const hostProtected = await options.protectedPaths?.all() ?? [];
   const policy: SandboxPolicy = {
     workspace,
     ...(settings.cwd && settings.cwd !== workspace ? { cwd: settings.cwd } : {}),
-    denied: [
+    denied: [...new Set([
       ...stratusHomesFor(workspace, processEnv, userHome),
+      ...hostProtected,
+      ...others,
       ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
+      ...DEFAULT_DENIED_SOCKETS,
       ...settings.deniedPaths,
-    ],
+    ].flatMap(spellings))],
     writable: [
       ...DEFAULT_WRITABLE_HOME_PATHS.map((entry) => path.join(userHome, entry)),
       ...settings.writablePaths,
@@ -330,6 +344,12 @@ export interface ShellToolOptions {
    * supplies one or leaves the cwd to `workspaceRoot`.
    */
   workspaces?: AgentWorkspaces;
+  /**
+   * What the host protects, `PluginContext.protectedPaths`: the sandbox
+   * hides each of these by its real path as well as its name. The plugin
+   * passes its `setup` context's seam through.
+   */
+  protectedPaths?: ProtectedPaths;
   /** What `~` in `cwd` expands to. Defaults to the daemon user's home. */
   home?: string;
   /**
@@ -453,7 +473,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
         }
       }
       const shellArgs = [...startupOff(settings.shell), '-c', command];
-      const run = sandboxed(settings, shellArgs, options);
+      const run = await sandboxed(settings, shellArgs, options);
       return {
         command: run.command,
         args: run.args,
@@ -542,8 +562,10 @@ export const createShellPlugin = (config: JsonObject = {}, options: ShellToolOpt
       ? workspaceResolver(context.workspaces, undefined)
       : undefined;
     const warn = options.warn ?? context.log;
+    const protectedPaths = options.protectedPaths ?? context.protectedPaths;
     context.tools.register(createShellTool(config, {
       ...options,
+      ...(protectedPaths !== undefined ? { protectedPaths } : {}),
       ...(warn !== undefined ? { warn } : {}),
       ...(workspaces !== undefined ? { workspaces } : {}),
       ...(ledgerFor !== undefined ? { ledger: createFileLedger(ledgerFor) } : {}),
