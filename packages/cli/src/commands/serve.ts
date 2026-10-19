@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import type { ApprovalPolicy } from '@stratusagent/core';
 import { createFileLedger } from '@stratusagent/plugins';
 import { autonomyDirectory } from '../autonomy.ts';
@@ -478,6 +480,9 @@ const serveHeldHome = async (
           const workspaces = createAgentWorkspaces(env);
           return { workspaces, ledger: createFileLedger((id) => workspaces.forAgent(id), (id) => workspaces.prepare(id)) };
         })(),
+        // Messages addressed to an agent while this daemon restarts, kept
+        // for the next one (see docs/guides/always-on.md).
+        pendingIntakePath: path.join(stratusHomePath(env), 'slack-pending-intake.json'),
         log,
         warn,
       }));

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, readFile, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -581,7 +581,54 @@ export interface SlackAdapterOptions {
    * answer carries no share ts. Defaults to `Date.now`.
    */
   now?: () => number;
+  /**
+   * Where to keep the messages addressed to an agent while the daemon was
+   * restarting or stopping, so the next start answers them. The gateway
+   * keeps channels connected through its drain and refuses new turns then
+   * (`GatewayStoppingError`); a message refused that way is told the agent
+   * is restarting and is written here — conversation, ts, thread, sender and
+   * channel type, never its text — then read back from Slack and handled
+   * as if it had just arrived once the adapter starts again. Without it, the
+   * refusal is said and nothing is kept.
+   */
+  pendingIntakePath?: string;
 }
+
+/** What a person who wrote during a restart is told, when it was kept. */
+export const RESTARTING_REPLY_TEXT = "I'm restarting right now. I'll answer this as soon as I'm back.";
+/** The same, for a daemon that is stopping rather than restarting. */
+export const STOPPING_REPLY_TEXT = "I'm shutting down right now. I'll answer this when I'm started again.";
+/**
+ * How old a kept message may be and still be answered at start: a daemon
+ * stopped for a week does not wake up to answer last week's questions.
+ */
+const PENDING_INTAKE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** The most messages kept at once; past it, the oldest go first. */
+const PENDING_INTAKE_MAX = 200;
+
+/** A message kept across a restart (see `pendingIntakePath`). No text. */
+interface PendingIntake {
+  agentId: string;
+  team: string;
+  channel: string;
+  ts: string;
+  threadTs?: string;
+  user: string;
+  channelType?: string;
+  /** When it was kept, in epoch milliseconds. */
+  keptAt: number;
+}
+
+const isPendingIntake = (value: unknown): value is PendingIntake => {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const entry = value as Record<string, unknown>;
+  const optionalString = (field: unknown): boolean => field === undefined || typeof field === 'string';
+  return typeof entry.agentId === 'string' && typeof entry.team === 'string' && typeof entry.channel === 'string'
+    && typeof entry.ts === 'string' && typeof entry.user === 'string' && typeof entry.keptAt === 'number'
+    && optionalString(entry.threadTs) && optionalString(entry.channelType);
+};
 
 // Lazy (and CJS-interoperable) so tests with injected fakes never load the
 // real SDK stack.
@@ -3210,6 +3257,147 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     });
     inflight.add(settled);
     void settled.finally(() => inflight.delete(settled));
+  };
+
+  /**
+   * The kept messages (see `pendingIntakePath`), read and written one change
+   * at a time so two refusals landing together cannot drop each other.
+   */
+  const pendingIntakePath = options.pendingIntakePath;
+  let pendingChain: Promise<unknown> = Promise.resolve();
+  const readPending = async (file: string): Promise<PendingIntake[]> => {
+    let raw: string;
+    try {
+      raw = await readFile(file, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(isPendingIntake);
+      }
+    } catch {
+      // Named below, and replaced by the next write.
+    }
+    warn(`slack: ${file} is not a list of kept messages; ignoring it`);
+    return [];
+  };
+  const changePending = <T>(change: (entries: PendingIntake[]) => { entries: PendingIntake[]; result: T }): Promise<T> => {
+    const file = pendingIntakePath;
+    if (file === undefined) {
+      return Promise.reject(new Error('no pendingIntakePath'));
+    }
+    const run = pendingChain.then(async () => {
+      const before = await readPending(file);
+      const { entries, result } = change(before);
+      if (entries.length === 0) {
+        await rm(file, { force: true });
+      } else {
+        // Whole or not at all: a crash mid-write must not leave half a list
+        // that the next start reads as no list.
+        const temporary = `${file}.${process.pid}.tmp`;
+        await writeFile(temporary, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
+        await rename(temporary, file);
+      }
+      return result;
+    });
+    pendingChain = run.catch(() => undefined);
+    return run;
+  };
+  const pendingKey = (entry: Pick<PendingIntake, 'agentId' | 'channel' | 'ts'>): string => `${entry.agentId}:${entry.channel}:${entry.ts}`;
+  /** Keeps a refused message for the next start; resolves with whether it was kept. */
+  const keepForNextStart = async (entry: PendingIntake): Promise<boolean> => {
+    if (pendingIntakePath === undefined) {
+      return false;
+    }
+    try {
+      await changePending((entries) => {
+        const key = pendingKey(entry);
+        const others = entries.filter((existing) => pendingKey(existing) !== key);
+        return { entries: [...others, entry].slice(-PENDING_INTAKE_MAX), result: undefined };
+      });
+      return true;
+    } catch (error) {
+      warn(`slack: could not keep ${entry.ts} in ${entry.channel} for after the restart: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  };
+  /** The kept message itself, as Slack has it now; `undefined` when it is gone. */
+  const fetchKept = async (connection: AgentConnection, entry: PendingIntake): Promise<SlackHistoryMessage | undefined> => {
+    const { history, replies } = connection.web.conversations;
+    const inThread = entry.threadTs !== undefined && entry.threadTs !== entry.ts;
+    const range = { channel: entry.channel, oldest: entry.ts, latest: entry.ts, inclusive: true };
+    const page = inThread
+      ? await replies?.call(connection.web.conversations, { ...range, ts: entry.threadTs as string, limit: 2 })
+      : await history?.call(connection.web.conversations, { ...range, limit: 1 });
+    if (page === undefined) {
+      throw new Error('this Slack client cannot read conversations');
+    }
+    return page.messages?.find((message) => message.ts === entry.ts);
+  };
+  /**
+   * What the last daemon kept, handled as if it had just arrived: through
+   * admission, the thread rules, and a dispatch keyed as the original
+   * delivery would have been, so a message the gateway already ran is a
+   * repeat there and not a second turn. Each is taken off the list before it
+   * is handed over, so a restart during the replay keeps it again rather
+   * than this removing it afterwards. A message deleted since is dropped; one
+   * that could not be read stays for the next start.
+   */
+  const replayKept = async (onEvent: Map<string, (args: SlackSocketEventArgs) => Promise<void>>): Promise<void> => {
+    if (pendingIntakePath === undefined) {
+      return;
+    }
+    const kept = await readPending(pendingIntakePath);
+    if (kept.length === 0) {
+      return;
+    }
+    const cutoff = now() - PENDING_INTAKE_MAX_AGE_MS;
+    const expired = kept.filter((entry) => entry.keptAt < cutoff);
+    const ready: Array<{ entry: PendingIntake; message?: SlackHistoryMessage; connection: AgentConnection }> = [];
+    for (const entry of kept.filter((candidate) => candidate.keptAt >= cutoff)) {
+      const connection = connections.find((candidate) => candidate.config.agentId === entry.agentId);
+      if (connection === undefined) {
+        continue;
+      }
+      try {
+        const message = await fetchKept(connection, entry);
+        ready.push({ entry, connection, ...(message !== undefined ? { message } : {}) });
+      } catch (error) {
+        warn(`slack: could not read ${entry.ts} in ${entry.channel} kept from the last restart; keeping it for the next start: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const entry of expired) {
+      log(`slack: ${entry.agentId} dropped ${entry.ts} in ${entry.channel} kept from a restart: older than a day`);
+    }
+    const handled = new Set([...expired, ...ready.map(({ entry }) => entry)].map(pendingKey));
+    if (handled.size === 0) {
+      return;
+    }
+    await changePending((entries) => ({ entries: entries.filter((entry) => !handled.has(pendingKey(entry))), result: undefined }));
+    ready.sort((a, b) => compareSlackTs(a.entry.ts, b.entry.ts));
+    for (const { entry, message, connection } of ready) {
+      if (message === undefined) {
+        log(`slack: ${entry.agentId} dropped ${entry.ts} in ${entry.channel} kept from a restart: no longer in Slack`);
+        continue;
+      }
+      log(`slack: ${entry.agentId} replaying ${entry.ts} in ${entry.channel}, sent during the last restart`);
+      const event = {
+        ...(message as unknown as SlackInboundEvent),
+        type: 'message',
+        channel: entry.channel,
+        ts: entry.ts,
+        ...(entry.threadTs !== undefined ? { thread_ts: entry.threadTs } : {}),
+        ...(entry.channelType !== undefined ? { channel_type: entry.channelType } : {}),
+      };
+      // Started in ts order without waiting on each: each claims its place
+      // on its session's chain synchronously, as a live delivery does.
+      void onEvent.get(connection.config.agentId)?.({ ack: async () => {}, body: { team_id: entry.team }, event });
+    }
   };
 
   const alreadySeen = (key: string): boolean => {
@@ -6903,10 +7091,39 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not a failure of the agent. Matched by name, as this package does
       // not import the gateway. A turn nobody asked for stays silent.
       const pausedReply = failure instanceof Error && failure.name === 'IntakePausedError';
+      // A daemon on its way down that still heard this (the gateway keeps
+      // channels connected through its drain): the message is kept for the
+      // next start, which handles it as if it had just arrived. Said only
+      // to a message that asked: a judged reply in the agent's thread (a
+      // turn nobody asked for) is kept so the next daemon can still judge
+      // it, but nobody asked, so a notice under it would be noise. An
+      // overheard message never gets here; it was never going to be a turn.
+      // Matched by name, like the pause.
+      const stoppingRefusal = failure instanceof Error && failure.name === 'GatewayStoppingError' && renderer.stoppedBy === undefined;
+      let deferredText: string | undefined;
+      if (stoppingRefusal) {
+        const restarting = (failure as Error & { restarting?: unknown }).restarting !== false;
+        const kept = await keepForNextStart({
+          agentId: connection.config.agentId,
+          team,
+          channel: event.channel,
+          ts: event.ts,
+          ...(event.thread_ts !== undefined ? { threadTs: event.thread_ts } : {}),
+          user: userId,
+          ...(event.channel_type !== undefined ? { channelType: event.channel_type } : {}),
+          keptAt: now(),
+        });
+        if (kept) {
+          log(`slack: ${connection.config.agentId} kept ${event.ts} in ${event.channel} to answer after the ${restarting ? 'restart' : 'stop'}`);
+          deferredText = restarting ? RESTARTING_REPLY_TEXT : STOPPING_REPLY_TEXT;
+        } else {
+          deferredText = (failure as Error).message;
+        }
+      }
       const { spoke, spokeAt } = renderer.stoppedBy !== undefined
         ? await renderer.stopped(renderer.stoppedBy)
-        : pausedReply
-        ? await renderer.finalize(renderer.lazy ? '' : (failure as Error).message)
+        : pausedReply || stoppingRefusal
+        ? await renderer.finalize(renderer.lazy ? '' : deferredText ?? (failure as Error).message)
         : await renderer.fail(failure instanceof Error ? failure.message : String(failure));
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking has still spoken, by the same
@@ -7083,6 +7300,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
       settleHomeOwners();
 
+      const listeners = new Map<string, (args: SlackSocketEventArgs) => Promise<void>>();
       for (const connection of authenticated) {
         const { config, socket } = connection;
         try {
@@ -7098,6 +7316,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           };
           socket.on('app_mention', onEvent);
           socket.on('message', onEvent);
+          listeners.set(config.agentId, onEvent);
           socket.on('interactive', (args: SlackSocketEventArgs): Promise<void> => {
             const handled = handleInteractive(connection, args).catch((error) => {
               warn(`slack interaction handling failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -7114,6 +7333,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
+      // Once every app is connected, so a kept message is handled with the
+      // whole roster's identities known, as a live one would be. Only for the
+      // apps that did connect: the rest stay kept for a start where they do.
+      track(replayKept(new Map([...listeners].filter(([agentId]) => connections.some((connection) => connection.config.agentId === agentId)))));
     },
 
     async stop() {

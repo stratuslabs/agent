@@ -611,6 +611,23 @@ export class IntakePausedError extends Error {
 }
 
 /**
+ * A dispatch refused because the daemon is restarting or stopping. Channels
+ * stay connected while a restart drains, so they hear people during it, and
+ * this is what tells them the message reached a daemon on its way down: a
+ * channel can say so and keep the message for the next one. Matched by name
+ * there, as channel packages do not import the gateway.
+ */
+export class GatewayStoppingError extends Error {
+  /** True for a restart, which comes back on its own; false for a stop. */
+  readonly restarting: boolean;
+  constructor(message: string, restarting: boolean) {
+    super(message);
+    this.name = 'GatewayStoppingError';
+    this.restarting = restarting;
+  }
+}
+
+/**
  * The intake state a previous process left, or open when there is none.
  *
  * Fails closed: a file that exists but cannot be read or parsed starts the
@@ -3426,9 +3443,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   let serving = false;
   /** Set once `restart()` announced; the refusal a caller reads says why. */
   let restartStatus: RestartStatus | undefined;
-  const refusal = (): Error => new Error(restartStatus
-    ? 'stratusd is restarting and will accept new work once it is back up.'
-    : 'The gateway is stopping and no longer accepts new work.');
+  const refusal = (): Error => restartStatus
+    ? new GatewayStoppingError('stratusd is restarting and will accept new work once it is back up.', true)
+    : new GatewayStoppingError('The gateway is stopping and no longer accepts new work.', false);
 
   /**
    * The turn id running on each session, for callers that named one.
@@ -5184,22 +5201,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the same messages. Reported, and for a restart, counted as not
     // drained; a plain stop goes on closing either way.
     let channelsReleased = true;
+    // Once, whichever path gets there first: the end of the drain, or the
+    // window giving up on a turn that ignores its abort.
+    let channelsStopping: Promise<void> | undefined;
+    const stopChannels = (): Promise<void> => {
+      channelsStopping ??= (async () => {
+        const stopping = [...startedChannels];
+        startedChannels.length = 0;
+        const stops = await Promise.allSettled(stopping.map((adapter) => adapter.stop()));
+        stops.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            channelsReleased = false;
+            warn(`channel ${stopping[index]?.name} failed to stop: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+          }
+        });
+      })();
+      return channelsStopping;
+    };
     const drain = (async () => {
       // A promotion still connecting channels finishes first, so every
       // channel it started is in the list stopped below; seeing `stopping`,
       // it starts nothing after that.
       await promoting?.catch(() => undefined);
       await Promise.allSettled([...approvalEmissions]);
-      const stopping = [...startedChannels];
-      const stops = await Promise.allSettled(stopping.map((adapter) => adapter.stop()));
-      stops.forEach((result, index) => {
-        if (result.status === 'rejected') {
-          channelsReleased = false;
-          warn(`channel ${stopping[index]?.name} failed to stop: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
-        }
-      });
-      startedChannels.length = 0;
-      await Promise.allSettled([...inflight]);
+      // The turns first, with the channels still connected. A channel that
+      // disconnects at the start of a drain cannot hear anyone for as long
+      // as the drain lasts, and a long turn makes that minutes: a message
+      // sent then reached no daemon at all, with no reply and no log line.
+      // Connected, it is refused with `GatewayStoppingError`, which the
+      // channel can answer and keep for the next daemon. Until the set stays
+      // empty: a turn queued behind one that finished joins it.
+      while (inflight.size > 0) {
+        await Promise.allSettled([...inflight]);
+      }
+      // Then the channels, whose stop awaits the rendering they still have
+      // in flight: the outcomes of the turns that just finished.
+      await stopChannels();
     })();
     // One deadline for the whole bounded shutdown: the drain window, then
     // one more window that everything after it shares (the aborted turns'
@@ -5229,6 +5266,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       drained = await settlesWithin(drain, remaining());
       if (!drained) {
         warn(`${kind}: ${inflight.size} turn(s) did not stop after being aborted; shutting down around them`);
+        // The drain never got to the channels. Stopped here instead, so a
+        // host that goes on to start the next daemon does not find this one
+        // still connected beside it; a channel's stop takes its intake down
+        // before it waits on anything, so this ends what it can hear even if
+        // it never settles.
+        await settlesWithin(stopChannels(), remaining());
       }
       drained = drained && channelsReleased;
     }
