@@ -1807,6 +1807,11 @@ test('approvals.channels adds up per agent and refuses names, bare ids, and anyt
       JSON.stringify(bad),
     );
   }
+  // The message names only what is accepted (Codex P2 4309652293).
+  await assert.rejects(
+    loadConfigFile(await writeConfig('channels-e.json', { approvals: { channels: ['slack:E0123/C0123'] } })),
+    (error: Error) => /workspace id starts with T\b/.test(error.message) && !/ or E\b/.test(error.message) && /not the organization's E/.test(error.message),
+  );
 });
 
 test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {

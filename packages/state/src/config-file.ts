@@ -460,7 +460,8 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
       throw new Error(
         `Invalid ${where}.channels in config ${configPath}: expected a list like ["slack:T0123ABCD/C0123ABCD"] or ["slack:*"]: `
         + 'a channel kind, the workspace id and a conversation id (not a name), or * for every channel the agent\'s app is in. '
-        + 'For Slack, the workspace id starts with T or E and the channel id with C or G, in capitals; DMs (D…) are never covered.',
+        + 'For Slack, the workspace id starts with T (on Enterprise Grid, the workspace\'s T… id, not the organization\'s E… id) '
+        + 'and the channel id with C or G, in capitals; DMs (D…) are never covered.',
       );
     }
     route.channels = [...new Set((entries as string[]).map((entry) => entry.trim()))];
