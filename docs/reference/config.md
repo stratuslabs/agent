@@ -307,7 +307,7 @@ set.
 | `plugins` | Which code runs in the daemon's process, with what settings | [Tools](../guides/tools.md) |
 | `executor`, `memoryStore` | Which of that code an agent's commands run in, and where its memories are written — a cloned repo swapping a sandbox for the host is the downgrade this refuses | [Extending](../guides/extending.md) |
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
-| `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
+| `principals` | Whose messages an agent takes as its operator's; everyone else gets no turn, or arrives as `unknown` under `admit: "anyone"` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `slack` | How the daemon's agents post into your workspace | [Slack](../guides/slack.md#how-replies-appear) |
 | `api` | Which interface and port a daemon binds, and the address credential links point at | [Remote access](../guides/remote-access.md) |
 | `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |

@@ -166,7 +166,8 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   model sees it too: every provider hands it an `external` result wrapped as
   `{ untrusted, untrustedNote, output }`, the note saying the text is data to
   evaluate, never instructions to follow. A message from a Slack sender you
-  have not named as a principal is `unknown`, not `user`. It is a label and
+  have not named as a principal is refused before the turn by default, and
+  is `unknown`, not `user`, under `principals.admit: "anyone"`. It is a label and
   the marker is a nudge, not a defence against prompt injection, and neither
   makes acting on that text safe. ([Memory](./memory.md#where-a-fact-came-from))
 - **A conversation that has read the web can lose its grants.** With
