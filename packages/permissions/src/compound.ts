@@ -605,6 +605,55 @@ const flagsCovered = (base: string, args: readonly string[]): boolean => {
   return true;
 };
 
+/** The rg long flags in `NAME_GRANT_FLAGS` that take the next word as their value. */
+const RG_LONG_VALUE = new Set([
+  '--glob', '--iglob', '--type', '--type-not', '--max-count', '--after-context', '--before-context',
+  '--context', '--regexp', '--sort', '--max-depth', '--max-columns', '--color',
+]);
+
+/**
+ * Whether an rg call turns off every ignore file. Without `--no-ignore`
+ * (or `-u`), ripgrep opens `.ignore`, `.rgignore` and `.gitignore` files,
+ * ignore files above the searched directory, the user's global one and a
+ * linked worktree's `info/exclude`, and none of them is an operand a path
+ * check sees. Only a word that is really a flag counts: in `rg -e
+ * --no-ignore` it is the pattern, and after `--` it is a path.
+ */
+const rgIgnoresOff = (args: readonly string[]): boolean => {
+  const flags = NAME_GRANT_FLAGS.rg!;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]!;
+    if (token === '--') {
+      return false;
+    }
+    if (token === '-' || !token.startsWith('-')) {
+      continue;
+    }
+    if (token.startsWith('--')) {
+      if (token === '--no-ignore') {
+        return true;
+      }
+      if (!token.includes('=') && RG_LONG_VALUE.has(token)) {
+        index += 1;
+      }
+      continue;
+    }
+    for (const [at, letter] of [...token.slice(1)].entries()) {
+      if ((flags.value ?? '').includes(letter)) {
+        // The rest of the word is the value, or the next word is.
+        if (at === token.length - 2) {
+          index += 1;
+        }
+        break;
+      }
+      if (letter === 'u') {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
 /** The readers that never ask inside the workspace, with or without autonomy. */
 const WORKSPACE_READERS = new Set(['cat', 'head', 'tail', 'ls']);
 
@@ -777,6 +826,9 @@ const coveredByName = async (
   }
   const args = stage.tokens.slice(1);
   if (!flagsCovered(base, args)) {
+    return false;
+  }
+  if (base === 'rg' && !rgIgnoresOff(args)) {
     return false;
   }
   if (stage.tokens.some((token) => /[$`]/.test(token))) {

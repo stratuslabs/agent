@@ -401,7 +401,7 @@ test('a by-name grant is only for commands that read and write paths, never ones
   ]) {
     assert.equal(await allowed(command), false, `should ask: ${command}`);
   }
-  for (const command of ['rg foo src', 'sort src/main.ts', 'wc -l src/main.ts', 'md5sum src/main.ts', 'file src/main.ts']) {
+  for (const command of ['rg -u foo src', 'sort src/main.ts', 'wc -l src/main.ts', 'md5sum src/main.ts', 'file src/main.ts']) {
     assert.equal(await allowed(command), true, `should run: ${command}`);
   }
   for (const name of ['tar', 'vitest', 'curl', 'jq', 'patch', 'make', 'sh']) {
@@ -428,7 +428,7 @@ test('a glob a by-name grant covers never expands into a flag, and nothing grant
   assert.equal(await allowed('rg x -- *'), false, 'still a word the shell globs into a flag-shaped name');
   // A glob in a directory with no flag-shaped names still runs, and one
   // whose matches carry a directory prefix can never be read as a flag.
-  assert.equal(await allowed('rg x src/*.ts'), true);
+  assert.equal(await allowed('rg -u x src/*.ts'), true);
   assert.equal(await allowed('cat docs/*'), true);
   assert.equal(await allowed('cat *', path.join(repo, 'src')), true);
   // Codex P1 4309067080: bash's builtin printf -v assigns a variable.
@@ -473,7 +473,7 @@ test('a by-name grant covers only the flags it lists, spelled out in full', asyn
     'grep -rn TODO src',
     'grep -A3 -i --include=*.ts token src',
     'grep -e-R src/main.ts',
-    'rg -n --hidden -g *.ts foo src',
+    'rg -nu --hidden -g *.ts foo src',
     'sort -k2 -t, -o src/sorted.txt src/main.ts',
     'wc -l src/main.ts',
     'rm -rf copy',
@@ -618,4 +618,40 @@ test('a command that changes the shell itself never runs in a line with others',
   assert.equal(await interactive.approve(contextFor(repo, 'export PATH=.; uname')), true);
   assert.match(asked[0]!, /not remembered/);
   assert.deepEqual(remembered, []);
+});
+
+test('a by-name grant on rg covers only a search with every ignore file turned off', async () => {
+  const { workspace, repo } = await layout();
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => workspace, names: namesStore(['rg']) },
+  });
+  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  // Codex P1 4315569693: without --no-ignore, ripgrep opens .ignore,
+  // .rgignore, .gitignore, parent and global ignore files and a linked
+  // worktree's info/exclude, none of them an operand anyone checked.
+  for (const command of [
+    'rg foo src',
+    'rg --files',
+    'rg -n --hidden foo src',
+    // A flag-shaped word that is the value of another flag is not the flag.
+    'rg -e --no-ignore src',
+    'rg -e -u src',
+    'rg --regexp --no-ignore src',
+    'rg -g --no-ignore foo src',
+    'rg -eu src',
+    'rg foo -- --no-ignore',
+  ]) {
+    assert.equal(await allowed(command), false, `should ask: ${command}`);
+  }
+  for (const command of [
+    'rg --no-ignore foo src',
+    'rg -u foo src',
+    'rg -nu foo src',
+    'rg -uu --files',
+    'rg -e foo --no-ignore src',
+    'rg --regexp=x --no-ignore src',
+  ]) {
+    assert.equal(await allowed(command), true, `should run: ${command}`);
+  }
 });
