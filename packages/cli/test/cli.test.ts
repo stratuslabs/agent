@@ -14697,16 +14697,21 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
     describePrincipals({ admit: 'principals' }, ['ava']),
     /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
   );
+  // Codex P2 4309804866: an agent's own empty list wins over the top level.
+  assert.match(
+    describePrincipals({ admit: 'principals', agents: { bea: { slackUsers: [] } } }, ['ava', 'bea']),
+    /nobody at all can talk to ava, bea until principals\.slackUsers \(principals\.agents\.bea\.slackUsers for bea\) names someone$/,
+  );
   // The same agent beside a covered one: excluded from the shared list and
   // closed, Bea refuses everyone, and the line must not first call her
   // senders "all unknown" and then "refused".
   assert.match(
     describePrincipals({ slackUsers: ['U1'], admit: 'principals', agents: { bea: { slackUsers: [] } } }, ['ava', 'bea']),
-    /^principals set for ava; none for bea, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused$/,
+    /^principals set for ava; none for bea, who refuse every sender until principals\.agents\.bea\.slackUsers names someone; unlisted senders are refused$/,
   );
   assert.match(
     describePrincipals({ slackUsers: ['U1'], agents: { bea: { slackUsers: [], admit: 'anyone' }, cy: { slackUsers: [] } } }, ['ava', 'bea', 'cy']),
-    /^principals set for ava; none for bea, whose Slack senders are all unknown; none for cy, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused by ava, cy and admitted as unknown by the rest$/,
+    /^principals set for ava; none for bea, whose Slack senders are all unknown; none for cy, who refuse every sender until principals\.agents\.cy\.slackUsers names someone; unlisted senders are refused by ava, cy and admitted as unknown by the rest$/,
   );
 });
 

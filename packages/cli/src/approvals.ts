@@ -189,9 +189,21 @@ export const createApprovalPolicy = (
 };
 
 /**
- * One line saying which agents run gated tools without asking, the way the
- * resolver decides it: the top-level posture with its exceptions named.
+ * The list key that would let someone reach these agents. An agent's own
+ * `slackUsers`, even an empty one, wins over the top level, so pointing
+ * it at `principals.slackUsers` would be advice that changes nothing.
  */
+const listKeyFor = (principals: PrincipalsConfig, agentIds: string[]): string => {
+  const own = agentIds.filter((agentId) => principals.agents?.[agentId]?.slackUsers !== undefined);
+  const ownKeys = own.map((agentId) => `principals.agents.${agentId}.slackUsers`);
+  if (own.length === agentIds.length) {
+    return ownKeys.join(' or ');
+  }
+  return own.length === 0
+    ? 'principals.slackUsers'
+    : `principals.slackUsers (${own.map((agentId, at) => `${ownKeys[at]} for ${agentId}`).join(', ')})`;
+};
+
 /**
  * Under the open posture, `externalContent: "gate"` sends gated calls in a
  * conversation that read external content back to asking. Says so, for
@@ -211,6 +223,10 @@ const externalGateNote = (approvals: ApprovalsConfig): string => {
     : '';
 };
 
+/**
+ * One line saying which agents run gated tools without asking, the way the
+ * resolver decides it: the top-level posture with its exceptions named.
+ */
 export const describePosture = (approvals: ApprovalsConfig): string => {
   const top = resolveAgentApprovals(approvals, '').posture;
   const exceptions = Object.keys(approvals.agents ?? {})
@@ -238,7 +254,7 @@ export const describePrincipals = (principals: PrincipalsConfig, agentIds: strin
   if (covered.length === 0) {
     return closed.length === 0
       ? 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json'
-      : `no principals listed, so every Slack sender is unknown${door} — nobody at all can talk to ${closed.join(', ')} until principals.slackUsers names someone`;
+      : `no principals listed, so every Slack sender is unknown${door} — nobody at all can talk to ${closed.join(', ')} until ${listKeyFor(principals, closed)} names someone`;
   }
   // An uncovered agent's senders are all unknown only if it admits them: a
   // closed agent with nobody listed refuses everyone, and saying its
@@ -250,7 +266,7 @@ export const describePrincipals = (principals: PrincipalsConfig, agentIds: strin
   return `principals set for ${covered.join(', ')}`
     + (uncoveredOpen.length > 0 ? `; none for ${uncoveredOpen.join(', ')}, whose Slack senders are all unknown` : '')
     + (uncoveredClosed.length > 0
-      ? `; none for ${uncoveredClosed.join(', ')}, who refuse every sender until principals.slackUsers names someone`
+      ? `; none for ${uncoveredClosed.join(', ')}, who refuse every sender until ${listKeyFor(principals, uncoveredClosed)} names someone`
       : '')
     + door;
 };
