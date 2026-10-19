@@ -38,8 +38,11 @@ which is canonical for the Slack surface.
 Mention it — `@Blair what's blocking the release?` — and it answers in a
 thread. **Inside that thread you do not have to mention it again**: replies
 reach it the way replying to a colleague reaches them, and so do replies
-from anyone else in the thread. Outside a thread it stays quiet; a channel
-message nobody addressed to it is not its business.
+from anyone else in the thread who may talk to it: the people listed in
+`principals.slackUsers` by default, or everyone under `admit: "anyone"`
+(see [Who counts as the operator](../../packages/channel-slack/README.md#who-counts-as-the-operator)). Outside a
+thread it stays quiet; a channel message nobody addressed to it is not its
+business.
 
 In a thread with more than one agent, an untagged reply goes to **the agent
 the thread belongs to**: the first one to hold it, usually the one you
