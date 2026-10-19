@@ -90,7 +90,7 @@ const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
 // Not POSIXLY_CORRECT: macOS's /bin/sh exports it to every command it runs,
 // so the permission engine reads arguments both ways instead (see
 // `operandsToo` in @stratusagent/permissions).
-export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS'] as const;
+export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS', 'GZIP'] as const;
 
 /**
  * Flags that stop a shell from running its user startup files before the
@@ -184,7 +184,8 @@ const settingsFor = (
 
   // Variables that hand a judged command options the command line never
   // shows: `rg pattern` with RIPGREP_CONFIG_PATH can be `rg --pre … --follow
-  // pattern`, and BSD grep reads GREP_OPTIONS. The permission engine judges
+  // pattern`, BSD grep reads GREP_OPTIONS, and gzip reads GZIP (`-S x`
+  // names an output file no operand does). The permission engine judges
   // the command as written, so what it judges has to be what runs. Withheld
   // whatever the config says.
   for (const name of COMMAND_OPTION_VARIABLES) {

@@ -373,7 +373,7 @@ test('a by-name grant is only for commands that read and write paths, never ones
     commands: {
       grantRootFor: () => workspace,
       // A hand-edited store: none of these may be honored by name.
-      names: namesStore(['tar', 'vitest', 'eslint', 'prettier', 'jest', 'tsc', 'pytest', 'curl', 'wget', 'patch', 'split', 'jq', 'rg', 'sort', 'wc', 'diff', 'md5sum', 'file']),
+      names: namesStore(['tar', 'vitest', 'eslint', 'prettier', 'jest', 'tsc', 'pytest', 'curl', 'wget', 'patch', 'split', 'jq', 'rg', 'sort', 'wc', 'diff', 'md5sum', 'file', 'sha256sum']),
     },
   });
   const allowed = (command: string) => policy.approve(contextFor(repo, command));
@@ -401,7 +401,7 @@ test('a by-name grant is only for commands that read and write paths, never ones
   ]) {
     assert.equal(await allowed(command), false, `should ask: ${command}`);
   }
-  for (const command of ['rg -u foo src', 'sort src/main.ts', 'wc -l src/main.ts', 'md5sum src/main.ts', 'file src/main.ts']) {
+  for (const command of ['rg -u foo src', 'sort src/main.ts', 'wc -l src/main.ts', 'md5sum src/main.ts', 'sha256sum src/main.ts']) {
     assert.equal(await allowed(command), true, `should run: ${command}`);
   }
   for (const name of ['tar', 'vitest', 'curl', 'jq', 'patch', 'make', 'sh']) {
@@ -521,6 +521,24 @@ test('diff is never granted by name, since comparing directories reads children 
   assert.equal(await allowed('diff a b'), false);
   assert.equal(await allowed('diff a b/f'), false);
   assert.equal(await allowed('diff b/f b/f'), false);
+});
+
+test('file and shasum are never granted by name, since each reads code or data no operand names', async () => {
+  const { workspace, repo } = await layout();
+  // Codex P1 4315808426: `file x` prefers ~/.magic(.mgc) and honors MAGIC,
+  // a database outside the workspace that shapes its output. Same class:
+  // macOS `shasum` is a Perl script, so PERL5OPT/PERL5LIB load any module.
+  await writeFile(path.join(repo, 'input'), 'x\n');
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => workspace, names: namesStore(['file', 'shasum']) },
+  });
+  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  assert.equal(grantableByName('file'), false);
+  assert.equal(grantableByName('shasum'), false);
+  assert.equal(grantableByName('sha256sum'), true);
+  assert.equal(await allowed('file input'), false);
+  assert.equal(await allowed('shasum input'), false);
 });
 
 test('a redirection operator this reader does not know, like zsh and tcsh >!, is not read as a target', () => {

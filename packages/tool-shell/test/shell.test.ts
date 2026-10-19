@@ -388,13 +388,16 @@ test('cwdFor names where a command would run without preparing anything', async 
 
 test('variables that carry options for a judged command never reach it, however they are configured', async () => {
   const tools = await registryFor(
-    { passEnv: ['PATH', 'GREP_OPTIONS', 'CDPATH'], env: { RIPGREP_CONFIG_PATH: '/tmp/rgrc', KEEP: 'kept' } },
-    { PATH: process.env.PATH, GREP_OPTIONS: '-R', CDPATH: '/tmp' },
+    { passEnv: ['PATH', 'GREP_OPTIONS', 'CDPATH', 'GZIP'], env: { RIPGREP_CONFIG_PATH: '/tmp/rgrc', KEEP: 'kept' } },
+    { PATH: process.env.PATH, GREP_OPTIONS: '-R', CDPATH: '/tmp', GZIP: '-S .x' },
   );
+  // GZIP (sweep after Codex P1 4315808426): Apple and GNU gzip read options
+  // from it, so `GZIP='-S x'` writes a file no operand names (measured on
+  // Apple gzip 448.80.1: GZIP=-c leaves the input in place).
   // CDPATH (Codex P1 4309568557) sends `cd foo` somewhere the judge, which
   // follows cd from the working directory, never looked.
-  const seen = String((await runCommand(tools, 'echo "[$RIPGREP_CONFIG_PATH][$GREP_OPTIONS][$CDPATH][$KEEP]"')).stdout).trim();
-  assert.equal(seen, '[][][][kept]');
+  const seen = String((await runCommand(tools, 'echo "[$RIPGREP_CONFIG_PATH][$GREP_OPTIONS][$CDPATH][$GZIP][$KEEP]"')).stdout).trim();
+  assert.equal(seen, '[][][][][kept]');
 });
 
 test('bash option variables never reach the child shell', async () => {

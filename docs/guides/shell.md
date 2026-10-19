@@ -211,7 +211,10 @@ builtin assigns a variable with `-v`. Neither is `cp`: `cp source dir`
 writes `dir/source` and follows a symlink already there, a path no
 argument names. Nor is `diff`: given two directories, or a directory and
 a file, it reads the files inside and follows a symlink among them, paths
-no argument names either. Everything else keeps the
+no argument names either. Nor is `file`, which prefers a magic database in
+your home directory (`~/.magic.mgc`) or `$MAGIC` over the system one, nor
+`shasum`, a Perl script on macOS that `PERL5OPT` can load code into
+(`sha256sum` and the other checksum tools are on the list). Everything else keeps the
 narrow scope: network clients (`curl`, `wget`), archivers (`tar`, `zip`),
 `jq`, test runners, linters, compilers, and build tools, which run code no
 path check sees, or reach past the workspace. Shells, interpreters, and wrappers that run another

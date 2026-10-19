@@ -292,8 +292,8 @@ pattern address). An
 unknown flag asks too. `rg` runs only with `--no-ignore` (or `-u`), because
 otherwise it reads ignore files outside the workspace: above it, in your
 home directory, and in a linked worktree's git directory.
-`grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH` or
-`GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
+`grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH`,
+`GREP_OPTIONS`, or `GZIP` to a command, whatever its `env` or `passEnv` says, because
 they add options the command line doesn't show. Nor are shell startup variables passed (`BASH_ENV`, `ENV`, `ZDOTDIR`,
 exported `BASH_FUNC_*` functions), since they run code before the command,
 or `CDPATH`, which sends a relative `cd` somewhere other than where the line

@@ -378,16 +378,20 @@ export const analyzeCompound = (command: string): CompoundCommand => {
  * `dest/source` for `cp source dest` and follows a symlink already there,
  * so its real destinations are paths no operand names, nor `diff`, which
  * for two directories (or a directory and a file) reads their children and
- * follows a child symlink, paths no operand names either. Adding one means reading its manual and
+ * follows a child symlink, paths no operand names either, nor `file`,
+ * which prefers a magic database in `$HOME` (`~/.magic.mgc`) or `MAGIC`
+ * over the system one, nor `shasum`, a Perl script on macOS that
+ * `PERL5OPT`/`PERL5LIB` load modules into (`sha256sum` and friends cover
+ * it). Adding one means reading its manual and
  * listing, in `NAME_GRANT_FLAGS`, only the flags that act on the paths
  * given and nothing else.
  */
 export const GRANTABLE_BY_NAME: ReadonlySet<string> = new Set([
   'grep', 'egrep', 'fgrep', 'rg',
   'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'tr', 'paste', 'join', 'comm', 'fold', 'nl', 'column', 'rev', 'tac',
-  'cmp', 'ls', 'stat', 'file', 'du', 'tree', 'realpath', 'readlink', 'basename', 'dirname',
+  'cmp', 'ls', 'stat', 'du', 'tree', 'realpath', 'readlink', 'basename', 'dirname',
   'mkdir', 'touch', 'mv', 'rm', 'rmdir', 'ln', 'tee',
-  'md5', 'md5sum', 'shasum', 'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'od', 'xxd', 'hexdump',
+  'md5', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'od', 'xxd', 'hexdump',
   'gzip', 'gunzip', 'zcat', 'test',
 ]);
 
@@ -532,7 +536,6 @@ const NAME_GRANT_FLAGS: Record<string, NameGrantFlags> = {
   cmp: { short: 'lsb', value: 'in', long: ['--verbose', '--silent', '--quiet', '--print-bytes'] },
   ls: { short: '1aAlhtrSRdFpiGnosucfgkT', long: ['--all', '--almost-all', '--human-readable', '--recursive', '--directory', '--color', '--classify'] },
   stat: { short: 'xsrnql', value: 'fct' },
-  file: { short: 'bhiI', long: ['--brief', '--mime', '--mime-type', '--mime-encoding'] },
   du: { short: 'shackmx', value: 'd', long: ['--summarize', '--human-readable', '--all', '--max-depth', '--total', '--apparent-size'] },
   tree: { short: 'adfFgpusDhCnJ', value: 'LIPo' },
   realpath: { short: 'qsezmP' },
@@ -550,7 +553,6 @@ const NAME_GRANT_FLAGS: Record<string, NameGrantFlags> = {
   tee: { short: 'ai', long: ['--append', '--ignore-interrupts'] },
   md5: { short: 'qrn', value: 's' },
   md5sum: SUM_FLAGS,
-  shasum: { ...SUM_FLAGS, short: 'btp0', value: 'a', long: ['--binary', '--text', '--portable', '--algorithm', '--tag'] },
   sha1sum: SUM_FLAGS,
   sha256sum: SUM_FLAGS,
   sha512sum: SUM_FLAGS,
