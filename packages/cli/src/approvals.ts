@@ -192,13 +192,32 @@ export const createApprovalPolicy = (
  * One line saying which agents run gated tools without asking, the way the
  * resolver decides it: the top-level posture with its exceptions named.
  */
+/**
+ * Under the open posture, `externalContent: "gate"` sends gated calls in a
+ * conversation that read external content back to asking. Says so, for
+ * every agent or naming the open agents it applies to; empty when none.
+ */
+const externalGateNote = (approvals: ApprovalsConfig): string => {
+  const resolved = (agentId: string) => resolveAgentApprovals(approvals, agentId);
+  const gates = (agentId: string) => resolved(agentId).posture === 'open' && resolved(agentId).externalContent === 'gate';
+  const named = Object.keys(approvals.agents ?? {});
+  if (gates('')) {
+    const not = named.filter((agentId) => resolved(agentId).posture === 'open' && !gates(agentId));
+    return `, except in a conversation that read external content (externalContent: gate${not.length > 0 ? `; not for ${not.join(', ')}` : ''})`;
+  }
+  const which = named.filter(gates);
+  return which.length > 0
+    ? `, except in ${which.map((agentId) => `${agentId}'s`).join(', ')} conversations that read external content (externalContent: gate)`
+    : '';
+};
+
 export const describePosture = (approvals: ApprovalsConfig): string => {
   const top = resolveAgentApprovals(approvals, '').posture;
   const exceptions = Object.keys(approvals.agents ?? {})
     .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
   const except = exceptions.length > 0 ? ` except ${exceptions.join(', ')}` : '';
   return top === 'open'
-    ? `posture open for every agent${except} (gated tools run without asking; dangerous ones still ask)`
+    ? `posture open for every agent${except} (gated tools run without asking${externalGateNote(approvals)}; dangerous ones still ask)`
     : `posture guarded for every agent${except} (gated tools ask, or are refused with nobody to ask)`;
 };
 
@@ -277,10 +296,10 @@ export const describeRemoteMode = (approvals: ApprovalsConfig, askable: string[]
   const who = `(${describeApprovers(approvals, askable)})`;
   if (top === 'open') {
     const guarded = differing.length > 0 ? `, except ${differing.join(', ')}'s, whose gated calls are parked too` : '';
-    return `approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture${guarded} ${who}`;
+    return `approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture${externalGateNote(approvals)}${guarded} ${who}`;
   }
   const open = differing.length > 0
-    ? `, except ${differing.join(', ')}'s, which run without asking (only dangerous ones are parked)`
+    ? `, except ${differing.join(', ')}'s, which run without asking${externalGateNote(approvals)} (only dangerous ones are parked)`
     : '';
   return `approvals: remote — gated calls are parked and asked in Slack${open} ${who}`;
 };

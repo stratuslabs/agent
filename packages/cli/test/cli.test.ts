@@ -14589,6 +14589,30 @@ test('the remote-mode startup line says what is actually parked under each postu
   );
 });
 
+test('the open-posture startup lines name the agents whose external-content gate still asks', () => {
+  // Codex P2 4309712885: under externalContent "gate" a conversation that
+  // read external content sends gated calls back to asking.
+  assert.match(
+    describePosture({ externalContent: 'gate' }),
+    /^posture open for every agent \(gated tools run without asking, except in a conversation that read external content \(externalContent: gate\); dangerous ones still ask\)$/,
+  );
+  assert.match(
+    describePosture({ agents: { bea: { externalContent: 'gate' } } }),
+    /except in bea's conversations that read external content/,
+  );
+  assert.doesNotMatch(describePosture({}), /external content/);
+  assert.match(
+    describeRemoteMode({ mode: 'remote', agents: { bea: { externalContent: 'gate' } } }, ['ava', 'bea']),
+    /gated ones run without asking under the open posture, except in bea's conversations that read external content/,
+  );
+  assert.match(
+    describeRemoteMode({ mode: 'remote', posture: 'guarded', agents: { bea: { posture: 'open', externalContent: 'gate' } } }, ['bea']),
+    /except bea's, which run without asking, except in bea's conversations that read external content \(externalContent: gate\) \(only dangerous/,
+  );
+  // A guarded agent asks anyway, so its gate changes nothing there.
+  assert.doesNotMatch(describePosture({ agents: { bea: { posture: 'guarded', externalContent: 'gate' } } }), /external content/);
+});
+
 test('an approvals block that cannot be trusted or read leaves the daemon guarded, never open', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
