@@ -728,7 +728,8 @@ export const collectDoctorReport = async (
   if (unreachable.length > 0) {
     problems.push(
       `Nobody is listed who may talk to ${unreachable.join(', ')} in Slack, so ${unreachable.length === 1 ? 'it ignores' : 'they ignore'} every message. `
-      + 'Add Slack member IDs to principals.slackUsers in ~/.stratus/config.json (or set principals.admit to "anyone"), then `stratus restart`.',
+      + `Add Slack member IDs to principals.slackUsers in ${explicitSource ? path.resolve(cwd, explicitSource.value) : '~/.stratus/config.json'} `
+      + '(or set principals.admit to "anyone"), then `stratus restart`.',
     );
   }
 

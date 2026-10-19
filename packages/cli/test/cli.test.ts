@@ -4446,6 +4446,22 @@ test('doctor reads the global principals when a project config wins discovery, a
   assert.doesNotMatch(output.stdout, /Nobody is listed who may talk to ava/);
 });
 
+test('doctor names the config serve would read when it says to list someone', async () => {
+  // Codex P2 4309644046: with --config, editing ~/.stratus/config.json changes nothing.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  const chosen = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-')), 'prod.json');
+  await writeFile(chosen, JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor', '--config', chosen], streams, env: { cwd: home, homeDir: home, processEnv: {} } });
+  assert.match(output.stdout, /Nobody is listed who may talk to ava/);
+  assert.ok(output.stdout.includes(`principals.slackUsers in ${chosen}`), output.stdout);
+});
+
 test('setup asks for nobody when the agent already admits anyone', async () => {
   // Codex P2 4309308066: with admit "anyone", a list labels trust and
   // closes no door, so the closed-door prompt would say something false.
