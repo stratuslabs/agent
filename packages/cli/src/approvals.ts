@@ -109,6 +109,17 @@ export const createApprovalPolicy = (
     };
   }
 
+  // `open` is the daemon's open posture at a terminal: anything short of
+  // `dangerous` runs, and a dangerous call still asks a person.
+  if (mode === 'open') {
+    const asking = createApprovalPolicy('ask', streams, env, ask);
+    return {
+      async approve(context) {
+        return context.risk === 'dangerous' ? asking.approve(context) : true;
+      },
+    };
+  }
+
   if (mode === 'never') {
     return {
       async approve() {
@@ -163,6 +174,20 @@ export const createApprovalPolicy = (
       }
     },
   };
+};
+
+/**
+ * One line saying which agents run gated tools without asking, the way the
+ * resolver decides it: the top-level posture with its exceptions named.
+ */
+export const describePosture = (approvals: ApprovalsConfig): string => {
+  const top = resolveAgentApprovals(approvals, '').posture;
+  const exceptions = Object.keys(approvals.agents ?? {})
+    .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
+  const except = exceptions.length > 0 ? ` except ${exceptions.join(', ')}` : '';
+  return top === 'open'
+    ? `posture open for every agent${except} (gated tools run without asking; dangerous ones still ask)`
+    : `posture guarded for every agent${except} (gated tools ask, or are refused with nobody to ask)`;
 };
 
 /** One line saying whose messages arrive as the operator's, per Slack agent. */

@@ -30,6 +30,9 @@ import {
   defaultApprovalMode,
   warnOnUntrustedConfig,
   describePrincipals,
+  describePosture,
+  loadServeApprovals,
+  defaultPostureIsOpen,
   loadServePrincipals,
   loadServeSlack,
   currentLogPosition,
@@ -14115,6 +14118,17 @@ test('gated runs a safe tool without asking and asks about the rest; a defaulted
   assert.equal(await gatedPolicy.approve(gatedCall), false);
   assert.equal(asks, 1);
 
+  // `open` (the open posture at a terminal): gated runs, dangerous asks.
+  const open = createStreams();
+  let openAsks = 0;
+  const openPolicy = createApprovalPolicy('open', open.streams, {}, async () => {
+    openAsks += 1;
+    return 'n';
+  });
+  assert.equal(await openPolicy.approve(gatedCall), true);
+  assert.equal(await openPolicy.approve({ ...gatedCall, risk: 'dangerous' as const }), false);
+  assert.equal(openAsks, 1);
+
   // `ask` still means every call — the word says so.
   const asking = createStreams();
   const askPolicy = createApprovalPolicy('ask', asking.streams, {}, async () => {
@@ -14287,6 +14301,38 @@ test('doctor names the soul and systemPrompt an auto-discovered project config a
   assert.doesNotMatch(none.output.stdout, /does not get to choose/);
   // The one finding left is the demo provider, which is the file's to set.
   assert.match(none.output.stdout, /1 problem found:\n\s+! Provider is the offline demo model/);
+});
+
+test('the startup posture line names the default and the agents that differ', () => {
+  assert.equal(describePosture({}), 'posture open for every agent (gated tools run without asking; dangerous ones still ask)');
+  assert.equal(
+    describePosture({ posture: 'guarded', agents: { ava: { posture: 'open' }, bea: { posture: 'guarded' } } }),
+    'posture guarded for every agent except ava (gated tools ask, or are refused with nobody to ask)',
+  );
+});
+
+test('an approvals block that cannot be trusted or read leaves the daemon guarded, never open', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ approvals: { posture: 'open' } }));
+  const warnings: string[] = [];
+  const untrusted = await loadServeApprovals({ cwd: project, homeDir: home, processEnv: {} }, undefined, (line) => warnings.push(line));
+  assert.equal(untrusted.posture, 'guarded');
+  assert.match(warnings[0] ?? '', /Gated calls ask until then \(posture guarded\)/);
+  assert.equal(await defaultPostureIsOpen({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
+
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const unreadable = await loadServeApprovals({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, () => {});
+  assert.equal(unreadable.posture, 'guarded');
+  assert.equal(await defaultPostureIsOpen({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
+
+  // And with a readable config that says nothing, chat and run default open.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.equal(await defaultPostureIsOpen({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), true);
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { agents: { stratus: { posture: 'guarded' } } } }));
+  assert.equal(await defaultPostureIsOpen({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
 });
 
 test('the startup provenance line says which agents refuse unlisted senders, even with nobody listed', () => {

@@ -386,6 +386,17 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     }
     route.externalContent = source.externalContent;
   }
+  if (source.posture !== undefined) {
+    // Refused when misspelled: a typo that silently meant `open` would run
+    // everything unasked, and one that meant `guarded` would look like the
+    // setting did nothing.
+    if (source.posture !== 'open' && source.posture !== 'guarded') {
+      throw new Error(
+        `Unsupported ${where}.posture in config ${configPath}: ${String(source.posture)}. Use open or guarded.`,
+      );
+    }
+    route.posture = source.posture;
+  }
   if (Array.isArray(source.slackApprovers)) {
     // Kept even when it filters down to nothing. An agent entry saying
     // `"slackApprovers": []` is an operator excluding that agent from a
@@ -527,12 +538,16 @@ export const resolveAgentApprovals = (
   const slackApprovers = agent?.slackApprovers ?? approvals?.slackApprovers;
   const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
   const externalContent = agent?.externalContent ?? approvals?.externalContent;
+  // Open by default: resolved here, the one place, so serve, doctor and the
+  // startup line read the same answer.
+  const posture = agent?.posture ?? approvals?.posture ?? 'open';
   const autonomy = agent?.autonomy ?? approvals?.autonomy;
   // Added together rather than overridden: see `AgentApprovalConfig.commands`.
   const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
   const branchPrefixes = agent?.branchPrefixes ?? approvals?.branchPrefixes;
   const trustedDomains = [...new Set([...(approvals?.trustedDomains ?? []), ...(agent?.trustedDomains ?? [])])];
   return {
+    posture,
     ...(autonomy !== undefined ? { autonomy } : {}),
     ...(branchPrefixes !== undefined ? { branchPrefixes } : {}),
     ...(slackApprovers ? { slackApprovers } : {}),

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import type { Session } from '@stratusagent/core';
+import { DEFAULT_STRATUS_AGENT } from '@stratusagent/state';
+import { defaultPostureIsOpen } from '../trusted-config.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { formatEvent } from '../events.ts';
 import { writeLine } from '../io.ts';
@@ -125,8 +127,12 @@ export const runChat = async (
 
   const { runner, agent, metadata, runtimeContext, disposePlugins } = await createAgentRuntime(streams, {
     runtime,
-    approvals: command.approvals ?? defaultApprovalMode(env),
-    approvalsDefaulted: command.approvals === undefined,
+    ...(command.approvals === undefined && await defaultPostureIsOpen(env, command.configPath, runtime.soul?.agent.id ?? DEFAULT_STRATUS_AGENT.id)
+      ? { approvals: 'open' as const }
+      : {
+        approvals: command.approvals ?? defaultApprovalMode(env),
+        approvalsDefaulted: command.approvals === undefined,
+      }),
     askApproval,
     ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
     ...(command.configPath ? { configPath: command.configPath } : {}),

@@ -41,7 +41,7 @@ import {
   grantWriteSerializer,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
-import { describePrincipals, describeApprovers } from '../approvals.ts';
+import { describePrincipals, describeApprovers, describePosture } from '../approvals.ts';
 import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
@@ -608,6 +608,8 @@ const serveHeldHome = async (
   // disagree about which one wins.
   const gateExternalContent = (agentId: string): boolean =>
     resolveAgentApprovals(approvalsConfig, agentId).externalContent === 'gate';
+  const openFor = (agentId: string): boolean =>
+    resolveAgentApprovals(approvalsConfig, agentId).posture === 'open';
   const approvals = (transport: ApprovalTransport): ApprovalPolicy => {
     // The standing-grant engine, in the same file again — and the tool's
     // contributor from the gateway, so a grant records which package's
@@ -637,8 +639,8 @@ const serveHeldHome = async (
       // grant is the only path a scope-less gated tool has to running
       // unattended, and headless is where that matters.
       approvalMode === 'remote'
-        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent }
-        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent },
+        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent, openFor }
+        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent, openFor },
     );
   };
 
@@ -654,6 +656,7 @@ const serveHeldHome = async (
   if (autonomous.length > 0) {
     log(`approvals: autonomy workspace for ${autonomous} (reads inside their own workspace run without asking)`);
   }
+  log(`approvals: ${describePosture(approvalsConfig)}`);
   const declared = operatorCommands.describe();
   if (declared) {
     log(declared);

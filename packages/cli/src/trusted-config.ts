@@ -1,6 +1,7 @@
 import {
   readGlobalConfigBlock,
   readTrustedConfigBlock,
+  resolveAgentApprovals,
   type ApiConfig,
   type ApprovalsConfig,
   type PrincipalsConfig,
@@ -45,15 +46,35 @@ export const loadServeApprovals = async (
   if (block.status === 'untrusted') {
     warn(
       `ignoring the approvals config in ${block.path}: a project-local config cannot decide who may approve `
-      + 'this daemon\'s tool calls. Move it to ~/.stratus/config.json, or pass it with --config.',
+      + 'this daemon\'s tool calls. Move it to ~/.stratus/config.json, or pass it with --config. Gated calls ask until then (posture guarded).',
     );
-    return {};
+    // Guarded, not the open default: the operator's policy could not be
+    // read, and running everything unasked is the one answer that cannot
+    // be taken back.
+    return { posture: 'guarded' };
   }
   if (block.status === 'unreadable') {
     warn(`ignoring the approvals config (${block.error instanceof Error ? block.error.message : String(block.error)}); refusing gated calls`);
-    return {};
+    return { posture: 'guarded' };
   }
   return block.status === 'present' ? block.value : {};
+};
+
+/**
+ * Whether `stratus chat`/`run` should run gated tools without asking when
+ * `--approvals` was not given: the trusted config's posture for this
+ * agent, open by default, guarded when the policy can't be read.
+ */
+export const defaultPostureIsOpen = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  agentId: string,
+): Promise<boolean> => {
+  const block = await readTrustedConfigBlock('approvals', env, configPath).catch(() => ({ status: 'unreadable' as const }));
+  if (block.status === 'untrusted' || block.status === 'unreadable') {
+    return false;
+  }
+  return resolveAgentApprovals(block.status === 'present' ? block.value : undefined, agentId).posture === 'open';
 };
 
 /**

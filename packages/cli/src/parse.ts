@@ -5,7 +5,7 @@ import type { CliEnvironment } from './environment.ts';
 
 export type CliProviderName = StratusProviderName;
 
-export type CliApprovalMode = 'always' | 'ask' | 'gated' | 'never';
+export type CliApprovalMode = 'always' | 'open' | 'ask' | 'gated' | 'never';
 
 export interface ParsedRunCommand {
   command: 'run';
@@ -1679,8 +1679,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
     if (token === '--approvals') {
       const value = readOptionValue(rest, index, '--approvals');
-      if (value !== 'always' && value !== 'ask' && value !== 'gated' && value !== 'never') {
-        throw new Error(`Unsupported approvals mode: ${value}. Use always, ask, gated, or never.`);
+      if (value !== 'always' && value !== 'open' && value !== 'ask' && value !== 'gated' && value !== 'never') {
+        throw new Error(`Unsupported approvals mode: ${value}. Use always, open, ask, gated, or never.`);
       }
       approvals = value;
       index += 1;

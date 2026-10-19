@@ -17,6 +17,9 @@ import {
  */
 export type ExternalContentApprovals = 'label' | 'gate';
 
+/** Whether gated tools ask. See `AgentApprovalConfig.posture`. */
+export type ApprovalPosture = 'open' | 'guarded';
+
 /**
  * Who may approve one agent's gated calls, where they are asked, and what
  * reading outside content costs its grants. Approver ids are
@@ -44,6 +47,17 @@ export interface AgentApprovalConfig {
    * nothing by keeping its grants.
    */
   externalContent?: ExternalContentApprovals;
+  /**
+   * Whether gated tools ask at all. `open` (the default): a gated call runs
+   * without asking, in interactive, scheduled, and delegated turns alike;
+   * who may talk to the agent (`principals`) and where its commands run
+   * (`tool-shell`'s sandbox) are the boundary instead. `dangerous` tools
+   * still ask every time, and `externalContent: "gate"` still sends a
+   * conversation that read the web back to asking. `guarded`: every gated
+   * call asks (or, under `headless`, is refused) unless a scope or grant
+   * covers it, which is the behavior before postures existed.
+   */
+  posture?: ApprovalPosture;
   /**
    * How much an agent may do in its own workspace without asking.
    * `workspace`: commands that only read, and only inside the agent's

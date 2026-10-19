@@ -1,18 +1,60 @@
 # Approvals
 
-At a terminal, `stratus chat` and `stratus run` ask you directly:
-`--approvals` is `always`, `ask` (a y/N prompt on every call), `gated`
-(`safe` tools run, everything else asks — exactly the line the daemon
-draws below), or `never`. `gated` is the default when stdin is a terminal.
-When stdin is a pipe or a script, or the prompt came in through `--stdin`,
-nobody can answer a y/N, so the default is `always`, and the run says so
-once on stderr the first time a gated tool runs. This page is about the
-daemon, where there is no terminal to prompt on.
+By default an agent does its work without asking. Three things bound it
+instead of a prompt on every call:
+
+- **Who can talk to it.** Only the Slack users listed in
+  `principals.slackUsers` get a turn; everyone else is ignored. See
+  [Slack](./slack.md).
+- **Where its commands run.** Shell commands run in an OS sandbox that can
+  write only the agent's workspace and can't read the Stratus home or your
+  credentials. See [Shell commands](./shell.md#what-a-command-can-reach).
+- **What its files tools can reach.** `tool-fs` roots, and the Stratus home is
+  kept from every agent whatever the roots say.
+
+That default is `approvals.posture: "open"`:
+
+```jsonc
+// ~/.stratus/config.json
+{
+  "approvals": {
+    "posture": "open",                           // the default: gated tools run without asking
+    "agents": { "intern": { "posture": "guarded" } }  // this agent asks
+  }
+}
+```
+
+- **`open`** (the default): every `gated` tool runs without asking, in
+  interactive, scheduled, and delegated turns, under `headless` and
+  `remote` alike. A `dangerous` tool still asks every time, and
+  [`externalContent: "gate"`](#after-an-agent-reads-the-web) still sends a
+  conversation that read the web back to asking.
+- **`guarded`**: every gated call asks, or is refused with nobody to ask,
+  unless a scope or grant covers it. The rest of this page describes how
+  that works.
+
+A config that can't be read, or a project-local config that tries to set
+`approvals`, leaves the daemon guarded rather than open. The daemon prints
+the posture at startup:
+
+```text
+approvals: posture open for every agent except intern (gated tools run without asking; dangerous ones still ask)
+```
+
+At a terminal, `stratus chat` and `stratus run` follow the same posture when
+`--approvals` isn't given: `open` runs gated tools and asks you about a
+dangerous one. `--approvals` still chooses explicitly: `always`, `open`,
+`ask` (a y/N prompt on every call), `gated` (`safe` tools run, everything
+else asks), or `never`. Under `guarded`, `gated` is the default at a
+terminal, and `always` when stdin is a pipe or a script (said once on
+stderr).
 
 ## What the daemon will do on its own
 
+This section and the ones after it are about the `guarded` posture.
+
 Tools declare how much damage they could do — `safe`, `gated`, or
-`dangerous` — and the daemon runs only the safe ones without asking.
+`dangerous` — and a guarded daemon runs only the safe ones without asking.
 Anything riskier is refused, with a line in the log saying which agent
 wanted what:
 
