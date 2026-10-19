@@ -223,7 +223,7 @@ them fails quietly on its own. `stratus plugins` walks all four:
 
 ```console
 $ stratus plugins
-approvals: headless — an uncovered dangerous call is refused. Already-authorized ones still run: standing grants, approved command scopes and sites (stratus grants <agent>), and destinations pre-authorized with a schedule (stratus schedules); posture open for every agent (gated tools run without asking; dangerous ones still ask)
+approvals: headless — an uncovered dangerous call is refused. Already-authorized ones still run: standing grants, approved command scopes and sites (stratus grants <agent>), and destinations pre-authorized with a schedule (stratus schedules); posture open for every agent (gated tools run without asking; dangerous ones are refused, since headless asks nobody)
 
 @stratusagent/tool-fs         installed, enabled
   fs.read                     safe → blair

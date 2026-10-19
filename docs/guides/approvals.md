@@ -33,9 +33,11 @@ That default is `approvals.posture: "open"`:
   unless a scope or grant covers it. The rest of this page describes how
   that works.
 
-A config that can't be read, or a project-local config that tries to set
-`approvals`, leaves the daemon guarded rather than open. The daemon prints
-the posture at startup:
+A config that can't be read leaves the daemon guarded rather than open. A
+project-local config that tries to set `approvals` is ignored, with a
+warning, and `~/.stratus/config.json`'s approvals apply instead. The daemon
+prints the posture at startup (this is `--approvals remote`; in `headless`,
+which asks nobody, the line says dangerous ones are refused):
 
 ```text
 approvals: posture open for every agent except intern (gated tools run without asking; dangerous ones still ask)
@@ -43,7 +45,9 @@ approvals: posture open for every agent except intern (gated tools run without a
 
 At a terminal, `stratus chat` and `stratus run` follow the same posture when
 `--approvals` isn't given: `open` runs gated tools and asks you about a
-dangerous one. `--approvals` still chooses explicitly: `always`, `open`,
+dangerous one. With no terminal (a pipe, `--stdin`), nobody can answer,
+so a call that would ask is refused instead, said once on stderr.
+`--approvals` still chooses explicitly: `always`, `open`,
 `ask` (a y/N prompt on every call), `gated` (`safe` tools run, everything
 else asks), or `never`. Under `guarded`, `gated` is the default at a
 terminal, and `never` when stdin is a pipe or a script, since nobody is

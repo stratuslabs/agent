@@ -256,14 +256,15 @@ const externalGateNote = (approvals: ApprovalsConfig): string => {
  * One line saying which agents run gated tools without asking, the way the
  * resolver decides it: the top-level posture with its exceptions named.
  */
-export const describePosture = (approvals: ApprovalsConfig): string => {
+export const describePosture = (approvals: ApprovalsConfig, mode: 'headless' | 'remote'): string => {
   const top = resolveAgentApprovals(approvals, '').posture;
   const exceptions = Object.keys(approvals.agents ?? {})
     .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
   const except = exceptions.length > 0 ? ` except ${exceptions.join(', ')}` : '';
+  // Headless asks nobody: what the posture would ask about is refused.
   return top === 'open'
-    ? `posture open for every agent${except} (gated tools run without asking${externalGateNote(approvals)}; dangerous ones still ask)`
-    : `posture guarded for every agent${except} (gated tools ask, or are refused with nobody to ask)`;
+    ? `posture open for every agent${except} (gated tools run without asking${externalGateNote(approvals)}; dangerous ones ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'still ask'})`
+    : `posture guarded for every agent${except} (gated tools ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'ask, or are refused with nobody to ask'})`;
 };
 
 /** One line saying whose messages arrive as the operator's, per Slack agent. */
@@ -501,7 +502,7 @@ export const describeUnattendedReach = async (
  * that would ask. With any agent open, the posture line follows the verdict
  * so the reader sees which agents run gated calls unasked.
  */
-const postureReach = (approvals: ApprovalsConfig): { call: string; calls: string; posture: string[] } => {
+const postureReach = (approvals: ApprovalsConfig, mode: 'headless' | 'remote'): { call: string; calls: string; posture: string[] } => {
   const postures = new Set([
     resolveAgentApprovals(approvals, '').posture,
     ...Object.keys(approvals.agents ?? {}).map((agentId) => resolveAgentApprovals(approvals, agentId).posture),
@@ -513,7 +514,7 @@ const postureReach = (approvals: ApprovalsConfig): { call: string; calls: string
   return {
     call: allOpen ? 'an uncovered dangerous call' : 'an uncovered call that would ask',
     calls: allOpen ? 'dangerous calls' : 'calls that would ask',
-    posture: [describePosture(approvals)],
+    posture: [describePosture(approvals, mode)],
   };
 };
 
@@ -525,7 +526,7 @@ export const unattendedReachParts = (
   apiReachable: boolean,
   env: CliEnvironment,
 ): string[] => {
-  const reach = postureReach(approvals);
+  const reach = postureReach(approvals, mode);
   if (mode === 'headless') {
     return [
       `headless — ${reach.call} is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`,

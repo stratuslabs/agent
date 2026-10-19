@@ -656,7 +656,7 @@ const serveHeldHome = async (
   if (autonomous.length > 0) {
     log(`approvals: autonomy workspace for ${autonomous} (reads inside their own workspace run without asking)`);
   }
-  log(`approvals: ${describePosture(approvalsConfig)}`);
+  log(`approvals: ${describePosture(approvalsConfig, approvalMode)}`);
   const declared = operatorCommands.describe();
   if (declared) {
     log(declared);

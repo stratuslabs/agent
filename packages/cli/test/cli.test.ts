@@ -13569,7 +13569,7 @@ test('plugins and the Approvals row say what the posture actually asks about', a
   };
   const open = await plugins({});
   assert.match(open, /approvals: headless — an uncovered dangerous call is refused\. Already-authorized ones still run/);
-  assert.match(open, /posture open for every agent \(gated tools run without asking; dangerous ones still ask\)/);
+  assert.match(open, /posture open for every agent \(gated tools run without asking; dangerous ones are refused, since headless asks nobody\)/);
   assert.doesNotMatch(open, /uncovered gated call/);
   const guarded = await plugins({ posture: 'guarded' });
   assert.match(guarded, /approvals: headless — an uncovered gated call is refused/);
@@ -14717,9 +14717,12 @@ test('doctor names the soul and systemPrompt an auto-discovered project config a
 });
 
 test('the startup posture line names the default and the agents that differ', () => {
-  assert.equal(describePosture({}), 'posture open for every agent (gated tools run without asking; dangerous ones still ask)');
+  assert.equal(describePosture({}, 'remote'), 'posture open for every agent (gated tools run without asking; dangerous ones still ask)');
+  // Codex P2 4310470201: headless asks nobody, so dangerous calls are refused.
+  assert.equal(describePosture({}, 'headless'), 'posture open for every agent (gated tools run without asking; dangerous ones are refused, since headless asks nobody)');
+  assert.match(describePosture({ posture: 'guarded' }, 'headless'), /posture guarded for every agent \(gated tools are refused, since headless asks nobody\)/);
   assert.equal(
-    describePosture({ posture: 'guarded', agents: { ava: { posture: 'open' }, bea: { posture: 'guarded' } } }),
+    describePosture({ posture: 'guarded', agents: { ava: { posture: 'open' }, bea: { posture: 'guarded' } } }, 'remote'),
     'posture guarded for every agent except ava (gated tools ask, or are refused with nobody to ask)',
   );
 });
@@ -14741,14 +14744,14 @@ test('the open-posture startup lines name the agents whose external-content gate
   // Codex P2 4309712885: under externalContent "gate" a conversation that
   // read external content sends gated calls back to asking.
   assert.match(
-    describePosture({ externalContent: 'gate' }),
+    describePosture({ externalContent: 'gate' }, 'remote'),
     /^posture open for every agent \(gated tools run without asking, except in a conversation that read external content \(externalContent: gate\); dangerous ones still ask\)$/,
   );
   assert.match(
-    describePosture({ agents: { bea: { externalContent: 'gate' } } }),
+    describePosture({ agents: { bea: { externalContent: 'gate' } } }, 'remote'),
     /except in bea's conversations that read external content/,
   );
-  assert.doesNotMatch(describePosture({}), /external content/);
+  assert.doesNotMatch(describePosture({}, 'remote'), /external content/);
   assert.match(
     describeRemoteMode({ mode: 'remote', agents: { bea: { externalContent: 'gate' } } }, ['ava', 'bea']),
     /gated ones run without asking under the open posture, except in bea's conversations that read external content/,
@@ -14758,7 +14761,7 @@ test('the open-posture startup lines name the agents whose external-content gate
     /except bea's, which run without asking, except in bea's conversations that read external content \(externalContent: gate\) \(only dangerous/,
   );
   // A guarded agent asks anyway, so its gate changes nothing there.
-  assert.doesNotMatch(describePosture({ agents: { bea: { posture: 'guarded', externalContent: 'gate' } } }), /external content/);
+  assert.doesNotMatch(describePosture({ agents: { bea: { posture: 'guarded', externalContent: 'gate' } } }, 'remote'), /external content/);
 });
 
 test('an unflagged chat or run is never more permissive than open, whatever the posture', () => {
@@ -14781,8 +14784,19 @@ test('an approvals block that cannot be trusted or read leaves the daemon guarde
   await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ approvals: { posture: 'open' } }));
   const warnings: string[] = [];
   const untrusted = await loadServeApprovals({ cwd: project, homeDir: home, processEnv: {} }, undefined, (line) => warnings.push(line));
-  assert.equal(untrusted.posture, 'guarded');
-  assert.match(warnings[0] ?? '', /Gated calls ask until then \(posture guarded\)/);
+  // Codex P2 4310470199: the clone's block is ignored and the global file
+  // decides (absent here, so the defaults), rather than forcing guarded,
+  // which let a repo override the operator's own posture or route.
+  assert.deepEqual(untrusted, {});
+  assert.match(warnings[0] ?? '', /a project-local config cannot decide who may approve[^\n]*Using ~\/\.stratus\/config\.json's approvals instead/);
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { posture: 'open', mode: 'remote', slackApprovers: ['U0DYLAN'] } }));
+  assert.deepEqual(
+    await loadServeApprovals({ cwd: project, homeDir: home, processEnv: {} }, undefined, () => {}),
+    { posture: 'open', mode: 'remote', slackApprovers: ['U0DYLAN'] },
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+  assert.equal((await loadServeApprovals({ cwd: project, homeDir: home, processEnv: {} }, undefined, () => {})).posture, 'guarded');
+  await rm(path.join(home, '.stratus', 'config.json'));
   // Codex P1 4309856143: the clone's block is ignored for chat/run too; the
   // global file (absent here, so the open default) decides.
   assert.equal(await defaultPosture({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'open');

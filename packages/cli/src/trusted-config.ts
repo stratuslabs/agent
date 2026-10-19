@@ -43,16 +43,20 @@ export const loadServeApprovals = async (
   configPath: string | undefined,
   warn: (line: string) => void,
 ): Promise<ApprovalsConfig> => {
-  const block = await readTrustedConfigBlock('approvals', env, configPath);
+  let block = await readTrustedConfigBlock('approvals', env, configPath);
   if (block.status === 'untrusted') {
     warn(
       `ignoring the approvals config in ${block.path}: a project-local config cannot decide who may approve `
-      + 'this daemon\'s tool calls. Move it to ~/.stratus/config.json, or pass it with --config. Gated calls ask until then (posture guarded).',
+      + 'this daemon\'s tool calls. Move it to ~/.stratus/config.json, or pass it with --config. Using ~/.stratus/config.json\'s approvals instead.',
     );
-    // Guarded, not the open default: the operator's policy could not be
-    // read, and running everything unasked is the one answer that cannot
-    // be taken back.
-    return { posture: 'guarded' };
+    // The clone's block has no authority either way: the global file
+    // decides, as it does for principals and for chat/run, so a repo can
+    // neither open nor close the operator's posture or route. If that file
+    // can't be read, the unreadable branch below fails closed.
+    block = await readGlobalConfigBlock('approvals', env).catch((error: unknown) => ({ status: 'unreadable' as const, error }));
+    if (block.status === 'untrusted') {
+      return { posture: 'guarded' };
+    }
   }
   if (block.status === 'unreadable') {
     warn(`ignoring the approvals config (${block.error instanceof Error ? block.error.message : String(block.error)}); refusing gated calls`);
