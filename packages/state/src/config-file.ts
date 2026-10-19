@@ -480,10 +480,12 @@ const STANDING_CHANNEL_ENTRY = /^[a-z][a-z0-9-]*:(\*|[A-Za-z0-9][A-Za-z0-9._-]*(
  * Slack's own id shapes, so a channel name that happens to fit the generic
  * pattern (`slack:T0123/general`) is refused at startup instead of loading
  * and never matching: `conversations.info` takes ids only. A workspace is
- * `T…` (or `E…` on Enterprise Grid), a channel `C…` or `G…`. `D…` is
- * refused because a DM is never covered.
+ * `T…`: what the adapter matches against is `auth.test`'s `team_id`, and an
+ * Enterprise Grid organization's `E…` id is never that, so it would load and
+ * never match. A channel is `C…` or `G…`. `D…` is refused because a DM is
+ * never covered.
  */
-const SLACK_STANDING_CHANNEL_ENTRY = /^slack:(\*|([TE][A-Z0-9]+\/)?[CG][A-Z0-9]+|[TE][A-Z0-9]+\/\*)$/;
+const SLACK_STANDING_CHANNEL_ENTRY = /^slack:(\*|(T[A-Z0-9]+\/)?[CG][A-Z0-9]+|T[A-Z0-9]+\/\*)$/;
 
 const standingChannelEntryValid = (entry: string): boolean =>
   STANDING_CHANNEL_ENTRY.test(entry)

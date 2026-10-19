@@ -1800,7 +1800,7 @@ test('approvals.channels adds up per agent and refuses names, bare ids, and anyt
   assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').channels, ['slack:T1/C0C1YV12SLC', 'slack:*', 'slack:T2/*', 'slack:C0BARE']);
   assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').channels, ['slack:T1/C0C1YV12SLC']);
   assert.equal(resolveAgentApprovals({}, 'nova').channels, undefined);
-  for (const bad of [['#stratus-agent'], ['C0C1YV12SLC'], ['slack:'], ['*'], ['slack:#general'], ['slack:T1/'], ['slack:/C1'], ['slack:T1/C1/x'], ['slack:*/C1'], ['slack:T0123/general'], ['slack:t0123/C0123'], ['slack:T0123/c0c1yv12slc'], ['slack:general'], ['slack:T0123/D0DM'], ['slack:U0123/C0123'], 'slack:*', [3]]) {
+  for (const bad of [['#stratus-agent'], ['C0C1YV12SLC'], ['slack:'], ['*'], ['slack:#general'], ['slack:T1/'], ['slack:/C1'], ['slack:T1/C1/x'], ['slack:*/C1'], ['slack:T0123/general'], ['slack:t0123/C0123'], ['slack:T0123/c0c1yv12slc'], ['slack:general'], ['slack:T0123/D0DM'], ['slack:U0123/C0123'], ['slack:E0123/C0123'], ['slack:E0123/*'], 'slack:*', [3]]) {
     await assert.rejects(
       loadConfigFile(await writeConfig('channels-bad.json', { approvals: { agents: { nova: { channels: bad } } } })),
       /Invalid approvals\.agents\.nova\.channels/,
