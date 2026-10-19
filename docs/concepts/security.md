@@ -84,10 +84,10 @@ linked own the full story.
 
 ## What a cloned repo cannot decide
 
-**Who may talk to an agent in Slack is the operator's list, once `admit`
-says so.** The `principals` block names the senders an agent takes as its
-operator; by default everyone else is still answered, labelled `unknown`.
-`"admit": "principals"` refuses them before a turn starts — see
+**Who may talk to an agent in Slack is the operator's list.** The
+`principals` block names the senders an agent takes as its operator, and by
+default (`"admit": "principals"`) everyone else is refused before a turn
+starts. `"admit": "anyone"` answers them too, labelled `unknown` — see
 [Who counts as the operator](../../packages/channel-slack/README.md#who-counts-as-the-operator).
 
 The `plugins`, `approvals`, `principals`, and `api` config blocks are read
@@ -166,7 +166,8 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   model sees it too: every provider hands it an `external` result wrapped as
   `{ untrusted, untrustedNote, output }`, the note saying the text is data to
   evaluate, never instructions to follow. A message from a Slack sender you
-  have not named as a principal is `unknown`, not `user`. It is a label and
+  have not named as a principal is refused before the turn by default, and
+  is `unknown`, not `user`, under `principals.admit: "anyone"`. It is a label and
   the marker is a nudge, not a defence against prompt injection, and neither
   makes acting on that text safe. ([Memory](./memory.md#where-a-fact-came-from))
 - **A conversation that has read the web can lose its grants.** With

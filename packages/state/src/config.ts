@@ -140,10 +140,10 @@ export interface AgentPrincipalsConfig {
    */
   slackUsers?: string[];
   /**
-   * Who gets a turn at all. `anyone` — the default — admits every sender
-   * the adapter's own checks pass, labelling the unlisted ones `unknown`;
-   * `principals` refuses everyone not in `slackUsers` before a turn
-   * starts, and does not let the agent overhear them either. The label is
+   * Who gets a turn at all. `principals` — the default — refuses everyone
+   * not in `slackUsers` before a turn starts, and does not let the agent
+   * overhear them either; `anyone` admits every sender the adapter's own
+   * checks pass, labelling the unlisted ones `unknown`. The label is
    * provenance; this is authorization, and an agent that holds tools
    * wants the second — a stranger's message is not merely uncertain, it
    * is a prompt they chose.

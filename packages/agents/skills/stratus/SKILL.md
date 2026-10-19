@@ -138,19 +138,19 @@ When a stored key "isn't found", check in this order:
 
 - **One Slack app per agent**, each with its own tokens, connected over Socket Mode, so no public address is needed. Set up with `stratus setup` → Channels, which prints the app manifest and checks the tokens.
 - **"Sending messages to this app has been turned off"** in a DM is a Slack setting, not Stratus. In the app's settings go to App Home → Messages Tab, turn on *Allow users to send Slash commands and messages from the messages tab*, then reopen the DM.
-- **What reaches you.** In a DM, every message. In a channel, a message that mentions you, which starts a thread. In a channel listed under your `slack.agents.<id>.homeChannels` in the trusted config, every new top-level message too, unless it names another agent (restart the daemon after changing it). In that thread, what happens to a reply that does not name you depends on your soul's `listens:`:
+- **What reaches you**, from a sender you admit (by default only those in `principals.slackUsers`; see *Who counts as your operator* below). In a DM, every message. In a channel, a message that mentions you, which starts a thread. In a channel listed under your `slack.agents.<id>.homeChannels` in the trusted config, every new top-level message too, unless it names another agent (restart the daemon after changing it). In that thread, what happens to a reply that does not name you depends on your soul's `listens:`:
   - `thread`, the default, hears every such reply.
   - `mentions` answers only messages that name you, though it still hears the rest of the thread.
   - `judge` hears them and decides whether to answer.
-- With several agents in one thread, an untagged reply goes to whoever spoke last. Mentioned partway into a thread, your first turn opens with what was said before it (the parent and the newest earlier messages, marked as overheard). Mentioned at the top of a channel, it opens with the channel's 20 most recent messages. Both need the Slack app's history scopes. Without them you hear the thread from the mention onward only. A stranger or another bot among those earlier messages lowers the conversation's trust as if they had spoken to you.
+- With several agents in one thread, an untagged reply goes to whoever spoke last. Mentioned partway into a thread, your first turn opens with what was said before it (the parent and the newest earlier messages, marked as overheard). Mentioned at the top of a channel, it opens with the channel's 20 most recent messages. Both need the Slack app's history scopes. Without them you hear the thread from the mention onward only. Under `admit: "principals"`, the default, earlier messages from people or integrations you don't admit are left out. Under `admit: "anyone"` a stranger among them lowers the conversation's trust as if they had spoken to you. Another of your fleet's agents, or a remote agent you answer, is kept and lowers it too.
 - **Answering only when mentioned**, never to thread replies, has three causes, and they are worth checking in this order:
   1. `listens: mentions` in your soul.
   2. Another agent spoke last in that thread. That includes an agent on another daemon or machine, and any other app's bot that posted there.
   3. The app is missing the history scopes (`channels:history`, `groups:history`, `mpim:history`) and their `message.*` events, which means adding them and reinstalling the app.
 
-  Not answering at all also happens when the daemon is down, the app was removed from the channel, or `admit: "principals"` turned the person away.
+  Not answering at all also happens when the daemon is down, the app was removed from the channel, or the person is not in `principals.slackUsers` and `admit` is `principals`, the default.
 - **Another agent on Slack** needs its own soul on the roster first, then its own Slack app through `stratus setup` → Channels, and a restart to connect it.
-- **Who counts as your operator** is `principals.slackUsers` in the trusted config. Everyone else's messages reach you labelled as from someone unknown, and `admit: "principals"` turns them away entirely.
+- **Who counts as your operator** is `principals.slackUsers` in the trusted config. By default (`admit: "principals"`) everyone else is turned away before a turn starts, so an agent that says nothing to someone may simply not admit them. Under `admit: "anyone"` their messages reach you labelled as from someone unknown.
 - **Images** need the `files:read` scope. Text files are read up to a size limit, and anything else reaches you by name only, with the reason. The message says which.
 
 ## The daemon

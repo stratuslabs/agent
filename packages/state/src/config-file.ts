@@ -665,8 +665,10 @@ export const resolveAgentPrincipals = (
 ): AgentPrincipalsConfig => {
   const agent = principals?.agents?.[agentId];
   const slackUsers = agent?.slackUsers ?? principals?.slackUsers;
-  const admit = agent?.admit ?? principals?.admit;
-  return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
+  // Closed by default: only listed principals get a turn. `anyone` is the
+  // explicit opt-in. Resolved here, the one place, like resolveAgentSlack.
+  const admit = agent?.admit ?? principals?.admit ?? 'principals';
+  return { ...(slackUsers ? { slackUsers } : {}), admit };
 };
 
 const parseSlackEntry = (

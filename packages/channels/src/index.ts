@@ -551,10 +551,9 @@ export type AdmitPolicy = 'anyone' | 'principals';
  * presentation (Slack shows everyone's name when there is no list).
  *
  * Which `admit` applies when config gives none is the adapter's call, not
- * this module's: Slack defaults to `anyone`, because only workspace members
- * can reach it, while a channel anyone in the world can message should
- * default to `principals`. Pass the policy with that default already
- * applied.
+ * this module's, and the daemon's config resolves an absent one to
+ * `principals` before any adapter sees it. Pass the policy with that
+ * default already applied.
  */
 export interface SenderPolicy {
   principals?: readonly string[];
