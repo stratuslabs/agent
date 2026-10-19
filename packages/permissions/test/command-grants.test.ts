@@ -481,6 +481,16 @@ test('&> is not read as a redirection, since dash and POSIX sh run the command i
   }
 });
 
+test('a bash {name} descriptor before a redirection disqualifies the line', () => {
+  // Codex P1 4309751929: bash reads `{fd}>out sh payload` as a dynamic
+  // descriptor redirection, so the stage is `sh payload`, not `{fd} sh`.
+  for (const command of ['{fd}>out sh payload', '{fd}<in sh payload', 'sh payload {fd}>&-', '{a_1}>>log cat x']) {
+    assert.ok(analyzeCompound(command).disqualifiedBy, command);
+  }
+  // A brace word that is not followed by a redirection stays an argument.
+  assert.equal(analyzeCompound('echo {fd} > out').disqualifiedBy, undefined);
+});
+
 test('a path checked before the line runs is not trusted after a command that can relink it', async () => {
   const { workspace, repo, outside } = await layout();
   // Codex P1 4309461022: every stage was checked against the filesystem as

@@ -266,6 +266,11 @@ export const analyzeCompound = (command: string): CompoundCommand => {
       const word = text.slice(wordStart);
       if (/^\d+$/.test(word)) {
         text = text.slice(0, wordStart);
+      } else if (/^\{[^{}]*\}$/.test(word)) {
+        // bash reads `{fd}>out` as a redirection that allocates a descriptor
+        // into $fd, so `{fd}` is not a word of the command. Refused rather
+        // than modeled: sh and dash read it as an argument.
+        return disqualified(command, 'it names a descriptor with {name} before a redirection');
       }
       let at = index;
       let direction: 'out' | 'in';

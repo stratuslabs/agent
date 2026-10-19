@@ -124,9 +124,12 @@ const GIT_REPOSITORY_VARIABLES: readonly string[] = [
  * Variables that make a shell run code before the command, or read it
  * differently from the permission engine. Never passed. `CDPATH` sends a
  * relative `cd` somewhere other than the working directory the engine
- * follows it from.
+ * follows it from. `BASHOPTS`, `SHELLOPTS` and `POSIXLY_CORRECT` switch on
+ * shell options at startup (`cdable_vars` makes `cd HOME` follow `$HOME`).
  */
-const SHELL_STARTUP_VARIABLES: readonly string[] = ['BASH_ENV', 'ENV', 'ZDOTDIR', 'CDPATH'];
+const SHELL_STARTUP_VARIABLES: readonly string[] = [
+  'BASH_ENV', 'ENV', 'ZDOTDIR', 'CDPATH', 'BASHOPTS', 'SHELLOPTS', 'POSIXLY_CORRECT',
+];
 
 const settingsFor = (
   config: JsonObject,

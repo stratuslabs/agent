@@ -397,6 +397,17 @@ test('variables that carry options for a judged command never reach it, however 
   assert.equal(seen, '[][][][kept]');
 });
 
+test('bash option variables never reach the child shell', async () => {
+  // Codex P1 4309751930: BASHOPTS=cdable_vars makes `cd HOME` follow $HOME,
+  // which the judge reads as a workspace-relative directory.
+  const tools = await registryFor(
+    { passEnv: ['PATH', 'BASHOPTS', 'SHELLOPTS'], env: { POSIXLY_CORRECT: '1', KEEP: 'kept' } },
+    { PATH: process.env.PATH, BASHOPTS: 'cdable_vars', SHELLOPTS: 'braceexpand' },
+  );
+  const seen = String((await runCommand(tools, 'env | grep -E "^(BASHOPTS|SHELLOPTS|POSIXLY_CORRECT|KEEP)=" | sort')).stdout).trim();
+  assert.equal(seen, 'KEEP=kept');
+});
+
 test('PATH never includes a directory the agent can write to', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-path-'));
   const workspaces: AgentWorkspaces = {
