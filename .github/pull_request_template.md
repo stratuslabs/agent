@@ -20,6 +20,13 @@
 - [ ] `pnpm build && pnpm typecheck && pnpm test` green locally
 - [ ] New behavior has a test that fails without the change
 
+<!-- UI changes only: uncomment and embed before/after images of the
+     changed screens. Most PRs here have no UI; leave this out.
+
+## Screenshots
+
+-->
+
 ## Notes for review
 
 <!-- Anything deliberately left out, a tradeoff worth arguing about, or a
