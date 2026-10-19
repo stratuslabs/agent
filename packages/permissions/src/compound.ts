@@ -521,7 +521,9 @@ const NAME_GRANT_FLAGS: Record<string, NameGrantFlags> = {
   cp: { short: 'rRpafivnPX', long: ['--recursive', '--force', '--interactive', '--no-clobber', '--verbose', '--archive'] },
   mv: { short: 'fivn', long: ['--force', '--interactive', '--no-clobber', '--verbose'] },
   rm: { short: 'rRfivd', long: ['--recursive', '--force', '--interactive', '--verbose', '--dir'] },
-  rmdir: { short: 'pv', long: ['--parents', '--verbose'] },
+  // No -p/--parents: it removes every empty ancestor of the operand, so an
+  // absolute in-root path walks up past the grant root.
+  rmdir: { short: 'v', long: ['--verbose'] },
   ln: { short: 'sfnvhi', long: ['--symbolic', '--force', '--no-dereference', '--verbose'] },
   tee: { short: 'ai', long: ['--append', '--ignore-interrupts'] },
   md5: { short: 'qrn', value: 's' },

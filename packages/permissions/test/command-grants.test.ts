@@ -190,6 +190,26 @@ test('a granted command still asks when it points outside the workspace', async 
   }
 });
 
+test('rmdir by name never takes --parents, which walks up past the path it was given', async () => {
+  const { repo } = await layout();
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => repo, names: namesStore(['rmdir']) },
+  });
+  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  // `rmdir -p /in/root/empty` goes on to remove every empty ancestor,
+  // including the grant root and directories above it.
+  for (const command of [
+    `rmdir -p ${repo}/src/empty`,
+    `rmdir --parents ${repo}/src/empty`,
+    `rmdir -vp ${repo}/src/empty`,
+    'rmdir -p src/empty',
+  ]) {
+    assert.equal(await allowed(command), false, `should ask: ${command}`);
+  }
+  assert.equal(await allowed('rmdir src/empty'), true);
+  assert.equal(await allowed('rmdir -v src/empty'), true);
+});
 test('redirections run inside the workspace and ask outside it', async () => {
   const { root, workspace, repo } = await layout();
   const policy = createPermissionPolicy({
