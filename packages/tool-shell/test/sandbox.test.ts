@@ -589,6 +589,34 @@ test('home: "visible" and readablePaths open the home again, and credentials sta
   assert.equal(key.ok, false);
 });
 
+test('a configured cwd under the hidden home stays readable', { skip: !sandboxedHere && NEEDS }, async () => {
+  // Codex P1 4316843343: on macOS the home deny covered a configured cwd
+  // under the home, so commands started there but could not read it.
+  const fixture = await fixtureHome();
+  const project = path.join(fixture.userHome, 'work', 'foo');
+  await mkdir(project, { recursive: true });
+  await writeFile(path.join(project, 'src.txt'), 'project-src');
+  const result = await run({ cwd: project }, fixture, 'cat src.txt && ls');
+  assert.equal(result.ok, true, JSON.stringify(result.output));
+  assert.match(output(result).stdout, /^project-src/);
+  // The rest of the home stays hidden.
+  const outside = await run({ cwd: project }, fixture, `cat ${path.join(fixture.userHome, 'outside.txt')}`);
+  assert.equal(outside.ok, false);
+});
+
+test('the macOS profile gives a configured cwd back for reading after hiding the home', () => {
+  const profile = darwinProfile({
+    workspace: '/nonexistent/h/.stratus/agents/ava/workspace',
+    cwd: '/nonexistent/h/work/foo',
+    denied: ['/nonexistent/h/.stratus'],
+    writable: [],
+    home: { path: '/nonexistent/h', visible: [] },
+  });
+  const hide = profile.indexOf('(deny file-read-data file-read-xattr (subpath "/nonexistent/h"))');
+  const back = profile.indexOf('(allow file-read-data file-read-xattr (subpath "/nonexistent/h/work/foo"))');
+  assert.ok(hide >= 0 && back > hide, profile);
+});
+
 test('a credential store an environment variable moves is denied where it was moved', async () => {
   // Codex P1 4316301467: gh keeps its token under $GH_CONFIG_DIR, else
   // $XDG_CONFIG_HOME/gh, so the fixed ~/.config/gh left a moved one readable.

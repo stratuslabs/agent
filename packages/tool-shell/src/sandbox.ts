@@ -387,14 +387,17 @@ const denyRules = (paths: string[]): string[] => paths.length === 0 ? [] : [
 
 /**
  * Hide the home: its contents and any socket under it, then give the
- * visible entries back for reading. Comes before the denials, so a
+ * visible entries, the writable caches, and a configured cwd back for
+ * reading. Comes before the denials, so a
  * credential inside a visible toolchain stays hidden.
  */
 const hideHomeRules = (policy: SandboxPolicy): string[] => {
   if (!policy.home) {
     return [];
   }
-  const visible = [...new Set([...policy.home.visible, ...policy.writable])];
+  // A configured cwd is where commands start, so it is read like the
+  // workspace (Codex P1 4316843343); credentials inside it stay denied below.
+  const visible = [...new Set([...policy.home.visible, ...policy.writable, ...(policy.cwd ? [policy.cwd] : [])])];
   return [
     `(deny file-read-data file-read-xattr ${subpaths([policy.home.path])})`,
     ...[...new Set(spellings(policy.home.path))].map((p) => `(deny network-outbound (remote unix-socket (subpath ${sbplString(p)})))`),
