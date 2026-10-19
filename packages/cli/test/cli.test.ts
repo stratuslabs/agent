@@ -1673,6 +1673,8 @@ test('parseCommand accepts the chat command with run-style flags', () => {
     maxTurns: 4,
     events: true,
   });
+  // Codex P2 4309749758: help advertises open for chat as for run.
+  assert.equal((parseCommand(['chat', '--approvals', 'open']) as { approvals?: string }).approvals, 'open');
   assert.throws(() => parseCommand(['chat', '--approvals', 'sometimes']), /Invalid value for --approvals/);
   assert.throws(() => parseCommand(['chat', '--bogus']), /Unknown option: --bogus/);
 });
@@ -14617,6 +14619,15 @@ test('an approvals block that cannot be trusted or read leaves the daemon guarde
   assert.equal(await externalContentGated({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
   await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
   assert.equal(await externalContentGated({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), true, 'unreadable fails closed');
+
+  // Codex P1 4309749756: a cloned repo's approvals block must not switch off
+  // the global gate. Untrusted reads the global file, as principals do.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { externalContent: 'gate' } }));
+  assert.equal(await externalContentGated({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), true, 'untrusted keeps the global gate');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.equal(await externalContentGated({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), false, 'untrusted, global sets no gate');
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+  assert.equal(await externalContentGated({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), true, 'untrusted, global unreadable fails closed');
 });
 
 test('the startup provenance line says which agents refuse unlisted senders, even with nobody listed', () => {

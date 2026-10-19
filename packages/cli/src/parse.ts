@@ -559,7 +559,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--approvals') {
         const value = readOptionValue(rest, index, '--approvals');
-        if (value !== 'always' && value !== 'ask' && value !== 'gated' && value !== 'never') {
+        if (value !== 'always' && value !== 'open' && value !== 'ask' && value !== 'gated' && value !== 'never') {
           throw new Error(`Invalid value for --approvals: ${value}`);
         }
         parsed.approvals = value;

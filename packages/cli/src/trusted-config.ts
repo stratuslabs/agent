@@ -82,19 +82,22 @@ export const defaultPostureIsOpen = async (
  * trusted config, for a terminal session in the open posture: a
  * conversation that has read external content then asks again, as it
  * does in the daemon. An unreadable config fails closed (gated); an
- * untrusted one is ignored, like every other approvals key it holds.
+ * untrusted one is ignored in favor of the global file.
  */
 export const externalContentGated = async (
   env: CliEnvironment,
   configPath: string | undefined,
   agentId: string,
 ): Promise<boolean> => {
-  const block = await readTrustedConfigBlock('approvals', env, configPath).catch(() => ({ status: 'unreadable' as const }));
-  if (block.status === 'unreadable') {
-    return true;
-  }
+  let block = await readTrustedConfigBlock('approvals', env, configPath).catch(() => ({ status: 'unreadable' as const }));
   if (block.status === 'untrusted') {
-    return false;
+    // A cloned repo's block can't set the gate, and must not be able to
+    // switch off the operator's either: the global file decides, as it
+    // does for principals.
+    block = await readGlobalConfigBlock('approvals', env).catch(() => ({ status: 'unreadable' as const }));
+  }
+  if (block.status === 'unreadable' || block.status === 'untrusted') {
+    return true;
   }
   return resolveAgentApprovals(block.status === 'present' ? block.value : undefined, agentId).externalContent === 'gate';
 };
