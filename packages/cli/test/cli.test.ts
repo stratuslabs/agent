@@ -4481,6 +4481,36 @@ test('setup asks for a list of its own when the inherited one belongs to another
   assert.deepEqual(saved.principals, { slackUsers: ['U0OPS'], agents: { ava: { slackUsers: ['U0AVA'] } } });
 });
 
+test('setup keeps a first list to the agent when another Slack agent is in a different workspace', async () => {
+  // Codex P1 4310414429: the first list went top-level, so Bea, in another
+  // workspace, inherited IDs that name nobody (or someone else) there.
+  const run = async (beaTeam: string) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { bea: { appToken: 'xapp-bea', botToken: 'xoxb-bea' } } } }));
+    await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+    const { streams } = createStreams();
+    assert.equal(await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        serviceRunner: stubServiceRunner,
+        setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', 'U0AVA\n', '3\n', '9\n']),
+        fetch: slackTeamsFetch(beaTeam),
+      },
+    }), 0);
+    return JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')).principals;
+  };
+  assert.deepEqual(await run('T2'), { agents: { ava: { slackUsers: ['U0AVA'] } } });
+  // Same workspace: still everyone's, as before.
+  assert.deepEqual(await run('T1'), { slackUsers: ['U0AVA'] });
+});
+
 test('setup keeps the inherited list without asking when another agent uses it in the same workspace', async () => {
   const { output, saved } = await connectAvaBesideBea('T1', []);
   assert.doesNotMatch(output.stdout, /Only the Slack users you list|Enter to keep/);
