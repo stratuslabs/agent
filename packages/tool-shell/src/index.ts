@@ -271,13 +271,9 @@ const sandboxed = (
   if (settings.sandbox === 'off') {
     return unconfined;
   }
-  const workspace = settings.workspace ?? settings.cwd;
-  if (workspace === undefined) {
-    if (settings.sandbox === 'required') {
-      throw new Error('shell.run is set to sandbox: "required", but this agent has no workspace to confine commands to.');
-    }
-    return unconfined;
-  }
+  // With no workspace from the host and no configured cwd, the command
+  // starts where the process runs, so that is the directory it may write.
+  const workspace = settings.workspace ?? settings.cwd ?? process.cwd();
   const userHome = options.home ?? os.homedir();
   const processEnv = options.processEnv ?? process.env;
   const policy: SandboxPolicy = {

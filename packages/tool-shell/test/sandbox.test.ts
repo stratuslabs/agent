@@ -140,6 +140,13 @@ test('the environment a command gets is still only what was granted', { skip: !s
 
 const unavailable: typeof planSandbox = () => ({ kind: 'unavailable', reason: 'bwrap cannot create a sandbox here (permission denied)' });
 
+test('with no sandbox setting a command is refused where no sandbox can start', async () => {
+  const fixture = await fixtureHome();
+  const result = await run({}, fixture, 'echo hi', { planSandbox: unavailable });
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /commands must run sandboxed \(sandbox: "required"\)/);
+});
+
 test('sandbox "required" refuses when no sandbox can start, and names why and what to change', async () => {
   const fixture = await fixtureHome();
   const result = await run({ sandbox: 'required' }, fixture, 'echo hi', { planSandbox: unavailable });
@@ -152,8 +159,8 @@ test('sandbox "auto" runs unconfined where no sandbox can start, and says so onc
   resetSandboxWarning();
   const fixture = await fixtureHome();
   const warnings: string[] = [];
-  const first = await run({}, fixture, 'echo one', { planSandbox: unavailable, warn: (m) => warnings.push(m) });
-  const second = await run({}, fixture, 'echo two', { planSandbox: unavailable, warn: (m) => warnings.push(m) });
+  const first = await run({ sandbox: 'auto' }, fixture, 'echo one', { planSandbox: unavailable, warn: (m) => warnings.push(m) });
+  const second = await run({ sandbox: 'auto' }, fixture, 'echo two', { planSandbox: unavailable, warn: (m) => warnings.push(m) });
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
   assert.equal(warnings.length, 1);
@@ -174,7 +181,7 @@ test('sandbox "off" never plans a sandbox, and an unknown value is refused', asy
 test('the policy hides the Stratus home and credentials and keeps the agent workspace', async () => {
   const fixture = await fixtureHome();
   let seen: Parameters<typeof planSandbox>[0] | undefined;
-  await run({ deniedPaths: ['~/vault'], writablePaths: ['~/.gradle'] }, fixture, 'true', {
+  await run({ sandbox: 'auto', deniedPaths: ['~/vault'], writablePaths: ['~/.gradle'] }, fixture, 'true', {
     planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); },
     warn: () => {},
   });

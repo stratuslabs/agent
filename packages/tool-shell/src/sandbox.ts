@@ -15,9 +15,9 @@ import path from 'node:path';
  * is its own workspace, not a token.
  *
  * macOS uses `sandbox-exec` with a generated profile; Linux uses `bwrap`
- * (bubblewrap). Neither falls back silently: under `required` an
- * unavailable sandbox refuses the command, and under `auto` it runs
- * unconfined only after saying so once.
+ * (bubblewrap). Neither falls back silently: under `required` (the
+ * default) an unavailable sandbox refuses the command, and under `auto` it
+ * runs unconfined only after saying so once.
  */
 
 export type SandboxMode = 'auto' | 'required' | 'off';
@@ -244,8 +244,10 @@ export const planSandbox = (
 };
 
 export const parseSandboxMode = (value: unknown): SandboxMode => {
+  // Required by default: commands run without asking under the open
+  // posture, so an unconfined shell is a refusal, not a warning.
   if (value === undefined) {
-    return 'auto';
+    return 'required';
   }
   if (value === 'auto' || value === 'required' || value === 'off') {
     return value;

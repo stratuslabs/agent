@@ -22,9 +22,10 @@ Every command runs in an OS sandbox (`sandbox-exec` on macOS, `bwrap` on
 Linux). It can write only the agent's workspace, temp, and package caches.
 It can't read the Stratus home outside that workspace, or your credential
 files (`~/.ssh`, cloud CLIs, `gh`, `~/.npmrc`, the macOS keychain). The
-network stays on. Where the host can't build a sandbox, commands run
-unconfined and the daemon says so once. `sandbox: "required"` refuses
-instead, and `sandbox: "off"` turns it off. The full list and settings are in
+network stays on. Where the host can't build a sandbox, commands are
+refused with the reason (`sandbox: "required"`, the default).
+`sandbox: "auto"` runs them unconfined there instead, and `sandbox: "off"`
+turns the sandbox off. The full list and settings are in
 [the package README](../../packages/tool-shell/README.md#the-sandbox).
 
 ## Which commands run unattended
