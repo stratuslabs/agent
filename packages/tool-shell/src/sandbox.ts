@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -41,6 +41,11 @@ export const DEFAULT_DENIED_HOME_PATHS: readonly string[] = [
   '.password-store',
   '.pypirc',
   'Library/Keychains',
+  // SSH agents that keep their socket under the home: 1Password (Linux and
+  // macOS) and Secretive. An agent signs with keys no file check sees.
+  '.1password',
+  'Library/Group Containers/2BUA8C4S2C.com.1password',
+  'Library/Containers/com.maxgoedjen.Secretive.SecretAgent',
   // Tokens kept inside a cache directory that is otherwise writable.
   '.cache/huggingface/token',
   '.cache/huggingface/stored_tokens',
@@ -62,15 +67,15 @@ export const DEFAULT_DENIED_SOCKETS: readonly string[] = [
 ];
 
 /**
- * The same kind of endpoint in the user's runtime directory: the user's
- * D-Bus and systemd manager (`bus`, `systemd/private`), either of which can
- * start a same-user process outside the sandbox, and rootless Docker and
- * Podman. Listed under `$XDG_RUNTIME_DIR` and `/run/user/<uid>`, whichever
- * exist. An abstract-namespace socket has no path to cover; the network is
- * not unshared, so one listening there stays reachable.
+ * The user's runtime directories, `$XDG_RUNTIME_DIR` and `/run/user/<uid>`,
+ * denied whole. Everything there is a per-user service endpoint: D-Bus and
+ * the systemd manager (either starts a same-user process outside the
+ * sandbox), rootless Docker and Podman, gpg-agent and systemd's ssh-agent
+ * (either signs with keys whose files are hidden). Naming entries one by
+ * one kept missing the next one. An abstract-namespace socket has no path
+ * to cover; the network is not unshared, so one listening there stays
+ * reachable.
  */
-export const USER_RUNTIME_ENDPOINTS: readonly string[] = ['bus', 'systemd', 'docker.sock', 'podman'];
-
 export const userRuntimeEndpoints = (processEnv: NodeJS.ProcessEnv, uid: number | undefined): string[] => {
   const dirs = new Set<string>();
   if (processEnv.XDG_RUNTIME_DIR && path.isAbsolute(processEnv.XDG_RUNTIME_DIR)) {
@@ -79,7 +84,39 @@ export const userRuntimeEndpoints = (processEnv: NodeJS.ProcessEnv, uid: number 
   if (uid !== undefined) {
     dirs.add(`/run/user/${uid}`);
   }
-  return [...dirs].flatMap((dir) => USER_RUNTIME_ENDPOINTS.map((entry) => path.join(dir, entry)));
+  return [...dirs];
+};
+
+/**
+ * SSH agent sockets outside the home and runtime directory: the one
+ * `$SSH_AUTH_SOCK` names, and on macOS every launchd session directory in
+ * `/private/tmp` (launchd's own agent listens in one, under a random name a
+ * command can list). `/private/tmp` is otherwise writable to the command;
+ * Linux gives it a private `/tmp` already.
+ */
+export const credentialAgentEndpoints = (
+  processEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  privateTmpEntries: () => readonly string[] = () => {
+    try {
+      return readdirSync('/private/tmp');
+    } catch {
+      return [];
+    }
+  },
+): string[] => {
+  const found: string[] = [];
+  if (processEnv.SSH_AUTH_SOCK && path.isAbsolute(processEnv.SSH_AUTH_SOCK)) {
+    found.push(processEnv.SSH_AUTH_SOCK);
+  }
+  if (platform === 'darwin') {
+    for (const entry of privateTmpEntries()) {
+      if (entry.startsWith('com.apple.launchd.')) {
+        found.push(path.join('/private/tmp', entry));
+      }
+    }
+  }
+  return found;
 };
 
 /**

@@ -114,17 +114,22 @@ and your credentials, whatever the command says:
   folder holds the souls and workspaces the home links to). Also
   `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, git
   credential files, `~/.docker`, `~/.fly`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
-  `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, the Hugging
+  `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, `~/.1password`,
+  1Password's group container and Secretive's container on macOS, the Hugging
   Face token under `~/.cache/huggingface`, and the macOS keychains (file and
   service). With a `workspaceRoot`, the other agents' workspaces under it;
   a root that exists but can't be listed refuses the command.
 - **No connection:** container runtime sockets (`/var/run/docker.sock`,
-  containerd, podman, CRI-O, BuildKit), which hand out the whole host; in
-  the user's runtime directory (`$XDG_RUNTIME_DIR`, `/run/user/<uid>`) the
-  user's D-Bus and systemd manager, which can start a process outside the
-  sandbox, and rootless Docker and Podman; and any socket under a denied
-  path. A socket in the abstract namespace has no path to cover and stays
-  reachable.
+  containerd, podman, CRI-O, BuildKit), which hand out the whole host; the
+  user's runtime directory (`$XDG_RUNTIME_DIR`, `/run/user/<uid>`) as a
+  whole, which holds the user's D-Bus and systemd manager (either can start
+  a process outside the sandbox), rootless Docker and Podman, gpg-agent and
+  systemd's ssh-agent; SSH agents, which sign with keys whose files are
+  hidden: the socket `$SSH_AUTH_SOCK` names, launchd's session directories
+  in `/private/tmp` on macOS, 1Password's and Secretive's agent folders;
+  and any socket under a denied path. Any other local service listening on
+  a socket path stays reachable (a database in `/tmp` on macOS, a daemon
+  under `/var/run`), as does a socket in the abstract namespace.
 - **Not writable:** everything else.
 - **Network:** on. A command can send its own workspace somewhere, but not a
   token it can't read.

@@ -9,6 +9,7 @@ import type { AgentWorkspaces, JsonObject, ProtectedPaths, Session } from '@stra
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 
 import {
+  credentialAgentEndpoints,
   bwrapArgs,
   createShellTool,
   darwinProfile,
@@ -360,18 +361,36 @@ const capture = async (
   return { result, seen, workspaceExisted };
 };
 
-test('per-user service manager and rootless container sockets are denied', async () => {
+test('the user runtime directory is denied whole, with every service and agent socket in it', async () => {
   // Codex P1 4314782586: /run/user/$UID/bus reaches the user's systemd, and
-  // rootless Docker and Podman listen there too.
+  // rootless Docker and Podman listen there too. Codex P1 4315253857: so do
+  // gpg-agent's ssh socket and systemd's ssh-agent, so the directory goes whole.
   const fixture = await fixtureHome();
   const runtime = path.join(fixture.userHome, 'xdg-runtime');
   const { seen } = await capture({}, fixture, { processEnv: { PATH: '/usr/bin:/bin', XDG_RUNTIME_DIR: runtime } });
   const uidDir = `/run/user/${process.getuid?.() ?? 0}`;
   for (const dir of [runtime, uidDir]) {
-    for (const entry of ['bus', 'systemd', 'docker.sock', 'podman']) {
-      assert.ok(seen!.denied.includes(path.join(dir, entry)), path.join(dir, entry));
-    }
+    assert.ok(seen!.denied.includes(dir), dir);
   }
+});
+
+test('ssh and gpg agent sockets are denied wherever the daemon can find them', async () => {
+  // Codex P1 4315253857: a read-only view of a socket still accepts connect(2),
+  // and an agent signs with keys whose files are hidden. Measured on macOS:
+  // a sandboxed `ssh-add -l` reached launchd's agent in /private/tmp.
+  const fixture = await fixtureHome();
+  const agentSock = path.join(fixture.userHome, 'elsewhere', 'agent.sock');
+  const { seen } = await capture({}, fixture, { processEnv: { PATH: '/usr/bin:/bin', SSH_AUTH_SOCK: agentSock } });
+  assert.ok(seen!.denied.includes(agentSock), 'SSH_AUTH_SOCK');
+  for (const entry of ['.1password', 'Library/Group Containers/2BUA8C4S2C.com.1password', 'Library/Containers/com.maxgoedjen.Secretive.SecretAgent']) {
+    assert.ok(seen!.denied.includes(path.join(fixture.userHome, entry)), entry);
+  }
+  // launchd makes one per login session, named at random.
+  assert.deepEqual(
+    credentialAgentEndpoints({ SSH_AUTH_SOCK: 'relative.sock' }, 'darwin', () => ['com.apple.launchd.AbC123', 'other', 'com.apple.launchd.x']),
+    ['/private/tmp/com.apple.launchd.AbC123', '/private/tmp/com.apple.launchd.x'],
+  );
+  assert.deepEqual(credentialAgentEndpoints({ SSH_AUTH_SOCK: '/tmp/ssh-q/agent.1' }, 'linux', () => ['com.apple.launchd.AbC123']), ['/tmp/ssh-q/agent.1']);
 });
 
 test('a workspaceRoot that cannot be listed refuses the command rather than hiding no siblings', { skip: process.getuid?.() === 0 && 'root lists anything' }, async () => {

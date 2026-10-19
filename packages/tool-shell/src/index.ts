@@ -31,6 +31,7 @@ import {
 } from '@stratusagent/plugins';
 
 import {
+  credentialAgentEndpoints,
   DEFAULT_DENIED_HOME_PATHS,
   DEFAULT_DENIED_SOCKETS,
   parseSandboxMode,
@@ -43,6 +44,7 @@ import {
 } from './sandbox.ts';
 
 export {
+  credentialAgentEndpoints,
   DEFAULT_DENIED_HOME_PATHS,
   DEFAULT_DENIED_SOCKETS,
   DEFAULT_WRITABLE_HOME_PATHS,
@@ -325,6 +327,7 @@ const sandboxed = async (
       ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
       ...DEFAULT_DENIED_SOCKETS,
       ...userRuntimeEndpoints(processEnv, process.getuid?.()),
+      ...credentialAgentEndpoints(processEnv, platform),
       ...settings.deniedPaths,
     ].flatMap(spellings))],
     writable: [
