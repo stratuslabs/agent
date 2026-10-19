@@ -45,6 +45,8 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 
 ## Risk model
 
+Under the default `approvals.posture: "open"` a `gated` call runs without asking; the column below is what each mode does with a call that still needs approval, which under `"guarded"` is every uncovered `gated` call.
+
 | Tool | Risk | What approval mode does |
 | --- | --- | --- |
 | `fs.read` | `safe` | Runs unattended. Nothing outside the agent's roots is readable, which is what makes reading safe rather than merely convenient. |

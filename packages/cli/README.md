@@ -77,7 +77,7 @@ Full reference with every subcommand:
 | `--model` | Model for real providers (anthropic default: `claude-opus-5-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
-| `--approvals` | `run`/`chat`: `always`, `ask`, or `never`. `serve`: `headless` (refuse gated calls) or `remote` (ask in Slack) |
+| `--approvals` | `run`/`chat`: `always`, `ask`, or `never`. `serve`: for a call that needs approval (dangerous under posture `open`, any gated one under `guarded`), `headless` (refuse it) or `remote` (ask in Slack) |
 | `--max-turns` | Max tool turns per run before it wraps up (default 40) |
 | `--format` | `text` or `json` |
 | `--idle-timeout` | `serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |

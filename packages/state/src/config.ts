@@ -102,8 +102,10 @@ export const MAX_APPROVAL_TIMEOUT_MS = 2_147_483_647;
 /** The `approvals` block of ~/.stratus/config.json. */
 export interface ApprovalsConfig extends AgentApprovalConfig {
   /**
-   * How the daemon reaches a person. `headless` refuses every gated call;
-   * `remote` parks the turn and asks through a channel. Default `headless`
+   * How the daemon reaches a person for a call that needs approval (a
+   * dangerous one under posture `open`, any uncovered gated one under
+   * `guarded`). `headless` refuses it; `remote` parks the turn and asks
+   * through a channel. Default `headless`
    * — an unconfigured daemon must not start waiting on humans who were
    * never told they were on the hook.
    */
