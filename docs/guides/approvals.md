@@ -655,8 +655,8 @@ Three limits to know before relying on it:
   send.
 - **Only `external` content trips it.** A shell's output is `unknown`, not
   `external`, so a coding agent keeps its grants after `ls`. A message from
-  a Slack sender you have not named as a principal is `unknown` too; refuse
-  those before the turn starts with `principals.admit: "principals"`
+  a Slack sender you have not named as a principal is `unknown` too, and
+  is refused before the turn starts unless you set `principals.admit: "anyone"`
   ([Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator)).
 - **It gates what an agent does, not what it believes.** A page can still
   mislead an answer. What the gate removes is the page's ability to act
