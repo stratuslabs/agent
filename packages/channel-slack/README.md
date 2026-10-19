@@ -420,12 +420,14 @@ So a message is the operator's only when the operator has said so:
 }
 ```
 
-A turn from a listed id reaches the agent as its operator's (`user`). A turn
-from anyone else — in a DM as much as in a channel — reaches it as
-`unknown`, and the session it lands in stays `unknown` from then on: that
+A turn from a listed id reaches the agent as its operator's (`user`). By
+default anyone else gets no turn (see the door below). Under
+`"admit": "anyone"`, a turn from anyone else — in a DM as much as in a
+channel — reaches it as `unknown`, and the session it lands in stays `unknown` from then on: that
 text is in the transcript. Every fact the agent remembers afterwards
 carries the label, and the prompt renders it under a heading that says so.
-With no list at all, every Slack sender is `unknown`, and `stratus serve`
+With no list at all, nobody is a principal: under the default nobody gets a
+turn, under `"anyone"` every Slack sender is `unknown`, and `stratus serve`
 says so at startup. An agent's own entry replaces the shared list;
 `"slackUsers": []` excludes an agent from it.
 

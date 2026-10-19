@@ -147,9 +147,9 @@ When a stored key "isn't found", check in this order:
   2. Another agent spoke last in that thread. That includes an agent on another daemon or machine, and any other app's bot that posted there.
   3. The app is missing the history scopes (`channels:history`, `groups:history`, `mpim:history`) and their `message.*` events, which means adding them and reinstalling the app.
 
-  Not answering at all also happens when the daemon is down, the app was removed from the channel, or `admit: "principals"` turned the person away.
+  Not answering at all also happens when the daemon is down, the app was removed from the channel, or the person is not in `principals.slackUsers` and `admit` is `principals`, the default.
 - **Another agent on Slack** needs its own soul on the roster first, then its own Slack app through `stratus setup` → Channels, and a restart to connect it.
-- **Who counts as your operator** is `principals.slackUsers` in the trusted config. Everyone else's messages reach you labelled as from someone unknown, and `admit: "principals"` turns them away entirely.
+- **Who counts as your operator** is `principals.slackUsers` in the trusted config. By default (`admit: "principals"`) everyone else is turned away before a turn starts, so an agent that says nothing to someone may simply not admit them. Under `admit: "anyone"` their messages reach you labelled as from someone unknown.
 - **Images** need the `files:read` scope. Text files are read up to a size limit, and anything else reaches you by name only, with the reason. The message says which.
 
 ## The daemon
