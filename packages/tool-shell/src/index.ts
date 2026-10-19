@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -203,14 +204,15 @@ const settingsFor = (
   // empty) resolve to the working directory, which is the workspace. Kept
   // out, whatever env or passEnv says; the system's own paths are unchanged.
   if (typeof granted.PATH === 'string') {
+    // Compared as written and through symlinks on both sides: a workspace
+    // reached by an alias, or a PATH entry that is one, is the same directory.
     const owned = [cwd, workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id)]
-      .filter((dir): dir is string => typeof dir === 'string' && dir.length > 0);
+      .filter((dir): dir is string => typeof dir === 'string' && dir.length > 0)
+      .flatMap((dir) => [path.resolve(dir), canonicalPath(dir)]);
     granted.PATH = granted.PATH
       .split(':')
-      .filter((entry) => entry.length > 0 && path.isAbsolute(entry) && !owned.some((dir) => {
-        const relative = path.relative(dir, path.resolve(entry));
-        return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-      }))
+      .filter((entry) => entry.length > 0 && path.isAbsolute(entry)
+        && ![path.resolve(entry), canonicalPath(entry)].some((candidate) => owned.some((dir) => isWithin(dir, candidate))))
       .join(':');
     // An empty PATH is the current directory to `sh`, the one thing this
     // filter exists to keep out.
@@ -235,6 +237,31 @@ const settingsFor = (
     maxOutputBytes: asNumber(resolved.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES),
     shell: typeof resolved.shell === 'string' && resolved.shell.length > 0 ? resolved.shell : '/bin/sh',
   };
+};
+
+const isWithin = (dir: string, candidate: string): boolean => {
+  const relative = path.relative(dir, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+};
+
+/**
+ * Where a path really is, symlinks resolved. A path that does not exist yet
+ * resolves through its nearest existing ancestor, so a `bin` the agent could
+ * still create under an aliased workspace is placed where it would land.
+ */
+const canonicalPath = (target: string): string => {
+  let current = path.resolve(target);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(current), ...rest);
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(target);
+      rest.unshift(path.basename(current));
+      current = parent;
+    }
+  }
 };
 
 export interface ShellToolOptions {

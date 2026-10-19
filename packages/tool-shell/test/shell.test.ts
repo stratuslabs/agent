@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, open, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, realpath, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -425,6 +425,26 @@ test('PATH never includes a directory the agent can write to', async () => {
   // Filtered to nothing is not an empty PATH, which sh reads as the cwd.
   const emptied = await registryFor({ passEnv: [], env: { PATH: `.:${inside}` } }, {}, workspaces);
   assert.equal(String((await runCommand(emptied, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
+});
+
+test('PATH keeps out the workspace when either side is reached through a symlink', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-alias-')));
+  const real = path.join(root, 'real');
+  await mkdir(path.join(real, 'agents', 'ava', 'workspace'), { recursive: true });
+  const alias = path.join(root, 'alias');
+  await symlink(real, alias);
+  const via = (base: string): AgentWorkspaces => ({
+    forAgent: (agentId) => path.join(base, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(base, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  });
+  // The workspace through the alias, PATH through the real path, and the
+  // reverse; bin does not exist yet, so the agent could still create it.
+  for (const [workspaceBase, pathBase] of [[alias, real], [real, alias]] as const) {
+    const bin = path.join(pathBase, 'agents', 'ava', 'workspace', 'bin');
+    const tools = await registryFor({ passEnv: [], env: { PATH: `${bin}:/usr/bin:/bin` } }, {}, via(workspaceBase));
+    assert.equal(String((await runCommand(tools, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin', `${workspaceBase} vs ${bin}`);
+  }
 });
 
 test('nothing a shell runs before the command is passed to it', async () => {
