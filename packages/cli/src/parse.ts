@@ -1716,7 +1716,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     throw new Error('A prompt is required. Pass it with --prompt, --stdin, or as a positional argument.');
   }
 
-  if ((approvals === 'ask' || approvals === 'gated') && useStdin) {
+  if ((approvals === 'ask' || approvals === 'gated' || approvals === 'open') && useStdin) {
     throw new Error(`--approvals ${approvals} cannot be combined with --stdin because both read from standard input.`);
   }
 

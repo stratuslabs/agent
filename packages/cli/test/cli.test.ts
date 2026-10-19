@@ -14358,6 +14358,11 @@ test('the approval default is gated at a terminal and always anywhere else', () 
     () => parseCommand(['run', '--approvals', 'gated', '--stdin'], { stdin: 'hello' }),
     /--approvals gated cannot be combined with --stdin/,
   );
+  // open still asks about dangerous and external-gated calls, so it needs stdin too.
+  assert.throws(
+    () => parseCommand(['run', '--approvals', 'open', '--stdin'], { stdin: 'hello' }),
+    /--approvals open cannot be combined with --stdin/,
+  );
 });
 
 test('gated runs a safe tool without asking and asks about the rest; a defaulted always says so once', async () => {
