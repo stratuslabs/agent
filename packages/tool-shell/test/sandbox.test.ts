@@ -15,6 +15,7 @@ import {
   darwinProfile,
   planSandbox as realPlanSandbox,
   resetSandboxWarning,
+  relocatedCredentials,
   stratusHomesFor,
   type planSandbox,
 } from '../src/index.ts';
@@ -490,4 +491,69 @@ test('stored tokens of common developer CLIs are denied', async () => {
   for (const entry of ['credentials.toml', 'credentials']) {
     assert.ok(seen!.denied.includes(path.join(cargoHome, entry)), `$CARGO_HOME/${entry}`);
   }
+});
+
+test('a credential store an environment variable moves is denied where it was moved', async () => {
+  // Codex P1 4316301467: gh keeps its token under $GH_CONFIG_DIR, else
+  // $XDG_CONFIG_HOME/gh, so the fixed ~/.config/gh left a moved one readable.
+  // Swept for the other stores whose location a variable sets.
+  const fixture = await fixtureHome();
+  const elsewhere = path.join(path.dirname(fixture.userHome), 'elsewhere');
+  const at = (name: string) => path.join(elsewhere, name);
+  const processEnv: NodeJS.ProcessEnv = {
+    PATH: '/usr/bin:/bin',
+    GH_CONFIG_DIR: at('gh'),
+    XDG_CONFIG_HOME: at('xdg-config'),
+    XDG_CACHE_HOME: at('xdg-cache'),
+    DOCKER_CONFIG: at('docker'),
+    DOCKER_HOST: `unix://${at('docker.sock')}`,
+    CONTAINER_HOST: `unix://${at('podman.sock')}`,
+    KUBECONFIG: `${at('kube-a')}:${at('kube-b')}`,
+    AWS_SHARED_CREDENTIALS_FILE: at('aws-credentials'),
+    AWS_CONFIG_FILE: at('aws-config'),
+    GNUPGHOME: at('gnupg'),
+    CLOUDSDK_CONFIG: at('gcloud'),
+    AZURE_CONFIG_DIR: at('azure'),
+    NPM_CONFIG_USERCONFIG: at('npmrc-upper'),
+    npm_config_userconfig: at('npmrc-lower'),
+    PASSWORD_STORE_DIR: at('pass'),
+    CARGO_HOME: at('cargo'),
+    PULUMI_HOME: at('pulumi'),
+    TF_CLI_CONFIG_FILE: at('terraformrc'),
+    GRADLE_USER_HOME: at('gradle'),
+    COMPOSER_HOME: at('composer'),
+    DATABRICKS_CONFIG_FILE: at('databrickscfg'),
+    CLAUDE_CONFIG_DIR: at('claude'),
+    CODEX_HOME: at('codex'),
+    HF_HOME: at('hf'),
+    HF_TOKEN_PATH: at('hf-token'),
+    GLAB_CONFIG_DIR: at('glab'),
+    HUB_CONFIG: at('hub'),
+    OP_CONFIG_DIR: at('op'),
+  };
+  const { seen } = await capture({}, fixture, { processEnv });
+  for (const expected of [
+    at('gh'), at('xdg-config/gh'), at('xdg-config/git/credentials'), at('xdg-config/gcloud'),
+    at('xdg-cache/huggingface/token'), at('docker'), at('docker.sock'), at('podman.sock'), at('kube-a'), at('kube-b'),
+    at('aws-credentials'), at('aws-config'), at('gnupg'), at('gcloud'), at('azure'), at('npmrc-upper'), at('npmrc-lower'),
+    at('pass'), at('cargo/credentials.toml'), at('cargo/credentials'), at('pulumi/credentials.json'), at('terraformrc'),
+    at('gradle/gradle.properties'), at('composer/auth.json'), at('databrickscfg'), at('claude/.credentials.json'),
+    at('codex/auth.json'), at('hf/token'), at('hf/stored_tokens'), at('hf-token'), at('glab'), at('hub'), at('op'),
+  ]) {
+    assert.ok(seen!.denied.includes(expected), expected);
+  }
+});
+
+test('a moved credential location that is relative, or holds the home or the workspace, is not denied', () => {
+  const home = '/Users/ava';
+  const workspace = '/Users/ava/.stratus/agents/ava/workspace';
+  const found = relocatedCredentials({
+    GH_CONFIG_DIR: 'relative/gh',
+    DOCKER_CONFIG: '/',
+    GNUPGHOME: home,
+    AZURE_CONFIG_DIR: workspace,
+    DOCKER_HOST: 'tcp://127.0.0.1:2375',
+    KUBECONFIG: ':relative:/etc/kube',
+  }, home, workspace);
+  assert.deepEqual(found, ['/etc/kube']);
 });

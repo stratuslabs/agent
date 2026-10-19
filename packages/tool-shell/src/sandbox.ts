@@ -108,18 +108,103 @@ export const userRuntimeEndpoints = (processEnv: NodeJS.ProcessEnv, uid: number 
 };
 
 /**
+ * Variables that move a credential store out of its default place, and what
+ * under the moved location is the credential ('' for the location itself).
+ * The daemon's environment decides where the CLIs it runs keep tokens, so
+ * the moved store is denied even when the variable is not forwarded to the
+ * command: the command reads the file, not the variable.
+ */
+const RELOCATED_CREDENTIAL_STORES: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['GH_CONFIG_DIR', ['']],
+  ['DOCKER_CONFIG', ['']],
+  ['AWS_SHARED_CREDENTIALS_FILE', ['']],
+  ['AWS_CONFIG_FILE', ['']],
+  ['GNUPGHOME', ['']],
+  ['CLOUDSDK_CONFIG', ['']],
+  ['AZURE_CONFIG_DIR', ['']],
+  ['NPM_CONFIG_USERCONFIG', ['']],
+  ['npm_config_userconfig', ['']],
+  ['PASSWORD_STORE_DIR', ['']],
+  ['CARGO_HOME', ['credentials.toml', 'credentials']],
+  ['PULUMI_HOME', ['credentials.json']],
+  ['TF_CLI_CONFIG_FILE', ['']],
+  ['GRADLE_USER_HOME', ['gradle.properties']],
+  ['COMPOSER_HOME', ['auth.json']],
+  ['DATABRICKS_CONFIG_FILE', ['']],
+  ['CLAUDE_CONFIG_DIR', ['.credentials.json']],
+  ['CODEX_HOME', ['auth.json']],
+  ['HF_HOME', ['token', 'stored_tokens']],
+  ['HF_TOKEN_PATH', ['']],
+  ['GLAB_CONFIG_DIR', ['']],
+  ['HUB_CONFIG', ['']],
+  ['OP_CONFIG_DIR', ['']],
+];
+
+/** XDG base directories, and the prefix of the default home entries each one moves. */
+const XDG_BASES: ReadonlyArray<readonly [string, string]> = [
+  ['XDG_CONFIG_HOME', '.config/'],
+  ['XDG_CACHE_HOME', '.cache/'],
+];
+
+/** Container runtime endpoints a variable names (`unix:///path`), like the default sockets. */
+const SOCKET_HOSTS = ['DOCKER_HOST', 'CONTAINER_HOST'];
+
+/**
+ * The credential stores, and container sockets, that the daemon's
+ * environment moves elsewhere. A relative value is ignored (it names no
+ * fixed place), and so is one that is or holds the user's home or the
+ * workspace: denying it would hide the whole system or the agent's own work,
+ * and the home's own credential paths are denied by name already.
+ */
+export const relocatedCredentials = (processEnv: NodeJS.ProcessEnv, userHome: string, workspace: string): string[] => {
+  const found: string[] = [];
+  const add = (target: string) => {
+    if (!path.isAbsolute(target)) {
+      return;
+    }
+    const resolved = path.resolve(target);
+    if (isWithin(resolved, path.resolve(userHome)) || isWithin(resolved, path.resolve(workspace))) {
+      return;
+    }
+    found.push(resolved);
+  };
+  for (const [name, entries] of RELOCATED_CREDENTIAL_STORES) {
+    const value = processEnv[name];
+    if (value && path.isAbsolute(value)) {
+      for (const entry of entries) {
+        add(path.join(value, entry));
+      }
+    }
+  }
+  for (const [name, prefix] of XDG_BASES) {
+    const value = processEnv[name];
+    if (value && path.isAbsolute(value)) {
+      for (const entry of DEFAULT_DENIED_HOME_PATHS) {
+        if (entry.startsWith(prefix)) {
+          add(path.join(value, entry.slice(prefix.length)));
+        }
+      }
+    }
+  }
+  for (const entry of (processEnv.KUBECONFIG ?? '').split(path.delimiter)) {
+    add(entry);
+  }
+  for (const name of SOCKET_HOSTS) {
+    const value = processEnv[name];
+    if (value?.startsWith('unix://')) {
+      add(value.slice('unix://'.length));
+    }
+  }
+  return found;
+};
+
+/**
  * SSH agent sockets outside the home and runtime directory: the one
  * `$SSH_AUTH_SOCK` names, and on macOS every launchd session directory in
  * `/private/tmp` (launchd's own agent listens in one, under a random name a
  * command can list). `/private/tmp` is otherwise writable to the command;
  * Linux gives it a private `/tmp` already.
  */
-/** Cargo's token files under `$CARGO_HOME`, when it moves them out of `~/.cargo`. */
-export const cargoHomeCredentials = (processEnv: NodeJS.ProcessEnv): string[] =>
-  processEnv.CARGO_HOME && path.isAbsolute(processEnv.CARGO_HOME)
-    ? ['credentials.toml', 'credentials'].map((entry) => path.join(processEnv.CARGO_HOME!, entry))
-    : [];
-
 export const credentialAgentEndpoints = (
   processEnv: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
