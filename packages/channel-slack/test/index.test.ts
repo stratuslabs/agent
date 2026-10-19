@@ -12938,6 +12938,73 @@ test('a mention refused because the daemon is restarting is told so and kept wit
   assert.deepEqual(third.dispatches, []);
 });
 
+test('a full kept list refuses a new message with the plain refusal instead of evicting one already promised an answer', async () => {
+  const file = await keptFile();
+  const at = 1_800_000_000_000;
+  const entry = (index: number, keptAt: number) => ({ agentId: 'ava', team: 'T1', channel: 'C1', ts: `${100 + index}.1`, user: 'U-DYLAN', keptAt });
+  // Full: 200 kept within the day, each already told it will be answered.
+  const full = Array.from({ length: 200 }, (_, index) => entry(index, at - 1000));
+  await writeFile(file, JSON.stringify(full));
+  const warnings: string[] = [];
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    now: () => at,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(createStubGateway(() => {
+    throw stoppingError(true);
+  }));
+  await socket.deliver('app_mention', mention('<@B-AVA> one more', { ts: '900.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  // Nothing promised is dropped, and the new message is not promised.
+  assert.deepEqual(await readKept(file), full);
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [[stoppingError(true).message, '900.1']]);
+  assert.ok(warnings.some((line) => /could not keep 900\.1 in C1/.test(line) && /200/.test(line)), warnings.join('\n'));
+});
+
+test('a full kept list makes room by dropping only messages too old to be answered anyway', async () => {
+  const file = await keptFile();
+  const logs: string[] = [];
+  const at = 1_800_000_000_000;
+  const day = 24 * 60 * 60 * 1000;
+  const entry = (index: number, keptAt: number) => ({ agentId: 'ava', team: 'T1', channel: 'C1', ts: `${100 + index}.1`, user: 'U-DYLAN', keptAt });
+  const stale = entry(0, at - day - 1);
+  const fresh = Array.from({ length: 199 }, (_, index) => entry(index + 1, at - 1000));
+  await writeFile(file, JSON.stringify([fresh[0], stale, ...fresh.slice(1)]));
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    now: () => at,
+    log: (line) => logs.push(line),
+  });
+  await adapter.start(createStubGateway(() => {
+    throw stoppingError(true);
+  }));
+  await socket.deliver('app_mention', mention('<@B-AVA> one more', { ts: '900.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  const kept = (await readKept(file)) as Array<{ ts: string }>;
+  assert.equal(kept.length, 200);
+  assert.deepEqual(kept.slice(0, 199), fresh);
+  assert.equal(kept[199]?.ts, '900.1');
+  assert.deepEqual(web.posts.map((post) => post.text), [RESTARTING_REPLY_TEXT]);
+  assert.ok(logs.includes('slack: ava dropped 100.1 in C1 kept from a restart: older than a day'), logs.join('\n'));
+});
+
 test('an untagged reply in a thread the agent holds is kept across a restart too, with its thread', async () => {
   const file = await keptFile();
   const socket = createFakeSocket();

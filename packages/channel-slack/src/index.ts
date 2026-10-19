@@ -603,7 +603,7 @@ export const STOPPING_REPLY_TEXT = "I'm shutting down right now. I'll answer thi
  * stopped for a week does not wake up to answer last week's questions.
  */
 const PENDING_INTAKE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-/** The most messages kept at once; past it, the oldest go first. */
+/** The most messages kept at once; past it, a new one is refused, not kept. */
 const PENDING_INTAKE_MAX = 200;
 
 /** A message kept across a restart (see `pendingIntakePath`). No text. */
@@ -3315,11 +3315,31 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return false;
     }
     try {
-      await changePending((entries) => {
+      // Every kept message was told it will be answered, so a full list
+      // never evicts one of them: it makes room only from messages too old
+      // to be answered at start anyway, and otherwise refuses this one, which
+      // then gets the plain refusal and no promise.
+      const { full, expired } = await changePending((entries) => {
         const key = pendingKey(entry);
-        const others = entries.filter((existing) => pendingKey(existing) !== key);
-        return { entries: [...others, entry].slice(-PENDING_INTAKE_MAX), result: undefined };
+        let others = entries.filter((existing) => pendingKey(existing) !== key);
+        let expired: PendingIntake[] = [];
+        if (others.length >= PENDING_INTAKE_MAX) {
+          const cutoff = now() - PENDING_INTAKE_MAX_AGE_MS;
+          expired = others.filter((existing) => existing.keptAt < cutoff);
+          others = others.filter((existing) => existing.keptAt >= cutoff);
+        }
+        if (others.length >= PENDING_INTAKE_MAX) {
+          return { entries, result: { full: true, expired: [] as PendingIntake[] } };
+        }
+        return { entries: [...others, entry], result: { full: false, expired } };
       });
+      for (const dropped of expired) {
+        log(`slack: ${dropped.agentId} dropped ${dropped.ts} in ${dropped.channel} kept from a restart: older than a day`);
+      }
+      if (full) {
+        warn(`slack: could not keep ${entry.ts} in ${entry.channel} for after the restart: ${PENDING_INTAKE_MAX} messages are already kept`);
+        return false;
+      }
       return true;
     } catch (error) {
       warn(`slack: could not keep ${entry.ts} in ${entry.channel} for after the restart: ${error instanceof Error ? error.message : String(error)}`);
