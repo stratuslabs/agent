@@ -14693,7 +14693,7 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
   // Closed by default: nothing configured refuses everyone, and says so.
   assert.match(
     describePrincipals({}, ['ava', 'bea']),
-    /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava, bea until principals\.slackUsers names someone$/,
+    /^no principals listed, so every Slack sender is refused — nobody at all can talk to ava, bea until principals\.slackUsers names someone$/,
   );
   assert.match(describePrincipals({ slackUsers: ['U1'] }, ['ava', 'bea']), /^principals set for ava, bea; unlisted senders are refused$/);
   // Opening the door is explicit, and the line says who opened it.
@@ -14714,7 +14714,14 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
   // must not claim the latter.
   assert.match(
     describePrincipals({ admit: 'principals' }, ['ava']),
-    /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
+    /^no principals listed, so every Slack sender is refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
+  );
+  // Codex P2 4310107914: a refused sender never becomes a turn, so it is
+  // never "unknown"; only an agent that admits them labels them that way.
+  assert.doesNotMatch(describePrincipals({}, ['ava']), /unknown/);
+  assert.match(
+    describePrincipals({ admit: 'principals', agents: { bea: { admit: 'anyone' } } }, ['ava', 'bea']),
+    /^no principals listed, so every Slack sender is refused by ava and unknown to bea — nobody at all can talk to ava until principals\.slackUsers names someone$/,
   );
   // Codex P2 4309804866: an agent's own empty list wins over the top level.
   assert.match(
