@@ -181,7 +181,6 @@ test('a granted command still asks when it points outside the workspace', async 
   // Inside, the same commands run.
   for (const command of [
     'rm -rf src/tmp',
-    'cp src/main.ts src/copy.ts',
     'grep x src/*.ts',
     'cat src/main.ts | grep x',
     'grep -rn --include=*.ts x .',
@@ -408,7 +407,7 @@ test('a by-name grant is only for commands that read and write paths, never ones
   for (const name of ['tar', 'vitest', 'curl', 'jq', 'patch', 'make', 'sh']) {
     assert.equal(grantableByName(name), false, name);
   }
-  for (const name of ['grep', 'rg', 'cat', 'wc', 'cp', 'mv', 'rm', 'mkdir']) {
+  for (const name of ['grep', 'rg', 'cat', 'wc', 'mv', 'rm', 'mkdir']) {
     assert.equal(grantableByName(name), true, name);
   }
 });
@@ -477,7 +476,6 @@ test('a by-name grant covers only the flags it lists, spelled out in full', asyn
     'rg -n --hidden -g *.ts foo src',
     'sort -k2 -t, -o src/sorted.txt src/main.ts',
     'wc -l src/main.ts',
-    'cp -r src copy',
     'rm -rf copy',
     'mkdir -p a/b',
     'test -f src/main.ts',
@@ -485,6 +483,24 @@ test('a by-name grant covers only the flags it lists, spelled out in full', asyn
   ]) {
     assert.equal(await allowed(command), true, `should run: ${command}`);
   }
+});
+
+test('cp is never granted by name, since it writes destinations no operand names', async () => {
+  const { workspace, repo, outside } = await layout();
+  // Codex P1 4314769599: `cp source dest` writes `dest/source`, and GNU cp
+  // follows a symlink there out of the workspace. Only the operands were checked.
+  await writeFile(path.join(repo, 'source'), 'payload\n');
+  await mkdir(path.join(repo, 'dest'), { recursive: true });
+  await symlink(outside, path.join(repo, 'dest', 'source'));
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    commands: { grantRootFor: () => workspace, names: namesStore(['cp']) },
+  });
+  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  assert.equal(grantableByName('cp'), false);
+  assert.equal(await allowed('cp source dest'), false);
+  assert.equal(await allowed('cp -r src dest'), false);
+  assert.equal(await allowed('cp src/main.ts src/copy.ts'), false);
 });
 
 test('a redirection operator this reader does not know, like zsh and tcsh >!, is not read as a target', () => {

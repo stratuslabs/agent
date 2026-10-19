@@ -374,7 +374,9 @@ export const analyzeCompound = (command: string): CompoundCommand => {
  * and `jq` (whose `env` reads the daemon's environment) are not on it;
  * they keep the narrower scope. Neither is `printf`, whose bash builtin
  * assigns a variable with `-v`, nor binutils `strings`, which reads more
- * arguments from the file an `@file` names. Adding one means reading its manual and
+ * arguments from the file an `@file` names, nor `cp`, which writes
+ * `dest/source` for `cp source dest` and follows a symlink already there,
+ * so its real destinations are paths no operand names. Adding one means reading its manual and
  * listing, in `NAME_GRANT_FLAGS`, only the flags that act on the paths
  * given and nothing else.
  */
@@ -382,7 +384,7 @@ export const GRANTABLE_BY_NAME: ReadonlySet<string> = new Set([
   'grep', 'egrep', 'fgrep', 'rg',
   'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'tr', 'paste', 'join', 'comm', 'fold', 'nl', 'column', 'rev', 'tac',
   'diff', 'cmp', 'ls', 'stat', 'file', 'du', 'tree', 'realpath', 'readlink', 'basename', 'dirname',
-  'mkdir', 'touch', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'tee',
+  'mkdir', 'touch', 'mv', 'rm', 'rmdir', 'ln', 'tee',
   'md5', 'md5sum', 'shasum', 'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'od', 'xxd', 'hexdump',
   'gzip', 'gunzip', 'zcat', 'test',
 ]);
@@ -546,7 +548,6 @@ const NAME_GRANT_FLAGS: Record<string, NameGrantFlags> = {
   dirname: { short: 'z' },
   mkdir: { short: 'pv', value: 'm', long: ['--parents', '--verbose'] },
   touch: { short: 'acmh', value: 'dtr' },
-  cp: { short: 'rRpafivnPX', long: ['--recursive', '--force', '--interactive', '--no-clobber', '--verbose', '--archive'] },
   mv: { short: 'fivn', long: ['--force', '--interactive', '--no-clobber', '--verbose'] },
   rm: { short: 'rRfivd', long: ['--recursive', '--force', '--interactive', '--verbose', '--dir'] },
   // No -p/--parents: it removes every empty ancestor of the operand, so an

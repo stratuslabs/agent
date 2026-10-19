@@ -195,16 +195,18 @@ name and the `git push` scope. The prompt says which before you answer.
 
 **Only commands that act on the paths they are given are granted by
 name**: searching and reading (`grep`, `rg`, `cat`, `wc`, `sort`, `diff`,
-`ls`, `stat`, `du`), moving files (`mkdir`, `touch`, `cp`, `mv`, `rm`,
-`ln`, `tee`), and a few converters (`base64`, `gzip`, `xxd`, the checksum
+`ls`, `stat`, `du`), moving files (`mkdir`, `touch`, `mv`, `rm`, `ln`,
+`tee`), and a few converters (`base64`, `gzip`, `xxd`, the checksum
 tools). A by-name grant covers only the flags listed for each command,
 spelled out in full: the common ones that act on the given paths (`grep
--rn`, `rg --hidden -g`, `sort -k2 -o out`, `cp -r`, `rm -rf`). Any other
+-rn`, `rg --hidden -g`, `sort -k2 -o out`, `rm -rf`). Any other
 flag asks, including an abbreviation GNU tools would accept (`sort
 --files0-f`) and the ones that run a program or read the paths to act on
 from a file (`rg --pre`, `sort --compress-program`, `--files0-from`,
 `md5sum -c`, `diff -r`). `printf` is not on the list: bash's
-builtin assigns a variable with `-v`. Everything else keeps the
+builtin assigns a variable with `-v`. Neither is `cp`: `cp source dir`
+writes `dir/source` and follows a symlink already there, a path no
+argument names. Everything else keeps the
 narrow scope: network clients (`curl`, `wget`), archivers (`tar`, `zip`),
 `jq`, test runners, linters, compilers, and build tools, which run code no
 path check sees, or reach past the workspace. Shells, interpreters, and wrappers that run another
