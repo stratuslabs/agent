@@ -3309,6 +3309,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return run;
   };
   const pendingKey = (entry: Pick<PendingIntake, 'agentId' | 'channel' | 'ts'>): string => `${entry.agentId}:${entry.channel}:${entry.ts}`;
+  /**
+   * Kept messages being replayed, by `pendingKey`: whether the handler got
+   * as far as the gateway, and whether it kept the message again (a restart
+   * during the replay). Each stays in the file until its handler settles,
+   * so a crash or a failure before the dispatch leaves it for the next start.
+   */
+  const replaying = new Map<string, { dispatched: boolean; rekept: boolean }>();
   /** Keeps a refused message for the next start; resolves with whether it was kept. */
   const keepForNextStart = async (entry: PendingIntake): Promise<boolean> => {
     if (pendingIntakePath === undefined) {
@@ -3340,6 +3347,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         warn(`slack: could not keep ${entry.ts} in ${entry.channel} for after the restart: ${PENDING_INTAKE_MAX} messages are already kept`);
         return false;
       }
+      const replay = replaying.get(pendingKey(entry));
+      if (replay !== undefined) {
+        replay.rekept = true;
+      }
       return true;
     } catch (error) {
       warn(`slack: could not keep ${entry.ts} in ${entry.channel} for after the restart: ${error instanceof Error ? error.message : String(error)}`);
@@ -3363,10 +3374,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * What the last daemon kept, handled as if it had just arrived: through
    * admission, the thread rules, and a dispatch keyed as the original
    * delivery would have been, so a message the gateway already ran is a
-   * repeat there and not a second turn. Each is taken off the list before it
-   * is handed over, so a restart during the replay keeps it again rather
-   * than this removing it afterwards. A message deleted since is dropped; one
-   * that could not be read stays for the next start.
+   * repeat there and not a second turn. That makes handing one over twice
+   * safe and losing one not, so each comes off the list only once its
+   * handler has reached the gateway and settled: a crash, or a failure
+   * before the dispatch (the reply could not be started), leaves it for the
+   * next start, and one kept again by a restart during the replay stays
+   * kept. A message deleted since is dropped; one that could not be read
+   * stays for the next start.
    */
   const replayKept = async (onEvent: Map<string, (args: SlackSocketEventArgs) => Promise<void>>): Promise<void> => {
     if (pendingIntakePath === undefined) {
@@ -3394,15 +3408,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     for (const entry of expired) {
       log(`slack: ${entry.agentId} dropped ${entry.ts} in ${entry.channel} kept from a restart: older than a day`);
     }
-    const handled = new Set([...expired, ...ready.map(({ entry }) => entry)].map(pendingKey));
-    if (handled.size === 0) {
-      return;
+    const gone = ready.filter(({ message }) => message === undefined).map(({ entry }) => entry);
+    const final = new Set([...expired, ...gone].map(pendingKey));
+    if (final.size > 0) {
+      await changePending((entries) => ({ entries: entries.filter((entry) => !final.has(pendingKey(entry))), result: undefined }));
     }
-    await changePending((entries) => ({ entries: entries.filter((entry) => !handled.has(pendingKey(entry))), result: undefined }));
+    for (const entry of gone) {
+      log(`slack: ${entry.agentId} dropped ${entry.ts} in ${entry.channel} kept from a restart: no longer in Slack`);
+    }
     ready.sort((a, b) => compareSlackTs(a.entry.ts, b.entry.ts));
+    const handovers: Array<Promise<void>> = [];
     for (const { entry, message, connection } of ready) {
       if (message === undefined) {
-        log(`slack: ${entry.agentId} dropped ${entry.ts} in ${entry.channel} kept from a restart: no longer in Slack`);
         continue;
       }
       log(`slack: ${entry.agentId} replaying ${entry.ts} in ${entry.channel}, sent during the last restart`);
@@ -3414,10 +3431,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ...(entry.threadTs !== undefined ? { thread_ts: entry.threadTs } : {}),
         ...(entry.channelType !== undefined ? { channel_type: entry.channelType } : {}),
       };
+      const handle = onEvent.get(connection.config.agentId);
+      if (handle === undefined) {
+        continue;
+      }
+      const key = pendingKey(entry);
+      const replay = { dispatched: false, rekept: false };
+      replaying.set(key, replay);
       // Started in ts order without waiting on each: each claims its place
       // on its session's chain synchronously, as a live delivery does.
-      void onEvent.get(connection.config.agentId)?.({ ack: async () => {}, body: { team_id: entry.team }, event });
+      const handled = handle({ ack: async () => {}, body: { team_id: entry.team }, event });
+      handovers.push(handled.catch(() => undefined).then(async () => {
+        replaying.delete(key);
+        if (replay.rekept) {
+          return;
+        }
+        if (!replay.dispatched) {
+          warn(`slack: ${entry.agentId} could not hand ${entry.ts} in ${entry.channel} kept from a restart to the gateway; keeping it for the next start`);
+          return;
+        }
+        await changePending((entries) => ({ entries: entries.filter((kept) => pendingKey(kept) !== key), result: undefined }));
+      }));
     }
+    await Promise.all(handovers);
   };
 
   const alreadySeen = (key: string): boolean => {
@@ -6926,6 +6962,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
       let repeat: 'live' | 'finished' | undefined;
       let absorbed = false;
+      const replay = replaying.get(pendingKey({ agentId: connection.config.agentId, channel: event.channel, ts: event.ts }));
+      if (replay !== undefined) {
+        replay.dispatched = true;
+      }
       const turn = gateway.dispatch({
         sessionId,
         agentId: connection.config.agentId,
