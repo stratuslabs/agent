@@ -7,10 +7,16 @@ permission engine then judges each command.
 
 **This page is about the daemon**, which is where a command runs with nobody
 watching. At a terminal, `stratus run` and `stratus chat` judge the *call*
-rather than the command, exactly as [Approvals](./approvals.md) describes:
-`--approvals always` (the default) runs whatever the agent asks for,
-`--approvals ask` shows you the command and waits for y/N, and
-`--approvals never` refuses every call — including `git status`. So none of
+rather than the command, exactly as [Approvals](./approvals.md) describes.
+Without `--approvals` they follow the configured posture: `open` (the
+default) runs every command without asking, since `shell.run` is a
+`gated` tool, and
+`guarded` asks about every gated call at a terminal and refuses it when
+nobody is there to ask. `--approvals always` runs whatever the agent asks
+for, `open` is the posture above, `gated`
+runs only `safe` tools without asking, `ask` shows you the
+command and waits for y/N, and `never` refuses every call, including
+`git status`. So none of
 the safe list, the scopes, or the control-operator rules below apply to a
 one-shot at your own terminal, where you are the gate. Install the shell
 pack for a daemon and this page is the whole story; run it yourself and
