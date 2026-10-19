@@ -451,11 +451,14 @@ test('a sandboxed command can fill a writable cache that did not exist yet', { s
   assert.equal(output(result).stdout, 'ok\n', JSON.stringify(result.output));
 });
 
-test('a temp directory other than /tmp gets its own private tmpfs on Linux, before anything binds over it', async () => {
+test('a temp directory other than /tmp gets its own private tmpfs on Linux, before anything binds over it', async (t) => {
   // Codex P2 4315505054: with TMPDIR elsewhere, only /tmp was writable.
   const fixture = await fixtureHome();
-  const custom = path.join(fixture.userHome, 'scratch-tmp');
-  await mkdir(custom, { recursive: true });
+  // On Linux the fixture home is under /tmp, which needs no tmpfs of its
+  // own, so the custom temp directory lives beside this test file instead.
+  const custom = await realpath(await mkdtemp(path.join(path.dirname(new URL(import.meta.url).pathname), '.scratch-tmp-')));
+  t.after(() => rm(custom, { recursive: true, force: true }));
+  assert.ok(!custom.startsWith('/tmp/'), custom);
   const cache = path.join(custom, 'cache');
   await mkdir(cache, { recursive: true });
   const joined = bwrapArgs({ workspace: fixture.workspace, denied: [], writable: [cache], tmp: custom }, '/bin/sh', []).join(' ');
