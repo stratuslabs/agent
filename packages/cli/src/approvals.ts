@@ -265,6 +265,27 @@ export const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]
 };
 
 /**
+ * The remote-mode startup line, posture-aware: under the open posture only
+ * dangerous calls (and, under `externalContent: "gate"`, gated calls in a
+ * conversation that read external content) reach Slack, so it must not
+ * promise that gated calls are parked.
+ */
+export const describeRemoteMode = (approvals: ApprovalsConfig, askable: string[]): string => {
+  const top = resolveAgentApprovals(approvals, '').posture;
+  const differing = Object.keys(approvals.agents ?? {})
+    .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
+  const who = `(${describeApprovers(approvals, askable)})`;
+  if (top === 'open') {
+    const guarded = differing.length > 0 ? `, except ${differing.join(', ')}'s, whose gated calls are parked too` : '';
+    return `approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture${guarded} ${who}`;
+  }
+  const open = differing.length > 0
+    ? `, except ${differing.join(', ')}'s, which run without asking (only dangerous ones are parked)`
+    : '';
+  return `approvals: remote — gated calls are parked and asked in Slack${open} ${who}`;
+};
+
+/**
  * The ways a gated call is already authorized before either mode's decision
  * is reached — the standing tool grants, the approved command scopes, the
  * approved sites, and a schedule's pre-authorized destination, in the order

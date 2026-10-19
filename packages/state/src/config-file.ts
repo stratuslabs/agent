@@ -370,8 +370,14 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
 };
 
 const parseApprovalRoute = (raw: unknown, configPath: string, where: string): AgentApprovalConfig | undefined => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+  if (raw === undefined) {
     return undefined;
+  }
+  // Refused, not skipped: with posture open by default, a block that
+  // parsed as nothing (`"approvals": "guarded"`) would run every gated
+  // call unasked while the config in front of the operator says guarded.
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object like { "posture": "guarded" }, got ${JSON.stringify(raw)}.`);
   }
   const source = raw as Record<string, unknown>;
   const route: AgentApprovalConfig = {};
@@ -505,7 +511,10 @@ const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig
     }
     approvals.timeoutMs = source.timeoutMs;
   }
-  if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
+  if (source.agents !== undefined && (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents))) {
+    throw new Error(`Invalid approvals.agents in config ${configPath}: expected an object keyed by agent id.`);
+  }
+  if (source.agents !== undefined) {
     const agents: Record<string, AgentApprovalConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
       const parsed = parseApprovalRoute(entry, configPath, `approvals.agents.${agentId}`);

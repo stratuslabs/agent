@@ -1813,6 +1813,20 @@ test('approvals.trustedDomains adds up per agent, normalizes, and refuses anythi
   );
 });
 
+test('a malformed approvals block is refused, never read as the open default', async () => {
+  // Codex P1 4309648327: these used to parse as no block at all.
+  for (const approvals of ['guarded', ['guarded'], { agents: { ava: 'guarded' } }, { agents: 'guarded' }, { agents: { ava: ['x'] } }]) {
+    await assert.rejects(
+      loadConfigFile(await writeConfig('approvals-bad.json', { approvals })),
+      /Invalid approvals/,
+      JSON.stringify(approvals),
+    );
+  }
+  // Absent is still absent.
+  const absent = await loadConfigFile(await writeConfig('approvals-none.json', { provider: 'demo' }));
+  assert.equal(absent.approvals, undefined);
+});
+
 test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {
   const configPath = await writeConfig('autonomy.json', {
     approvals: { autonomy: 'workspace', agents: { blair: { autonomy: 'off' }, nova: {} } },

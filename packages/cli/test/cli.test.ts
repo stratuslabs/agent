@@ -31,6 +31,7 @@ import {
   warnOnUntrustedConfig,
   describePrincipals,
   describePosture,
+  describeRemoteMode,
   loadServeApprovals,
   defaultPostureIsOpen,
   externalContentGated,
@@ -14479,6 +14480,19 @@ test('the startup posture line names the default and the agents that differ', ()
   assert.equal(
     describePosture({ posture: 'guarded', agents: { ava: { posture: 'open' }, bea: { posture: 'guarded' } } }),
     'posture guarded for every agent except ava (gated tools ask, or are refused with nobody to ask)',
+  );
+});
+
+test('the remote-mode startup line says what is actually parked under each posture', () => {
+  // Codex P2 4309648332: it said gated calls are parked even when the open posture runs them.
+  assert.match(
+    describeRemoteMode({ mode: 'remote' }, ['ava']),
+    /^approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture \(but no approvers are configured/,
+  );
+  assert.match(describeRemoteMode({ mode: 'remote', posture: 'guarded' }, ['ava']), /^approvals: remote — gated calls are parked and asked in Slack \(/);
+  assert.match(
+    describeRemoteMode({ mode: 'remote', posture: 'guarded', agents: { bea: { posture: 'open' } } }, ['ava', 'bea']),
+    /^approvals: remote — gated calls are parked and asked in Slack, except bea's, which run without asking \(only dangerous ones are parked\) \(/,
   );
 });
 

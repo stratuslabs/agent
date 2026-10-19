@@ -41,7 +41,7 @@ import {
   grantWriteSerializer,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
-import { describePrincipals, describeApprovers, describePosture } from '../approvals.ts';
+import { describePrincipals, describePosture, describeRemoteMode } from '../approvals.ts';
 import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
@@ -672,7 +672,7 @@ const serveHeldHome = async (
     // disk with the Slack package missing means nothing renders the
     // request, and the turn discovers that by hanging.
     const askable = slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : [];
-    log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
+    log(describeRemoteMode(approvalsConfig, askable));
   }
   if (slackAdapterUp) {
     // Said at startup, because the failure it names is silent otherwise: a
