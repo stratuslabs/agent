@@ -78,6 +78,28 @@ export const defaultPostureIsOpen = async (
 };
 
 /**
+ * Whether `approvals.externalContent` is `gate` for this agent in the
+ * trusted config, for a terminal session in the open posture: a
+ * conversation that has read external content then asks again, as it
+ * does in the daemon. An unreadable config fails closed (gated); an
+ * untrusted one is ignored, like every other approvals key it holds.
+ */
+export const externalContentGated = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  agentId: string,
+): Promise<boolean> => {
+  const block = await readTrustedConfigBlock('approvals', env, configPath).catch(() => ({ status: 'unreadable' as const }));
+  if (block.status === 'unreadable') {
+    return true;
+  }
+  if (block.status === 'untrusted') {
+    return false;
+  }
+  return resolveAgentApprovals(block.status === 'present' ? block.value : undefined, agentId).externalContent === 'gate';
+};
+
+/**
  * One line naming who can actually answer, so a remote daemon does not look
  * configured when it is not. Two ways it can be hollow, and they fail
  * differently, so they read differently:

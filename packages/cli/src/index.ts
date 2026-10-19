@@ -113,7 +113,7 @@ export {
 export { formatEvent, eventDetail } from './events.ts';
 
 export { describeApprovalCall, createApprovalPolicy, describePrincipals, describePosture } from './approvals.ts';
-export { loadServePrincipals, loadServeSlack, loadServeApprovals, defaultPostureIsOpen } from './trusted-config.ts';
+export { loadServePrincipals, loadServeSlack, loadServeApprovals, defaultPostureIsOpen, externalContentGated } from './trusted-config.ts';
 
 export {
   resolveRuntimeConfig,

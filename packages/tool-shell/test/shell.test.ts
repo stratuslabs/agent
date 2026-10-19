@@ -20,7 +20,16 @@ import { createPermissionPolicy, type PermissionDecision } from '@stratusagent/p
 
 import { createFileLedger, LEDGER_FILENAME } from '@stratusagent/plugins';
 
-import { createShellPlugin, createShellTool } from '../src/index.ts';
+import { createShellPlugin as createShellPluginAsShipped, createShellTool as createShellToolAsShipped, type ShellToolOptions } from '../src/index.ts';
+
+// These tests are about what a command gets and where it runs, not the
+// sandbox (sandbox.test.ts is). Shipped, the sandbox is `required`, which
+// refuses every command on a host that can't build one, such as a CI runner
+// without bwrap. `auto` sandboxes them wherever it can and runs them there
+// otherwise, which is how they ran before `required` became the default.
+const testConfig = (config: JsonObject = {}): JsonObject => ({ sandbox: 'auto', ...config });
+const createShellTool = (config?: JsonObject, options?: ShellToolOptions) => createShellToolAsShipped(testConfig(config), options);
+const createShellPlugin = (config?: JsonObject, options?: ShellToolOptions) => createShellPluginAsShipped(testConfig(config), options);
 
 const session = (agentId = 'ava'): Session => ({
   id: `session-${agentId}`,

@@ -33,6 +33,7 @@ import {
   describePosture,
   loadServeApprovals,
   defaultPostureIsOpen,
+  externalContentGated,
   loadServePrincipals,
   loadServeSlack,
   currentLogPosition,
@@ -74,6 +75,7 @@ import {
   validateSkillDirectory,
 } from '@stratusagent/state';
 import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
+import { SESSION_TRUST_METADATA_KEY } from '@stratusagent/core';
 import type { Session, Tool } from '@stratusagent/core';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -14128,6 +14130,17 @@ test('gated runs a safe tool without asking and asks about the rest; a defaulted
   assert.equal(await openPolicy.approve(gatedCall), true);
   assert.equal(await openPolicy.approve({ ...gatedCall, risk: 'dangerous' as const }), false);
   assert.equal(openAsks, 1);
+  // Codex P1 4309388128: under externalContent "gate", a conversation that
+  // read external content asks again, as it does in the daemon.
+  const externalCall = { ...gatedCall, session: { ...session, metadata: { [SESSION_TRUST_METADATA_KEY]: 'external' } } as unknown as Session };
+  assert.equal(await openPolicy.approve(externalCall), true, 'labelled, not gated: still open');
+  const gatedOpen = createApprovalPolicy('open', open.streams, {}, async () => {
+    openAsks += 1;
+    return 'n';
+  }, false, { gateExternalContent: true });
+  assert.equal(await gatedOpen.approve(gatedCall), true);
+  assert.equal(await gatedOpen.approve(externalCall), false);
+  assert.equal(openAsks, 2);
 
   // `ask` still means every call — the word says so.
   const asking = createStreams();
@@ -14333,6 +14346,14 @@ test('an approvals block that cannot be trusted or read leaves the daemon guarde
   assert.equal(await defaultPostureIsOpen({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), true);
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { agents: { stratus: { posture: 'guarded' } } } }));
   assert.equal(await defaultPostureIsOpen({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
+
+  // The external-content gate an open terminal session honors.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { externalContent: 'gate' } }));
+  assert.equal(await externalContentGated({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), true);
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.equal(await externalContentGated({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+  assert.equal(await externalContentGated({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), true, 'unreadable fails closed');
 });
 
 test('the startup provenance line says which agents refuse unlisted senders, even with nobody listed', () => {

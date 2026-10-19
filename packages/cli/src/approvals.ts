@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline';
 import {
   AllowAllApprovalPolicy,
   originOf,
+  sessionTrustOf,
   type ApprovalContext,
   type ApprovalPolicy,
 } from '@stratusagent/core';
@@ -88,6 +89,11 @@ export const createApprovalPolicy = (
    * asked gets one line, the first time a call that would have asked runs.
    */
   defaulted = false,
+  /**
+   * For `open`: `approvals.externalContent` is `gate` for this agent, so a
+   * conversation that has read external content asks again.
+   */
+  openOptions: { gateExternalContent?: boolean } = {},
 ): ApprovalPolicy => {
   if (mode === 'always') {
     if (!defaulted) {
@@ -110,12 +116,18 @@ export const createApprovalPolicy = (
   }
 
   // `open` is the daemon's open posture at a terminal: anything short of
-  // `dangerous` runs, and a dangerous call still asks a person.
+  // `dangerous` runs, and a dangerous call still asks a person. So does a
+  // gated call in a conversation that read external content, under
+  // `externalContent: "gate"`, the same rule the daemon's policy applies.
   if (mode === 'open') {
     const asking = createApprovalPolicy('ask', streams, env, ask);
     return {
       async approve(context) {
-        return context.risk === 'dangerous' ? asking.approve(context) : true;
+        if (context.risk === 'safe') {
+          return true;
+        }
+        const closedByContent = openOptions.gateExternalContent === true && sessionTrustOf(context.session) === 'external';
+        return context.risk === 'dangerous' || closedByContent ? asking.approve(context) : true;
       },
     };
   }

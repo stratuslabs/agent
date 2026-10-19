@@ -61,7 +61,7 @@ import { formatEvent } from './events.ts';
 import { writeLine, stringifyValue } from './io.ts';
 import { quoteShellArg } from './prompter.ts';
 import type { CliApprovalMode, ParsedRunCommand } from './parse.ts';
-import { loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
+import { externalContentGated, loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
 
 /**
  * Kept with its historical CLI signature: a parsed run command is a
@@ -388,16 +388,20 @@ export const createAgentRuntime = async (
       providers,
     );
 
+    const approvalMode = options.approvals ?? 'always';
     const runner = new AgentRunner({
       provider: runtimeProvider,
       tools,
       executor: executor ?? createLocalCommandExecutor(),
       approvals: createApprovalPolicy(
-        options.approvals ?? 'always',
+        approvalMode,
         streams,
         options.env ?? {},
         options.askApproval,
         options.approvalsDefaulted ?? false,
+        approvalMode === 'open'
+          ? { gateExternalContent: await externalContentGated(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id) }
+          : {},
       ),
       bus,
       skills,

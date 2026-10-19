@@ -294,3 +294,30 @@ test('the policy denies what the host protects and every other agent\'s workspac
   assert.ok(seen!.denied.includes(fixture.otherWorkspace));
   assert.ok(!seen!.denied.includes(fixture.workspace), 'never its own workspace');
 });
+
+test('a workspace that holds a denied path does not give it back', { skip: !sandboxedHere && NEEDS }, async () => {
+  // Codex P1 4309388132: with no workspace seam and no cwd, the fallback
+  // can be the user's home, and the workspace was given back after the
+  // denials, so `~/.ssh` and the Stratus home showed through again.
+  const fixture = await fixtureHome();
+  const tool = createShellTool({ cwd: fixture.userHome, sandbox: 'required' }, {
+    home: fixture.userHome,
+    processEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+  });
+  const read = (command: string) => createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command } }, tool, session('ava'));
+  for (const target of [path.join(fixture.userHome, '.ssh', 'id_ed25519'), path.join(fixture.stratusHome, 'credentials.json')]) {
+    const result = await read(`cat ${target}`);
+    assert.equal(result.ok, false, `${target}: ${JSON.stringify(result.output)}`);
+    assert.doesNotMatch(output(result).stdout, /PRIVATE KEY|sk-secret/);
+  }
+  // The rest of it is still the workspace.
+  const ok = await read('echo hi > note.txt && cat outside.txt note.txt');
+  assert.equal(ok.ok, true, JSON.stringify(ok.output));
+  assert.equal(output(ok).stdout, "outsidehi\n");
+});
+
+test('bwrap covers a denied path inside the workspace again after binding the workspace', async () => {
+  const fixture = await fixtureHome();
+  const joined = bwrapArgs({ workspace: fixture.userHome, denied: [fixture.stratusHome], writable: [] }, '/bin/sh', []).join(' ');
+  assert.ok(joined.lastIndexOf(`--tmpfs ${fixture.stratusHome}`) > joined.indexOf(`--bind ${fixture.userHome} ${fixture.userHome}`), joined);
+});
