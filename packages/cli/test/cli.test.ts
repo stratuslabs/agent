@@ -8402,7 +8402,7 @@ test('setup does not say headless refuses a call an existing grant already cover
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'anthropic',
-    approvals: { mode: 'headless' },
+    approvals: { mode: 'headless', posture: 'guarded' },
   }));
   const { streams, output } = createStreams();
 
@@ -8423,7 +8423,7 @@ test('setup does not say headless refuses a call an existing grant already cover
   // and a schedule's destination *before* it reaches the headless refusal.
   // A flat "refused while unattended" would tell an operator that switching
   // to headless disabled unattended access that is still live.
-  assert.match(output.stdout, /headless — an uncovered dangerous call is refused\. Already-authorized ones still run/);
+  assert.match(output.stdout, /headless — an uncovered gated call is refused\. Already-authorized ones still run/);
   assert.match(output.stdout, /stratus grants/);
 });
 
@@ -13613,15 +13613,30 @@ test('plugins and the Approvals row say what the posture actually asks about', a
     return output.stdout;
   };
   const open = await plugins({});
-  assert.match(open, /approvals: headless — an uncovered dangerous call is refused\. Already-authorized ones still run/);
+  assert.match(open, /approvals: headless — an uncovered dangerous call is refused/);
+  // Codex P2 4310573242: no grant, scope, site or destination ever covers a
+  // dangerous call, so the all-open line must not offer them.
+  assert.doesNotMatch(open, /Already-authorized/);
   assert.match(open, /posture open for every agent \(gated tools run without asking; dangerous ones are refused, since headless asks nobody\)/);
   assert.doesNotMatch(open, /uncovered gated call/);
   const guarded = await plugins({ posture: 'guarded' });
   assert.match(guarded, /approvals: headless — an uncovered gated call is refused/);
   assert.doesNotMatch(guarded, /posture open/);
   const mixed = await plugins({ posture: 'guarded', agents: { blair: { posture: 'open' } } });
-  assert.match(mixed, /approvals: headless — an uncovered call that would ask is refused/);
+  assert.match(mixed, /approvals: headless — an uncovered call that would ask is refused\. Already-authorized gated calls still run/);
   assert.match(mixed, /posture guarded for every agent except blair/);
+  assert.match(guarded, /an uncovered gated call is refused\. Already-authorized ones still run/);
+  // Named with the command that lists each, because "already authorized"
+  // spans two of them: grants, scopes and sites are `stratus grants`, a
+  // schedule's destination is `stratus schedules`.
+  assert.match(guarded, /standing grants, approved command scopes and sites \(stratus grants <agent>\)/);
+  assert.match(guarded, /destinations pre-authorized with a schedule \(stratus schedules\)/);
+  assert.doesNotMatch(open, /refused\.;/);
+  // Codex P2 4310573248: an override for an agent no longer served does not
+  // make the fleet mixed.
+  const stale = await plugins({ posture: 'guarded', agents: { ghost: { posture: 'open' } } });
+  assert.match(stale, /approvals: headless — an uncovered gated call is refused/);
+  assert.doesNotMatch(stale, /posture open|would ask/);
 });
 
 test('plugins names every link in the chain from installed to callable', async () => {
@@ -13640,11 +13655,11 @@ test('plugins names every link in the chain from installed to callable', async (
   // after the standing grants and scopes, so the line must not claim that
   // only safe tools ever run.
   assert.match(output.stdout, /approvals: headless — an uncovered dangerous call is refused/);
-  // Named with the command that lists each, because "already authorized"
-  // spans two of them: grants, scopes and sites are `stratus grants`, a
-  // schedule's destination is `stratus schedules`.
-  assert.match(output.stdout, /standing grants, approved command scopes and sites \(stratus grants <agent>\)/);
-  assert.match(output.stdout, /destinations pre-authorized with a schedule \(stratus schedules\)/);
+  // Open for every agent, so nothing already authorized can cover what is
+  // refused: no grant covers a dangerous call. The guarded wording is
+  // pinned in 'plugins and the Approvals row say what the posture actually
+  // asks about'.
+  assert.doesNotMatch(output.stdout, /Already-authorized/);
   // Granted, and granted to whom.
   assert.match(output.stdout, /fs\.read\s+safe → stratus, blair/);
   // Registered but granted to nobody: installing is not granting.

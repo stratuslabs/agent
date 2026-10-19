@@ -256,9 +256,14 @@ const externalGateNote = (approvals: ApprovalsConfig): string => {
  * One line saying which agents run gated tools without asking, the way the
  * resolver decides it: the top-level posture with its exceptions named.
  */
-export const describePosture = (approvals: ApprovalsConfig, mode: 'headless' | 'remote'): string => {
+export const describePosture = (
+  approvals: ApprovalsConfig,
+  mode: 'headless' | 'remote',
+  servedAgentIds?: readonly string[],
+): string => {
   const top = resolveAgentApprovals(approvals, '').posture;
   const exceptions = Object.keys(approvals.agents ?? {})
+    .filter((agentId) => servedAgentIds === undefined || servedAgentIds.includes(agentId))
     .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
   const except = exceptions.length > 0 ? ` except ${exceptions.join(', ')}` : '';
   // Headless asks nobody: what the posture would ask about is refused.
@@ -502,19 +507,26 @@ export const describeUnattendedReach = async (
  * that would ask. With any agent open, the posture line follows the verdict
  * so the reader sees which agents run gated calls unasked.
  */
-const postureReach = (approvals: ApprovalsConfig, mode: 'headless' | 'remote'): { call: string; calls: string; posture: string[] } => {
-  const postures = new Set([
-    resolveAgentApprovals(approvals, '').posture,
-    ...Object.keys(approvals.agents ?? {}).map((agentId) => resolveAgentApprovals(approvals, agentId).posture),
-  ]);
+const postureReach = (
+  approvals: ApprovalsConfig,
+  mode: 'headless' | 'remote',
+  servedAgentIds: readonly string[] | undefined,
+): { call: string; calls: string; authorized: string; posture: string[] } => {
+  // The served roster when it is known: an override left behind for an
+  // agent no longer served changes nothing the daemon does.
+  const agentIds = servedAgentIds ?? ['', ...Object.keys(approvals.agents ?? {})];
+  const postures = new Set(agentIds.map((agentId) => resolveAgentApprovals(approvals, agentId).posture));
   if (!postures.has('open')) {
-    return { call: 'an uncovered gated call', calls: 'gated calls', posture: [] };
+    return { call: 'an uncovered gated call', calls: 'gated calls', authorized: ` Already-authorized ones still run: ${ALREADY_AUTHORIZED}`, posture: [] };
   }
+  // No grant, scope, site or destination ever covers a dangerous call, so
+  // the all-open line offers none of them, and the mixed one only for gated.
   const allOpen = postures.size === 1;
   return {
     call: allOpen ? 'an uncovered dangerous call' : 'an uncovered call that would ask',
     calls: allOpen ? 'dangerous calls' : 'calls that would ask',
-    posture: [describePosture(approvals, mode)],
+    authorized: allOpen ? '' : ` Already-authorized gated calls still run: ${ALREADY_AUTHORIZED}`,
+    posture: [describePosture(approvals, mode, servedAgentIds)],
   };
 };
 
@@ -526,10 +538,10 @@ export const unattendedReachParts = (
   apiReachable: boolean,
   env: CliEnvironment,
 ): string[] => {
-  const reach = postureReach(approvals, mode);
+  const reach = postureReach(approvals, mode, servedAgentIds);
   if (mode === 'headless') {
     return [
-      `headless — ${reach.call} is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`,
+      `headless — ${reach.call} is refused${reach.authorized ? `.${reach.authorized}` : ''}`,
       ...reach.posture,
       ...externalContentClause(approvals, servedAgentIds),
     ];
