@@ -279,6 +279,8 @@ export interface GatewayChannelAdapter {
   }): ReturnType<ConversationReader>;
   /** See `@stratusagent/channels`' `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
+  /** See `@stratusagent/channels`' `ChannelAdapter.conversationKindFor`. */
+  conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
   /**
    * Shows a person a form for a credential an agent asked for, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
@@ -383,6 +385,12 @@ export interface ApprovalTransport {
      * on one conversation is bound to the workspace it was made in.
      */
     accountFor(agentId: string, destination: string): string | undefined;
+    /**
+     * Whether a `channel:to` destination is a channel or a DM, asked of the
+     * agent's own app for that channel (`ChannelAdapter.conversationKindFor`).
+     * Undefined when no adapter can say.
+     */
+    conversationKindFor(agentId: string, destination: string): Promise<'channel' | 'direct' | undefined>;
   };
 }
 
@@ -1963,6 +1971,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
             const kind = destination.slice(0, separator);
             return channelCarrying(kind, agentId, (candidate) => candidate.accountFor !== undefined)
               .adapter?.accountFor?.(agentId);
+          },
+          conversationKindFor: async (agentId, destination) => {
+            const separator = destination.indexOf(':');
+            if (separator <= 0) {
+              return undefined;
+            }
+            const kind = destination.slice(0, separator);
+            const adapter = channelCarrying(kind, agentId, (candidate) => candidate.conversationKindFor !== undefined).adapter;
+            try {
+              return await adapter?.conversationKindFor?.(agentId, destination.slice(separator + 1));
+            } catch {
+              // Unknown, so the call asks: never a reason to allow.
+              return undefined;
+            }
           },
         },
         contributorOf: (toolName) => toolProvenance().get(toolName)?.package,

@@ -486,6 +486,16 @@ export interface ChannelAdapter {
    * lacks the method.
    */
   accountFor?(agentId: string): string | undefined;
+  /**
+   * Whether a conversation is a channel (`channel`, public or private) or
+   * a direct message (`direct`, including a group DM), as this agent's own
+   * app sees it. Undefined when it cannot say: no app, not connected, or
+   * a conversation it cannot see. The operator's standing channel
+   * authorization (`approvals.channels`) covers `channel` only, so an
+   * implementation never guesses `channel` from an id's shape. Optional:
+   * without it, that authorization never applies on this transport.
+   */
+  conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
 }
 
 export interface ChannelSessionKeyParts {
