@@ -8281,7 +8281,7 @@ test('setup does not claim every agent is covered when one is excluded', async (
   assert.equal(exitCode, 0);
   // The daemon's own verdict, which names the excluded agent rather than
   // counting it as covered.
-  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks and asks in Slack, approvers set for ava; none for juno, whose calls are denied on arrival/);
+  assert.match(output.stdout, /Approvals            remote — an uncovered dangerous call parks and asks in Slack, approvers set for ava; none for juno, whose calls are denied on arrival/);
   assert.doesNotMatch(output.stdout, /all agents/);
 });
 
@@ -8348,7 +8348,7 @@ test('setup does not say headless refuses a call an existing grant already cover
   // and a schedule's destination *before* it reaches the headless refusal.
   // A flat "refused while unattended" would tell an operator that switching
   // to headless disabled unattended access that is still live.
-  assert.match(output.stdout, /headless — an uncovered gated call is refused\. Already-authorized ones still run/);
+  assert.match(output.stdout, /headless — an uncovered dangerous call is refused\. Already-authorized ones still run/);
   assert.match(output.stdout, /stratus grants/);
 });
 
@@ -8457,7 +8457,7 @@ test('setup does not report a flat denial when the control API answers for anoth
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /reaches Slack and is denied on arrival/);
   // The clause a prefix would have dropped.
-  assert.match(output.stdout, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
+  assert.match(output.stdout, /no Slack channel can ask for stratus, so their dangerous calls park until the control API answers them/);
 });
 
 test('setup puts the whole approval verdict on the screen that sets it', async () => {
@@ -8499,7 +8499,7 @@ test('setup puts the whole approval verdict on the screen that sets it', async (
   const opened = output.stdout.slice(output.stdout.indexOf('Approvals — what happens'));
   const screen = opened.slice(0, opened.indexOf('1) Providers'));
   assert.match(screen, /reaches Slack and is denied on arrival/);
-  assert.match(screen, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
+  assert.match(screen, /no Slack channel can ask for stratus, so their dangerous calls park until the control API answers them/);
 });
 
 test('setup withholds the approval verdict when the roster will not load', async () => {
@@ -8597,7 +8597,7 @@ test('setup says remote approvals deny everything while no agent is connected to
   // The advice follows the verdict rather than replacing it: with the
   // control API installed a parked call is already answerable, and telling
   // the operator to connect Slack *instead* contradicted the row above.
-  assert.match(output.stdout, /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it[^\n]*No agent is connected to Slack, so connect one under Channels to be asked there/);
+  assert.match(output.stdout, /remote — an uncovered dangerous call parks with no Slack channel to ask through, so the control API is the only way to answer it[^\n]*No agent is connected to Slack, so connect one under Channels to be asked there/);
 });
 
 test('setup says remote approvals are denied when nothing can answer them at all', async () => {
@@ -8631,7 +8631,7 @@ test('setup says remote approvals are denied when nothing can answer them at all
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/);
+  assert.match(output.stdout, /remote — an uncovered dangerous call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/);
   // The verdict names the absent API ("no control API to answer it"), so
   // the assertion is that no route is offered, not that the words are gone.
   assert.doesNotMatch(output.stdout, /the control API is the only way/);
@@ -8673,7 +8673,7 @@ test('setup does not count an agent with no fallback channel as fully covered', 
   assert.equal(exitCode, 0);
   // The row carries the verdict and the screen that sets it carries the
   // qualifiers — the same split `stratus plugins` prints as one paragraph.
-  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks and asks in Slack, approvers set for ava/);
+  assert.match(output.stdout, /Approvals            remote — an uncovered dangerous call parks and asks in Slack, approvers set for ava/);
   assert.match(output.stdout, /approvers for ava\s+U01ABCDEF · no fallback channel/);
 });
 
@@ -8708,7 +8708,7 @@ test('setup does not offer approvers when the Slack channel package is not insta
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks with no Slack channel to ask through/);
+  assert.match(output.stdout, /Approvals            remote — an uncovered dangerous call parks with no Slack channel to ask through/);
   assert.doesNotMatch(output.stdout, /approvers set for ava/);
 });
 
@@ -13518,11 +13518,35 @@ test('plugins says which agents lose their grants after reading external content
   assert.equal(exitCode, 0);
   // "Already-authorized ones still run" is false for a gated agent the
   // first time it browses, so the summary names who it is false for.
-  assert.match(output.stdout, /approvals: headless — an uncovered gated call is refused/);
+  assert.match(output.stdout, /approvals: headless — an uncovered dangerous call is refused/);
   assert.match(
     output.stdout,
     /a conversation that has read external content runs nothing on a grant, for blair \(approvals\.externalContent\)/,
   );
+});
+
+test('plugins and the Approvals row say what the posture actually asks about', async () => {
+  // Codex P2 4310421766: under the default open posture the daemon runs
+  // gated calls, but the summary said an uncovered dangerous call is refused.
+  const { home, cwd } = await writePluginFixture();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  const plugins = async (approvals: unknown) => {
+    await writeFile(configPath, JSON.stringify({ ...config, approvals }));
+    const { streams, output } = createStreams();
+    assert.equal(await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } }), 0);
+    return output.stdout;
+  };
+  const open = await plugins({});
+  assert.match(open, /approvals: headless — an uncovered dangerous call is refused\. Already-authorized ones still run/);
+  assert.match(open, /posture open for every agent \(gated tools run without asking; dangerous ones still ask\)/);
+  assert.doesNotMatch(open, /uncovered gated call/);
+  const guarded = await plugins({ posture: 'guarded' });
+  assert.match(guarded, /approvals: headless — an uncovered gated call is refused/);
+  assert.doesNotMatch(guarded, /posture open/);
+  const mixed = await plugins({ posture: 'guarded', agents: { blair: { posture: 'open' } } });
+  assert.match(mixed, /approvals: headless — an uncovered call that would ask is refused/);
+  assert.match(mixed, /posture guarded for every agent except blair/);
 });
 
 test('plugins names every link in the chain from installed to callable', async () => {
@@ -13540,7 +13564,7 @@ test('plugins names every link in the chain from installed to callable', async (
   // installed packages has ever shown — and `headless` refuses one *last*,
   // after the standing grants and scopes, so the line must not claim that
   // only safe tools ever run.
-  assert.match(output.stdout, /approvals: headless — an uncovered gated call is refused/);
+  assert.match(output.stdout, /approvals: headless — an uncovered dangerous call is refused/);
   // Named with the command that lists each, because "already authorized"
   // spans two of them: grants, scopes and sites are `stratus grants`, a
   // schedule's destination is `stratus schedules`.
@@ -13696,7 +13720,7 @@ test('plugins does not claim Slack is asked when nothing can ask it', async () =
   // route and then withdrew it in the same breath.
   assert.match(
     output.stdout,
-    /approvals: remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/,
+    /approvals: remote — an uncovered dangerous call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/,
   );
   assert.doesNotMatch(output.stdout, /asks in Slack/);
   // The same qualification the headless line carries: the engine allows an
@@ -13958,7 +13982,7 @@ test('plugins names the served agents no channel can ask for, and approvers with
   // simply doomed — it waits for a client rather than for the timeout.
   assert.match(
     output.stdout,
-    /no Slack channel can ask for blair, so their gated calls park until the control API answers them/,
+    /no Slack channel can ask for blair, so their dangerous calls park until the control API answers them/,
   );
   // Approvers with nowhere to be asked outside their own thread: a turn
   // that did not start in Slack reaches the adapter with no destination.
@@ -14254,7 +14278,7 @@ test('plugins says a gated call waits out the timeout only when nothing can answ
     },
   });
 
-  assert.match(output.stdout, /no channel can ask for blair, so their gated calls wait out the timeout and are denied/);
+  assert.match(output.stdout, /no channel can ask for blair, so their dangerous calls wait out the timeout and are denied/);
   assert.doesNotMatch(output.stdout, /the control API answers them/);
 });
 
@@ -14310,7 +14334,7 @@ test('plugins does not both deny and offer the control API in one verdict', asyn
 
   assert.match(
     output.stdout,
-    /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it/,
+    /remote — an uncovered dangerous call parks with no Slack channel to ask through, so the control API is the only way to answer it/,
   );
   // The contradiction, in either of the two shapes it took.
   assert.doesNotMatch(output.stdout, /wait out the approval timeout and then be denied/);
@@ -14342,7 +14366,7 @@ test('plugins does not offer the control API where Slack denies first', async ()
 
   assert.match(
     output.stdout,
-    /remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured/,
+    /remote — an uncovered dangerous call reaches Slack and is denied on arrival, because no approvers are configured/,
   );
   assert.doesNotMatch(output.stdout, /the control API is the only way to answer it/);
   // The adapter denies synchronously here, so nothing parks and nobody is

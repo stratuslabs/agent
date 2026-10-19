@@ -223,7 +223,7 @@ them fails quietly on its own. `stratus plugins` walks all four:
 
 ```console
 $ stratus plugins
-approvals: headless — an uncovered gated call is refused. Already-authorized ones still run: standing grants, approved command scopes and sites (stratus grants <agent>), and destinations pre-authorized with a schedule (stratus schedules)
+approvals: headless — an uncovered dangerous call is refused. Already-authorized ones still run: standing grants, approved command scopes and sites (stratus grants <agent>), and destinations pre-authorized with a schedule (stratus schedules); posture open for every agent (gated tools run without asking; dangerous ones still ask)
 
 @stratusagent/tool-fs         installed, enabled
   fs.read                     safe → blair
@@ -325,8 +325,14 @@ spawn every server you configured. Two consequences worth knowing:
   only a call scoped by destination, such as an outbound `message.send`,
   lasting just the session.
 
+  The verdict names what reaches the approval path under the posture:
+  dangerous calls when every agent is open (the default; gated ones run
+  unasked), gated calls when every agent is guarded, and calls that would
+  ask when they differ, followed by the posture line whenever an agent is
+  open.
+
   In `remote` the line also names what is missing: an agent the daemon
-  serves that no Slack channel can ask for — its gated calls park until the
+  serves that no Slack channel can ask for — its calls that ask park until the
   control API answers them, or, with no API serving either, until the
   timeout denies them, which is what `stratus serve` warns about at startup.
   Where nothing is askable in Slack at all, the line says so once rather

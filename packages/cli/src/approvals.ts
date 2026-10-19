@@ -494,6 +494,29 @@ export const describeUnattendedReach = async (
  * now; a menu that wants a shorter line takes fewer clauses, never
  * different words.
  */
+/**
+ * What reaches the approval path under the posture: gated calls when every
+ * agent is guarded, dangerous ones when every agent is open (the open
+ * posture runs gated calls before anything is asked), and, mixed, the calls
+ * that would ask. With any agent open, the posture line follows the verdict
+ * so the reader sees which agents run gated calls unasked.
+ */
+const postureReach = (approvals: ApprovalsConfig): { call: string; calls: string; posture: string[] } => {
+  const postures = new Set([
+    resolveAgentApprovals(approvals, '').posture,
+    ...Object.keys(approvals.agents ?? {}).map((agentId) => resolveAgentApprovals(approvals, agentId).posture),
+  ]);
+  if (!postures.has('open')) {
+    return { call: 'an uncovered gated call', calls: 'gated calls', posture: [] };
+  }
+  const allOpen = postures.size === 1;
+  return {
+    call: allOpen ? 'an uncovered dangerous call' : 'an uncovered call that would ask',
+    calls: allOpen ? 'dangerous calls' : 'calls that would ask',
+    posture: [describePosture(approvals)],
+  };
+};
+
 export const unattendedReachParts = (
   mode: 'headless' | 'remote',
   approvals: ApprovalsConfig,
@@ -502,9 +525,11 @@ export const unattendedReachParts = (
   apiReachable: boolean,
   env: CliEnvironment,
 ): string[] => {
+  const reach = postureReach(approvals);
   if (mode === 'headless') {
     return [
-      `headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`,
+      `headless — ${reach.call} is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`,
+      ...reach.posture,
       ...externalContentClause(approvals, servedAgentIds),
     ];
   }
@@ -547,8 +572,8 @@ export const unattendedReachParts = (
   const verdict = (): string => {
     if (askable.length === 0) {
       return apiReachable
-        ? `remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
-        : 'remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it '
+        ? `remote — ${reach.call} parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
+        : `remote — ${reach.call} parks with no channel to ask through and no control API to answer it, so it `
           + (expires
             ? 'waits out the approval timeout and is denied'
             : 'is never answered: this daemon\'s approval timeout is 0, so it parks indefinitely');
@@ -559,11 +584,11 @@ export const unattendedReachParts = (
     // Same defect as the branch above, one case over — found by auditing
     // the rest of this function after that one, not by review.
     if (covered.length === 0) {
-      return 'remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured';
+      return `remote — ${reach.call} reaches Slack and is denied on arrival, because no approvers are configured`;
     }
-    return `remote — an uncovered gated call parks and asks in Slack, ${slack}`;
+    return `remote — ${reach.call} parks and asks in Slack, ${slack}`;
   };
-  const parts = [verdict()];
+  const parts = [verdict(), ...reach.posture];
   // The reverse of a stale token, and the failure that actually bites: an
   // agent the daemon serves that no channel can ask for parks its gated
   // calls until the timeout denies them. `runServe` warns about exactly
@@ -582,9 +607,9 @@ export const unattendedReachParts = (
     // these calls wait for a client rather than for the timeout — a very
     // different thing to tell an operator.
     parts.push(apiReachable
-      ? `no Slack channel can ask for ${unreachable.join(', ')}, so their gated calls park until the control `
+      ? `no Slack channel can ask for ${unreachable.join(', ')}, so their ${reach.calls} park until the control `
         + `API answers them${expires ? ' or the timeout denies them' : ' — with a timeout of 0, nothing else ever will'}`
-      : `no channel can ask for ${unreachable.join(', ')}, so their gated calls `
+      : `no channel can ask for ${unreachable.join(', ')}, so their ${reach.calls} `
         + (expires ? 'wait out the timeout and are denied' : 'park indefinitely: this daemon\'s approval timeout is 0'));
   }
   // Stored tokens are a *configured* route, not a live one. The adapter
