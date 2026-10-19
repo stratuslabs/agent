@@ -448,3 +448,41 @@ test('a sandboxed command can fill a writable cache that did not exist yet', { s
   const result = await run({ writablePaths: [cache] }, fixture, `mkdir -p ${cache}/pkg && echo ok > ${cache}/pkg/f && cat ${cache}/pkg/f`);
   assert.equal(output(result).stdout, 'ok\n', JSON.stringify(result.output));
 });
+
+test('a temp directory other than /tmp gets its own private tmpfs on Linux, before anything binds over it', async () => {
+  // Codex P2 4315505054: with TMPDIR elsewhere, only /tmp was writable.
+  const fixture = await fixtureHome();
+  const custom = path.join(fixture.userHome, 'scratch-tmp');
+  await mkdir(custom, { recursive: true });
+  const cache = path.join(custom, 'cache');
+  await mkdir(cache, { recursive: true });
+  const joined = bwrapArgs({ workspace: fixture.workspace, denied: [], writable: [cache], tmp: custom }, '/bin/sh', []).join(' ');
+  assert.ok(joined.includes(`--tmpfs ${custom}`), joined);
+  assert.ok(joined.indexOf(`--tmpfs ${custom}`) < joined.indexOf(`--bind ${cache} ${cache}`), 'writable paths bind over it');
+  // Under /tmp it is covered already; one holding the workspace would hide it.
+  await mkdir('/tmp/stratus-test-tmp', { recursive: true }).catch(() => undefined);
+  for (const tmp of ['/tmp/stratus-test-tmp', '/tmp', path.dirname(fixture.workspace), '/']) {
+    const other = bwrapArgs({ workspace: fixture.workspace, denied: [], writable: [], tmp }, '/bin/sh', []);
+    const covered = other.filter((arg, i) => arg === '--tmpfs' && other[i + 1] === tmp).length;
+    assert.equal(covered, tmp === '/tmp' ? 1 : 0, tmp);
+  }
+});
+
+test('stored tokens of common developer CLIs are denied', async () => {
+  // Codex P1 4315505028: `cargo login` stores the registry token in
+  // ~/.cargo/credentials.toml (legacy ~/.cargo/credentials), or under $CARGO_HOME.
+  const fixture = await fixtureHome();
+  const cargoHome = path.join(fixture.userHome, 'rust', 'cargo');
+  const { seen } = await capture({}, fixture, { processEnv: { PATH: '/usr/bin:/bin', CARGO_HOME: cargoHome } });
+  for (const entry of [
+    '.cargo/credentials.toml', '.cargo/credentials', '.gem/credentials', '.config/hub', '.config/glab-cli',
+    '.terraform.d/credentials.tfrc.json', '.vault-token', '.pulumi/credentials.json', '.m2/settings.xml',
+    '.m2/settings-security.xml', '.gradle/gradle.properties', '.composer/auth.json', '.config/composer/auth.json',
+    '.databrickscfg', '.config/doctl', '.oci', '.config/hcloud', '.claude/.credentials.json', '.codex/auth.json',
+  ]) {
+    assert.ok(seen!.denied.includes(path.join(fixture.userHome, entry)), entry);
+  }
+  for (const entry of ['credentials.toml', 'credentials']) {
+    assert.ok(seen!.denied.includes(path.join(cargoHome, entry)), `$CARGO_HOME/${entry}`);
+  }
+});

@@ -41,6 +41,26 @@ export const DEFAULT_DENIED_HOME_PATHS: readonly string[] = [
   '.password-store',
   '.pypirc',
   'Library/Keychains',
+  // Tokens developer CLIs store after a login.
+  '.cargo/credentials.toml',
+  '.cargo/credentials',
+  '.gem/credentials',
+  '.config/hub',
+  '.config/glab-cli',
+  '.terraform.d/credentials.tfrc.json',
+  '.vault-token',
+  '.pulumi/credentials.json',
+  '.m2/settings.xml',
+  '.m2/settings-security.xml',
+  '.gradle/gradle.properties',
+  '.composer/auth.json',
+  '.config/composer/auth.json',
+  '.databrickscfg',
+  '.config/doctl',
+  '.oci',
+  '.config/hcloud',
+  '.claude/.credentials.json',
+  '.codex/auth.json',
   // SSH agents that keep their socket under the home: 1Password (Linux and
   // macOS) and Secretive. An agent signs with keys no file check sees.
   '.1password',
@@ -94,6 +114,12 @@ export const userRuntimeEndpoints = (processEnv: NodeJS.ProcessEnv, uid: number 
  * command can list). `/private/tmp` is otherwise writable to the command;
  * Linux gives it a private `/tmp` already.
  */
+/** Cargo's token files under `$CARGO_HOME`, when it moves them out of `~/.cargo`. */
+export const cargoHomeCredentials = (processEnv: NodeJS.ProcessEnv): string[] =>
+  processEnv.CARGO_HOME && path.isAbsolute(processEnv.CARGO_HOME)
+    ? ['credentials.toml', 'credentials'].map((entry) => path.join(processEnv.CARGO_HOME!, entry))
+    : [];
+
 export const credentialAgentEndpoints = (
   processEnv: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
@@ -274,8 +300,31 @@ export const darwinProfile = (policy: SandboxPolicy): string => {
  * shows through a covered Stratus home. A fresh pid and IPC namespace keep
  * the command from signalling the daemon or other agents.
  */
+/**
+ * The daemon's temp directory when it is not under `/tmp`, which gets a
+ * private tmpfs of its own the way `/tmp` does, so tools that honor
+ * `TMPDIR` can write there. Not one that holds the workspace or the
+ * starting directory (`TMPDIR=$HOME`): an empty tmpfs there would hide the
+ * toolchains a command needs.
+ */
+const privateTmpFor = (policy: SandboxPolicy): string | undefined => {
+  if (!policy.tmp) {
+    return undefined;
+  }
+  const tmp = path.resolve(policy.tmp);
+  if (tmp === '/' || isWithin('/tmp', tmp) || !existsSync(tmp) || !statSync(tmp).isDirectory()) {
+    return undefined;
+  }
+  const held = [policy.workspace, ...(policy.cwd ? [policy.cwd] : [])].flatMap(spellings);
+  return held.some((dir) => isWithin(tmp, dir)) ? undefined : tmp;
+};
+
 export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: string[]): string[] => {
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
+  const tmp = privateTmpFor(policy);
+  if (tmp) {
+    args.push('--tmpfs', tmp);
+  }
   for (const dir of new Set([...policy.writable, ...(policy.cwd ? [policy.cwd] : [])])) {
     if (existsSync(dir)) {
       args.push('--bind', dir, dir);

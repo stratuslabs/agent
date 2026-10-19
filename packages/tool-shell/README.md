@@ -104,7 +104,8 @@ Every command runs under an OS sandbox that keeps it out of the Stratus home
 and your credentials, whatever the command says:
 
 - **Readable and writable:** the agent's workspace, its starting directory,
-  temp, and package-manager caches (`~/.npm`, `~/.cache`, `~/Library/Caches`,
+  temp (on Linux a private `/tmp`, and a private one over the daemon's
+  `TMPDIR` too when that is elsewhere), and package-manager caches (`~/.npm`, `~/.cache`, `~/Library/Caches`,
   pnpm, bun, yarn).
 - **Readable:** the rest of the system, so toolchains work as usual.
 - **Not readable or writable:** the Stratus home (`~/.stratus`, or
@@ -115,9 +116,14 @@ and your credentials, whatever the command says:
   `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, git
   credential files, `~/.docker`, `~/.fly`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
   `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, `~/.1password`,
-  1Password's group container and Secretive's container on macOS, the Hugging
+  1Password's group container and Secretive's container on macOS, the
+  tokens developer CLIs store after a login (Cargo's `credentials.toml`,
+  also under `$CARGO_HOME`, RubyGems, hub, glab, Terraform, Vault, Pulumi,
+  Maven and Gradle settings, Composer, Databricks, doctl, OCI, hcloud,
+  Claude Code's `~/.claude/.credentials.json`, Codex's `~/.codex/auth.json`), the Hugging
   Face token under `~/.cache/huggingface`, and the macOS keychains (file and
-  service). With a `workspaceRoot`, the other agents' workspaces under it;
+  service). Any credential file not listed stays readable: add it to
+  `deniedPaths`. With a `workspaceRoot`, the other agents' workspaces under it;
   a root that exists but can't be listed refuses the command.
 - **No connection:** container runtime sockets (`/var/run/docker.sock`,
   containerd, podman, CRI-O, BuildKit), which hand out the whole host; the
