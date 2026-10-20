@@ -285,8 +285,9 @@ only answers mentions or judges; the others only hear it. Under `admit: "princip
 principal can still stop the agent by naming it (`@agent stop`), and
 nothing else they send is admitted.
 
-A turn the daemon picked back up after a restart can't be stopped from Slack
-yet.
+A turn the daemon picked back up after a restart, or one something else
+started in that conversation such as a schedule, is stopped the same way,
+and the thread reads "Stopped by @you."
 
 ## Sending an image
 

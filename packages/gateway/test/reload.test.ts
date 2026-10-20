@@ -927,6 +927,77 @@ test('a turn recovered from a parked approval is aborted at the window like any 
   assert.equal(session?.lastError, RESTARTING_TURN_ERROR);
 });
 
+test('abortTurns stops a turn recovered after a restart on its own session only', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, 'state');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // Two sessions parked on an approval when the last daemon died. Each
+  // recovery runs its parked call and then blocks on the provider until its
+  // signal aborts, so both are running turns no channel started.
+  const seed = new ShardedSessionStore({ stateDir });
+  const now = new Date().toISOString();
+  for (const id of ['stopped-session', 'other-session']) {
+    await seed.create({
+      id,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'pending_approval',
+      messages: [
+        { id: 'm1', role: 'user', content: 'go', createdAt: now },
+        { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+      ],
+      metadata: {
+        [PENDING_APPROVAL_METADATA_KEY]: {
+          call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+          remaining: [],
+          parkedAt: now,
+        },
+      },
+    });
+  }
+  seed.close();
+
+  let calls = 0;
+  let bothBlocked!: () => void;
+  const blocked = new Promise<void>((resolve) => { bothBlocked = resolve; });
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      calls += 1;
+      if (calls === 2) {
+        bothBlocked();
+      }
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, stateDir, log: () => {}, warn: () => {} });
+  const failed = nextEvent(gateway.bus, 'session.failed');
+  await gateway.start();
+  await blocked;
+
+  // Nothing running there: nothing aborted, nothing changed.
+  assert.equal(gateway.abortTurns('no-such-session', 'Stopped from Slack by U1'), 0);
+
+  assert.equal(gateway.abortTurns('stopped-session', 'Stopped from Slack by U1'), 1);
+  const event = await failed;
+  assert.equal(event.sessionId, 'stopped-session');
+  assert.equal(event.error, 'Stopped from Slack by U1');
+
+  // The other recovered turn is still running: a second stop there still
+  // finds it, and stopping the daemon then has nothing left to wait on.
+  assert.equal(gateway.abortTurns('other-session', 'Stopped from Slack by U2'), 1);
+  await gateway.stop();
+
+  const after = new ShardedSessionStore({ stateDir });
+  const stopped = await after.get('stopped-session');
+  const other = await after.get('other-session');
+  after.close();
+  assert.equal(stopped?.status, 'failed');
+  assert.equal(stopped?.lastError, 'Stopped from Slack by U1');
+  assert.equal(other?.status, 'failed');
+  assert.equal(other?.lastError, 'Stopped from Slack by U2');
+});
+
 test('channels stay connected while a restart drains, so a message sent then is refused as a restart, not lost', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');

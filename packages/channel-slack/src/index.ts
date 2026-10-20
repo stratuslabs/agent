@@ -3086,6 +3086,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const intakeInFlight = new Map<string, number>();
   const stopsBySession = new Map<string, { count: number; by: string }>();
+  /**
+   * Who stopped a turn no renderer here was showing (card 501), by session,
+   * so its failure reads as the stop it was. Taken by the next unrendered
+   * outcome reported for the session, whichever it is.
+   */
+  const unrenderedStops = new Map<string, string>();
   const displayNames = new Map<string, string>();
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
@@ -4963,6 +4969,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     behind: HandoverClaim | undefined,
     files: readonly string[],
   ): Promise<ReportedOutcome> => {
+    const stoppedBy = unrenderedStops.get(event.sessionId);
+    unrenderedStops.delete(event.sessionId);
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
       return NOTHING_REPORTED;
@@ -5015,7 +5023,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connection,
       channel,
       thread,
-      messageChunks(`Something went wrong: ${event.error}`),
+      messageChunks(stoppedBy === undefined ? `Something went wrong: ${event.error}` : `Stopped by <@${stoppedBy}>.`),
       async () => {
         landed = await uploadUnrenderedFiles(connection, channel, thread, files);
       },
@@ -5037,6 +5045,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     behind: HandoverClaim | undefined,
     files: readonly string[],
   ): Promise<ReportedOutcome> => {
+    // A stopped turn that finished anyway: the stop missed, and the reply
+    // stands.
+    unrenderedStops.delete(event.sessionId);
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
       return NOTHING_REPORTED;
@@ -6358,19 +6369,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const stopTurns = (connection: AgentConnection, sessionId: string, userId: string, channel: string, fromIntake = false): boolean => {
     const running = renderers.get(sessionId) ?? [];
     const inIntake = fromIntake ? 0 : intakeInFlight.get(sessionId) ?? 0;
-    if (running.length === 0 && inIntake === 0) {
-      return false;
-    }
+    const reason = `Stopped from Slack by ${userId}`;
     for (const renderer of running) {
       if (renderer.stoppedBy === undefined) {
         renderer.stoppedBy = userId;
-        renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${userId}`));
+        renderer.controller.abort(new RunAbortedError(reason));
       }
+    }
+    // A turn no renderer of this process started (card 501): one the
+    // gateway recovered after a restart, or another caller's on this
+    // session. The renderers' turns were aborted just above through their
+    // own signals, so this counts only the others.
+    const unrendered = gatewayRef?.abortTurns?.(sessionId, reason) ?? 0;
+    if (unrendered > 0) {
+      unrenderedStops.set(sessionId, userId);
+    }
+    if (running.length === 0 && inIntake === 0 && unrendered === 0) {
+      return false;
     }
     if (inIntake > 0) {
       stopsBySession.set(sessionId, { count: (stopsBySession.get(sessionId)?.count ?? 0) + 1, by: userId });
     }
-    log(`slack: ${userId} stopped ${running.length + inIntake} turn(s) of ${connection.config.agentId} in ${channel}`);
+    log(`slack: ${userId} stopped ${running.length + inIntake + unrendered} turn(s) of ${connection.config.agentId} in ${channel}`);
     return true;
   };
 
