@@ -117,6 +117,9 @@ const THREAD_HANDOVER_DEPTH = 32;
  * costs a thread read or two, never a wrong placement.
  */
 const LIVE_FROM_MARGIN_MS = 60_000;
+
+/** `liveFrom` while `start()` runs: later than any message. */
+const NOT_LIVE_YET = '9999999999.999999';
 /**
  * How many agent mentions one thread admits in a row before a person has
  * to speak there again (card 513): enough for a question, an answer and a
@@ -3095,8 +3098,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * message a read covered. A read stops at the message it places, so one
    * for a message from before this process started (delivered late, or a
    * replay after a restart) leaves out every take between that message and
-   * the start (card 562). `liveFrom` is the start: claims since were seen
-   * live. Goes with the thread's record.
+   * the start (card 562). `liveFrom` is when every socket was up, plus a
+   * margin for clock skew: claims since were seen live. Goes with the
+   * thread's record.
    */
   const threadReadUntil = new Map<string, string>();
   let liveFrom: string | undefined;
@@ -7019,8 +7023,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     async start(gateway) {
       gatewayRef = gateway;
-      const startedMs = now() + LIVE_FROM_MARGIN_MS;
-      liveFrom = `${Math.floor(startedMs / 1000)}.${String((startedMs % 1000) * 1000).padStart(6, '0')}`;
+      // Nothing counts as seen live until every socket is up (Codex
+      // 4321128637): a message sent while the sockets are still coming up
+      // reaches none of them, so a read stopping before it stops short.
+      liveFrom = NOT_LIVE_YET;
       unsubscribe = gateway.bus.subscribe((event) => {
         // Approval traffic is not part of a reply: it gets its own message
         // with its own lifetime, and routing it through the running turn's
@@ -7205,6 +7211,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
+      const liveMs = now() + LIVE_FROM_MARGIN_MS;
+      liveFrom = `${Math.floor(liveMs / 1000)}.${String((liveMs % 1000) * 1000).padStart(6, '0')}`;
     },
 
     async stop() {

@@ -12482,6 +12482,50 @@ test('after a restart, a host clock behind Slack\'s does not make a read that st
   );
 });
 
+test('after a restart, a read for a message sent while the sockets were coming up does not look complete', async () => {
+  // Codex 4321128637 on #385: the live boundary was taken on entry to
+  // start(), before the slow connects. A message sent while the sockets
+  // were still coming up (621070, delivered later) was counted as seen
+  // live, so its read, which stopped before Ava's take 3 at 621100, looked
+  // complete and gave the reply to Bea.
+  const ts = (n: number): string => `${621_000 + n}.000000`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: ts(10), user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'take 1' },
+    { ts: ts(20), user: 'U-DYLAN', text: 'step 2' },
+    { ts: ts(30), user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'take 2' },
+    { ts: ts(90), user: 'U-DYLAN', text: 'step 3' },
+    { ts: ts(100), user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'take 3' },
+  ];
+  let clock = 621_000_000;
+  const { sockets, webs, gateway, adapter, all } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(100))], ['slack:bea:T1:C1:' + ts(0), Number(ts(30))]],
+    { bea: 'judge', now: () => clock },
+  );
+  // Each connect takes a minute.
+  for (const socket of [sockets.ava, sockets.bea]) {
+    const start = socket.start.bind(socket);
+    socket.start = async () => {
+      clock += 60_000;
+      await start();
+    };
+  }
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `${621_500 + (seq += 1)}.000000`;
+  }
+  await adapter.start(gateway);
+  await all(channelMessage({ text: 'sent while connecting', ts: ts(70), thread: ts(0) }));
+  await all(channelMessage({ text: 'and now', ts: ts(400), thread: ts(0) }));
+  await adapter.stop();
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('and now')).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]),
+    [['ava', true]],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
 test('after a restart, a read for a message sent since the start warms the record fully, and the next reply needs no read', async () => {
   // Card 562's guard is only for a read that stopped before the start: a
   // read for a live message saw every take before it, so the record places
