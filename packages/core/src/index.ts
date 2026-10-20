@@ -3169,6 +3169,11 @@ export interface Tool {
    * as the call's error, so it says what to do instead. The tool's own
    * `execute` must still refuse the same call, because a hook that cannot
    * tell (a lookup that failed) answers nothing.
+   *
+   * It runs before any tool event, so a host that watches for a stalled
+   * model (the gateway's idle watchdog) cannot tell a slow hook from a
+   * silent provider. Keep it to a quick lookup, and a host that wires one
+   * up holds it the way it holds an approval wait.
    */
   refusalFor?(input: JsonObject, session: Session): string | undefined | Promise<string | undefined>;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;

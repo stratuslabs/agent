@@ -196,7 +196,7 @@ const optionalId = (input: JsonObject, key: string, tool = MESSAGE_READ_TOOL_NAM
  * message, which no channel reads from outside it. Undefined when it is
  * readable or the channel cannot say, and then the read asks as before.
  */
-export type ConversationReadRefusal = (input: { agentId: string; source: ScheduleDestination }) => Promise<string | undefined>;
+export type ConversationReadRefusal = (input: { agentId: string; sessionId: string; source: ScheduleDestination }) => Promise<string | undefined>;
 
 /** The refusal a direct-message read gets, before any approval prompt. */
 export const directMessageReadRefusal = (destination: string): string =>
@@ -240,7 +240,7 @@ export const createMessageReadTool = (
     ? {
         async refusalFor(input: JsonObject, session: Session) {
           const source = parseDestinationInput(input.source);
-          return source ? options.refusalFor?.({ agentId: session.agent.id, source }) : undefined;
+          return source ? options.refusalFor?.({ agentId: session.agent.id, sessionId: session.id, source }) : undefined;
         },
       }
     : {}),

@@ -503,6 +503,82 @@ test('a message.read of a direct message is refused before any approval prompt, 
   }
 });
 
+test('a slow DM lookup before message.read holds the watchdog on a provider that hosts its own loop', async () => {
+  // The refusal check runs before any tool event, so on a streaming
+  // provider that hosts its own loop nothing tells the watchdog a tool is
+  // being judged. A channel lookup slower than the idle timeout must not
+  // read as a stalled model.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: anthropic\ntools: [message.read]\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat' } }),
+  );
+  const IDLE_MS = 300;
+  let toolText = '';
+  const queryFn = ((params: { options?: unknown }) => {
+    const options = params.options as {
+      mcpServers?: Record<string, {
+        instance?: { _registeredTools?: Record<string, { handler: (a: unknown, b: unknown) => Promise<unknown> }> };
+      }>;
+    };
+    return (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
+      yield {
+        type: 'stream_event',
+        session_id: 'sdk-1',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'reading' } },
+      };
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.message_read?.handler;
+      if (!handler) {
+        throw new Error('the tool was not bridged');
+      }
+      toolText = JSON.stringify(await handler({ source: { channel: 'fixture', to: 'D123' } }, {}));
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'all done', session_id: 'sdk-1' };
+    })();
+  }) as never;
+  const host = await hostFor({
+    'stratus-plugin-chan-a': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('a', (context) => {
+        context.channels!.register({
+          agents: ['ava'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async conversationKindFor() {
+              await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 3));
+              return 'direct';
+            },
+            async readConversation() {
+              throw new Error('never reached');
+            },
+          },
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, queryFn },
+    idleTimeoutMs: IDLE_MS,
+    plugins: { 'stratus-plugin-chan-a': {} },
+    pluginHost: host,
+    approvals: { approve: async () => true },
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    const session = await gateway.dispatch({ sessionId: 'slow-kind-1', agentId: 'ava', userMessage: 'read D123' });
+    assert.equal(session.status, 'completed', `session failed: ${session.lastError ?? ''}`);
+    assert.match(toolText, /approval cannot unlock/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a plugin executor selected by the config runs the commands, and a selection nothing registers refuses to start', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');

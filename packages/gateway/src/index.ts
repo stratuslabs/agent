@@ -2532,13 +2532,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the channel will refuse anyway only teaches people to click yes.
     // Asked of the same app the read would go through; a channel that
     // cannot say leaves the call to ask, and its own rule still applies.
-    refusalFor: async ({ agentId, source }) => {
+    //
+    // Held as an approval wait, because that is the phase it stands in
+    // for: it runs before any tool event, so on a streaming provider that
+    // hosts its own loop a slow lookup would otherwise read as a stalled
+    // model and the watchdog would abort a healthy turn.
+    refusalFor: async ({ agentId, sessionId, source }) => {
       const { adapter } = channelCarrying(source.channel, agentId, (candidate) => candidate.conversationKindFor !== undefined);
+      if (!adapter?.conversationKindFor) {
+        return undefined;
+      }
       let kind: 'channel' | 'direct' | undefined;
+      const release = holdApprovalWait(sessionId);
       try {
-        kind = await adapter?.conversationKindFor?.(agentId, source.to);
+        kind = await adapter.conversationKindFor(agentId, source.to);
       } catch {
         kind = undefined;
+      } finally {
+        release();
       }
       return kind === 'direct' ? directMessageReadRefusal(`${source.channel}:${source.to}`) : undefined;
     },
