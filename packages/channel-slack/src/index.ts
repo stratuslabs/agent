@@ -4997,7 +4997,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
-    if (routing.unaddressed === true && routing.reply === undefined) {
+    if (stoppedBy === undefined && routing.unaddressed === true && routing.reply === undefined) {
+      // A stop is someone asking, so a stopped turn always says who
+      // stopped it, judged or not.
+      //
       // A turn nobody asked for that said nothing before it broke — the
       // daemon died inside it, and the next start failed it with no
       // renderer here to keep quiet for it. The same rule as the lazy

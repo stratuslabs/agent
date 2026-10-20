@@ -11307,6 +11307,29 @@ test("an approver's stop reaches a turn this process never started, such as one 
   assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Stopped by <@U-DYLAN>.', '100.1']]);
 });
 
+test('a recovered judging turn that had said nothing still reads as stopped when an approver stops it', async () => {
+  // An unaddressed turn that saved no reply fails silently on its own; a
+  // stop is someone asking, so the thread says who stopped it.
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 1;
+  gateway.sessionRouting = async (sessionId) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? {
+          agentId: 'ava',
+          unaddressed: true,
+          metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' },
+        }
+      : undefined;
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop'));
+  await socket.settled();
+  await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:100.1', error: 'Stopped from Slack by U-DYLAN' });
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Stopped by <@U-DYLAN>.', '100.1']]);
+});
+
 test('a stop from someone who is not an approver never asks the gateway to abort anything', async () => {
   const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
   let asked = 0;

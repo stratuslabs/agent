@@ -285,9 +285,10 @@ only answers mentions or judges; the others only hear it. Under `admit: "princip
 principal can still stop the agent by naming it (`@agent stop`), and
 nothing else they send is admitted.
 
-A turn the daemon picked back up after a restart, or one something else
-started in that conversation such as a schedule, is stopped the same way,
-and the thread reads "Stopped by @you."
+A turn the daemon picked back up after a restart is stopped the same way,
+and the thread reads "Stopped by @you." A scheduled firing runs in its own
+session, not the thread's, so a `stop` under a schedule's report does not
+reach it.
 
 ## Sending an image
 
