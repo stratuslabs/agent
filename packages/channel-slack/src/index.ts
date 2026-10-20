@@ -6384,10 +6384,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // session. The renderers' turns were aborted just above through their
     // own signals, so this counts only the others.
     const unrendered = gatewayRef?.abortTurns?.(sessionId, reason) ?? 0;
+    // A turn stopped earlier that has not reported its outcome yet is
+    // already aborted, so the gateway no longer counts it; a repeated stop
+    // is still a stop, not a message for a new turn to answer.
+    const winding = unrenderedStops.has(sessionId);
     if (unrendered > 0) {
       unrenderedStops.set(sessionId, userId);
     }
-    if (running.length === 0 && inIntake === 0 && unrendered === 0) {
+    if (running.length === 0 && inIntake === 0 && unrendered === 0 && !winding) {
       return false;
     }
     if (inIntake > 0) {
