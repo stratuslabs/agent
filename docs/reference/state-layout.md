@@ -16,6 +16,7 @@ what moves when you rename an agent.
 | `fleet.db` | The schedules, and the session index that says which agent's store holds a given session id. Fleet infrastructure, deliberately not per agent — see below. |
 | `promoted.json` | The last version promoted on this home under `stratus serve --hold-new-version`, and when. A start of any other version is held until promoted. `0600`. |
 | `intake.json` | Present only while intake is paused (`PUT /api/v1/intake`): the pause, its message, and when it began. Read at start, so a pause survives a restart; a file that cannot be read starts the daemon paused. `0600`. |
+| `slack-pending-intake.json` | Present only while Slack messages sent during a restart or stop wait for the next start: per message the agent, workspace, channel, ts, thread, sender, channel type, and when it was kept. Never the text, which is read back from Slack. Each entry is removed as it is handled; one over a day old is dropped. `0600`. |
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
 | `grants.lock` | Held for a moment while a grant file is read by the daemon or rewritten by `stratus grants revoke`, so a daemon never reads one halfway through a revoke. Empty; safe to delete when nothing is running. |

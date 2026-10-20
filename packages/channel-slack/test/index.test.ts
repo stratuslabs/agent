@@ -10,6 +10,8 @@ import {
   createSlackChannelAdapter as createAdapterAsShipped,
   createSlackFileFetcher,
   isStopRequest,
+  RESTARTING_REPLY_TEXT,
+  STOPPING_REPLY_TEXT,
   type SlackAdapterOptions,
   type SlackBlock,
   type SlackInboundFile,
@@ -13206,4 +13208,822 @@ test('judge v2: each judging decision is logged once per agent, with who and why
     'slack: judge: bea took 5000.3 in C1 (addressed it last)',
   ]);
   assert.ok(logged.every((line) => !/secret/.test(line)), logged.join('\n'));
+});
+
+// Restart intake (P0, 2026-10-19): the gateway keeps channels connected
+// through a restart's drain and refuses new turns with a named error. A
+// message addressed to the agent then is told so and kept, without its
+// text, for the next start to read back from Slack and answer.
+
+const stoppingError = (restarting: boolean): Error => {
+  const error = new Error(restarting
+    ? 'stratusd is restarting and will accept new work once it is back up.'
+    : 'The gateway is stopping and no longer accepts new work.') as Error & { restarting: boolean };
+  error.name = 'GatewayStoppingError';
+  error.restarting = restarting;
+  return error;
+};
+
+const keptFile = async (): Promise<string> =>
+  path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-kept-')), 'slack-pending-intake.json');
+
+const readKept = async (file: string): Promise<unknown[] | undefined> => {
+  try {
+    return JSON.parse(await readFile(file, 'utf8')) as unknown[];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+/** A web client whose history answers with `messages`, as Slack would. */
+const webWithHistory = (botUserId: string, messages: Array<Record<string, unknown>>): FakeWeb => {
+  const web = createFakeWeb(botUserId, 'T1');
+  const pick = (args: { oldest?: string; latest?: string }) =>
+    ({ messages: messages.filter((message) => message.ts === args.oldest && message.ts === args.latest) });
+  web.conversations.history = async (args) => pick(args);
+  web.conversations.replies = async (args) => pick(args);
+  return web;
+};
+
+test('a mention refused because the daemon is restarting is told so and kept without its text, then answered once after the restart', async () => {
+  const file = await keptFile();
+  const logs: string[] = [];
+
+  // The daemon on its way down: connected, refusing.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const draining = createStubGateway(() => {
+    throw stoppingError(true);
+  });
+  const before = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    log: (line) => logs.push(line),
+  });
+  await before.start(draining);
+  await socket.deliver('app_mention', mention('<@B-AVA> is the deploy done?', { ts: '200.1' }));
+  await socket.settled();
+  await before.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [[RESTARTING_REPLY_TEXT, '200.1']]);
+  const kept = await readKept(file);
+  assert.equal(kept?.length, 1);
+  assert.deepEqual({ ...(kept?.[0] as Record<string, unknown>), keptAt: 0 }, { agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: 0 });
+  assert.ok(!(await readFile(file, 'utf8')).includes('deploy'), 'the kept file holds the message text');
+  assert.ok(logs.some((line) => line === 'slack: ava kept 200.1 in C1 to answer after the restart'), logs.join('\n'));
+
+  // The next daemon reads it back from Slack and handles it as if it had
+  // just arrived.
+  const history = [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> is the deploy done?' }];
+  const replaySocket = createFakeSocket();
+  const replayWeb = webWithHistory('B-AVA', history);
+  const serving = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'Yes, it finished.'));
+  const after = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => replaySocket,
+    createWebClient: () => replayWeb,
+    pendingIntakePath: file,
+  });
+  await after.start(serving);
+  await after.stop();
+  assert.deepEqual(serving.dispatches.map((dispatch) => [dispatch.sessionId, dispatch.userMessage]), [
+    ['slack:ava:T1:C1:200.1', 'Dylan: is the deploy done?'],
+  ]);
+  assert.deepEqual(replayWeb.posts.map((post) => [post.text, post.thread_ts]), [['Yes, it finished.', '200.1']]);
+  assert.equal(await readKept(file), undefined);
+
+  // And only once: a third start finds nothing kept.
+  const third = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'again'));
+  const again = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => webWithHistory('B-AVA', history),
+    pendingIntakePath: file,
+  });
+  await again.start(third);
+  await again.stop();
+  assert.deepEqual(third.dispatches, []);
+});
+
+test('a full kept list refuses a new message with the plain refusal instead of evicting one already promised an answer', async () => {
+  const file = await keptFile();
+  const at = 1_800_000_000_000;
+  const entry = (index: number, keptAt: number) => ({ agentId: 'ava', team: 'T1', channel: 'C1', ts: `${100 + index}.1`, user: 'U-DYLAN', keptAt });
+  // Full: 200 kept within the day, each already told it will be answered.
+  const full = Array.from({ length: 200 }, (_, index) => entry(index, at - 1000));
+  await writeFile(file, JSON.stringify(full));
+  const warnings: string[] = [];
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    now: () => at,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(createStubGateway(() => {
+    throw stoppingError(true);
+  }));
+  await socket.deliver('app_mention', mention('<@B-AVA> one more', { ts: '900.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  // Nothing promised is dropped, and the new message is not promised.
+  assert.deepEqual(await readKept(file), full);
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [[stoppingError(true).message, '900.1']]);
+  assert.ok(warnings.some((line) => /could not keep 900\.1 in C1/.test(line) && /200/.test(line)), warnings.join('\n'));
+});
+
+test('a full kept list makes room by dropping only messages too old to be answered anyway', async () => {
+  const file = await keptFile();
+  const logs: string[] = [];
+  const at = 1_800_000_000_000;
+  const day = 24 * 60 * 60 * 1000;
+  const entry = (index: number, keptAt: number) => ({ agentId: 'ava', team: 'T1', channel: 'C1', ts: `${100 + index}.1`, user: 'U-DYLAN', keptAt });
+  const stale = entry(0, at - day - 1);
+  const fresh = Array.from({ length: 199 }, (_, index) => entry(index + 1, at - 1000));
+  await writeFile(file, JSON.stringify([fresh[0], stale, ...fresh.slice(1)]));
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    now: () => at,
+    log: (line) => logs.push(line),
+  });
+  await adapter.start(createStubGateway(() => {
+    throw stoppingError(true);
+  }));
+  await socket.deliver('app_mention', mention('<@B-AVA> one more', { ts: '900.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  const kept = (await readKept(file)) as Array<{ ts: string }>;
+  assert.equal(kept.length, 200);
+  assert.deepEqual(kept.slice(0, 199), fresh);
+  assert.equal(kept[199]?.ts, '900.1');
+  assert.deepEqual(web.posts.map((post) => post.text), [RESTARTING_REPLY_TEXT]);
+  assert.ok(logs.includes('slack: ava dropped 100.1 in C1 kept from a restart: older than a day'), logs.join('\n'));
+});
+
+test('a replayed message whose reply could not be started stays kept, and the next start answers it once', async () => {
+  const file = await keptFile();
+  const kept = { agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: Date.now() };
+  await writeFile(file, JSON.stringify([kept]));
+  const history = [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> is the deploy done?' }];
+  const warnings: string[] = [];
+
+  // Streaming replies post a placeholder first; Slack refuses it this time.
+  const failing = webWithHistory('B-AVA', history);
+  failing.chat.postMessage = async () => {
+    throw new Error('ratelimited');
+  };
+  const first = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'Yes, it finished.'));
+  const before = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'stream' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => failing,
+    pendingIntakePath: file,
+    warn: (line) => warnings.push(line),
+  });
+  await before.start(first);
+  await before.stop();
+  assert.deepEqual(first.dispatches, []);
+  assert.deepEqual(await readKept(file), [kept]);
+  assert.ok(warnings.some((line) => line === 'slack: ava could not hand 200.1 in C1 kept from a restart to the gateway; keeping it for the next start'), warnings.join('\n'));
+
+  const working = webWithHistory('B-AVA', history);
+  const second = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'Yes, it finished.'));
+  const after = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'stream' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => working,
+    pendingIntakePath: file,
+  });
+  await after.start(second);
+  await after.stop();
+  assert.deepEqual(second.dispatches.map((dispatch) => dispatch.sessionId), ['slack:ava:T1:C1:200.1']);
+  assert.equal(await readKept(file), undefined);
+});
+
+test('a replayed message stays kept while its turn runs, so a crash mid-turn hands it over again', async () => {
+  const file = await keptFile();
+  const kept = { agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: Date.now() };
+  await writeFile(file, JSON.stringify([kept]));
+  let release: () => void = () => {};
+  const running = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started: () => void = () => {};
+  const dispatched = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    started();
+    await running;
+    return sessionWithReply(sessionId, 'done');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => webWithHistory('B-AVA', [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> go' }]),
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await dispatched;
+  assert.deepEqual(await readKept(file), [kept]);
+  release();
+  await adapter.stop();
+  assert.equal(await readKept(file), undefined);
+});
+
+test('a restart during the replay keeps the replayed message again', async () => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: Date.now() - 1000 }]));
+  const web = webWithHistory('B-AVA', [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> go' }]);
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  await adapter.start(createStubGateway(() => {
+    throw stoppingError(true);
+  }));
+  await adapter.stop();
+  const kept = (await readKept(file)) as Array<{ ts: string }>;
+  assert.deepEqual(kept.map((entry) => entry.ts), ['200.1']);
+  assert.deepEqual(web.posts.map((post) => post.text), [RESTARTING_REPLY_TEXT]);
+});
+
+test('a replayed message whose answer Slack refused to post stays kept, and the next start posts it', async () => {
+  const file = await keptFile();
+  const kept = { agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: Date.now() };
+  await writeFile(file, JSON.stringify([kept]));
+  const history = [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> is the deploy done?' }];
+  const warnings: string[] = [];
+
+  // The turn runs; Slack refuses the reply itself.
+  const failing = webWithHistory('B-AVA', history);
+  failing.chat.postMessage = async () => {
+    throw new Error('ratelimited');
+  };
+  const first = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'Yes, it finished.'));
+  const before = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => failing,
+    pendingIntakePath: file,
+    warn: (line) => warnings.push(line),
+  });
+  await before.start(first);
+  await before.stop();
+  assert.deepEqual(first.dispatches.map((dispatch) => dispatch.sessionId), ['slack:ava:T1:C1:200.1']);
+  assert.deepEqual(await readKept(file), [kept]);
+  assert.ok(warnings.some((line) => line === 'slack: ava could not post the answer to 200.1 in C1 kept from a restart; keeping it for the next start'), warnings.join('\n'));
+
+  const working = webWithHistory('B-AVA', history);
+  const second = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'Yes, it finished.'));
+  const after = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => working,
+    pendingIntakePath: file,
+  });
+  await after.start(second);
+  await after.stop();
+  assert.deepEqual(working.posts.map((post) => [post.text, post.thread_ts]), [['Yes, it finished.', '200.1']]);
+  assert.equal(await readKept(file), undefined);
+});
+
+test('a replayed message a judged turn chose not to answer is not kept again', async () => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '980.3', threadTs: '980.0', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const web = webWithHistory('B-AVA', [{ ts: '980.3', thread_ts: '980.0', user: 'U-DYLAN', text: 'and then' }]);
+  web.knownConversations.set('C1', { is_member: true });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C1:980.0'
+    ? { agentId: 'ava', metadata: {} }
+    : undefined);
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false]);
+  assert.deepEqual(web.posts, []);
+  assert.equal(await readKept(file), undefined);
+});
+
+test('a replayed message the start-up recovery answered comes off the list only if that answer reached Slack', async () => {
+  // The recovery sweep owns the message's turn, so the replay is a live
+  // repeat and withdraws; the sweep's own report is the answer. A report
+  // Slack refused is no answer, and the message stays kept (Codex 4321200338).
+  // The same holds when the sweep finished the turn before the replay asked.
+  for (const [repeat, delivered] of [['live', false], ['live', true], ['finished', false], ['finished', true]] as const) {
+    const file = await keptFile();
+    const kept = { agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: Date.now() };
+    await writeFile(file, JSON.stringify([kept]));
+    const web = webWithHistory('B-AVA', [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> is the deploy done?' }]);
+    if (!delivered) {
+      web.chat.postMessage = async () => {
+        throw new Error('ratelimited');
+      };
+    }
+    const warnings: string[] = [];
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+    gateway.sessionRouting = async () => ({
+      agentId: 'ava',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '200.1' },
+      reply: 'the recovered answer',
+    });
+    gateway.dispatch = async (input) => {
+      if (repeat === 'live') {
+        input.onRepeat?.('live');
+      }
+      await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+      if (repeat === 'finished') {
+        input.onRepeat?.('finished');
+      }
+      const at = new Date().toISOString();
+      return {
+        id: input.sessionId,
+        agent: { id: 'ava', name: 'Ava' },
+        status: 'completed',
+        messages: [
+          { id: 'u1', role: 'user', content: 'is the deploy done?', createdAt: at, idempotencyKey: input.idempotencyKey ?? '' },
+          { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: at },
+        ],
+        createdAt: at,
+        updatedAt: at,
+      };
+    };
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+      editIntervalMs: 0,
+      createSocketClient: () => createFakeSocket(),
+      createWebClient: () => web,
+      pendingIntakePath: file,
+      warn: (line) => warnings.push(line),
+    });
+    await adapter.start(gateway);
+    await adapter.stop();
+    const label = `${repeat}, ${delivered ? 'delivered' : 'refused'}`;
+    if (delivered) {
+      assert.equal(web.posts.filter((post) => post.text === 'the recovered answer').length, 1, label);
+      assert.equal(await readKept(file), undefined, label);
+    } else {
+      assert.deepEqual(await readKept(file), [kept], label);
+      if (repeat === 'live') {
+        assert.ok(warnings.some((line) => line === 'slack: ava has no confirmed answer to 200.1 in C1 kept from a restart; keeping it for the next start'), warnings.join('\n'));
+      }
+    }
+  }
+});
+
+test('a replayed message is never merged into another turn, so its own answer is the one that takes it off the list', async () => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const merging: boolean[] = [];
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'done'));
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      merging.push(input.onAbsorbed !== undefined);
+      return stub.dispatch(input);
+    },
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => webWithHistory('B-AVA', [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> go' }]),
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await adapter.stop();
+  assert.deepEqual(merging, [false]);
+  assert.equal(await readKept(file), undefined);
+});
+
+test('a live message in a kept message\'s thread waits until the replay has taken its place, so the kept one runs first', async () => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '700.2', threadTs: '700.1', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const web = webWithHistory('B-AVA', [{ ts: '700.2', thread_ts: '700.1', user: 'U-DYLAN', text: '<@B-AVA> first' }]);
+  const replies = web.conversations.replies;
+  let readable: () => void = () => {};
+  const readGate = new Promise<void>((resolve) => {
+    readable = resolve;
+  });
+  web.conversations.replies = async (args) => {
+    await readGate;
+    return replies!.call(web.conversations, args);
+  };
+  const socket = createFakeSocket();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> second', { ts: '700.3', thread_ts: '700.1' }));
+  assert.equal(socket.acks, 1, 'a held message is still acked at once');
+  assert.equal(gateway.dispatches.length, 0);
+  readable();
+  await socket.settled();
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: first', 'Dylan: second']);
+});
+
+test('a kept message whose read outlasts the wait is left for the next start, never answered after a newer message in its thread', async (t) => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '700.2', threadTs: '700.1', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const web = webWithHistory('B-AVA', [{ ts: '700.2', thread_ts: '700.1', user: 'U-DYLAN', text: '<@B-AVA> first' }]);
+  const replies = web.conversations.replies;
+  let readable: () => void = () => {};
+  const readGate = new Promise<void>((resolve) => {
+    readable = resolve;
+  });
+  let reading: () => void = () => {};
+  const readStarted = new Promise<void>((resolve) => {
+    reading = resolve;
+  });
+  // Only the replay's read of the kept message is slow; the live message's
+  // own thread reads answer at once.
+  web.conversations.replies = async (args) => {
+    if (args.oldest === '700.2' && args.latest === '700.2') {
+      reading();
+      await readGate;
+    }
+    return replies!.call(web.conversations, args);
+  };
+  const socket = createFakeSocket();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await adapter.start(gateway);
+  await readStarted;
+  // `deliver` waits on a timer too, which the mocked clock has to run.
+  const delivered = socket.deliver('app_mention', mention('<@B-AVA> second', { ts: '700.3', thread_ts: '700.1' }));
+  t.mock.timers.tick(20);
+  await delivered;
+  // Slack is slow: the read outlasts the wait, and the live message goes.
+  t.mock.timers.tick(10_000);
+  t.mock.timers.reset();
+  await socket.settled();
+  // The read comes back after the newer message took the thread: too late
+  // to go first, so it is not answered now, and stays kept for next time.
+  readable();
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: second']);
+  assert.deepEqual((await readKept(file))?.map((entry) => (entry as { ts: string }).ts), ['700.2']);
+});
+
+test('a stop during the replay reads no further kept message, and leaves the rest kept', async () => {
+  const file = await keptFile();
+  const now = Date.now();
+  await writeFile(file, JSON.stringify([
+    { agentId: 'ava', team: 'T1', channel: 'C1', ts: '710.1', user: 'U-DYLAN', keptAt: now },
+    { agentId: 'ava', team: 'T1', channel: 'C1', ts: '710.2', user: 'U-DYLAN', keptAt: now },
+  ]));
+  const web = webWithHistory('B-AVA', [
+    { ts: '710.1', user: 'U-DYLAN', text: '<@B-AVA> one' },
+    { ts: '710.2', user: 'U-DYLAN', text: '<@B-AVA> two' },
+  ]);
+  const reads: string[] = [];
+  const history = web.conversations.history;
+  // Each read is slow but inside the bound, so a stop that waited on the
+  // whole replay would wait on one after another.
+  web.conversations.history = async (args) => {
+    reads.push(String(args.oldest));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return history!.call(web.conversations, args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await adapter.stop();
+  assert.deepEqual(reads.filter((ts) => ts.startsWith('710.')), ['710.1']);
+  assert.deepEqual((await readKept(file))?.map((entry) => (entry as { ts: string }).ts), ['710.2']);
+});
+
+test('a live message in a conversation with nothing kept is not held behind a slow replay elsewhere', async () => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '700.2', threadTs: '700.1', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const web = webWithHistory('B-AVA', [{ ts: '700.2', thread_ts: '700.1', user: 'U-DYLAN', text: '<@B-AVA> first' }]);
+  const replies = web.conversations.replies;
+  let readable: () => void = () => {};
+  const readGate = new Promise<void>((resolve) => {
+    readable = resolve;
+  });
+  web.conversations.replies = async (args) => {
+    await readGate;
+    return replies!.call(web.conversations, args);
+  };
+  const socket = createFakeSocket();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> elsewhere', { ts: '800.1', channel: 'C2' }));
+  // Bounded event-loop turns, not the clock: a held message never dispatches here.
+  for (let turn = 0; turn < 200 && gateway.dispatches.length === 0; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: elsewhere']);
+  readable();
+  await socket.settled();
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: elsewhere', 'Dylan: first']);
+});
+
+test('an untagged reply in a thread the agent holds is kept across a restart too, with its thread', async () => {
+  const file = await keptFile();
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let refusing = false;
+  const gateway = createStubGateway(({ sessionId }) => {
+    if (refusing) {
+      throw stoppingError(true);
+    }
+    return sessionWithReply(sessionId, 'on it');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> check the build', { ts: '300.1' }));
+  await socket.settled();
+  refusing = true;
+  await socket.deliver('message', channelMessage({ text: 'and the tests', ts: '300.2', thread: '300.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.at(-1)?.text, RESTARTING_REPLY_TEXT);
+  const kept = (await readKept(file)) as Array<Record<string, unknown>>;
+  assert.deepEqual(kept.map((entry) => [entry.ts, entry.threadTs, entry.channelType]), [['300.2', '300.1', 'channel']]);
+});
+
+test('a stopping daemon says it is shutting down, and a message nobody addressed to the agent is not kept', async () => {
+  const file = await keptFile();
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(() => {
+    throw stoppingError(false);
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  const forBea = channelMessage({ text: '<@B-BEA> are you there?', ts: '400.1' });
+  await Promise.all([socketAva.deliver('message', forBea), socketBea.deliver('message', forBea)]);
+  await Promise.all([socketAva.settled(), socketBea.settled()]);
+  await adapter.stop();
+
+  assert.deepEqual(webAva.posts, []);
+  assert.deepEqual(webBea.posts.map((post) => post.text), [STOPPING_REPLY_TEXT]);
+  const kept = (await readKept(file)) as Array<Record<string, unknown>>;
+  assert.deepEqual(kept.map((entry) => [entry.agentId, entry.ts]), [['bea', '400.1']]);
+});
+
+test('without a place to keep it, a refused message is told the refusal and nothing is promised', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(() => {
+    throw stoppingError(true);
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello?', { ts: '500.1' }));
+  await socket.settled();
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['stratusd is restarting and will accept new work once it is back up.']);
+});
+
+test('a kept message deleted before the restart finished, or kept over a day ago, is dropped with a line and not run', async () => {
+  const file = await keptFile();
+  const now = Date.now();
+  await writeFile(file, JSON.stringify([
+    { agentId: 'ava', team: 'T1', channel: 'C1', ts: '600.1', user: 'U-DYLAN', keptAt: now },
+    { agentId: 'ava', team: 'T1', channel: 'C1', ts: '600.2', user: 'U-DYLAN', keptAt: now - 2 * 24 * 60 * 60 * 1000 },
+    // An agent this daemon does not connect stays kept for one that does.
+    { agentId: 'cy', team: 'T1', channel: 'C1', ts: '600.3', user: 'U-DYLAN', keptAt: now },
+  ]));
+  const logs: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hi'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => webWithHistory('B-AVA', [{ ts: '600.2', user: 'U-DYLAN', text: '<@B-AVA> old' }]),
+    pendingIntakePath: file,
+    log: (line) => logs.push(line),
+  });
+  await adapter.start(gateway);
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches, []);
+  assert.ok(logs.includes('slack: ava dropped 600.1 in C1 kept from a restart: no longer in Slack'), logs.join('\n'));
+  assert.ok(logs.includes('slack: ava dropped 600.2 in C1 kept from a restart: older than a day'), logs.join('\n'));
+  const kept = (await readKept(file)) as Array<Record<string, unknown>>;
+  assert.deepEqual(kept.map((entry) => entry.ts), ['600.3']);
+});
+
+test('a kept message from another Slack workspace is not read or answered through this one, and stays kept', async () => {
+  const file = await keptFile();
+  const now = Date.now();
+  // Kept while ava's app was in T-OLD; her credentials now point at T1.
+  await writeFile(file, JSON.stringify([
+    { agentId: 'ava', team: 'T-OLD', channel: 'C1', ts: '610.1', user: 'U-DYLAN', keptAt: now },
+  ]));
+  const logs: string[] = [];
+  const reads: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hi'));
+  const web = webWithHistory('B-AVA', [{ ts: '610.1', user: 'U-DYLAN', text: '<@B-AVA> same ids, other workspace' }]);
+  const history = web.conversations.history;
+  web.conversations.history = async (args) => {
+    reads.push(String(args.oldest));
+    return history!(args);
+  };
+  const replies = web.conversations.replies;
+  web.conversations.replies = async (args) => {
+    reads.push(String(args.oldest));
+    return replies!(args);
+  };
+  const socket = createFakeSocket();
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(line),
+  });
+  await adapter.start(gateway);
+  // A live message in a channel with the same id is not held behind it.
+  await socket.deliver('app_mention', mention('<@B-AVA> live', { ts: '611.1', channel: 'C1' }));
+  await adapter.stop();
+  assert.ok(!reads.includes('610.1'), reads.join(','));
+  assert.equal(gateway.dispatches.length, 1);
+  assert.ok(logs.some((line) => line.includes('610.1') && line.includes('T-OLD')), logs.join('\n'));
+  const kept = (await readKept(file)) as Array<Record<string, unknown>>;
+  assert.deepEqual(kept.map((entry) => entry.ts), ['610.1']);
+});
+
+test('a message kept in one workspace does not replace one kept in another with the same channel and ts', async () => {
+  const file = await keptFile();
+  const now = Date.now();
+  await writeFile(file, JSON.stringify([
+    { agentId: 'ava', team: 'T-OLD', channel: 'C1', ts: '620.1', user: 'U-DYLAN', keptAt: now },
+  ]));
+  const socket = createFakeSocket();
+  const draining = createStubGateway(() => {
+    throw stoppingError(true);
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => createFakeWeb('B-AVA', 'T1'),
+    pendingIntakePath: file,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(draining);
+  await socket.deliver('app_mention', mention('<@B-AVA> same ids here', { ts: '620.1' }));
+  await socket.settled();
+  await adapter.stop();
+  const kept = (await readKept(file)) as Array<Record<string, unknown>>;
+  assert.deepEqual(kept.map((entry) => `${entry.team}:${entry.ts}`).sort(), ['T-OLD:620.1', 'T1:620.1']);
+});
+
+for (const [label, refuse] of [
+  ['refused by a stopping daemon that could not keep it again', () => stoppingError(true)],
+  ['refused because intake is paused', () => {
+    const error = new Error("I'm paused: this workspace's usage limit is reached.");
+    error.name = 'IntakePausedError';
+    return error;
+  }],
+] as const) {
+  test(`a replayed message ${label} stays kept: the refusal is not its answer`, async () => {
+    const file = await keptFile();
+    await writeFile(file, JSON.stringify([
+      { agentId: 'ava', team: 'T1', channel: 'C1', ts: '630.1', user: 'U-DYLAN', keptAt: Date.now() },
+    ]));
+    // Writing the list fails (as on a full disk); removing it would not.
+    await mkdir(`${file}.${process.pid}.tmp`);
+    const gateway = createStubGateway(() => {
+      throw refuse();
+    });
+    const web = webWithHistory('B-AVA', [{ ts: '630.1', user: 'U-DYLAN', text: '<@B-AVA> still there?' }]);
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+      editIntervalMs: 0,
+      createSocketClient: () => createFakeSocket(),
+      createWebClient: () => web,
+      pendingIntakePath: file,
+      log: () => {},
+      warn: () => {},
+    });
+    await adapter.start(gateway);
+    await adapter.stop();
+    assert.ok(web.posts.length > 0, 'the refusal was posted');
+    const kept = (await readKept(file)) as Array<Record<string, unknown>> | undefined;
+    assert.deepEqual(kept?.map((entry) => entry.ts), ['630.1']);
+  });
+}
+
+test('a judged reply in the agent\'s own thread during a restart is kept for the next daemon to judge, with nothing posted', async () => {
+  const file = await keptFile();
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C1', { is_member: true });
+  const gateway = createStubGateway(() => {
+    throw stoppingError(true);
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C1:980.0'
+    ? { agentId: 'ava', metadata: {} }
+    : undefined);
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'and then', ts: '980.3', thread: '980.0' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false]);
+  assert.deepEqual(web.posts, []);
+  const kept = (await readKept(file)) as Array<Record<string, unknown>>;
+  assert.deepEqual(kept.map((entry) => [entry.ts, entry.threadTs]), [['980.3', '980.0']]);
 });
