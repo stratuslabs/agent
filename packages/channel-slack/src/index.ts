@@ -5205,6 +5205,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * Records that a thread read of `key` covered every message before `ts`.
+   * Bounded on its own, since a read that found nobody's post leaves an
+   * owner and no record (Codex 4321103567). A thread whose mark is evicted
+   * loses its record and owner with it, so it is read afresh instead of
+   * placed from claims the read may have stopped short of.
+   */
+  const noteReadUntil = (key: string, ts: string): void => {
+    const until = threadReadUntil.get(key);
+    threadReadUntil.delete(key);
+    threadReadUntil.set(key, until !== undefined && compareSlackTs(ts, until) < 0 ? until : ts);
+    if (threadReadUntil.size > THREAD_ADDRESSEE_CAPACITY) {
+      const oldest = threadReadUntil.keys().next();
+      if (!oldest.done) {
+        threadReadUntil.delete(oldest.value);
+        threadAddressee.delete(oldest.value);
+        threadTrimmedUntil.delete(oldest.value);
+        threadOrigins.delete(oldest.value);
+      }
+    }
+  };
+
+  /**
    * Where the record of thread `key` stops knowing every take, for a
    * message at `ts` after what a thread read covered (card 562): a claim
    * older than the returned point may have been taken from since, unseen.
@@ -5819,10 +5841,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       for (const post of takeovers) {
         rememberAddressee(key, post.agentId, post.ts, true, true);
       }
-      const until = threadReadUntil.get(key);
-      if (until === undefined || compareSlackTs(until, ts) < 0) {
-        threadReadUntil.set(key, ts);
-      }
+      noteReadUntil(key, ts);
     };
     if (taken && taken.agentId !== ownerId && (ownerId !== undefined || taken.at > read.foreign)) {
       warm();
