@@ -603,6 +603,8 @@ export const STOPPING_REPLY_TEXT = "I'm shutting down right now. I'll answer thi
  * stopped for a week does not wake up to answer last week's questions.
  */
 const PENDING_INTAKE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** How long live intake waits on the start-up replay's reads; see `replayHold`. */
+const REPLAY_HOLD_MAX_MS = 10_000;
 /** The most messages kept at once; past it, a new one is refused, not kept. */
 const PENDING_INTAKE_MAX = 200;
 
@@ -780,12 +782,15 @@ interface HandoverClaim {
  * — the edit taken and every overflow message posted. `spoke`: whether
  * ANYTHING of the turn's landed, a chunk or a file. `spokeAt`: where in
  * the thread what landed sits — the ts of the lowest message of the
- * turn's that Slack took — present exactly when `spoke` is.
+ * turn's that Slack took — present exactly when `spoke` is. `refused`:
+ * there was text to say and Slack refused some of it, unlike a turn that
+ * decided to say nothing, which is unpublished but not refused.
  */
 interface ReplyOutcome {
   published: boolean;
   spoke: boolean;
   spokeAt?: string;
+  refused?: true;
 }
 
 /**
@@ -1664,7 +1669,7 @@ class ReplyRenderer {
       // that would take the next turn's status down with it.
       await this.statusChain;
     }
-    return this.outcome(published, landed || this.edited || this.uploaded || stranded);
+    return this.outcome(published, landed || this.edited || this.uploaded || stranded, !published);
   }
 
   private placeText(ts: string | undefined): void {
@@ -1673,12 +1678,12 @@ class ReplyRenderer {
     }
   }
 
-  private outcome(published: boolean, spoke: boolean): ReplyOutcome {
+  private outcome(published: boolean, spoke: boolean, refused = false): ReplyOutcome {
     const spokeAt = [this.textAt, this.uploadedAt]
       .filter((ts): ts is string => ts !== undefined)
       .sort()
       .at(-1);
-    return { published, spoke, ...(spoke && spokeAt !== undefined ? { spokeAt } : {}) };
+    return { published, spoke, ...(spoke && spokeAt !== undefined ? { spokeAt } : {}), ...(refused ? { refused: true as const } : {}) };
   }
 
   /**
@@ -3311,11 +3316,31 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const pendingKey = (entry: Pick<PendingIntake, 'agentId' | 'channel' | 'ts'>): string => `${entry.agentId}:${entry.channel}:${entry.ts}`;
   /**
    * Kept messages being replayed, by `pendingKey`: whether the handler got
-   * as far as the gateway, and whether it kept the message again (a restart
-   * during the replay). Each stays in the file until its handler settles,
-   * so a crash or a failure before the dispatch leaves it for the next start.
+   * as far as the gateway, whether it kept the message again (a restart
+   * during the replay), and whether Slack refused the answer it had to
+   * post. Each stays in the file until its handler settles, so a crash, a
+   * failure before the dispatch, or an answer that never landed leaves it
+   * for the next start, where the gateway repeats the finished turn and
+   * the answer is posted from the session rather than run again.
    */
-  const replaying = new Map<string, { dispatched: boolean; rekept: boolean }>();
+  const replaying = new Map<string, { dispatched: boolean; rekept: boolean; refused: boolean }>();
+  /** Notes a reply outcome against the kept message it answers, if that one is being replayed. */
+  const noteReplayOutcome = (agentId: string, channel: string, ts: string, outcome: ReplyOutcome): ReplyOutcome => {
+    const replay = replaying.get(pendingKey({ agentId, channel, ts }));
+    if (replay !== undefined && outcome.refused === true) {
+      replay.refused = true;
+    }
+    return outcome;
+  };
+  /**
+   * Live intake waits here while the start-up replay reads the kept
+   * messages back, so each kept message takes its place on its session's
+   * chain ahead of anything sent after it. Released once every replay has
+   * been handed to its handler, or after `REPLAY_HOLD_MAX_MS` if Slack is
+   * slow to answer the reads (then a later message can go first).
+   */
+  let replayHold: Promise<void> | undefined;
+  let releaseReplayHold: () => void = () => {};
   /** Keeps a refused message for the next start; resolves with whether it was kept. */
   const keepForNextStart = async (entry: PendingIntake): Promise<boolean> => {
     if (pendingIntakePath === undefined) {
@@ -3436,7 +3461,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         continue;
       }
       const key = pendingKey(entry);
-      const replay = { dispatched: false, rekept: false };
+      const replay = { dispatched: false, rekept: false, refused: false };
       replaying.set(key, replay);
       // Started in ts order without waiting on each: each claims its place
       // on its session's chain synchronously, as a live delivery does.
@@ -3450,9 +3475,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           warn(`slack: ${entry.agentId} could not hand ${entry.ts} in ${entry.channel} kept from a restart to the gateway; keeping it for the next start`);
           return;
         }
+        if (replay.refused) {
+          warn(`slack: ${entry.agentId} could not post the answer to ${entry.ts} in ${entry.channel} kept from a restart; keeping it for the next start`);
+          return;
+        }
         await changePending((entries) => ({ entries: entries.filter((kept) => pendingKey(kept) !== key), result: undefined }));
       }));
     }
+    releaseReplayHold();
     await Promise.all(handovers);
   };
 
@@ -7114,6 +7144,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // interim messages already in the thread are heard either way.
       let replyLanded = false;
       const settled = finalized.then((outcome) => {
+        noteReplayOutcome(connection.config.agentId, event.channel, event.ts, outcome);
         replyLanded = outcome.published;
         return true;
       }, () => true);
@@ -7180,11 +7211,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           deferredText = (failure as Error).message;
         }
       }
-      const { spoke, spokeAt } = renderer.stoppedBy !== undefined
+      const { spoke, spokeAt } = noteReplayOutcome(connection.config.agentId, event.channel, event.ts, renderer.stoppedBy !== undefined
         ? await renderer.stopped(renderer.stoppedBy)
         : pausedReply || stoppingRefusal
         ? await renderer.finalize(renderer.lazy ? '' : deferredText ?? (failure as Error).message)
-        : await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+        : await renderer.fail(failure instanceof Error ? failure.message : String(failure)));
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking has still spoken, by the same
         // rule as a reply that landed.
@@ -7361,22 +7392,51 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       settleHomeOwners();
 
       const listeners = new Map<string, (args: SlackSocketEventArgs) => Promise<void>>();
+      if (pendingIntakePath !== undefined) {
+        replayHold = new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            warn(`slack: reading back the messages kept from the last restart is taking over ${REPLAY_HOLD_MAX_MS / 1000}s; taking new messages without waiting for it`);
+            release();
+          }, REPLAY_HOLD_MAX_MS);
+          const release = (): void => {
+            clearTimeout(timer);
+            replayHold = undefined;
+            releaseReplayHold = () => {};
+            resolve();
+          };
+          releaseReplayHold = release;
+        });
+      }
       for (const connection of authenticated) {
         const { config, socket } = connection;
         try {
           // Returns the work it started: the SDK ignores it, and a test's fake
           // socket waits on it rather than guessing how long it takes.
-          const onEvent = (args: SlackSocketEventArgs): Promise<void> => {
-            const handled = handleInbound(connection, args).catch((error) => {
+          const handle = (inbound: Promise<void>): Promise<void> => {
+            const handled = inbound.catch((error) => {
               warn(`slack event handling failed: ${error instanceof Error ? error.message : String(error)}`);
             });
             inflight.add(handled);
             void handled.finally(() => inflight.delete(handled));
             return handled;
           };
+          // The replay's own deliveries never wait on the hold they release.
+          const onReplay = (args: SlackSocketEventArgs): Promise<void> => handle(handleInbound(connection, args));
+          const onEvent = (args: SlackSocketEventArgs): Promise<void> => {
+            const hold = replayHold;
+            if (hold === undefined) {
+              return onReplay(args);
+            }
+            // Acked now, as any delivery is, so Slack does not redeliver a
+            // message that is only waiting its turn; admitted after the hold.
+            void Promise.resolve(args.ack()).catch((error) => {
+              warn(`slack: could not ack an envelope: ${error instanceof Error ? error.message : String(error)}`);
+            });
+            return handle(hold.then(() => handleInbound(connection, { ...args, ack: async () => {} })));
+          };
           socket.on('app_mention', onEvent);
           socket.on('message', onEvent);
-          listeners.set(config.agentId, onEvent);
+          listeners.set(config.agentId, onReplay);
           socket.on('interactive', (args: SlackSocketEventArgs): Promise<void> => {
             const handled = handleInteractive(connection, args).catch((error) => {
               warn(`slack interaction handling failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -7396,10 +7456,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // Once every app is connected, so a kept message is handled with the
       // whole roster's identities known, as a live one would be. Only for the
       // apps that did connect: the rest stay kept for a start where they do.
-      track(replayKept(new Map([...listeners].filter(([agentId]) => connections.some((connection) => connection.config.agentId === agentId)))));
+      track(replayKept(new Map([...listeners].filter(([agentId]) => connections.some((connection) => connection.config.agentId === agentId)))).finally(() => releaseReplayHold()));
     },
 
     async stop() {
+      releaseReplayHold();
       // Stop intake first, so no new INBOUND event can slip into
       // `inflight` while the drain below runs.
       await Promise.allSettled(connections.map((connection) => connection.socket.disconnect()));
