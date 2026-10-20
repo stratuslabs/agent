@@ -311,6 +311,12 @@ export interface SandboxPolicy {
    * `writable`). Absent: the home stays readable apart from `denied`.
    */
   home?: { path: string; visible: string[] };
+  /**
+   * Paths the operator named readable. Given back after the default
+   * denials, so one inside the Stratus home (an agent's own integration
+   * config) can be read; a denied path inside one stays denied.
+   */
+  readable?: string[];
 }
 
 export interface SandboxedCommand {
@@ -362,8 +368,8 @@ const isWithin = (parent: string, child: string): boolean => {
  * operator's `deniedPaths` entry inside it) must not show it again.
  */
 const deniedInside = (policy: SandboxPolicy): string[] => {
-  const workspace = spellings(policy.workspace);
-  return [...new Set(policy.denied.flatMap(spellings))].filter((denied) => workspace.some((dir) => isWithin(dir, denied)));
+  const given = [policy.workspace, ...(policy.readable ?? [])].flatMap(spellings);
+  return [...new Set(policy.denied.flatMap(spellings))].filter((denied) => given.some((dir) => isWithin(dir, denied)));
 };
 
 const SBPL_UNSAFE = /["\\\n\r\0]/;
@@ -440,6 +446,9 @@ export const darwinProfile = (policy: SandboxPolicy): string => {
     // and git's repository discovery fail when the workspace sits inside
     // the hidden Stratus home. A listing names files; it reads none.
     ...(ancestors.length > 0 ? [`(allow file-read-data ${ancestors.map((p) => `(literal ${sbplString(p)})`).join(' ')})`] : []),
+    // Operator-named readable paths, after the denials: they may sit inside
+    // the hidden Stratus home. Denied paths inside them are denied again below.
+    ...((policy.readable ?? []).length > 0 ? [`(allow file-read-data file-read-xattr ${subpaths(policy.readable!)})`] : []),
     // Named operation by operation: an allow of the `file-read*` wildcard
     // does not undo a deny that named `file-read-data`.
     `(allow file-read-data file-read-xattr file-read* file-write* ${subpaths([policy.workspace])})`,
@@ -525,6 +534,11 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
     } else {
       args.push('--ro-bind', '/dev/null', denied);
     }
+  }
+  // Operator-named readable paths over the denials, read-only, before the
+  // workspace so one that holds the workspace leaves it writable.
+  for (const dir of new Set((policy.readable ?? []).flatMap(realOnly))) {
+    args.push('--ro-bind', dir, dir);
   }
   const workspaceSpellings = spellings(policy.workspace);
   const workspaceSource = workspaceSpellings.at(-1)!;
