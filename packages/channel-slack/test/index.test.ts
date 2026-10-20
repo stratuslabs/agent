@@ -13197,6 +13197,91 @@ test('a live message in a kept message\'s thread waits until the replay has take
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: first', 'Dylan: second']);
 });
 
+test('a kept message whose read outlasts the wait is left for the next start, never answered after a newer message in its thread', async (t) => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '700.2', threadTs: '700.1', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const web = webWithHistory('B-AVA', [{ ts: '700.2', thread_ts: '700.1', user: 'U-DYLAN', text: '<@B-AVA> first' }]);
+  const replies = web.conversations.replies;
+  let readable: () => void = () => {};
+  const readGate = new Promise<void>((resolve) => {
+    readable = resolve;
+  });
+  let reading: () => void = () => {};
+  const readStarted = new Promise<void>((resolve) => {
+    reading = resolve;
+  });
+  // Only the replay's read of the kept message is slow; the live message's
+  // own thread reads answer at once.
+  web.conversations.replies = async (args) => {
+    if (args.oldest === '700.2' && args.latest === '700.2') {
+      reading();
+      await readGate;
+    }
+    return replies!.call(web.conversations, args);
+  };
+  const socket = createFakeSocket();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await adapter.start(gateway);
+  await readStarted;
+  // `deliver` waits on a timer too, which the mocked clock has to run.
+  const delivered = socket.deliver('app_mention', mention('<@B-AVA> second', { ts: '700.3', thread_ts: '700.1' }));
+  t.mock.timers.tick(20);
+  await delivered;
+  // Slack is slow: the read outlasts the wait, and the live message goes.
+  t.mock.timers.tick(10_000);
+  t.mock.timers.reset();
+  await socket.settled();
+  // The read comes back after the newer message took the thread: too late
+  // to go first, so it is not answered now, and stays kept for next time.
+  readable();
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: second']);
+  assert.deepEqual((await readKept(file))?.map((entry) => (entry as { ts: string }).ts), ['700.2']);
+});
+
+test('a live message in a conversation with nothing kept is not held behind a slow replay elsewhere', async () => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '700.2', threadTs: '700.1', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const web = webWithHistory('B-AVA', [{ ts: '700.2', thread_ts: '700.1', user: 'U-DYLAN', text: '<@B-AVA> first' }]);
+  const replies = web.conversations.replies;
+  let readable: () => void = () => {};
+  const readGate = new Promise<void>((resolve) => {
+    readable = resolve;
+  });
+  web.conversations.replies = async (args) => {
+    await readGate;
+    return replies!.call(web.conversations, args);
+  };
+  const socket = createFakeSocket();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> elsewhere', { ts: '800.1', channel: 'C2' }));
+  // Bounded event-loop turns, not the clock: a held message never dispatches here.
+  for (let turn = 0; turn < 200 && gateway.dispatches.length === 0; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: elsewhere']);
+  readable();
+  await socket.settled();
+  await adapter.stop();
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: elsewhere', 'Dylan: first']);
+});
+
 test('an untagged reply in a thread the agent holds is kept across a restart too, with its thread', async () => {
   const file = await keptFile();
   const socket = createFakeSocket();

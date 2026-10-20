@@ -136,6 +136,11 @@ than a surprise, and one that costs the fleet as little as it can.
    kept in `slack-pending-intake.json`: where it was and who sent it, never
    its text. The next daemon reads each one back from Slack once its apps
    connect and handles it as if it had just arrived, so it is answered once.
+   New messages in a conversation with kept ones wait until those are back
+   in line, so answers keep their order; other conversations do not wait.
+   If Slack takes over 10 seconds to read a kept message back, it (and any
+   kept after it in that conversation) waits for the next start instead of
+   being answered out of order.
    A message deleted meanwhile, or kept over a day ago, is dropped with a
    line in the log. A reply the agent would only judge is kept the same way
    but gets no notice, and a message it only overhears is not kept. A plain
