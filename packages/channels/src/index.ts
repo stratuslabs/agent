@@ -117,25 +117,6 @@ export interface SessionRouting {
    */
   lastSpokeAt?: string;
   /**
-   * When the agent last answered a message that ADDRESSED it — its newest
-   * reply to a turn somebody asked for, ISO-8601 — and absent when it never
-   * has. The anchor of an attention window: an agent that judges whether
-   * to speak does so for a bounded stretch after being spoken to, and a
-   * reply it chose to give on a turn nobody asked for does not move the
-   * anchor, or a talkative judge would keep itself attentive for good.
-   * `lastSpokeAt` stays the thread rule's answer, which counts every reply.
-   */
-  lastAnsweredAt?: string;
-  /**
-   * How many user messages the session holds after that answer — heard,
-   * judged, or asked and left unanswered — and every one of them when it
-   * never has. With `lastAnsweredAt`, the two halves of the window, both
-   * read from the session rather than remembered in-process, so a restart
-   * forgets nothing about who is still listening. Absent from a host that
-   * does not count.
-   */
-  heardSinceAnswered?: number;
-  /**
    * The text the session's latest turn produced (`latestTurnReply` in
    * `@stratusagent/core`, the same rule an adapter finalizes its own turns
    * by; absent when the turn produced none) — for a turn the adapter did
@@ -236,6 +217,16 @@ export interface GatewayLike {
    * adapter's was queued behind it.
    */
   activeTurnId?(sessionId: string): string | undefined;
+  /**
+   * Aborts every turn running on a session, including one the host
+   * recovered after a restart that no adapter started, and returns how many
+   * turns are on the session, each now stopping (one already aborted that
+   * has not settled still counts; 0 means nothing is running there).
+   * Optional: a host without it leaves
+   * an adapter able to stop only the turns it dispatched with its own
+   * signal. The adapter decides who may stop; the host asks nothing.
+   */
+  abortTurns?(sessionId: string, reason: string): number;
   /**
    * Where a durable session came from, or undefined if there is no such
    * session.

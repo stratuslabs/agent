@@ -3039,6 +3039,16 @@ const compareSlackTs = (left: string, right: string): number => {
   return Math.sign(Number(leftMicros.padEnd(6, '0').slice(0, 6)) - Number(rightMicros.padEnd(6, '0').slice(0, 6)));
 };
 
+/** What a Slack stop aborts a turn with, followed by the stopper's user id. */
+const SLACK_STOP_REASON = 'Stopped from Slack by ';
+
+/**
+ * Who stopped a turn, read back from the error it failed with: the gateway
+ * fails an aborted turn with the abort's reason verbatim.
+ */
+const slackStopper = (error: string | undefined): string | undefined =>
+  error?.startsWith(SLACK_STOP_REASON) ? error.slice(SLACK_STOP_REASON.length) || undefined : undefined;
+
 export const createSlackChannelAdapter = (options: SlackAdapterOptions): ChannelAdapter => {
   const log = options.log ?? (() => {});
   const warn = options.warn ?? (() => {});
@@ -4963,6 +4973,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     behind: HandoverClaim | undefined,
     files: readonly string[],
   ): Promise<ReportedOutcome> => {
+    // A turn no renderer here was showing (card 501) that a Slack stop
+    // aborted fails with the stop's own reason, so who stopped it is read
+    // from the failure itself rather than from a note an outcome may never
+    // come to clear.
+    const stoppedBy = slackStopper(event.error);
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
       return NOTHING_REPORTED;
@@ -4989,7 +5004,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
-    if (routing.unaddressed === true && routing.reply === undefined) {
+    if (stoppedBy === undefined && routing.unaddressed === true && routing.reply === undefined) {
+      // A stop is someone asking, so a stopped turn always says who
+      // stopped it, judged or not.
+      //
       // A turn nobody asked for that said nothing before it broke — the
       // daemon died inside it, and the next start failed it with no
       // renderer here to keep quiet for it. The same rule as the lazy
@@ -5015,7 +5033,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connection,
       channel,
       thread,
-      messageChunks(`Something went wrong: ${event.error}`),
+      messageChunks(stoppedBy === undefined ? `Something went wrong: ${event.error}` : `Stopped by <@${stoppedBy}>.`),
       async () => {
         landed = await uploadUnrenderedFiles(connection, channel, thread, files);
       },
@@ -6358,19 +6376,30 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const stopTurns = (connection: AgentConnection, sessionId: string, userId: string, channel: string, fromIntake = false): boolean => {
     const running = renderers.get(sessionId) ?? [];
     const inIntake = fromIntake ? 0 : intakeInFlight.get(sessionId) ?? 0;
-    if (running.length === 0 && inIntake === 0) {
-      return false;
-    }
+    const reason = `${SLACK_STOP_REASON}${userId}`;
     for (const renderer of running) {
       if (renderer.stoppedBy === undefined) {
         renderer.stoppedBy = userId;
-        renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${userId}`));
+        renderer.controller.abort(new RunAbortedError(reason));
       }
+    }
+    // Also a turn no renderer of this process started (card 501): one the
+    // gateway recovered after a restart, or another caller's on this
+    // session. The gateway counts every turn still on the session, one
+    // already stopping included, so a repeated stop while a stopped turn
+    // winds down is still a stop, and once it has ended, however it ended,
+    // a stop with nothing running is an ordinary message. The renderers'
+    // started turns are among those counted.
+    const onSession = gatewayRef?.abortTurns?.(sessionId, reason) ?? 0;
+    if (running.length === 0 && inIntake === 0 && onSession === 0) {
+      return false;
     }
     if (inIntake > 0) {
       stopsBySession.set(sessionId, { count: (stopsBySession.get(sessionId)?.count ?? 0) + 1, by: userId });
     }
-    log(`slack: ${userId} stopped ${running.length + inIntake} turn(s) of ${connection.config.agentId} in ${channel}`);
+    // A renderer's started turn is also one the gateway counts, so this is
+    // the larger of the two, not their sum.
+    log(`slack: ${userId} stopped ${Math.max(running.length, onSession) + inIntake} turn(s) of ${connection.config.agentId} in ${channel}`);
     return true;
   };
 
@@ -7177,7 +7206,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       leaveIntake();
       if (stopped !== undefined && stopped.count !== stopsAtClaim && renderer.stoppedBy === undefined) {
         renderer.stoppedBy = stopped.by;
-        renderer.controller.abort(new RunAbortedError(`Stopped from Slack by ${stopped.by}`));
+        renderer.controller.abort(new RunAbortedError(`${SLACK_STOP_REASON}${stopped.by}`));
       }
       // In a DM each message is its own status key, and Slack stops showing
       // the running turn's once a newer message sits below it — so a
