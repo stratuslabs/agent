@@ -43,6 +43,7 @@ import {
   CREDENTIAL_NAME_PATTERN,
   saveConfigFile,
   saveCredentials,
+  resolveAgentPrincipals,
   CREDENTIAL_PROVIDER_NAMES,
   verifyProviderKey,
   type ApiConfig,
@@ -1102,6 +1103,9 @@ export const runSetup = async (
     }
 
     const slack = { ...(state.channels.slack ?? {}) };
+    // The bot this agent had before, if any: evidence of which workspace
+    // its current list was written for.
+    const previousBotToken = slack[agentId]?.botToken;
     slack[agentId] = { appToken, botToken };
     state.channels = { ...state.channels, slack };
     state.channelsDirty = true;
@@ -1115,6 +1119,136 @@ export const runSetup = async (
       // daemon report on its first connection attempt.
       const detail = bot.status === 'unreachable' ? bot.detail : (app as { detail?: string }).detail;
       writeLine(streams.stdout, `! Could not reach Slack to verify (${detail}). Saved the tokens anyway — \`${serveCommand()}\` will report on startup.`);
+    }
+    await askSlackPrincipals(agentId, agentName, bot.status === 'ok' ? bot.identity.teamId : undefined, fetchImpl, previousBotToken);
+  };
+
+  /**
+   * Whether another agent already on Slack uses the inherited top-level
+   * list in workspace `teamId`. Member IDs are workspace-scoped, so a list
+   * nobody can place there may name nobody this agent will ever hear from.
+   */
+  const inheritingSlackTeams = async (agentId: string, fetchImpl: typeof fetch | undefined): Promise<Array<string | undefined>> => {
+    const teams: Array<string | undefined> = [];
+    for (const [otherId, tokens] of Object.entries(state.channels.slack ?? {})) {
+      if (otherId === agentId || !tokens?.botToken || state.principals?.agents?.[otherId]?.slackUsers !== undefined) {
+        continue;
+      }
+      const other = await verifySlackBotToken(tokens.botToken, fetchImpl);
+      // Unverifiable counts as another workspace: it can't be placed.
+      teams.push(other.status === 'ok' ? other.identity.teamId : undefined);
+    }
+    return teams;
+  };
+  /**
+   * Whether the list this agent resolves to is confirmed for workspace
+   * `teamId`: a verified bot in that team already uses it. Its users are
+   * this agent's previous bot and, for an inherited list, every other
+   * agent inheriting it. Nothing else says which workspace a list is for.
+   */
+  const listConfirmedIn = async (
+    agentId: string,
+    own: boolean,
+    teamId: string | undefined,
+    fetchImpl: typeof fetch | undefined,
+    previousBotToken: string | undefined,
+  ): Promise<boolean> => {
+    if (teamId === undefined) {
+      return false;
+    }
+    if (previousBotToken !== undefined) {
+      const previous = await verifySlackBotToken(previousBotToken, fetchImpl);
+      if (previous.status === 'ok' && previous.identity.teamId === teamId) {
+        return true;
+      }
+    }
+    return !own && (await inheritingSlackTeams(agentId, fetchImpl)).includes(teamId);
+  };
+  /**
+   * Whether a first list can be everyone's: every other Slack agent that
+   * would inherit it is verified into the same workspace (or there is none).
+   */
+  const allInheritorsIn = async (agentId: string, teamId: string | undefined, fetchImpl: typeof fetch | undefined): Promise<boolean> => {
+    const teams = await inheritingSlackTeams(agentId, fetchImpl);
+    return teams.length === 0 || (teamId !== undefined && teams.every((team) => team === teamId));
+  };
+
+  /**
+   * Only listed Slack users get a turn (`principals.admit` defaults to
+   * `principals`), so an agent connected with nobody listed ignores
+   * everyone. Asked right after the connect, the one moment the operator
+   * is in Slack's settings anyway. Skipped when it admits anyone, and when
+   * the list it resolves to (its own or inherited) is confirmed for this
+   * workspace (see listConfirmedIn). An unconfirmed list is offered with
+   * Enter to keep it, so a re-run never overwrites one silently; member
+   * IDs are workspace-scoped, so a list from another workspace names
+   * nobody, or someone else.
+   */
+  const askSlackPrincipals = async (
+    agentId: string,
+    agentName: string,
+    teamId?: string,
+    fetchImpl?: typeof fetch,
+    previousBotToken?: string,
+  ): Promise<void> => {
+    const resolved = resolveAgentPrincipals(state.principals, agentId);
+    // `admit: "anyone"` opened the door on purpose: a list would only label
+    // trust there, and the closed-door wording below would be false.
+    if (resolved.admit === 'anyone') {
+      return;
+    }
+    const listed = resolved.slackUsers ?? [];
+    const own = state.principals?.agents?.[agentId]?.slackUsers !== undefined;
+    if (listed.length > 0 && await listConfirmedIn(agentId, own, teamId, fetchImpl, previousBotToken)) {
+      return;
+    }
+    const inherited = listed.length > 0 ? listed.join(', ') : undefined;
+    writeLine(streams.stdout, `Only the Slack users you list can talk to ${agentName}; everyone else is ignored.`);
+    if (inherited !== undefined) {
+      const whose = own ? `${agentName}'s Slack list` : `The Slack list ${agentName} would inherit`;
+      writeLine(streams.stdout, `${whose} (${inherited}) is not confirmed for this workspace, and member IDs only work in their own.`);
+    }
+    writeLine(streams.stdout, 'Find your member ID in Slack: your profile → ⋯ → Copy member ID.');
+    for (;;) {
+      const answer = (await prompter.ask(inherited !== undefined
+        ? `Slack member IDs who may talk to it here (U…, comma-separated, Enter to keep ${inherited}): `
+        : 'Slack member IDs who may talk to it (U…, comma-separated, Enter to skip): ')).trim();
+      // Separators alone (`, ,`) name nobody, the same as Enter.
+      const ids = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      if (ids.length === 0 && inherited !== undefined) {
+        return;
+      }
+      if (ids.length === 0) {
+        // The key that decides this agent's list: its own, where it has one.
+        const key = state.principals?.agents?.[agentId]?.slackUsers !== undefined ? `principals.agents.${agentId}.slackUsers` : 'principals.slackUsers';
+        writeLine(streams.stdout, `! Nobody is listed, so ${agentName} will ignore every Slack message until ${key} names someone.`);
+        return;
+      }
+      const bad = ids.filter((id) => !/^[UW][A-Z0-9]{2,}$/.test(id));
+      if (bad.length > 0) {
+        writeLine(streams.stdout, `✗ ${bad.join(', ')} ${bad.length === 1 ? 'is not a member ID' : 'are not member IDs'} (they look like U0123ABCD). Nothing was saved.`);
+        continue;
+      }
+      const principals: PrincipalsConfig = { ...(state.principals ?? {}) };
+      const anyList = principals.slackUsers !== undefined
+        || Object.values(principals.agents ?? {}).some((entry) => entry?.slackUsers !== undefined);
+      if (!anyList && await allInheritorsIn(agentId, teamId, fetchImpl)) {
+        // The first list on this install is everyone's: the operator who
+        // connects a second agent is almost always the same person. Once
+        // any agent has a list, a new one is that agent's alone, so it
+        // never opens an agent left unlisted on purpose; so is a first one
+        // when another Slack agent is in (or can't be placed in) a
+        // different workspace, since member IDs only mean something there.
+        principals.slackUsers = ids;
+      } else {
+        principals.agents = {
+          ...(principals.agents ?? {}),
+          [agentId]: { ...(principals.agents?.[agentId] ?? {}), slackUsers: ids },
+        };
+      }
+      state.principals = principals;
+      writeLine(streams.stdout, `✓ ${ids.join(', ')} can talk to ${agentName}. Saved with the rest of setup.`);
+      return;
     }
   };
 

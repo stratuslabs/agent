@@ -5,7 +5,7 @@ Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no w
 - **Resumable conversations**: session keys are `slack:<agent>:<team>:<channel>:<thread_ts ?? ts>` (a DM's top level: the DM channel id alone; a thread in a DM adds its `thread_ts`) — a thread is a conversation, it survives daemon restarts, and two agents sharing a thread keep fully separate sessions. A turn parked on a human when the daemon died is re-asked after the restart, and a turn that was still running is continued from where it got to (unless the agent runs on a harness — `codex` or a Claude subscription — where it is failed instead, since the harness may already have acted on it); either way, when it finishes its reply is posted into the thread as a fresh message — the placeholder it would have edited belonged to the old process.
 - **Replies post when they are ready**: by default each message is posted once, finished: what the agent writes before starting a tool is posted as the tool starts, and the reply follows, with Slack's loading status (`assistant.threads.setStatus` — "is thinking…", "is running shell.run…") shown while the turn works, so the notification carries the answer. The `stream` reply mode (`slack.replies` in the [config](../../docs/guides/slack.md#how-replies-appear)) keeps the placeholder-and-edit rendering instead: post `…`, edit as deltas arrive (throttled for `chat.update` limits), show `⚙ tool…` status lines, finalize with the full reply. Either way a reply that outgrows one message is split across several.
 - **Markdown is translated to Slack's mrkdwn** on the way out — `**bold**` to `*bold*`, `*italic*` to `_italic_`, `~~struck~~` to `~struck~`, `[text](https://…)` to `<https://…|text>`, and a `#` heading to a bold line, since mrkdwn has no headings. A bare address is sent as `<https://…>`, Slack's own link markup, so emphasis around it (`**https://…**`) cannot be read as part of it, and a `*`, `_`, or `~` inside one is part of the address rather than a marker. Trailing punctuation (`.`, `,`, `**`) and a `)` the address never opened belong to the sentence, as in GFM autolinks, so `…/wiki/Function_(mathematics)` stays whole. A bare address is sent as `<https://…>`, Slack's own link markup, so emphasis around it (`**https://…**`) cannot be read as part of it, and the `*`, `_`, or `~` inside one is part of the address rather than a marker; trailing punctuation (`.`, `,`, `**`) is the sentence's, as in GFM autolinks. The reply is read once into tokens and written back from those, so what counts as code is decided one time rather than by each rule in turn. Three things follow from that. **A code run is one token**: nothing reads or rewrites inside it, an unclosed fence included, and the newlines in a fence are not line breaks — so a `#` on a line of somebody's shell script is not a heading. A run of N backticks opens code and only a run of exactly N closes it, which is what lets ``a span with a ` in it`` and a ````-fence holding a ```-fence work; one or two unmatched backticks are text, as they are in Markdown, but a pair is a span however far apart, because Slack pairs them too. **A delimiter is matched to its partner**, across whatever sits between — ``**the `fs.read` tool**`` is bold around a snippet, not four literal asterisks — though never across a line, so a marker still being streamed stays literal until its closing half arrives. A run is spent rather than matched whole, so the three asterisks ending `**bold and *italic***` close the italic with one and the bold with two; what no pair spends stays on the line as text, and what a run cannot buy — the third tilde of `~~~struck~~~`, a style that does not exist — is never charged for. **A wrapper is only written where its own character is not already loose** in what it wraps: Slack has one delimiter per style and no way to nest it, so a heading that already contains bold keeps the bold it has rather than gaining a second pair that would print instead of render, and `# glob *.ts` keeps an asterisk that was never a marker. A heading sheds its hashes and its trailing spaces from the prose that holds them, never from a snippet. Anything whose spelling already matches — lists, block quotes, inline code — is untouched. **A pipe table**, which mrkdwn has no syntax for, becomes a code block with its columns padded to line up (alignment colons respected, `**`/`` ` `` markers dropped from cells, since nothing renders inside code); a grid wider than 60 characters — past what a phone shows unwrapped — or one with a link in it (a link inside a code block is not clickable) becomes one line per row, `*Header*: value · *Header*: value`. A one-column table has nothing to line up and becomes a bulleted list under its bold header. A table inside a fence is somebody's text and stays as written, and a grid longer than one message is split like any code block, closed at the cut and reopened in the next, with its header and rule repeated so every part names its columns.
-- **Mention to start, then it stays in the thread.** A mention opens a conversation; every reply in that thread reaches the agent without tagging it again, and free-form DMs are unchanged. A mention partway into an existing thread opens the conversation with what was said before it: the thread's parent and its newest 39 earlier messages. A mention at the top of a channel opens with the channel's 20 most recent messages instead, which is where a channel per client or per project keeps its context. Either way each message keeps its own speaker and its own trust, so a principal's mention does not carry a stranger's earlier words in under the principal's label (other bots count as `unknown`, and under `admit: "principals"` unlisted senders are left out). This needs the history scopes below; without them the agent sees only the message that named it, and the adapter logs a warning. Who an untagged reply is for is decided by [Who a message is for](#who-a-message-is-for). Inbound mentions of other users are humanized to `@Display Name` for the model; redeliveries are deduped so a slow turn never runs twice — in memory while the process remembers them, and after a restart by the gateway: each message is dispatched with its own key (`idempotencyKey`), a repeat runs no second turn, and the adapter posts that message's own reply and files (a file changed since that turn is skipped, since the path may now hold another file), or its failure if the turn failed — once more, if the process died after posting it, which beats a reply never posted.
+- **Mention to start, then it stays in the thread.** A mention opens a conversation; every later reply in that thread from someone the agent admits reaches it without tagging it again (by default only its listed principals; see [Who can talk to an agent](#who-counts-as-the-operator)), and free-form DMs are unchanged. A mention partway into an existing thread opens the conversation with what was said before it: the thread's parent and its newest 39 earlier messages. A mention at the top of a channel opens with the channel's 20 most recent messages instead, which is where a channel per client or per project keeps its context. Either way each message keeps its own speaker and its own trust, so a principal's mention does not carry a stranger's earlier words in under the principal's label (other bots count as `unknown`, and under `admit: "principals"` unlisted senders are left out). This needs the history scopes below; without them the agent sees only the message that named it, and the adapter logs a warning. Who an untagged reply is for is decided by [Who a message is for](#who-a-message-is-for). Inbound mentions of other users are humanized to `@Display Name` for the model; redeliveries are deduped so a slow turn never runs twice — in memory while the process remembers them, and after a restart by the gateway: each message is dispatched with its own key (`idempotencyKey`), a repeat runs no second turn, and the adapter posts that message's own reply and files (a file changed since that turn is skipped, since the path may now hold another file), or its failure if the turn failed — once more, if the process died after posting it, which beats a reply never posted.
 - **Approval buttons** for the gateway's `remote` permission mode: a gated tool call parks the turn and asks in its thread with **Allow once** / **Always allow** / **Deny**. See [Approving tool calls](#approving-tool-calls) — clicks are authorized by *who clicked*, never by who can see the message, and **Always allow** is offered only where the daemon would actually remember it.
 - **Tokens are gateway infrastructure secrets**, stored in the `channels` namespace of `~/.stratus/credentials.json` — never in an agent's credential allowlist:
 
@@ -43,9 +43,12 @@ they are the whole model:
 4. **In a thread with several agents, an untagged reply goes to the agent
    the thread belongs to.** That is the first agent to hold it: the one its
    first message named, or the one that posted it. Naming another agent
-   gets that agent's answer to that message, and nothing more: the thread
-   stays where it was, so the next untagged reply goes back to its owner
-   and the agent you pulled in stays quiet unless it is named again. A
+   gets that agent's answer to that message, and makes the untagged
+   replies the same person sends after it that agent's too, until they
+   name someone else (`@Bea your turn`, then `and?`, is Bea's). The thread
+   itself stays where it was: an untagged reply from anyone who has not
+   named an agent in it goes to its owner. Who each person last named is
+   kept in memory, so after a restart it falls back to the owner. A
    message an agent already took stays that agent's: Slack redelivering it
    after a restart goes back to the agent that accepted it — and if that
    agent's app has not come back, the others stand down rather than run it
@@ -63,35 +66,33 @@ they are the whole model:
 5. **How an agent listens is the soul's to say.** Rules 3 and 4 are the
    `thread` mode, the default. A soul with `listens: mentions` takes only
    messages that name it, and hears the rest. One with `listens: judge`
-   hears everything and, while attentive — eight messages or fifteen
-   minutes after it last answered a message that named it, whichever ends
-   first — runs a turn nobody asked for on each untagged message, told it
-   may answer with nothing; past the window a message is heard with no
-   turn at all, and a mention re-arms it. A reply it chose to give on its
-   own does not: it takes the thread for the thread rule, and counts
-   against its own window like any other message. A turn that decides on silence posts nothing: its
+   hears everything and runs a turn nobody asked for, told it may answer
+   with nothing, on each untagged message that is its own by rule 4: the
+   agent the sender last named, else the thread's owner (card 541). There
+   is no window: an owner an hour past its last answer still takes an
+   untagged instruction in its thread, and only one agent takes each
+   message. A judged turn does not take images (they are named, as for a
+   message that was overheard). Each decision is logged as one line with
+   the agent, the message's ts, and the reason (`addressed it last`,
+   `owner`, or whose it was instead), never the text. An approver's
+   untagged stop is never judged: it stops the holder's turn or, with
+   nothing running, is only heard. A turn that decides on silence posts nothing: its
    placeholder is opened only on the first text it streams, never on a
    tool line, and a failed one posts no error note — one the daemon died
    inside, failed at the next start, included, a line it had already
    streamed staying as it was. A line an attempt the
    provider abandoned had already posted is taken back when the retry
-   decides on silence. Neither mode takes
-   part in the holder rule — that rule answers whose an untagged reply is,
-   and for these two the soul already has — so a thread-rule agent stands
-   down in a thread a mentions-only agent owns, or where a judging one has
-   chosen to speak: the judging one decides for itself, and the
-   mentions-only one is being talked to and waits to be named. A judging agent that chooses to speak takes the thread,
-   recorded once its reply has landed — so a message typed while it was
-   still deciding may be answered by both it and a thread-rule colleague
-   that held the thread before — and the owner takes it back by answering
-   in it. Which of the two spoke last is read off the thread, not the
+   decides on silence. A mentions-only agent takes no part in the
+   holder rule: a thread-rule agent stands down in a thread one owns, since
+   that agent is being talked to and waits to be named. A judging agent
+   that chooses to speak on a turn nobody asked for takes the thread,
+   recorded once its reply has landed (a message typed while it was still
+   deciding stays the previous owner's), and the owner takes it back by
+   answering in it. Which of the two spoke last is read off the thread, not the
    clock: whichever reply sits lowest, since that is the one a reader
    answers, and a placeholder posted early and filled in slowly sits above
    a reply posted while it was being written. A colleague's reply is never
    judged, only heard.
-   The window also counts messages this daemon has dispatched that the
-   session does not hold yet, so a burst typed inside one turn is judged
-   up to the window and heard past it.
 6. **Standing down is not leaving.** An agent in a thread hears what is
    said to the other agent in it — the question that named its colleague,
    the untagged replies that were the colleague's to answer, and what the
@@ -99,9 +100,10 @@ they are the whole model:
    nothing posted. The next time it is asked, it answers as someone who
    followed the conversation rather than one who stepped out of the room.
    What it hears is marked as said to somebody else, so a stranger's words
-   in a shared thread never read to it as an instruction; and a stranger
-   overheard lowers its session's trust label exactly as one who addressed
-   it would, since their text is in the transcript either way. A
+   in a shared thread never read to it as an instruction. By default an
+   unlisted sender is not overheard at all; under `"admit": "anyone"` a
+   stranger overheard lowers its session's trust label exactly as one who
+   addressed it would, since their text is in the transcript either way. A
    colleague's reply is heard under the colleague's own label, never as a
    person's: an agent's word is at most `agent`, and carries whatever its
    session has been exposed to. Replies only — a turn that said nothing,
@@ -420,12 +422,14 @@ So a message is the operator's only when the operator has said so:
 }
 ```
 
-A turn from a listed id reaches the agent as its operator's (`user`). A turn
-from anyone else — in a DM as much as in a channel — reaches it as
-`unknown`, and the session it lands in stays `unknown` from then on: that
+A turn from a listed id reaches the agent as its operator's (`user`). By
+default anyone else gets no turn (see the door below). Under
+`"admit": "anyone"`, a turn from anyone else — in a DM as much as in a
+channel — reaches it as `unknown`, and the session it lands in stays `unknown` from then on: that
 text is in the transcript. Every fact the agent remembers afterwards
 carries the label, and the prompt renders it under a heading that says so.
-With no list at all, every Slack sender is `unknown`, and `stratus serve`
+With no list at all, nobody is a principal: under the default nobody gets a
+turn, under `"anyone"` every Slack sender is `unknown`, and `stratus serve`
 says so at startup. An agent's own entry replaces the shared list;
 `"slackUsers": []` excludes an agent from it.
 
@@ -443,15 +447,17 @@ prefers nobody, so under it every author is an id.
 
 The sender is judged on **every message**, not once per thread. A thread
 keys one session for everyone in it, so an authorized member can open one
-and a stranger can mention the agent inside it afterwards — the stranger's
-turn lowers the session, and the authorized member's next turn does not
-raise it back.
+and a stranger can mention the agent inside it afterwards. By default the
+stranger's message is refused before it becomes a turn, and the session is
+untouched. Under `"admit": "anyone"` it becomes an `unknown` turn that
+lowers the session, and the authorized member's next turn does not raise it
+back.
 
-The list is a **label** by default: an unlisted sender still gets a turn,
-marked `unknown`. For an agent that holds tools that is not enough — a
+The list is a **door** by default: an unlisted sender gets no turn. A
 stranger's message is not merely uncertain, it is a prompt they chose, and
-`unknown` does not stop `shell.run` from running on it once a listed
-approver clicks. `admit` makes the list a **door**:
+an agent that holds tools should not run on it. `"admit": "anyone"` turns
+the list back into a **label**, where an unlisted sender still gets a turn,
+marked `unknown`. Per agent, as here, where Bea answers anyone:
 
 ```jsonc
 {
@@ -465,7 +471,9 @@ approver clicks. `admit` makes the list a **door**:
 }
 ```
 
-Under `"admit": "principals"` a sender not in `slackUsers` gets no turn:
+Under `"admit": "principals"` (the default; the daemon resolves an absent
+key to it, while an embedder calling the adapter directly without `admit`
+still gets `anyone`) a sender not in `slackUsers` gets no turn:
 the message is refused before it takes a place in the queue, the agent
 does not overhear it into a thread's transcript either, and nothing is
 posted back — a reply is a conversation the operator chose not to have.
@@ -474,8 +482,8 @@ id — one per message, however many times Slack delivers it, and only for a
 message the agent would have taken up: a mention, or a reply in a thread
 the agent holds, whether the daemon remembers that or its sessions do. A
 stranger's reply in a thread the agent was never part of is dropped
-without a line. `"anyone"` is
-the default and today's behavior; the key inherits per agent like
+without a line. The daemon's default is `"principals"`; `"anyone"` is the
+default only for an embedder calling the adapter directly. The key inherits per agent like
 `slackUsers`, so Bea above stays open while everyone else is closed. A value
 that is neither word is a config error, never `anyone`: this is the one
 setting here whose misspelling would open the door. So is a `slackUsers`

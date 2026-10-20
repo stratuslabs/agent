@@ -1,6 +1,8 @@
+import path from 'node:path';
+
 import type { ApprovalPolicy } from '@stratusagent/core';
 import { createFileLedger } from '@stratusagent/plugins';
-import { autonomyDirectory } from '../autonomy.ts';
+import { agentShellGrantRoot, autonomyDirectory } from '../autonomy.ts';
 import type {
   ApprovalTransport,
   GatewayChannelAdapter,
@@ -14,11 +16,13 @@ import {
   describeDestinationGrant,
   describeOriginScope,
   describeToolGrant,
+  type CommandNameGrant,
   type CommandScope,
   type OriginScope,
   type PermissionDecision,
   type DestinationGrant,
   type ToolGrant,
+  unboundStandingChannels,
 } from '@stratusagent/permissions';
 import {
   agentsDirPath,
@@ -477,6 +481,9 @@ const serveHeldHome = async (
           const workspaces = createAgentWorkspaces(env);
           return { workspaces, ledger: createFileLedger((id) => workspaces.forAgent(id), (id) => workspaces.prepare(id)) };
         })(),
+        // Messages addressed to an agent while this daemon restarts, kept
+        // for the next one (see docs/guides/always-on.md).
+        pendingIntakePath: path.join(stratusHomePath(env), 'slack-pending-intake.json'),
         log,
         warn,
       }));
@@ -576,6 +583,9 @@ const serveHeldHome = async (
       scopesFor: async (agentId: string) => [...operatorCommands.scopesFor(agentId), ...await grantStore.scopesFor(agentId)],
       remember: (agentId: string, scope: CommandScope) => grantStore.remember(agentId, scope),
     },
+    // Commands granted by name, kept inside the agent's workspace.
+    names: grantStore,
+    grantRootFor: (agentId: string) => agentShellGrantRoot(pluginsConfig, env, agentId),
     // Workspace autonomy: the agent's own workspace, for the agents config
     // turns it on for. Resolved per call so the answer always matches the
     // config this daemon started with.
@@ -589,6 +599,9 @@ const serveHeldHome = async (
       // session, is precisely the decision that must not be the one leaving
       // no trace.
       log(`${agentId}: "${describeCommandScope(scope)}" now runs without asking`);
+    },
+    onCommandNameRemembered: ({ agentId, grant }: { agentId: string; grant: CommandNameGrant }) => {
+      log(`${agentId}: "${grant.command}" now runs without asking inside its workspace`);
     },
   };
   // The origin-scope engine, whose grants live in the same file as the
@@ -625,6 +638,8 @@ const serveHeldHome = async (
     const destinations = {
       ...transport.destinations,
       whitelist: grantStore,
+      // The operator's standing channel authorization, read per call.
+      standingChannelsFor: (agentId: string) => resolveAgentApprovals(approvalsConfig, agentId).channels ?? [],
       onGranted: ({ agentId, grant }: { agentId: string; grant: DestinationGrant }) => {
         log(`${agentId}: ${describeDestinationGrant(grant)} now runs without asking, until revoked${grant.grantedBy ? ` (granted by ${grant.grantedBy})` : ''}`);
       },
@@ -653,6 +668,19 @@ const serveHeldHome = async (
     : overrides.filter(([, agent]) => agent.autonomy === 'workspace').map(([agentId]) => agentId).join(', ');
   if (autonomous.length > 0) {
     log(`approvals: autonomy workspace for ${autonomous} (reads inside their own workspace run without asking)`);
+  }
+  const standingChannels = [...new Set([...Object.keys(approvalsConfig.agents ?? {}), ...slackAgents.map(([agentId]) => agentId)])]
+    .map((agentId) => [agentId, resolveAgentApprovals(approvalsConfig, agentId).channels ?? []] as const)
+    .filter(([, channels]) => channels.length > 0);
+  if (standingChannels.length > 0) {
+    log(`approvals: message.read/send run without asking in ${standingChannels.map(([agentId, channels]) => `${channels.join(', ')} for ${agentId}`).join('; ')} (approvals.channels; DMs still ask)`);
+    // A bare id names no workspace, so it covers nothing (see
+    // matchesStandingChannel). Said once here rather than refused, so a
+    // config written before the workspace was required still starts.
+    const unbound = [...new Set(standingChannels.flatMap(([, channels]) => unboundStandingChannels(channels)))];
+    if (unbound.length > 0) {
+      log(`approvals: ${unbound.join(', ')} in approvals.channels name${unbound.length === 1 ? 's' : ''} no workspace and cover${unbound.length === 1 ? 's' : ''} nothing; write slack:<workspace id>/<channel id> (the workspace id is the T… id), or slack:*`);
+    }
   }
   const declared = operatorCommands.describe();
   if (declared) {

@@ -79,10 +79,13 @@ control API) are read once, at start, and stay as they were until `stratus
 restart`. So doctor also asks the running daemon
 (through the control API, at the address in `~/.stratus/gateway.json`) what
 it met while starting. Each warning it logged then (a plugin that did not
-load, nobody able to approve, and so on) is a problem, and so is a config
-file that has changed, appeared or gone since the daemon started, including a
-global config behind a project one, since a restart is what applies the
-daemon-level settings in it. No daemon found is not a problem, since `stratus run`
+load, nobody able to approve, and so on) is a problem, except an intake file
+it could not read: that one started the daemon paused, and doctor reports it
+only while that pause is still on, since resuming intake (`PUT
+/api/v1/intake` with `{"paused": false}`) repairs it without a restart, and
+so does a later pause, which writes a good file. A config file that has changed, appeared or gone since the daemon
+started is a problem too, including a global config behind a project one,
+since a restart is what applies the daemon-level settings in it. No daemon found is not a problem, since `stratus run`
 needs none; doctor says `none found (no control API published)` because a
 daemon started with its API off publishes no address either. A damaged
 `gateway.json`, or a daemon that published its address and does not answer, is
@@ -158,7 +161,9 @@ a problem.
   `message.*` events too. With scopes and events both in place, check the
   soul's [`listens`](./slack.md#how-an-agent-listens) setting: `mentions`
   hears untagged replies without answering them, and `judge` may choose
-  silence or be past its attention window. Under the default `thread`, a
+  silence, or the reply was another agent's (the one that person last
+  named, or the thread's owner; the daemon log has a `slack: judge:` line
+  for each decision). Under the default `thread`, a
   missing reply usually means the thread belongs to another agent: it was
   there first. Mention the agent you want, or start a new thread with it.
 - **A DM to the app says "Sending messages to this app has been turned

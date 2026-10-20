@@ -292,10 +292,14 @@ pattern address). An
 unknown flag asks too. `rg` runs only with `--no-ignore` (or `-u`), because
 otherwise it reads ignore files outside the workspace: above it, in your
 home directory, and in a linked worktree's git directory.
-`grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH` or
-`GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
+`grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH`,
+`GREP_OPTIONS`, or `GZIP` to a command, whatever its `env` or `passEnv` says, because
 they add options the command line doesn't show. Nor are shell startup variables passed (`BASH_ENV`, `ENV`, `ZDOTDIR`,
 exported `BASH_FUNC_*` functions), since they run code before the command,
+or `CDPATH`, which sends a relative `cd` somewhere other than where the line
+is judged, or `BASHOPTS`, `SHELLOPTS`, and `POSIXLY_CORRECT`, which turn on
+shell options that change how the line reads (`cdable_vars` makes `cd HOME`
+follow `$HOME`). A bash `{name}>file` descriptor redirection asks too,
 and zsh, tcsh, csh, and fish are started without their user startup
 files (`-f`, or `fish --no-config`) for the same reason.
 Nor does `PATH` keep an
@@ -427,6 +431,59 @@ agent with `externalContent: "gate"`, downloads always ask: the shell
 doesn't mark what it prints as web content, so a download could never
 close the gate the way `web.fetch` does.
 
+## Channels your agents may read and post in
+
+Agents that work in Slack read and post in channels all day. Instead of
+approving each channel with **Always allow**, you can authorize them in
+config:
+
+```jsonc
+"approvals": {
+  "channels": ["slack:T0123ABCD/C0C1YV12SLC"],
+  "agents": { "nova": { "channels": ["slack:*"] } }
+}
+```
+
+`message.read` and `message.send` to a listed channel then run without
+asking, in every session: a conversation, a scheduled turn, or a
+delegated one, headless or remote. Because it lives in config, it holds
+through new sessions, restarts, and `stratus update`. An entry is one of:
+
+- `slack:<workspace id>/<channel id>`: one channel. The workspace id is
+  the `T…` id. A channel id is unique only within its workspace, so the
+  entry covers that channel only while the agent's app is connected to
+  that workspace, the same way an **Always allow** grant does.
+- `slack:<workspace id>/*`: every channel the agent's app is in, in that
+  workspace.
+- `slack:*`: every channel the agent's app is in, whatever workspace it is
+  connected to.
+
+Write Slack ids in capitals (a `T…` workspace, a `C…` or `G…` channel; on Enterprise Grid use the workspace's `T…` id, not the organization's `E…`), not channel names; anything else, a `D…` DM id included, is refused at startup. A bare
+`slack:<channel id>` names no workspace and covers nothing; the daemon
+loads it and says so in its startup log. An agent's list adds to the top-level one, like
+`commands`, and the daemon names who has what in its startup log.
+
+What it doesn't change:
+
+- **DMs still ask.** Only a conversation the agent's Slack app reports as a
+  channel, public or private, is covered. A DM or group DM asks as before,
+  even when its id is listed, and so does a conversation the app can't look
+  up at that moment. This is decided by asking Slack, not by the id's
+  first letter, since a `G…` id can be either.
+- **Slack still decides access.** The app must be a member of the channel,
+  with the scopes `message.read` and `message.send` already need. A listed
+  channel the app isn't in fails the same way it did before.
+- **Other tools are unaffected.** Only the built-in `message.read` and
+  `message.send` are covered, not a plugin tool with the same name, and
+  every other approval works as before.
+- **The external-content gate still applies.** With
+  `externalContent: "gate"`, a conversation that has read web content asks
+  again, like every other standing grant.
+
+To revoke, remove the entry and restart the daemon. Grants made with
+**Always allow** on one conversation are separate and stay in
+`whitelist.json` until `stratus grants revoke`.
+
 ## Standing grants
 
 Most installed tools are `gated` and name no scope — `fs.write`, a
@@ -506,6 +563,7 @@ than scoping choices:
 stratus grants blair                                # everything blair may do unattended, every kind
 stratus grants revoke blair --tool fs.write           # a standing grant
 stratus grants revoke blair --scope "git push"        # a command scope, by the line the listing shows
+stratus grants revoke blair --scope grep              # a command granted by name
 stratus grants revoke blair --origin https://app.example.com
 stratus grants revoke blair --destination slack:C0123ABCD   # every tool granted on that conversation
 ```
@@ -613,8 +671,10 @@ Three limits to know before relying on it:
   send.
 - **Only `external` content trips it.** A shell's output is `unknown`, not
   `external`, so a coding agent keeps its grants after `ls`. A message from
-  a Slack sender you have not named as a principal is `unknown` too; refuse
-  those before the turn starts with `principals.admit: "principals"`
+  a Slack sender you have not named as a principal is refused before the
+  turn starts, so it carries no label at all; only under
+  `principals.admit: "anyone"` is it admitted, as `unknown`, which does not
+  trip the gate either
   ([Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator)).
 - **It gates what an agent does, not what it believes.** A page can still
   mislead an answer. What the gate removes is the page's ability to act

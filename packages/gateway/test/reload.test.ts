@@ -11,6 +11,7 @@ import type { OptionalModuleHost } from '@stratusagent/plugins';
 import {
   RESTARTING_TURN_ERROR,
   STOPPING_TURN_ERROR,
+  GatewayStoppingError,
   RestartUnsupportedError,
   ShardedSessionStore,
   createGateway,
@@ -924,4 +925,115 @@ test('a turn recovered from a parked approval is aborted at the window like any 
   after.close();
   assert.equal(session?.status, 'failed');
   assert.equal(session?.lastError, RESTARTING_TURN_ERROR);
+});
+
+test('channels stay connected while a restart drains, so a message sent then is refused as a restart, not lost', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let firstCall!: () => void;
+  const started = new Promise<void>((resolve) => { firstCall = resolve; });
+  const fetchImpl = (async () => {
+    firstCall();
+    await held;
+    return openAiText('finished');
+  }) as typeof fetch;
+
+  // A channel that records when it was told to stop: before that it is
+  // still connected and can still hear people.
+  let stoppedWhileRunning: boolean | undefined;
+  let released = false;
+  const channel: GatewayChannelAdapter = {
+    name: 'recording-channel',
+    async start() {},
+    async stop() {
+      stoppedWhileRunning = !released;
+    },
+  };
+
+  let handOff!: (outcome: RestartOutcome) => void;
+  const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    channels: [channel],
+    log: () => {},
+    warn: () => {},
+    onRestart: (outcome) => handOff(outcome),
+  });
+  await gateway.start();
+
+  const running = gateway.dispatch({ sessionId: 'long', agentId: 'ava', userMessage: 'take your time' });
+  await started;
+  gateway.restart({ drainTimeoutMs: 60_000 });
+  // Let the drain get as far as it goes while the turn is still running.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(stoppedWhileRunning, undefined, 'the channel was stopped while a turn was still draining');
+
+  // What a channel that is still up hears in the drain is refused by name,
+  // so it can tell the person and keep the message for the next daemon.
+  await assert.rejects(
+    gateway.dispatch({ sessionId: 'late', agentId: 'ava', userMessage: 'hello?' }),
+    (error: Error) => error instanceof GatewayStoppingError && error.restarting && /restarting/.test(error.message),
+  );
+
+  released = true;
+  release();
+  await running;
+  assert.deepEqual(await restarted, { drained: true });
+  assert.equal(stoppedWhileRunning, false);
+  await gateway.stop();
+});
+
+test('a turn that ignores its abort does not keep the channels connected past the window', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // Never settles, abort or not.
+  let firstCall!: () => void;
+  const started = new Promise<void>((resolve) => { firstCall = resolve; });
+  const fetchImpl = (() => new Promise(() => { firstCall(); })) as typeof fetch;
+
+  let stopped = false;
+  const channel: GatewayChannelAdapter = {
+    name: 'recording-channel',
+    async start() {},
+    async stop() {
+      stopped = true;
+    },
+  };
+  let handOff!: (outcome: RestartOutcome) => void;
+  const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    channels: [channel],
+    log: () => {},
+    warn: () => {},
+    onRestart: (outcome) => handOff(outcome),
+  });
+  await gateway.start();
+  void gateway.dispatch({ sessionId: 'stuck', agentId: 'ava', userMessage: 'hang' }).catch(() => undefined);
+  await started;
+  gateway.restart({ drainTimeoutMs: 50 });
+  assert.deepEqual(await restarted, { drained: false });
+  // Released anyway: a host that starts the next daemon must not find this
+  // one still holding the connection.
+  assert.equal(stopped, true);
+});
+
+test('a plain stop refuses by name too, and says it is stopping rather than restarting', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await gateway.start();
+  await gateway.stop();
+  await assert.rejects(
+    gateway.dispatch({ sessionId: 'late', agentId: 'ava', userMessage: 'hello?' }),
+    (error: Error) => error instanceof GatewayStoppingError && !error.restarting && error.name === 'GatewayStoppingError',
+  );
 });

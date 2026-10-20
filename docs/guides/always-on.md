@@ -129,9 +129,22 @@ A plugin is code, and code gets a restart — but an announced one rather
 than a surprise, and one that costs the fleet as little as it can.
 `stratus restart` (or `POST /restart`) asks the running daemon to:
 
-1. **Refuse new turns**, at once. A message arriving during the drain is
-   answered with "stratusd is restarting and will accept new work once it
-   is back up" rather than dropped.
+1. **Refuse new turns**, at once, with channels still connected. A Slack
+   message addressed to an agent during the drain (a mention, a DM, a new
+   message in its home channel, a reply in a thread it holds) is answered
+   "I'm restarting right now. I'll answer this as soon as I'm back." and
+   kept in `slack-pending-intake.json`: where it was and who sent it, never
+   its text. The next daemon reads each one back from Slack once its apps
+   connect and handles it as if it had just arrived, so it is answered once.
+   New messages in a conversation with kept ones wait until those are back
+   in line, so answers keep their order; other conversations do not wait.
+   If Slack takes over 10 seconds to read a kept message back, it (and any
+   kept after it in that conversation) waits for the next start instead of
+   being answered out of order.
+   A message deleted meanwhile, or kept over a day ago, is dropped with a
+   line in the log. A reply the agent would only judge is kept the same way
+   but gets no notice, and a message it only overhears is not kept. A plain
+   stop does the same, saying it is shutting down instead.
 2. **Let in-flight turns finish**, for up to the drain window —
    `--drain-timeout <seconds>`, default 30. A turn still running when the
    window closes is aborted the way the watchdog aborts one: its session is
@@ -161,7 +174,11 @@ explains.
 
 Refusing new turns first is what makes the drain finite: every turn is
 queued through one place, and that place turns new work away once a stop
-begins, so the set the daemon waits on can only shrink. A channel's own
+begins, so the set the daemon waits on can only shrink. Channels are stopped
+after the turns, not before: a channel that disconnected first could not
+hear anyone for as long as a long turn held the drain, and Slack does not
+redeliver to an app that was not connected. A turn that ignores its abort
+does not keep them connected past the window. A channel's own
 drain is a loop rather than a single snapshot, because a turn finishing
 inside the drain still hands it work to deliver — the retraction that takes
 the buttons off an approval denied by the shutdown is exactly that, and it

@@ -16,6 +16,7 @@ what moves when you rename an agent.
 | `fleet.db` | The schedules, and the session index that says which agent's store holds a given session id. Fleet infrastructure, deliberately not per agent — see below. |
 | `promoted.json` | The last version promoted on this home under `stratus serve --hold-new-version`, and when. A start of any other version is held until promoted. `0600`. |
 | `intake.json` | Present only while intake is paused (`PUT /api/v1/intake`): the pause, its message, and when it began. Read at start, so a pause survives a restart; a file that cannot be read starts the daemon paused. `0600`. |
+| `slack-pending-intake.json` | Present only while Slack messages sent during a restart or stop wait for the next start: per message the agent, workspace, channel, ts, thread, sender, channel type, and when it was kept. Never the text, which is read back from Slack. Each entry is removed as it is handled; one over a day old is dropped. `0600`. |
 | `gateway-token`, `gateway.json` | The [control API](../../packages/control-api/README.md)'s bearer token and the address a running daemon bound. Both `0600`. |
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
 | `grants.lock` | Held for a moment while a grant file is read by the daemon or rewritten by `stratus grants revoke`, so a daemon never reads one halfway through a revoke. Empty; safe to delete when nothing is running. |
@@ -33,7 +34,7 @@ what moves when you rename an agent.
 | --- | --- |
 | `agents/<id>/sessions.db` | Its conversations, whole: messages, status, and the provider replay state a resumed turn needs. `0600`. |
 | `agents/<id>/memory.jsonl` | What it [remembers](../concepts/memory.md), one JSON record per line, plus the derived `memory.jsonl.index` beside it. `0600`. |
-| `agents/<id>/whitelist.json` | What it may do unattended: command scopes, origins, and standing tool grants. See [Approvals](../guides/approvals.md#standing-grants). `0600`. An install still waiting on the upgrade move has this as `agents/<id>.whitelist.json`, and that file is the one both read and written until it moves. |
+| `agents/<id>/whitelist.json` | What it may do unattended: command scopes, commands granted by name, origins, and standing tool grants. See [Approvals](../guides/approvals.md#standing-grants). `0600`. An install still waiting on the upgrade move has this as `agents/<id>.whitelist.json`, and that file is the one both read and written until it moves. |
 | `agents/<id>/workspace/` | A link to `~/Agents/<id>/workspace/` (see [the agents folder](#the-agents-folder)). Where its tools put the files they produce — a screenshot a channel uploads, a report it wrote, an image an MCP server returned — plus `fs-provenance.jsonl`, the ledger that remembers which of those files came from outside (see [Tools](../guides/tools.md)). `0700`. An install still waiting on the upgrade move has this as `workspaces/<id>/`. |
 
 The agent's **soul is named in `agents/`**, not in this directory: a

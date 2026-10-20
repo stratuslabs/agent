@@ -451,8 +451,46 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     }
     route.trustedDomains = [...new Set(normalized as string[])];
   }
+  if (source.channels !== undefined) {
+    // Refused rather than dropped, like the lists above: an operator who
+    // wrote a channel name or a bare id expects it to stop asking.
+    const entries = Array.isArray(source.channels) ? source.channels : undefined;
+    const valid = entries?.every((entry) => typeof entry === 'string' && standingChannelEntryValid(entry.trim()));
+    if (!entries || !valid) {
+      throw new Error(
+        `Invalid ${where}.channels in config ${configPath}: expected a list like ["slack:T0123ABCD/C0123ABCD"] or ["slack:*"]: `
+        + 'a channel kind, the workspace id and a conversation id (not a name), or * for every channel the agent\'s app is in. '
+        + 'For Slack, the workspace id starts with T (on Enterprise Grid, the workspace\'s T… id, not the organization\'s E… id) '
+        + 'and the channel id with C or G, in capitals; DMs (D…) are never covered.',
+      );
+    }
+    route.channels = [...new Set((entries as string[]).map((entry) => entry.trim()))];
+  }
   return route;
 };
+
+/**
+ * `slack:T0123ABCD/C0123ABCD`, `slack:T0123ABCD/*`, or `slack:*`. A bare
+ * `slack:C0123ABCD` still loads, so a config written for the first form of
+ * this setting never stops the daemon, but it names no workspace and covers
+ * nothing; the daemon says so at startup.
+ */
+const STANDING_CHANNEL_ENTRY = /^[a-z][a-z0-9-]*:(\*|[A-Za-z0-9][A-Za-z0-9._-]*(\/(\*|[A-Za-z0-9][A-Za-z0-9._-]*))?)$/;
+
+/**
+ * Slack's own id shapes, so a channel name that happens to fit the generic
+ * pattern (`slack:T0123/general`) is refused at startup instead of loading
+ * and never matching: `conversations.info` takes ids only. A workspace is
+ * `T…`: what the adapter matches against is `auth.test`'s `team_id`, and an
+ * Enterprise Grid organization's `E…` id is never that, so it would load and
+ * never match. A channel is `C…` or `G…`. `D…` is refused because a DM is
+ * never covered.
+ */
+const SLACK_STANDING_CHANNEL_ENTRY = /^slack:(\*|(T[A-Z0-9]+\/)?[CG][A-Z0-9]+|T[A-Z0-9]+\/\*)$/;
+
+const standingChannelEntryValid = (entry: string): boolean =>
+  STANDING_CHANNEL_ENTRY.test(entry)
+  && (!entry.startsWith('slack:') || SLACK_STANDING_CHANNEL_ENTRY.test(entry));
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
   const route = parseApprovalRoute(raw, configPath, 'approvals');
@@ -532,6 +570,7 @@ export const resolveAgentApprovals = (
   const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
   const branchPrefixes = agent?.branchPrefixes ?? approvals?.branchPrefixes;
   const trustedDomains = [...new Set([...(approvals?.trustedDomains ?? []), ...(agent?.trustedDomains ?? [])])];
+  const channels = [...new Set([...(approvals?.channels ?? []), ...(agent?.channels ?? [])])];
   return {
     ...(autonomy !== undefined ? { autonomy } : {}),
     ...(branchPrefixes !== undefined ? { branchPrefixes } : {}),
@@ -540,6 +579,7 @@ export const resolveAgentApprovals = (
     ...(externalContent !== undefined ? { externalContent } : {}),
     ...(commands.length > 0 ? { commands } : {}),
     ...(trustedDomains.length > 0 ? { trustedDomains } : {}),
+    ...(channels.length > 0 ? { channels } : {}),
   };
 };
 
@@ -625,8 +665,10 @@ export const resolveAgentPrincipals = (
 ): AgentPrincipalsConfig => {
   const agent = principals?.agents?.[agentId];
   const slackUsers = agent?.slackUsers ?? principals?.slackUsers;
-  const admit = agent?.admit ?? principals?.admit;
-  return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
+  // Closed by default: only listed principals get a turn. `anyone` is the
+  // explicit opt-in. Resolved here, the one place, like resolveAgentSlack.
+  const admit = agent?.admit ?? principals?.admit ?? 'principals';
+  return { ...(slackUsers ? { slackUsers } : {}), admit };
 };
 
 const parseSlackEntry = (

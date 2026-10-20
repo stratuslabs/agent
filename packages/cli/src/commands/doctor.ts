@@ -17,6 +17,7 @@ import {
   readWorkingDirectory,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
+  resolveAgentPrincipals,
   gatewayInfoPath,
   gatewayTokenPath,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
@@ -45,6 +46,7 @@ import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { harnessesMissingMessage, missingHarnessPackages } from '../harness-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
+import { loadServePrincipals } from '../trusted-config.ts';
 
 export interface DoctorKeyCheck {
   provider: CredentialProviderName;
@@ -218,7 +220,16 @@ interface DaemonHealth {
   version?: string;
   startedAt?: string;
   startup?: { warnings?: unknown; configs?: unknown };
+  intake?: { paused?: unknown; unreadable?: unknown };
 }
+
+/**
+ * How the gateway begins every intake warning it logs at start (an intake
+ * file it could not read, so it started paused). Unlike the rest of the
+ * start, that one is repaired live: resuming intake rewrites the file, and
+ * a restart would only read the same broken one and pause again.
+ */
+const INTAKE_WARNING_PREFIX = 'intake: ';
 
 /** What a daemon's /health said about each config file at start, keeping only well-formed entries. */
 const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | null }> =>
@@ -286,7 +297,22 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   const warnings = Array.isArray(startup?.warnings)
     ? startup.warnings.filter((line): line is string => typeof line === 'string')
     : [];
+  // The pause an unreadable file started is over once intake was resumed,
+  // or paused again (a pause writes a good file), even if a later pause is
+  // still on. A daemon that reports no intake state, or does not say which
+  // pause this is, gives no evidence either way, so the warning stays.
+  const intake = health.intake;
+  const startupPauseOver = intake?.paused === false || (intake?.paused === true && intake.unreadable === false);
   for (const line of warnings) {
+    if (line.startsWith(INTAKE_WARNING_PREFIX)) {
+      if (!startupPauseOver) {
+        problems.push(
+          `The running daemon started with intake paused and is still refusing new work: ${line.slice(INTAKE_WARNING_PREFIX.length)} `
+          + 'Resume it with PUT /api/v1/intake {"paused": false}; a restart reads the same file and pauses again.',
+        );
+      }
+      continue;
+    }
     problems.push(`The running daemon warned at start: ${line}. It runs on what it loaded until \`stratus restart\`.`);
   }
   const configs = startedConfigs(startup?.configs);
@@ -710,6 +736,41 @@ export const collectDoctorReport = async (
     problems.push(
       `Slack tokens are stored for ${orphans.join(', ')}, which no agent matches — \`stratus serve\` skips them. `
       + 'Clear them from `stratus setup` → Channels.',
+    );
+  }
+
+  // Only listed principals get a turn unless an agent says `admit: "anyone"`,
+  // so a connected agent with nobody listed ignores every Slack message.
+  // Read the way `serve` reads them (`loadServePrincipals`): from a trusted
+  // config only, falling back to the global file when an auto-discovered
+  // project config wins discovery, and closed when unreadable.
+  // Its warnings are what serve would log at start, and the only place that
+  // says why a shadowed global file's list did not take effect.
+  const trustedPrincipals = await loadServePrincipals(env, command.configPath, (line) => {
+    problems.push(`At start, serve would warn: ${line.replace(/\.$/, '')}.`);
+  });
+  const unreachable = slackAgents.filter((id) => !orphans.includes(id)).filter((id) => {
+    const resolved = resolveAgentPrincipals(trustedPrincipals, id);
+    return resolved.admit === 'principals' && (resolved.slackUsers ?? []).length === 0;
+  });
+  // The keys that would change each agent's answer: its own entry wins
+  // over the top level key by key (`resolveAgentPrincipals`), so advice to
+  // edit the top level does nothing for an agent that overrides it.
+  const remedies = new Map<string, { ids: string[]; list: string; admit: string }>();
+  for (const id of unreachable) {
+    const own = trustedPrincipals?.agents?.[id];
+    const list = own?.slackUsers !== undefined ? `principals.agents.${id}.slackUsers` : 'principals.slackUsers';
+    const admit = own?.admit !== undefined ? `principals.agents.${id}.admit` : 'principals.admit';
+    const key = `${list} ${admit}`;
+    const entry = remedies.get(key) ?? { ids: [], list, admit };
+    entry.ids.push(id);
+    remedies.set(key, entry);
+  }
+  for (const { ids, list, admit } of remedies.values()) {
+    problems.push(
+      `Nobody is listed who may talk to ${ids.join(', ')} in Slack, so ${ids.length === 1 ? 'it ignores' : 'they ignore'} every message. `
+      + `Add Slack member IDs to ${list} in ${explicitSource ? path.resolve(cwd, explicitSource.value) : '~/.stratus/config.json'} `
+      + `(or set ${admit} to "anyone"), then \`stratus restart\`.`,
     );
   }
 

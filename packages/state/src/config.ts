@@ -77,6 +77,22 @@ export interface AgentApprovalConfig {
    * anyone can publish a page (`github.io`, `githubusercontent.com`).
    */
   trustedDomains?: string[];
+  /**
+   * The operator's standing channel authorization: conversations where
+   * `message.read` and `message.send` run without asking, in every
+   * session (interactive, scheduled, delegated) and across restarts and
+   * upgrades. Entries are `channel:<workspace>/<id>`
+   * (`slack:T0123ABCD/C0123ABCD`), bound to that workspace because an id is
+   * unique only within one; `channel:<workspace>/*`; or `channel:*`
+   * (`slack:*`) for every channel the agent's app is in. A bare
+   * `channel:<id>` loads but covers nothing. Channels only: a
+   * DM or group DM still asks, decided by the agent's app rather than the
+   * id. Slack membership and scopes still apply when the tool runs.
+   * Additive like `commands`. Withdrawn, like every grant, when
+   * `externalContent` is `gate` and the conversation has read external
+   * content. Revoke by removing the entry and restarting the daemon.
+   */
+  channels?: string[];
 }
 
 /**
@@ -124,10 +140,10 @@ export interface AgentPrincipalsConfig {
    */
   slackUsers?: string[];
   /**
-   * Who gets a turn at all. `anyone` — the default — admits every sender
-   * the adapter's own checks pass, labelling the unlisted ones `unknown`;
-   * `principals` refuses everyone not in `slackUsers` before a turn
-   * starts, and does not let the agent overhear them either. The label is
+   * Who gets a turn at all. `principals` — the default — refuses everyone
+   * not in `slackUsers` before a turn starts, and does not let the agent
+   * overhear them either; `anyone` admits every sender the adapter's own
+   * checks pass, labelling the unlisted ones `unknown`. The label is
    * provenance; this is authorization, and an agent that holds tools
    * wants the second — a stranger's message is not merely uncertain, it
    * is a prompt they chose.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, open, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, realpath, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -210,11 +210,11 @@ test('headless: a safe scope and a safe pipeline run through a real pack, a cont
   // The safe scope ran, unattended, and produced real output.
   assert.equal(results[0]?.toolResult?.ok, true);
   assert.match(String((results[0]?.toolResult?.output as JsonObject).stdout), new RegExp(os.tmpdir()));
-  // The chain is refused despite `pwd` being safe-listed — which is the
-  // whole point of the operator rule.
+  // The chain is refused despite `pwd` being safe-listed: a chain runs
+  // only when every command in it would, and `curl` is covered by nothing.
   assert.equal(results[1]?.toolResult?.ok, false);
   assert.match(results[1]?.toolResult?.error ?? '', /denied by approval policy/);
-  assert.match(decisions[1]?.reason ?? '', /cannot run unattended: it contains an ampersand/);
+  assert.match(decisions[1]?.reason ?? '', /outside every approved scope/);
   // And a `git` subcommand outside the safe scopes, which listing the
   // executable would have covered.
   assert.equal(results[2]?.toolResult?.ok, false);
@@ -230,6 +230,60 @@ test('headless: a safe scope and a safe pipeline run through a real pack, a cont
   // without naming it.
   assert.equal(results[4]?.toolResult?.ok, false);
   assert.match(decisions[4]?.reason ?? '', /outside every approved scope \(a pipeline\)/);
+});
+
+test('headless: a by-name grep grant runs a chained, piped, redirected grep through a real pack', async () => {
+  const workspace = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-names-')));
+  await mkdir(path.join(workspace, 'app'), { recursive: true });
+  await writeFile(path.join(workspace, 'app', 'notes.md'), 'one todo\ntwo\nthree todo\n');
+  const decisions: PermissionDecision[] = [];
+  const tools = await registryFor({ cwd: workspace });
+
+  let turn = 0;
+  const commands = [
+    'cd app && grep -rn todo . 2>/dev/null | head -1 > hit.txt; cat hit.txt',
+    'cd app && grep -rn todo /etc/hosts',
+  ];
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate() {
+      const command = commands[turn];
+      turn += 1;
+      if (command === undefined) {
+        return { parts: [{ type: 'text', text: 'done' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `c${turn}`, toolName: 'shell.run', input: { command } } }] };
+    },
+  };
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    executor: createLocalCommandExecutor(),
+    approvals: createPermissionPolicy({
+      mode: 'headless',
+      onDecision: (decision) => decisions.push(decision),
+      commands: {
+        grantRootFor: () => workspace,
+        names: { commandNamesFor: async () => [{ command: 'grep', grantedAt: '2026-10-18T00:00:00.000Z' }], rememberCommandName: async () => {} },
+      },
+    }),
+    store: new InMemorySessionStore(),
+    maxTurns: 6,
+  });
+  await runner.initialize();
+  const finished = await runner.run({
+    sessionId: 'shell-names',
+    agent: { id: 'ava', name: 'Ava', tools: ['shell.*'] },
+    userMessage: 'find the todos',
+  });
+  const results = finished.messages.filter((message) => message.role === 'tool');
+  // The shell agreed with the reader: the cd held, the pipe and both
+  // redirections happened, and the file landed in the workspace.
+  assert.equal(results[0]?.toolResult?.ok, true, decisions[0]?.reason);
+  assert.equal(String((results[0]?.toolResult?.output as JsonObject).stdout).trim(), './notes.md:1:one todo');
+  assert.equal(existsSync(path.join(workspace, 'app', 'hit.txt')), true);
+  // The same grant does not reach outside the workspace.
+  assert.equal(results[1]?.toolResult?.ok, false);
 });
 
 test('the pack hands the engine the command and nothing else', () => {
@@ -334,11 +388,27 @@ test('cwdFor names where a command would run without preparing anything', async 
 
 test('variables that carry options for a judged command never reach it, however they are configured', async () => {
   const tools = await registryFor(
-    { passEnv: ['PATH', 'GREP_OPTIONS'], env: { RIPGREP_CONFIG_PATH: '/tmp/rgrc', KEEP: 'kept' } },
-    { PATH: process.env.PATH, GREP_OPTIONS: '-R' },
+    { passEnv: ['PATH', 'GREP_OPTIONS', 'CDPATH', 'GZIP'], env: { RIPGREP_CONFIG_PATH: '/tmp/rgrc', KEEP: 'kept' } },
+    { PATH: process.env.PATH, GREP_OPTIONS: '-R', CDPATH: '/tmp', GZIP: '-S .x' },
   );
-  const seen = String((await runCommand(tools, 'echo "[$RIPGREP_CONFIG_PATH][$GREP_OPTIONS][$KEEP]"')).stdout).trim();
-  assert.equal(seen, '[][][kept]');
+  // GZIP (sweep after Codex P1 4315808426): Apple and GNU gzip read options
+  // from it, so `GZIP='-S x'` writes a file no operand names (measured on
+  // Apple gzip 448.80.1: GZIP=-c leaves the input in place).
+  // CDPATH (Codex P1 4309568557) sends `cd foo` somewhere the judge, which
+  // follows cd from the working directory, never looked.
+  const seen = String((await runCommand(tools, 'echo "[$RIPGREP_CONFIG_PATH][$GREP_OPTIONS][$CDPATH][$GZIP][$KEEP]"')).stdout).trim();
+  assert.equal(seen, '[][][][][kept]');
+});
+
+test('bash option variables never reach the child shell', async () => {
+  // Codex P1 4309751930: BASHOPTS=cdable_vars makes `cd HOME` follow $HOME,
+  // which the judge reads as a workspace-relative directory.
+  const tools = await registryFor(
+    { passEnv: ['PATH', 'BASHOPTS', 'SHELLOPTS'], env: { POSIXLY_CORRECT: '1', KEEP: 'kept' } },
+    { PATH: process.env.PATH, BASHOPTS: 'cdable_vars', SHELLOPTS: 'braceexpand' },
+  );
+  const seen = String((await runCommand(tools, 'env | grep -E "^(BASHOPTS|SHELLOPTS|POSIXLY_CORRECT|KEEP)=" | sort')).stdout).trim();
+  assert.equal(seen, 'KEEP=kept');
 });
 
 test('PATH never includes a directory the agent can write to', async () => {
@@ -358,6 +428,45 @@ test('PATH never includes a directory the agent can write to', async () => {
   // Filtered to nothing is not an empty PATH, which sh reads as the cwd.
   const emptied = await registryFor({ passEnv: [], env: { PATH: `.:${inside}` } }, {}, workspaces);
   assert.equal(String((await runCommand(emptied, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
+});
+
+test('PATH keeps out the workspace when either side is reached through a symlink', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-alias-')));
+  const real = path.join(root, 'real');
+  await mkdir(path.join(real, 'agents', 'ava', 'workspace'), { recursive: true });
+  const alias = path.join(root, 'alias');
+  await symlink(real, alias);
+  const via = (base: string): AgentWorkspaces => ({
+    forAgent: (agentId) => path.join(base, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(base, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  });
+  // The workspace through the alias, PATH through the real path, and the
+  // reverse; bin does not exist yet, so the agent could still create it.
+  for (const [workspaceBase, pathBase] of [[alias, real], [real, alias]] as const) {
+    const bin = path.join(pathBase, 'agents', 'ava', 'workspace', 'bin');
+    const tools = await registryFor({ passEnv: [], env: { PATH: `${bin}:/usr/bin:/bin` } }, {}, via(workspaceBase));
+    assert.equal(String((await runCommand(tools, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin', `${workspaceBase} vs ${bin}`);
+  }
+});
+
+test('PATH resolves a symlink before the .. that follows it, as the kernel does', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-dotdot-')));
+  const workspace = path.join(root, 'agents', 'ava', 'workspace');
+  await mkdir(path.join(workspace, 'sub'), { recursive: true });
+  await mkdir(path.join(workspace, 'bin'), { recursive: true });
+  await mkdir(path.join(root, 'aliases'), { recursive: true });
+  // /aliases/a -> <workspace>/sub, so /aliases/a/../bin is <workspace>/bin
+  // to the shell, though collapsing `..` first reads it as /aliases/bin.
+  await symlink(path.join(workspace, 'sub'), path.join(root, 'aliases', 'a'));
+  const entry = `${root}/aliases/a/../bin`;
+  const workspaces: AgentWorkspaces = {
+    forAgent: (agentId) => path.join(root, 'agents', agentId, 'workspace'),
+    prepare: (agentId) => path.join(root, 'agents', agentId, 'workspace'),
+    all: async () => [],
+  };
+  const tools = await registryFor({ passEnv: [], env: { PATH: `${entry}:/usr/bin:/bin` } }, {}, workspaces);
+  assert.equal(String((await runCommand(tools, 'echo "$PATH"')).stdout).trim(), '/usr/bin:/bin');
 });
 
 test('nothing a shell runs before the command is passed to it', async () => {

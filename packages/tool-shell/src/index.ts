@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -122,7 +123,7 @@ const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
 // Not POSIXLY_CORRECT: macOS's /bin/sh exports it to every command it runs,
 // so the permission engine reads arguments both ways instead (see
 // `operandsToo` in @stratusagent/permissions).
-export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS'] as const;
+export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS', 'GZIP'] as const;
 
 /**
  * Flags that stop a shell from running its user startup files before the
@@ -153,8 +154,16 @@ const GIT_REPOSITORY_VARIABLES: readonly string[] = [
   'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
 ];
 
-/** Variables that make a shell run code before the command. Never passed. */
-const SHELL_STARTUP_VARIABLES: readonly string[] = ['BASH_ENV', 'ENV', 'ZDOTDIR'];
+/**
+ * Variables that make a shell run code before the command, or read it
+ * differently from the permission engine. Never passed. `CDPATH` sends a
+ * relative `cd` somewhere other than the working directory the engine
+ * follows it from. `BASHOPTS`, `SHELLOPTS` and `POSIXLY_CORRECT` switch on
+ * shell options at startup (`cdable_vars` makes `cd HOME` follow `$HOME`).
+ */
+const SHELL_STARTUP_VARIABLES: readonly string[] = [
+  'BASH_ENV', 'ENV', 'ZDOTDIR', 'CDPATH', 'BASHOPTS', 'SHELLOPTS', 'POSIXLY_CORRECT',
+];
 
 const settingsFor = (
   config: JsonObject,
@@ -208,7 +217,8 @@ const settingsFor = (
 
   // Variables that hand a judged command options the command line never
   // shows: `rg pattern` with RIPGREP_CONFIG_PATH can be `rg --pre … --follow
-  // pattern`, and BSD grep reads GREP_OPTIONS. The permission engine judges
+  // pattern`, BSD grep reads GREP_OPTIONS, and gzip reads GZIP (`-S x`
+  // names an output file no operand does). The permission engine judges
   // the command as written, so what it judges has to be what runs. Withheld
   // whatever the config says.
   for (const name of COMMAND_OPTION_VARIABLES) {
@@ -228,14 +238,15 @@ const settingsFor = (
   // empty) resolve to the working directory, which is the workspace. Kept
   // out, whatever env or passEnv says; the system's own paths are unchanged.
   if (typeof granted.PATH === 'string') {
+    // Compared as written and through symlinks on both sides: a workspace
+    // reached by an alias, or a PATH entry that is one, is the same directory.
     const owned = [cwd, workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id)]
-      .filter((dir): dir is string => typeof dir === 'string' && dir.length > 0);
+      .filter((dir): dir is string => typeof dir === 'string' && dir.length > 0)
+      .flatMap((dir) => [path.resolve(dir), canonicalPath(dir)]);
     granted.PATH = granted.PATH
       .split(':')
-      .filter((entry) => entry.length > 0 && path.isAbsolute(entry) && !owned.some((dir) => {
-        const relative = path.relative(dir, path.resolve(entry));
-        return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-      }))
+      .filter((entry) => entry.length > 0 && path.isAbsolute(entry)
+        && ![path.resolve(entry), canonicalPath(entry)].some((candidate) => owned.some((dir) => isWithin(dir, candidate))))
       .join(':');
     // An empty PATH is the current directory to `sh`, the one thing this
     // filter exists to keep out.
@@ -378,6 +389,39 @@ let unconfinedWarned = false;
 /** For tests: say the unconfined warning again. */
 export const resetSandboxWarning = (): void => {
   unconfinedWarned = false;
+};
+
+const isWithin = (dir: string, candidate: string): boolean => {
+  const relative = path.relative(dir, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+};
+
+/**
+ * Where a path really is, symlinks resolved. Walked one component at a time
+ * in the order the kernel does: a symlink is followed before the `..` after
+ * it, so `/alias/../bin` lands beside the link's target, not beside the link
+ * (collapsing `..` first would get that wrong). A path that does not exist
+ * yet resolves through its nearest existing ancestor, so a `bin` the agent
+ * could still create under an aliased workspace is placed where it would land.
+ */
+const canonicalPath = (target: string): string => {
+  const parts = (path.isAbsolute(target) ? target : `${process.cwd()}/${target}`).split('/');
+  let current = '/';
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index]!;
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      current = path.dirname(current);
+      continue;
+    }
+    const next = path.join(current, part);
+    try {
+      current = realpathSync(next);
+    } catch {
+      return path.join(next, ...parts.slice(index + 1));
+    }
+  }
+  return current;
 };
 
 export interface ShellToolOptions {

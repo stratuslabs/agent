@@ -179,8 +179,8 @@ Commands:
                    destination that was approved with it
                    (also: stratus schedule list / schedule cancel <id>)
   grants           What an agent may do unattended beyond the built-in safe
-                   list — its standing tool grants, command scopes, and
-                   sites, each an "always allow" somebody answered. From the
+                   list — its standing tool grants, command scopes,
+                   commands granted by name, and sites, each an "always allow" somebody answered. From the
                    running daemon when one is serving (--gateway, --token),
                    else from ~/.stratus/agents/<id>/whitelist.json; --format
                    json. "stratus grants revoke <agent> --tool <name> |

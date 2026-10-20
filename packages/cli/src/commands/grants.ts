@@ -170,7 +170,7 @@ export const runGrants = async (
   const render = (answered: GrantsListing, source: string): number => {
     // A daemon older than destination grants answers without the key. Filled
     // in before either format, so JSON keeps one schema through an upgrade.
-    const listing: GrantsListing = { ...answered, destinations: answered.destinations ?? [] };
+    const listing: GrantsListing = { ...answered, destinations: answered.destinations ?? [], commands: answered.commands ?? [] };
     if (command.format === 'json') {
       writeLine(streams.stdout, JSON.stringify({ ...listing, source, configCommands: declared, configSource }, null, 2));
       return 0;
@@ -187,7 +187,7 @@ export const runGrants = async (
       }
     }
     const destinations = listing.destinations;
-    const total = listing.tools.length + listing.scopes.length + listing.origins.length + destinations.length;
+    const total = listing.tools.length + listing.scopes.length + listing.commands.length + listing.origins.length + destinations.length;
     if (total === 0) {
       writeLine(streams.stdout, `${agentId} has no standing grants beyond the built-in safe list (${source}).`);
       writeLine(streams.stdout, 'An "always allow" answered on one of its gated calls creates one.');
@@ -200,6 +200,13 @@ export const runGrants = async (
         const by = grant.grantedBy ? ` by ${grant.grantedBy}` : '';
         const stale = grant.stale ? `  — stale: ${grant.stale}` : '';
         writeLine(streams.stdout, `    ${describeToolGrant(grant)}  (granted ${grant.grantedAt}${by})${stale}`);
+      }
+    }
+    if (listing.commands.length > 0) {
+      writeLine(streams.stdout, '  commands by name (any arguments, inside its workspace)');
+      for (const grant of listing.commands) {
+        const by = grant.grantedBy ? ` by ${grant.grantedBy}` : '';
+        writeLine(streams.stdout, `    ${grant.command}  (granted ${grant.grantedAt}${by})`);
       }
     }
     if (listing.scopes.length > 0) {
