@@ -89,6 +89,12 @@ export interface ParsedSkillDocument {
   compatibility?: string;
   /** The spec's `metadata:` map, verbatim — every value a string. */
   metadata?: Record<string, string>;
+  /**
+   * `metadata` entries skipped because their value is structured (another
+   * host's nested block or JSON object), in file order. What validation
+   * warns about; absent when there were none.
+   */
+  skippedMetadata?: string[];
   /** `metadata.version`, or the legacy top-level key. Informational. */
   version?: string;
   /**
@@ -122,7 +128,7 @@ export const parseSkillDocument = (source: string): ParsedSkillDocument => {
   if (!lines) {
     throw new Error('Skill file has no frontmatter. A SKILL.md starts with --- and needs at least a description.');
   }
-  const { scalars, lists, maps, unknownKeys } = parseFrontmatterLines(lines, {
+  const { scalars, lists, maps, unknownKeys, skippedMapEntries } = parseFrontmatterLines(lines, {
     kind: 'skill',
     scalarKeys: SKILL_SCALAR_KEYS,
     listKeys: SKILL_LIST_KEYS,
@@ -140,6 +146,16 @@ export const parseSkillDocument = (source: string): ParsedSkillDocument => {
     );
   }
   const metadata = maps.metadata;
+  const skippedMetadata = skippedMapEntries.metadata ?? [];
+  // Skipping another host's structured entry changes nothing here; skipping
+  // one of the keys this file reads would drop it unseen, so those stay refused.
+  for (const read of ['version', 'requires']) {
+    if (skippedMetadata.includes(read)) {
+      throw new Error(
+        `Skill frontmatter metadata.${read} must be a string${read === 'requires' ? ', space-separated: "browser.* fs.read"' : ''}, not a nested value.`,
+      );
+    }
+  }
   const version = metadata?.version ?? scalars.version;
   const requires = metadata?.requires !== undefined
     ? metadata.requires.split(/\s+/).filter((entry) => entry.length > 0)
@@ -153,6 +169,7 @@ export const parseSkillDocument = (source: string): ParsedSkillDocument => {
     ...(scalars.license ? { license: scalars.license } : {}),
     ...(scalars.compatibility ? { compatibility: scalars.compatibility } : {}),
     ...(metadata ? { metadata } : {}),
+    ...(skippedMetadata.length > 0 ? { skippedMetadata } : {}),
     ...(version ? { version } : {}),
     ...(requires && requires.length > 0 ? { requires } : {}),
     unknownKeys: [...legacy, ...unknownKeys.filter((key) => !SKILL_SPEC_KEYS.includes(key))],
@@ -248,6 +265,14 @@ export const validateSkillDocument = (
   if (foreign.length > 0) {
     warnings.push(
       `frontmatter key${foreign.length > 1 ? 's' : ''} outside the Agent Skills spec: ${foreign.map((key) => JSON.stringify(key)).join(', ')}. Another host's; ignored here, and the reference validator refuses ${foreign.length > 1 ? 'them' : 'it'}.`,
+    );
+  }
+
+  const skipped = document.skippedMetadata ?? [];
+  if (skipped.length > 0) {
+    const names = skipped.map((key) => `metadata.${key}`).join(', ');
+    warnings.push(
+      `${names} ${skipped.length > 1 ? 'are not string values' : 'is not a string value'}. The spec types metadata values as strings; another host's structured data, ignored here.`,
     );
   }
 

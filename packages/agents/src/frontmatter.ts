@@ -84,7 +84,45 @@ export interface ParsedFrontmatter {
    * silence.
    */
   unknownKeys: string[];
+  /**
+   * Per map key, the entries skipped because their value is not a string
+   * (a nested block, a block list, a JSON object): other hosts' structured
+   * data, which the spec's string-to-string map has no place for. Skipped
+   * rather than refused, and named so a validator can say so.
+   */
+  skippedMapEntries: Partial<Record<string, string[]>>;
 }
+
+/**
+ * A flow map written as JSON, `{"host":{"emoji":"x"},"version":"1.0"}` —
+ * the form OpenClaw and ClawHub skills use for `metadata`. String values
+ * are read; numbers and booleans as their text, the way the block form
+ * reads them; anything structured is skipped and named. Undefined when the
+ * text is not a JSON object, so the caller refuses it as before.
+ */
+const readJsonFlowMap = (inline: string): { map: Record<string, string>; skipped: string[] } | undefined => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inline);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const map: Record<string, string> = {};
+  const skipped: string[] = [];
+  for (const [entryKey, entryValue] of Object.entries(parsed)) {
+    if (typeof entryValue === 'string') {
+      map[entryKey] = entryValue;
+    } else if (typeof entryValue === 'number' || typeof entryValue === 'boolean') {
+      map[entryKey] = String(entryValue);
+    } else {
+      skipped.push(entryKey);
+    }
+  }
+  return { map, skipped };
+};
 
 // A deliberately tiny frontmatter dialect: `key: value` scalars and block
 // lists of `- item` lines. Enough for souls and skills, no YAML dependency.
@@ -96,9 +134,13 @@ export const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape):
   const lists: ParsedFrontmatter['lists'] = {};
   const maps: ParsedFrontmatter['maps'] = {};
   const unknownKeys: string[] = [];
+  const skippedMapEntries: ParsedFrontmatter['skippedMapEntries'] = {};
   const tolerant = shape.tolerant ?? false;
   let currentList: string[] | undefined;
-  let currentMap: Record<string, string> | undefined;
+  let currentMap: { key: string; map: Record<string, string>; entryIndent?: number } | undefined;
+  // Inside a map, the indent of an entry with a structured value whose
+  // deeper-indented lines are being skipped.
+  let skippingMapEntryIndent: number | undefined;
   // Tolerant-mode line context: an unknown key whose indented block is
   // being skipped, or a known scalar whose value continues on indented
   // lines (a YAML block scalar, or a plain scalar that wraps). Inside
@@ -150,20 +192,53 @@ export const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape):
 
     if (currentMap && isIndented(line)) {
       // One level of `key: value` pairs, every value a string — the
-      // spec's shape for `metadata`. Anything deeper is not a string
-      // value, and refusing it beats reading the wrong half of it.
+      // spec's shape for `metadata`. An entry with nothing after its colon
+      // opens a nested block or block list: another host's structured
+      // data, skipped whole (every line indented deeper than the entry)
+      // and named, so a published skill is not refused over it. A line
+      // that belongs to no entry is still refused rather than half-read.
       // Any string is a key — quoted (`"vendor/key": v`), or bare up to
       // the first colon — since the spec types the map as string to
       // string and says nothing about what a key looks like.
+      const indent = line.length - line.trimStart().length;
+      // A deeper line is the skipped entry's; so is a `- item` at its own
+      // indent, YAML's indentless list form.
+      if (
+        skippingMapEntryIndent !== undefined
+        && (indent > skippingMapEntryIndent || (indent === skippingMapEntryIndent && /^\s*-(\s|$)/.test(line)))
+      ) {
+        continue;
+      }
+      skippingMapEntryIndent = undefined;
       const pair = /^\s+(?:"([^"]*)"|'([^']*)'|([^\s"'#][^:]*?))\s*:\s*(.*)$/.exec(line);
       const mapKey = pair?.[1] ?? pair?.[2] ?? pair?.[3]?.trim();
-      if (!pair || mapKey === undefined || mapKey.length === 0 || pair[4] === undefined || unquote(pair[4]).length === 0) {
-        throw new Error(
-          `${capitalize(shape.kind)} frontmatter metadata entries must be "key: value" strings, one per line: "${line.trim()}"`,
-        );
+      // Entries sit at the first entry's indent. A line at any other indent
+      // that no skipped entry owns is refused: read as a sibling, it would
+      // flatten another host's nested data into this map.
+      currentMap.entryIndent ??= indent;
+      const rawValue = (pair?.[4] ?? '').trim();
+      if (pair && mapKey !== undefined && mapKey.length > 0 && indent === currentMap.entryIndent) {
+        // Nothing after the colon but a comment opens a nested block or
+        // block list; an unquoted value opening with [ or { is a flow
+        // collection, as in YAML (a string that starts with a bracket has
+        // to be quoted). Both are structured: skipped and named.
+        if (rawValue.length === 0 || rawValue.startsWith('#')) {
+          (skippedMapEntries[currentMap.key] ??= []).push(mapKey);
+          skippingMapEntryIndent = indent;
+          continue;
+        }
+        if (/^[[{]/.test(rawValue)) {
+          (skippedMapEntries[currentMap.key] ??= []).push(mapKey);
+          continue;
+        }
+        if (unquote(rawValue).length > 0) {
+          currentMap.map[mapKey] = unquote(rawValue);
+          continue;
+        }
       }
-      currentMap[mapKey] = unquote(pair[4]);
-      continue;
+      throw new Error(
+        `${capitalize(shape.kind)} frontmatter metadata entries must be "key: value" strings, one per line: "${line.trim()}"`,
+      );
     }
 
     const listItem = /^\s+-\s*(.*)$/.exec(line);
@@ -187,19 +262,28 @@ export const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape):
     const value = entry[2] ?? '';
     currentList = undefined;
     currentMap = undefined;
+    skippingMapEntryIndent = undefined;
     skippingUnknownBlock = false;
     continuation = undefined;
 
     if (tolerant && shape.mapKeys?.includes(key)) {
       const inline = value.trim();
       if (inline.length > 0 && inline !== '{}') {
-        throw new Error(
-          `${capitalize(shape.kind)} frontmatter "${key}" must be a block of indented "key: value" lines: "${inline}"`,
-        );
+        const flow = readJsonFlowMap(inline);
+        if (!flow) {
+          throw new Error(
+            `${capitalize(shape.kind)} frontmatter "${key}" must be a block of indented "key: value" lines: "${inline}"`,
+          );
+        }
+        maps[key] = flow.map;
+        if (flow.skipped.length > 0) {
+          skippedMapEntries[key] = flow.skipped;
+        }
+        continue;
       }
       const map: Record<string, string> = {};
       maps[key] = map;
-      currentMap = map;
+      currentMap = { key, map };
       continue;
     }
 
@@ -278,7 +362,7 @@ export const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape):
     }
   }
 
-  return { scalars, lists, maps, unknownKeys };
+  return { scalars, lists, maps, unknownKeys, skippedMapEntries };
 };
 
 const capitalize = (word: string): string => `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
