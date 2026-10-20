@@ -766,3 +766,30 @@ test('the gateway token a mounted secret supplies is denied where it is mounted'
   const found = relocatedCredentials({ STRATUS_GATEWAY_TOKEN_FILE: '/run/secrets/stratus-gateway-token' }, '/home/ava', '/home/ava/.stratus/agents/ava/workspace');
   assert.deepEqual(found, ['/run/secrets/stratus-gateway-token']);
 });
+
+test('a hidden home reached through a symlinked directory is covered and given back at its real path', async () => {
+  // Codex P1 4330384998: bwrap cannot mount through a linked directory, so
+  // an alias spelling of the home failed every command before it started.
+  const real = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-real-home-')));
+  await mkdir(path.join(real, '.cargo'));
+  await mkdir(path.join(real, '.local', 'rustup'), { recursive: true });
+  await symlink(path.join(real, '.local', 'rustup'), path.join(real, '.rustup'));
+  const aliasRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-alias-')));
+  const alias = path.join(aliasRoot, 'home');
+  await symlink(real, alias);
+  const workspace = path.join(real, '.stratus', 'agents', 'ava', 'workspace');
+  await mkdir(workspace, { recursive: true });
+  const args = bwrapArgs({
+    workspace,
+    denied: [],
+    writable: [],
+    home: { path: alias, visible: [path.join(alias, '.cargo'), path.join(alias, '.rustup')] },
+  }, '/bin/sh', []);
+  const joined = args.join(' ');
+  assert.ok(joined.includes(`--tmpfs ${real} `), joined);
+  assert.ok(joined.includes(`--ro-bind ${path.join(real, '.cargo')} ${path.join(real, '.cargo')}`), joined);
+  // A visible entry that links elsewhere in the home: both names come back.
+  assert.ok(joined.includes(`--ro-bind ${path.join(real, '.local', 'rustup')} ${path.join(real, '.rustup')}`), joined);
+  assert.ok(joined.includes(`--ro-bind ${path.join(real, '.local', 'rustup')} ${path.join(real, '.local', 'rustup')}`), joined);
+  assert.ok(!joined.includes(alias), joined);
+});

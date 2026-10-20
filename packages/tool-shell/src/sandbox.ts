@@ -494,16 +494,21 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
   // The hidden home first: an empty tmpfs over it, the visible entries
   // bound back read-only. Everything after binds over this.
-  if (policy.home && existsSync(policy.home.path)) {
-    const home = policy.home.path;
-    for (const spelling of new Set(spellings(home))) {
-      args.push('--tmpfs', spelling);
-    }
+  // Everything at real paths only (see realOnly): an entry is given back
+  // where its name lands under the real home and, when it links elsewhere in
+  // the home, at its target too, since the tmpfs hid both.
+  const home = policy.home ? realOnly(policy.home.path)[0] : undefined;
+  if (policy.home && home) {
+    args.push('--tmpfs', home);
     for (const entry of new Set(policy.home.visible)) {
-      if (existsSync(entry)) {
-        for (const spelling of new Set(spellings(entry))) {
-          args.push('--ro-bind', spellings(entry).at(-1)!, spelling);
-        }
+      const source = realOnly(entry)[0];
+      if (!source) {
+        continue;
+      }
+      const named = path.resolve(entry);
+      const dest = isWithin(policy.home.path, named) ? path.join(home, path.relative(policy.home.path, named)) : source;
+      for (const target of new Set([dest, ...(isWithin(home, source) ? [source] : [])])) {
+        args.push('--ro-bind', source, target);
       }
     }
   }
