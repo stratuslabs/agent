@@ -15,9 +15,9 @@ import path from 'node:path';
  * is its own workspace, not a token.
  *
  * macOS uses `sandbox-exec` with a generated profile; Linux uses `bwrap`
- * (bubblewrap). Neither falls back silently: under `required` an
- * unavailable sandbox refuses the command, and under `auto` it runs
- * unconfined only after saying so once.
+ * (bubblewrap). Neither falls back silently: under `required` (the
+ * default) an unavailable sandbox refuses the command, and under `auto` it
+ * runs unconfined only after saying so once.
  */
 
 export type SandboxMode = 'auto' | 'required' | 'off';
@@ -138,6 +138,8 @@ const RELOCATED_CREDENTIAL_STORES: ReadonlyArray<readonly [string, readonly stri
   ['GLAB_CONFIG_DIR', ['']],
   ['HUB_CONFIG', ['']],
   ['OP_CONFIG_DIR', ['']],
+  // The daemon's own control-API token, when a mounted secret supplies it.
+  ['STRATUS_GATEWAY_TOKEN_FILE', ['']],
 ];
 
 /** XDG base directories, and the prefix of the default home entries each one moves. */
@@ -472,6 +474,22 @@ const privateTmpFor = (policy: SandboxPolicy): string | undefined => {
   return held.some((dir) => isWithin(tmp, dir)) ? undefined : tmp;
 };
 
+/**
+ * An existing path as bwrap must mount it: at its real path, and nowhere
+ * else. bwrap resolves an absolute symlink against the host root while it
+ * builds the new one, so a mount through a linked directory (`/var/run` is
+ * `/run` on most distributions) fails before the command starts. The alias
+ * resolves to the real path inside the sandbox, so one mount covers both
+ * names. A path that does not exist has nothing to cover.
+ */
+const realOnly = (target: string): string[] => {
+  try {
+    return [realpathSync(target)];
+  } catch {
+    return [];
+  }
+};
+
 export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: string[]): string[] => {
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
   // The hidden home first: an empty tmpfs over it, the visible entries
@@ -493,15 +511,10 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
   if (tmp) {
     args.push('--tmpfs', tmp);
   }
-  for (const dir of new Set([...policy.writable, ...(policy.cwd ? [policy.cwd] : [])])) {
-    if (existsSync(dir)) {
-      args.push('--bind', dir, dir);
-    }
+  for (const dir of new Set([...policy.writable, ...(policy.cwd ? [policy.cwd] : [])].flatMap(realOnly))) {
+    args.push('--bind', dir, dir);
   }
-  for (const denied of new Set(policy.denied.flatMap(spellings))) {
-    if (!existsSync(denied)) {
-      continue;
-    }
+  for (const denied of new Set(policy.denied.flatMap(realOnly))) {
     if (statSync(denied).isDirectory()) {
       args.push('--tmpfs', denied);
     } else {
@@ -513,10 +526,8 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
   for (const spelling of workspaceSpellings) {
     args.push('--bind', workspaceSource, spelling);
   }
-  for (const denied of deniedInside(policy)) {
-    if (existsSync(denied)) {
-      args.push(statSync(denied).isDirectory() ? '--tmpfs' : '--ro-bind', ...(statSync(denied).isDirectory() ? [denied] : ['/dev/null', denied]));
-    }
+  for (const denied of new Set(deniedInside(policy).flatMap(realOnly))) {
+    args.push(statSync(denied).isDirectory() ? '--tmpfs' : '--ro-bind', ...(statSync(denied).isDirectory() ? [denied] : ['/dev/null', denied]));
   }
   args.push('--unshare-pid', '--unshare-ipc', '--die-with-parent', '--new-session');
   if (policy.cwd) {
@@ -589,8 +600,10 @@ export const parseHomeMode = (value: unknown): HomeMode => {
 };
 
 export const parseSandboxMode = (value: unknown): SandboxMode => {
+  // Required by default: commands run without asking under the open
+  // posture, so an unconfined shell is a refusal, not a warning.
   if (value === undefined) {
-    return 'auto';
+    return 'required';
   }
   if (value === 'auto' || value === 'required' || value === 'off') {
     return value;

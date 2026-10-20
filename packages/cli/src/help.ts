@@ -179,8 +179,8 @@ Commands:
                    destination that was approved with it
                    (also: stratus schedule list / schedule cancel <id>)
   grants           What an agent may do unattended beyond the built-in safe
-                   list — its standing tool grants, command scopes, and
-                   sites, each an "always allow" somebody answered. From the
+                   list — its standing tool grants, command scopes,
+                   commands granted by name, and sites, each an "always allow" somebody answered. From the
                    running daemon when one is serving (--gateway, --token),
                    else from ~/.stratus/agents/<id>/whitelist.json; --format
                    json. "stratus grants revoke <agent> --tool <name> |
@@ -270,12 +270,16 @@ Options:
   --config         Config file path (run: load settings from it, setup: write it)
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
-  --approvals      run/chat: tool approval mode — always, ask (every call), gated (safe tools
-                   run, the rest ask), or never. Default: gated at a terminal; always
-                   otherwise, said once on stderr the first time a gated tool runs
-                   serve: how the daemon reaches a human — headless (refuse every
-                   gated call) or remote (ask in Slack). Default headless, or
-                   the config file's "approvals.mode"
+  --approvals      run/chat: tool approval mode — always, open (gated tools run, dangerous
+                   ones ask), ask (every call), gated (safe tools run, the rest ask), or
+                   never. Default: open, from approvals.posture (with no terminal,
+                   a call that would ask is refused, said once on stderr); with
+                   posture guarded (or an unreadable config), gated at a terminal
+                   and never otherwise: gated calls are refused, said once on stderr
+                   serve: how the daemon reaches a human for a call that needs
+                   approval (dangerous ones under posture open, every gated one
+                   under guarded) — headless (refuse it) or remote (ask in Slack).
+                   Default headless, or the config file's "approvals.mode"
   --max-turns      Maximum tool turns per run before it wraps up (default: 40)
   --port           dashboard: port for a daemon it starts (default: 4123)
   --host           dashboard: host for a daemon it starts (default: 127.0.0.1)

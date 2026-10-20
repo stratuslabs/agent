@@ -537,20 +537,20 @@ test('an agent inherits the default approval route key by key', async () => {
   // Ava names her own approvers but not her own channel, so she asks the
   // people she listed in the default conversation. Per-key inheritance, not
   // per-block: overriding one must not silently clear the other.
-  assert.deepEqual(resolveAgentApprovals(approvals, 'ava'), {
+  assert.deepEqual(resolveAgentApprovals(approvals, 'ava'), { posture: 'open',
     slackApprovers: ['U-DYLAN'],
     slackChannel: 'C-OPS',
   });
-  assert.deepEqual(resolveAgentApprovals(approvals, 'bea'), {
+  assert.deepEqual(resolveAgentApprovals(approvals, 'bea'), { posture: 'open',
     slackApprovers: ['U-OPS'],
     slackChannel: 'C-BEA',
   });
-  assert.deepEqual(resolveAgentApprovals(approvals, 'unlisted'), {
+  assert.deepEqual(resolveAgentApprovals(approvals, 'unlisted'), { posture: 'open',
     slackApprovers: ['U-OPS'],
     slackChannel: 'C-OPS',
   });
   // Nothing configured means nobody may approve — never everybody.
-  assert.deepEqual(resolveAgentApprovals(undefined, 'ava'), {});
+  assert.deepEqual(resolveAgentApprovals(undefined, 'ava'), { posture: 'open' });
 });
 
 test('externalContent parses at the top and per agent, inherits per agent, and fails loudly when misspelled', async () => {
@@ -574,6 +574,27 @@ test('externalContent parses at the top and per agent, inherits per agent, and f
   await assert.rejects(loadConfigFile(perAgent), /Unsupported approvals\.agents\.ava\.externalContent/);
 });
 
+test('posture is open unless a config says guarded, per agent, and a misspelling is refused', async () => {
+  // A config written before postures existed (0.12.5 and earlier) has no
+  // key, and resolves open: that is the upgrade behavior, on purpose.
+  const legacy = await writeConfig('legacy-approvals.json', { approvals: { mode: 'remote', slackApprovers: ['U-OPS'] } });
+  assert.equal(resolveAgentApprovals((await loadConfigFile(legacy)).approvals, 'ava').posture, 'open');
+  assert.equal(resolveAgentApprovals(undefined, 'ava').posture, 'open');
+
+  const configPath = await writeConfig('posture.json', {
+    approvals: { posture: 'guarded', agents: { ava: { posture: 'open' }, bea: {} } },
+  });
+  const config = await loadConfigFile(configPath);
+  assert.equal(resolveAgentApprovals(config.approvals, 'ava').posture, 'open');
+  assert.equal(resolveAgentApprovals(config.approvals, 'bea').posture, 'guarded');
+  assert.equal(resolveAgentApprovals(config.approvals, 'unlisted').posture, 'guarded');
+
+  const top = await writeConfig('bad-posture.json', { approvals: { posture: 'yolo' } });
+  await assert.rejects(loadConfigFile(top), /Unsupported approvals\.posture in config .*: yolo\. Use open or guarded\./);
+  const perAgent = await writeConfig('bad-agent-posture.json', { approvals: { agents: { ava: { posture: true } } } });
+  await assert.rejects(loadConfigFile(perAgent), /Unsupported approvals\.agents\.ava\.posture/);
+});
+
 test('an explicitly empty approver list excludes an agent instead of inheriting', async () => {
   const approvals = {
     slackApprovers: ['U-OPS'],
@@ -584,22 +605,22 @@ test('an explicitly empty approver list excludes an agent instead of inheriting'
   // global approver list. Treating it as "unset" would fall back to exactly
   // the list they were excluding — turning "nobody may approve for Ava"
   // into "everyone on the default list may".
-  assert.deepEqual(resolveAgentApprovals(approvals, 'ava'), { slackApprovers: [] });
+  assert.deepEqual(resolveAgentApprovals(approvals, 'ava'), { posture: 'open', slackApprovers: [] });
   // An absent key still inherits: that is what the fallback is for.
-  assert.deepEqual(resolveAgentApprovals(approvals, 'bea'), { slackApprovers: ['U-OPS'] });
+  assert.deepEqual(resolveAgentApprovals(approvals, 'bea'), { posture: 'open', slackApprovers: ['U-OPS'] });
 
   // And it survives config parsing, which is where it was being dropped.
   const configPath = await writeConfig('empty-approvers.json', {
     approvals: { slackApprovers: ['U-OPS'], agents: { ava: { slackApprovers: [] } } },
   });
   const parsed = (await loadConfigFile(configPath)).approvals;
-  assert.deepEqual(resolveAgentApprovals(parsed, 'ava'), { slackApprovers: [] });
+  assert.deepEqual(resolveAgentApprovals(parsed, 'ava'), { posture: 'open', slackApprovers: [] });
   // A list of nothing but junk is the same statement as an empty one.
   const junkPath = await writeConfig('junk-approvers.json', {
     approvals: { slackApprovers: ['U-OPS'], agents: { ava: { slackApprovers: ['', ''] } } },
   });
   const junk = (await loadConfigFile(junkPath)).approvals;
-  assert.deepEqual(resolveAgentApprovals(junk, 'ava'), { slackApprovers: [] });
+  assert.deepEqual(resolveAgentApprovals(junk, 'ava'), { posture: 'open', slackApprovers: [] });
 });
 
 test('two souls claiming one id refuse the roster, naming both files', async () => {
@@ -1790,6 +1811,42 @@ test('approvals.trustedDomains adds up per agent, normalizes, and refuses anythi
     loadConfigFile(await writeConfig('trusted-suffix.json', { approvals: { trustedDomains: ['openai.com', '*.github.io'] } })),
     /Invalid approvals\.trustedDomains in config .*: github\.io is a suffix anyone can register a site under/,
   );
+});
+
+test('approvals.channels adds up per agent and refuses names, bare ids, and anything else', async () => {
+  const config = await loadConfigFile(await writeConfig('channels.json', {
+    approvals: { channels: ['slack:T1/C0C1YV12SLC'], agents: { nova: { channels: ['slack:*', ' slack:T1/C0C1YV12SLC ', 'slack:T2/*', 'slack:C0BARE'] } } },
+  }));
+  // A bare id still loads (it covers nothing, and the daemon says so), so an older config never stops startup.
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').channels, ['slack:T1/C0C1YV12SLC', 'slack:*', 'slack:T2/*', 'slack:C0BARE']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').channels, ['slack:T1/C0C1YV12SLC']);
+  assert.equal(resolveAgentApprovals({}, 'nova').channels, undefined);
+  for (const bad of [['#stratus-agent'], ['C0C1YV12SLC'], ['slack:'], ['*'], ['slack:#general'], ['slack:T1/'], ['slack:/C1'], ['slack:T1/C1/x'], ['slack:*/C1'], ['slack:T0123/general'], ['slack:t0123/C0123'], ['slack:T0123/c0c1yv12slc'], ['slack:general'], ['slack:T0123/D0DM'], ['slack:U0123/C0123'], ['slack:E0123/C0123'], ['slack:E0123/*'], 'slack:*', [3]]) {
+    await assert.rejects(
+      loadConfigFile(await writeConfig('channels-bad.json', { approvals: { agents: { nova: { channels: bad } } } })),
+      /Invalid approvals\.agents\.nova\.channels/,
+      JSON.stringify(bad),
+    );
+  }
+  // The message names only what is accepted (Codex P2 4309652293).
+  await assert.rejects(
+    loadConfigFile(await writeConfig('channels-e.json', { approvals: { channels: ['slack:E0123/C0123'] } })),
+    (error: Error) => /workspace id starts with T\b/.test(error.message) && !/ or E\b/.test(error.message) && /not the organization's E/.test(error.message),
+  );
+});
+
+test('a malformed approvals block is refused, never read as the open default', async () => {
+  // Codex P1 4309648327: these used to parse as no block at all.
+  for (const approvals of ['guarded', ['guarded'], { agents: { ava: 'guarded' } }, { agents: 'guarded' }, { agents: { ava: ['x'] } }]) {
+    await assert.rejects(
+      loadConfigFile(await writeConfig('approvals-bad.json', { approvals })),
+      /Invalid approvals/,
+      JSON.stringify(approvals),
+    );
+  }
+  // Absent is still absent.
+  const absent = await loadConfigFile(await writeConfig('approvals-none.json', { provider: 'demo' }));
+  assert.equal(absent.approvals, undefined);
 });
 
 test('approvals.autonomy parses at the top and per agent, overrides per agent, and fails loudly when misspelled', async () => {

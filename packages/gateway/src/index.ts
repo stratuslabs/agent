@@ -279,6 +279,8 @@ export interface GatewayChannelAdapter {
   }): ReturnType<ConversationReader>;
   /** See `@stratusagent/channels`' `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
+  /** See `@stratusagent/channels`' `ChannelAdapter.conversationKindFor`. */
+  conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
   /**
    * Shows a person a form for a credential an agent asked for, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
@@ -383,6 +385,12 @@ export interface ApprovalTransport {
      * on one conversation is bound to the workspace it was made in.
      */
     accountFor(agentId: string, destination: string): string | undefined;
+    /**
+     * Whether a `channel:to` destination is a channel or a DM, asked of the
+     * agent's own app for that channel (`ChannelAdapter.conversationKindFor`).
+     * Undefined when no adapter can say.
+     */
+    conversationKindFor(agentId: string, destination: string): Promise<'channel' | 'direct' | undefined>;
   };
 }
 
@@ -571,6 +579,14 @@ export interface IntakeState {
   message?: string;
   /** When the pause began (ISO 8601). Present only while paused. */
   since?: string;
+  /**
+   * Whether this pause is the one the daemon started in because its intake
+   * file could not be read. Reported while paused: true only for that pause,
+   * false once a pause written since has replaced it, so `stratus doctor`
+   * can tell a startup warning about the file from a pause someone chose.
+   * Never written to the file.
+   */
+  unreadable?: boolean;
 }
 
 /** What a paused daemon says when nobody gave it a sentence of its own. */
@@ -603,6 +619,23 @@ export class IntakePausedError extends Error {
 }
 
 /**
+ * A dispatch refused because the daemon is restarting or stopping. Channels
+ * stay connected while a restart drains, so they hear people during it, and
+ * this is what tells them the message reached a daemon on its way down: a
+ * channel can say so and keep the message for the next one. Matched by name
+ * there, as channel packages do not import the gateway.
+ */
+export class GatewayStoppingError extends Error {
+  /** True for a restart, which comes back on its own; false for a stop. */
+  readonly restarting: boolean;
+  constructor(message: string, restarting: boolean) {
+    super(message);
+    this.name = 'GatewayStoppingError';
+    this.restarting = restarting;
+  }
+}
+
+/**
  * The intake state a previous process left, or open when there is none.
  *
  * Fails closed: a file that exists but cannot be read or parsed starts the
@@ -620,7 +653,7 @@ const readIntakeState = async (env: StateEnvironment, warn: (line: string) => vo
       return { paused: false };
     }
     warn(`intake: ${file} could not be read (${(error as Error).message}); starting paused. Resume intake to clear it.`);
-    return { paused: true, since: new Date().toISOString() };
+    return { paused: true, since: new Date().toISOString(), unreadable: true };
   }
   try {
     const parsed = JSON.parse(raw) as Partial<IntakeState> | null;
@@ -629,7 +662,7 @@ const readIntakeState = async (env: StateEnvironment, warn: (line: string) => vo
     // rule as an unreadable file applies.
     if (typeof parsed !== 'object' || parsed === null || parsed.paused !== true) {
       warn(`intake: ${file} does not hold a pause record; starting paused. Resume intake to clear it.`);
-      return { paused: true, since: new Date().toISOString() };
+      return { paused: true, since: new Date().toISOString(), unreadable: true };
     }
     return {
       paused: true,
@@ -638,7 +671,7 @@ const readIntakeState = async (env: StateEnvironment, warn: (line: string) => vo
     };
   } catch {
     warn(`intake: ${file} is not valid JSON; starting paused. Resume intake to clear it.`);
-    return { paused: true, since: new Date().toISOString() };
+    return { paused: true, since: new Date().toISOString(), unreadable: true };
   }
 };
 
@@ -1963,6 +1996,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
             const kind = destination.slice(0, separator);
             return channelCarrying(kind, agentId, (candidate) => candidate.accountFor !== undefined)
               .adapter?.accountFor?.(agentId);
+          },
+          conversationKindFor: async (agentId, destination) => {
+            const separator = destination.indexOf(':');
+            if (separator <= 0) {
+              return undefined;
+            }
+            const kind = destination.slice(0, separator);
+            const adapter = channelCarrying(kind, agentId, (candidate) => candidate.conversationKindFor !== undefined).adapter;
+            try {
+              return await adapter?.conversationKindFor?.(agentId, destination.slice(separator + 1));
+            } catch {
+              // Unknown, so the call asks: never a reason to allow.
+              return undefined;
+            }
           },
         },
         contributorOf: (toolName) => toolProvenance().get(toolName)?.package,
@@ -3362,6 +3409,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // Open until `startServing` reads what the last process left, which it
   // does before any channel or the scheduler can deliver work.
   let intakeState: IntakeState = { paused: false };
+  // A copy for callers, saying while paused whether this is the pause an
+  // unreadable file started (see `IntakeState.unreadable`).
+  const intakeView = (): IntakeState => (intakeState.paused
+    ? { ...intakeState, unreadable: intakeState.unreadable === true }
+    : { ...intakeState });
   let heldState = options.held === true;
   /** What a held start left for `promote()`: the channels it did not start, and the sweeps it did not run. */
   let deferredStart: { adapters: GatewayChannelAdapter[]; orphaned: ReadonlySet<string>; abandoned: string[] } | undefined;
@@ -3404,9 +3456,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   let serving = false;
   /** Set once `restart()` announced; the refusal a caller reads says why. */
   let restartStatus: RestartStatus | undefined;
-  const refusal = (): Error => new Error(restartStatus
-    ? 'stratusd is restarting and will accept new work once it is back up.'
-    : 'The gateway is stopping and no longer accepts new work.');
+  const refusal = (): Error => restartStatus
+    ? new GatewayStoppingError('stratusd is restarting and will accept new work once it is back up.', true)
+    : new GatewayStoppingError('The gateway is stopping and no longer accepts new work.', false);
 
   /**
    * The turn id running on each session, for callers that named one.
@@ -4946,6 +4998,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       try {
         await adapter.start(gateway);
+        // A shutdown that gave up waiting on this start has already stopped
+        // the channels it could see; one that comes up after that is
+        // stopped here, or it would stay connected beside the next daemon.
+        if (channelsClosed) {
+          try {
+            await adapter.stop();
+          } catch (stopError) {
+            warn(`channel ${adapter.name} started after the shutdown stopped the channels, and failed to stop: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+          }
+          return;
+        }
         startedChannels.push(adapter);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
@@ -5101,6 +5164,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const startedChannels: GatewayChannelAdapter[] = [];
+  /** Set once a shutdown has stopped the started channels; a start that finishes after it stops its own. */
+  let channelsClosed = false;
 
   /** Resolves with `true` when `work` settles before `ms` elapse. */
   const settlesWithin = (work: Promise<unknown>, ms: number): Promise<boolean> =>
@@ -5162,22 +5227,43 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the same messages. Reported, and for a restart, counted as not
     // drained; a plain stop goes on closing either way.
     let channelsReleased = true;
+    // Once, whichever path gets there first: the end of the drain, or the
+    // window giving up on a turn that ignores its abort.
+    let channelsStopping: Promise<void> | undefined;
+    const stopChannels = (): Promise<void> => {
+      channelsStopping ??= (async () => {
+        channelsClosed = true;
+        const stopping = [...startedChannels];
+        startedChannels.length = 0;
+        const stops = await Promise.allSettled(stopping.map((adapter) => adapter.stop()));
+        stops.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            channelsReleased = false;
+            warn(`channel ${stopping[index]?.name} failed to stop: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+          }
+        });
+      })();
+      return channelsStopping;
+    };
     const drain = (async () => {
       // A promotion still connecting channels finishes first, so every
       // channel it started is in the list stopped below; seeing `stopping`,
       // it starts nothing after that.
       await promoting?.catch(() => undefined);
       await Promise.allSettled([...approvalEmissions]);
-      const stopping = [...startedChannels];
-      const stops = await Promise.allSettled(stopping.map((adapter) => adapter.stop()));
-      stops.forEach((result, index) => {
-        if (result.status === 'rejected') {
-          channelsReleased = false;
-          warn(`channel ${stopping[index]?.name} failed to stop: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
-        }
-      });
-      startedChannels.length = 0;
-      await Promise.allSettled([...inflight]);
+      // The turns first, with the channels still connected. A channel that
+      // disconnects at the start of a drain cannot hear anyone for as long
+      // as the drain lasts, and a long turn makes that minutes: a message
+      // sent then reached no daemon at all, with no reply and no log line.
+      // Connected, it is refused with `GatewayStoppingError`, which the
+      // channel can answer and keep for the next daemon. Until the set stays
+      // empty: a turn queued behind one that finished joins it.
+      while (inflight.size > 0) {
+        await Promise.allSettled([...inflight]);
+      }
+      // Then the channels, whose stop awaits the rendering they still have
+      // in flight: the outcomes of the turns that just finished.
+      await stopChannels();
     })();
     // One deadline for the whole bounded shutdown: the drain window, then
     // one more window that everything after it shares (the aborted turns'
@@ -5207,6 +5293,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       drained = await settlesWithin(drain, remaining());
       if (!drained) {
         warn(`${kind}: ${inflight.size} turn(s) did not stop after being aborted; shutting down around them`);
+        // The drain never got to the channels. Stopped here instead, so a
+        // host that goes on to start the next daemon does not find this one
+        // still connected beside it; a channel's stop takes its intake down
+        // before it waits on anything, so this ends what it can hear even if
+        // it never settles.
+        await settlesWithin(stopChannels(), remaining());
       }
       drained = drained && channelsReleased;
     }
@@ -5682,7 +5774,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     resolveApproval,
 
     intake() {
-      return { ...intakeState };
+      return intakeView();
     },
 
     async pauseIntake(input = {}) {
@@ -5708,7 +5800,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         await writeIntakeState(env, next);
         intakeState = next;
         log('intake paused: new work will be refused until it resumes');
-        return { ...intakeState };
+        return intakeView();
       });
     },
 
@@ -5725,7 +5817,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           log('intake resumed');
         }
         intakeState = { paused: false };
-        return { ...intakeState };
+        return intakeView();
       });
     },
     provideCredential,

@@ -40,6 +40,8 @@ fails that one call with a message naming the fix.
 
 ## Risk model
 
+Under the default `approvals.posture: "open"` a `gated` call runs without asking; the column below is what each mode does with a call that still needs approval, which under `"guarded"` is every uncovered `gated` call.
+
 | Tool | Risk | What approval mode does |
 | --- | --- | --- |
 | `browser.goto` | `gated` | `interactive` asks, `remote` asks in Slack, `headless` refuses. |

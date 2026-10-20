@@ -139,16 +139,112 @@ Body.
   assert.deepEqual(both.requires, ['fs.*']);
   assert.deepEqual(both.unknownKeys, ['version', 'requires']);
 
-  // An empty flow map is fine; a nested block under metadata is not a
-  // string value and is refused rather than half-read.
+  // An empty flow map is fine; a flow map that is not JSON is not read
+  // at all, and refused rather than half-read.
   assert.deepEqual(parseSkillDocument('---\ndescription: d\nmetadata: {}\n---\n\nBody.').metadata, {});
-  assert.throws(
-    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  nested:\n    deep: 1\n---\n\nBody.'),
-    /metadata entries must be "key: value" strings/,
-  );
   assert.throws(
     () => parseSkillDocument('---\ndescription: d\nmetadata: {a: b}\n---\n\nBody.'),
     /must be a block of indented/,
+  );
+});
+
+test('structured metadata from other hosts is skipped with a warning, not refused', () => {
+  // The OpenClaw / ClawHub form: one line of JSON under metadata.
+  const flow = parseSkillDocument(
+    '---\nname: github\ndescription: Use gh.\nmetadata: {"clawdbot":{"emoji":"x","requires":{"bins":["gh"]}},"version":"1.2.0","n":3}\n---\n\nBody.',
+  );
+  assert.deepEqual(flow.metadata, { version: '1.2.0', n: '3' });
+  assert.equal(flow.version, '1.2.0');
+  assert.equal(flow.requires, undefined);
+  assert.deepEqual(flow.skippedMetadata, ['clawdbot']);
+  assert.deepEqual(flow.unknownKeys, []);
+  const flowCheck = validateSkillDocument(flow, { directoryName: 'github' });
+  assert.deepEqual(flowCheck.errors, []);
+  assert.equal(flowCheck.warnings.length, 1);
+  assert.match(flowCheck.warnings[0] ?? '', /metadata\.clawdbot is not a string/);
+
+  // The same data as a nested YAML block, beside string entries before
+  // and after it, and a block list.
+  const block = parseSkillDocument(`---
+name: github
+description: Use gh.
+metadata:
+  author: someone
+  clawdbot:
+    emoji: x
+    requires:
+      bins: [gh]
+  tags:
+    - a
+    - b
+  requires: fs.read
+---
+
+Body.`);
+  assert.deepEqual(block.metadata, { author: 'someone', requires: 'fs.read' });
+  assert.deepEqual(block.requires, ['fs.read']);
+  assert.deepEqual(block.skippedMetadata, ['clawdbot', 'tags']);
+  assert.deepEqual(validateSkillDocument(block, { directoryName: 'github' }).errors, []);
+
+  // A key Stratus reads is still refused when it is not a string:
+  // skipping it would drop the skill's declared requirements unseen.
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  requires:\n    - fs.read\n---\n\nBody.'),
+    /metadata\.requires must be a string/,
+  );
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata: {"version": {"major": 1}}\n---\n\nBody.'),
+    /metadata\.version must be a string/,
+  );
+  // A flow value that is JSON but not an object is still refused.
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata: ["a"]\n---\n\nBody.'),
+    /must be a block of indented/,
+  );
+  // An inline flow collection on one block entry is structured too: a
+  // read key is refused, another host's key skipped, and a quoted value
+  // that only looks like one stays a string.
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  requires: ["fs.read"]\n---\n\nBody.'),
+    /metadata\.requires must be a string/,
+  );
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  version: {"major": 1}\n---\n\nBody.'),
+    /metadata\.version must be a string/,
+  );
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  requires: [fs.read]\n---\n\nBody.'),
+    /metadata\.requires must be a string/,
+  );
+  const inline = parseSkillDocument('---\ndescription: d\nmetadata:\n  tags: [a, b]\n  host: {"x": 1}\n  label: "[draft]"\n---\n\nBody.');
+  assert.deepEqual(inline.metadata, { label: '[draft]' });
+  assert.deepEqual(inline.skippedMetadata, ['tags', 'host']);
+  // YAML's indentless list (items at the entry's own indent) belongs to
+  // the entry, and the next sibling after it is read again.
+  const indentless = parseSkillDocument('---\ndescription: d\nmetadata:\n  tags:\n  - a\n  - b\n  author: someone\n---\n\nBody.');
+  assert.deepEqual(indentless.metadata, { author: 'someone' });
+  assert.deepEqual(indentless.skippedMetadata, ['tags']);
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  requires:\n  - fs.read\n---\n\nBody.'),
+    /metadata\.requires must be a string/,
+  );
+  // A comment after an entry's colon is not a value: the entry opens a
+  // structured block, skipped whole, so its nested keys are never read as
+  // metadata (or as a nested requires).
+  const commented = parseSkillDocument('---\ndescription: d\nmetadata:\n  clawdbot: # host config\n    emoji: x\n    requires: fs.*\n  author: someone\n---\n\nBody.');
+  assert.deepEqual(commented.metadata, { author: 'someone' });
+  assert.deepEqual(commented.skippedMetadata, ['clawdbot']);
+  assert.equal(commented.requires, undefined);
+  // Entries sit at one indent: a deeper key after a string entry is not
+  // read as a sibling (it would flatten another host's data into ours).
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  author: someone\n    requires: fs.*\n---\n\nBody.'),
+    /metadata entries must be "key: value" strings/,
+  );
+  // A line indented under metadata with no entry to belong to is still refused.
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  a: b\n    - stray\n---\n\nBody.'),
+    /metadata entries must be "key: value" strings/,
   );
 });
 

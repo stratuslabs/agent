@@ -30,6 +30,8 @@ tools: [web.fetch]
 
 ## Risk model
 
+Under the default `approvals.posture: "open"` a `gated` call runs without asking; the column below is what each mode does with a call that still needs approval, which under `"guarded"` is every uncovered `gated` call.
+
 | Tool | Risk | What approval mode does |
 | --- | --- | --- |
 | `web.fetch` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. It reaches a service outside Stratus at an address the agent chose, which is the line 03 draws. Judged per site: **Always allow** grants the URL's origin, not every URL, and a redirect to another site is returned as `redirectedTo` instead of followed. |

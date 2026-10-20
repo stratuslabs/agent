@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline';
 import {
   AllowAllApprovalPolicy,
   originOf,
+  sessionTrustOf,
   type ApprovalContext,
   type ApprovalPolicy,
 } from '@stratusagent/core';
@@ -88,6 +89,11 @@ export const createApprovalPolicy = (
    * asked gets one line, the first time a call that would have asked runs.
    */
   defaulted = false,
+  /**
+   * For `open`: `approvals.externalContent` is `gate` for this agent, so a
+   * conversation that has read external content asks again.
+   */
+  openOptions: { gateExternalContent?: boolean } = {},
 ): ApprovalPolicy => {
   if (mode === 'always') {
     if (!defaulted) {
@@ -109,9 +115,55 @@ export const createApprovalPolicy = (
     };
   }
 
-  if (mode === 'never') {
+  // `open` is the daemon's open posture at a terminal: anything short of
+  // `dangerous` runs, and a dangerous call still asks a person. So does a
+  // gated call in a conversation that read external content, under
+  // `externalContent: "gate"`, the same rule the daemon's policy applies.
+  if (mode === 'open') {
+    // Defaulted means nobody can answer (a pipe, `--stdin`): what would
+    // ask is refused, never read from consumed stdin or taken from the
+    // next piped chat line, and said once.
+    let noted = false;
+    const asking: ApprovalPolicy = defaulted
+      ? {
+        async approve(context) {
+          if (!noted) {
+            noted = true;
+            writeLine(
+              streams.stderr,
+              `Note: refusing ${context.call.toolName} — it would ask for approval, and stdin is not a terminal. `
+              + 'Pass --approvals always to run it unattended.',
+            );
+          }
+          return false;
+        },
+      }
+      : createApprovalPolicy('ask', streams, env, ask);
     return {
-      async approve() {
+      async approve(context) {
+        if (context.risk === 'safe') {
+          return true;
+        }
+        const closedByContent = openOptions.gateExternalContent === true && sessionTrustOf(context.session) === 'external';
+        return context.risk === 'dangerous' || closedByContent ? asking.approve(context) : true;
+      },
+    };
+  }
+
+  if (mode === 'never') {
+    // Defaulted here only when the posture is guarded (or its config could
+    // not be read) and nobody can be asked: say why, once.
+    let noted = !defaulted;
+    return {
+      async approve(context) {
+        if (!noted && context.risk !== 'safe') {
+          noted = true;
+          writeLine(
+            streams.stderr,
+            `Note: refusing ${context.call.toolName} — the approvals posture is guarded (or its config could not be read) and stdin is not a terminal. `
+            + 'Pass --approvals open or always to run gated tools.',
+          );
+        }
         return false;
       },
     };
@@ -165,6 +217,64 @@ export const createApprovalPolicy = (
   };
 };
 
+/**
+ * The list key that would let someone reach these agents. An agent's own
+ * `slackUsers`, even an empty one, wins over the top level, so pointing
+ * it at `principals.slackUsers` would be advice that changes nothing.
+ */
+const listKeyFor = (principals: PrincipalsConfig, agentIds: string[]): string => {
+  const own = agentIds.filter((agentId) => principals.agents?.[agentId]?.slackUsers !== undefined);
+  const ownKeys = own.map((agentId) => `principals.agents.${agentId}.slackUsers`);
+  if (own.length === agentIds.length) {
+    return ownKeys.join(' or ');
+  }
+  return own.length === 0
+    ? 'principals.slackUsers'
+    : `principals.slackUsers (${own.map((agentId, at) => `${ownKeys[at]} for ${agentId}`).join(', ')})`;
+};
+
+/**
+ * Under the open posture, `externalContent: "gate"` sends gated calls in a
+ * conversation that read external content back to asking. Says so, for
+ * every agent or naming the open agents it applies to; empty when none.
+ */
+const externalGateNote = (approvals: ApprovalsConfig, servedAgentIds?: readonly string[]): string => {
+  const resolved = (agentId: string) => resolveAgentApprovals(approvals, agentId);
+  const gates = (agentId: string) => resolved(agentId).posture === 'open' && resolved(agentId).externalContent === 'gate';
+  // Only served agents, like the posture exceptions beside it: a stale
+  // override for a removed agent is not an exception anyone will meet.
+  const named = Object.keys(approvals.agents ?? {})
+    .filter((agentId) => servedAgentIds === undefined || servedAgentIds.includes(agentId));
+  if (gates('')) {
+    const not = named.filter((agentId) => resolved(agentId).posture === 'open' && !gates(agentId));
+    return `, except in a conversation that read external content (externalContent: gate${not.length > 0 ? `; not for ${not.join(', ')}` : ''})`;
+  }
+  const which = named.filter(gates);
+  return which.length > 0
+    ? `, except in ${which.map((agentId) => `${agentId}'s`).join(', ')} conversations that read external content (externalContent: gate)`
+    : '';
+};
+
+/**
+ * One line saying which agents run gated tools without asking, the way the
+ * resolver decides it: the top-level posture with its exceptions named.
+ */
+export const describePosture = (
+  approvals: ApprovalsConfig,
+  mode: 'headless' | 'remote',
+  servedAgentIds?: readonly string[],
+): string => {
+  const top = resolveAgentApprovals(approvals, '').posture;
+  const exceptions = Object.keys(approvals.agents ?? {})
+    .filter((agentId) => servedAgentIds === undefined || servedAgentIds.includes(agentId))
+    .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
+  const except = exceptions.length > 0 ? ` except ${exceptions.join(', ')}` : '';
+  // Headless asks nobody: what the posture would ask about is refused.
+  return top === 'open'
+    ? `posture open for every agent${except} (gated tools run without asking${externalGateNote(approvals, servedAgentIds)}; dangerous ones ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'still ask'})`
+    : `posture guarded for every agent${except} (gated tools ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'ask, or are refused with nobody to ask'})`;
+};
+
 /** One line saying whose messages arrive as the operator's, per Slack agent. */
 export const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): string => {
   const covered = agentIds.filter((agentId) => (resolveAgentPrincipals(principals, agentId).slackUsers ?? []).length > 0);
@@ -182,7 +292,14 @@ export const describePrincipals = (principals: PrincipalsConfig, agentIds: strin
   if (covered.length === 0) {
     return closed.length === 0
       ? 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json'
-      : `no principals listed, so every Slack sender is unknown${door} — nobody at all can talk to ${closed.join(', ')} until principals.slackUsers names someone`;
+      // Codex P2 4310107914: a refused sender never becomes a turn and never
+      // gets a trust label, so only the agents that admit them may call
+      // their senders unknown.
+      : `no principals listed, so every Slack sender is refused${
+        closed.length === agentIds.length
+          ? ''
+          : ` by ${closed.join(', ')} and unknown to ${agentIds.filter((agentId) => !closed.includes(agentId)).join(', ')}`
+      } — nobody at all can talk to ${closed.join(', ')} until ${listKeyFor(principals, closed)} names someone`;
   }
   // An uncovered agent's senders are all unknown only if it admits them: a
   // closed agent with nobody listed refuses everyone, and saying its
@@ -194,7 +311,7 @@ export const describePrincipals = (principals: PrincipalsConfig, agentIds: strin
   return `principals set for ${covered.join(', ')}`
     + (uncoveredOpen.length > 0 ? `; none for ${uncoveredOpen.join(', ')}, whose Slack senders are all unknown` : '')
     + (uncoveredClosed.length > 0
-      ? `; none for ${uncoveredClosed.join(', ')}, who refuse every sender until principals.slackUsers names someone`
+      ? `; none for ${uncoveredClosed.join(', ')}, who refuse every sender until ${listKeyFor(principals, uncoveredClosed)} names someone`
       : '')
     + door;
 };
@@ -214,17 +331,67 @@ const classifyApprovers = (
   return { covered, uncovered: agentIds.filter((agentId) => !covered.includes(agentId)) };
 };
 
+/**
+ * Which calls reach the approval path for these agents (every configured
+ * one when none is named): gated ones when all are guarded, dangerous ones
+ * when all are open with no external-content gate, and otherwise (mixed, or
+ * an open agent whose `externalContent: "gate"` sends gated calls back to
+ * asking after external content) the calls that would ask.
+ */
+export const askingCalls = (approvals: ApprovalsConfig, agentIds: readonly string[]): { call: string; calls: string } => {
+  const ids = agentIds.length > 0 ? agentIds : ['', ...Object.keys(approvals.agents ?? {})];
+  const resolved = ids.map((agentId) => resolveAgentApprovals(approvals, agentId));
+  const postures = new Set(resolved.map((agent) => agent.posture));
+  if (!postures.has('open')) {
+    return { call: 'gated call', calls: 'gated calls' };
+  }
+  const externalGate = resolved.some((agent) => agent.posture === 'open' && agent.externalContent === 'gate');
+  return postures.size === 1 && !externalGate
+    ? { call: 'dangerous call', calls: 'dangerous calls' }
+    : { call: 'call that would ask', calls: 'calls that would ask' };
+};
+
+/** The startup warning for served agents no running channel can ask for. */
+export const describeUnreachable = (approvals: ApprovalsConfig, unreachable: readonly string[]): string =>
+  `no channel can ask for ${unreachable.join(', ')}, so their ${askingCalls(approvals, unreachable).calls} will wait out the `
+  + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.';
+
 export const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]): string => {
   if (agentIds.length === 0) {
-    return 'but no channel is running to ask through, so gated calls will wait out the approval timeout and then be denied';
+    return `but no channel is running to ask through, so ${askingCalls(approvals, agentIds).calls} will wait out the approval timeout and then be denied`;
   }
   const { covered, uncovered } = classifyApprovers(approvals, agentIds);
   if (covered.length === 0) {
-    return 'but no approvers are configured, so every gated call is denied on arrival';
+    return `but no approvers are configured, so every ${askingCalls(approvals, agentIds).call} is denied on arrival`;
   }
   return uncovered.length === 0
     ? `approvers set for ${covered.join(', ')}`
     : `approvers set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose calls are denied on arrival`;
+};
+
+/**
+ * The remote-mode startup line, posture-aware: under the open posture only
+ * dangerous calls (and, under `externalContent: "gate"`, gated calls in a
+ * conversation that read external content) reach Slack, so it must not
+ * promise that gated calls are parked.
+ */
+export const describeRemoteMode = (approvals: ApprovalsConfig, askable: string[], servedAgentIds?: readonly string[]): string => {
+  const top = resolveAgentApprovals(approvals, '').posture;
+  const differing = Object.keys(approvals.agents ?? {})
+    .filter((agentId) => servedAgentIds === undefined || servedAgentIds.includes(agentId))
+    .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
+  const who = `(${describeApprovers(approvals, askable)})`;
+  if (top === 'open') {
+    const guarded = differing.length > 0 ? `, except ${differing.join(', ')}'s, whose gated calls are parked too` : '';
+    return `approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture${externalGateNote(approvals, servedAgentIds)}${guarded} ${who}`;
+  }
+  // "Only dangerous ones" holds only when no open agent gates on external
+  // content; otherwise the note before it already says what else is parked.
+  const gateNote = externalGateNote(approvals, servedAgentIds);
+  const open = differing.length > 0
+    ? `, except ${differing.join(', ')}'s, which run without asking${gateNote}${gateNote === '' ? ' (only dangerous ones are parked)' : ''}`
+    : '';
+  return `approvals: remote — gated calls are parked and asked in Slack${open} ${who}`;
 };
 
 /**
@@ -365,6 +532,36 @@ export const describeUnattendedReach = async (
  * now; a menu that wants a shorter line takes fewer clauses, never
  * different words.
  */
+/**
+ * What reaches the approval path under the posture: gated calls when every
+ * agent is guarded, dangerous ones when every agent is open (the open
+ * posture runs gated calls before anything is asked), and, mixed, the calls
+ * that would ask. With any agent open, the posture line follows the verdict
+ * so the reader sees which agents run gated calls unasked.
+ */
+const postureReach = (
+  approvals: ApprovalsConfig,
+  mode: 'headless' | 'remote',
+  servedAgentIds: readonly string[] | undefined,
+): { call: string; calls: string; authorized: string; posture: string[] } => {
+  // The served roster when it is known: an override left behind for an
+  // agent no longer served changes nothing the daemon does.
+  const agentIds = servedAgentIds ?? ['', ...Object.keys(approvals.agents ?? {})];
+  const postures = new Set(agentIds.map((agentId) => resolveAgentApprovals(approvals, agentId).posture));
+  if (!postures.has('open')) {
+    return { call: 'an uncovered gated call', calls: 'gated calls', authorized: ` Already-authorized ones still run: ${ALREADY_AUTHORIZED}`, posture: [] };
+  }
+  // No grant, scope, site or destination ever covers a dangerous call, so
+  // the all-open line offers none of them, and the mixed one only for gated.
+  const allOpen = postures.size === 1;
+  return {
+    call: allOpen ? 'an uncovered dangerous call' : 'an uncovered call that would ask',
+    calls: allOpen ? 'dangerous calls' : 'calls that would ask',
+    authorized: allOpen ? '' : ` Already-authorized gated calls still run: ${ALREADY_AUTHORIZED}`,
+    posture: [describePosture(approvals, mode, servedAgentIds)],
+  };
+};
+
 export const unattendedReachParts = (
   mode: 'headless' | 'remote',
   approvals: ApprovalsConfig,
@@ -373,9 +570,11 @@ export const unattendedReachParts = (
   apiReachable: boolean,
   env: CliEnvironment,
 ): string[] => {
+  const reach = postureReach(approvals, mode, servedAgentIds);
   if (mode === 'headless') {
     return [
-      `headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`,
+      `headless — ${reach.call} is refused${reach.authorized ? `.${reach.authorized}` : ''}`,
+      ...reach.posture,
       ...externalContentClause(approvals, servedAgentIds),
     ];
   }
@@ -418,8 +617,8 @@ export const unattendedReachParts = (
   const verdict = (): string => {
     if (askable.length === 0) {
       return apiReachable
-        ? `remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
-        : 'remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it '
+        ? `remote — ${reach.call} parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
+        : `remote — ${reach.call} parks with no channel to ask through and no control API to answer it, so it `
           + (expires
             ? 'waits out the approval timeout and is denied'
             : 'is never answered: this daemon\'s approval timeout is 0, so it parks indefinitely');
@@ -430,11 +629,11 @@ export const unattendedReachParts = (
     // Same defect as the branch above, one case over — found by auditing
     // the rest of this function after that one, not by review.
     if (covered.length === 0) {
-      return 'remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured';
+      return `remote — ${reach.call} reaches Slack and is denied on arrival, because no approvers are configured`;
     }
-    return `remote — an uncovered gated call parks and asks in Slack, ${slack}`;
+    return `remote — ${reach.call} parks and asks in Slack, ${slack}`;
   };
-  const parts = [verdict()];
+  const parts = [verdict(), ...reach.posture];
   // The reverse of a stale token, and the failure that actually bites: an
   // agent the daemon serves that no channel can ask for parks its gated
   // calls until the timeout denies them. `runServe` warns about exactly
@@ -453,9 +652,9 @@ export const unattendedReachParts = (
     // these calls wait for a client rather than for the timeout — a very
     // different thing to tell an operator.
     parts.push(apiReachable
-      ? `no Slack channel can ask for ${unreachable.join(', ')}, so their gated calls park until the control `
+      ? `no Slack channel can ask for ${unreachable.join(', ')}, so their ${reach.calls} park until the control `
         + `API answers them${expires ? ' or the timeout denies them' : ' — with a timeout of 0, nothing else ever will'}`
-      : `no channel can ask for ${unreachable.join(', ')}, so their gated calls `
+      : `no channel can ask for ${unreachable.join(', ')}, so their ${reach.calls} `
         + (expires ? 'wait out the timeout and are denied' : 'park indefinitely: this daemon\'s approval timeout is 0'));
   }
   // Stored tokens are a *configured* route, not a live one. The adapter

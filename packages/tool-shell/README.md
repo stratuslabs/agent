@@ -25,6 +25,8 @@ npm install @stratusagent/tool-shell
 
 ## Risk model
 
+Under the default `approvals.posture: "open"` a `gated` call runs without asking; the column below is what each mode does with a call that still needs approval, which under `"guarded"` is every uncovered `gated` call.
+
 | Tool | Risk | What approval mode does |
 | --- | --- | --- |
 | `shell.run` | `gated`, narrowed per command | `interactive` shows the command and asks; `remote` asks in Slack; `headless` runs commands inside an approved scope and refuses everything else. |
@@ -168,7 +170,7 @@ git can find its repository), but nothing can be read from inside them.
 
 | Key | Default | What |
 | --- | --- | --- |
-| `sandbox` | `auto` | `auto`: sandboxed where the host can build one; where it can't (no `bwrap`, a container that forbids user namespaces, or no workspace to confine to), commands run unconfined and the daemon logs why, once. `required`: refuse every command when no sandbox can start. `off`: run with the daemon user's full access. |
+| `sandbox` | `required` | `required`: refuse every command when no sandbox can start (no `bwrap`, or a container that forbids user namespaces), with the reason. A host wired by hand with no workspace and no `cwd` has nothing to confine commands to, so `required` refuses there too. `auto`: run unconfined there instead, and log why, once. `off`: run with the daemon user's full access. |
 | `deniedPaths` | none | More directories or files to hide, added to the list above, including ones inside the workspace (a repository's `.env`). A leading `~` is your home directory. |
 | `home` | `hidden` | `hidden`: only the toolchain paths above and `readablePaths` are readable in your home. `visible`: all of it is, apart from the denied paths. |
 | `readablePaths` | none | More paths in your home a command may read (`~/projects`). Denied paths inside them stay hidden. |

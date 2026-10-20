@@ -6,11 +6,17 @@ the **site the conversation is already on**.
 
 **This page is about the daemon**, which is where a click happens with
 nobody watching. At a terminal, `stratus run` and `stratus chat` judge the
-call rather than the site, exactly as [Approvals](./approvals.md) describes:
-`--approvals always` (the default) does whatever the agent asks,
-`--approvals ask` shows you the page and the arguments and waits for y/N,
-and `--approvals never` refuses. None of the grants below apply to a
-one-shot at your own terminal, where you are the gate.
+call rather than the site, exactly as [Approvals](./approvals.md) describes.
+Without `--approvals` they follow the configured posture: `open` (the
+default) runs these calls without asking, since the browser tools are
+`gated`, and
+`guarded` asks about every gated call at a terminal and refuses it when
+nobody is there to ask. `--approvals always` does whatever the agent asks,
+`open` is the posture above, `gated`
+runs only `safe` tools without asking, `ask` shows you the page
+and the arguments and waits for y/N, and `never` refuses. None of the
+grants below apply to a one-shot at your own terminal, where you are the
+gate.
 
 Navigating, reading, and screenshotting are `gated` and judged by their
 risk alone — the address policy is what bounds them, and it is the same

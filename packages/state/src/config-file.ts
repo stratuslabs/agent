@@ -370,8 +370,14 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
 };
 
 const parseApprovalRoute = (raw: unknown, configPath: string, where: string): AgentApprovalConfig | undefined => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+  if (raw === undefined) {
     return undefined;
+  }
+  // Refused, not skipped: with posture open by default, a block that
+  // parsed as nothing (`"approvals": "guarded"`) would run every gated
+  // call unasked while the config in front of the operator says guarded.
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object like { "posture": "guarded" }, got ${JSON.stringify(raw)}.`);
   }
   const source = raw as Record<string, unknown>;
   const route: AgentApprovalConfig = {};
@@ -385,6 +391,17 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
       );
     }
     route.externalContent = source.externalContent;
+  }
+  if (source.posture !== undefined) {
+    // Refused when misspelled: a typo that silently meant `open` would run
+    // everything unasked, and one that meant `guarded` would look like the
+    // setting did nothing.
+    if (source.posture !== 'open' && source.posture !== 'guarded') {
+      throw new Error(
+        `Unsupported ${where}.posture in config ${configPath}: ${String(source.posture)}. Use open or guarded.`,
+      );
+    }
+    route.posture = source.posture;
   }
   if (Array.isArray(source.slackApprovers)) {
     // Kept even when it filters down to nothing. An agent entry saying
@@ -451,8 +468,46 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     }
     route.trustedDomains = [...new Set(normalized as string[])];
   }
+  if (source.channels !== undefined) {
+    // Refused rather than dropped, like the lists above: an operator who
+    // wrote a channel name or a bare id expects it to stop asking.
+    const entries = Array.isArray(source.channels) ? source.channels : undefined;
+    const valid = entries?.every((entry) => typeof entry === 'string' && standingChannelEntryValid(entry.trim()));
+    if (!entries || !valid) {
+      throw new Error(
+        `Invalid ${where}.channels in config ${configPath}: expected a list like ["slack:T0123ABCD/C0123ABCD"] or ["slack:*"]: `
+        + 'a channel kind, the workspace id and a conversation id (not a name), or * for every channel the agent\'s app is in. '
+        + 'For Slack, the workspace id starts with T (on Enterprise Grid, the workspace\'s T… id, not the organization\'s E… id) '
+        + 'and the channel id with C or G, in capitals; DMs (D…) are never covered.',
+      );
+    }
+    route.channels = [...new Set((entries as string[]).map((entry) => entry.trim()))];
+  }
   return route;
 };
+
+/**
+ * `slack:T0123ABCD/C0123ABCD`, `slack:T0123ABCD/*`, or `slack:*`. A bare
+ * `slack:C0123ABCD` still loads, so a config written for the first form of
+ * this setting never stops the daemon, but it names no workspace and covers
+ * nothing; the daemon says so at startup.
+ */
+const STANDING_CHANNEL_ENTRY = /^[a-z][a-z0-9-]*:(\*|[A-Za-z0-9][A-Za-z0-9._-]*(\/(\*|[A-Za-z0-9][A-Za-z0-9._-]*))?)$/;
+
+/**
+ * Slack's own id shapes, so a channel name that happens to fit the generic
+ * pattern (`slack:T0123/general`) is refused at startup instead of loading
+ * and never matching: `conversations.info` takes ids only. A workspace is
+ * `T…`: what the adapter matches against is `auth.test`'s `team_id`, and an
+ * Enterprise Grid organization's `E…` id is never that, so it would load and
+ * never match. A channel is `C…` or `G…`. `D…` is refused because a DM is
+ * never covered.
+ */
+const SLACK_STANDING_CHANNEL_ENTRY = /^slack:(\*|(T[A-Z0-9]+\/)?[CG][A-Z0-9]+|T[A-Z0-9]+\/\*)$/;
+
+const standingChannelEntryValid = (entry: string): boolean =>
+  STANDING_CHANNEL_ENTRY.test(entry)
+  && (!entry.startsWith('slack:') || SLACK_STANDING_CHANNEL_ENTRY.test(entry));
 
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
   const route = parseApprovalRoute(raw, configPath, 'approvals');
@@ -494,7 +549,10 @@ const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig
     }
     approvals.timeoutMs = source.timeoutMs;
   }
-  if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
+  if (source.agents !== undefined && (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents))) {
+    throw new Error(`Invalid approvals.agents in config ${configPath}: expected an object keyed by agent id.`);
+  }
+  if (source.agents !== undefined) {
     const agents: Record<string, AgentApprovalConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
       const parsed = parseApprovalRoute(entry, configPath, `approvals.agents.${agentId}`);
@@ -527,12 +585,17 @@ export const resolveAgentApprovals = (
   const slackApprovers = agent?.slackApprovers ?? approvals?.slackApprovers;
   const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
   const externalContent = agent?.externalContent ?? approvals?.externalContent;
+  // Open by default: resolved here, the one place, so serve, doctor and the
+  // startup line read the same answer.
+  const posture = agent?.posture ?? approvals?.posture ?? 'open';
   const autonomy = agent?.autonomy ?? approvals?.autonomy;
   // Added together rather than overridden: see `AgentApprovalConfig.commands`.
   const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
   const branchPrefixes = agent?.branchPrefixes ?? approvals?.branchPrefixes;
   const trustedDomains = [...new Set([...(approvals?.trustedDomains ?? []), ...(agent?.trustedDomains ?? [])])];
+  const channels = [...new Set([...(approvals?.channels ?? []), ...(agent?.channels ?? [])])];
   return {
+    posture,
     ...(autonomy !== undefined ? { autonomy } : {}),
     ...(branchPrefixes !== undefined ? { branchPrefixes } : {}),
     ...(slackApprovers ? { slackApprovers } : {}),
@@ -540,6 +603,7 @@ export const resolveAgentApprovals = (
     ...(externalContent !== undefined ? { externalContent } : {}),
     ...(commands.length > 0 ? { commands } : {}),
     ...(trustedDomains.length > 0 ? { trustedDomains } : {}),
+    ...(channels.length > 0 ? { channels } : {}),
   };
 };
 
@@ -625,8 +689,10 @@ export const resolveAgentPrincipals = (
 ): AgentPrincipalsConfig => {
   const agent = principals?.agents?.[agentId];
   const slackUsers = agent?.slackUsers ?? principals?.slackUsers;
-  const admit = agent?.admit ?? principals?.admit;
-  return { ...(slackUsers ? { slackUsers } : {}), ...(admit ? { admit } : {}) };
+  // Closed by default: only listed principals get a turn. `anyone` is the
+  // explicit opt-in. Resolved here, the one place, like resolveAgentSlack.
+  const admit = agent?.admit ?? principals?.admit ?? 'principals';
+  return { ...(slackUsers ? { slackUsers } : {}), admit };
 };
 
 const parseSlackEntry = (

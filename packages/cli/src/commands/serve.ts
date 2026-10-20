@@ -1,6 +1,8 @@
+import path from 'node:path';
+
 import type { ApprovalPolicy } from '@stratusagent/core';
 import { createFileLedger } from '@stratusagent/plugins';
-import { autonomyDirectory } from '../autonomy.ts';
+import { agentShellGrantRoot, autonomyDirectory } from '../autonomy.ts';
 import type {
   ApprovalTransport,
   GatewayChannelAdapter,
@@ -14,11 +16,13 @@ import {
   describeDestinationGrant,
   describeOriginScope,
   describeToolGrant,
+  type CommandNameGrant,
   type CommandScope,
   type OriginScope,
   type PermissionDecision,
   type DestinationGrant,
   type ToolGrant,
+  unboundStandingChannels,
 } from '@stratusagent/permissions';
 import {
   agentsDirPath,
@@ -41,7 +45,7 @@ import {
   grantWriteSerializer,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
-import { describePrincipals, describeApprovers } from '../approvals.ts';
+import { describePrincipals, describePosture, describeRemoteMode, describeUnreachable } from '../approvals.ts';
 import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
@@ -477,6 +481,9 @@ const serveHeldHome = async (
           const workspaces = createAgentWorkspaces(env);
           return { workspaces, ledger: createFileLedger((id) => workspaces.forAgent(id), (id) => workspaces.prepare(id)) };
         })(),
+        // Messages addressed to an agent while this daemon restarts, kept
+        // for the next one (see docs/guides/always-on.md).
+        pendingIntakePath: path.join(stratusHomePath(env), 'slack-pending-intake.json'),
         log,
         warn,
       }));
@@ -576,6 +583,9 @@ const serveHeldHome = async (
       scopesFor: async (agentId: string) => [...operatorCommands.scopesFor(agentId), ...await grantStore.scopesFor(agentId)],
       remember: (agentId: string, scope: CommandScope) => grantStore.remember(agentId, scope),
     },
+    // Commands granted by name, kept inside the agent's workspace.
+    names: grantStore,
+    grantRootFor: (agentId: string) => agentShellGrantRoot(pluginsConfig, env, agentId),
     // Workspace autonomy: the agent's own workspace, for the agents config
     // turns it on for. Resolved per call so the answer always matches the
     // config this daemon started with.
@@ -589,6 +599,9 @@ const serveHeldHome = async (
       // session, is precisely the decision that must not be the one leaving
       // no trace.
       log(`${agentId}: "${describeCommandScope(scope)}" now runs without asking`);
+    },
+    onCommandNameRemembered: ({ agentId, grant }: { agentId: string; grant: CommandNameGrant }) => {
+      log(`${agentId}: "${grant.command}" now runs without asking inside its workspace`);
     },
   };
   // The origin-scope engine, whose grants live in the same file as the
@@ -608,6 +621,8 @@ const serveHeldHome = async (
   // disagree about which one wins.
   const gateExternalContent = (agentId: string): boolean =>
     resolveAgentApprovals(approvalsConfig, agentId).externalContent === 'gate';
+  const openFor = (agentId: string): boolean =>
+    resolveAgentApprovals(approvalsConfig, agentId).posture === 'open';
   const approvals = (transport: ApprovalTransport): ApprovalPolicy => {
     // The standing-grant engine, in the same file again — and the tool's
     // contributor from the gateway, so a grant records which package's
@@ -625,6 +640,8 @@ const serveHeldHome = async (
     const destinations = {
       ...transport.destinations,
       whitelist: grantStore,
+      // The operator's standing channel authorization, read per call.
+      standingChannelsFor: (agentId: string) => resolveAgentApprovals(approvalsConfig, agentId).channels ?? [],
       onGranted: ({ agentId, grant }: { agentId: string; grant: DestinationGrant }) => {
         log(`${agentId}: ${describeDestinationGrant(grant)} now runs without asking, until revoked${grant.grantedBy ? ` (granted by ${grant.grantedBy})` : ''}`);
       },
@@ -637,8 +654,8 @@ const serveHeldHome = async (
       // grant is the only path a scope-less gated tool has to running
       // unattended, and headless is where that matters.
       approvalMode === 'remote'
-        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent }
-        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent },
+        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent, openFor }
+        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent, openFor },
     );
   };
 
@@ -654,6 +671,19 @@ const serveHeldHome = async (
   if (autonomous.length > 0) {
     log(`approvals: autonomy workspace for ${autonomous} (reads inside their own workspace run without asking)`);
   }
+  const standingChannels = [...new Set([...Object.keys(approvalsConfig.agents ?? {}), ...slackAgents.map(([agentId]) => agentId)])]
+    .map((agentId) => [agentId, resolveAgentApprovals(approvalsConfig, agentId).channels ?? []] as const)
+    .filter(([, channels]) => channels.length > 0);
+  if (standingChannels.length > 0) {
+    log(`approvals: message.read/send run without asking in ${standingChannels.map(([agentId, channels]) => `${channels.join(', ')} for ${agentId}`).join('; ')} (approvals.channels; DMs still ask)`);
+    // A bare id names no workspace, so it covers nothing (see
+    // matchesStandingChannel). Said once here rather than refused, so a
+    // config written before the workspace was required still starts.
+    const unbound = [...new Set(standingChannels.flatMap(([, channels]) => unboundStandingChannels(channels)))];
+    if (unbound.length > 0) {
+      log(`approvals: ${unbound.join(', ')} in approvals.channels name${unbound.length === 1 ? 's' : ''} no workspace and cover${unbound.length === 1 ? 's' : ''} nothing; write slack:<workspace id>/<channel id> (the workspace id is the T… id), or slack:*`);
+    }
+  }
   const declared = operatorCommands.describe();
   if (declared) {
     log(declared);
@@ -663,13 +693,6 @@ const serveHeldHome = async (
   }
   if (Object.keys(autoContinue).length > 0) {
     log(`autoContinue: ${Object.entries(autoContinue).map(([agentId, setting]) => `${agentId} ${setting === true ? 'no cap' : `up to ${setting} more`}`).join(', ')} (the codex runtime is not covered and wraps up as before)`);
-  }
-  if (approvalMode === 'remote') {
-    // Only agents whose channel actually came up can be asked: tokens on
-    // disk with the Slack package missing means nothing renders the
-    // request, and the turn discovers that by hanging.
-    const askable = slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : [];
-    log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
   if (slackAdapterUp) {
     // Said at startup, because the failure it names is silent otherwise: a
@@ -832,14 +855,21 @@ const serveHeldHome = async (
     // on its own — a request is a broadcast, and no adapter knows whether
     // another one is about to answer — so it is reported here, where the
     // roster and the channel list are both in view.
+    // The posture lines wait for the roster too: an override left behind
+    // for an agent no longer served changes nothing the daemon does.
+    const served = gateway.agents().map((agent) => agent.id);
+    log(`approvals: ${describePosture(approvalsConfig, approvalMode, served)}`);
+    if (approvalMode === 'remote') {
+      // Only agents whose channel actually came up can be asked: tokens on
+      // disk with the Slack package missing means nothing renders the
+      // request, and the turn discovers that by hanging.
+      log(describeRemoteMode(approvalsConfig, slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : [], served));
+    }
     if (approvalMode === 'remote') {
       const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
-      const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
+      const unreachable = served.filter((id) => !askable.has(id));
       if (unreachable.length > 0) {
-        warn(
-          `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
-          + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
-        );
+        warn(describeUnreachable(approvalsConfig, unreachable));
       }
     }
 

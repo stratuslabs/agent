@@ -274,6 +274,16 @@ export const SAFE_COMMAND_SCOPES: CommandScope[] = [
   { command: 'pwd' },
   { command: 'whoami' },
   { command: 'uname' },
+  // Navigation and the shell's no-ops. `cd` changes only where the rest of
+  // the line runs, which the compound judge tracks (`judgeCompound`), and a
+  // `cd` on its own changes nothing a later call sees: every call starts a
+  // new shell. `echo` prints its arguments and nothing else, so it may
+  // expand nothing: `echo $TOKEN` is an environment read, and `echo *` a
+  // directory listing.
+  { command: 'cd' },
+  { command: 'echo', literal: true },
+  { command: 'true' },
+  { command: 'false' },
 ];
 
 /**
@@ -358,6 +368,13 @@ const tokenize = (command: string): { tokens: string[]; expands: boolean[] } | u
       if (char === quote) {
         quote = undefined;
       } else {
+        // Double quotes stop globbing and `~`, not parameter expansion:
+        // `echo "$TOKEN"` prints the variable as surely as `echo $TOKEN`.
+        // An escaped `\$` was taken above and is text, and so is a `$`
+        // that starts no expansion (`grep "x$"`), as it is to `sh`.
+        if (quote === '"' && char === '$' && /[A-Za-z0-9_@*#?!${(-]/.test(command[index + 1] ?? '')) {
+          expanding = true;
+        }
         current += char;
       }
       continue;
