@@ -137,7 +137,7 @@ export const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape):
   const skippedMapEntries: ParsedFrontmatter['skippedMapEntries'] = {};
   const tolerant = shape.tolerant ?? false;
   let currentList: string[] | undefined;
-  let currentMap: { key: string; map: Record<string, string> } | undefined;
+  let currentMap: { key: string; map: Record<string, string>; entryIndent?: number } | undefined;
   // Inside a map, the indent of an entry with a structured value whose
   // deeper-indented lines are being skipped.
   let skippingMapEntryIndent: number | undefined;
@@ -212,25 +212,33 @@ export const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape):
       skippingMapEntryIndent = undefined;
       const pair = /^\s+(?:"([^"]*)"|'([^']*)'|([^\s"'#][^:]*?))\s*:\s*(.*)$/.exec(line);
       const mapKey = pair?.[1] ?? pair?.[2] ?? pair?.[3]?.trim();
-      if (pair && mapKey !== undefined && mapKey.length > 0 && (pair[4] ?? '').trim().length === 0) {
-        (skippedMapEntries[currentMap.key] ??= []).push(mapKey);
-        skippingMapEntryIndent = indent;
-        continue;
+      // Entries sit at the first entry's indent. A line at any other indent
+      // that no skipped entry owns is refused: read as a sibling, it would
+      // flatten another host's nested data into this map.
+      currentMap.entryIndent ??= indent;
+      const rawValue = (pair?.[4] ?? '').trim();
+      if (pair && mapKey !== undefined && mapKey.length > 0 && indent === currentMap.entryIndent) {
+        // Nothing after the colon but a comment opens a nested block or
+        // block list; an unquoted value opening with [ or { is a flow
+        // collection, as in YAML (a string that starts with a bracket has
+        // to be quoted). Both are structured: skipped and named.
+        if (rawValue.length === 0 || rawValue.startsWith('#')) {
+          (skippedMapEntries[currentMap.key] ??= []).push(mapKey);
+          skippingMapEntryIndent = indent;
+          continue;
+        }
+        if (/^[[{]/.test(rawValue)) {
+          (skippedMapEntries[currentMap.key] ??= []).push(mapKey);
+          continue;
+        }
+        if (unquote(rawValue).length > 0) {
+          currentMap.map[mapKey] = unquote(rawValue);
+          continue;
+        }
       }
-      // An unquoted value opening with [ or { is a flow collection, as in
-      // YAML, not a string: skipped and named like the nested forms. A
-      // string that starts with a bracket has to be quoted.
-      if (pair && mapKey !== undefined && mapKey.length > 0 && /^[[{]/.test((pair[4] ?? '').trim())) {
-        (skippedMapEntries[currentMap.key] ??= []).push(mapKey);
-        continue;
-      }
-      if (!pair || mapKey === undefined || mapKey.length === 0 || pair[4] === undefined || unquote(pair[4]).length === 0) {
-        throw new Error(
-          `${capitalize(shape.kind)} frontmatter metadata entries must be "key: value" strings, one per line: "${line.trim()}"`,
-        );
-      }
-      currentMap.map[mapKey] = unquote(pair[4]);
-      continue;
+      throw new Error(
+        `${capitalize(shape.kind)} frontmatter metadata entries must be "key: value" strings, one per line: "${line.trim()}"`,
+      );
     }
 
     const listItem = /^\s+-\s*(.*)$/.exec(line);

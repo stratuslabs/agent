@@ -228,6 +228,19 @@ Body.`);
     () => parseSkillDocument('---\ndescription: d\nmetadata:\n  requires:\n  - fs.read\n---\n\nBody.'),
     /metadata\.requires must be a string/,
   );
+  // A comment after an entry's colon is not a value: the entry opens a
+  // structured block, skipped whole, so its nested keys are never read as
+  // metadata (or as a nested requires).
+  const commented = parseSkillDocument('---\ndescription: d\nmetadata:\n  clawdbot: # host config\n    emoji: x\n    requires: fs.*\n  author: someone\n---\n\nBody.');
+  assert.deepEqual(commented.metadata, { author: 'someone' });
+  assert.deepEqual(commented.skippedMetadata, ['clawdbot']);
+  assert.equal(commented.requires, undefined);
+  // Entries sit at one indent: a deeper key after a string entry is not
+  // read as a sibling (it would flatten another host's data into ours).
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  author: someone\n    requires: fs.*\n---\n\nBody.'),
+    /metadata entries must be "key: value" strings/,
+  );
   // A line indented under metadata with no entry to belong to is still refused.
   assert.throws(
     () => parseSkillDocument('---\ndescription: d\nmetadata:\n  a: b\n    - stray\n---\n\nBody.'),
