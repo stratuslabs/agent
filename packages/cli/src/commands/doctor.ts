@@ -17,6 +17,7 @@ import {
   readWorkingDirectory,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
+  resolveAgentPrincipals,
   gatewayInfoPath,
   gatewayTokenPath,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
@@ -45,6 +46,7 @@ import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { harnessesMissingMessage, missingHarnessPackages } from '../harness-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
+import { loadServePrincipals } from '../trusted-config.ts';
 
 export interface DoctorKeyCheck {
   provider: CredentialProviderName;
@@ -710,6 +712,41 @@ export const collectDoctorReport = async (
     problems.push(
       `Slack tokens are stored for ${orphans.join(', ')}, which no agent matches — \`stratus serve\` skips them. `
       + 'Clear them from `stratus setup` → Channels.',
+    );
+  }
+
+  // Only listed principals get a turn unless an agent says `admit: "anyone"`,
+  // so a connected agent with nobody listed ignores every Slack message.
+  // Read the way `serve` reads them (`loadServePrincipals`): from a trusted
+  // config only, falling back to the global file when an auto-discovered
+  // project config wins discovery, and closed when unreadable.
+  // Its warnings are what serve would log at start, and the only place that
+  // says why a shadowed global file's list did not take effect.
+  const trustedPrincipals = await loadServePrincipals(env, command.configPath, (line) => {
+    problems.push(`At start, serve would warn: ${line.replace(/\.$/, '')}.`);
+  });
+  const unreachable = slackAgents.filter((id) => !orphans.includes(id)).filter((id) => {
+    const resolved = resolveAgentPrincipals(trustedPrincipals, id);
+    return resolved.admit === 'principals' && (resolved.slackUsers ?? []).length === 0;
+  });
+  // The keys that would change each agent's answer: its own entry wins
+  // over the top level key by key (`resolveAgentPrincipals`), so advice to
+  // edit the top level does nothing for an agent that overrides it.
+  const remedies = new Map<string, { ids: string[]; list: string; admit: string }>();
+  for (const id of unreachable) {
+    const own = trustedPrincipals?.agents?.[id];
+    const list = own?.slackUsers !== undefined ? `principals.agents.${id}.slackUsers` : 'principals.slackUsers';
+    const admit = own?.admit !== undefined ? `principals.agents.${id}.admit` : 'principals.admit';
+    const key = `${list} ${admit}`;
+    const entry = remedies.get(key) ?? { ids: [], list, admit };
+    entry.ids.push(id);
+    remedies.set(key, entry);
+  }
+  for (const { ids, list, admit } of remedies.values()) {
+    problems.push(
+      `Nobody is listed who may talk to ${ids.join(', ')} in Slack, so ${ids.length === 1 ? 'it ignores' : 'they ignore'} every message. `
+      + `Add Slack member IDs to ${list} in ${explicitSource ? path.resolve(cwd, explicitSource.value) : '~/.stratus/config.json'} `
+      + `(or set ${admit} to "anyone"), then \`stratus restart\`.`,
     );
   }
 

@@ -171,6 +171,13 @@ test('the environment a command gets is still only what was granted', { skip: !s
 
 const unavailable: typeof planSandbox = () => ({ kind: 'unavailable', reason: 'bwrap cannot create a sandbox here (permission denied)' });
 
+test('with no sandbox setting a command is refused where no sandbox can start', async () => {
+  const fixture = await fixtureHome();
+  const result = await run({}, fixture, 'echo hi', { planSandbox: unavailable });
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /commands must run sandboxed \(sandbox: "required"\)/);
+});
+
 test('sandbox "required" refuses when no sandbox can start, and names why and what to change', async () => {
   const fixture = await fixtureHome();
   const result = await run({ sandbox: 'required' }, fixture, 'echo hi', { planSandbox: unavailable });
@@ -183,9 +190,9 @@ test('sandbox "auto" runs unconfined where no sandbox can start, and says so onc
   resetSandboxWarning();
   const fixture = await fixtureHome();
   const warnings: string[] = [];
-  const first = await run({}, fixture, 'echo one', { planSandbox: unavailable, warn: (m) => warnings.push(m) });
-  const second = await run({}, fixture, 'echo two', { planSandbox: unavailable, warn: (m) => warnings.push(m) });
-  assert.equal(first.ok, true, JSON.stringify(first));
+  const first = await run({ sandbox: 'auto' }, fixture, 'echo one', { planSandbox: unavailable, warn: (m) => warnings.push(m) });
+  const second = await run({ sandbox: 'auto' }, fixture, 'echo two', { planSandbox: unavailable, warn: (m) => warnings.push(m) });
+  assert.equal(first.ok, true);
   assert.equal(second.ok, true);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0]!, /commands run without a sandbox because bwrap cannot create a sandbox here/);
@@ -205,7 +212,7 @@ test('sandbox "off" never plans a sandbox, and an unknown value is refused', asy
 test('the policy hides the Stratus home and credentials and keeps the agent workspace', async () => {
   const fixture = await fixtureHome();
   let seen: Parameters<typeof planSandbox>[0] | undefined;
-  await run({ deniedPaths: ['~/vault'], writablePaths: ['~/.gradle'] }, fixture, 'true', {
+  await run({ sandbox: 'auto', deniedPaths: ['~/vault'], writablePaths: ['~/.gradle'] }, fixture, 'true', {
     planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); },
     warn: () => {},
   });
@@ -297,6 +304,27 @@ test('the policy denies what the host protects and every other agent\'s workspac
   assert.ok(!seen!.denied.includes(fixture.workspace), 'never its own workspace');
 });
 
+test('a workspace that holds a denied path does not give it back', { skip: !sandboxedHere && NEEDS }, async () => {
+  // Codex P1 4309388132: with no workspace seam and no cwd, the fallback
+  // can be the user's home, and the workspace was given back after the
+  // denials, so `~/.ssh` and the Stratus home showed through again.
+  const fixture = await fixtureHome();
+  const tool = createShellTool({ cwd: fixture.userHome, sandbox: 'required' }, {
+    home: fixture.userHome,
+    processEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+  });
+  const read = (command: string) => createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command } }, tool, session('ava'));
+  for (const target of [path.join(fixture.userHome, '.ssh', 'id_ed25519'), path.join(fixture.stratusHome, 'credentials.json')]) {
+    const result = await read(`cat ${target}`);
+    assert.equal(result.ok, false, `${target}: ${JSON.stringify(result.output)}`);
+    assert.doesNotMatch(output(result).stdout, /PRIVATE KEY|sk-secret/);
+  }
+  // The rest of it is still the workspace.
+  const ok = await read('echo hi > note.txt && cat outside.txt note.txt');
+  assert.equal(ok.ok, true, JSON.stringify(ok.output));
+  assert.equal(output(ok).stdout, "outsidehi\n");
+});
+
 test('an operator denied path inside the workspace stays denied', { skip: !sandboxedHere && NEEDS }, async () => {
   // Codex P1 4309587626: the workspace was given back after the denials.
   const fixture = await fixtureHome();
@@ -329,15 +357,40 @@ test('with a workspaceRoot, the other agents\' workspaces under it are denied', 
   assert.equal(output(own).stdout, 'mine\n');
 });
 
-test('sandbox "auto" with no workspace to confine to says so before running unconfined', async () => {
-  // Codex P1 4309587622.
+
+test('with no workspace and no cwd, required refuses instead of granting the process directory', async () => {
+  // Codex P1 4310573233 / 4310550266: falling back to process.cwd() made
+  // wherever the host started (a home, `/`, a repository with
+  // node_modules/.bin on PATH) writable inside a "required" sandbox.
+  const fixture = await fixtureHome();
+  let planned = false;
+  const tool = createShellTool({}, {
+    home: fixture.userHome,
+    processEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+    planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); },
+  });
+  const result = await createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command: 'echo hi' } }, tool, session('ava'));
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /no workspace to confine commands to/);
+  assert.match(result.error ?? '', /cwd/);
+  assert.equal(planned, false, 'no sandbox is planned around the process directory');
+});
+
+test('with no workspace and no cwd, auto runs unconfined and says so once', async () => {
   resetSandboxWarning();
+  const fixture = await fixtureHome();
   const warnings: string[] = [];
-  const tool = createShellTool({}, { home: os.tmpdir(), processEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' }, warn: (line) => warnings.push(line) });
-  const result = await createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command: 'true' } }, tool, session('ava'));
-  assert.equal(result.ok, true, JSON.stringify(result.output));
+  const tool = createShellTool({ sandbox: 'auto' }, {
+    home: fixture.userHome,
+    processEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+    planSandbox: () => { throw new Error('should not plan'); },
+    warn: (m) => warnings.push(m),
+  });
+  const exec = (command: string) => createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command } }, tool, session('ava'));
+  assert.equal((await exec('echo one')).ok, true);
+  assert.equal((await exec('echo two')).ok, true);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0]!, /without a sandbox because this agent has no workspace/);
+  assert.match(warnings[0]!, /no workspace/);
 });
 
 const capture = async (

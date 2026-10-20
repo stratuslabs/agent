@@ -5,7 +5,7 @@ import type { CliEnvironment } from './environment.ts';
 
 export type CliProviderName = StratusProviderName;
 
-export type CliApprovalMode = 'always' | 'ask' | 'gated' | 'never';
+export type CliApprovalMode = 'always' | 'open' | 'ask' | 'gated' | 'never';
 
 export interface ParsedRunCommand {
   command: 'run';
@@ -559,7 +559,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--approvals') {
         const value = readOptionValue(rest, index, '--approvals');
-        if (value !== 'always' && value !== 'ask' && value !== 'gated' && value !== 'never') {
+        if (value !== 'always' && value !== 'open' && value !== 'ask' && value !== 'gated' && value !== 'never') {
           throw new Error(`Invalid value for --approvals: ${value}`);
         }
         parsed.approvals = value;
@@ -1679,8 +1679,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
     if (token === '--approvals') {
       const value = readOptionValue(rest, index, '--approvals');
-      if (value !== 'always' && value !== 'ask' && value !== 'gated' && value !== 'never') {
-        throw new Error(`Unsupported approvals mode: ${value}. Use always, ask, gated, or never.`);
+      if (value !== 'always' && value !== 'open' && value !== 'ask' && value !== 'gated' && value !== 'never') {
+        throw new Error(`Unsupported approvals mode: ${value}. Use always, open, ask, gated, or never.`);
       }
       approvals = value;
       index += 1;
@@ -1716,7 +1716,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     throw new Error('A prompt is required. Pass it with --prompt, --stdin, or as a positional argument.');
   }
 
-  if ((approvals === 'ask' || approvals === 'gated') && useStdin) {
+  if ((approvals === 'ask' || approvals === 'gated' || approvals === 'open') && useStdin) {
     throw new Error(`--approvals ${approvals} cannot be combined with --stdin because both read from standard input.`);
   }
 

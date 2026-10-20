@@ -41,7 +41,7 @@ import {
   grantWriteSerializer,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
-import { describePrincipals, describeApprovers } from '../approvals.ts';
+import { describePrincipals, describePosture, describeRemoteMode, describeUnreachable } from '../approvals.ts';
 import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
@@ -608,6 +608,8 @@ const serveHeldHome = async (
   // disagree about which one wins.
   const gateExternalContent = (agentId: string): boolean =>
     resolveAgentApprovals(approvalsConfig, agentId).externalContent === 'gate';
+  const openFor = (agentId: string): boolean =>
+    resolveAgentApprovals(approvalsConfig, agentId).posture === 'open';
   const approvals = (transport: ApprovalTransport): ApprovalPolicy => {
     // The standing-grant engine, in the same file again — and the tool's
     // contributor from the gateway, so a grant records which package's
@@ -637,8 +639,8 @@ const serveHeldHome = async (
       // grant is the only path a scope-less gated tool has to running
       // unattended, and headless is where that matters.
       approvalMode === 'remote'
-        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent }
-        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent },
+        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent, openFor }
+        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent, openFor },
     );
   };
 
@@ -663,13 +665,6 @@ const serveHeldHome = async (
   }
   if (Object.keys(autoContinue).length > 0) {
     log(`autoContinue: ${Object.entries(autoContinue).map(([agentId, setting]) => `${agentId} ${setting === true ? 'no cap' : `up to ${setting} more`}`).join(', ')} (the codex runtime is not covered and wraps up as before)`);
-  }
-  if (approvalMode === 'remote') {
-    // Only agents whose channel actually came up can be asked: tokens on
-    // disk with the Slack package missing means nothing renders the
-    // request, and the turn discovers that by hanging.
-    const askable = slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : [];
-    log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
   if (slackAdapterUp) {
     // Said at startup, because the failure it names is silent otherwise: a
@@ -832,14 +827,21 @@ const serveHeldHome = async (
     // on its own — a request is a broadcast, and no adapter knows whether
     // another one is about to answer — so it is reported here, where the
     // roster and the channel list are both in view.
+    // The posture lines wait for the roster too: an override left behind
+    // for an agent no longer served changes nothing the daemon does.
+    const served = gateway.agents().map((agent) => agent.id);
+    log(`approvals: ${describePosture(approvalsConfig, approvalMode, served)}`);
+    if (approvalMode === 'remote') {
+      // Only agents whose channel actually came up can be asked: tokens on
+      // disk with the Slack package missing means nothing renders the
+      // request, and the turn discovers that by hanging.
+      log(describeRemoteMode(approvalsConfig, slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : [], served));
+    }
     if (approvalMode === 'remote') {
       const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
-      const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
+      const unreachable = served.filter((id) => !askable.has(id));
       if (unreachable.length > 0) {
-        warn(
-          `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
-          + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
-        );
+        warn(describeUnreachable(approvalsConfig, unreachable));
       }
     }
 

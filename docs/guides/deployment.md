@@ -374,6 +374,15 @@ What the recipe sets, and what it leaves to you.
   directory and `ProtectHome=yes`. A shell command an agent runs can write
   its workspace and `/tmp`, and nothing else. A `tool-fs` root outside the
   home needs its own `ReadWritePaths=` or mount.
+- [ ] **A shell sandbox that can start.** `tool-shell` runs each command in
+  bubblewrap (installed in the image) and refuses commands when it can't
+  start one. bwrap needs unprivileged user namespaces. If the container
+  runtime forbids them, every `shell.run` fails with the reason (`bwrap
+  cannot create a sandbox here (…)`): allow them for this container (for
+  Docker, a seccomp profile that permits `clone`/`unshare` with
+  `CLONE_NEWUSER`), or set `sandbox: "auto"` for `@stratusagent/tool-shell`
+  to run commands unconfined inside the container instead, accepting that a
+  command can then read the credential store in the volume.
 - [ ] **The API on loopback only.** Compose publishes `127.0.0.1:4123`;
   the unit uses the config's `api.host`, which the VM profile sets to
   `127.0.0.1`. Reach it from elsewhere through a tunnel — Tailscale, or

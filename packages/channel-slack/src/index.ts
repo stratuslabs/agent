@@ -182,9 +182,11 @@ export interface SlackAgentConfig {
    */
   principals?: string[];
   /**
-   * Whether an unlisted sender gets a turn at all. `anyone` (the default)
-   * admits them as `unknown`; `principals` refuses them before a turn
-   * starts and does not let the agent overhear them either — the text
+   * Whether an unlisted sender gets a turn at all. `principals` refuses
+   * them before a turn starts and does not let the agent overhear them
+   * either; `anyone` admits them as `unknown`. Absent here means `anyone`,
+   * for embedders that predate the option. The daemon always passes it:
+   * its config resolves an absent `principals.admit` to `principals` — the text
    * would be in the transcript, which is what this mode exists to keep
    * out. The label above is provenance; this is authorization.
    */

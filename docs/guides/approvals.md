@@ -1,18 +1,67 @@
 # Approvals
 
-At a terminal, `stratus chat` and `stratus run` ask you directly:
-`--approvals` is `always`, `ask` (a y/N prompt on every call), `gated`
-(`safe` tools run, everything else asks — exactly the line the daemon
-draws below), or `never`. `gated` is the default when stdin is a terminal.
-When stdin is a pipe or a script, or the prompt came in through `--stdin`,
-nobody can answer a y/N, so the default is `always`, and the run says so
-once on stderr the first time a gated tool runs. This page is about the
-daemon, where there is no terminal to prompt on.
+By default an agent does its work without asking. Three things bound it
+instead of a prompt on every call:
+
+- **Who can talk to it.** Only the Slack users listed in
+  `principals.slackUsers` get a turn; everyone else is ignored. See
+  [Slack](./slack.md).
+- **Where its commands run.** Shell commands run in an OS sandbox that can
+  write only the agent's workspace and can't read the Stratus home or your
+  credentials. See [Shell commands](./shell.md#what-a-command-can-reach).
+- **What its files tools can reach.** `tool-fs` roots, and the Stratus home is
+  kept from every agent whatever the roots say.
+
+That default is `approvals.posture: "open"`:
+
+```jsonc
+// ~/.stratus/config.json
+{
+  "approvals": {
+    "posture": "open",                           // the default: gated tools run without asking
+    "agents": { "intern": { "posture": "guarded" } }  // this agent asks
+  }
+}
+```
+
+- **`open`** (the default): every `gated` tool runs without asking, in
+  interactive, scheduled, and delegated turns, under `headless` and
+  `remote` alike. A `dangerous` tool still asks every time, and
+  [`externalContent: "gate"`](#after-an-agent-reads-the-web) still sends a
+  conversation that read the web back to asking.
+- **`guarded`**: every gated call asks, or is refused with nobody to ask,
+  unless a scope or grant covers it. The rest of this page describes how
+  that works.
+
+A config that can't be read leaves the daemon guarded rather than open. A
+project-local config that tries to set `approvals` is ignored, with a
+warning, and `~/.stratus/config.json`'s approvals apply instead. The daemon
+prints the posture at startup (this is `--approvals remote`; in `headless`,
+which asks nobody, the line says dangerous ones are refused):
+
+```text
+approvals: posture open for every agent except intern (gated tools run without asking; dangerous ones still ask)
+```
+
+At a terminal, `stratus chat` and `stratus run` follow the same posture when
+`--approvals` isn't given: `open` runs gated tools and asks you about a
+dangerous one. With no terminal (a pipe, `--stdin`), nobody can answer,
+so a call that would ask is refused instead, said once on stderr.
+`--approvals` still chooses explicitly: `always`, `open`,
+`ask` (a y/N prompt on every call), `gated` (`safe` tools run, everything
+else asks), or `never`. Under `guarded`, `gated` is the default at a
+terminal, and `never` when stdin is a pipe or a script, since nobody is
+there to ask (said once on stderr); pass `--approvals always` for an
+unattended script that should run everything. A config the posture can't
+be read from counts as `guarded`, and a project-local `approvals` block is
+ignored for the global one, as it is by the daemon.
 
 ## What the daemon will do on its own
 
+This section and the ones after it are about the `guarded` posture.
+
 Tools declare how much damage they could do — `safe`, `gated`, or
-`dangerous` — and the daemon runs only the safe ones without asking.
+`dangerous` — and a guarded daemon runs only the safe ones without asking.
 Anything riskier is refused, with a line in the log saying which agent
 wanted what:
 
@@ -613,8 +662,10 @@ Three limits to know before relying on it:
   send.
 - **Only `external` content trips it.** A shell's output is `unknown`, not
   `external`, so a coding agent keeps its grants after `ls`. A message from
-  a Slack sender you have not named as a principal is `unknown` too; refuse
-  those before the turn starts with `principals.admit: "principals"`
+  a Slack sender you have not named as a principal is refused before the
+  turn starts, so it carries no label at all; only under
+  `principals.admit: "anyone"` is it admitted, as `unknown`, which does not
+  trip the gate either
   ([Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator)).
 - **It gates what an agent does, not what it believes.** A page can still
   mislead an answer. What the gate removes is the page's ability to act

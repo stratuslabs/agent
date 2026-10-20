@@ -30,6 +30,13 @@ import {
   defaultApprovalMode,
   warnOnUntrustedConfig,
   describePrincipals,
+  describePosture,
+  describeRemoteMode,
+  describeUnreachable,
+  loadServeApprovals,
+  defaultPosture,
+  unflaggedApprovals,
+  externalContentGated,
   loadServePrincipals,
   loadServeSlack,
   currentLogPosition,
@@ -71,6 +78,7 @@ import {
   validateSkillDirectory,
 } from '@stratusagent/state';
 import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
+import { SESSION_TRUST_METADATA_KEY } from '@stratusagent/core';
 import type { Session, Tool } from '@stratusagent/core';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -1667,6 +1675,8 @@ test('parseCommand accepts the chat command with run-style flags', () => {
     maxTurns: 4,
     events: true,
   });
+  // Codex P2 4309749758: help advertises open for chat as for run.
+  assert.equal((parseCommand(['chat', '--approvals', 'open']) as { approvals?: string }).approvals, 'open');
   assert.throws(() => parseCommand(['chat', '--approvals', 'sometimes']), /Invalid value for --approvals/);
   assert.throws(() => parseCommand(['chat', '--bogus']), /Unknown option: --bogus/);
 });
@@ -4335,6 +4345,353 @@ test('optional channel packages are never hard dependencies of the CLI', async (
   }
 });
 
+const slackOkFetch = (async (url: any) => new Response(JSON.stringify(
+  String(url).endsWith('/auth.test')
+    ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+    : { ok: true, url: 'wss://x' },
+), { status: 200 })) as typeof fetch;
+
+test('setup re-asks for a malformed member ID and warns when nobody is listed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → tokens → a display name (refused) → Enter (skip) → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', 'dylan\n', '\n', '3\n', '9\n']),
+      fetch: slackOkFetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /✗ dylan is not a member ID \(they look like U0123ABCD\)\. Nothing was saved\./);
+  assert.match(output.stdout, /! Nobody is listed, so Ava will ignore every Slack message until principals\.slackUsers names someone\./);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(saved.principals, undefined);
+});
+
+test('setup treats a separators-only answer as no answer, and names the agent\'s own empty list', async () => {
+  // Codex P2s 4309740884 (", ," saved an empty list as success) and 4309740885 (advice named the overridden key).
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { agents: { ava: { slackUsers: [] } } } }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', ', ,\n', '3\n', '9\n']),
+      fetch: slackOkFetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /can talk to Ava\./);
+  assert.match(output.stdout, /! Nobody is listed, so Ava will ignore every Slack message until principals\.agents\.ava\.slackUsers names someone\./);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { agents: { ava: { slackUsers: [] } } });
+});
+
+test('setup leaves an existing principals list alone when connecting another agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { slackUsers: ['U0OPS'] } }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // No agent on Slack confirms which workspace U0OPS is in, so Ava is
+      // asked (Codex P2 4310305742); Enter keeps the inherited list.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      fetch: slackOkFetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Enter to keep U0OPS/);
+  assert.doesNotMatch(output.stdout, /! Nobody is listed/);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { slackUsers: ['U0OPS'] });
+});
+
+// Bea's bot is in the workspace named by `beaTeam`; every other token is in T1.
+const slackTeamsFetch = (beaTeam: string) => (async (url: any, init: any) => {
+  const token = String(init?.headers?.authorization ?? '').replace(/^Bearer /, '');
+  return new Response(JSON.stringify(
+    String(url).endsWith('/auth.test')
+      ? { ok: true, user_id: 'B1', team: 'Acme', team_id: token === 'xoxb-bea' ? beaTeam : 'T1' }
+      : { ok: true, url: 'wss://x' },
+  ), { status: 200 });
+}) as typeof fetch;
+
+const connectAvaBesideBea = async (beaTeam: string, answers: string[]) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { slackUsers: ['U0OPS'] } }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { bea: { appToken: 'xapp-bea', botToken: 'xoxb-bea' } } } }));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '3\n', '9\n']),
+      fetch: slackTeamsFetch(beaTeam),
+    },
+  });
+  assert.equal(exitCode, 0);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  return { output, saved };
+};
+
+test('setup asks for a list of its own when the inherited one belongs to another Slack workspace', async () => {
+  // Codex P2 4310305742: member IDs are workspace-scoped, so a list from
+  // Bea's workspace would leave Ava, closed by default, ignoring everyone.
+  const { output, saved } = await connectAvaBesideBea('T2', ['U0AVA\n']);
+  assert.match(output.stdout, /The Slack list Ava would inherit \(U0OPS\) is not confirmed for this workspace/);
+  assert.match(output.stdout, /✓ U0AVA can talk to Ava\./);
+  assert.deepEqual(saved.principals, { slackUsers: ['U0OPS'], agents: { ava: { slackUsers: ['U0AVA'] } } });
+});
+
+test('setup keeps a first list to the agent when another Slack agent is in a different workspace', async () => {
+  // Codex P1 4310414429: the first list went top-level, so Bea, in another
+  // workspace, inherited IDs that name nobody (or someone else) there.
+  const run = async (beaTeam: string) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { bea: { appToken: 'xapp-bea', botToken: 'xoxb-bea' } } } }));
+    await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+    const { streams } = createStreams();
+    assert.equal(await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        serviceRunner: stubServiceRunner,
+        setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', 'U0AVA\n', '3\n', '9\n']),
+        fetch: slackTeamsFetch(beaTeam),
+      },
+    }), 0);
+    return JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')).principals;
+  };
+  assert.deepEqual(await run('T2'), { agents: { ava: { slackUsers: ['U0AVA'] } } });
+  // Same workspace: still everyone's, as before.
+  assert.deepEqual(await run('T1'), { slackUsers: ['U0AVA'] });
+});
+
+const reconnectAva = async (oldTeam: string, answers: string[]) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { agents: { ava: { slackUsers: ['U0OLD'] } } } }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-old', botToken: 'xoxb-old' } } } }));
+  const fetchImpl = (async (url: any, init: any) => {
+    const token = String(init?.headers?.authorization ?? '').replace(/^Bearer /, '');
+    return new Response(JSON.stringify(
+      String(url).endsWith('/auth.test')
+        ? { ok: true, user_id: 'B1', team: 'Acme', team_id: token === 'xoxb-old' ? oldTeam : 'T1' }
+        : { ok: true, url: 'wss://x' },
+    ), { status: 200 });
+  }) as typeof fetch;
+  const { streams, output } = createStreams();
+  assert.equal(await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → Replace the tokens → new tokens → answers → Back → Save & finish
+      setupInput: Readable.from(['5\n', '2\n', '1\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '3\n', '9\n']),
+      fetch: fetchImpl,
+    },
+  }), 0);
+  return { output, saved: JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) };
+};
+
+test('setup asks again for an agent\'s own list when its new bot is in another workspace', async () => {
+  // Codex P1 4310449463: an agent's own list was kept unchecked when its
+  // tokens moved to another workspace, where the IDs name nobody or
+  // someone else.
+  const moved = await reconnectAva('T2', ['U0NEW\n']);
+  assert.match(moved.output.stdout, /Ava's Slack list \(U0OLD\) is not confirmed for this workspace/);
+  assert.deepEqual(moved.saved.principals, { agents: { ava: { slackUsers: ['U0NEW'] } } });
+  // Same workspace: kept without a question, as before.
+  const stayed = await reconnectAva('T1', []);
+  assert.doesNotMatch(stayed.output.stdout, /Only the Slack users you list|Enter to keep/);
+  assert.deepEqual(stayed.saved.principals, { agents: { ava: { slackUsers: ['U0OLD'] } } });
+});
+
+test('setup keeps the inherited list without asking when another agent uses it in the same workspace', async () => {
+  const { output, saved } = await connectAvaBesideBea('T1', []);
+  assert.doesNotMatch(output.stdout, /Only the Slack users you list|Enter to keep/);
+  assert.deepEqual(saved.principals, { slackUsers: ['U0OPS'] });
+});
+
+test('doctor flags a Slack agent nobody may talk to, and not one that opened its door', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  for (const [id, name] of [['ava', 'Ava'], ['bea', 'Bea'], ['cy', 'Cy']]) {
+    await writeFile(path.join(agentsDir, `${id}.md`), `---\nname: ${name}\n---\n\nYou are ${name}.\n`);
+  }
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'demo',
+    // Ava: nobody listed, closed by default. Bea: opened explicitly. Cy: listed.
+    principals: { agents: { bea: { admit: 'anyone' }, cy: { slackUsers: ['U0DYLAN'] } } },
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    channels: { slack: Object.fromEntries(['ava', 'bea', 'cy'].map((id) => [id, { appToken: 'xapp-t', botToken: 'xoxb-t' }])) },
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.match(output.stdout, /Nobody is listed who may talk to ava in Slack, so it ignores every message\./);
+  assert.doesNotMatch(output.stdout, /may talk to [^\n]*\bbea\b/);
+  assert.doesNotMatch(output.stdout, /may talk to [^\n]*\bcy\b/);
+});
+
+test('doctor reads the global principals when a project config wins discovery, as serve does', async () => {
+  // Codex P2 4309308061.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { slackUsers: ['U0DYLAN'] } }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor'], streams, env: { cwd: project, homeDir: home, processEnv: {} } });
+  assert.doesNotMatch(output.stdout, /Nobody is listed who may talk to ava/);
+});
+
+test('doctor says why the global principals could not be read when a project config shadows it', async () => {
+  // Codex P2 4309769295: the fallback's warning was the only explanation.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ "principals": { "slackUsers": ["U0DYLAN"] ');
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor'], streams, env: { cwd: project, homeDir: home, processEnv: {} } });
+  assert.match(output.stdout, /principals config could not be read/);
+});
+
+test('doctor names the config serve would read when it says to list someone', async () => {
+  // Codex P2 4309644046: with --config, editing ~/.stratus/config.json changes nothing.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  const chosen = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-')), 'prod.json');
+  await writeFile(chosen, JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor', '--config', chosen], streams, env: { cwd: home, homeDir: home, processEnv: {} } });
+  assert.match(output.stdout, /Nobody is listed who may talk to ava/);
+  assert.ok(output.stdout.includes(`principals.slackUsers in ${chosen}`), output.stdout);
+});
+
+test('doctor points an unreachable agent at its own override when it has one', async () => {
+  // Codex P2 4309690211: per-agent keys win, so top-level advice changes nothing.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  for (const [id, name] of [['ava', 'Ava'], ['bea', 'Bea']]) {
+    await writeFile(path.join(agentsDir, `${id}.md`), `---\nname: ${name}\n---\n\nYou are ${name}.\n`);
+  }
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'demo',
+    principals: { agents: { ava: { slackUsers: [], admit: 'principals' } } },
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    channels: { slack: Object.fromEntries(['ava', 'bea'].map((id) => [id, { appToken: 'xapp-t', botToken: 'xoxb-t' }])) },
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['doctor'], streams, env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} } });
+  assert.match(output.stdout, /Nobody is listed who may talk to ava in Slack[^\n]*principals\.agents\.ava\.slackUsers[^\n]*principals\.agents\.ava\.admit/);
+  // Bea has no override, so the top-level keys are the ones that reach her.
+  assert.match(output.stdout, /Nobody is listed who may talk to bea in Slack[^\n]*Add Slack member IDs to principals\.slackUsers [^\n]*principals\.admit to "anyone"/);
+});
+
+test('setup asks for nobody when the agent already admits anyone', async () => {
+  // Codex P2 4309308066: with admit "anyone", a list labels trust and
+  // closes no door, so the closed-door prompt would say something false.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', principals: { admit: 'anyone' } }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
+      fetch: slackOkFetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /Only the Slack users you list/);
+  assert.doesNotMatch(output.stdout, /will ignore every Slack message/);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { admit: 'anyone' });
+});
+
 test('setup connects an agent to Slack without touching any file by hand', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
@@ -4354,7 +4711,7 @@ test('setup connects an agent to Slack without touching any file by hand', async
       // Channels → Ava (2; the built-in Stratus agent is 1) → paste both
       // tokens → Back → Save & finish
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0DYLAN\n', '3\n', '9\n']),
       fetch: (async (url: any, init?: any) => {
         slackCalls.push({
           url: String(url),
@@ -4374,6 +4731,12 @@ test('setup connects an agent to Slack without touching any file by hand', async
   assert.equal(slackCalls[0]?.auth, 'Bearer xoxb-tok');
   assert.equal(slackCalls[1]?.auth, 'Bearer xapp-tok');
   assert.match(output.stdout, /✓ Verified — Ava is connected to Slack in Acme \(bot B123\)\./);
+  // Only listed users get a turn, so setup asks who may talk right after
+  // the connect, and the first list on an install is everyone's.
+  assert.match(output.stdout, /Only the Slack users you list can talk to Ava; everyone else is ignored\./);
+  assert.match(output.stdout, /✓ U0DYLAN can talk to Ava\./);
+  const savedConfig = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(savedConfig.principals, { slackUsers: ['U0DYLAN'] });
   // The manifest is printed for pasting, so app creation needs no file hunt.
   assert.match(output.stdout, /"always_online": true/);
   assert.match(output.stdout, /app_mentions:read/);
@@ -4386,6 +4749,45 @@ test('setup connects an agent to Slack without touching any file by hand', async
 
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials.channels, { slack: { ava: { appToken: 'xapp-tok', botToken: 'xoxb-tok' } } });
+});
+
+test('setup keeps a later agent\'s Slack list to that agent when another agent has its own list', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(agentsDir, 'bea.md'), '---\nname: Bea\n---\n\nYou are Bea.\n');
+  // Ava has her own list and nothing is listed at the top, so a top-level
+  // write for Bea would admit her users to every agent without a list.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ principals: { agents: { ava: { slackUsers: ['U0AVA'] } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      // Channels → Bea (3) → paste both tokens → member ID → Back → Save & finish
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '3\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0BEA\n', '4\n', '9\n']),
+      fetch: (async (url: any) => {
+        if (String(url).endsWith('/auth.test')) {
+          return new Response(JSON.stringify({ ok: true, user_id: 'B456', team: 'Acme', team_id: 'T1' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true, url: 'wss://slack' }), { status: 200 });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /✓ U0BEA can talk to Bea\./);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.principals, { agents: { ava: { slackUsers: ['U0AVA'] }, bea: { slackUsers: ['U0BEA'] } } });
 });
 
 test('setup refuses to store Slack tokens the API rejects', async () => {
@@ -4612,7 +5014,7 @@ test('the Channels menu offers a default soul that lives outside the roster', as
       processEnv: {},
       // Channels → Nova → tokens → Back → Save & finish
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B9', team: 'Acme', team_id: 'T9' }
@@ -4675,7 +5077,7 @@ test('setup suggests serve with the same --config it was run with', async () => 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
@@ -6454,7 +6856,7 @@ test('the Channels menu connects the built-in agent on a fresh install', async (
       // connectable here — otherwise Slack is unreachable until you
       // create an agent you may not want.
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '2\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B7', team: 'Acme', team_id: 'T7' }
@@ -7955,7 +8357,7 @@ test('setup does not claim every agent is covered when one is excluded', async (
   assert.equal(exitCode, 0);
   // The daemon's own verdict, which names the excluded agent rather than
   // counting it as covered.
-  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks and asks in Slack, approvers set for ava; none for juno, whose calls are denied on arrival/);
+  assert.match(output.stdout, /Approvals            remote — an uncovered dangerous call parks and asks in Slack, approvers set for ava; none for juno, whose calls are denied on arrival/);
   assert.doesNotMatch(output.stdout, /all agents/);
 });
 
@@ -8001,7 +8403,7 @@ test('setup does not say headless refuses a call an existing grant already cover
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'anthropic',
-    approvals: { mode: 'headless' },
+    approvals: { mode: 'headless', posture: 'guarded' },
   }));
   const { streams, output } = createStreams();
 
@@ -8131,7 +8533,7 @@ test('setup does not report a flat denial when the control API answers for anoth
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /reaches Slack and is denied on arrival/);
   // The clause a prefix would have dropped.
-  assert.match(output.stdout, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
+  assert.match(output.stdout, /no Slack channel can ask for stratus, so their dangerous calls park until the control API answers them/);
 });
 
 test('setup puts the whole approval verdict on the screen that sets it', async () => {
@@ -8173,7 +8575,7 @@ test('setup puts the whole approval verdict on the screen that sets it', async (
   const opened = output.stdout.slice(output.stdout.indexOf('Approvals — what happens'));
   const screen = opened.slice(0, opened.indexOf('1) Providers'));
   assert.match(screen, /reaches Slack and is denied on arrival/);
-  assert.match(screen, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
+  assert.match(screen, /no Slack channel can ask for stratus, so their dangerous calls park until the control API answers them/);
 });
 
 test('setup withholds the approval verdict when the roster will not load', async () => {
@@ -8271,7 +8673,7 @@ test('setup says remote approvals deny everything while no agent is connected to
   // The advice follows the verdict rather than replacing it: with the
   // control API installed a parked call is already answerable, and telling
   // the operator to connect Slack *instead* contradicted the row above.
-  assert.match(output.stdout, /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it[^\n]*No agent is connected to Slack, so connect one under Channels to be asked there/);
+  assert.match(output.stdout, /remote — an uncovered dangerous call parks with no Slack channel to ask through, so the control API is the only way to answer it[^\n]*No agent is connected to Slack, so connect one under Channels to be asked there/);
 });
 
 test('setup says remote approvals are denied when nothing can answer them at all', async () => {
@@ -8305,7 +8707,7 @@ test('setup says remote approvals are denied when nothing can answer them at all
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/);
+  assert.match(output.stdout, /remote — an uncovered dangerous call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/);
   // The verdict names the absent API ("no control API to answer it"), so
   // the assertion is that no route is offered, not that the words are gone.
   assert.doesNotMatch(output.stdout, /the control API is the only way/);
@@ -8347,7 +8749,7 @@ test('setup does not count an agent with no fallback channel as fully covered', 
   assert.equal(exitCode, 0);
   // The row carries the verdict and the screen that sets it carries the
   // qualifiers — the same split `stratus plugins` prints as one paragraph.
-  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks and asks in Slack, approvers set for ava/);
+  assert.match(output.stdout, /Approvals            remote — an uncovered dangerous call parks and asks in Slack, approvers set for ava/);
   assert.match(output.stdout, /approvers for ava\s+U01ABCDEF · no fallback channel/);
 });
 
@@ -8382,7 +8784,7 @@ test('setup does not offer approvers when the Slack channel package is not insta
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks with no Slack channel to ask through/);
+  assert.match(output.stdout, /Approvals            remote — an uncovered dangerous call parks with no Slack channel to ask through/);
   assert.doesNotMatch(output.stdout, /approvers set for ava/);
 });
 
@@ -13192,11 +13594,50 @@ test('plugins says which agents lose their grants after reading external content
   assert.equal(exitCode, 0);
   // "Already-authorized ones still run" is false for a gated agent the
   // first time it browses, so the summary names who it is false for.
-  assert.match(output.stdout, /approvals: headless — an uncovered gated call is refused/);
+  assert.match(output.stdout, /approvals: headless — an uncovered dangerous call is refused/);
   assert.match(
     output.stdout,
     /a conversation that has read external content runs nothing on a grant, for blair \(approvals\.externalContent\)/,
   );
+});
+
+test('plugins and the Approvals row say what the posture actually asks about', async () => {
+  // Codex P2 4310421766: under the default open posture the daemon runs
+  // gated calls, but the summary said an uncovered dangerous call is refused.
+  const { home, cwd } = await writePluginFixture();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  const plugins = async (approvals: unknown) => {
+    await writeFile(configPath, JSON.stringify({ ...config, approvals }));
+    const { streams, output } = createStreams();
+    assert.equal(await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } }), 0);
+    return output.stdout;
+  };
+  const open = await plugins({});
+  assert.match(open, /approvals: headless — an uncovered dangerous call is refused/);
+  // Codex P2 4310573242: no grant, scope, site or destination ever covers a
+  // dangerous call, so the all-open line must not offer them.
+  assert.doesNotMatch(open, /Already-authorized/);
+  assert.match(open, /posture open for every agent \(gated tools run without asking; dangerous ones are refused, since headless asks nobody\)/);
+  assert.doesNotMatch(open, /uncovered gated call/);
+  const guarded = await plugins({ posture: 'guarded' });
+  assert.match(guarded, /approvals: headless — an uncovered gated call is refused/);
+  assert.doesNotMatch(guarded, /posture open/);
+  const mixed = await plugins({ posture: 'guarded', agents: { blair: { posture: 'open' } } });
+  assert.match(mixed, /approvals: headless — an uncovered call that would ask is refused\. Already-authorized gated calls still run/);
+  assert.match(mixed, /posture guarded for every agent except blair/);
+  assert.match(guarded, /an uncovered gated call is refused\. Already-authorized ones still run/);
+  // Named with the command that lists each, because "already authorized"
+  // spans two of them: grants, scopes and sites are `stratus grants`, a
+  // schedule's destination is `stratus schedules`.
+  assert.match(guarded, /standing grants, approved command scopes and sites \(stratus grants <agent>\)/);
+  assert.match(guarded, /destinations pre-authorized with a schedule \(stratus schedules\)/);
+  assert.doesNotMatch(open, /refused\.;/);
+  // Codex P2 4310573248: an override for an agent no longer served does not
+  // make the fleet mixed.
+  const stale = await plugins({ posture: 'guarded', agents: { ghost: { posture: 'open' } } });
+  assert.match(stale, /approvals: headless — an uncovered gated call is refused/);
+  assert.doesNotMatch(stale, /posture open|would ask/);
 });
 
 test('plugins names every link in the chain from installed to callable', async () => {
@@ -13214,12 +13655,12 @@ test('plugins names every link in the chain from installed to callable', async (
   // installed packages has ever shown — and `headless` refuses one *last*,
   // after the standing grants and scopes, so the line must not claim that
   // only safe tools ever run.
-  assert.match(output.stdout, /approvals: headless — an uncovered gated call is refused/);
-  // Named with the command that lists each, because "already authorized"
-  // spans two of them: grants, scopes and sites are `stratus grants`, a
-  // schedule's destination is `stratus schedules`.
-  assert.match(output.stdout, /standing grants, approved command scopes and sites \(stratus grants <agent>\)/);
-  assert.match(output.stdout, /destinations pre-authorized with a schedule \(stratus schedules\)/);
+  assert.match(output.stdout, /approvals: headless — an uncovered dangerous call is refused/);
+  // Open for every agent, so nothing already authorized can cover what is
+  // refused: no grant covers a dangerous call. The guarded wording is
+  // pinned in 'plugins and the Approvals row say what the posture actually
+  // asks about'.
+  assert.doesNotMatch(output.stdout, /Already-authorized/);
   // Granted, and granted to whom.
   assert.match(output.stdout, /fs\.read\s+safe → stratus, blair/);
   // Registered but granted to nobody: installing is not granting.
@@ -13370,7 +13811,7 @@ test('plugins does not claim Slack is asked when nothing can ask it', async () =
   // route and then withdrew it in the same breath.
   assert.match(
     output.stdout,
-    /approvals: remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/,
+    /approvals: remote — an uncovered dangerous call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/,
   );
   assert.doesNotMatch(output.stdout, /asks in Slack/);
   // The same qualification the headless line carries: the engine allows an
@@ -13632,7 +14073,7 @@ test('plugins names the served agents no channel can ask for, and approvers with
   // simply doomed — it waits for a client rather than for the timeout.
   assert.match(
     output.stdout,
-    /no Slack channel can ask for blair, so their gated calls park until the control API answers them/,
+    /no Slack channel can ask for blair, so their dangerous calls park until the control API answers them/,
   );
   // Approvers with nowhere to be asked outside their own thread: a turn
   // that did not start in Slack reaches the adapter with no destination.
@@ -13928,7 +14369,7 @@ test('plugins says a gated call waits out the timeout only when nothing can answ
     },
   });
 
-  assert.match(output.stdout, /no channel can ask for blair, so their gated calls wait out the timeout and are denied/);
+  assert.match(output.stdout, /no channel can ask for blair, so their dangerous calls wait out the timeout and are denied/);
   assert.doesNotMatch(output.stdout, /the control API answers them/);
 });
 
@@ -13984,7 +14425,7 @@ test('plugins does not both deny and offer the control API in one verdict', asyn
 
   assert.match(
     output.stdout,
-    /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it/,
+    /remote — an uncovered dangerous call parks with no Slack channel to ask through, so the control API is the only way to answer it/,
   );
   // The contradiction, in either of the two shapes it took.
   assert.doesNotMatch(output.stdout, /wait out the approval timeout and then be denied/);
@@ -14016,7 +14457,7 @@ test('plugins does not offer the control API where Slack denies first', async ()
 
   assert.match(
     output.stdout,
-    /remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured/,
+    /remote — an uncovered dangerous call reaches Slack and is denied on arrival, because no approvers are configured/,
   );
   assert.doesNotMatch(output.stdout, /the control API is the only way to answer it/);
   // The adapter denies synchronously here, so nothing parks and nobody is
@@ -14084,6 +14525,11 @@ test('the approval default is gated at a terminal and always anywhere else', () 
     () => parseCommand(['run', '--approvals', 'gated', '--stdin'], { stdin: 'hello' }),
     /--approvals gated cannot be combined with --stdin/,
   );
+  // open still asks about dangerous and external-gated calls, so it needs stdin too.
+  assert.throws(
+    () => parseCommand(['run', '--approvals', 'open', '--stdin'], { stdin: 'hello' }),
+    /--approvals open cannot be combined with --stdin/,
+  );
 });
 
 test('gated runs a safe tool without asking and asks about the rest; a defaulted always says so once', async () => {
@@ -14114,6 +14560,48 @@ test('gated runs a safe tool without asking and asks about the rest; a defaulted
   assert.equal(asks, 0);
   assert.equal(await gatedPolicy.approve(gatedCall), false);
   assert.equal(asks, 1);
+
+  // `open` (the open posture at a terminal): gated runs, dangerous asks.
+  const open = createStreams();
+  let openAsks = 0;
+  const openPolicy = createApprovalPolicy('open', open.streams, {}, async () => {
+    openAsks += 1;
+    return 'n';
+  });
+  assert.equal(await openPolicy.approve(gatedCall), true);
+  assert.equal(await openPolicy.approve({ ...gatedCall, risk: 'dangerous' as const }), false);
+  assert.equal(openAsks, 1);
+  // Codex P1 4309388128: under externalContent "gate", a conversation that
+  // read external content asks again, as it does in the daemon.
+  const externalCall = { ...gatedCall, session: { ...session, metadata: { [SESSION_TRUST_METADATA_KEY]: 'external' } } as unknown as Session };
+  assert.equal(await openPolicy.approve(externalCall), true, 'labelled, not gated: still open');
+  const gatedOpen = createApprovalPolicy('open', open.streams, {}, async () => {
+    openAsks += 1;
+    return 'n';
+  }, false, { gateExternalContent: true });
+  assert.equal(await gatedOpen.approve(gatedCall), true);
+  assert.equal(await gatedOpen.approve(externalCall), false);
+  assert.equal(openAsks, 2);
+
+  // Codex P2 4310305238: `open` defaulted with nobody to ask never asks,
+  // even when the caller supplies an asker (piped chat's readline would
+  // take the next queued message as the answer). Gated runs; what would
+  // ask is refused, with one note on stderr.
+  const headless = createStreams();
+  let headlessAsks = 0;
+  const headlessOpen = createApprovalPolicy('open', headless.streams, {}, async () => {
+    headlessAsks += 1;
+    return 'y';
+  }, true, { gateExternalContent: true });
+  assert.equal(await headlessOpen.approve(safeCall), true);
+  assert.equal(await headlessOpen.approve(gatedCall), true);
+  assert.equal(await headlessOpen.approve({ ...gatedCall, risk: 'dangerous' as const }), false);
+  assert.equal(await headlessOpen.approve(externalCall), false);
+  assert.equal(headlessAsks, 0);
+  assert.equal(
+    (headless.output.stderr.match(/Note: refusing shell\.run — it would ask for approval, and stdin is not a terminal/g) ?? []).length,
+    1,
+  );
 
   // `ask` still means every call — the word says so.
   const asking = createStreams();
@@ -14289,10 +14777,157 @@ test('doctor names the soul and systemPrompt an auto-discovered project config a
   assert.match(none.output.stdout, /1 problem found:\n\s+! Provider is the offline demo model/);
 });
 
-test('the startup provenance line says which agents refuse unlisted senders, even with nobody listed', () => {
-  assert.match(describePrincipals({}, ['ava', 'bea']), /^no principals configured, so every Slack sender is unknown/);
+test('the startup posture line names the default and the agents that differ', () => {
+  assert.equal(describePosture({}, 'remote'), 'posture open for every agent (gated tools run without asking; dangerous ones still ask)');
+  // Codex P2 4310470201: headless asks nobody, so dangerous calls are refused.
+  assert.equal(describePosture({}, 'headless'), 'posture open for every agent (gated tools run without asking; dangerous ones are refused, since headless asks nobody)');
+  assert.match(describePosture({ posture: 'guarded' }, 'headless'), /posture guarded for every agent \(gated tools are refused, since headless asks nobody\)/);
+  assert.equal(
+    describePosture({ posture: 'guarded', agents: { ava: { posture: 'open' }, bea: { posture: 'guarded' } } }, 'remote'),
+    'posture guarded for every agent except ava (gated tools ask, or are refused with nobody to ask)',
+  );
+});
+
+test('the startup posture lines leave out overrides for agents that are not served', () => {
+  // Codex P2 4310622987: a stale override named a nonexistent agent as the exception.
+  const approvals = { mode: 'remote' as const, posture: 'guarded' as const, agents: { ghost: { posture: 'open' as const } } };
+  assert.doesNotMatch(describeRemoteMode(approvals, ['ava'], ['ava']), /ghost|run without asking/);
+  assert.match(describeRemoteMode(approvals, ['ava']), /except ghost's/, 'without a roster every override still counts');
+  assert.doesNotMatch(describePosture(approvals, 'remote', ['ava']), /ghost/);
+  assert.match(describePosture(approvals, 'remote', ['ava', 'ghost']), /except ghost/);
+});
+
+test('the unreachable-agent warning and the approver clause name the calls that actually ask', () => {
+  // Codex P2 4310693967: under the default open posture gated calls run, so
+  // the warning must not say they wait out the timeout.
+  assert.match(describeUnreachable({ mode: 'remote' }, ['ava']), /^no channel can ask for ava, so their dangerous calls will wait out the approval timeout/);
+  assert.match(describeUnreachable({ mode: 'remote', posture: 'guarded' }, ['ava']), /their gated calls will wait/);
+  assert.match(describeUnreachable({ mode: 'remote', posture: 'guarded', agents: { bea: { posture: 'open' } } }, ['ava', 'bea']), /their calls that would ask will wait/);
+  assert.match(describeRemoteMode({ mode: 'remote' }, ['ava']), /no approvers are configured, so every dangerous call is denied on arrival/);
+  assert.match(describeRemoteMode({ mode: 'remote' }, []), /so dangerous calls will wait out the approval timeout/);
+  assert.match(describeRemoteMode({ mode: 'remote', posture: 'guarded' }, ['ava']), /every gated call is denied on arrival/);
+});
+
+test('the remote-mode startup line says what is actually parked under each posture', () => {
+  // Codex P2 4309648332: it said gated calls are parked even when the open posture runs them.
   assert.match(
-    describePrincipals({ slackUsers: ['U1'] }, ['ava', 'bea']),
+    describeRemoteMode({ mode: 'remote' }, ['ava']),
+    /^approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture \(but no approvers are configured/,
+  );
+  assert.match(describeRemoteMode({ mode: 'remote', posture: 'guarded' }, ['ava']), /^approvals: remote — gated calls are parked and asked in Slack \(/);
+  assert.match(
+    describeRemoteMode({ mode: 'remote', posture: 'guarded', agents: { bea: { posture: 'open' } } }, ['ava', 'bea']),
+    /^approvals: remote — gated calls are parked and asked in Slack, except bea's, which run without asking \(only dangerous ones are parked\) \(/,
+  );
+});
+
+test('the open-posture startup lines name the agents whose external-content gate still asks', () => {
+  // Codex P2 4309712885: under externalContent "gate" a conversation that
+  // read external content sends gated calls back to asking.
+  assert.match(
+    describePosture({ externalContent: 'gate' }, 'remote'),
+    /^posture open for every agent \(gated tools run without asking, except in a conversation that read external content \(externalContent: gate\); dangerous ones still ask\)$/,
+  );
+  assert.match(
+    describePosture({ agents: { bea: { externalContent: 'gate' } } }, 'remote'),
+    /except in bea's conversations that read external content/,
+  );
+  assert.doesNotMatch(describePosture({}, 'remote'), /external content/);
+  assert.match(
+    describeRemoteMode({ mode: 'remote', agents: { bea: { externalContent: 'gate' } } }, ['ava', 'bea']),
+    /gated ones run without asking under the open posture, except in bea's conversations that read external content/,
+  );
+  assert.match(
+    describeRemoteMode({ mode: 'remote', posture: 'guarded', agents: { bea: { posture: 'open', externalContent: 'gate' } } }, ['bea']),
+    /except bea's, which run without asking, except in bea's conversations that read external content \(externalContent: gate\) \(/,
+  );
+  // A guarded agent asks anyway, so its gate changes nothing there.
+  assert.doesNotMatch(describePosture({ agents: { bea: { posture: 'guarded', externalContent: 'gate' } } }, 'remote'), /external content/);
+});
+
+test('an unflagged chat or run is never more permissive than open, whatever the posture', () => {
+  // Codex P1 4309856143: guarded or unreadable fell through to the
+  // unattended default, which approves dangerous calls too.
+  // Codex P2 4310305238: open with nobody to ask (a pipe, --stdin) is
+  // marked defaulted, so the policy refuses what would ask instead of
+  // reading a y/N from consumed stdin or the next piped chat line.
+  assert.deepEqual(unflaggedApprovals('open', 'always'), { approvals: 'open', approvalsDefaulted: true });
+  assert.deepEqual(unflaggedApprovals('open', 'gated'), { approvals: 'open' });
+  assert.deepEqual(unflaggedApprovals('guarded', 'always'), { approvals: 'never', approvalsDefaulted: true });
+  assert.deepEqual(unflaggedApprovals('unreadable', 'always'), { approvals: 'never', approvalsDefaulted: true });
+  assert.deepEqual(unflaggedApprovals('guarded', 'gated'), { approvals: 'gated', approvalsDefaulted: true });
+});
+
+test('an approvals block that cannot be trusted or read leaves the daemon guarded, never open', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ approvals: { posture: 'open' } }));
+  const warnings: string[] = [];
+  const untrusted = await loadServeApprovals({ cwd: project, homeDir: home, processEnv: {} }, undefined, (line) => warnings.push(line));
+  // Codex P2 4310470199: the clone's block is ignored and the global file
+  // decides (absent here, so the defaults), rather than forcing guarded,
+  // which let a repo override the operator's own posture or route.
+  assert.deepEqual(untrusted, {});
+  assert.match(warnings[0] ?? '', /a project-local config cannot decide who may approve[^\n]*Using ~\/\.stratus\/config\.json's approvals instead/);
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { posture: 'open', mode: 'remote', slackApprovers: ['U0DYLAN'] } }));
+  assert.deepEqual(
+    await loadServeApprovals({ cwd: project, homeDir: home, processEnv: {} }, undefined, () => {}),
+    { posture: 'open', mode: 'remote', slackApprovers: ['U0DYLAN'] },
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+  assert.equal((await loadServeApprovals({ cwd: project, homeDir: home, processEnv: {} }, undefined, () => {})).posture, 'guarded');
+  await rm(path.join(home, '.stratus', 'config.json'));
+  // Codex P1 4309856143: the clone's block is ignored for chat/run too; the
+  // global file (absent here, so the open default) decides.
+  assert.equal(await defaultPosture({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'open');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { posture: 'guarded' } }));
+  assert.equal(await defaultPosture({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'guarded');
+
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const unreadable = await loadServeApprovals({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, () => {});
+  assert.equal(unreadable.posture, 'guarded');
+  assert.equal(await defaultPosture({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'unreadable');
+
+  // And with a readable config that says nothing, chat and run default open.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.equal(await defaultPosture({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'open');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { agents: { stratus: { posture: 'guarded' } } } }));
+  assert.equal(await defaultPosture({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'guarded');
+
+  // The external-content gate an open terminal session honors.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { externalContent: 'gate' } }));
+  assert.equal(await externalContentGated({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), true);
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.equal(await externalContentGated({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), false);
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+  assert.equal(await externalContentGated({ cwd: elsewhere, homeDir: home, processEnv: {} }, undefined, 'stratus'), true, 'unreadable fails closed');
+
+  // Codex P1 4309749756: a cloned repo's approvals block must not switch off
+  // the global gate. Untrusted reads the global file, as principals do.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { externalContent: 'gate' } }));
+  assert.equal(await externalContentGated({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), true, 'untrusted keeps the global gate');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.equal(await externalContentGated({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), false, 'untrusted, global sets no gate');
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
+  assert.equal(await externalContentGated({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), true, 'untrusted, global unreadable fails closed');
+});
+
+test('the startup provenance line says which agents refuse unlisted senders, even with nobody listed', () => {
+  // Closed by default: nothing configured refuses everyone, and says so.
+  assert.match(
+    describePrincipals({}, ['ava', 'bea']),
+    /^no principals listed, so every Slack sender is refused — nobody at all can talk to ava, bea until principals\.slackUsers names someone$/,
+  );
+  assert.match(describePrincipals({ slackUsers: ['U1'] }, ['ava', 'bea']), /^principals set for ava, bea; unlisted senders are refused$/);
+  // Opening the door is explicit, and the line says who opened it.
+  assert.match(
+    describePrincipals({ admit: 'anyone' }, ['ava', 'bea']),
+    /^no principals configured, so every Slack sender is unknown/,
+  );
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'], admit: 'anyone' }, ['ava', 'bea']),
     /^principals set for ava, bea; every agent still admits unlisted senders as unknown/,
   );
   assert.match(
@@ -14304,18 +14939,30 @@ test('the startup provenance line says which agents refuse unlisted senders, eve
   // must not claim the latter.
   assert.match(
     describePrincipals({ admit: 'principals' }, ['ava']),
-    /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
+    /^no principals listed, so every Slack sender is refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
+  );
+  // Codex P2 4310107914: a refused sender never becomes a turn, so it is
+  // never "unknown"; only an agent that admits them labels them that way.
+  assert.doesNotMatch(describePrincipals({}, ['ava']), /unknown/);
+  assert.match(
+    describePrincipals({ admit: 'principals', agents: { bea: { admit: 'anyone' } } }, ['ava', 'bea']),
+    /^no principals listed, so every Slack sender is refused by ava and unknown to bea — nobody at all can talk to ava until principals\.slackUsers names someone$/,
+  );
+  // Codex P2 4309804866: an agent's own empty list wins over the top level.
+  assert.match(
+    describePrincipals({ admit: 'principals', agents: { bea: { slackUsers: [] } } }, ['ava', 'bea']),
+    /nobody at all can talk to ava, bea until principals\.slackUsers \(principals\.agents\.bea\.slackUsers for bea\) names someone$/,
   );
   // The same agent beside a covered one: excluded from the shared list and
   // closed, Bea refuses everyone, and the line must not first call her
   // senders "all unknown" and then "refused".
   assert.match(
     describePrincipals({ slackUsers: ['U1'], admit: 'principals', agents: { bea: { slackUsers: [] } } }, ['ava', 'bea']),
-    /^principals set for ava; none for bea, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused$/,
+    /^principals set for ava; none for bea, who refuse every sender until principals\.agents\.bea\.slackUsers names someone; unlisted senders are refused$/,
   );
   assert.match(
-    describePrincipals({ slackUsers: ['U1'], agents: { bea: { slackUsers: [] }, cy: { slackUsers: [], admit: 'principals' } } }, ['ava', 'bea', 'cy']),
-    /^principals set for ava; none for bea, whose Slack senders are all unknown; none for cy, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused by cy and admitted as unknown by the rest$/,
+    describePrincipals({ slackUsers: ['U1'], agents: { bea: { slackUsers: [], admit: 'anyone' }, cy: { slackUsers: [] } } }, ['ava', 'bea', 'cy']),
+    /^principals set for ava; none for bea, whose Slack senders are all unknown; none for cy, who refuse every sender until principals\.agents\.cy\.slackUsers names someone; unlisted senders are refused by ava, cy and admitted as unknown by the rest$/,
   );
 });
 
@@ -15165,4 +15812,22 @@ test('template add --force that cannot write the new soul keeps the agent it was
 
   assert.equal(await readFile(roster, 'utf8'), EXAMPLE_SOUL, 'the roster still serves the agent');
   assert.deepEqual((await readdir(path.dirname(roster))).filter((name) => name.endsWith('.replaced')), []);
+});
+
+test('the startup lines count external-content gated calls among those that ask, for served agents only', () => {
+  // Codex P2 4314770745: all open with externalContent gate still asks gated calls after external content.
+  assert.match(describeUnreachable({ mode: 'remote', externalContent: 'gate' }, ['ava']), /their calls that would ask will wait/);
+  assert.match(describeUnreachable({ mode: 'remote', agents: { ava: { externalContent: 'gate' } } }, ['ava', 'bea']), /their calls that would ask will wait/);
+  assert.match(describeUnreachable({ mode: 'remote', agents: { ghost: { externalContent: 'gate' } } }, ['ava']), /their dangerous calls will wait/);
+  assert.match(describeRemoteMode({ mode: 'remote', externalContent: 'gate' }, ['ava']), /so every call that would ask is denied on arrival/);
+  // Codex P2 4314770756: an override for an agent that is not served is not reported.
+  const ghost = { mode: 'remote' as const, agents: { ghost: { externalContent: 'gate' as const } } };
+  assert.doesNotMatch(describePosture(ghost, 'remote', ['ava']), /ghost|external content/);
+  assert.doesNotMatch(describeRemoteMode(ghost, ['ava'], ['ava']), /ghost|external content/);
+  assert.match(describePosture(ghost, 'remote', ['ava', 'ghost']), /ghost's conversations that read external content/);
+  // Codex P2 4314770779: an open agent with the gate parks gated calls too, so not "only dangerous ones".
+  const mixed = { mode: 'remote' as const, posture: 'guarded' as const, agents: { bea: { posture: 'open' as const, externalContent: 'gate' as const } } };
+  const line = describeRemoteMode(mixed, ['ava', 'bea'], ['ava', 'bea']);
+  assert.match(line, /except bea's, which run without asking, except in bea's conversations that read external content/);
+  assert.doesNotMatch(line, /only dangerous ones are parked/);
 });

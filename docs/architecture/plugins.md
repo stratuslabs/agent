@@ -522,9 +522,9 @@ capability rather than an assumption:
 - Who counts as the operator is one rule in `@stratusagent/channels`, not
   one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
   `senderTrustFor` (the `user`/`unknown` label a turn carries). Which
-  `admit` applies when config gives none stays the adapter's call — Slack
-  defaults to `anyone`, because only its workspace can reach it; a channel
-  anyone in the world can message should default to `principals`.
+  `admit` applies when config gives none is settled before the adapter
+  sees it: the daemon's config resolves an absent one to `principals`, and
+  passes it explicitly.
 - `GatewayLike.dispatch` takes an `idempotencyKey`: the platform's message
   id. A redelivery — after a crash included — never starts a second turn,
   and a turn the daemon died inside is continued from its transcript at
