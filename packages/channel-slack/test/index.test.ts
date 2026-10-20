@@ -12492,7 +12492,8 @@ test('after a restart, a late message in a thread with more takes than the recor
   );
 });
 
-test('after a restart, a thread with more takes than the record keeps stays on thread reads after late messages are placed', async () => {
+/** Codex 4320763062 and 4320903226 on #384, with `others` threads begun between. */
+const oversizedAfterLateMessages = async (others: number): Promise<void> => {
   // Codex 4320763062 on #384: skipping the warm-up alone left the record
   // to the messages the cold reads placed. Two late ones resolved newest
   // first put the older one first, and with no owner noted that first
@@ -12510,7 +12511,7 @@ test('after a restart, a thread with more takes than the record keeps stays on t
     const who = k % 2 === 1 ? 'AVA' : 'BEA';
     thread.push({ ts: ts(k * 10 + 5), user: `B-${who}`, bot_id: `B-${who}-APP`, text: `take ${k}` });
   }
-  const { webs, gateway, adapter, all } = twoAgentsOverThread(
+  const { sockets, webs, gateway, adapter, all } = twoAgentsOverThread(
     thread,
     [['slack:ava:T1:C1:' + ts(0), Number(ts(355))], ['slack:bea:T1:C1:' + ts(0), Number(ts(365))]],
     { bea: 'judge' },
@@ -12532,6 +12533,12 @@ test('after a restart, a thread with more takes than the record keeps stays on t
   // held it after take 33.
   await all(channelMessage({ text: 'late bea', ts: ts(347), thread: ts(0) }));
   await all(channelMessage({ text: 'late ava', ts: ts(337), thread: ts(0) }));
+  // Codex 4320903226: the mark outlives a busy channel, where enough other
+  // threads begin to push the thread's oldest note out. Ava's socket alone
+  // notes each start for the whole adapter, and asks nobody to answer.
+  await Promise.all(Array.from({ length: others }, (_, n) =>
+    sockets.ava.deliver('message', channelMessage({ text: `other ${n}`, ts: `616.${String(n).padStart(6, '0')}` }))));
+  await sockets.ava.settled();
   await all(channelMessage({ text: 'and now', ts: ts(400), thread: ts(0) }));
   await adapter.stop();
   const placed = (text: string) =>
@@ -12541,6 +12548,14 @@ test('after a restart, a thread with more takes than the record keeps stays on t
   assert.deepEqual(placed('late ava'), [['ava', true]], seen);
   // Bea took the thread at take 36: the reply is hers to judge.
   assert.deepEqual(placed('and now'), [['bea', false]], seen);
+};
+
+test('after a restart, a thread with more takes than the record keeps stays on thread reads after late messages are placed', async () => {
+  await oversizedAfterLateMessages(0);
+});
+
+test('a thread marked too long for the record stays marked while more threads begin than the record keeps', async () => {
+  await oversizedAfterLateMessages(2001);
 });
 
 test('after a restart, a stop is not placed by a live claim older than a post the thread read rebuilt', async () => {

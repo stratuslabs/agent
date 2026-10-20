@@ -5223,18 +5223,26 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   /**
    * Records that this process saw the thread `key` begin, or who owns it,
    * or (`false`) that the record cannot place messages there, which then
-   * stands: the thread only gains claims.
+   * stands: the thread only gains claims. Marking it again moves it to
+   * the back of the eviction order, as a thread still in use.
    */
   const noteOrigin = (key: string, owner: true | string | false = true): void => {
-    if ((owner === true && threadOrigins.has(key)) || threadOrigins.get(key) === false) {
+    if ((owner === true && threadOrigins.has(key)) || (owner !== false && threadOrigins.get(key) === false)) {
       return;
     }
     threadOrigins.delete(key);
     threadOrigins.set(key, owner);
     if (threadOrigins.size > THREAD_ADDRESSEE_CAPACITY) {
-      const oldest = threadOrigins.keys().next();
+      const oldest = threadOrigins.entries().next();
       if (!oldest.done) {
-        threadOrigins.delete(oldest.value);
+        const [evicted, value] = oldest.value;
+        threadOrigins.delete(evicted);
+        // The claims of a thread too long for the record go with its mark
+        // (Codex 4320903226): kept alone, its oldest would read as the
+        // owner again. Without them, the next message there is read.
+        if (value === false) {
+          threadAddressee.delete(evicted);
+        }
       }
     }
   };
