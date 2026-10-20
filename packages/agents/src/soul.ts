@@ -77,7 +77,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
   const { lines, body } = extractFrontmatter(source, 'soul');
   const { scalars, lists } = lines
     ? parseFrontmatterLines(lines, { kind: 'soul', scalarKeys: SOUL_SCALAR_KEYS, listKeys: SOUL_LIST_KEYS })
-    : { scalars: {}, lists: {}, maps: {}, unknownKeys: [] } as ParsedFrontmatter;
+    : { scalars: {}, lists: {}, maps: {}, unknownKeys: [], skippedMapEntries: {} } as ParsedFrontmatter;
 
   const instructions = body.trim();
 

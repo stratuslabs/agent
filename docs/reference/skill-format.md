@@ -40,9 +40,16 @@ The frontmatter dialect is a subset of YAML, read without a YAML library:
 `key: value` scalars (quoted or bare), block lists and `[a, b]`, the block
 scalar forms for a multi-line `description` (`>-`, `|`, and their
 indicator variants), and one level of `key: value` pairs under
-`metadata:`. Anchors, flow maps, and nested maps under `metadata:` are
-not read; a nested block under `metadata:` is refused rather than
-half-read, since the spec says every value there is a string.
+`metadata:`, written as a block or as one line of JSON
+(`metadata: {"author": "someone"}`, the form OpenClaw and ClawHub skills
+use). Anchors are not read, and neither is a flow map that is not JSON.
+
+The spec says every `metadata` value is a string. An entry whose value is
+structured instead (a nested block, a block list, or a JSON object or
+array) is another host's data: it is skipped and named in a warning, and
+the rest of the skill installs. The exception is the two keys Stratus
+reads: a structured `metadata.requires` or `metadata.version` is refused,
+since skipping it would drop what the skill declared.
 
 ## Stratus extensions
 
@@ -88,12 +95,14 @@ implementation, so what validates installs and what installs loads.
   directory is circumstance rather than identity)
 - no `description`, or one past 1024 characters
 - `compatibility` past 500 characters
-- frontmatter that does not parse: a nested block under `metadata:`, a
-  list item outside a list, an unclosed `---`
+- frontmatter that does not parse: a `metadata:` flow map that is not
+  JSON, a structured `metadata.requires` or `metadata.version`, a list
+  item outside a list, an unclosed `---`
 
 **Warned** (installed, and said next to the install line):
 
 - top-level keys outside the spec — another host's, and ignored here
+- `metadata` entries whose value is not a string — skipped
 - the pre-spec Stratus keys, with the `metadata:` form to move to
 - a bundled `scripts/`, with a count — installed as files, never run
 
