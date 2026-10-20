@@ -11331,12 +11331,10 @@ test('a recovered judging turn that had said nothing still reads as stopped when
 });
 
 test('a second stop while a stopped recovered turn is still winding down is a stop, not a new message', async () => {
-  // The first stop aborted the recovered turn, so the gateway finds nothing
-  // left to abort for the second; the turn has not reported its outcome
-  // yet, and the second stop must not queue a turn that answers "stop".
+  // The gateway still counts a stopped turn until it settles, so the second
+  // stop finds it too and must not queue a turn that answers "stop".
   const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
-  let aborted = 0;
-  gateway.abortTurns = () => (aborted++ === 0 ? 1 : 0);
+  gateway.abortTurns = () => 1;
   gateway.sessionRouting = async (sessionId) =>
     sessionId === 'slack:ava:T1:C1:100.1'
       ? { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' } }
@@ -11352,6 +11350,53 @@ test('a second stop while a stopped recovered turn is still winding down is a st
   await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:100.1', error: 'Stopped from Slack by U-DYLAN' });
   await adapter.stop();
   assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Stopped by <@U-DYLAN>.', '100.1']]);
+});
+
+test('once a stopped recovered turn has ended without an outcome, the next stop is an ordinary message', async () => {
+  // Recovery can end with nothing to report (its checkpoint was gone, or a
+  // queued message finished the session first). Whether anything is still
+  // running is the gateway's to say; the adapter keeps no record of it.
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  let running = 1;
+  gateway.abortTurns = () => running;
+  gateway.sessionRouting = async (sessionId) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' } }
+      : undefined;
+  const { socket, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.settled();
+  assert.equal(gateway.dispatches.length, 0);
+
+  running = 0;
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.3', thread_ts: '100.1' }));
+  await socket.settled();
+  assert.equal(gateway.dispatches.length, 1, 'nothing running: the stop is a message to the agent');
+  await adapter.stop();
+});
+
+test('a later failure on a session whose stopped turn never reported reads as the failure it is', async () => {
+  // Who stopped a turn comes from the error the gateway failed it with, not
+  // from a note left by the stop that an outcome may never come to clear.
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  let running = 1;
+  gateway.abortTurns = () => running;
+  gateway.sessionRouting = async (sessionId) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' } }
+      : undefined;
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.settled();
+  running = 0;
+
+  await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:100.1', error: 'provider unavailable' });
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Something went wrong: provider unavailable', '100.1']]);
 });
 
 test('a stop from someone who is not an approver never asks the gateway to abort anything', async () => {

@@ -1150,10 +1150,13 @@ export interface Gateway {
   /**
    * Aborts every turn running on a session right now, one recovered after a
    * restart included, the way the watchdog and a restart's window do: each
-   * fails with `reason`, its session saved. Returns how many it aborted; an
-   * idle or unknown session is 0 and nothing happens. A message queued on
-   * the session but not started is left to its caller's own signal. The
-   * caller decides who may stop; this asks nothing.
+   * fails with `reason`, its session saved. Returns how many turns are on
+   * the session, each now stopping: one aborted earlier that has not
+   * settled yet still counts (it is not aborted again), so 0 means nothing
+   * is running there at all. An idle or unknown session is 0 and nothing
+   * happens. A message queued on the session but not started is left to
+   * its caller's own signal. The caller decides who may stop; this asks
+   * nothing.
    */
   abortTurns(sessionId: string, reason: string): number;
   /** Every call parked on a human right now, oldest first. */
@@ -5677,14 +5680,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     abortTurns(sessionId, reason) {
-      let aborted = 0;
-      for (const controller of turnControllers.get(sessionId) ?? []) {
+      const running = turnControllers.get(sessionId) ?? new Set<AbortController>();
+      for (const controller of running) {
         if (!controller.signal.aborted) {
           controller.abort(new RunAbortedError(reason));
-          aborted += 1;
         }
       }
-      return aborted;
+      return running.size;
     },
 
     pendingApprovals() {

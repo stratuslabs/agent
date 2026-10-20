@@ -979,6 +979,9 @@ test('abortTurns stops a turn recovered after a restart on its own session only'
   assert.equal(gateway.abortTurns('no-such-session', 'Stopped from Slack by U1'), 0);
 
   assert.equal(gateway.abortTurns('stopped-session', 'Stopped from Slack by U1'), 1);
+  // Stopped but not settled: still a turn on the session, so a repeated
+  // stop still finds it (and aborts nothing twice).
+  assert.equal(gateway.abortTurns('stopped-session', 'Stopped from Slack by U9'), 1);
   const event = await failed;
   assert.equal(event.sessionId, 'stopped-session');
   assert.equal(event.error, 'Stopped from Slack by U1');
@@ -987,6 +990,9 @@ test('abortTurns stops a turn recovered after a restart on its own session only'
   // finds it, and stopping the daemon then has nothing left to wait on.
   assert.equal(gateway.abortTurns('other-session', 'Stopped from Slack by U2'), 1);
   await gateway.stop();
+  // Both turns have settled: nothing is left on either session to stop.
+  assert.equal(gateway.abortTurns('stopped-session', 'Stopped from Slack by U1'), 0);
+  assert.equal(gateway.abortTurns('other-session', 'Stopped from Slack by U2'), 0);
 
   const after = new ShardedSessionStore({ stateDir });
   const stopped = await after.get('stopped-session');
