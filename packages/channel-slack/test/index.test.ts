@@ -10,6 +10,8 @@ import {
   createSlackChannelAdapter as createAdapterAsShipped,
   createSlackFileFetcher,
   isStopRequest,
+  RESTARTING_REPLY_TEXT,
+  STOPPING_REPLY_TEXT,
   type SlackAdapterOptions,
   type SlackBlock,
   type SlackInboundFile,
@@ -13206,4 +13208,80 @@ test('judge v2: each judging decision is logged once per agent, with who and why
     'slack: judge: bea took 5000.3 in C1 (addressed it last)',
   ]);
   assert.ok(logged.every((line) => !/secret/.test(line)), logged.join('\n'));
+});
+
+/** What the gateway's dispatch throws once a restart or stop has begun. */
+const stoppingError = (restarting: boolean): Error => {
+  const error = new Error(restarting
+    ? 'stratusd is restarting and will accept new work once it is back up.'
+    : 'The gateway is stopping and no longer accepts new work.') as Error & { restarting: boolean };
+  error.name = 'GatewayStoppingError';
+  error.restarting = restarting;
+  return error;
+};
+
+test('a mention refused because the daemon is restarting is told to send it again, not shown a failure', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(() => {
+    throw stoppingError(true);
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> is the deploy done?', { ts: '200.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [[RESTARTING_REPLY_TEXT, '200.1']]);
+});
+
+test('a stopping daemon says it is shutting down instead', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(() => {
+    throw stoppingError(false);
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> are you there?', { ts: '400.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), [STOPPING_REPLY_TEXT]);
+});
+
+test('a judged reply in the agent\'s own thread during a restart gets nothing posted', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C1', { is_member: true });
+  const gateway = createStubGateway(() => {
+    throw stoppingError(true);
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C1:980.0'
+    ? { agentId: 'ava', metadata: {} }
+    : undefined);
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'and then', ts: '980.3', thread: '980.0' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false]);
+  assert.deepEqual(web.posts, []);
 });

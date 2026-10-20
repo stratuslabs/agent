@@ -127,6 +127,17 @@ const NOT_LIVE_YET = '9999999999.999999';
  * Counted per daemon, in memory; a restart starts it again.
  */
 export const AGENT_MENTION_HOP_LIMIT = 4;
+
+/**
+ * What a person who wrote to an agent while the daemon was restarting is
+ * told. The gateway keeps channels connected through its drain and refuses
+ * new turns then (`GatewayStoppingError`), so the message was heard but not
+ * taken: nothing keeps it for the next daemon, and the sender is asked to
+ * send it again rather than left to wait for an answer that will not come.
+ */
+export const RESTARTING_REPLY_TEXT = "I'm restarting right now and couldn't take this. Please send it again in a minute.";
+/** The same, for a daemon that is stopping rather than restarting. */
+export const STOPPING_REPLY_TEXT = "I'm shutting down right now and couldn't take this. Please send it again once I'm back.";
 /**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
@@ -6996,10 +7007,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not a failure of the agent. Matched by name, as this package does
       // not import the gateway. A turn nobody asked for stays silent.
       const pausedReply = failure instanceof Error && failure.name === 'IntakePausedError';
+      // A daemon on its way down that still heard this (the gateway keeps
+      // channels connected through its drain) says so and asks for the
+      // message again, since nothing keeps it for the next daemon. Like the
+      // pause, said only to a message that asked, and matched by name.
+      const stopping = failure instanceof Error && failure.name === 'GatewayStoppingError';
+      const stoppingText = stopping
+        ? ((failure as Error & { restarting?: unknown }).restarting === false ? STOPPING_REPLY_TEXT : RESTARTING_REPLY_TEXT)
+        : undefined;
       const { spoke, spokeAt } = renderer.stoppedBy !== undefined
         ? await renderer.stopped(renderer.stoppedBy)
-        : pausedReply
-        ? await renderer.finalize(renderer.lazy ? '' : (failure as Error).message)
+        : pausedReply || stoppingText !== undefined
+        ? await renderer.finalize(renderer.lazy ? '' : stoppingText ?? (failure as Error).message)
         : await renderer.fail(failure instanceof Error ? failure.message : String(failure));
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking has still spoken, by the same

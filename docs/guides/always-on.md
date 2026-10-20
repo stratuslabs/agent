@@ -129,9 +129,13 @@ A plugin is code, and code gets a restart — but an announced one rather
 than a surprise, and one that costs the fleet as little as it can.
 `stratus restart` (or `POST /restart`) asks the running daemon to:
 
-1. **Refuse new turns**, at once. A message arriving during the drain is
-   answered with "stratusd is restarting and will accept new work once it
-   is back up" rather than dropped.
+1. **Refuse new turns**, at once, with channels still connected. A Slack
+   message addressed to an agent during the drain (a mention, a DM, a new
+   message in its home channel, a reply in a thread it holds) is answered
+   "I'm restarting right now and couldn't take this. Please send it again
+   in a minute." Nothing is kept for the next daemon, so the sender has to
+   send it again. A reply the agent would only judge gets no notice, and a
+   plain stop says it is shutting down instead.
 2. **Let in-flight turns finish**, for up to the drain window —
    `--drain-timeout <seconds>`, default 30. A turn still running when the
    window closes is aborted the way the watchdog aborts one: its session is
@@ -161,7 +165,11 @@ explains.
 
 Refusing new turns first is what makes the drain finite: every turn is
 queued through one place, and that place turns new work away once a stop
-begins, so the set the daemon waits on can only shrink. A channel's own
+begins, so the set the daemon waits on can only shrink. Channels are stopped
+after the turns, not before: a channel that disconnected first could not
+hear anyone for as long as a long turn held the drain, and Slack does not
+redeliver to an app that was not connected. A turn that ignores its abort
+does not keep them connected past the window. A channel's own
 drain is a loop rather than a single snapshot, because a turn finishing
 inside the drain still hands it work to deliver — the retraction that takes
 the buttons off an approval denied by the shutdown is exactly that, and it
