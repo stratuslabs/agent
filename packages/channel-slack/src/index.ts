@@ -3351,7 +3351,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     pendingChain = run.catch(() => undefined);
     return run;
   };
-  const pendingKey = (entry: Pick<PendingIntake, 'agentId' | 'channel' | 'ts'>): string => `${entry.agentId}:${entry.channel}:${entry.ts}`;
+  const pendingKey = (entry: Pick<PendingIntake, 'agentId' | 'team' | 'channel' | 'ts'>): string => `${entry.agentId}:${entry.team}:${entry.channel}:${entry.ts}`;
   /**
    * Kept messages being replayed, by `pendingKey`. A replayed message comes
    * off the list only once its answer is confirmed (`answered`): an answer
@@ -3366,8 +3366,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const replaying = new Map<string, { dispatched: boolean; rekept: boolean; refused: boolean; answered: boolean }>();
   /** Notes a reply outcome against the kept message it answers, if that one is being replayed. */
-  const noteReplayOutcome = (agentId: string, channel: string, ts: string, outcome: ReplyOutcome): ReplyOutcome => {
-    const replay = replaying.get(pendingKey({ agentId, channel, ts }));
+  const noteReplayOutcome = (connection: AgentConnection, channel: string, ts: string, outcome: ReplyOutcome): ReplyOutcome => {
+    const replay = replaying.get(pendingKey({ agentId: connection.config.agentId, team: connection.teamId, channel, ts }));
     if (replay !== undefined) {
       if (outcome.refused === true) {
         replay.refused = true;
@@ -3378,8 +3378,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return outcome;
   };
   /** Confirms that a replayed message was answered by a report posted ahead of its own renderer. */
-  const noteReplayAnsweredAhead = (agentId: string, channel: string, ts: string): void => {
-    const replay = replaying.get(pendingKey({ agentId, channel, ts }));
+  const noteReplayAnsweredAhead = (connection: AgentConnection, channel: string, ts: string): void => {
+    const replay = replaying.get(pendingKey({ agentId: connection.config.agentId, team: connection.teamId, channel, ts }));
     if (replay !== undefined) {
       replay.answered = true;
     }
@@ -7171,7 +7171,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
       let repeat: 'live' | 'finished' | undefined;
       let absorbed = false;
-      const replay = replaying.get(pendingKey({ agentId: connection.config.agentId, channel: event.channel, ts: event.ts }));
+      const replay = replaying.get(pendingKey({ agentId: connection.config.agentId, team: connection.teamId, channel: event.channel, ts: event.ts }));
       if (replay !== undefined) {
         replay.dispatched = true;
       }
@@ -7265,7 +7265,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ? await renderer.outcomeReportedAhead
         : undefined;
       if (ahead?.said === true) {
-        noteReplayAnsweredAhead(connection.config.agentId, event.channel, event.ts);
+        noteReplayAnsweredAhead(connection, event.channel, event.ts);
       }
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
@@ -7304,7 +7304,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }));
     }
     if (reportedAhead?.said === true) {
-      noteReplayAnsweredAhead(connection.config.agentId, event.channel, event.ts);
+      noteReplayAnsweredAhead(connection, event.channel, event.ts);
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;
@@ -7339,7 +7339,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // interim messages already in the thread are heard either way.
       let replyLanded = false;
       const settled = finalized.then((outcome) => {
-        noteReplayOutcome(connection.config.agentId, event.channel, event.ts, outcome);
+        noteReplayOutcome(connection, event.channel, event.ts, outcome);
         replyLanded = outcome.published;
         return true;
       }, () => true);
@@ -7406,7 +7406,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           deferredText = (failure as Error).message;
         }
       }
-      const { spoke, spokeAt } = noteReplayOutcome(connection.config.agentId, event.channel, event.ts, renderer.stoppedBy !== undefined
+      const { spoke, spokeAt } = noteReplayOutcome(connection, event.channel, event.ts, renderer.stoppedBy !== undefined
         ? await renderer.stopped(renderer.stoppedBy)
         : pausedReply || stoppingRefusal
         ? await renderer.finalize(renderer.lazy ? '' : deferredText ?? (failure as Error).message)

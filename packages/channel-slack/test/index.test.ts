@@ -13899,6 +13899,33 @@ test('a kept message from another Slack workspace is not read or answered throug
   assert.deepEqual(kept.map((entry) => entry.ts), ['610.1']);
 });
 
+test('a message kept in one workspace does not replace one kept in another with the same channel and ts', async () => {
+  const file = await keptFile();
+  const now = Date.now();
+  await writeFile(file, JSON.stringify([
+    { agentId: 'ava', team: 'T-OLD', channel: 'C1', ts: '620.1', user: 'U-DYLAN', keptAt: now },
+  ]));
+  const socket = createFakeSocket();
+  const draining = createStubGateway(() => {
+    throw stoppingError(true);
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => createFakeWeb('B-AVA', 'T1'),
+    pendingIntakePath: file,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(draining);
+  await socket.deliver('app_mention', mention('<@B-AVA> same ids here', { ts: '620.1' }));
+  await socket.settled();
+  await adapter.stop();
+  const kept = (await readKept(file)) as Array<Record<string, unknown>>;
+  assert.deepEqual(kept.map((entry) => `${entry.team}:${entry.ts}`).sort(), ['T-OLD:620.1', 'T1:620.1']);
+});
+
 test('a judged reply in the agent\'s own thread during a restart is kept for the next daemon to judge, with nothing posted', async () => {
   const file = await keptFile();
   const socket = createFakeSocket();
