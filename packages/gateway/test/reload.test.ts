@@ -1108,3 +1108,74 @@ test('a plain stop refuses by name too, and says it is stopping rather than rest
     (error: Error) => error instanceof GatewayStoppingError && !error.restarting && error.name === 'GatewayStoppingError',
   );
 });
+test('abortTurns reaches a recovered turn while its recovery is still resolving the agent', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, 'state');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // Parked long enough ago that its approval expired while the daemon was
+  // down: recovery logs that, synchronously, just before it resolves the
+  // agent, saves the session and builds the runtime. That log is the
+  // stop's way in to the window before the runner starts.
+  const seed = new ShardedSessionStore({ stateDir });
+  const parkedAt = new Date(Date.now() - 60_000).toISOString();
+  await seed.create({
+    id: 'parked-session',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: parkedAt },
+      { id: 'm2', role: 'assistant', content: '', createdAt: parkedAt, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt,
+      },
+    },
+  });
+  seed.close();
+
+  let providerCalls = 0;
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      providerCalls += 1;
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+
+  let stoppedDuringPreflight: number | undefined;
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    approvalTimeoutMs: 1_000,
+    stateDir,
+    log: (line) => {
+      if (line.includes('parked-session') && line.includes('outlived its window')) {
+        stoppedDuringPreflight = gateway.abortTurns('parked-session', 'Stopped from Slack by U1');
+      }
+    },
+    warn: () => {},
+  });
+  const failed = nextEvent(gateway.bus, 'session.failed');
+  await gateway.start();
+
+  const event = await Promise.race([
+    failed,
+    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+  ]);
+  assert.equal(stoppedDuringPreflight, 1);
+  assert.notEqual(event, 'hung');
+  if (event === 'hung') return;
+  assert.equal(event.sessionId, 'parked-session');
+  assert.equal(event.error, 'Stopped from Slack by U1');
+  assert.equal(providerCalls, 0);
+  await gateway.stop();
+
+  const after = new ShardedSessionStore({ stateDir });
+  const session = await after.get('parked-session');
+  after.close();
+  assert.equal(session?.status, 'failed');
+  assert.equal(session?.lastError, 'Stopped from Slack by U1');
+});
