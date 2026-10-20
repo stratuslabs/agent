@@ -12445,6 +12445,218 @@ test('after a restart, a late message from when a judge held the thread is still
   );
 });
 
+test('after a restart, a late message in a thread with more takes than the record keeps is placed by a thread read', async () => {
+  // Card 559 (Codex 4291036888 on #369): the warm record keeps at most
+  // THREAD_HANDOVER_DEPTH claims, so a thread with more takes loses the
+  // middle ones while the record still looks complete. Ava and Bea trade
+  // the thread 36 times; a message typed while Bea held it early on is
+  // delivered late. Placed by the trimmed record it went to Ava, the first
+  // claim kept; it is Bea's to judge, as a read of the thread up to it says.
+  const ts = (n: number): string => `614.${String(n).padStart(6, '0')}`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+  ];
+  for (let k = 1; k <= 36; k += 1) {
+    if (k > 1) {
+      thread.push({ ts: ts(k * 10), user: 'U-DYLAN', text: `step ${k}` });
+    }
+    const who = k % 2 === 1 ? 'AVA' : 'BEA';
+    thread.push({ ts: ts(k * 10 + 5), user: `B-${who}`, bot_id: `B-${who}-APP`, text: `take ${k}` });
+  }
+  const { webs, gateway, adapter, all } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(355))], ['slack:bea:T1:C1:' + ts(0), Number(ts(365))]],
+    { bea: 'judge' },
+  );
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `614.9${String((seq += 1)).padStart(5, '0')}`;
+  }
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(Number(ts(365)) * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  await adapter.start(gateway);
+  await all(channelMessage({ text: 'go on', ts: ts(400), thread: ts(0) }));
+  // Delivered late: typed just after Bea's take 4, before Ava's take 5.
+  await all(channelMessage({ text: 'late one', ts: ts(47), thread: ts(0) }));
+  await adapter.stop();
+  // Bea's, as a cold verdict for a judge is: heard and judged, never Ava's.
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('late one')).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]),
+    [['bea', false]],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
+/** Codex 4320763062 and 4320903226 on #384, with `others` threads begun between. */
+const oversizedAfterLateMessages = async (others: number): Promise<void> => {
+  // Codex 4320763062 on #384: an earlier version skipped the warm-up for
+  // such a thread, which left the record to the messages the cold reads
+  // placed. Two late ones resolved newest first put the older one first,
+  // and with no owner noted that first claim read as the owner, so a later
+  // untagged reply went to Ava though Bea's take 36 holds the thread.
+  const ts = (n: number): string => `615.${String(n).padStart(6, '0')}`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+  ];
+  for (let k = 1; k <= 36; k += 1) {
+    if (k > 1) {
+      thread.push({ ts: ts(k * 10), user: 'U-DYLAN', text: `step ${k}` });
+    }
+    const who = k % 2 === 1 ? 'AVA' : 'BEA';
+    thread.push({ ts: ts(k * 10 + 5), user: `B-${who}`, bot_id: `B-${who}-APP`, text: `take ${k}` });
+  }
+  const { sockets, webs, gateway, adapter, all } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(355))], ['slack:bea:T1:C1:' + ts(0), Number(ts(365))]],
+    { bea: 'judge' },
+  );
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `615.9${String((seq += 1)).padStart(5, '0')}`;
+  }
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(Number(ts(365)) * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  await adapter.start(gateway);
+  // Delivered late, newest first, each read finding more takes than the
+  // record keeps: typed while Bea held it after take 34, then while Ava
+  // held it after take 33.
+  await all(channelMessage({ text: 'late bea', ts: ts(347), thread: ts(0) }));
+  await all(channelMessage({ text: 'late ava', ts: ts(337), thread: ts(0) }));
+  // Codex 4320903226: still right in a busy channel, where enough other
+  // threads begin to push the thread's oldest notes out. Ava's socket alone
+  // notes each start for the whole adapter, and asks nobody to answer.
+  await Promise.all(Array.from({ length: others }, (_, n) =>
+    sockets.ava.deliver('message', channelMessage({ text: `other ${n}`, ts: `616.${String(n).padStart(6, '0')}` }))));
+  await sockets.ava.settled();
+  await all(channelMessage({ text: 'and now', ts: ts(400), thread: ts(0) }));
+  await adapter.stop();
+  const placed = (text: string) =>
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes(text)).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]);
+  const seen = JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage]));
+  assert.deepEqual(placed('late bea'), [['bea', false]], seen);
+  assert.deepEqual(placed('late ava'), [['ava', true]], seen);
+  // Bea took the thread at take 36: the reply is hers to judge.
+  assert.deepEqual(placed('and now'), [['bea', false]], seen);
+};
+
+test('after a restart, a reply after late messages in a thread with more takes than the record keeps goes to the latest take', async () => {
+  await oversizedAfterLateMessages(0);
+});
+
+test('a thread too long for the record is still placed right while more threads begin than the record keeps', async () => {
+  await oversizedAfterLateMessages(2001);
+});
+
+test('two cold reads of the same thread at once do not count its takes twice against the record', async () => {
+  // Codex 4320950889 on #384: two messages after a restart, read at once,
+  // both find the thread's 17 takes. An earlier version counted them on
+  // top of the 17 the first warm-up had kept, judged the thread too long
+  // for the record, and sent every reply after to a thread read. The
+  // second warm-up adds nothing, and the reply is placed from the record.
+  const ts = (n: number): string => `617.${String(n).padStart(6, '0')}`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+  ];
+  for (let k = 1; k <= 17; k += 1) {
+    if (k > 1) {
+      thread.push({ ts: ts(k * 10), user: 'U-DYLAN', text: `step ${k}` });
+    }
+    const who = k % 2 === 1 ? 'AVA' : 'BEA';
+    thread.push({ ts: ts(k * 10 + 5), user: `B-${who}`, bot_id: `B-${who}-APP`, text: `take ${k}` });
+  }
+  const { sockets, webs, gateway, adapter } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(175))], ['slack:bea:T1:C1:' + ts(0), Number(ts(165))]],
+    { bea: 'judge' },
+  );
+  let seq = 0;
+  let reads = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `617.9${String((seq += 1)).padStart(5, '0')}`;
+    const replies = web.conversations.replies!;
+    web.conversations.replies = async (args) => {
+      reads += 1;
+      return replies(args);
+    };
+  }
+  await adapter.start(gateway);
+  // Both delivered before either read comes back.
+  await Promise.all(['ava', 'bea'].flatMap((id) => [
+    sockets[id as 'ava' | 'bea'].deliver('message', channelMessage({ text: 'first', ts: ts(200), thread: ts(0) })),
+    sockets[id as 'ava' | 'bea'].deliver('message', channelMessage({ text: 'second', ts: ts(201), thread: ts(0) })),
+  ]));
+  await sockets.ava.settled();
+  await sockets.bea.settled();
+  const before = reads;
+  for (const id of ['ava', 'bea'] as const) {
+    await sockets[id].deliver('message', channelMessage({ text: 'third', ts: ts(300), thread: ts(0) }));
+  }
+  await sockets.ava.settled();
+  await sockets.bea.settled();
+  await adapter.stop();
+  // Placed by the record the reads warmed, as Ava's: no read of its own.
+  assert.equal(reads - before, 0);
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('third')).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]),
+    [['ava', true]],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
+test('after a restart, a late message in the part of the record that the answer\'s own claim cut is placed by a thread read', async () => {
+  // Codex 4320988170 on #384: a read finding exactly as many takes as the
+  // record keeps warmed it full, and the claim of the message it placed
+  // then cut take 2 out of it. A message typed after Bea's take 2,
+  // delivered late, went to Ava, the first claim, which the cut made look
+  // like the holder.
+  const ts = (n: number): string => `618.${String(n).padStart(6, '0')}`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+  ];
+  for (let k = 1; k <= 32; k += 1) {
+    if (k > 1) {
+      thread.push({ ts: ts(k * 10), user: 'U-DYLAN', text: `step ${k}` });
+    }
+    const who = k % 2 === 1 ? 'AVA' : 'BEA';
+    thread.push({ ts: ts(k * 10 + 5), user: `B-${who}`, bot_id: `B-${who}-APP`, text: `take ${k}` });
+  }
+  const { webs, gateway, adapter, all } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(315))], ['slack:bea:T1:C1:' + ts(0), Number(ts(325))]],
+    { bea: 'judge' },
+  );
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `618.9${String((seq += 1)).padStart(5, '0')}`;
+  }
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(Number(ts(325)) * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  await adapter.start(gateway);
+  await all(channelMessage({ text: 'go on', ts: ts(400), thread: ts(0) }));
+  await all(channelMessage({ text: 'late one', ts: ts(27), thread: ts(0) }));
+  await adapter.stop();
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('late one')).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]),
+    [['bea', false]],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
 test('after a restart, a stop is not placed by a live claim older than a post the thread read rebuilt', async () => {
   // Codex on #369: the warm record holds Bea's take at .3 and Ava's post at
   // .6, both rebuilt from the thread read. A mention of Bea at .4 is

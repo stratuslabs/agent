@@ -3071,6 +3071,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const threadAddressee = new Map<string, Handover[]>();
   /**
+   * Per thread whose record has been cut in the middle (`trimHandovers`),
+   * the first claim kept after the cut. Who held the thread between its
+   * first claim and that one is no longer known here (card 559): a message
+   * from then is left to the sessions and a thread read, rather than
+   * placed by the first claim, or the latest take, that outlived the cut.
+   * Goes with the thread's record.
+   */
+  const threadTrimmedUntil = new Map<string, string>();
+  /**
    * Threads whose owner this process can name (card 508): `true` for one
    * whose first message it saw, so the first claim in `threadAddressee` is
    * the owner, or the owner itself when the thread read named it after a
@@ -5061,7 +5070,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Dropping that one would hand the thread back to its owner after enough
    * mentions of a third agent, while the judge that took it still answers.
    */
-  const trimHandovers = (handovers: Handover[]): Handover[] => {
+  const trimHandovers = (key: string, handovers: Handover[]): Handover[] => {
     if (handovers.length <= THREAD_HANDOVER_DEPTH) {
       return handovers;
     }
@@ -5077,6 +5086,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // The kept take sits on top of the full recent tail, one past the depth,
     // so `holderAt` still sees every recent claim it saw before.
     const tail = handovers.slice(tailFrom);
+    // The cut only ever moves later: a claim inserted into the gap since
+    // is dropped again, and the gap it fell in stays unknown.
+    const until = (tail[0] as Handover).ts;
+    const before = threadTrimmedUntil.get(key);
+    if (before === undefined || before < until) {
+      threadTrimmedUntil.set(key, until);
+    }
     return latestTake > 0 && latestTake < tailFrom
       ? [first, handovers[latestTake] as Handover, ...tail]
       : [first, ...tail];
@@ -5130,11 +5146,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Re-inserted rather than mutated in place: a Map iterates in insertion
     // order, which is what makes the first key the one to evict.
     threadAddressee.delete(key);
-    threadAddressee.set(key, trimHandovers(handovers));
+    threadAddressee.set(key, trimHandovers(key, handovers));
     if (threadAddressee.size > THREAD_ADDRESSEE_CAPACITY) {
       const oldest = threadAddressee.keys().next();
       if (!oldest.done) {
         threadAddressee.delete(oldest.value);
+        threadTrimmedUntil.delete(oldest.value);
         // The owner goes with the record of who took the thread since: an
         // owner kept alone would stand in for a judge's takeover it no
         // longer knows of, where the thread read would see it.
@@ -5158,9 +5175,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const stopHolderAt = (key: string, ts: string): string | undefined => holderAt(key, ts);
 
+  /** Whether the record of thread `key` lost who held it at `ts` to a cut. */
+  const inTrimmedGap = (key: string, handovers: Handover[], ts: string): boolean => {
+    const until = threadTrimmedUntil.get(key);
+    const first = handovers[0];
+    return until !== undefined && first !== undefined && first.ts < ts && ts < until;
+  };
+
   const holderAt = (key: string, ts: string): string | undefined => {
     const handovers = threadAddressee.get(key);
-    if (!handovers) {
+    if (!handovers || inTrimmedGap(key, handovers, ts)) {
       return undefined;
     }
     // The newest entry at or before `ts` answers, and only if this process
@@ -5194,6 +5218,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const ownerAt = (key: string, ts: string): string | undefined => {
     const origin = threadOrigins.get(key);
     const handovers = threadAddressee.get(key) ?? [];
+    if (inTrimmedGap(key, handovers, ts)) {
+      return undefined;
+    }
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
       if (handover && handover.ts <= ts && (handover.takes === true || (index === 0 && typeof origin !== 'string'))) {
@@ -7144,6 +7171,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connections.length = 0;
       approvalPosts.clear();
       threadAddressee.clear();
+      threadTrimmedUntil.clear();
       senderAddressees.clear();
       coldVerdicts.clear();
       botIdentities.clear();
