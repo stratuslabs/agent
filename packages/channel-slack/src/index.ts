@@ -5772,9 +5772,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // (card 559). Such a thread is marked to stay on thread reads: only
       // skipping the warm-up left the claims of the messages placed since,
       // the oldest of which then read as the owner (Codex 4320763062).
+      // Only claims the record does not hold yet count: a read that ran
+      // alongside another of the same thread finds the takes the other has
+      // just warmed, which add nothing (Codex 4320950889).
       const key = threadKeyFor(parts);
-      const kept = threadAddressee.get(key)?.length ?? 0;
-      if (kept + takeovers.length > THREAD_HANDOVER_DEPTH) {
+      const kept = threadAddressee.get(key) ?? [];
+      const held = new Set(kept.map((handover) => `${handover.agentId} ${handover.ts}`));
+      const added = takeovers.filter((post) => !held.has(`${post.agentId} ${post.ts}`)).length;
+      if (kept.length + added > THREAD_HANDOVER_DEPTH) {
         noteOrigin(key, false);
         return;
       }

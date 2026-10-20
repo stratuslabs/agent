@@ -12558,6 +12558,62 @@ test('a thread marked too long for the record stays marked while more threads be
   await oversizedAfterLateMessages(2001);
 });
 
+test('two cold reads of the same thread at once do not count its takes twice against the record', async () => {
+  // Codex 4320950889 on #384: two messages after a restart, read at once,
+  // both found the thread's 17 takes. Counted on top of the 17 the first
+  // warm-up had kept, they marked the thread too long for the record, and
+  // every reply after went to a thread read. Only claims the record does
+  // not already hold count.
+  const ts = (n: number): string => `617.${String(n).padStart(6, '0')}`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+  ];
+  for (let k = 1; k <= 17; k += 1) {
+    if (k > 1) {
+      thread.push({ ts: ts(k * 10), user: 'U-DYLAN', text: `step ${k}` });
+    }
+    const who = k % 2 === 1 ? 'AVA' : 'BEA';
+    thread.push({ ts: ts(k * 10 + 5), user: `B-${who}`, bot_id: `B-${who}-APP`, text: `take ${k}` });
+  }
+  const { sockets, webs, gateway, adapter } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(175))], ['slack:bea:T1:C1:' + ts(0), Number(ts(165))]],
+    { bea: 'judge' },
+  );
+  let seq = 0;
+  let reads = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `617.9${String((seq += 1)).padStart(5, '0')}`;
+    const replies = web.conversations.replies!;
+    web.conversations.replies = async (args) => {
+      reads += 1;
+      return replies(args);
+    };
+  }
+  await adapter.start(gateway);
+  // Both delivered before either read comes back.
+  await Promise.all(['ava', 'bea'].flatMap((id) => [
+    sockets[id as 'ava' | 'bea'].deliver('message', channelMessage({ text: 'first', ts: ts(200), thread: ts(0) })),
+    sockets[id as 'ava' | 'bea'].deliver('message', channelMessage({ text: 'second', ts: ts(201), thread: ts(0) })),
+  ]));
+  await sockets.ava.settled();
+  await sockets.bea.settled();
+  const before = reads;
+  for (const id of ['ava', 'bea'] as const) {
+    await sockets[id].deliver('message', channelMessage({ text: 'third', ts: ts(300), thread: ts(0) }));
+  }
+  await sockets.ava.settled();
+  await sockets.bea.settled();
+  await adapter.stop();
+  // Placed by the record the reads warmed, as Ava's: no read of its own.
+  assert.equal(reads - before, 0);
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('third')).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]),
+    [['ava', true]],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
 test('after a restart, a stop is not placed by a live claim older than a post the thread read rebuilt', async () => {
   // Codex on #369: the warm record holds Bea's take at .3 and Ava's post at
   // .6, both rebuilt from the thread read. A mention of Bea at .4 is
