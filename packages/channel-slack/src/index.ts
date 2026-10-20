@@ -7171,6 +7171,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connections.length = 0;
       approvalPosts.clear();
       threadAddressee.clear();
+      threadTrimmedUntil.clear();
       senderAddressees.clear();
       coldVerdicts.clear();
       botIdentities.clear();
