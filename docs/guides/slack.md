@@ -286,9 +286,11 @@ principal can still stop the agent by naming it (`@agent stop`), and
 nothing else they send is admitted.
 
 A turn the daemon picked back up after a restart is stopped the same way,
-and the thread reads "Stopped by @you." A scheduled firing runs in its own
-session, not the thread's, so a `stop` under a schedule's report does not
-reach it.
+and the thread reads "Stopped by @you." In the moment after a restart while
+the daemon is still loading that turn, nothing is running yet, so a `stop`
+sent then is handled as an ordinary message after the turn. A scheduled
+firing runs in its own session, not the thread's, so a `stop` under a
+schedule's report does not reach it.
 
 ## Sending an image
 

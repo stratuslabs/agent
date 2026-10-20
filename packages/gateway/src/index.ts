@@ -3890,22 +3890,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (stopping) {
       return;
     }
-    // Tracked like a dispatched turn's controller, and from the moment the
-    // recovery owns the session: a recovered turn that runs on past its
-    // approval is a turn like any other, so a restart's window has to be
-    // able to cut it short with the same reason (or it runs unseen to the
-    // second window and the restart reports undrained), and a stop for the
-    // session has to find it. Registered before the reads and the agent
-    // resolution below, not just before the runner: the channels are
-    // already up, and a stop sent while those awaits are pending would
-    // otherwise find nothing to abort and queue behind the very turn it
-    // meant to cancel. An abort that lands early reaches the runner as an
-    // already-aborted signal.
-    const controller = new AbortController();
-    trackTurn(sessionId, controller);
-    if (abortingWith !== undefined) {
-      controller.abort(new RunAbortedError(abortingWith));
-    }
     try {
       const session = await store.get(sessionId);
       if (!session) {
@@ -3974,6 +3958,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
       const recoveredConfig = await runtimeForAgent(source);
       const runner = runnerFor(recoveredConfig, source.definition.id);
+      // Tracked like a dispatched turn's controller: a recovered turn that
+      // runs on past its approval is a turn like any other, so a restart's
+      // window has to be able to cut it short with the same reason (or it
+      // runs unseen to the second window and the restart reports
+      // undrained), and a stop for the session has to find it. Only once
+      // the checkpoint has been read on this chain, right before the runner
+      // takes it: a stop counted then always ends in the turn's own
+      // outcome. A stop sent during the reads above finds nothing running
+      // and reaches the session as an ordinary message, queued behind it.
+      const controller = new AbortController();
+      if (record) {
+        trackTurn(sessionId, controller);
+        if (abortingWith !== undefined) {
+          controller.abort(new RunAbortedError(abortingWith));
+        }
+      }
       try {
         await runner.recoverPendingApproval(sessionId, {
           denyPending: expired,
@@ -3981,6 +3981,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           signal: controller.signal,
         });
       } finally {
+        untrackTurn(sessionId, controller);
         // A recovered firing's row outlived the process that would have
         // retired it, and the firing is over either way — a recovery that
         // failed has durably failed its session, which is as finished as
@@ -4002,8 +4003,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (after !== undefined && key !== undefined && after.status === 'pending_approval' && workItemState(after, key) === 'unfinished') {
         await failParked(after, ABANDONED_TURN_ERROR).catch(() => {});
       }
-    } finally {
-      untrackTurn(sessionId, controller);
     }
   };
 

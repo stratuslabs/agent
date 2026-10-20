@@ -1114,7 +1114,7 @@ test('a plain stop refuses by name too, and says it is stopping rather than rest
     (error: Error) => error instanceof GatewayStoppingError && !error.restarting && error.name === 'GatewayStoppingError',
   );
 });
-test('abortTurns reaches a recovered turn while its recovery is still resolving the agent', async () => {
+test('a recovered turn counts for abortTurns only once its runner has it, never during the recovery preflight', async () => {
   const home = await newHome();
   const stateDir = path.join(home, 'state');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
@@ -1122,7 +1122,7 @@ test('abortTurns reaches a recovered turn while its recovery is still resolving 
   // Parked long enough ago that its approval expired while the daemon was
   // down: recovery logs that, synchronously, just before it resolves the
   // agent, saves the session and builds the runtime. That log is the
-  // stop's way in to the window before the runner starts.
+  // stop's way in to the preflight, before the runner starts.
   const seed = new ShardedSessionStore({ stateDir });
   const parkedAt = new Date(Date.now() - 60_000).toISOString();
   await seed.create({
@@ -1151,6 +1151,8 @@ test('abortTurns reaches a recovered turn while its recovery is still resolving 
     })) as typeof fetch;
 
   let stoppedDuringPreflight: number | undefined;
+  let preflightReached!: () => void;
+  const preflight = new Promise<void>((resolve) => { preflightReached = resolve; });
   const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
   const gateway = createGateway({
     env,
@@ -1160,6 +1162,7 @@ test('abortTurns reaches a recovered turn while its recovery is still resolving 
     log: (line) => {
       if (line.includes('parked-session') && line.includes('outlived its window')) {
         stoppedDuringPreflight = gateway.abortTurns('parked-session', 'Stopped from Slack by U1');
+        preflightReached();
       }
     },
     warn: () => {},
@@ -1167,21 +1170,35 @@ test('abortTurns reaches a recovered turn while its recovery is still resolving 
   const failed = nextEvent(gateway.bus, 'session.failed');
   await gateway.start();
 
+  await preflight;
+  // Nothing is counted before the runner takes the checkpoint: a stop in
+  // the preflight is not consumed (it would get no outcome if the
+  // recovery then found nothing to run), so its caller handles it as an
+  // ordinary message.
+  assert.equal(stoppedDuringPreflight, 0);
+
+  // The recovery goes on: the denial is recorded and the turn reaches the
+  // provider, where a stop now finds it.
+  const deadline = Date.now() + 5_000;
+  while (providerCalls === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(providerCalls, 1);
+  assert.equal(gateway.abortTurns('parked-session', 'Stopped from Slack by U2'), 1);
+
   const event = await Promise.race([
     failed,
     new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
   ]);
-  assert.equal(stoppedDuringPreflight, 1);
   assert.notEqual(event, 'hung');
   if (event === 'hung') return;
   assert.equal(event.sessionId, 'parked-session');
-  assert.equal(event.error, 'Stopped from Slack by U1');
-  assert.equal(providerCalls, 0);
+  assert.equal(event.error, 'Stopped from Slack by U2');
   await gateway.stop();
 
   const after = new ShardedSessionStore({ stateDir });
   const session = await after.get('parked-session');
   after.close();
   assert.equal(session?.status, 'failed');
-  assert.equal(session?.lastError, 'Stopped from Slack by U1');
+  assert.equal(session?.lastError, 'Stopped from Slack by U2');
 });
