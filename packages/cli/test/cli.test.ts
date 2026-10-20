@@ -10668,11 +10668,13 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   await store.rememberOrigin('ava', { origin: 'https://app.example.com' });
   await store.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z', grantedBy: 'U1' });
   await store.rememberDestination('ava', { tool: 'message.read', destination: 'slack:C-ENG', grantedAt: '2026-10-12T01:00:00.000Z', grantedBy: 'U1' });
+  await store.rememberCommandName('ava', { command: 'grep', grantedAt: '2026-10-18T01:00:00.000Z', grantedBy: 'U1' });
 
   const listing = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'ava'], streams: listing.streams, env }), 0);
   assert.match(listing.output.stdout, /ava may do this unattended/);
   assert.match(listing.output.stdout, /web\.fetch \(stratus-plugin-web\) {2}\(granted 2026-09-07T01:00:00\.000Z by U1\)/);
+  assert.match(listing.output.stdout, /commands by name \(any arguments, inside its workspace\)\n {4}grep {2}\(granted 2026-10-18T01:00:00\.000Z by U1\)/);
   assert.match(listing.output.stdout, /commands\n {4}git push/);
   assert.match(listing.output.stdout, /sites\n {4}https:\/\/app\.example\.com/);
   assert.match(listing.output.stdout, /conversations\n {4}slack:C-ENG \(message\.read\) {2}\(granted 2026-10-12T01:00:00\.000Z by U1\)/);
@@ -10691,6 +10693,7 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
   assert.match(revoke.output.stdout, /Revoked web\.fetch for ava\./);
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--scope', 'git push'], streams: createStreams().streams, env }), 0);
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--scope', 'grep'], streams: createStreams().streams, env }), 0);
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--origin', 'https://app.example.com'], streams: createStreams().streams, env }), 0);
   assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--destination', 'slack:C-ENG'], streams: createStreams().streams, env }), 0);
 
@@ -10703,7 +10706,7 @@ test('stratus grants reads and revokes from the whitelist file when no daemon is
     directory: path.join(home, '.stratus', 'agents'),
     stateHome: path.join(home, '.stratus'),
   }).grantsFor('ava');
-  assert.deepEqual(after, { scopes: [], origins: [], tools: [], destinations: [] });
+  assert.deepEqual(after, { scopes: [], origins: [], tools: [], destinations: [], commands: [] });
 
   const empty = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'ava'], streams: empty.streams, env }), 0);

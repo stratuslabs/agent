@@ -2,7 +2,7 @@ import path from 'node:path';
 
 import type { ApprovalPolicy } from '@stratusagent/core';
 import { createFileLedger } from '@stratusagent/plugins';
-import { autonomyDirectory } from '../autonomy.ts';
+import { agentShellGrantRoot, autonomyDirectory } from '../autonomy.ts';
 import type {
   ApprovalTransport,
   GatewayChannelAdapter,
@@ -16,6 +16,7 @@ import {
   describeDestinationGrant,
   describeOriginScope,
   describeToolGrant,
+  type CommandNameGrant,
   type CommandScope,
   type OriginScope,
   type PermissionDecision,
@@ -582,6 +583,9 @@ const serveHeldHome = async (
       scopesFor: async (agentId: string) => [...operatorCommands.scopesFor(agentId), ...await grantStore.scopesFor(agentId)],
       remember: (agentId: string, scope: CommandScope) => grantStore.remember(agentId, scope),
     },
+    // Commands granted by name, kept inside the agent's workspace.
+    names: grantStore,
+    grantRootFor: (agentId: string) => agentShellGrantRoot(pluginsConfig, env, agentId),
     // Workspace autonomy: the agent's own workspace, for the agents config
     // turns it on for. Resolved per call so the answer always matches the
     // config this daemon started with.
@@ -595,6 +599,9 @@ const serveHeldHome = async (
       // session, is precisely the decision that must not be the one leaving
       // no trace.
       log(`${agentId}: "${describeCommandScope(scope)}" now runs without asking`);
+    },
+    onCommandNameRemembered: ({ agentId, grant }: { agentId: string; grant: CommandNameGrant }) => {
+      log(`${agentId}: "${grant.command}" now runs without asking inside its workspace`);
     },
   };
   // The origin-scope engine, whose grants live in the same file as the

@@ -292,10 +292,14 @@ pattern address). An
 unknown flag asks too. `rg` runs only with `--no-ignore` (or `-u`), because
 otherwise it reads ignore files outside the workspace: above it, in your
 home directory, and in a linked worktree's git directory.
-`grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH` or
-`GREP_OPTIONS` to a command, whatever its `env` or `passEnv` says, because
+`grep -rn` needs nothing extra. The shell never passes `RIPGREP_CONFIG_PATH`,
+`GREP_OPTIONS`, or `GZIP` to a command, whatever its `env` or `passEnv` says, because
 they add options the command line doesn't show. Nor are shell startup variables passed (`BASH_ENV`, `ENV`, `ZDOTDIR`,
 exported `BASH_FUNC_*` functions), since they run code before the command,
+or `CDPATH`, which sends a relative `cd` somewhere other than where the line
+is judged, or `BASHOPTS`, `SHELLOPTS`, and `POSIXLY_CORRECT`, which turn on
+shell options that change how the line reads (`cdable_vars` makes `cd HOME`
+follow `$HOME`). A bash `{name}>file` descriptor redirection asks too,
 and zsh, tcsh, csh, and fish are started without their user startup
 files (`-f`, or `fish --no-config`) for the same reason.
 Nor does `PATH` keep an
@@ -559,6 +563,7 @@ than scoping choices:
 stratus grants blair                                # everything blair may do unattended, every kind
 stratus grants revoke blair --tool fs.write           # a standing grant
 stratus grants revoke blair --scope "git push"        # a command scope, by the line the listing shows
+stratus grants revoke blair --scope grep              # a command granted by name
 stratus grants revoke blair --origin https://app.example.com
 stratus grants revoke blair --destination slack:C0123ABCD   # every tool granted on that conversation
 ```
