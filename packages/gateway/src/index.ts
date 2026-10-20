@@ -4985,6 +4985,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       try {
         await adapter.start(gateway);
+        // A shutdown that gave up waiting on this start has already stopped
+        // the channels it could see; one that comes up after that is
+        // stopped here, or it would stay connected beside the next daemon.
+        if (channelsClosed) {
+          try {
+            await adapter.stop();
+          } catch (stopError) {
+            warn(`channel ${adapter.name} started after the shutdown stopped the channels, and failed to stop: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+          }
+          return;
+        }
         startedChannels.push(adapter);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
@@ -5140,6 +5151,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const startedChannels: GatewayChannelAdapter[] = [];
+  /** Set once a shutdown has stopped the started channels; a start that finishes after it stops its own. */
+  let channelsClosed = false;
 
   /** Resolves with `true` when `work` settles before `ms` elapse. */
   const settlesWithin = (work: Promise<unknown>, ms: number): Promise<boolean> =>
@@ -5206,6 +5219,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     let channelsStopping: Promise<void> | undefined;
     const stopChannels = (): Promise<void> => {
       channelsStopping ??= (async () => {
+        channelsClosed = true;
         const stopping = [...startedChannels];
         startedChannels.length = 0;
         const stops = await Promise.allSettled(stopping.map((adapter) => adapter.stop()));

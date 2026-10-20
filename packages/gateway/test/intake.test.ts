@@ -371,6 +371,39 @@ test('a stop during a promotion starts no further channel, even one that would n
   assert.deepEqual(order, ['start first', 'stop first']);
 });
 
+test('a channel that finishes starting after the stop gave up waiting on it is stopped as soon as it is up', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const order: string[] = [];
+  let release: () => void = () => {};
+  const slowStart = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slow: GatewayChannelAdapter = {
+    name: 'slow',
+    async start() {
+      order.push('start slow');
+      await slowStart;
+      order.push('started slow');
+    },
+    async stop() {
+      order.push('stop slow');
+    },
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, held: true, channels: [slow], stopDrainTimeoutMs: 20, warn: () => {} });
+  await gateway.start();
+
+  const promoted = gateway.promote();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  // Both windows run out with the start still connecting.
+  await gateway.stop();
+  assert.deepEqual(order, ['start slow']);
+  release();
+  await assert.rejects(promoted, /stopping|restarting/);
+
+  assert.deepEqual(order, ['start slow', 'started slow', 'stop slow']);
+});
+
 test('onPromoted runs once after a promotion succeeds, and its failure does not undo it', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
