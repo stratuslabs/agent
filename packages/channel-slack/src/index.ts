@@ -107,6 +107,19 @@ const THREAD_SENDER_CAPACITY = 64;
  * socket stays behind for all of them.
  */
 const THREAD_HANDOVER_DEPTH = 32;
+
+/**
+ * How far past this host's clock at `start()` claims count as seen live
+ * (card 562). Slack stamps messages by its own clock, so a host clock
+ * behind Slack's would date a message sent just before the restart as
+ * after it, and a read stopping there would look complete. Reads for
+ * messages in this first stretch are treated as stopping short, which
+ * costs a thread read or two, never a wrong placement.
+ */
+const LIVE_FROM_MARGIN_MS = 60_000;
+
+/** `liveFrom` while `start()` runs: later than any message. */
+const NOT_LIVE_YET = '9999999999.999999';
 /**
  * How many agent mentions one thread admits in a row before a person has
  * to speak there again (card 513): enough for a question, an answer and a
@@ -578,7 +591,8 @@ export interface SlackAdapterOptions {
   /**
    * Test injection: the clock, in milliseconds, that an upload's place in
    * the thread is read from (`ReplyOutcome.spokeAt`) when the upload's
-   * answer carries no share ts. Defaults to `Date.now`.
+   * answer carries no share ts, and that dates `start()`, after which every
+   * claim in a thread is seen live. Defaults to `Date.now`.
    */
   now?: () => number;
   /**
@@ -3127,6 +3141,26 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const threadAddressee = new Map<string, Handover[]>();
   /**
+   * Per thread whose record has been cut in the middle (`trimHandovers`),
+   * the first claim kept after the cut. Who held the thread between its
+   * first claim and that one is no longer known here (card 559): a message
+   * from then is left to the sessions and a thread read, rather than
+   * placed by the first claim, or the latest take, that outlived the cut.
+   * Goes with the thread's record.
+   */
+  const threadTrimmedUntil = new Map<string, string>();
+  /**
+   * Per thread the record was warmed from a thread read (#369), the last
+   * message a read covered. A read stops at the message it places, so one
+   * for a message from before this process started (delivered late, or a
+   * replay after a restart) leaves out every take between that message and
+   * the start (card 562). `liveFrom` is when every socket was up, plus a
+   * margin for clock skew: claims since were seen live. Goes with the
+   * thread's record.
+   */
+  const threadReadUntil = new Map<string, string>();
+  let liveFrom: string | undefined;
+  /**
    * Threads whose owner this process can name (card 508): `true` for one
    * whose first message it saw, so the first claim in `threadAddressee` is
    * the owner, or the owner itself when the thread read named it after a
@@ -5389,7 +5423,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Dropping that one would hand the thread back to its owner after enough
    * mentions of a third agent, while the judge that took it still answers.
    */
-  const trimHandovers = (handovers: Handover[]): Handover[] => {
+  const trimHandovers = (key: string, handovers: Handover[]): Handover[] => {
     if (handovers.length <= THREAD_HANDOVER_DEPTH) {
       return handovers;
     }
@@ -5405,6 +5439,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // The kept take sits on top of the full recent tail, one past the depth,
     // so `holderAt` still sees every recent claim it saw before.
     const tail = handovers.slice(tailFrom);
+    // The cut only ever moves later: a claim inserted into the gap since
+    // is dropped again, and the gap it fell in stays unknown.
+    const until = (tail[0] as Handover).ts;
+    const before = threadTrimmedUntil.get(key);
+    if (before === undefined || before < until) {
+      threadTrimmedUntil.set(key, until);
+    }
     return latestTake > 0 && latestTake < tailFrom
       ? [first, handovers[latestTake] as Handover, ...tail]
       : [first, ...tail];
@@ -5458,11 +5499,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Re-inserted rather than mutated in place: a Map iterates in insertion
     // order, which is what makes the first key the one to evict.
     threadAddressee.delete(key);
-    threadAddressee.set(key, trimHandovers(handovers));
+    threadAddressee.set(key, trimHandovers(key, handovers));
     if (threadAddressee.size > THREAD_ADDRESSEE_CAPACITY) {
       const oldest = threadAddressee.keys().next();
       if (!oldest.done) {
         threadAddressee.delete(oldest.value);
+        threadTrimmedUntil.delete(oldest.value);
+        threadReadUntil.delete(oldest.value);
         // The owner goes with the record of who took the thread since: an
         // owner kept alone would stand in for a judge's takeover it no
         // longer knows of, where the thread read would see it.
@@ -5486,9 +5529,51 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const stopHolderAt = (key: string, ts: string): string | undefined => holderAt(key, ts);
 
+  /** Whether the record of thread `key` lost who held it at `ts` to a cut. */
+  const inTrimmedGap = (key: string, handovers: Handover[], ts: string): boolean => {
+    const until = threadTrimmedUntil.get(key);
+    const first = handovers[0];
+    return until !== undefined && first !== undefined && first.ts < ts && ts < until;
+  };
+
+  /**
+   * Records that a thread read of `key` covered every message before `ts`.
+   * Bounded on its own, since a read that found nobody's post leaves an
+   * owner and no record (Codex 4321103567). A thread whose mark is evicted
+   * loses its record and owner with it, so it is read afresh instead of
+   * placed from claims the read may have stopped short of.
+   */
+  const noteReadUntil = (key: string, ts: string): void => {
+    const until = threadReadUntil.get(key);
+    threadReadUntil.delete(key);
+    threadReadUntil.set(key, until !== undefined && compareSlackTs(ts, until) < 0 ? until : ts);
+    if (threadReadUntil.size > THREAD_ADDRESSEE_CAPACITY) {
+      const oldest = threadReadUntil.keys().next();
+      if (!oldest.done) {
+        threadReadUntil.delete(oldest.value);
+        threadAddressee.delete(oldest.value);
+        threadTrimmedUntil.delete(oldest.value);
+        threadOrigins.delete(oldest.value);
+      }
+    }
+  };
+
+  /**
+   * Where the record of thread `key` stops knowing every take, for a
+   * message at `ts` after what a thread read covered (card 562): a claim
+   * older than the returned point may have been taken from since, unseen.
+   * Undefined when the record is complete as far as `ts`.
+   */
+  const unreadBefore = (key: string, ts: string): string | undefined => {
+    const until = threadReadUntil.get(key);
+    return until !== undefined && liveFrom !== undefined && compareSlackTs(until, liveFrom) < 0 && compareSlackTs(ts, until) > 0
+      ? liveFrom
+      : undefined;
+  };
+
   const holderAt = (key: string, ts: string): string | undefined => {
     const handovers = threadAddressee.get(key);
-    if (!handovers) {
+    if (!handovers || inTrimmedGap(key, handovers, ts)) {
       return undefined;
     }
     // The newest entry at or before `ts` answers, and only if this process
@@ -5496,10 +5581,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // asked since may be a mention it cannot see, so it leaves the question
     // to a fresh read. And it is newer than every live entry before it, so
     // skipping it for one of those would answer with a claim it superseded.
+    const unread = unreadBefore(key, ts);
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
       if (handover && handover.ts <= ts) {
-        return handover.cold === true ? undefined : handover.agentId;
+        return handover.cold === true || (unread !== undefined && compareSlackTs(handover.ts, unread) < 0) ? undefined : handover.agentId;
       }
     }
     return undefined;
@@ -5522,13 +5608,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const ownerAt = (key: string, ts: string): string | undefined => {
     const origin = threadOrigins.get(key);
     const handovers = threadAddressee.get(key) ?? [];
+    if (inTrimmedGap(key, handovers, ts)) {
+      return undefined;
+    }
+    // A take from before the stretch the read left out may have been
+    // superseded there: the question goes to a fresh read (card 562).
+    const unread = unreadBefore(key, ts);
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
       if (handover && handover.ts <= ts && (handover.takes === true || (index === 0 && typeof origin !== 'string'))) {
-        return handover.agentId;
+        return unread !== undefined && compareSlackTs(handover.ts, unread) < 0 ? undefined : handover.agentId;
       }
     }
-    return typeof origin === 'string' ? origin : undefined;
+    return typeof origin === 'string' && unread === undefined ? origin : undefined;
   };
 
   /**
@@ -6081,6 +6173,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       for (const post of takeovers) {
         rememberAddressee(key, post.agentId, post.ts, true, true);
       }
+      noteReadUntil(key, ts);
     };
     if (taken && taken.agentId !== ownerId && (ownerId !== undefined || taken.at > read.foreign)) {
       warm();
@@ -7292,6 +7385,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     async start(gateway) {
       gatewayRef = gateway;
+      // Nothing counts as seen live until every socket is up (Codex
+      // 4321128637): a message sent while the sockets are still coming up
+      // reaches none of them, so a read stopping before it stops short.
+      liveFrom = NOT_LIVE_YET;
       unsubscribe = gateway.bus.subscribe((event) => {
         // Approval traffic is not part of a reply: it gets its own message
         // with its own lifetime, and routing it through the running turn's
@@ -7509,9 +7606,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
+      const liveMs = now() + LIVE_FROM_MARGIN_MS;
+      liveFrom = `${Math.floor(liveMs / 1000)}.${String((liveMs % 1000) * 1000).padStart(6, '0')}`;
       // Once every app is connected, so a kept message is handled with the
       // whole roster's identities known, as a live one would be. Only for the
       // apps that did connect: the rest stay kept for a start where they do.
+      // A kept message is from before the restart, so its thread read stops
+      // short of the start, as `liveFrom` already says (card 562).
       track(replayKept(kept, new Map([...listeners].filter(([agentId]) => connections.some((connection) => connection.config.agentId === agentId)))).finally(releaseAllConversations));
     },
 
@@ -7544,6 +7645,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connections.length = 0;
       approvalPosts.clear();
       threadAddressee.clear();
+      threadTrimmedUntil.clear();
+      threadReadUntil.clear();
       senderAddressees.clear();
       coldVerdicts.clear();
       botIdentities.clear();
