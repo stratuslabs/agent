@@ -579,6 +579,14 @@ export interface IntakeState {
   message?: string;
   /** When the pause began (ISO 8601). Present only while paused. */
   since?: string;
+  /**
+   * Whether this pause is the one the daemon started in because its intake
+   * file could not be read. Reported while paused: true only for that pause,
+   * false once a pause written since has replaced it, so `stratus doctor`
+   * can tell a startup warning about the file from a pause someone chose.
+   * Never written to the file.
+   */
+  unreadable?: boolean;
 }
 
 /** What a paused daemon says when nobody gave it a sentence of its own. */
@@ -645,7 +653,7 @@ const readIntakeState = async (env: StateEnvironment, warn: (line: string) => vo
       return { paused: false };
     }
     warn(`intake: ${file} could not be read (${(error as Error).message}); starting paused. Resume intake to clear it.`);
-    return { paused: true, since: new Date().toISOString() };
+    return { paused: true, since: new Date().toISOString(), unreadable: true };
   }
   try {
     const parsed = JSON.parse(raw) as Partial<IntakeState> | null;
@@ -654,7 +662,7 @@ const readIntakeState = async (env: StateEnvironment, warn: (line: string) => vo
     // rule as an unreadable file applies.
     if (typeof parsed !== 'object' || parsed === null || parsed.paused !== true) {
       warn(`intake: ${file} does not hold a pause record; starting paused. Resume intake to clear it.`);
-      return { paused: true, since: new Date().toISOString() };
+      return { paused: true, since: new Date().toISOString(), unreadable: true };
     }
     return {
       paused: true,
@@ -663,7 +671,7 @@ const readIntakeState = async (env: StateEnvironment, warn: (line: string) => vo
     };
   } catch {
     warn(`intake: ${file} is not valid JSON; starting paused. Resume intake to clear it.`);
-    return { paused: true, since: new Date().toISOString() };
+    return { paused: true, since: new Date().toISOString(), unreadable: true };
   }
 };
 
@@ -3401,6 +3409,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // Open until `startServing` reads what the last process left, which it
   // does before any channel or the scheduler can deliver work.
   let intakeState: IntakeState = { paused: false };
+  // A copy for callers, saying while paused whether this is the pause an
+  // unreadable file started (see `IntakeState.unreadable`).
+  const intakeView = (): IntakeState => (intakeState.paused
+    ? { ...intakeState, unreadable: intakeState.unreadable === true }
+    : { ...intakeState });
   let heldState = options.held === true;
   /** What a held start left for `promote()`: the channels it did not start, and the sweeps it did not run. */
   let deferredStart: { adapters: GatewayChannelAdapter[]; orphaned: ReadonlySet<string>; abandoned: string[] } | undefined;
@@ -5761,7 +5774,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     resolveApproval,
 
     intake() {
-      return { ...intakeState };
+      return intakeView();
     },
 
     async pauseIntake(input = {}) {
@@ -5787,7 +5800,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         await writeIntakeState(env, next);
         intakeState = next;
         log('intake paused: new work will be refused until it resumes');
-        return { ...intakeState };
+        return intakeView();
       });
     },
 
@@ -5804,7 +5817,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           log('intake resumed');
         }
         intakeState = { paused: false };
-        return { ...intakeState };
+        return intakeView();
       });
     },
     provideCredential,

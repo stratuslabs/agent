@@ -109,6 +109,13 @@ test('an unreadable intake file starts paused, and says why', async () => {
   try {
     assert.equal(gateway.intake().paused, true);
     assert.ok(warnings.some((line) => line.includes(intakeStatePath(env))), warnings.join('\n'));
+    // Said while this pause lasts, so doctor can tell it from a chosen one.
+    assert.equal(gateway.intake().unreadable, true);
+    // A pause written since replaces it, and the file it wrote is good.
+    assert.equal((await gateway.pauseIntake({ message: 'Paused for maintenance.' })).unreadable, false);
+    assert.equal(gateway.intake().unreadable, false);
+    assert.equal(JSON.parse(await readFile(intakeStatePath(env), 'utf8')).unreadable, undefined);
+    assert.equal((await gateway.resumeIntake()).unreadable, undefined);
   } finally {
     await gateway.stop();
   }

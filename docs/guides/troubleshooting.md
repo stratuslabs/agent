@@ -81,9 +81,9 @@ restart`. So doctor also asks the running daemon
 it met while starting. Each warning it logged then (a plugin that did not
 load, nobody able to approve, and so on) is a problem, except an intake file
 it could not read: that one started the daemon paused, and doctor reports it
-only while the daemon still says intake is paused, since resuming intake
-(`PUT /api/v1/intake` with `{"paused": false}`) repairs it without a
-restart. A config file that has changed, appeared or gone since the daemon
+only while that pause is still on, since resuming intake (`PUT
+/api/v1/intake` with `{"paused": false}`) repairs it without a restart, and
+so does a later pause, which writes a good file. A config file that has changed, appeared or gone since the daemon
 started is a problem too, including a global config behind a project one,
 since a restart is what applies the daemon-level settings in it. No daemon found is not a problem, since `stratus run`
 needs none; doctor says `none found (no control API published)` because a

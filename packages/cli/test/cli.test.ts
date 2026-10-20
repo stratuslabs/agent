@@ -5487,6 +5487,19 @@ test('doctor against a real daemon: an intake warning is a problem while paused 
     assert.equal(afterCode, 0, after.output.stdout);
     assert.doesNotMatch(after.output.stdout, /intake paused|intake\.json/);
     assert.match(after.output.stdout, /No problems found\./);
+
+    // Paused again on purpose: that pause wrote a good file, so the
+    // warning about the broken one stays resolved.
+    const repaused = await fetch(`${url.replace(/\/+$/, '')}/api/v1/intake`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ paused: true }),
+    });
+    assert.equal(repaused.status, 200, await repaused.text());
+    const later = createStreams();
+    const laterCode = await runCli({ argv: ['doctor'], streams: later.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    assert.equal(laterCode, 0, later.output.stdout);
+    assert.doesNotMatch(later.output.stdout, /intake paused|intake\.json/);
   } finally {
     controller.abort();
     await serving;
@@ -5504,6 +5517,18 @@ test('doctor keeps a startup warning that is not about intake after intake resum
   assert.equal(exitCode, 1, output.stdout);
   assert.match(output.stdout, /ava: soul could not be loaded/);
   assert.doesNotMatch(output.stdout, /intake\.json/);
+});
+
+test('doctor keeps an intake warning from a paused daemon that does not say which pause it is', async () => {
+  const { exitCode, output } = await doctorAgainstDaemon((configPath, sha256) => ({
+    intake: { paused: true, since: '2026-10-12T08:00:00.000Z' },
+    startup: {
+      warnings: ['intake: /h/.stratus/intake.json is not valid JSON; starting paused. Resume intake to clear it.'],
+      configs: [{ path: configPath, sha256 }],
+    },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.match(output.stdout, /intake\.json is not valid JSON/);
 });
 
 test('doctor keeps an intake warning from a daemon whose health does not say intake', async () => {

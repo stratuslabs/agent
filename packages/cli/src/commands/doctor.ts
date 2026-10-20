@@ -220,7 +220,7 @@ interface DaemonHealth {
   version?: string;
   startedAt?: string;
   startup?: { warnings?: unknown; configs?: unknown };
-  intake?: { paused?: unknown };
+  intake?: { paused?: unknown; unreadable?: unknown };
 }
 
 /**
@@ -297,12 +297,15 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   const warnings = Array.isArray(startup?.warnings)
     ? startup.warnings.filter((line): line is string => typeof line === 'string')
     : [];
-  // Only a health answer that says intake is open shows the pause lifted;
-  // an older daemon that reports no intake state keeps the warning.
-  const intakeOpen = health.intake?.paused === false;
+  // The pause an unreadable file started is over once intake was resumed,
+  // or paused again (a pause writes a good file), even if a later pause is
+  // still on. A daemon that reports no intake state, or does not say which
+  // pause this is, gives no evidence either way, so the warning stays.
+  const intake = health.intake;
+  const startupPauseOver = intake?.paused === false || (intake?.paused === true && intake.unreadable === false);
   for (const line of warnings) {
     if (line.startsWith(INTAKE_WARNING_PREFIX)) {
-      if (!intakeOpen) {
+      if (!startupPauseOver) {
         problems.push(
           `The running daemon started with intake paused and is still refusing new work: ${line.slice(INTAKE_WARNING_PREFIX.length)} `
           + 'Resume it with PUT /api/v1/intake {"paused": false}; a restart reads the same file and pauses again.',
