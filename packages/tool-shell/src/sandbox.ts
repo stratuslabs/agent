@@ -138,6 +138,8 @@ const RELOCATED_CREDENTIAL_STORES: ReadonlyArray<readonly [string, readonly stri
   ['GLAB_CONFIG_DIR', ['']],
   ['HUB_CONFIG', ['']],
   ['OP_CONFIG_DIR', ['']],
+  // The daemon's own control-API token, when a mounted secret supplies it.
+  ['STRATUS_GATEWAY_TOKEN_FILE', ['']],
 ];
 
 /** XDG base directories, and the prefix of the default home entries each one moves. */

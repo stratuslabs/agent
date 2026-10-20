@@ -29,7 +29,10 @@ Linux). It can write only the agent's workspace, temp, and package caches.
 It can't read the Stratus home outside that workspace, other agents' souls
 and workspaces in the visible agents folder, or your credential files
 (`~/.ssh`, cloud CLIs, `gh`, `~/.npmrc`, the macOS keychain), and it can't
-connect to a container runtime's socket. The network stays on. Where the
+connect to a container runtime's socket. The network stays on, so on a
+cloud VM a command can still reach the instance metadata service
+(`169.254.169.254`) and any credentials its role hands out; block that at
+the host if the role matters. Where the
 host can't build a sandbox, commands are refused with the reason
 (`sandbox: "required"`, the default). `sandbox: "auto"` runs them unconfined
 there instead, and `sandbox: "off"` turns the sandbox off. The full list and

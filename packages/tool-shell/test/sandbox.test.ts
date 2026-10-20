@@ -628,3 +628,10 @@ test('a moved credential location that is relative, or holds the home or the wor
   }, home, workspace);
   assert.deepEqual(found, ['/etc/kube']);
 });
+
+test('the gateway token a mounted secret supplies is denied where it is mounted', () => {
+  // Codex P1 4330123135: the host protects only ~/.stratus/gateway-token,
+  // and the documented Docker setup reads it from /run/secrets instead.
+  const found = relocatedCredentials({ STRATUS_GATEWAY_TOKEN_FILE: '/run/secrets/stratus-gateway-token' }, '/home/ava', '/home/ava/.stratus/agents/ava/workspace');
+  assert.deepEqual(found, ['/run/secrets/stratus-gateway-token']);
+});
