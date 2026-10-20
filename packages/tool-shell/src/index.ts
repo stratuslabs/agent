@@ -36,7 +36,9 @@ import {
   credentialAgentEndpoints,
   DEFAULT_DENIED_HOME_PATHS,
   DEFAULT_DENIED_SOCKETS,
+  parseHomeMode,
   parseSandboxMode,
+  DEFAULT_VISIBLE_HOME_PATHS,
   planSandbox,
   spellings,
   stratusHomesFor,
@@ -51,6 +53,8 @@ export {
   DEFAULT_DENIED_HOME_PATHS,
   DEFAULT_DENIED_SOCKETS,
   DEFAULT_WRITABLE_HOME_PATHS,
+  DEFAULT_VISIBLE_HOME_PATHS,
+  parseHomeMode,
   bwrapArgs,
   darwinProfile,
   planSandbox,
@@ -271,6 +275,7 @@ const settingsFor = (
     maxOutputBytes: asNumber(resolved.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES),
     shell: typeof resolved.shell === 'string' && resolved.shell.length > 0 ? resolved.shell : '/bin/sh',
     sandbox: parseSandboxMode(resolved.sandbox),
+    home: parseHomeMode(resolved.home),
     // The agent's own workspace, whatever cwd says: it is what the sandbox
     // leaves writable inside a Stratus home it otherwise hides.
     workspace: workspaceResolver(workspaces, workspaceRoot)?.(session.agent.id),
@@ -281,6 +286,7 @@ const settingsFor = (
     workspaceRoot,
     deniedPaths: asStrings(resolved.deniedPaths, []).map((entry) => expandHome(entry, home)),
     writablePaths: asStrings(resolved.writablePaths, []).map((entry) => expandHome(entry, home)),
+    readablePaths: asStrings(resolved.readablePaths, []).map((entry) => expandHome(entry, home)),
   };
 };
 
@@ -355,6 +361,16 @@ const sandboxed = async (
       ...settings.writablePaths,
     ],
     tmp: os.tmpdir(),
+    ...(settings.home === 'hidden' ? {
+      home: {
+        path: userHome,
+        visible: [...new Set([
+          ...DEFAULT_VISIBLE_HOME_PATHS.map((entry) => path.join(userHome, entry)),
+          ...writableHomePathsFor(platform).map((entry) => path.join(userHome, entry)),
+          ...settings.readablePaths,
+        ])],
+      },
+    } : {}),
   };
   // bwrap binds only what exists, under a read-only root, so a cache
   // missing now could never be created by the command. macOS's profile

@@ -109,7 +109,17 @@ and your credentials, whatever the command says:
   temp (on Linux a private `/tmp`, and a private one over the daemon's
   `TMPDIR` too when that is elsewhere), and package-manager caches (`~/.npm`, `~/.cache`, `~/Library/Caches`,
   pnpm, bun, yarn).
-- **Readable:** the rest of the system, so toolchains work as usual.
+- **Readable:** the rest of the system outside your home, so system
+  toolchains work as usual, and in your home only the tools and config a
+  command needs: git config (`~/.gitconfig`, `~/.config/git`), version
+  managers and language toolchains (`~/.nvm`, `~/.volta`, `~/.fnm`,
+  `~/.bun`, `~/.deno`, `~/.rustup`, `~/.cargo`, `~/.pyenv`, `~/.rbenv`,
+  `~/.rye`, `~/.asdf`, `~/.sdkman`, `~/.gradle`, `~/.m2`, `~/.gem`, `~/go`,
+  `~/.nix-profile`, `~/.local/bin`, `~/.local/lib`, mise, uv, pnpm), plus
+  `readablePaths`.
+- **Hidden:** the rest of your home (documents, other projects, shell
+  history, browser and app data), and any socket under it. Set
+  `home: "visible"` to make it readable again, apart from the paths below.
 - **Not readable or writable:** the Stratus home (`~/.stratus`, or
   `STRATUS_HOME`) apart from this agent's own workspace, which covers
   credentials, config, souls, sessions, and other agents' workspaces, each
@@ -162,9 +172,11 @@ git can find its repository), but nothing can be read from inside them.
 | --- | --- | --- |
 | `sandbox` | `required` | `required`: refuse every command when no sandbox can start (no `bwrap`, or a container that forbids user namespaces), with the reason. A host wired by hand with no workspace and no `cwd` has nothing to confine commands to, so `required` refuses there too. `auto`: run unconfined there instead, and log why, once. `off`: run with the daemon user's full access. |
 | `deniedPaths` | none | More directories or files to hide, added to the list above, including ones inside the workspace (a repository's `.env`). A leading `~` is your home directory. |
+| `home` | `hidden` | `hidden`: only the toolchain paths above and `readablePaths` are readable in your home. `visible`: all of it is, apart from the denied paths. |
+| `readablePaths` | none | More paths in your home a command may read (`~/projects`). Denied paths inside them stay hidden. |
 | `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). On Linux, these and the default caches are created before the command if missing, since nothing under the read-only root can be. |
 
-All three can be set per agent under `agents`.
+All of these can be set per agent under `agents`.
 
 A CLI that reads its login from a hidden path (`gh` from `~/.config/gh` or
 the keychain, `fly` from `~/.fly`) can't authenticate inside the sandbox.

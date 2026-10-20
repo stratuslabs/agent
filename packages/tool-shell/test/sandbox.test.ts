@@ -12,6 +12,7 @@ import {
   credentialAgentEndpoints,
   bwrapArgs,
   createShellTool,
+  DEFAULT_VISIBLE_HOME_PATHS,
   darwinProfile,
   planSandbox as realPlanSandbox,
   resetSandboxWarning,
@@ -33,8 +34,8 @@ const session = (agentId = 'ava'): Session => ({
  * A user home holding a Stratus home with two agents and the usual
  * credential files, laid out the way the daemon lays it out.
  */
-const fixtureHome = async () => {
-  const userHome = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-sandbox-')));
+const fixtureHome = async (root = os.tmpdir()) => {
+  const userHome = await realpath(await mkdtemp(path.join(root, 'stratus-sandbox-')));
   const stratusHome = path.join(userHome, '.stratus');
   const workspace = path.join(stratusHome, 'agents', 'ava', 'workspace');
   const otherWorkspace = path.join(stratusHome, 'agents', 'bea', 'workspace');
@@ -117,6 +118,8 @@ const ESCAPES: Array<[string, (f: Awaited<ReturnType<typeof fixtureHome>>) => st
   ["another agent's soul by its visible path", (f) => `cat ${path.join(f.visible, 'carl', 'soul.md')}`],
   // Codex P1 4309587628.
   ['a token inside the writable cache', (f) => `cat ${path.join(f.userHome, '.cache', 'huggingface', 'token')}`],
+  // open-by-default.md Phase 2: the rest of the home is hidden by default.
+  ['a file elsewhere in the home', (f) => `cat ${path.join(f.userHome, 'outside.txt')}`],
 ];
 
 for (const [what, command] of ESCAPES) {
@@ -562,6 +565,134 @@ test('stored tokens of common developer CLIs are denied', async () => {
   for (const entry of ['credentials.toml', 'credentials']) {
     assert.ok(seen!.denied.includes(path.join(cargoHome, entry)), `$CARGO_HOME/${entry}`);
   }
+});
+
+// ---- the hidden home ----
+
+const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>) => {
+  let seen: Parameters<typeof planSandbox>[0] | undefined;
+  const result = await run(config, fixture, 'true', { planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
+  return { seen, result };
+};
+
+test('the home is hidden by default except toolchains, caches, and readablePaths', async () => {
+  const fixture = await fixtureHome();
+  const { seen } = await policyOf({ readablePaths: ['~/projects'] }, fixture);
+  assert.equal(seen!.home?.path, fixture.userHome);
+  for (const entry of ['.gitconfig', '.cargo', '.rustup', '.nvm', '.local/bin', '.npm']) {
+    assert.ok(seen!.home!.visible.includes(path.join(fixture.userHome, entry)), entry);
+  }
+  assert.ok(seen!.home!.visible.includes(path.join(fixture.userHome, 'projects')));
+  assert.ok(!seen!.home!.visible.some((entry) => entry === fixture.userHome), 'never the whole home');
+  // Credentials inside a visible toolchain stay in the denied list.
+  assert.ok(seen!.denied.includes(path.join(fixture.userHome, '.cargo', 'credentials.toml')));
+  assert.ok(DEFAULT_VISIBLE_HOME_PATHS.every((entry) => !path.isAbsolute(entry)));
+});
+
+test('home: "visible" leaves the rest of the home readable, and an unknown value is refused', async () => {
+  const fixture = await fixtureHome();
+  const { seen } = await policyOf({ home: 'visible' }, fixture);
+  assert.equal(seen!.home, undefined);
+  const bad = await run({ home: 'open' }, fixture, 'true', { warn: () => {} });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error ?? '', /home must be "hidden" or "visible"; got "open"/);
+});
+
+test('the macOS profile hides the home, gives toolchains back, then denies credentials inside them', () => {
+  const profile = darwinProfile({
+    workspace: '/nonexistent/h/.stratus/agents/ava/workspace',
+    denied: ['/nonexistent/h/.stratus', '/nonexistent/h/.cargo/credentials.toml'],
+    writable: ['/nonexistent/h/.npm'],
+    home: { path: '/nonexistent/h', visible: ['/nonexistent/h/.cargo', '/nonexistent/h/.npm'] },
+  });
+  const hide = profile.indexOf('(deny file-read-data file-read-xattr (subpath "/nonexistent/h"))');
+  const socket = profile.indexOf('(deny network-outbound (remote unix-socket (subpath "/nonexistent/h")))');
+  const back = profile.indexOf('(allow file-read-data file-read-xattr (subpath "/nonexistent/h/.cargo") (subpath "/nonexistent/h/.npm"))');
+  const creds = profile.indexOf('(subpath "/nonexistent/h/.cargo/credentials.toml")');
+  const writes = profile.indexOf('(deny file-write* (subpath "/"))');
+  assert.ok(writes < hide && hide < back && socket < back && back < creds, profile);
+});
+
+test('bwrap covers the home with a tmpfs and binds toolchains back read-only before the writable caches', async () => {
+  const fixture = await fixtureHome();
+  const cargo = path.join(fixture.userHome, '.cargo');
+  const npm = path.join(fixture.userHome, '.npm');
+  await mkdir(cargo, { recursive: true });
+  await mkdir(npm, { recursive: true });
+  const joined = bwrapArgs({
+    workspace: fixture.workspace,
+    denied: [fixture.stratusHome],
+    writable: [npm],
+    home: { path: fixture.userHome, visible: [cargo, npm, path.join(fixture.userHome, '.missing')] },
+  }, '/bin/sh', []).join(' ');
+  const cover = joined.indexOf(`--tmpfs ${fixture.userHome} `);
+  const back = joined.indexOf(`--ro-bind ${cargo} ${cargo}`);
+  const write = joined.indexOf(`--bind ${npm} ${npm}`);
+  const hide = joined.indexOf(`--tmpfs ${fixture.stratusHome}`);
+  assert.ok(cover > 0 && cover < back && back < write && write < hide, joined);
+  assert.ok(!joined.includes('.missing'));
+});
+
+test('a toolchain under the hidden home stays readable, and a credential inside it does not', { skip: !sandboxedHere && NEEDS }, async () => {
+  const fixture = await fixtureHome();
+  await mkdir(path.join(fixture.userHome, '.cargo', 'bin'), { recursive: true });
+  await writeFile(path.join(fixture.userHome, '.cargo', 'bin', 'tool'), 'cargo-tool');
+  await writeFile(path.join(fixture.userHome, '.cargo', 'credentials.toml'), 'cargo-secret');
+  await writeFile(path.join(fixture.userHome, '.gitconfig'), 'gitconfig-ok');
+  const ok = await run({}, fixture, `cat ${path.join(fixture.userHome, '.gitconfig')} ${path.join(fixture.userHome, '.cargo', 'bin', 'tool')}`);
+  assert.equal(ok.ok, true, JSON.stringify(ok.output));
+  assert.equal(output(ok).stdout, 'gitconfig-okcargo-tool');
+  const creds = await run({}, fixture, `cat ${path.join(fixture.userHome, '.cargo', 'credentials.toml')}`);
+  assert.equal(creds.ok, false);
+  assert.doesNotMatch(output(creds).stdout, /cargo-secret/);
+});
+
+test('home: "visible" and readablePaths open the home again, and credentials stay hidden', { skip: !sandboxedHere && NEEDS }, async (t) => {
+  // Outside /tmp: bwrap gives every command an empty /tmp, which would hide a
+  // fixture home there whatever home says (os.tmpdir() is /tmp on Linux CI).
+  const root = await mkdtemp(path.join(process.cwd(), '.sandbox-home-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = await fixtureHome(root);
+  const outside = path.join(fixture.userHome, 'outside.txt');
+  // Here, unlike under /tmp, it is the hidden home that keeps it unreadable.
+  const hidden = await run({}, fixture, `cat ${outside}`);
+  assert.equal(hidden.ok, false, JSON.stringify(hidden.output));
+  const visible = await run({ home: 'visible' }, fixture, `cat ${outside}`);
+  assert.equal(output(visible).stdout, 'outside', JSON.stringify(visible.output));
+  await mkdir(path.join(fixture.userHome, 'projects'), { recursive: true });
+  await writeFile(path.join(fixture.userHome, 'projects', 'a.txt'), 'project-a');
+  const listed = await run({ readablePaths: ['~/projects'] }, fixture, `cat ${path.join(fixture.userHome, 'projects', 'a.txt')}`);
+  assert.equal(output(listed).stdout, 'project-a', JSON.stringify(listed.output));
+  const key = await run({ home: 'visible' }, fixture, `cat ${path.join(fixture.userHome, '.ssh', 'id_ed25519')}`);
+  assert.equal(key.ok, false);
+});
+
+test('a configured cwd under the hidden home stays readable', { skip: !sandboxedHere && NEEDS }, async () => {
+  // Codex P1 4316843343: on macOS the home deny covered a configured cwd
+  // under the home, so commands started there but could not read it.
+  const fixture = await fixtureHome();
+  const project = path.join(fixture.userHome, 'work', 'foo');
+  await mkdir(project, { recursive: true });
+  await writeFile(path.join(project, 'src.txt'), 'project-src');
+  const result = await run({ cwd: project }, fixture, 'cat src.txt && ls');
+  assert.equal(result.ok, true, JSON.stringify(result.output));
+  assert.match(output(result).stdout, /^project-src/);
+  // The rest of the home stays hidden.
+  const outside = await run({ cwd: project }, fixture, `cat ${path.join(fixture.userHome, 'outside.txt')}`);
+  assert.equal(outside.ok, false);
+});
+
+test('the macOS profile gives a configured cwd back for reading after hiding the home', () => {
+  const profile = darwinProfile({
+    workspace: '/nonexistent/h/.stratus/agents/ava/workspace',
+    cwd: '/nonexistent/h/work/foo',
+    denied: ['/nonexistent/h/.stratus'],
+    writable: [],
+    home: { path: '/nonexistent/h', visible: [] },
+  });
+  const hide = profile.indexOf('(deny file-read-data file-read-xattr (subpath "/nonexistent/h"))');
+  const back = profile.indexOf('(allow file-read-data file-read-xattr (subpath "/nonexistent/h/work/foo"))');
+  assert.ok(hide >= 0 && back > hide, profile);
 });
 
 test('a credential store an environment variable moves is denied where it was moved', async () => {
