@@ -267,6 +267,24 @@ test('a workspace that is a symlink is bound from its real path under both names
   assert.ok(joined.includes(`--bind ${real} ${real}`));
 });
 
+test('a denied path reached through a symlinked directory is covered at its real path only', async () => {
+  // CI with bwrap: /var/run is a link to /run, and bwrap resolves an absolute
+  // link against the host root while it builds the new one, so a mount on
+  // /var/run/docker.sock failed every command. The real path covers both names.
+  const fixture = await fixtureHome();
+  const real = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-real-run-')));
+  await writeFile(path.join(real, 'docker.sock'), '');
+  await mkdir(path.join(real, 'cache'));
+  const alias = path.join(fixture.userHome, 'var-run');
+  await symlink(real, alias);
+  const args = bwrapArgs({ workspace: fixture.workspace, denied: [path.join(alias, 'docker.sock'), path.join(real, 'docker.sock')], writable: [path.join(alias, 'cache')] }, '/bin/sh', []);
+  const joined = args.join(' ');
+  assert.ok(joined.includes(`--ro-bind /dev/null ${path.join(real, 'docker.sock')}`));
+  assert.ok(joined.includes(`--bind ${path.join(real, 'cache')} ${path.join(real, 'cache')}`));
+  assert.ok(!joined.includes(alias), joined);
+  assert.equal(args.filter((arg) => arg === path.join(real, 'docker.sock')).length, 1);
+});
+
 test('a sandboxed command cannot connect to a denied control socket, and an unconfined one can', { skip: !sandboxedHere && NEEDS }, async () => {
   // Codex P1 4309344608: a read-only view of a socket still accepts a
   // connection, and a container runtime's socket is the whole host.

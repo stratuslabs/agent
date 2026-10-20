@@ -404,21 +404,32 @@ const privateTmpFor = (policy: SandboxPolicy): string | undefined => {
   return held.some((dir) => isWithin(tmp, dir)) ? undefined : tmp;
 };
 
+/**
+ * An existing path as bwrap must mount it: at its real path, and nowhere
+ * else. bwrap resolves an absolute symlink against the host root while it
+ * builds the new one, so a mount through a linked directory (`/var/run` is
+ * `/run` on most distributions) fails before the command starts. The alias
+ * resolves to the real path inside the sandbox, so one mount covers both
+ * names. A path that does not exist has nothing to cover.
+ */
+const realOnly = (target: string): string[] => {
+  try {
+    return [realpathSync(target)];
+  } catch {
+    return [];
+  }
+};
+
 export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: string[]): string[] => {
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
   const tmp = privateTmpFor(policy);
   if (tmp) {
     args.push('--tmpfs', tmp);
   }
-  for (const dir of new Set([...policy.writable, ...(policy.cwd ? [policy.cwd] : [])])) {
-    if (existsSync(dir)) {
-      args.push('--bind', dir, dir);
-    }
+  for (const dir of new Set([...policy.writable, ...(policy.cwd ? [policy.cwd] : [])].flatMap(realOnly))) {
+    args.push('--bind', dir, dir);
   }
-  for (const denied of new Set(policy.denied.flatMap(spellings))) {
-    if (!existsSync(denied)) {
-      continue;
-    }
+  for (const denied of new Set(policy.denied.flatMap(realOnly))) {
     if (statSync(denied).isDirectory()) {
       args.push('--tmpfs', denied);
     } else {
@@ -430,10 +441,8 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
   for (const spelling of workspaceSpellings) {
     args.push('--bind', workspaceSource, spelling);
   }
-  for (const denied of deniedInside(policy)) {
-    if (existsSync(denied)) {
-      args.push(statSync(denied).isDirectory() ? '--tmpfs' : '--ro-bind', ...(statSync(denied).isDirectory() ? [denied] : ['/dev/null', denied]));
-    }
+  for (const denied of new Set(deniedInside(policy).flatMap(realOnly))) {
+    args.push(statSync(denied).isDirectory() ? '--tmpfs' : '--ro-bind', ...(statSync(denied).isDirectory() ? [denied] : ['/dev/null', denied]));
   }
   args.push('--unshare-pid', '--unshare-ipc', '--die-with-parent', '--new-session');
   if (policy.cwd) {
