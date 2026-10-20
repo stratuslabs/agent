@@ -34,8 +34,8 @@ const session = (agentId = 'ava'): Session => ({
  * A user home holding a Stratus home with two agents and the usual
  * credential files, laid out the way the daemon lays it out.
  */
-const fixtureHome = async () => {
-  const userHome = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-sandbox-')));
+const fixtureHome = async (root = os.tmpdir()) => {
+  const userHome = await realpath(await mkdtemp(path.join(root, 'stratus-sandbox-')));
   const stratusHome = path.join(userHome, '.stratus');
   const workspace = path.join(stratusHome, 'agents', 'ava', 'workspace');
   const otherWorkspace = path.join(stratusHome, 'agents', 'bea', 'workspace');
@@ -647,8 +647,12 @@ test('a toolchain under the hidden home stays readable, and a credential inside 
   assert.doesNotMatch(output(creds).stdout, /cargo-secret/);
 });
 
-test('home: "visible" and readablePaths open the home again, and credentials stay hidden', { skip: !sandboxedHere && NEEDS }, async () => {
-  const fixture = await fixtureHome();
+test('home: "visible" and readablePaths open the home again, and credentials stay hidden', { skip: !sandboxedHere && NEEDS }, async (t) => {
+  // Outside /tmp: bwrap gives every command an empty /tmp, which would hide a
+  // fixture home there whatever home says (os.tmpdir() is /tmp on Linux CI).
+  const root = await mkdtemp(path.join(process.cwd(), '.sandbox-home-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = await fixtureHome(root);
   const outside = path.join(fixture.userHome, 'outside.txt');
   const visible = await run({ home: 'visible' }, fixture, `cat ${outside}`);
   assert.equal(output(visible).stdout, 'outside', JSON.stringify(visible.output));
