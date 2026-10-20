@@ -7406,11 +7406,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           deferredText = (failure as Error).message;
         }
       }
-      const { spoke, spokeAt } = noteReplayOutcome(connection, event.channel, event.ts, renderer.stoppedBy !== undefined
+      // A refusal (paused, or a daemon on its way down) ran no turn, so its
+      // notice is never what answers a replayed message: that one stays
+      // kept, whether or not keeping it again just worked.
+      const refused = pausedReply || stoppingRefusal;
+      const outcome = renderer.stoppedBy !== undefined
         ? await renderer.stopped(renderer.stoppedBy)
-        : pausedReply || stoppingRefusal
+        : refused
         ? await renderer.finalize(renderer.lazy ? '' : deferredText ?? (failure as Error).message)
-        : await renderer.fail(failure instanceof Error ? failure.message : String(failure)));
+        : await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+      const { spoke, spokeAt } = refused && renderer.stoppedBy === undefined
+        ? outcome
+        : noteReplayOutcome(connection, event.channel, event.ts, outcome);
       if (spoke && threadKey !== undefined) {
         // A file it posted before breaking has still spoken, by the same
         // rule as a reply that landed.

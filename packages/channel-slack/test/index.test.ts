@@ -13926,6 +13926,42 @@ test('a message kept in one workspace does not replace one kept in another with 
   assert.deepEqual(kept.map((entry) => `${entry.team}:${entry.ts}`).sort(), ['T-OLD:620.1', 'T1:620.1']);
 });
 
+for (const [label, refuse] of [
+  ['refused by a stopping daemon that could not keep it again', () => stoppingError(true)],
+  ['refused because intake is paused', () => {
+    const error = new Error("I'm paused: this workspace's usage limit is reached.");
+    error.name = 'IntakePausedError';
+    return error;
+  }],
+] as const) {
+  test(`a replayed message ${label} stays kept: the refusal is not its answer`, async () => {
+    const file = await keptFile();
+    await writeFile(file, JSON.stringify([
+      { agentId: 'ava', team: 'T1', channel: 'C1', ts: '630.1', user: 'U-DYLAN', keptAt: Date.now() },
+    ]));
+    // Writing the list fails (as on a full disk); removing it would not.
+    await mkdir(`${file}.${process.pid}.tmp`);
+    const gateway = createStubGateway(() => {
+      throw refuse();
+    });
+    const web = webWithHistory('B-AVA', [{ ts: '630.1', user: 'U-DYLAN', text: '<@B-AVA> still there?' }]);
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+      editIntervalMs: 0,
+      createSocketClient: () => createFakeSocket(),
+      createWebClient: () => web,
+      pendingIntakePath: file,
+      log: () => {},
+      warn: () => {},
+    });
+    await adapter.start(gateway);
+    await adapter.stop();
+    assert.ok(web.posts.length > 0, 'the refusal was posted');
+    const kept = (await readKept(file)) as Array<Record<string, unknown>> | undefined;
+    assert.deepEqual(kept?.map((entry) => entry.ts), ['630.1']);
+  });
+}
+
 test('a judged reply in the agent\'s own thread during a restart is kept for the next daemon to judge, with nothing posted', async () => {
   const file = await keptFile();
   const socket = createFakeSocket();
