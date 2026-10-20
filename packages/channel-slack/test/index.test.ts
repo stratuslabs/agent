@@ -12446,6 +12446,42 @@ test('after a restart, a late message from when a judge held the thread is still
   );
 });
 
+test('after a restart, a host clock behind Slack\'s does not make a read that stopped before the restart look complete', async () => {
+  // Codex 4321075233 on #385: the host's clock trails Slack's by 30 s, so
+  // by the host's clock the daemon started at 621020 while Slack's said
+  // 621050. Ava's take 3 at 621035 and the late message at 621027 are both
+  // from before the restart, but dated after the host's start, which made
+  // the read for the late message look complete and gave the reply to Bea.
+  const ts = (n: number): string => `${621_000 + n}.000000`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+    { ts: ts(15), user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'take 1' },
+    { ts: ts(20), user: 'U-DYLAN', text: 'step 2' },
+    { ts: ts(25), user: 'B-BEA', bot_id: 'B-BEA-APP', text: 'take 2' },
+    { ts: ts(30), user: 'U-DYLAN', text: 'step 3' },
+    { ts: ts(35), user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'take 3' },
+  ];
+  const { webs, gateway, adapter, all } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(35))], ['slack:bea:T1:C1:' + ts(0), Number(ts(25))]],
+    { bea: 'judge', now: () => 621_020_000 },
+  );
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `${621_500 + (seq += 1)}.000000`;
+  }
+  await adapter.start(gateway);
+  await all(channelMessage({ text: 'late one', ts: ts(27), thread: ts(0) }));
+  await all(channelMessage({ text: 'and now', ts: ts(100), thread: ts(0) }));
+  await adapter.stop();
+  const seen = JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage]));
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('and now')).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]),
+    [['ava', true]],
+    seen,
+  );
+});
+
 test('after a restart, a read for a message sent since the start warms the record fully, and the next reply needs no read', async () => {
   // Card 562's guard is only for a read that stopped before the start: a
   // read for a live message saw every take before it, so the record places
@@ -12462,7 +12498,8 @@ test('after a restart, a read for a message sent since the start warms the recor
   const { webs, gateway, adapter, all } = twoAgentsOverThread(
     thread,
     [['slack:ava:T1:C1:' + ts(0), Number(ts(35))], ['slack:bea:T1:C1:' + ts(0), Number(ts(25))]],
-    { bea: 'judge', now: () => 620_050 },
+    // Counted live from 620.050: the start plus the 60 s clock margin.
+    { bea: 'judge', now: () => 560_050 },
   );
   let seq = 0;
   let reads = 0;
@@ -12657,8 +12694,9 @@ test('two cold reads of the same thread at once do not count its takes twice aga
   const { sockets, webs, gateway, adapter } = twoAgentsOverThread(
     thread,
     [['slack:ava:T1:C1:' + ts(0), Number(ts(175))], ['slack:bea:T1:C1:' + ts(0), Number(ts(165))]],
-    // Started before the messages it reads for: live, not late.
-    { bea: 'judge', now: () => 617_000 },
+    // Started before the messages it reads for: live, not late (counted
+    // live from 617.000, the start plus the 60 s clock margin).
+    { bea: 'judge', now: () => 557_000 },
   );
   let seq = 0;
   let reads = 0;

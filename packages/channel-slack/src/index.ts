@@ -107,6 +107,16 @@ const THREAD_SENDER_CAPACITY = 64;
  * socket stays behind for all of them.
  */
 const THREAD_HANDOVER_DEPTH = 32;
+
+/**
+ * How far past this host's clock at `start()` claims count as seen live
+ * (card 562). Slack stamps messages by its own clock, so a host clock
+ * behind Slack's would date a message sent just before the restart as
+ * after it, and a read stopping there would look complete. Reads for
+ * messages in this first stretch are treated as stopping short, which
+ * costs a thread read or two, never a wrong placement.
+ */
+const LIVE_FROM_MARGIN_MS = 60_000;
 /**
  * How many agent mentions one thread admits in a row before a person has
  * to speak there again (card 513): enough for a question, an answer and a
@@ -6990,7 +7000,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     async start(gateway) {
       gatewayRef = gateway;
-      const startedMs = now();
+      const startedMs = now() + LIVE_FROM_MARGIN_MS;
       liveFrom = `${Math.floor(startedMs / 1000)}.${String((startedMs % 1000) * 1000).padStart(6, '0')}`;
       unsubscribe = gateway.bus.subscribe((event) => {
         // Approval traffic is not part of a reply: it gets its own message
