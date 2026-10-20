@@ -134,8 +134,9 @@ digits to jump, Esc to go back.
   asks for their names, then each value with input hidden, and writes them
   on save. Setup never edits the plugin's config — its README says what
   goes there. See [Extending](../guides/extending.md#channels).
-- **Approvals** — what happens to a gated call with nobody watching.
-  `headless` refuses it; **ask in Slack** parks the turn and asks an
+- **Approvals** — what happens to a call that needs approval with nobody
+  watching: a dangerous one under the default open posture, any uncovered
+  gated one under `guarded`. `headless` refuses it; **ask in Slack** parks the turn and asks an
   approver. Both halves are set on one screen because they are one decision:
   `remote` with nobody listed ends in a denial too, and setup says which
   kind on the screen rather than leaving it to be discovered from a refused

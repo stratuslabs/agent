@@ -2217,7 +2217,7 @@ export const runSetup = async (
       // wrapped row corrupts every redraw, because the rewind counts
       // options rather than rendered rows. Being static is not being short.
       const options = [
-        fitMenuRow(`Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`, reserved),
+        fitMenuRow(`Headless${mode === 'headless' ? ' (current)' : ''}          refuse calls that need a person's approval`, reserved),
         fitMenuRow(`Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`, reserved),
       ];
       if (mode === 'remote') {

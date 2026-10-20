@@ -17,6 +17,9 @@ import {
  */
 export type ExternalContentApprovals = 'label' | 'gate';
 
+/** Whether gated tools ask. See `AgentApprovalConfig.posture`. */
+export type ApprovalPosture = 'open' | 'guarded';
+
 /**
  * Who may approve one agent's gated calls, where they are asked, and what
  * reading outside content costs its grants. Approver ids are
@@ -44,6 +47,17 @@ export interface AgentApprovalConfig {
    * nothing by keeping its grants.
    */
   externalContent?: ExternalContentApprovals;
+  /**
+   * Whether gated tools ask at all. `open` (the default): a gated call runs
+   * without asking, in interactive, scheduled, and delegated turns alike;
+   * who may talk to the agent (`principals`) and where its commands run
+   * (`tool-shell`'s sandbox) are the boundary instead. `dangerous` tools
+   * still ask every time, and `externalContent: "gate"` still sends a
+   * conversation that read the web back to asking. `guarded`: every gated
+   * call asks (or, under `headless`, is refused) unless a scope or grant
+   * covers it, which is the behavior before postures existed.
+   */
+  posture?: ApprovalPosture;
   /**
    * How much an agent may do in its own workspace without asking.
    * `workspace`: commands that only read, and only inside the agent's
@@ -104,8 +118,10 @@ export const MAX_APPROVAL_TIMEOUT_MS = 2_147_483_647;
 /** The `approvals` block of ~/.stratus/config.json. */
 export interface ApprovalsConfig extends AgentApprovalConfig {
   /**
-   * How the daemon reaches a person. `headless` refuses every gated call;
-   * `remote` parks the turn and asks through a channel. Default `headless`
+   * How the daemon reaches a person for a call that needs approval (a
+   * dangerous one under posture `open`, any uncovered gated one under
+   * `guarded`). `headless` refuses it; `remote` parks the turn and asks
+   * through a channel. Default `headless`
    * — an unconfigured daemon must not start waiting on humans who were
    * never told they were on the hook.
    */

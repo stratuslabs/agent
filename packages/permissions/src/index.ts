@@ -355,6 +355,14 @@ export interface PermissionPolicyOptions {
    * Everything else asks, and `headless` refuses.
    */
   gateExternalContent?: (agentId: string) => boolean;
+  /**
+   * Whether this agent's gated calls run without asking: the operator's
+   * `approvals.posture: "open"`, read per call like the gate above. A
+   * `dangerous` call still asks, and a conversation the gate above has
+   * closed (it read external content with `gate` on) goes back to the
+   * scope-and-grant path. Omitted, or answering false, nothing changes.
+   */
+  openFor?: (agentId: string) => boolean;
 }
 
 export interface ToolGrantOptions {
@@ -829,7 +837,7 @@ const commandNames = (analysis: CommandAnalysis | undefined): string | undefined
 };
 
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
-  const { mode, ask, request, onDecision, commands, destinations, origins, grants, gateExternalContent } = options;
+  const { mode, ask, request, onDecision, commands, destinations, origins, grants, gateExternalContent, openFor } = options;
   if (mode === 'interactive' && !ask) {
     throw new Error('interactive permission mode needs an `ask` function to reach a human.');
   }
@@ -907,6 +915,13 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
 
       if (risk === 'safe') {
         return report(context, true, `${call.toolName} is safe and runs without approval`);
+      }
+
+      if (risk === 'gated' && openFor?.(session.agent.id) === true) {
+        const closedByContent = sessionTrustOf(session) === 'external' && gateExternalContent?.(session.agent.id) === true;
+        if (!closedByContent) {
+          return report(context, true, `${call.toolName} runs without asking (approvals.posture is open)`);
+        }
       }
 
       // What this *invocation* would run, for a tool whose danger lives in

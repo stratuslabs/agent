@@ -149,7 +149,9 @@ const newHome = async (): Promise<Home> => {
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'isolation',
     // Remote, so a gated call parks and the control API answers it.
-    approvals: { mode: 'remote' },
+    // Guarded: these tests are about the asking path, which the open
+    // posture (the default) skips for gated calls.
+    approvals: { mode: 'remote', posture: 'guarded' },
     plugins: { [plugin]: { enabled: true } },
   }));
   for (const [id, name] of [['ava', 'Ava'], ['bea', 'Bea']]) {
@@ -297,6 +299,33 @@ test('a session one agent holds cannot be written to as another agent', async (t
   assert.equal(after.agent.id, 'ava');
   assert.equal(after.messages.filter((message: { role: string }) => message.role === 'user').length, 1);
   assert.equal((await seenBy(seen)).length, before, 'nothing reached the provider for the refused message');
+});
+
+test('with the default open posture a gated call runs without parking, before and after a restart', async (t) => {
+  const home = await newHome();
+  // A config that says nothing about posture, as every config before it
+  // existed: the upgrade case.
+  const configPath = path.join(home.home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.approvals = { mode: 'remote' };
+  await writeFile(configPath, JSON.stringify(config));
+  let daemon = await startDaemon(home.home);
+  t.after(async () => {
+    await stop(daemon);
+    await rm(home.home, { recursive: true, force: true });
+  });
+
+  await send(daemon, 'a-1', 'ava', 'please mark');
+  await completed(daemon, 'a-1', 1);
+  assert.deepEqual(await runsOf(home.runs), ['mark a-1']);
+  assert.deepEqual(await pending(daemon), []);
+
+  await stop(daemon);
+  daemon = await startDaemon(home.home);
+  await send(daemon, 'a-2', 'ava', 'please mark');
+  await completed(daemon, 'a-2', 1);
+  assert.deepEqual(await runsOf(home.runs), ['mark a-1', 'mark a-2']);
+  assert.deepEqual(await pending(daemon), []);
 });
 
 test('an approval answers only the call it was asked for, and Always allow stays with one agent', async (t) => {

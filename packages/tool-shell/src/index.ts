@@ -298,10 +298,16 @@ const sandboxed = async (
   if (settings.sandbox === 'off') {
     return unconfined;
   }
+  // With no workspace from the host and no configured cwd there is nothing
+  // bounded to confine commands to. The process directory is not one: it
+  // can be a home, `/`, or a repository whose node_modules/.bin is on PATH.
   const workspace = settings.workspace ?? settings.cwd;
   if (workspace === undefined) {
     if (settings.sandbox === 'required') {
-      throw new Error('shell.run is set to sandbox: "required", but this agent has no workspace to confine commands to.');
+      throw new Error(
+        'shell.run refused: commands must run sandboxed (sandbox: "required"), but this agent has no workspace to confine commands to. '
+        + 'Set cwd for @stratusagent/tool-shell to the directory commands may write, or set sandbox to "auto" or "off" to run them unconfined.',
+      );
     }
     warnUnconfined(options, 'this agent has no workspace to confine commands to');
     return unconfined;
