@@ -1143,6 +1143,18 @@ export interface Gateway {
    * belongs to this turn and no other.
    */
   activeTurnId(sessionId: string): string | undefined;
+  /**
+   * Aborts every turn running on a session right now, one recovered after a
+   * restart included, the way the watchdog and a restart's window do: each
+   * fails with `reason`, its session saved. Returns how many turns are on
+   * the session, each now stopping: one aborted earlier that has not
+   * settled yet still counts (it is not aborted again), so 0 means nothing
+   * is running there at all. An idle or unknown session is 0 and nothing
+   * happens. A message queued on the session but not started is left to
+   * its caller's own signal. The caller decides who may stop; this asks
+   * nothing.
+   */
+  abortTurns(sessionId: string, reason: string): number;
   /** Every call parked on a human right now, oldest first. */
   pendingApprovals(): PendingApproval[];
   /**
@@ -3204,19 +3216,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // No watchdog and nobody outside to cancel it — but still a turn an
       // announced restart must be able to cut short at the window.
       const idle = new AbortController();
-      turnControllers.add(idle);
+      trackTurn(sessionId, idle);
       if (abortingWith !== undefined) {
         idle.abort(new RunAbortedError(abortingWith));
       }
       try {
         return await run(idle.signal);
       } finally {
-        turnControllers.delete(idle);
+        untrackTurn(sessionId, idle);
       }
     }
 
     const controller = new AbortController();
-    turnControllers.add(controller);
+    trackTurn(sessionId, controller);
     if (abortingWith !== undefined) {
       controller.abort(new RunAbortedError(abortingWith));
     }
@@ -3383,7 +3395,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       unsubscribeObserver();
       unsubscribeDrain();
       suspendWatchdog.delete(sessionId);
-      turnControllers.delete(controller);
+      untrackTurn(sessionId, controller);
       external?.removeEventListener('abort', onExternalAbort);
     }
   };
@@ -3428,9 +3440,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * window ends by aborting these — the same signal the watchdog fires —
    * so a turn that outlives the window fails as aborted, its session
    * saved, instead of being cut off by a process exit and found as
-   * abandoned by the next one.
+   * abandoned by the next one. Keyed by session, so a stop for one
+   * conversation (`abortTurns`) reaches every turn running there, a
+   * recovered one included, and nothing else.
    */
-  const turnControllers = new Set<AbortController>();
+  const turnControllers = new Map<string, Set<AbortController>>();
+  const trackTurn = (sessionId: string, controller: AbortController): void => {
+    const running = turnControllers.get(sessionId);
+    if (running) {
+      running.add(controller);
+    } else {
+      turnControllers.set(sessionId, new Set([controller]));
+    }
+  };
+  const untrackTurn = (sessionId: string, controller: AbortController): void => {
+    const running = turnControllers.get(sessionId);
+    running?.delete(controller);
+    if (running?.size === 0) {
+      turnControllers.delete(sessionId);
+    }
+  };
   /**
    * Set once a restart's or a stop's window has closed and the turns in it
    * were aborted, to the reason they were aborted with. A turn that starts
@@ -3925,15 +3954,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
       const recoveredConfig = await runtimeForAgent(source);
       const runner = runnerFor(recoveredConfig, source.definition.id);
-      // Tracked like a dispatched turn's controller: a recovered turn
-      // that runs on past its approval is a turn like any other, and a
-      // restart's window has to be able to cut it short with the same
-      // reason — or it runs unseen to the second window and the restart
-      // reports undrained for a turn it could have finished cleanly.
+      // Tracked like a dispatched turn's controller: a recovered turn that
+      // runs on past its approval is a turn like any other, so a restart's
+      // window has to be able to cut it short with the same reason (or it
+      // runs unseen to the second window and the restart reports
+      // undrained), and a stop for the session has to find it. Only once
+      // the checkpoint has been read on this chain, right before the runner
+      // takes it: a stop counted then always ends in the turn's own
+      // outcome. A stop sent during the reads above finds nothing running
+      // and reaches the session as an ordinary message, queued behind it.
       const controller = new AbortController();
-      turnControllers.add(controller);
-      if (abortingWith !== undefined) {
-        controller.abort(new RunAbortedError(abortingWith));
+      if (record) {
+        trackTurn(sessionId, controller);
+        if (abortingWith !== undefined) {
+          controller.abort(new RunAbortedError(abortingWith));
+        }
       }
       try {
         await runner.recoverPendingApproval(sessionId, {
@@ -3942,7 +3977,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           signal: controller.signal,
         });
       } finally {
-        turnControllers.delete(controller);
+        untrackTurn(sessionId, controller);
         // A recovered firing's row outlived the process that would have
         // retired it, and the firing is over either way — a recovery that
         // failed has durably failed its session, which is as finished as
@@ -5283,8 +5318,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Before the loop, so a turn queued behind one aborted here, which
       // starts as soon as that one settles, is aborted the same way.
       abortingWith = kind === 'stop' ? STOPPING_TURN_ERROR : RESTARTING_TURN_ERROR;
-      for (const controller of turnControllers) {
-        controller.abort(new RunAbortedError(abortingWith));
+      for (const running of turnControllers.values()) {
+        for (const controller of running) {
+          controller.abort(new RunAbortedError(abortingWith));
+        }
       }
       drained = await settlesWithin(drain, remaining());
       if (!drained) {
@@ -5610,6 +5647,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     activeTurnId(sessionId) {
       return activeTurns.get(sessionId);
+    },
+
+    abortTurns(sessionId, reason) {
+      const running = turnControllers.get(sessionId) ?? new Set<AbortController>();
+      for (const controller of running) {
+        if (!controller.signal.aborted) {
+          controller.abort(new RunAbortedError(reason));
+        }
+      }
+      return running.size;
     },
 
     pendingApprovals() {

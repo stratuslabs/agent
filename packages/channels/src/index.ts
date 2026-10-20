@@ -218,6 +218,16 @@ export interface GatewayLike {
    */
   activeTurnId?(sessionId: string): string | undefined;
   /**
+   * Aborts every turn running on a session, including one the host
+   * recovered after a restart that no adapter started, and returns how many
+   * turns are on the session, each now stopping (one already aborted that
+   * has not settled still counts; 0 means nothing is running there).
+   * Optional: a host without it leaves
+   * an adapter able to stop only the turns it dispatched with its own
+   * signal. The adapter decides who may stop; the host asks nothing.
+   */
+  abortTurns?(sessionId: string, reason: string): number;
+  /**
    * Where a durable session came from, or undefined if there is no such
    * session.
    *

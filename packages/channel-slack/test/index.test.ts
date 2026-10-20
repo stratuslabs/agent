@@ -11218,6 +11218,158 @@ test('a stop with nothing running is an ordinary message to the agent', async ()
   await adapter.stop();
 });
 
+test("an approver's stop reaches a turn this process never started, such as one recovered after a restart", async () => {
+  // No renderer here, and nothing in intake: the only running turn is one
+  // the gateway recovered, which only the gateway can abort.
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  const aborts: Array<{ sessionId: string; reason: string }> = [];
+  gateway.abortTurns = (sessionId, reason) => {
+    aborts.push({ sessionId, reason });
+    return 1;
+  };
+  gateway.sessionRouting = async (sessionId) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' } }
+      : undefined;
+  const { socket, web, adapter, logs } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop'));
+  await socket.settled();
+
+  assert.equal(gateway.dispatches.length, 0, 'the stop is not a turn');
+  assert.deepEqual(aborts, [{ sessionId: 'slack:ava:T1:C1:100.1', reason: 'Stopped from Slack by U-DYLAN' }]);
+  assert.ok(logs.some((line) => line.includes('U-DYLAN stopped 1 turn(s) of ava')));
+
+  // The aborted turn fails the way the gateway fails it, and the thread
+  // reads as a stop, not as something going wrong.
+  await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:100.1', error: 'Stopped from Slack by U-DYLAN' });
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Stopped by <@U-DYLAN>.', '100.1']]);
+});
+
+test('a recovered judging turn that had said nothing still reads as stopped when an approver stops it', async () => {
+  // An unaddressed turn that saved no reply fails silently on its own; a
+  // stop is someone asking, so the thread says who stopped it.
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 1;
+  gateway.sessionRouting = async (sessionId) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? {
+          agentId: 'ava',
+          unaddressed: true,
+          metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' },
+        }
+      : undefined;
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop'));
+  await socket.settled();
+  await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:100.1', error: 'Stopped from Slack by U-DYLAN' });
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Stopped by <@U-DYLAN>.', '100.1']]);
+});
+
+test('a second stop while a stopped recovered turn is still winding down is a stop, not a new message', async () => {
+  // The gateway still counts a stopped turn until it settles, so the second
+  // stop finds it too and must not queue a turn that answers "stop".
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 1;
+  gateway.sessionRouting = async (sessionId) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' } }
+      : undefined;
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.3', thread_ts: '100.1' }));
+  await socket.settled();
+  assert.equal(gateway.dispatches.length, 0, 'neither stop is a turn');
+
+  await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:100.1', error: 'Stopped from Slack by U-DYLAN' });
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Stopped by <@U-DYLAN>.', '100.1']]);
+});
+
+test('once a stopped recovered turn has ended without an outcome, the next stop is an ordinary message', async () => {
+  // Recovery can end with nothing to report (its checkpoint was gone, or a
+  // queued message finished the session first). Whether anything is still
+  // running is the gateway's to say; the adapter keeps no record of it.
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  let running = 1;
+  gateway.abortTurns = () => running;
+  gateway.sessionRouting = async (sessionId) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' } }
+      : undefined;
+  const { socket, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.settled();
+  assert.equal(gateway.dispatches.length, 0);
+
+  running = 0;
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.3', thread_ts: '100.1' }));
+  await socket.settled();
+  assert.equal(gateway.dispatches.length, 1, 'nothing running: the stop is a message to the agent');
+  await adapter.stop();
+});
+
+test('a later failure on a session whose stopped turn never reported reads as the failure it is', async () => {
+  // Who stopped a turn comes from the error the gateway failed it with, not
+  // from a note left by the stop that an outcome may never come to clear.
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  let running = 1;
+  gateway.abortTurns = () => running;
+  gateway.sessionRouting = async (sessionId) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' } }
+      : undefined;
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.settled();
+  running = 0;
+
+  await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:100.1', error: 'provider unavailable' });
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Something went wrong: provider unavailable', '100.1']]);
+});
+
+test('a stop from someone who is not an approver never asks the gateway to abort anything', async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  let asked = 0;
+  gateway.abortTurns = () => {
+    asked += 1;
+    return 1;
+  };
+  const { socket, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { user: 'U-OTHER' }));
+  await socket.settled();
+
+  assert.equal(asked, 0);
+  assert.equal(gateway.dispatches.length, 1, 'an ordinary message to the agent');
+  await adapter.stop();
+});
+
+test('a stop the gateway finds nothing running for is an ordinary message to the agent', async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  const { socket, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop'));
+  await socket.settled();
+  assert.equal(gateway.dispatches.length, 1);
+  await adapter.stop();
+});
+
 test('in the default final reply mode a stopped turn posts who stopped it in the thread', async () => {
   const { gateway, signals } = stoppableGateway();
   const { socket, web, adapter } = stopAdapter(['U-DYLAN'], 'final');
