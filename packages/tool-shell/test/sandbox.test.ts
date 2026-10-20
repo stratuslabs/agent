@@ -793,3 +793,47 @@ test('a hidden home reached through a symlinked directory is covered and given b
   assert.ok(joined.includes(`--ro-bind ${path.join(real, '.local', 'rustup')} ${path.join(real, '.local', 'rustup')}`), joined);
   assert.ok(!joined.includes(alias), joined);
 });
+
+test('readablePaths inside the Stratus home are readable, and what is denied around and inside them is not', { skip: !sandboxedHere && NEEDS }, async (t) => {
+  // An agent's own integration config (gitconfig, gh) that the host keeps
+  // under ~/.stratus/integrations/<id>: 0.13.0 denied it with the rest of
+  // the Stratus home, so git failed in every sandboxed command.
+  const root = await mkdtemp(path.join(process.cwd(), '.sandbox-integrations-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = await fixtureHome(root);
+  const integration = path.join(fixture.stratusHome, 'integrations', 'ava');
+  await mkdir(integration, { recursive: true });
+  await writeFile(path.join(integration, 'gitconfig'), '[user]\n\tname = ava\n');
+  await writeFile(path.join(integration, 'private.key'), 'integration-secret');
+  const config = { readablePaths: ['~/.stratus/integrations/ava'], deniedPaths: ['~/.stratus/integrations/ava/private.key'] };
+  const read = await run(config, fixture, `cat ${path.join(integration, 'gitconfig')}`);
+  assert.match(output(read).stdout, /name = ava/, JSON.stringify(read.output));
+  for (const target of [path.join(fixture.stratusHome, 'credentials.json'), path.join(fixture.otherWorkspace, 'notes.md'), path.join(integration, 'private.key')]) {
+    const denied = await run(config, fixture, `cat ${target}`);
+    assert.equal(denied.ok, false, `${target}: ${JSON.stringify(denied.output)}`);
+  }
+  const write = await run(config, fixture, `echo x > ${path.join(integration, 'gitconfig')}`);
+  assert.equal(write.ok, false, JSON.stringify(write.output));
+  const workspace = await run(config, fixture, 'echo ok > note.txt && cat note.txt');
+  assert.equal(output(workspace).stdout.trim(), 'ok', JSON.stringify(workspace.output));
+});
+
+test('readable paths come after the denials, and denials inside them come after that', async () => {
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-readable-')));
+  const stratus = path.join(home, '.stratus');
+  const workspace = path.join(stratus, 'agents', 'ava', 'workspace');
+  const integration = path.join(stratus, 'integrations', 'ava');
+  const secret = path.join(integration, 'gh');
+  await mkdir(workspace, { recursive: true });
+  await mkdir(secret, { recursive: true });
+  const policy = { workspace, denied: [stratus, secret], writable: [], readable: [integration] };
+  const profile = darwinProfile(policy);
+  const allow = profile.indexOf(`(allow file-read-data file-read-xattr (subpath "${integration}"))`);
+  assert.ok(allow > profile.indexOf(`(subpath "${stratus}")`), profile);
+  assert.ok(profile.lastIndexOf(`(subpath "${secret}")`) > allow, profile);
+  const args = bwrapArgs(policy, '/bin/sh', []).join(' ');
+  const bound = args.indexOf(`--ro-bind ${integration} ${integration}`);
+  assert.ok(bound > args.indexOf(`--tmpfs ${stratus} `), args);
+  assert.ok(bound < args.indexOf(`--bind ${workspace} ${workspace}`), args);
+  assert.ok(args.lastIndexOf(`--tmpfs ${secret}`) > bound, args);
+});
