@@ -12492,6 +12492,57 @@ test('after a restart, a late message in a thread with more takes than the recor
   );
 });
 
+test('after a restart, a thread with more takes than the record keeps stays on thread reads after late messages are placed', async () => {
+  // Codex 4320763062 on #384: skipping the warm-up alone left the record
+  // to the messages the cold reads placed. Two late ones resolved newest
+  // first put the older one first, and with no owner noted that first
+  // claim read as the owner, so a later untagged reply went to Ava though
+  // Bea's take 36 holds the thread. The thread stays marked as one the
+  // record cannot place, and the reply is read like the others.
+  const ts = (n: number): string => `615.${String(n).padStart(6, '0')}`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+  ];
+  for (let k = 1; k <= 36; k += 1) {
+    if (k > 1) {
+      thread.push({ ts: ts(k * 10), user: 'U-DYLAN', text: `step ${k}` });
+    }
+    const who = k % 2 === 1 ? 'AVA' : 'BEA';
+    thread.push({ ts: ts(k * 10 + 5), user: `B-${who}`, bot_id: `B-${who}-APP`, text: `take ${k}` });
+  }
+  const { webs, gateway, adapter, all } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(355))], ['slack:bea:T1:C1:' + ts(0), Number(ts(365))]],
+    { bea: 'judge' },
+  );
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `615.9${String((seq += 1)).padStart(5, '0')}`;
+  }
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(Number(ts(365)) * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  await adapter.start(gateway);
+  // Delivered late, newest first, each read finding more takes than the
+  // record keeps: typed while Bea held it after take 34, then while Ava
+  // held it after take 33.
+  await all(channelMessage({ text: 'late bea', ts: ts(347), thread: ts(0) }));
+  await all(channelMessage({ text: 'late ava', ts: ts(337), thread: ts(0) }));
+  await all(channelMessage({ text: 'and now', ts: ts(400), thread: ts(0) }));
+  await adapter.stop();
+  const placed = (text: string) =>
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes(text)).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]);
+  const seen = JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage]));
+  assert.deepEqual(placed('late bea'), [['bea', false]], seen);
+  assert.deepEqual(placed('late ava'), [['ava', true]], seen);
+  // Bea took the thread at take 36: the reply is hers to judge.
+  assert.deepEqual(placed('and now'), [['bea', false]], seen);
+});
+
 test('after a restart, a stop is not placed by a live claim older than a post the thread read rebuilt', async () => {
   // Codex on #369: the warm record holds Bea's take at .3 and Ava's post at
   // .6, both rebuilt from the thread read. A mention of Bea at .4 is

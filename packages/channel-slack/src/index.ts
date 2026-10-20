@@ -3078,8 +3078,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * its first claim here is only the first one SEEN, and an untagged reply
    * in it asks the sessions and the thread (see `ownerAt`). Bounded like
    * the addressee map; a lost entry costs a lookup.
+   * `false` marks a thread the thread read found more claims in than the
+   * record keeps (card 559): the record cannot place a message there, so
+   * every one is left to a thread read.
    */
-  const threadOrigins = new Map<string, true | string>();
+  const threadOrigins = new Map<string, true | string | false>();
   /**
    * Per thread, the agent each person last addressed by name, and when
    * (card 541). An untagged reply from that person is that agent's —
@@ -5160,7 +5163,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   const holderAt = (key: string, ts: string): string | undefined => {
     const handovers = threadAddressee.get(key);
-    if (!handovers) {
+    if (!handovers || threadOrigins.get(key) === false) {
       return undefined;
     }
     // The newest entry at or before `ts` answers, and only if this process
@@ -5193,6 +5196,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const ownerAt = (key: string, ts: string): string | undefined => {
     const origin = threadOrigins.get(key);
+    if (origin === false) {
+      return undefined;
+    }
     const handovers = threadAddressee.get(key) ?? [];
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
@@ -5211,12 +5217,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const threadOwner = (key: string): string | undefined => {
     const origin = threadOrigins.get(key);
-    return typeof origin === 'string' ? origin : threadAddressee.get(key)?.[0]?.agentId;
+    return typeof origin === 'string' ? origin : origin === false ? undefined : threadAddressee.get(key)?.[0]?.agentId;
   };
 
-  /** Records that this process saw the thread `key` begin, or who owns it. */
-  const noteOrigin = (key: string, owner: true | string = true): void => {
-    if (owner === true && threadOrigins.has(key)) {
+  /**
+   * Records that this process saw the thread `key` begin, or who owns it,
+   * or (`false`) that the record cannot place messages there, which then
+   * stands: the thread only gains claims.
+   */
+  const noteOrigin = (key: string, owner: true | string | false = true): void => {
+    if ((owner === true && threadOrigins.has(key)) || threadOrigins.get(key) === false) {
       return;
     }
     threadOrigins.delete(key);
@@ -5751,10 +5761,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // More claims than the record keeps would be trimmed in the middle
       // while the owner note makes the record look complete, so a message
       // delivered late into the gap would be placed by the first claim kept
-      // (card 559). Such a thread stays on thread reads instead.
+      // (card 559). Such a thread is marked to stay on thread reads: only
+      // skipping the warm-up left the claims of the messages placed since,
+      // the oldest of which then read as the owner (Codex 4320763062).
       const key = threadKeyFor(parts);
       const kept = threadAddressee.get(key)?.length ?? 0;
       if (kept + takeovers.length > THREAD_HANDOVER_DEPTH) {
+        noteOrigin(key, false);
         return;
       }
       noteOrigin(key, ownerId);
