@@ -113,7 +113,9 @@ export {
   MESSAGE_READ_MAX_LIMIT,
   MESSAGE_READ_TEXT_BUDGET,
   type ConversationReader,
+  type ConversationReadRefusal,
   createMessageReadTool,
+  directMessageReadRefusal,
 } from './tools/message.ts';
 
 export {

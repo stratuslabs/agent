@@ -790,6 +790,10 @@ browser pack contributes the origin of the page a conversation is on
 (`Tool.originFor`) on the same terms. A tool offers **one** of those hooks
 or none — with two, the engine judges it by neither and asks every time,
 because how two grants compose on one call is a decision nobody has made.
+Separately from those, a tool may name a call it will refuse whatever anyone
+approves (`Tool.refusalFor`, which `message.read` uses for a direct message);
+the runner answers it with that reason before the policy is asked. It is never
+a reason to allow, and the tool's own `execute` still refuses the same call.
 
 **First-party, outside.** Same authors, separate repositories:
 

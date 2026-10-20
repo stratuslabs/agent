@@ -3156,6 +3156,21 @@ export interface Tool {
    * session, and must not create it: it's asked before anything runs.
    */
   cwdFor?(session: Session): string | undefined;
+  /**
+   * Why this call can never run, whatever anyone approves, for a tool that
+   * can tell before it is asked about (`message.read` naming a direct
+   * message). Not a scope hook, and never a reason to allow: answering
+   * nothing changes nothing, and the call is judged as it always was.
+   *
+   * Asked before the approval policy, for a call that would be asked about,
+   * the way a malformed call is answered first: a prompt for a call that
+   * is bound to fail is a question with no useful answer, and the model
+   * needs the reason to stop retrying it. The text is handed to the model
+   * as the call's error, so it says what to do instead. The tool's own
+   * `execute` must still refuse the same call, because a hook that cannot
+   * tell (a lookup that failed) answers nothing.
+   */
+  refusalFor?(input: JsonObject, session: Session): string | undefined | Promise<string | undefined>;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
@@ -4294,6 +4309,8 @@ export interface ChannelAdapterLike {
   }>;
   /** See `@stratusagent/channels`' `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
+  /** See `@stratusagent/channels`' `ChannelAdapter.conversationKindFor`. */
+  conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
 }
 
 /**
@@ -7533,6 +7550,18 @@ export class AgentRunner {
       const problem = inputProblem(tool.parameters, call.input);
       if (problem) {
         return rejected(`Invalid input for ${call.toolName}: ${problem}. Fix the call and try again.`);
+      }
+      // A call the tool already knows it will refuse, answered here for the
+      // same reason: nobody should be asked to approve it. A hook that
+      // throws is no answer, and the call goes on to be judged as before.
+      let refusal: string | undefined;
+      try {
+        refusal = await tool.refusalFor?.(call.input, session);
+      } catch {
+        refusal = undefined;
+      }
+      if (typeof refusal === 'string' && refusal.trim().length > 0) {
+        return rejected(refusal.trim());
       }
     }
 

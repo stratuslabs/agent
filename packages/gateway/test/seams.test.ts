@@ -422,6 +422,87 @@ test('message.read goes through the adapter that carries the calling agent, and 
   }
 });
 
+test('a message.read of a direct message is refused before any approval prompt, and a channel read still asks and runs', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: reader\ntools: [message.read]\n---\n\nYou are Ava.\n');
+  const reads: string[] = [];
+  const asked: string[] = [];
+  const host = await hostFor({
+    'stratus-plugin-chan-a': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('a', (context) => {
+        context.channels!.register({
+          agents: ['ava'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async conversationKindFor(_agentId, conversation) {
+              return conversation.startsWith('D') ? 'direct' : conversation.startsWith('C') ? 'channel' : undefined;
+            },
+            async readConversation(request) {
+              reads.push(request.conversation);
+              if (request.conversation.startsWith('D')) {
+                throw new Error('fixture: direct messages are never read from outside them.');
+              }
+              return { messages: [{ id: '1', author: 'U1', text: 'channel text' }], more: false };
+            },
+          },
+        });
+      }),
+    },
+    'stratus-plugin-reader': {
+      manifest: manifest({ providers: [{ name: 'reader' }] }),
+      module: plugin('reader', (context) => {
+        context.providers!.register({
+          name: 'reader',
+          create: () => ({
+            name: 'reader',
+            async generate({ session }): Promise<ProviderResponse> {
+              if (session.messages.at(-1)?.role === 'tool') {
+                return { parts: [{ type: 'text', text: 'done' }] };
+              }
+              const to = session.messages.at(-1)?.content ?? '';
+              return { parts: [{ type: 'tool-call', call: { id: `${session.id}:read`, toolName: 'message.read', input: { source: { channel: 'fixture', to } } } }] };
+            },
+          }),
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-reader': {} },
+    pluginHost: host,
+    approvals: { approve: async ({ call }) => { asked.push(call.toolName); return true; } },
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    const dm = await gateway.dispatch({ sessionId: 'read-dm', agentId: 'ava', userMessage: 'D123' });
+    assert.deepEqual(asked, [], 'a DM read never reaches the approval policy');
+    assert.deepEqual(reads, [], 'and never reaches the adapter');
+    const refused = dm.messages.find((message) => message.toolResult?.callId === 'read-dm:read')?.toolResult;
+    assert.equal(refused?.ok, false);
+    assert.match(refused?.error ?? '', /direct message/);
+    assert.match(refused?.error ?? '', /approval cannot unlock/);
+
+    const channel = await gateway.dispatch({ sessionId: 'read-channel', agentId: 'ava', userMessage: 'C123' });
+    assert.deepEqual(asked, ['message.read'], 'a channel read is still put to the policy');
+    assert.deepEqual(reads, ['C123']);
+    assert.match(JSON.stringify(channel.messages), /channel text/);
+
+    // A conversation the adapter cannot describe is not refused up front:
+    // it asks as before, and the adapter's own rule decides at read time.
+    await gateway.dispatch({ sessionId: 'read-unknown', agentId: 'ava', userMessage: 'X9' });
+    assert.deepEqual(asked, ['message.read', 'message.read']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a plugin executor selected by the config runs the commands, and a selection nothing registers refuses to start', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');

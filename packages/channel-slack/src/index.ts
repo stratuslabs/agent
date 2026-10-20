@@ -4506,7 +4506,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       throw new Error(`slack: ${request.agentId}'s app cannot see a conversation ${channel}.`);
     }
     if (info.is_im === true || info.is_mpim === true) {
-      throw new Error(`slack: ${channel} is a direct message, and direct messages are never read from outside them.`);
+      throw new Error(`slack: ${channel} is a direct message, and direct messages are never read from outside them. Approval cannot unlock this; read a channel instead.`);
     }
     if (info.is_member !== true) {
       throw new Error(`slack: ${request.agentId}'s app is not a member of ${channel} — invite it there before it can read.`);
