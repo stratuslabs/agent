@@ -12494,12 +12494,11 @@ test('after a restart, a late message in a thread with more takes than the recor
 
 /** Codex 4320763062 and 4320903226 on #384, with `others` threads begun between. */
 const oversizedAfterLateMessages = async (others: number): Promise<void> => {
-  // Codex 4320763062 on #384: skipping the warm-up alone left the record
-  // to the messages the cold reads placed. Two late ones resolved newest
-  // first put the older one first, and with no owner noted that first
-  // claim read as the owner, so a later untagged reply went to Ava though
-  // Bea's take 36 holds the thread. The thread stays marked as one the
-  // record cannot place, and the reply is read like the others.
+  // Codex 4320763062 on #384: an earlier version skipped the warm-up for
+  // such a thread, which left the record to the messages the cold reads
+  // placed. Two late ones resolved newest first put the older one first,
+  // and with no owner noted that first claim read as the owner, so a later
+  // untagged reply went to Ava though Bea's take 36 holds the thread.
   const ts = (n: number): string => `615.${String(n).padStart(6, '0')}`;
   const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
     { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
@@ -12533,8 +12532,8 @@ const oversizedAfterLateMessages = async (others: number): Promise<void> => {
   // held it after take 33.
   await all(channelMessage({ text: 'late bea', ts: ts(347), thread: ts(0) }));
   await all(channelMessage({ text: 'late ava', ts: ts(337), thread: ts(0) }));
-  // Codex 4320903226: the mark outlives a busy channel, where enough other
-  // threads begin to push the thread's oldest note out. Ava's socket alone
+  // Codex 4320903226: still right in a busy channel, where enough other
+  // threads begin to push the thread's oldest notes out. Ava's socket alone
   // notes each start for the whole adapter, and asks nobody to answer.
   await Promise.all(Array.from({ length: others }, (_, n) =>
     sockets.ava.deliver('message', channelMessage({ text: `other ${n}`, ts: `616.${String(n).padStart(6, '0')}` }))));
@@ -12550,20 +12549,20 @@ const oversizedAfterLateMessages = async (others: number): Promise<void> => {
   assert.deepEqual(placed('and now'), [['bea', false]], seen);
 };
 
-test('after a restart, a thread with more takes than the record keeps stays on thread reads after late messages are placed', async () => {
+test('after a restart, a reply after late messages in a thread with more takes than the record keeps goes to the latest take', async () => {
   await oversizedAfterLateMessages(0);
 });
 
-test('a thread marked too long for the record stays marked while more threads begin than the record keeps', async () => {
+test('a thread too long for the record is still placed right while more threads begin than the record keeps', async () => {
   await oversizedAfterLateMessages(2001);
 });
 
 test('two cold reads of the same thread at once do not count its takes twice against the record', async () => {
   // Codex 4320950889 on #384: two messages after a restart, read at once,
-  // both found the thread's 17 takes. Counted on top of the 17 the first
-  // warm-up had kept, they marked the thread too long for the record, and
-  // every reply after went to a thread read. Only claims the record does
-  // not already hold count.
+  // both find the thread's 17 takes. An earlier version counted them on
+  // top of the 17 the first warm-up had kept, judged the thread too long
+  // for the record, and sent every reply after to a thread read. The
+  // second warm-up adds nothing, and the reply is placed from the record.
   const ts = (n: number): string => `617.${String(n).padStart(6, '0')}`;
   const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
     { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
@@ -12610,6 +12609,50 @@ test('two cold reads of the same thread at once do not count its takes twice aga
   assert.deepEqual(
     gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('third')).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]),
     [['ava', true]],
+    JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
+  );
+});
+
+test('after a restart, a late message in the part of the record that the answer\'s own claim cut is placed by a thread read', async () => {
+  // Codex 4320988170 on #384: a read finding exactly as many takes as the
+  // record keeps warmed it full, and the claim of the message it placed
+  // then cut take 2 out of it. A message typed after Bea's take 2,
+  // delivered late, went to Ava, the first claim, which the cut made look
+  // like the holder.
+  const ts = (n: number): string => `618.${String(n).padStart(6, '0')}`;
+  const thread: Array<{ ts: string; user: string; bot_id?: string; text: string }> = [
+    { ts: ts(0), user: 'U-DYLAN', text: '<@B-AVA> plan the release' },
+  ];
+  for (let k = 1; k <= 32; k += 1) {
+    if (k > 1) {
+      thread.push({ ts: ts(k * 10), user: 'U-DYLAN', text: `step ${k}` });
+    }
+    const who = k % 2 === 1 ? 'AVA' : 'BEA';
+    thread.push({ ts: ts(k * 10 + 5), user: `B-${who}`, bot_id: `B-${who}-APP`, text: `take ${k}` });
+  }
+  const { webs, gateway, adapter, all } = twoAgentsOverThread(
+    thread,
+    [['slack:ava:T1:C1:' + ts(0), Number(ts(315))], ['slack:bea:T1:C1:' + ts(0), Number(ts(325))]],
+    { bea: 'judge' },
+  );
+  let seq = 0;
+  for (const web of Object.values(webs)) {
+    web.stamp = () => `618.9${String((seq += 1)).padStart(5, '0')}`;
+  }
+  const routing = gateway.sessionRouting!;
+  gateway.sessionRouting = async (sessionId) => {
+    const found = await routing(sessionId);
+    return found && sessionId.includes(':bea:')
+      ? { ...found, lastAnsweredAt: new Date(Number(ts(325)) * 1000).toISOString(), heardSinceAnswered: 0 }
+      : found;
+  };
+  await adapter.start(gateway);
+  await all(channelMessage({ text: 'go on', ts: ts(400), thread: ts(0) }));
+  await all(channelMessage({ text: 'late one', ts: ts(27), thread: ts(0) }));
+  await adapter.stop();
+  assert.deepEqual(
+    gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('late one')).map((dispatch) => [dispatch.agentId, dispatch.addressed !== false]),
+    [['bea', false]],
     JSON.stringify(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.addressed, dispatch.userMessage])),
   );
 });

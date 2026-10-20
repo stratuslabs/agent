@@ -3071,6 +3071,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const threadAddressee = new Map<string, Handover[]>();
   /**
+   * Per thread whose record has been cut in the middle (`trimHandovers`),
+   * the first claim kept after the cut. Who held the thread between its
+   * first claim and that one is no longer known here (card 559): a message
+   * from then is left to the sessions and a thread read, rather than
+   * placed by the first claim, or the latest take, that outlived the cut.
+   * Goes with the thread's record.
+   */
+  const threadTrimmedUntil = new Map<string, string>();
+  /**
    * Threads whose owner this process can name (card 508): `true` for one
    * whose first message it saw, so the first claim in `threadAddressee` is
    * the owner, or the owner itself when the thread read named it after a
@@ -3078,11 +3087,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * its first claim here is only the first one SEEN, and an untagged reply
    * in it asks the sessions and the thread (see `ownerAt`). Bounded like
    * the addressee map; a lost entry costs a lookup.
-   * `false` marks a thread the thread read found more claims in than the
-   * record keeps (card 559): the record cannot place a message there, so
-   * every one is left to a thread read.
    */
-  const threadOrigins = new Map<string, true | string | false>();
+  const threadOrigins = new Map<string, true | string>();
   /**
    * Per thread, the agent each person last addressed by name, and when
    * (card 541). An untagged reply from that person is that agent's —
@@ -5064,7 +5070,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Dropping that one would hand the thread back to its owner after enough
    * mentions of a third agent, while the judge that took it still answers.
    */
-  const trimHandovers = (handovers: Handover[]): Handover[] => {
+  const trimHandovers = (key: string, handovers: Handover[]): Handover[] => {
     if (handovers.length <= THREAD_HANDOVER_DEPTH) {
       return handovers;
     }
@@ -5080,6 +5086,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // The kept take sits on top of the full recent tail, one past the depth,
     // so `holderAt` still sees every recent claim it saw before.
     const tail = handovers.slice(tailFrom);
+    // The cut only ever moves later: a claim inserted into the gap since
+    // is dropped again, and the gap it fell in stays unknown.
+    const until = (tail[0] as Handover).ts;
+    const before = threadTrimmedUntil.get(key);
+    if (before === undefined || before < until) {
+      threadTrimmedUntil.set(key, until);
+    }
     return latestTake > 0 && latestTake < tailFrom
       ? [first, handovers[latestTake] as Handover, ...tail]
       : [first, ...tail];
@@ -5133,11 +5146,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Re-inserted rather than mutated in place: a Map iterates in insertion
     // order, which is what makes the first key the one to evict.
     threadAddressee.delete(key);
-    threadAddressee.set(key, trimHandovers(handovers));
+    threadAddressee.set(key, trimHandovers(key, handovers));
     if (threadAddressee.size > THREAD_ADDRESSEE_CAPACITY) {
       const oldest = threadAddressee.keys().next();
       if (!oldest.done) {
         threadAddressee.delete(oldest.value);
+        threadTrimmedUntil.delete(oldest.value);
         // The owner goes with the record of who took the thread since: an
         // owner kept alone would stand in for a judge's takeover it no
         // longer knows of, where the thread read would see it.
@@ -5161,9 +5175,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const stopHolderAt = (key: string, ts: string): string | undefined => holderAt(key, ts);
 
+  /** Whether the record of thread `key` lost who held it at `ts` to a cut. */
+  const inTrimmedGap = (key: string, handovers: Handover[], ts: string): boolean => {
+    const until = threadTrimmedUntil.get(key);
+    const first = handovers[0];
+    return until !== undefined && first !== undefined && first.ts < ts && ts < until;
+  };
+
   const holderAt = (key: string, ts: string): string | undefined => {
     const handovers = threadAddressee.get(key);
-    if (!handovers || threadOrigins.get(key) === false) {
+    if (!handovers || inTrimmedGap(key, handovers, ts)) {
       return undefined;
     }
     // The newest entry at or before `ts` answers, and only if this process
@@ -5196,10 +5217,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const ownerAt = (key: string, ts: string): string | undefined => {
     const origin = threadOrigins.get(key);
-    if (origin === false) {
+    const handovers = threadAddressee.get(key) ?? [];
+    if (inTrimmedGap(key, handovers, ts)) {
       return undefined;
     }
-    const handovers = threadAddressee.get(key) ?? [];
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
       if (handover && handover.ts <= ts && (handover.takes === true || (index === 0 && typeof origin !== 'string'))) {
@@ -5217,32 +5238,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const threadOwner = (key: string): string | undefined => {
     const origin = threadOrigins.get(key);
-    return typeof origin === 'string' ? origin : origin === false ? undefined : threadAddressee.get(key)?.[0]?.agentId;
+    return typeof origin === 'string' ? origin : threadAddressee.get(key)?.[0]?.agentId;
   };
 
-  /**
-   * Records that this process saw the thread `key` begin, or who owns it,
-   * or (`false`) that the record cannot place messages there, which then
-   * stands: the thread only gains claims. Marking it again moves it to
-   * the back of the eviction order, as a thread still in use.
-   */
-  const noteOrigin = (key: string, owner: true | string | false = true): void => {
-    if ((owner === true && threadOrigins.has(key)) || (owner !== false && threadOrigins.get(key) === false)) {
+  /** Records that this process saw the thread `key` begin, or who owns it. */
+  const noteOrigin = (key: string, owner: true | string = true): void => {
+    if (owner === true && threadOrigins.has(key)) {
       return;
     }
     threadOrigins.delete(key);
     threadOrigins.set(key, owner);
     if (threadOrigins.size > THREAD_ADDRESSEE_CAPACITY) {
-      const oldest = threadOrigins.entries().next();
+      const oldest = threadOrigins.keys().next();
       if (!oldest.done) {
-        const [evicted, value] = oldest.value;
-        threadOrigins.delete(evicted);
-        // The claims of a thread too long for the record go with its mark
-        // (Codex 4320903226): kept alone, its oldest would read as the
-        // owner again. Without them, the next message there is read.
-        if (value === false) {
-          threadAddressee.delete(evicted);
-        }
+        threadOrigins.delete(oldest.value);
       }
     }
   };
@@ -5766,23 +5775,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (ownerId === undefined) {
         return;
       }
-      // More claims than the record keeps would be trimmed in the middle
-      // while the owner note makes the record look complete, so a message
-      // delivered late into the gap would be placed by the first claim kept
-      // (card 559). Such a thread is marked to stay on thread reads: only
-      // skipping the warm-up left the claims of the messages placed since,
-      // the oldest of which then read as the owner (Codex 4320763062).
-      // Only claims the record does not hold yet count: a read that ran
-      // alongside another of the same thread finds the takes the other has
-      // just warmed, which add nothing (Codex 4320950889).
       const key = threadKeyFor(parts);
-      const kept = threadAddressee.get(key) ?? [];
-      const held = new Set(kept.map((handover) => `${handover.agentId} ${handover.ts}`));
-      const added = takeovers.filter((post) => !held.has(`${post.agentId} ${post.ts}`)).length;
-      if (kept.length + added > THREAD_HANDOVER_DEPTH) {
-        noteOrigin(key, false);
-        return;
-      }
       noteOrigin(key, ownerId);
       for (const post of takeovers) {
         rememberAddressee(key, post.agentId, post.ts, true, true);
