@@ -13540,6 +13540,97 @@ test('a replayed message a judged turn chose not to answer is not kept again', a
   assert.equal(await readKept(file), undefined);
 });
 
+test('a replayed message the start-up recovery answered comes off the list only if that answer reached Slack', async () => {
+  // The recovery sweep owns the message's turn, so the replay is a live
+  // repeat and withdraws; the sweep's own report is the answer. A report
+  // Slack refused is no answer, and the message stays kept (Codex 4321200338).
+  // The same holds when the sweep finished the turn before the replay asked.
+  for (const [repeat, delivered] of [['live', false], ['live', true], ['finished', false], ['finished', true]] as const) {
+    const file = await keptFile();
+    const kept = { agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: Date.now() };
+    await writeFile(file, JSON.stringify([kept]));
+    const web = webWithHistory('B-AVA', [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> is the deploy done?' }]);
+    if (!delivered) {
+      web.chat.postMessage = async () => {
+        throw new Error('ratelimited');
+      };
+    }
+    const warnings: string[] = [];
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+    gateway.sessionRouting = async () => ({
+      agentId: 'ava',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '200.1' },
+      reply: 'the recovered answer',
+    });
+    gateway.dispatch = async (input) => {
+      if (repeat === 'live') {
+        input.onRepeat?.('live');
+      }
+      await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+      if (repeat === 'finished') {
+        input.onRepeat?.('finished');
+      }
+      const at = new Date().toISOString();
+      return {
+        id: input.sessionId,
+        agent: { id: 'ava', name: 'Ava' },
+        status: 'completed',
+        messages: [
+          { id: 'u1', role: 'user', content: 'is the deploy done?', createdAt: at, idempotencyKey: input.idempotencyKey ?? '' },
+          { id: 'a1', role: 'assistant', content: 'the recovered answer', createdAt: at },
+        ],
+        createdAt: at,
+        updatedAt: at,
+      };
+    };
+    const adapter = createAdapterAsShipped({
+      agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+      editIntervalMs: 0,
+      createSocketClient: () => createFakeSocket(),
+      createWebClient: () => web,
+      pendingIntakePath: file,
+      warn: (line) => warnings.push(line),
+    });
+    await adapter.start(gateway);
+    await adapter.stop();
+    const label = `${repeat}, ${delivered ? 'delivered' : 'refused'}`;
+    if (delivered) {
+      assert.equal(web.posts.filter((post) => post.text === 'the recovered answer').length, 1, label);
+      assert.equal(await readKept(file), undefined, label);
+    } else {
+      assert.deepEqual(await readKept(file), [kept], label);
+      if (repeat === 'live') {
+        assert.ok(warnings.some((line) => line === 'slack: ava has no confirmed answer to 200.1 in C1 kept from a restart; keeping it for the next start'), warnings.join('\n'));
+      }
+    }
+  }
+});
+
+test('a replayed message is never merged into another turn, so its own answer is the one that takes it off the list', async () => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '200.1', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const merging: boolean[] = [];
+  const stub = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'done'));
+  const gateway: StubGateway = {
+    ...stub,
+    async dispatch(input) {
+      merging.push(input.onAbsorbed !== undefined);
+      return stub.dispatch(input);
+    },
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => webWithHistory('B-AVA', [{ ts: '200.1', user: 'U-DYLAN', text: '<@B-AVA> go' }]),
+    pendingIntakePath: file,
+  });
+  await adapter.start(gateway);
+  await adapter.stop();
+  assert.deepEqual(merging, [false]);
+  assert.equal(await readKept(file), undefined);
+});
+
 test('a live message in a kept message\'s thread waits until the replay has taken its place, so the kept one runs first', async () => {
   const file = await keptFile();
   await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '700.2', threadTs: '700.1', user: 'U-DYLAN', keptAt: Date.now() }]));

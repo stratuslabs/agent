@@ -3353,22 +3353,36 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
   const pendingKey = (entry: Pick<PendingIntake, 'agentId' | 'channel' | 'ts'>): string => `${entry.agentId}:${entry.channel}:${entry.ts}`;
   /**
-   * Kept messages being replayed, by `pendingKey`: whether the handler got
-   * as far as the gateway, whether it kept the message again (a restart
-   * during the replay), and whether Slack refused the answer it had to
-   * post. Each stays in the file until its handler settles, so a crash, a
-   * failure before the dispatch, or an answer that never landed leaves it
-   * for the next start, where the gateway repeats the finished turn and
-   * the answer is posted from the session rather than run again.
+   * Kept messages being replayed, by `pendingKey`. A replayed message comes
+   * off the list only once its answer is confirmed (`answered`): an answer
+   * or failure Slack took, a turn that chose to say nothing, or the
+   * start-up recovery's own report of it reaching the thread. Every other
+   * way a handler can end leaves it kept, so a path that forgets to say
+   * how it went keeps the message rather than losing it. A message kept
+   * again by a restart during the replay (`rekept`) stays kept too. The
+   * next start hands it over again, and the gateway repeats the finished
+   * turn, so the answer is posted from the session rather than run again.
+   * `dispatched` and `refused` only choose the warning.
    */
-  const replaying = new Map<string, { dispatched: boolean; rekept: boolean; refused: boolean }>();
+  const replaying = new Map<string, { dispatched: boolean; rekept: boolean; refused: boolean; answered: boolean }>();
   /** Notes a reply outcome against the kept message it answers, if that one is being replayed. */
   const noteReplayOutcome = (agentId: string, channel: string, ts: string, outcome: ReplyOutcome): ReplyOutcome => {
     const replay = replaying.get(pendingKey({ agentId, channel, ts }));
-    if (replay !== undefined && outcome.refused === true) {
-      replay.refused = true;
+    if (replay !== undefined) {
+      if (outcome.refused === true) {
+        replay.refused = true;
+      } else {
+        replay.answered = true;
+      }
     }
     return outcome;
+  };
+  /** Confirms that a replayed message was answered by a report posted ahead of its own renderer. */
+  const noteReplayAnsweredAhead = (agentId: string, channel: string, ts: string): void => {
+    const replay = replaying.get(pendingKey({ agentId, channel, ts }));
+    if (replay !== undefined) {
+      replay.answered = true;
+    }
   };
   /**
    * Live intake for a conversation (agent and channel) that has kept
@@ -3544,7 +3558,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             ...(entry.channelType !== undefined ? { channel_type: entry.channelType } : {}),
           };
           const replayKey = pendingKey(entry);
-          const replay = { dispatched: false, rekept: false, refused: false };
+          const replay = { dispatched: false, rekept: false, refused: false, answered: false };
           replaying.set(replayKey, replay);
           // Not waited on: the handler claims its place on its session's
           // chain synchronously, as a live delivery does, so the next kept
@@ -3561,6 +3575,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             }
             if (replay.refused) {
               warn(`slack: ${entry.agentId} could not post the answer to ${entry.ts} in ${entry.channel} kept from a restart; keeping it for the next start`);
+              return;
+            }
+            if (!replay.answered) {
+              warn(`slack: ${entry.agentId} has no confirmed answer to ${entry.ts} in ${entry.channel} kept from a restart; keeping it for the next start`);
               return;
             }
             await changePending((current) => ({ entries: current.filter((kept) => pendingKey(kept) !== replayKey), result: undefined }));
@@ -7162,10 +7180,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         },
         // Sent while a turn is running, this message is answered by the
         // next turn together with everything else that queued (card 423);
-        // the first of them renders that answer.
-        onAbsorbed: () => {
-          absorbed = true;
-        },
+        // the first of them renders that answer. Not a replayed message:
+        // it leaves the kept list only on its own confirmed answer, and an
+        // answer another message's renderer posts is not one it can see.
+        ...(replay === undefined
+          ? {
+            onAbsorbed: () => {
+              absorbed = true;
+            },
+          }
+          : {}),
       });
       return { renderer, turn, repeat: () => repeat, absorbed: () => absorbed };
     });
@@ -7220,6 +7244,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Likewise a message absorbed into a merged turn: the turn's leading
     // message's renderer answers for all of them.
     if (repeat() === 'live' || absorbed()) {
+      // A replayed message whose turn the start-up recovery owns is
+      // answered by that recovery's report, and only if it reached the
+      // thread; anything else leaves it kept.
+      const ahead = repeat() === 'live' && renderer.outcomeReportedAhead !== undefined
+        ? await renderer.outcomeReportedAhead
+        : undefined;
+      if (ahead?.said === true) {
+        noteReplayAnsweredAhead(connection.config.agentId, event.channel, event.ts);
+      }
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;
@@ -7257,6 +7290,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }));
     }
     if (reportedAhead?.said === true) {
+      noteReplayAnsweredAhead(connection.config.agentId, event.channel, event.ts);
       await renderer.withdraw();
       renderers.get(sessionId)?.[0]?.refreshLoading();
       return;
