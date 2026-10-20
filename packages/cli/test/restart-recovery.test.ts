@@ -97,7 +97,9 @@ const newHome = async (): Promise<{ home: string; counter: string }> => {
     provider: 'recovery',
     // Remote, so a gated call parks instead of being refused. No Slack app
     // is configured: the control API is the client that answers.
-    approvals: { mode: 'remote' },
+    // Guarded: these tests are about the asking path, which the open
+    // posture (the default) skips for gated calls.
+    approvals: { mode: 'remote', posture: 'guarded' },
     plugins: { [plugin]: { enabled: true } },
   }));
   await writeFile(

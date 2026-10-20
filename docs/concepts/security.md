@@ -136,8 +136,11 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   plugin, and a soul that omits `tools:` gets every registered tool — an
   empty `plugins` block is not an empty toolbox.
   ([Plugins](./plugins.md), [Tools](../guides/tools.md))
-- **The daemon runs only `safe` tools unattended**; everything else is
-  refused or asked of a configured human. ([Approvals](../guides/approvals.md))
+- **Under the default open posture, gated tools run without asking**; the
+  boundary is who may talk to the agent, the shell sandbox, and `tool-fs`
+  roots. `dangerous` tools still ask. Under `approvals.posture: "guarded"`
+  the daemon runs only `safe` tools unattended and refuses or asks about
+  everything else. ([Approvals](../guides/approvals.md))
 - **Shell commands are judged individually**, control operators disqualify
   a command outright, and "Always allow" persists a scope minus its
   destructive forms. ([Shell commands](../guides/shell.md))

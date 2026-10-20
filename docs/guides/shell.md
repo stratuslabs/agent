@@ -7,14 +7,37 @@ permission engine then judges each command.
 
 **This page is about the daemon**, which is where a command runs with nobody
 watching. At a terminal, `stratus run` and `stratus chat` judge the *call*
-rather than the command, exactly as [Approvals](./approvals.md) describes:
-`--approvals always` (the default) runs whatever the agent asks for,
-`--approvals ask` shows you the command and waits for y/N, and
-`--approvals never` refuses every call — including `git status`. So none of
+rather than the command, exactly as [Approvals](./approvals.md) describes.
+Without `--approvals` they follow the configured posture: `open` (the
+default) runs every command without asking, since `shell.run` is a
+`gated` tool, and
+`guarded` asks about every gated call at a terminal and refuses it when
+nobody is there to ask. `--approvals always` runs whatever the agent asks
+for, `open` is the posture above, `gated`
+runs only `safe` tools without asking, `ask` shows you the
+command and waits for y/N, and `never` refuses every call, including
+`git status`. So none of
 the safe list, the scopes, or the control-operator rules below apply to a
 one-shot at your own terminal, where you are the gate. Install the shell
 pack for a daemon and this page is the whole story; run it yourself and
 `--approvals` is.
+
+## What a command can reach
+
+Every command runs in an OS sandbox (`sandbox-exec` on macOS, `bwrap` on
+Linux). It can write only the agent's workspace, temp, and package caches.
+It can't read the Stratus home outside that workspace, other agents' souls
+and workspaces in the visible agents folder, or your credential files
+(`~/.ssh`, cloud CLIs, `gh`, `~/.npmrc`, the macOS keychain), and it can't
+connect to a container runtime's socket. The network stays on, so on a
+cloud VM a command can still reach the instance metadata service
+(`169.254.169.254`) and any credentials its role hands out; block that at
+the host if the role matters. Where the
+host can't build a sandbox, commands are refused with the reason
+(`sandbox: "required"`, the default). `sandbox: "auto"` runs them unconfined
+there instead, and `sandbox: "off"` turns the sandbox off. The full list and
+settings are in
+[the package README](../../packages/tool-shell/README.md#the-sandbox).
 
 ## Which commands run unattended
 

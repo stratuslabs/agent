@@ -370,8 +370,14 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
 };
 
 const parseApprovalRoute = (raw: unknown, configPath: string, where: string): AgentApprovalConfig | undefined => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+  if (raw === undefined) {
     return undefined;
+  }
+  // Refused, not skipped: with posture open by default, a block that
+  // parsed as nothing (`"approvals": "guarded"`) would run every gated
+  // call unasked while the config in front of the operator says guarded.
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object like { "posture": "guarded" }, got ${JSON.stringify(raw)}.`);
   }
   const source = raw as Record<string, unknown>;
   const route: AgentApprovalConfig = {};
@@ -385,6 +391,17 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
       );
     }
     route.externalContent = source.externalContent;
+  }
+  if (source.posture !== undefined) {
+    // Refused when misspelled: a typo that silently meant `open` would run
+    // everything unasked, and one that meant `guarded` would look like the
+    // setting did nothing.
+    if (source.posture !== 'open' && source.posture !== 'guarded') {
+      throw new Error(
+        `Unsupported ${where}.posture in config ${configPath}: ${String(source.posture)}. Use open or guarded.`,
+      );
+    }
+    route.posture = source.posture;
   }
   if (Array.isArray(source.slackApprovers)) {
     // Kept even when it filters down to nothing. An agent entry saying
@@ -532,7 +549,10 @@ const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig
     }
     approvals.timeoutMs = source.timeoutMs;
   }
-  if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
+  if (source.agents !== undefined && (typeof source.agents !== 'object' || source.agents === null || Array.isArray(source.agents))) {
+    throw new Error(`Invalid approvals.agents in config ${configPath}: expected an object keyed by agent id.`);
+  }
+  if (source.agents !== undefined) {
     const agents: Record<string, AgentApprovalConfig> = {};
     for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
       const parsed = parseApprovalRoute(entry, configPath, `approvals.agents.${agentId}`);
@@ -565,6 +585,9 @@ export const resolveAgentApprovals = (
   const slackApprovers = agent?.slackApprovers ?? approvals?.slackApprovers;
   const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
   const externalContent = agent?.externalContent ?? approvals?.externalContent;
+  // Open by default: resolved here, the one place, so serve, doctor and the
+  // startup line read the same answer.
+  const posture = agent?.posture ?? approvals?.posture ?? 'open';
   const autonomy = agent?.autonomy ?? approvals?.autonomy;
   // Added together rather than overridden: see `AgentApprovalConfig.commands`.
   const commands = [...new Set([...(approvals?.commands ?? []), ...(agent?.commands ?? [])])];
@@ -572,6 +595,7 @@ export const resolveAgentApprovals = (
   const trustedDomains = [...new Set([...(approvals?.trustedDomains ?? []), ...(agent?.trustedDomains ?? [])])];
   const channels = [...new Set([...(approvals?.channels ?? []), ...(agent?.channels ?? [])])];
   return {
+    posture,
     ...(autonomy !== undefined ? { autonomy } : {}),
     ...(branchPrefixes !== undefined ? { branchPrefixes } : {}),
     ...(slackApprovers ? { slackApprovers } : {}),

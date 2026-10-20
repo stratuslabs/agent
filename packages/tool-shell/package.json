@@ -87,6 +87,22 @@
         },
         "workspaceRoot": {
           "type": "string"
+        },
+        "sandbox": {
+          "type": "string",
+          "enum": ["auto", "required", "off"]
+        },
+        "deniedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "writablePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

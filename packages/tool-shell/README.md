@@ -25,6 +25,8 @@ npm install @stratusagent/tool-shell
 
 ## Risk model
 
+Under the default `approvals.posture: "open"` a `gated` call runs without asking; the column below is what each mode does with a call that still needs approval, which under `"guarded"` is every uncovered `gated` call.
+
 | Tool | Risk | What approval mode does |
 | --- | --- | --- |
 | `shell.run` | `gated`, narrowed per command | `interactive` shows the command and asks; `remote` asks in Slack; `headless` runs commands inside an approved scope and refuses everything else. |
@@ -95,6 +97,76 @@ read would not have said so.
 All of them can be set per agent under `agents`.
 
 **`cwd` is a starting directory, not a jail.** An approved command can
-change directory or name an absolute path; what bounds a shell is which
-commands get approved, not where they begin. If you want a filesystem
-boundary, that is [`@stratusagent/tool-fs`](../tool-fs), whose roots are one.
+change directory or name an absolute path. What bounds it is the sandbox
+below, plus which commands get approved.
+
+## The sandbox
+
+Every command runs under an OS sandbox that keeps it out of the Stratus home
+and your credentials, whatever the command says:
+
+- **Readable and writable:** the agent's workspace, its starting directory,
+  temp (on Linux a private `/tmp`, and a private one over the daemon's
+  `TMPDIR` too when that is elsewhere), and package-manager caches (`~/.npm`, `~/.cache`, `~/Library/Caches`,
+  pnpm, bun, yarn).
+- **Readable:** the rest of the system, so toolchains work as usual.
+- **Not readable or writable:** the Stratus home (`~/.stratus`, or
+  `STRATUS_HOME`) apart from this agent's own workspace, which covers
+  credentials, config, souls, sessions, and other agents' workspaces, each
+  also by the real path it links to (the visible `~/Agents` or `~/Stratus`
+  folder holds the souls and workspaces the home links to). Also
+  `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, git
+  credential files, `~/.docker`, `~/.fly`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
+  `~/.npmrc`, `~/.pypirc`, `~/.password-store`, `~/.config/op`, `~/.1password`,
+  1Password's group container and Secretive's container on macOS, the
+  tokens developer CLIs store after a login (Cargo's `credentials.toml`,
+  RubyGems, hub, glab, Terraform, Vault, Pulumi,
+  Maven and Gradle settings, Composer, Databricks, doctl, OCI, hcloud,
+  Claude Code's `~/.claude/.credentials.json`, Codex's `~/.codex/auth.json`), the Hugging
+  Face token under `~/.cache/huggingface`, and the macOS keychains (file and
+  service). Where the daemon's environment moves one of these stores
+  (`GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `DOCKER_CONFIG`,
+  `KUBECONFIG`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `GNUPGHOME`,
+  `CLOUDSDK_CONFIG`, `AZURE_CONFIG_DIR`, `NPM_CONFIG_USERCONFIG`,
+  `PASSWORD_STORE_DIR`, `CARGO_HOME`, `PULUMI_HOME`, `TF_CLI_CONFIG_FILE`,
+  `GRADLE_USER_HOME`, `COMPOSER_HOME`, `DATABRICKS_CONFIG_FILE`,
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HF_HOME`, `HF_TOKEN_PATH`,
+  `GLAB_CONFIG_DIR`, `HUB_CONFIG`, `OP_CONFIG_DIR`), the moved location is
+  denied too, unless it is relative or holds the home or the workspace.
+  Any credential file not listed stays readable: add it to
+  `deniedPaths`. With a `workspaceRoot`, the other agents' workspaces under it;
+  a root that exists but can't be listed refuses the command.
+- **No connection:** container runtime sockets (`/var/run/docker.sock`,
+  containerd, podman, CRI-O, BuildKit), which hand out the whole host; the
+  user's runtime directory (`$XDG_RUNTIME_DIR`, `/run/user/<uid>`) as a
+  whole, which holds the user's D-Bus and systemd manager (either can start
+  a process outside the sandbox), rootless Docker and Podman, gpg-agent and
+  systemd's ssh-agent; SSH agents, which sign with keys whose files are
+  hidden: the socket `$SSH_AUTH_SOCK` names, a `unix://` socket
+  `DOCKER_HOST` or `CONTAINER_HOST` names, launchd's session directories
+  in `/private/tmp` on macOS, 1Password's and Secretive's agent folders;
+  and any socket under a denied path. Any other local service listening on
+  a socket path stays reachable (a database in `/tmp` on macOS, a daemon
+  under `/var/run`), as does a socket in the abstract namespace.
+- **Not writable:** everything else.
+- **Network:** on. A command can send its own workspace somewhere, but not a
+  token it can't read.
+
+macOS uses `sandbox-exec`. Linux uses [bubblewrap](https://github.com/containers/bubblewrap)
+(`bwrap`), with its own pid and IPC namespaces, so a command can't signal
+the daemon or other agents. The denied directories keep their names (`stat`
+and directory listings of the workspace's parent directories still work, so
+git can find its repository), but nothing can be read from inside them.
+
+| Key | Default | What |
+| --- | --- | --- |
+| `sandbox` | `required` | `required`: refuse every command when no sandbox can start (no `bwrap`, or a container that forbids user namespaces), with the reason. A host wired by hand with no workspace and no `cwd` has nothing to confine commands to, so `required` refuses there too. `auto`: run unconfined there instead, and log why, once. `off`: run with the daemon user's full access. |
+| `deniedPaths` | none | More directories or files to hide, added to the list above, including ones inside the workspace (a repository's `.env`). A leading `~` is your home directory. |
+| `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). On Linux, these and the default caches are created before the command if missing, since nothing under the read-only root can be. |
+
+All three can be set per agent under `agents`.
+
+A CLI that reads its login from a hidden path (`gh` from `~/.config/gh` or
+the keychain, `fly` from `~/.fly`) can't authenticate inside the sandbox.
+Give that agent a token through `env`, where it's visible in config, or set
+`sandbox: "off"` for it.

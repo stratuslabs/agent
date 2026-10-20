@@ -114,6 +114,7 @@ export {
   MAX_APPROVAL_TIMEOUT_MS,
   type ApprovalsConfig,
   type ExternalContentApprovals,
+  type ApprovalPosture,
   type AgentPrincipalsConfig,
   type PrincipalsAdmit,
   type PrincipalsConfig,
