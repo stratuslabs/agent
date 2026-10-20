@@ -5748,7 +5748,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (ownerId === undefined) {
         return;
       }
+      // More claims than the record keeps would be trimmed in the middle
+      // while the owner note makes the record look complete, so a message
+      // delivered late into the gap would be placed by the first claim kept
+      // (card 559). Such a thread stays on thread reads instead.
       const key = threadKeyFor(parts);
+      const kept = threadAddressee.get(key)?.length ?? 0;
+      if (kept + takeovers.length > THREAD_HANDOVER_DEPTH) {
+        return;
+      }
       noteOrigin(key, ownerId);
       for (const post of takeovers) {
         rememberAddressee(key, post.agentId, post.ts, true, true);
