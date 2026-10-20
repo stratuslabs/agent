@@ -3418,6 +3418,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     replayHolds.set(key, { held, release });
   };
   const releaseConversation = (key: string): void => replayHolds.get(key)?.release();
+  /** Aborted by `stop()`, which ends a replay still reading kept messages back. */
+  let replayStopping: AbortController | undefined;
   const releaseAllConversations = (): void => {
     for (const { release } of [...replayHolds.values()]) {
       release();
@@ -3510,7 +3512,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * handing a later one over first, or the slow one over after live
    * messages were let in, would answer them out of order.
    */
-  const replayKept = async (kept: PendingIntake[], onEvent: Map<string, (args: SlackSocketEventArgs) => Promise<void>>): Promise<void> => {
+  const replayKept = async (kept: PendingIntake[], onEvent: Map<string, (args: SlackSocketEventArgs) => Promise<void>>, stopping: AbortSignal): Promise<void> => {
     if (pendingIntakePath === undefined || kept.length === 0) {
       return;
     }
@@ -3519,10 +3521,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     for (const entry of expired) {
       log(`slack: ${entry.agentId} dropped ${entry.ts} in ${entry.channel} kept from a restart: older than a day`);
     }
-    if (expired.length > 0) {
-      const old = new Set(expired.map(pendingKey));
-      await changePending((entries) => ({ entries: entries.filter((entry) => !old.has(pendingKey(entry))), result: undefined }));
-    }
+    // Not waited on before the reads: the list's writes are serialized, so
+    // this one lands ahead of any the replay makes, and the reads start
+    // inside start() (a stop right after it still sees each conversation's
+    // first one through).
+    const old = new Set(expired.map(pendingKey));
+    const droppingExpired = expired.length > 0
+      ? changePending((entries) => ({ entries: entries.filter((entry) => !old.has(pendingKey(entry))), result: undefined }))
+      : Promise.resolve();
     const conversations = new Map<string, PendingIntake[]>();
     for (const entry of kept.filter((candidate) => candidate.keptAt >= cutoff)) {
       const elsewhere = connections.find((connection) => connection.config.agentId === entry.agentId && !keptFor(connection, entry));
@@ -3544,6 +3550,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           return;
         }
         for (const [index, entry] of entries.entries()) {
+          // A stop ends the replay at the next message: what it has not read
+          // yet stays kept for the next start, so the stop waits on at most
+          // the one bounded read in progress per conversation, not a chain
+          // of them.
+          if (stopping.aborted) {
+            log(`slack: ${agentId} stopping; leaving ${entries.length - index} kept message(s) in ${entry.channel} for the next start`);
+            return;
+          }
           let read: { message?: SlackHistoryMessage; timedOut?: true };
           try {
             read = await fetchKeptWithin(connection, entry);
@@ -3604,6 +3618,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     };
     await Promise.all([...conversations].map(([key, entries]) => replayConversation(key, entries)));
     await Promise.all(handovers);
+    await droppingExpired;
   };
 
   const alreadySeen = (key: string): boolean => {
@@ -7668,10 +7683,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // apps that did connect: the rest stay kept for a start where they do.
       // A kept message is from before the restart, so its thread read stops
       // short of the start, as `liveFrom` already says (card 562).
-      track(replayKept(kept, new Map([...listeners].filter(([agentId]) => connections.some((connection) => connection.config.agentId === agentId)))).finally(releaseAllConversations));
+      replayStopping = new AbortController();
+      track(replayKept(kept, new Map([...listeners].filter(([agentId]) => connections.some((connection) => connection.config.agentId === agentId))), replayStopping.signal).finally(releaseAllConversations));
     },
 
     async stop() {
+      replayStopping?.abort();
       releaseAllConversations();
       // Stop intake first, so no new INBOUND event can slip into
       // `inflight` while the drain below runs.

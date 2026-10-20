@@ -13713,6 +13713,42 @@ test('a kept message whose read outlasts the wait is left for the next start, ne
   assert.deepEqual((await readKept(file))?.map((entry) => (entry as { ts: string }).ts), ['700.2']);
 });
 
+test('a stop during the replay reads no further kept message, and leaves the rest kept', async () => {
+  const file = await keptFile();
+  const now = Date.now();
+  await writeFile(file, JSON.stringify([
+    { agentId: 'ava', team: 'T1', channel: 'C1', ts: '710.1', user: 'U-DYLAN', keptAt: now },
+    { agentId: 'ava', team: 'T1', channel: 'C1', ts: '710.2', user: 'U-DYLAN', keptAt: now },
+  ]));
+  const web = webWithHistory('B-AVA', [
+    { ts: '710.1', user: 'U-DYLAN', text: '<@B-AVA> one' },
+    { ts: '710.2', user: 'U-DYLAN', text: '<@B-AVA> two' },
+  ]);
+  const reads: string[] = [];
+  const history = web.conversations.history;
+  // Each read is slow but inside the bound, so a stop that waited on the
+  // whole replay would wait on one after another.
+  web.conversations.history = async (args) => {
+    reads.push(String(args.oldest));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return history!.call(web.conversations, args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await adapter.stop();
+  assert.deepEqual(reads.filter((ts) => ts.startsWith('710.')), ['710.1']);
+  assert.deepEqual((await readKept(file))?.map((entry) => (entry as { ts: string }).ts), ['710.2']);
+});
+
 test('a live message in a conversation with nothing kept is not held behind a slow replay elsewhere', async () => {
   const file = await keptFile();
   await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '700.2', threadTs: '700.1', user: 'U-DYLAN', keptAt: Date.now() }]));
