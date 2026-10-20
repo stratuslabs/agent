@@ -201,7 +201,12 @@ export const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape):
       // the first colon — since the spec types the map as string to
       // string and says nothing about what a key looks like.
       const indent = line.length - line.trimStart().length;
-      if (skippingMapEntryIndent !== undefined && indent > skippingMapEntryIndent) {
+      // A deeper line is the skipped entry's; so is a `- item` at its own
+      // indent, YAML's indentless list form.
+      if (
+        skippingMapEntryIndent !== undefined
+        && (indent > skippingMapEntryIndent || (indent === skippingMapEntryIndent && /^\s*-(\s|$)/.test(line)))
+      ) {
         continue;
       }
       skippingMapEntryIndent = undefined;

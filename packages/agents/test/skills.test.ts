@@ -219,6 +219,15 @@ Body.`);
   const inline = parseSkillDocument('---\ndescription: d\nmetadata:\n  tags: [a, b]\n  host: {"x": 1}\n  label: "[draft]"\n---\n\nBody.');
   assert.deepEqual(inline.metadata, { label: '[draft]' });
   assert.deepEqual(inline.skippedMetadata, ['tags', 'host']);
+  // YAML's indentless list (items at the entry's own indent) belongs to
+  // the entry, and the next sibling after it is read again.
+  const indentless = parseSkillDocument('---\ndescription: d\nmetadata:\n  tags:\n  - a\n  - b\n  author: someone\n---\n\nBody.');
+  assert.deepEqual(indentless.metadata, { author: 'someone' });
+  assert.deepEqual(indentless.skippedMetadata, ['tags']);
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  requires:\n  - fs.read\n---\n\nBody.'),
+    /metadata\.requires must be a string/,
+  );
   // A line indented under metadata with no entry to belong to is still refused.
   assert.throws(
     () => parseSkillDocument('---\ndescription: d\nmetadata:\n  a: b\n    - stray\n---\n\nBody.'),
