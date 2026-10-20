@@ -3528,6 +3528,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const old = new Set(expired.map(pendingKey));
     const droppingExpired = expired.length > 0
       ? changePending((entries) => ({ entries: entries.filter((entry) => !old.has(pendingKey(entry))), result: undefined }))
+        .catch((error) => warn(`slack: could not drop the day-old messages kept from a restart; the next start drops them: ${error instanceof Error ? error.message : String(error)}`))
       : Promise.resolve();
     const conversations = new Map<string, PendingIntake[]>();
     for (const entry of kept.filter((candidate) => candidate.keptAt >= cutoff)) {
