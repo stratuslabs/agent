@@ -2321,7 +2321,7 @@ test('an agent that judges takes a turn nobody asked for on every untagged reply
   gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
   // Ava is the only agent in the thread, so it is hers.
   gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C1:980.0'
-    ? { agentId: 'ava', metadata: {}, heardSinceAnswered: 0 }
+    ? { agentId: 'ava', metadata: {} }
     : undefined);
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -2440,8 +2440,6 @@ test('a turn nobody asked for opens its placeholder on its first text, never on 
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(990 * 1000).toISOString(),
-    lastAnsweredAt: new Date(990 * 1000).toISOString(),
-    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -2495,8 +2493,6 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
     metadata: {},
     // Bea spoke last: the thread is hers.
     lastSpokeAt: new Date((sessionId.includes(':ava:') ? 990 : 991) * 1000).toISOString(),
-    lastAnsweredAt: new Date(990 * 1000).toISOString(),
-    heardSinceAnswered: 0,
   });
   const clock = stampsAfter();
   webAva.stamp = clock.stamp;
@@ -2578,8 +2574,6 @@ test('a turn nobody asked for whose placeholder opened but took no edit takes it
     agentId: sessionId.includes(':ava:') ? 'ava' : 'bea',
     metadata: {},
     lastSpokeAt: new Date((sessionId.includes(':ava:') ? 1120 : 1121) * 1000).toISOString(),
-    lastAnsweredAt: new Date(1120 * 1000).toISOString(),
-    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [
@@ -2643,8 +2637,6 @@ test('text streamed to a turn nobody asked for before it begins does not open it
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(995 * 1000).toISOString(),
-    lastAnsweredAt: new Date(995 * 1000).toISOString(),
-    heardSinceAnswered: 0,
   });
   // The turn is queued behind something — a recovery — and has not begun:
   // the session has not reported `running` for it.
@@ -2704,8 +2696,6 @@ test('a turn nobody asked for that ends while its placeholder is still opening f
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1010 * 1000).toISOString(),
-    lastAnsweredAt: new Date(1010 * 1000).toISOString(),
-    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -2748,8 +2738,6 @@ test('a turn nobody asked for that fails while its placeholder is still opening 
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1015 * 1000).toISOString(),
-    lastAnsweredAt: new Date(1015 * 1000).toISOString(),
-    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -2776,8 +2764,6 @@ test('an attachment with nothing said does not spend a judging slot', async () =
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1020 * 1000).toISOString(),
-    lastAnsweredAt: new Date(1020 * 1000).toISOString(),
-    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -2801,49 +2787,6 @@ test('an attachment with nothing said does not spend a judging slot', async () =
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.addressed]), [['Dylan: so what do we do', false]]);
 });
 
-test('a judged turn already running is counted by the store, not twice', async () => {
-  const socket = createFakeSocket();
-  const web = createFakeWeb('B-AVA', 'T1');
-  // Seven heard since Ava spoke, one of them the message of the turn now
-  // running (the store saved it as the turn began). An eighth message is
-  // the last inside the window, and must not read as the ninth.
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const gateway = createStubGateway(async ({ sessionId }) => {
-    await gate;
-    return sessionWithReply(sessionId, '');
-  });
-  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
-  let heard = 6;
-  gateway.sessionRouting = async () => ({
-    agentId: 'ava',
-    metadata: {},
-    lastSpokeAt: new Date(1030 * 1000).toISOString(),
-    lastAnsweredAt: new Date(1030 * 1000).toISOString(),
-    heardSinceAnswered: heard,
-  });
-  const adapter = createSlackChannelAdapter({
-    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
-    editIntervalMs: 0,
-    createSocketClient: () => socket,
-    createWebClient: () => web,
-  });
-  await adapter.start(gateway);
-
-  const seventh = socket.deliver('message', channelMessage({ text: 'seven', ts: '1030.7', thread: '1030.0' }));
-  // The stub reports `running` at dispatch, which is when the store holds
-  // the message: the count moves with it.
-  heard = 7;
-  const eighth = socket.deliver('message', channelMessage({ text: 'eight', ts: '1030.8', thread: '1030.0' }));
-  release();
-  await Promise.all([seventh, eighth]);
-  await adapter.stop();
-
-  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: seven', 'Dylan: eight']);
-});
-
 test('a turn nobody asked for that fails right after its first text still reports the failure', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
@@ -2858,8 +2801,6 @@ test('a turn nobody asked for that fails right after its first text still report
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1050 * 1000).toISOString(),
-    lastAnsweredAt: new Date(1050 * 1000).toISOString(),
-    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -2900,10 +2841,10 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   // Both in the thread; Bea spoke last.
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1060.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1060 * 1000).toISOString(), lastAnsweredAt: new Date(1060 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1060 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1060.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1060.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1060.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -2972,10 +2913,10 @@ test('a judge that took the thread still holds it after many exchanges with a th
   // Bea's thread; Ava is in it.
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1080.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString(), lastAnsweredAt: new Date(1080 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1080.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1080.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1080.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -3069,10 +3010,10 @@ test('an untagged reply is for whoever\'s reply sits lowest in the thread, not f
   // Bea spoke last.
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1070.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString(), lastAnsweredAt: new Date(1070 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1070.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -3155,10 +3096,10 @@ test('a judge whose reply sits above a colleague\'s placeholder does not take th
   ];
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1080.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString(), lastAnsweredAt: new Date(1080 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1080.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1080.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1080.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -3239,10 +3180,10 @@ test('a judging agent that posts a file and says nothing has still spoken, for t
   ];
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1070.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString(), lastAnsweredAt: new Date(1070 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1070.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -3320,10 +3261,10 @@ test('a file sits where the share Slack answers with says, not where the clock d
   ];
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1070.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString(), lastAnsweredAt: new Date(1070 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1070 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1070.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1070.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -3397,10 +3338,10 @@ test('a judged turn whose file landed but whose words Slack refused has spoken, 
   ];
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1080.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString(), lastAnsweredAt: new Date(1080 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1080 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1080.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1080.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1080.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -3479,10 +3420,10 @@ test('a judged turn that posted a file and then failed has still spoken, for the
   ];
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1100.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1100 * 1000).toISOString(), lastAnsweredAt: new Date(1100 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1100 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1100.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1100.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1100.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -3555,10 +3496,10 @@ test('a judged turn whose streamed line landed but whose final edit Slack refuse
   ];
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1110.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1110 * 1000).toISOString(), lastAnsweredAt: new Date(1110 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1110 * 1000).toISOString() };
     }
     if (sessionId === 'slack:bea:T1:C1:1110.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1110.05 * 1000).toISOString(), heardSinceAnswered: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1110.05 * 1000).toISOString() };
     }
     return undefined;
   };
@@ -11524,7 +11465,7 @@ for (const evicted of [false, true]) {
     // ordinary untagged reply here would be judged as a turn.
     gateway.sessionRouting = async (sessionId: string) =>
       sessionId.startsWith('slack:ava:') && sessionId.endsWith(':100.1')
-        ? { agentId: 'ava', metadata: {}, lastAnsweredAt: new Date(100_000).toISOString(), heardSinceAnswered: 0 }
+        ? { agentId: 'ava', metadata: {} }
         : sessionId.endsWith(':100.1')
           ? { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(100_000).toISOString() }
           : undefined;
@@ -12336,13 +12277,6 @@ test('after a restart, the owner a judge took the thread from can still take it 
   for (const web of Object.values(webs)) {
     web.stamp = () => `${answering}${(seq += 1)}`;
   }
-  const routing = gateway.sessionRouting!;
-  gateway.sessionRouting = async (sessionId) => {
-    const found = await routing(sessionId);
-    return found && sessionId.includes(':bea:')
-      ? { ...found, lastAnsweredAt: new Date(609.3 * 1000).toISOString(), heardSinceAnswered: 0 }
-      : found;
-  };
   await adapter.start(gateway);
   answering = '609.4';
   await all(channelMessage({ text: 'go ahead', ts: '609.4', thread: '609.0' }));
@@ -12373,13 +12307,6 @@ test('after a restart, a reply typed while the judge is still answering stays wi
   for (const web of Object.values(webs)) {
     web.stamp = () => `611.4${(seq += 1)}`;
   }
-  const routing = gateway.sessionRouting!;
-  gateway.sessionRouting = async (sessionId) => {
-    const found = await routing(sessionId);
-    return found && sessionId.includes(':bea:')
-      ? { ...found, lastAnsweredAt: new Date(611.3 * 1000).toISOString(), heardSinceAnswered: 0 }
-      : found;
-  };
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -12429,13 +12356,6 @@ test('after a restart, a late message from when a judge held the thread is still
   for (const web of Object.values(webs)) {
     web.stamp = () => `612.9${(seq += 1)}`;
   }
-  const routing = gateway.sessionRouting!;
-  gateway.sessionRouting = async (sessionId) => {
-    const found = await routing(sessionId);
-    return found && sessionId.includes(':bea:')
-      ? { ...found, lastAnsweredAt: new Date(612.8 * 1000).toISOString(), heardSinceAnswered: 0 }
-      : found;
-  };
   await adapter.start(gateway);
   await all(channelMessage({ text: 'go on', ts: '612.9', thread: '612.0' }));
   // Delivered late: typed while Bea held the thread the first time.
@@ -12844,13 +12764,6 @@ test('after a restart, a stop is not placed by a live claim older than a post th
   for (const web of Object.values(webs)) {
     web.stamp = () => `613.9${(seq += 1)}`;
   }
-  const routing = gateway.sessionRouting!;
-  gateway.sessionRouting = async (sessionId) => {
-    const found = await routing(sessionId);
-    return found && sessionId.includes(':bea:')
-      ? { ...found, lastAnsweredAt: new Date(613.75 * 1000).toISOString(), heardSinceAnswered: 0 }
-      : found;
-  };
   await adapter.start(gateway);
   // Warms the record from the thread read: Bea's takes at .3 and .75, Ava's post at .6.
   await all(channelMessage({ text: 'go on', ts: '613.8', thread: '613.0' }));
@@ -13063,7 +12976,7 @@ const judgeV2Pair = async (listens: { ava: 'judge' | 'thread'; bea: 'judge' | 't
     if (!sessionId.endsWith(':5000.0')) {
       return undefined;
     }
-    return { agentId, metadata: {}, lastSpokeAt: new Date(5000 * 1000).toISOString(), lastAnsweredAt: new Date(5000 * 1000).toISOString(), heardSinceAnswered: 0 };
+    return { agentId, metadata: {}, lastSpokeAt: new Date(5000 * 1000).toISOString() };
   };
   const clock = stampsAfter();
   webAva.stamp = clock.stamp;

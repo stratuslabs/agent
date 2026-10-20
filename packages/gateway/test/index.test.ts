@@ -225,11 +225,6 @@ test('observe puts a message into a session with no turn, on the session\'s chai
       [{ type: 'session.observed', sessionId: 'thread-o', agentId: first.agent.id }],
     );
     assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, spoke);
-    // And it has heard one message since it last answered: the other half
-    // of an attention window, counted from the session so a restart
-    // forgets nothing.
-    assert.equal((await gateway.sessionRouting('thread-o'))?.lastAnsweredAt, spoke);
-    assert.equal((await gateway.sessionRouting('thread-o'))?.heardSinceAnswered, 1);
 
     // The next turn carries it, ahead of the message that started the turn.
     const next = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Dylan: Ava, and you?' });
@@ -239,24 +234,20 @@ test('observe puts a message into a session with no turn, on the session\'s chai
       ['Dylan: Bea, what do you think?', true],
       ['Dylan: Ava, and you?', false],
     ]);
-    assert.equal((await gateway.sessionRouting('thread-o'))?.heardSinceAnswered, 0);
 
     // A turn dispatched unaddressed carries the same mark through to the
     // runner: the message is stored overheard, on a new session and an
     // existing one alike, and the turn is nobody's to answer.
-    const answered = (await gateway.sessionRouting('thread-o'))?.lastAnsweredAt;
+    const answered = (await gateway.sessionRouting('thread-o'))?.lastSpokeAt;
     assert.equal((await gateway.sessionRouting('thread-o'))?.unaddressed, undefined);
     const unasked = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Bea: on it', addressed: false });
     const unaskedMessage = unasked.messages.findLast((message) => message.role === 'user');
     assert.equal(unaskedMessage?.overheard, true);
     assert.equal(unaskedMessage?.content, 'Bea: on it');
     // The reply it chose to give on a turn nobody asked for is speaking,
-    // for the thread rule, and not an anchor: attention runs from the
-    // last message that addressed it, and this one counts against it.
+    // for the thread rule.
     const afterUnasked = await gateway.sessionRouting('thread-o');
     assert.notEqual(afterUnasked?.lastSpokeAt, answered);
-    assert.equal(afterUnasked?.lastAnsweredAt, answered);
-    assert.equal(afterUnasked?.heardSinceAnswered, 1);
     // And the routing says whose turn it is on: nobody's, so a channel
     // that finds it failed after a restart knows to keep quiet for it.
     assert.equal(afterUnasked?.unaddressed, true);
@@ -278,9 +269,6 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     await gateway.store.save(filed);
     const withFile = await gateway.sessionRouting('thread-o');
     assert.equal(withFile?.lastSpokeAt, at);
-    // Though a turn nobody asked for, so not an answer: the anchor stays.
-    assert.equal(withFile?.lastAnsweredAt, answered);
-    assert.equal(withFile?.heardSinceAnswered, 2);
 
     // An agent hears only conversations it is already in: nothing is
     // created on its behalf, and "not in that one" is an answer rather
