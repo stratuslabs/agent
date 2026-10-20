@@ -3395,6 +3395,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const replayHolds = new Map<string, { held: Promise<void>; release: () => void }>();
   const holdKey = (agentId: string, channel: string): string => `${agentId}:${channel}`;
+  /**
+   * Whether `connection` is the one to replay `entry` through: the same
+   * agent in the workspace it was kept from. Channel and user ids belong to
+   * a workspace, so an agent whose credentials moved to another one leaves
+   * the entry kept (and its day-old expiry) rather than reading or answering
+   * whatever has that id there.
+   */
+  const keptFor = (connection: AgentConnection, entry: PendingIntake): boolean =>
+    connection.config.agentId === entry.agentId && connection.teamId === entry.team;
   const holdConversation = (key: string): void => {
     if (replayHolds.has(key)) {
       return;
@@ -3516,6 +3525,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const conversations = new Map<string, PendingIntake[]>();
     for (const entry of kept.filter((candidate) => candidate.keptAt >= cutoff)) {
+      const elsewhere = connections.find((connection) => connection.config.agentId === entry.agentId && !keptFor(connection, entry));
+      if (elsewhere !== undefined) {
+        warn(`slack: ${entry.agentId} kept ${entry.ts} in ${entry.channel} from workspace ${entry.team}, but is now connected to ${elsewhere.teamId}; keeping it for a start in that workspace`);
+        continue;
+      }
       const key = holdKey(entry.agentId, entry.channel);
       conversations.set(key, [...(conversations.get(key) ?? []), entry]);
     }
@@ -3524,7 +3538,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       try {
         entries.sort((a, b) => compareSlackTs(a.ts, b.ts));
         const agentId = entries[0]!.agentId;
-        const connection = connections.find((candidate) => candidate.config.agentId === agentId);
+        const connection = connections.find((candidate) => keptFor(candidate, entries[0]!));
         const handle = onEvent.get(agentId);
         if (connection === undefined || handle === undefined) {
           return;
@@ -7588,7 +7602,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
         const cutoff = now() - PENDING_INTAKE_MAX_AGE_MS;
         for (const entry of kept) {
-          if (entry.keptAt >= cutoff && authenticated.some((connection) => connection.config.agentId === entry.agentId)) {
+          if (entry.keptAt >= cutoff && authenticated.some((connection) => keptFor(connection, entry))) {
             holdConversation(holdKey(entry.agentId, entry.channel));
           }
         }

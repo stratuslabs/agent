@@ -13857,6 +13857,48 @@ test('a kept message deleted before the restart finished, or kept over a day ago
   assert.deepEqual(kept.map((entry) => entry.ts), ['600.3']);
 });
 
+test('a kept message from another Slack workspace is not read or answered through this one, and stays kept', async () => {
+  const file = await keptFile();
+  const now = Date.now();
+  // Kept while ava's app was in T-OLD; her credentials now point at T1.
+  await writeFile(file, JSON.stringify([
+    { agentId: 'ava', team: 'T-OLD', channel: 'C1', ts: '610.1', user: 'U-DYLAN', keptAt: now },
+  ]));
+  const logs: string[] = [];
+  const reads: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hi'));
+  const web = webWithHistory('B-AVA', [{ ts: '610.1', user: 'U-DYLAN', text: '<@B-AVA> same ids, other workspace' }]);
+  const history = web.conversations.history;
+  web.conversations.history = async (args) => {
+    reads.push(String(args.oldest));
+    return history!(args);
+  };
+  const replies = web.conversations.replies;
+  web.conversations.replies = async (args) => {
+    reads.push(String(args.oldest));
+    return replies!(args);
+  };
+  const socket = createFakeSocket();
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(line),
+  });
+  await adapter.start(gateway);
+  // A live message in a channel with the same id is not held behind it.
+  await socket.deliver('app_mention', mention('<@B-AVA> live', { ts: '611.1', channel: 'C1' }));
+  await adapter.stop();
+  assert.ok(!reads.includes('610.1'), reads.join(','));
+  assert.equal(gateway.dispatches.length, 1);
+  assert.ok(logs.some((line) => line.includes('610.1') && line.includes('T-OLD')), logs.join('\n'));
+  const kept = (await readKept(file)) as Array<Record<string, unknown>>;
+  assert.deepEqual(kept.map((entry) => entry.ts), ['610.1']);
+});
+
 test('a judged reply in the agent\'s own thread during a restart is kept for the next daemon to judge, with nothing posted', async () => {
   const file = await keptFile();
   const socket = createFakeSocket();
