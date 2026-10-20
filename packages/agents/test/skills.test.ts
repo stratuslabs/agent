@@ -201,6 +201,24 @@ Body.`);
     () => parseSkillDocument('---\ndescription: d\nmetadata: ["a"]\n---\n\nBody.'),
     /must be a block of indented/,
   );
+  // An inline flow collection on one block entry is structured too: a
+  // read key is refused, another host's key skipped, and a quoted value
+  // that only looks like one stays a string.
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  requires: ["fs.read"]\n---\n\nBody.'),
+    /metadata\.requires must be a string/,
+  );
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  version: {"major": 1}\n---\n\nBody.'),
+    /metadata\.version must be a string/,
+  );
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  requires: [fs.read]\n---\n\nBody.'),
+    /metadata\.requires must be a string/,
+  );
+  const inline = parseSkillDocument('---\ndescription: d\nmetadata:\n  tags: [a, b]\n  host: {"x": 1}\n  label: "[draft]"\n---\n\nBody.');
+  assert.deepEqual(inline.metadata, { label: '[draft]' });
+  assert.deepEqual(inline.skippedMetadata, ['tags', 'host']);
   // A line indented under metadata with no entry to belong to is still refused.
   assert.throws(
     () => parseSkillDocument('---\ndescription: d\nmetadata:\n  a: b\n    - stray\n---\n\nBody.'),

@@ -212,6 +212,13 @@ export const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape):
         skippingMapEntryIndent = indent;
         continue;
       }
+      // An unquoted value opening with [ or { is a flow collection, as in
+      // YAML, not a string: skipped and named like the nested forms. A
+      // string that starts with a bracket has to be quoted.
+      if (pair && mapKey !== undefined && mapKey.length > 0 && /^[[{]/.test((pair[4] ?? '').trim())) {
+        (skippedMapEntries[currentMap.key] ??= []).push(mapKey);
+        continue;
+      }
       if (!pair || mapKey === undefined || mapKey.length === 0 || pair[4] === undefined || unquote(pair[4]).length === 0) {
         throw new Error(
           `${capitalize(shape.kind)} frontmatter metadata entries must be "key: value" strings, one per line: "${line.trim()}"`,
