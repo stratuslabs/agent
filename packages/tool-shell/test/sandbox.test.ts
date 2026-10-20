@@ -654,6 +654,9 @@ test('home: "visible" and readablePaths open the home again, and credentials sta
   t.after(() => rm(root, { recursive: true, force: true }));
   const fixture = await fixtureHome(root);
   const outside = path.join(fixture.userHome, 'outside.txt');
+  // Here, unlike under /tmp, it is the hidden home that keeps it unreadable.
+  const hidden = await run({}, fixture, `cat ${outside}`);
+  assert.equal(hidden.ok, false, JSON.stringify(hidden.output));
   const visible = await run({ home: 'visible' }, fixture, `cat ${outside}`);
   assert.equal(output(visible).stdout, 'outside', JSON.stringify(visible.output));
   await mkdir(path.join(fixture.userHome, 'projects'), { recursive: true });
