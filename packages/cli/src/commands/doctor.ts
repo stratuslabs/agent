@@ -220,7 +220,16 @@ interface DaemonHealth {
   version?: string;
   startedAt?: string;
   startup?: { warnings?: unknown; configs?: unknown };
+  intake?: { paused?: unknown };
 }
+
+/**
+ * How the gateway begins every intake warning it logs at start (an intake
+ * file it could not read, so it started paused). Unlike the rest of the
+ * start, that one is repaired live: resuming intake rewrites the file, and
+ * a restart would only read the same broken one and pause again.
+ */
+const INTAKE_WARNING_PREFIX = 'intake: ';
 
 /** What a daemon's /health said about each config file at start, keeping only well-formed entries. */
 const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | null }> =>
@@ -288,7 +297,19 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   const warnings = Array.isArray(startup?.warnings)
     ? startup.warnings.filter((line): line is string => typeof line === 'string')
     : [];
+  // Only a health answer that says intake is open shows the pause lifted;
+  // an older daemon that reports no intake state keeps the warning.
+  const intakeOpen = health.intake?.paused === false;
   for (const line of warnings) {
+    if (line.startsWith(INTAKE_WARNING_PREFIX)) {
+      if (!intakeOpen) {
+        problems.push(
+          `The running daemon started with intake paused and is still refusing new work: ${line.slice(INTAKE_WARNING_PREFIX.length)} `
+          + 'Resume it with PUT /api/v1/intake {"paused": false}; a restart reads the same file and pauses again.',
+        );
+      }
+      continue;
+    }
     problems.push(`The running daemon warned at start: ${line}. It runs on what it loaded until \`stratus restart\`.`);
   }
   const configs = startedConfigs(startup?.configs);

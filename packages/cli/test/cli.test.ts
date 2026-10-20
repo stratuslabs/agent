@@ -5439,6 +5439,85 @@ test('doctor against a real daemon: what it warned at start stays a problem afte
   }
 });
 
+test('doctor against a real daemon: an intake warning is a problem while paused and gone once intake resumes', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-intake-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  // A runnable config, so the intake warning is the only problem doctor has.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' }), { mode: 0o600 });
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }), { mode: 0o600 });
+  // Not a pause record: the daemon fails closed, starts paused and warns.
+  await writeFile(path.join(home, '.stratus', 'intake.json'), '{"paused":', { mode: 0o600 });
+  const controller = new AbortController();
+  const served = createStreams();
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: served.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+  try {
+    let url = '';
+    for (let tries = 0; ; tries += 1) {
+      try {
+        url = (JSON.parse(await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8')) as { url: string }).url;
+        break;
+      } catch {
+        if (tries > 100) throw new Error(`daemon never published gateway.json: ${served.output.stdout}${served.output.stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    const paused = createStreams();
+    const pausedCode = await runCli({ argv: ['doctor'], streams: paused.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    assert.equal(pausedCode, 1, paused.output.stdout);
+    const line = paused.output.stdout.split('\n').find((text) => text.includes('is not valid JSON')) ?? '';
+    assert.match(line, /intake/, paused.output.stdout);
+    // A restart reads the same file and pauses again; resuming is the fix.
+    assert.doesNotMatch(line, /until `stratus restart`/);
+    assert.match(line, /resume/i);
+
+    const token = (await readFile(path.join(home, '.stratus', 'gateway-token'), 'utf8')).trim();
+    const resumed = await fetch(`${url.replace(/\/+$/, '')}/api/v1/intake`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ paused: false }),
+    });
+    assert.equal(resumed.status, 200, await resumed.text());
+
+    const after = createStreams();
+    const afterCode = await runCli({ argv: ['doctor'], streams: after.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    assert.equal(afterCode, 0, after.output.stdout);
+    assert.doesNotMatch(after.output.stdout, /intake paused|intake\.json/);
+    assert.match(after.output.stdout, /No problems found\./);
+  } finally {
+    controller.abort();
+    await serving;
+  }
+});
+
+test('doctor keeps a startup warning that is not about intake after intake resumes', async () => {
+  const { exitCode, output } = await doctorAgainstDaemon((configPath, sha256) => ({
+    intake: { paused: false },
+    startup: {
+      warnings: ['ava: soul could not be loaded', 'intake: /h/.stratus/intake.json is not valid JSON; starting paused. Resume intake to clear it.'],
+      configs: [{ path: configPath, sha256 }],
+    },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.match(output.stdout, /ava: soul could not be loaded/);
+  assert.doesNotMatch(output.stdout, /intake\.json/);
+});
+
+test('doctor keeps an intake warning from a daemon whose health does not say intake', async () => {
+  // An older daemon, or a damaged answer: no evidence the pause lifted.
+  const { exitCode, output } = await doctorAgainstDaemon((configPath, sha256) => ({
+    startup: {
+      warnings: ['intake: /h/.stratus/intake.json is not valid JSON; starting paused. Resume intake to clear it.'],
+      configs: [{ path: configPath, sha256 }],
+    },
+  }));
+  assert.equal(exitCode, 1, output.stdout);
+  assert.match(output.stdout, /intake\.json is not valid JSON/);
+});
+
 test('doctor flags a trusted config other users can read, and not a project-local one', async () => {
   // It holds plugin secrets — tool-shell's env block — and a file an older
   // build wrote at the umask's mode stays loose until something saves it.
