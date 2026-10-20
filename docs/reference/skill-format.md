@@ -45,8 +45,9 @@ indicator variants), and one level of `key: value` pairs under
 use). Anchors are not read, and neither is a flow map that is not JSON.
 
 The spec says every `metadata` value is a string. An entry whose value is
-structured instead (a nested block, a block list, or a JSON object or
-array) is another host's data: it is skipped and named in a warning, and
+structured instead (a nested block, a block list, a JSON object or array,
+or an unquoted inline `[...]` or `{...}`; quote a string that starts with
+a bracket) is another host's data: it is skipped and named in a warning, and
 the rest of the skill installs. The exception is the two keys Stratus
 reads: a structured `metadata.requires` or `metadata.version` is refused,
 since skipping it would drop what the skill declared.
