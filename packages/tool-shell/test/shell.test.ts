@@ -774,3 +774,57 @@ test('the plugin hands the host\'s credential store to the tool', async () => {
   );
   assert.equal(String((result.output as JsonObject).stdout).trim(), '[ghs-ava]', JSON.stringify(result));
 });
+
+test('with the external-content gate on, a tainted ledger closes grants before the first shell call is judged', async () => {
+  const { workspaces, workspace } = await ledgerHome();
+  const notes = path.join(workspace, 'notes.txt');
+  await writeFile(notes, 'text a web page wrote\n');
+  await createFileLedger((id) => workspaces.forAgent(id)).recordWrite('ava', notes, 'external');
+  const git = (args: string) => createLocalCommandExecutor().execute(
+    { id: 'git', toolName: 'shell.run', input: { command: `git ${args}` } },
+    createShellTool({ cwd: workspace, sandbox: 'off' }),
+    session('ava'),
+  );
+  assert.equal((await git('init -q')).ok, true);
+  assert.equal((await git('-c user.email=a@b -c user.name=a commit -q --allow-empty -m one')).ok, true);
+
+  const decisions: PermissionDecision[] = [];
+  const tools = await registryFor({ sandbox: 'off' }, undefined, workspaces);
+  // The first call of a clean session. Local git can print any tracked
+  // file, the tainted one included, so it must be judged as reading it.
+  const commands = ['git log --oneline'];
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate() {
+      const command = commands[turn];
+      turn += 1;
+      return command === undefined
+        ? { parts: [{ type: 'text', text: 'done' }] }
+        : { parts: [{ type: 'tool-call', call: { id: `c${turn}`, toolName: 'shell.run', input: { command } } }] };
+    },
+  };
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    executor: createLocalCommandExecutor(),
+    approvals: createPermissionPolicy({
+      mode: 'headless',
+      onDecision: (decision) => decisions.push(decision),
+      commands: { workspace: { directoryFor: () => workspace } },
+      gateExternalContent: () => true,
+    }),
+    store: new InMemorySessionStore(),
+    maxTurns: 4,
+  });
+  await runner.initialize();
+  const finished = await runner.run({
+    sessionId: 'shell-ledger-gate-first-call',
+    agent: { id: 'ava', name: 'Ava', tools: ['shell.*'] },
+    userMessage: 'show the log',
+  });
+
+  const results = finished.messages.filter((message) => message.role === 'tool');
+  assert.equal(results[0]?.toolResult?.ok, false);
+  assert.match(decisions[0]?.reason ?? '', /after this conversation read external content/);
+});
