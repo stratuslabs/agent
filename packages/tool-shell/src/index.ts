@@ -297,6 +297,9 @@ const settingsFor = (
   };
 };
 
+/** An agent id that names one directory: never empty, `.`, `..`, or a path. */
+const SAFE_AGENT_ID = /^(?!\.\.?$)[A-Za-z0-9._-]+$/;
+
 /**
  * The command to spawn for `shell shellArgs…`, under the sandbox unless the
  * operator turned it off. `required` refuses when no sandbox can start;
@@ -306,6 +309,7 @@ const sandboxed = async (
   settings: ReturnType<typeof settingsFor>,
   shellArgs: string[],
   options: ShellToolOptions,
+  agentId: string,
 ): Promise<{ command: string; args: string[] }> => {
   const unconfined = { command: settings.shell, args: shellArgs };
   if (settings.sandbox === 'off') {
@@ -356,13 +360,21 @@ const sandboxed = async (
   // operator meant something by it, and the fix is to name the directory.
   // Another agent's workspace and every other directory the host protects
   // (a gateway's own stateDir) are refused in both directions: a writable
-  // path inside one opens that part of it as surely as one above it. The
-  // Stratus home is the one exception, refused only from above, since an
-  // agent's own home lives inside it. Every path is compared by its
-  // written and its real spelling, the real one resolved through the
-  // nearest existing ancestor so an absent path behind a symlink is placed
-  // where it would land.
-  const homePlaces = stratusHomesFor(workspace, processEnv, userHome).flatMap(placements);
+  // path inside one opens that part of it as surely as one above it.
+  // Inside the Stratus home the rule is an allowlist, not a carve-out:
+  // only this agent's own integrations/<id>/home, and its own workspace
+  // when that sits inside the home, since every other descendant
+  // (sessions, daemon state, another agent's home) is what the denial is
+  // for. Every path is compared by its written and its real spelling, the
+  // real one resolved through the nearest existing ancestor so an absent
+  // path behind a symlink is placed where it would land.
+  const stratusHomes = stratusHomesFor(workspace, processEnv, userHome);
+  const homePlaces = stratusHomes.flatMap(placements);
+  const workspacePlaces = placements(workspace);
+  const ownPlaces = [
+    ...(SAFE_AGENT_ID.test(agentId) ? stratusHomes.map((home) => path.join(home, 'integrations', agentId, 'home')).flatMap(placements) : []),
+    ...(workspacePlaces.some((dir) => homePlaces.some((home) => dir !== home && isWithin(home, dir))) ? workspacePlaces : []),
+  ];
   const guarded = [...homePlaces, ...hostProtected.flatMap(placements)];
   const sealed = hostProtected
     .filter((target) => !placements(target).some((place) => homePlaces.includes(place)))
@@ -389,6 +401,13 @@ const sandboxed = async (
       throw new Error(
         `shell.run refused: writablePaths names ${entry}, which overlaps another agent's workspace (${overlaps}), and a writable path there would open it to this agent's commands. `
         + 'Name a directory outside every other agent\'s workspace.',
+      );
+    }
+    const inHome = homePlaces.find((home) => places.some((dir) => isWithin(home, dir)));
+    if (inHome !== undefined && !places.some((dir) => ownPlaces.some((own) => isWithin(own, dir)))) {
+      throw new Error(
+        `shell.run refused: writablePaths names ${entry}, which is inside the Stratus home (${inHome}), and a writable path there would open daemon state or another agent's files to every command. `
+        + 'Inside it, name only this agent\'s own ~/.stratus/integrations/<id>/home.',
       );
     }
   }
@@ -722,7 +741,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
         }
       }
       const shellArgs = [...startupOff(settings.shell), '-c', command];
-      const run = await sandboxed(settings, shellArgs, options);
+      const run = await sandboxed(settings, shellArgs, options, session.agent.id);
       return {
         command: run.command,
         args: run.args,

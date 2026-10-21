@@ -971,3 +971,37 @@ test('a writablePaths entry inside a directory the host protects, other than the
   const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, withState);
   assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', 'ava', 'home')]);
 });
+
+test('inside the Stratus home only the agent\'s own integrations/<id>/home or its own workspace may be writable (Codex P1 4334240775)', async () => {
+  // The Stratus home is denied and writablePaths are granted after it, so
+  // any descendant named here would be reopened: sessions, the daemon's
+  // state, another agent's integration home, the agent's own credentials
+  // beside its home. Only the two places this agent already owns pass.
+  const fixture = await fixtureHome();
+  const stratus = fixture.stratusHome;
+  await mkdir(path.join(stratus, 'sessions'), { recursive: true });
+  await mkdir(path.join(stratus, 'integrations', 'bea', 'home'), { recursive: true });
+  await mkdir(path.join(stratus, 'integrations', 'ava', 'home'), { recursive: true });
+  const alias = path.join(fixture.userHome, 'sessions-alias');
+  await symlink(path.join(stratus, 'sessions'), alias);
+  for (const entry of [
+    '~/.stratus/sessions',
+    '~/.stratus/not-yet',
+    '~/.stratus/integrations/bea/home',
+    '~/.stratus/integrations/ava',
+    '~/.stratus/integrations/ava/other',
+    '~/.stratus/agents/ava',
+    alias,
+  ]) {
+    let planned = false;
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, `${entry}: refused before any command is planned`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*inside the Stratus home/, entry);
+  }
+  for (const entry of ['~/.stratus/integrations/ava/home', '~/.stratus/integrations/ava/home/.config', '~/.stratus/agents/ava/workspace/build']) {
+    const { seen } = await policyOf({ writablePaths: [entry] }, fixture);
+    assert.ok(seen, `${entry}: planned`);
+    assert.equal(seen!.grantedWritable!.length, 1, entry);
+  }
+});
