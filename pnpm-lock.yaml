@@ -548,6 +548,9 @@ importers:
 
   packages/tool-shell:
     dependencies:
+      '@stratusagent/agents':
+        specifier: workspace:*
+        version: link:../agents
       '@stratusagent/core':
         specifier: workspace:*
         version: link:../core

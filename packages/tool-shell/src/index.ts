@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { isValidAgentId } from '@stratusagent/agents';
 
 import {
   DEFAULT_SUBPROCESS_PASS_ENV,
@@ -297,9 +298,6 @@ const settingsFor = (
   };
 };
 
-/** An agent id that names one directory: never empty, `.`, `..`, or a path. */
-const SAFE_AGENT_ID = /^(?!\.\.?$)[A-Za-z0-9._-]+$/;
-
 /**
  * The command to spawn for `shell shellArgs…`, under the sandbox unless the
  * operator turned it off. `required` refuses when no sandbox can start;
@@ -372,7 +370,7 @@ const sandboxed = async (
   const homePlaces = stratusHomes.flatMap(placements);
   const workspacePlaces = placements(workspace);
   const ownPlaces = [
-    ...(SAFE_AGENT_ID.test(agentId) ? stratusHomes.map((home) => path.join(home, 'integrations', agentId, 'home')).flatMap(placements) : []),
+    ...(isValidAgentId(agentId) ? stratusHomes.map((home) => path.join(home, 'integrations', agentId, 'home')).flatMap(placements) : []),
     ...(workspacePlaces.some((dir) => homePlaces.some((home) => dir !== home && isWithin(home, dir))) ? workspacePlaces : []),
   ];
   const guarded = [...homePlaces, ...hostProtected.flatMap(placements)];
@@ -404,7 +402,10 @@ const sandboxed = async (
       );
     }
     const inHome = homePlaces.find((home) => places.some((dir) => isWithin(home, dir)));
-    if (inHome !== undefined && !places.some((dir) => ownPlaces.some((own) => isWithin(own, dir)))) {
+    // Every placement, not just the written one: a link inside the agent's
+    // own subtree that lands elsewhere in the home is granted by its real
+    // path, so that is the one that has to stay inside.
+    if (inHome !== undefined && !places.every((dir) => !homePlaces.some((home) => isWithin(home, dir)) || ownPlaces.some((own) => isWithin(own, dir)))) {
       throw new Error(
         `shell.run refused: writablePaths names ${entry}, which is inside the Stratus home (${inHome}), and a writable path there would open daemon state or another agent's files to every command. `
         + 'Inside it, name only this agent\'s own ~/.stratus/integrations/<id>/home.',

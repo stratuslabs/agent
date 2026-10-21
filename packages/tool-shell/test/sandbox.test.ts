@@ -80,7 +80,7 @@ const run = async (
   config: JsonObject,
   fixture: Awaited<ReturnType<typeof fixtureHome>>,
   command: string,
-  extra: { planSandbox?: typeof planSandbox; warn?: (message: string) => void; processEnv?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {},
+  extra: { planSandbox?: typeof planSandbox; warn?: (message: string) => void; processEnv?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; agentId?: string } = {},
 ) => {
   const tool = createShellTool(config, {
     ...(extra.platform ? { platform: extra.platform } : {}),
@@ -91,7 +91,7 @@ const run = async (
     ...(extra.planSandbox ? { planSandbox: extra.planSandbox } : {}),
     ...(extra.warn ? { warn: extra.warn } : {}),
   });
-  return createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command } }, tool, session('ava'));
+  return createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command } }, tool, session(extra.agentId ?? 'ava'));
 };
 
 const output = (result: Awaited<ReturnType<typeof run>>): { stdout: string; stderr: string } => {
@@ -570,7 +570,7 @@ test('stored tokens of common developer CLIs are denied', async () => {
 
 // ---- the hidden home ----
 
-const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>, extra: { platform?: NodeJS.Platform } = {}) => {
+const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>, extra: { platform?: NodeJS.Platform; agentId?: string } = {}) => {
   let seen: Parameters<typeof planSandbox>[0] | undefined;
   const result = await run(config, fixture, 'true', { ...extra, planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
   return { seen, result };
@@ -1003,5 +1003,33 @@ test('inside the Stratus home only the agent\'s own integrations/<id>/home or it
     const { seen } = await policyOf({ writablePaths: [entry] }, fixture);
     assert.ok(seen, `${entry}: planned`);
     assert.equal(seen!.grantedWritable!.length, 1, entry);
+  }
+});
+
+test('a writablePaths entry inside the agent\'s own home or workspace that links elsewhere in the Stratus home is refused (Codex P1 4335097416)', async () => {
+  // The written spelling is allowlisted, but the real one is what the
+  // sandbox grants, so a link out of the agent's own subtree would open
+  // sessions or daemon state. Every placement must stay inside it.
+  const fixture = await fixtureHome();
+  const stratus = fixture.stratusHome;
+  await mkdir(path.join(stratus, 'sessions'), { recursive: true });
+  await mkdir(path.join(stratus, 'integrations', 'ava', 'home'), { recursive: true });
+  await mkdir(fixture.workspaces.forAgent('ava'), { recursive: true });
+  await symlink(path.join(stratus, 'sessions'), path.join(stratus, 'integrations', 'ava', 'home', 'cache'));
+  await symlink(path.join(stratus, 'sessions'), path.join(fixture.workspaces.forAgent('ava'), 'out'));
+  for (const entry of ['~/.stratus/integrations/ava/home/cache', '~/.stratus/integrations/ava/home/cache/new', '~/.stratus/agents/ava/workspace/out']) {
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => unavailable(policy, '', []), warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*inside the Stratus home/, entry);
+  }
+});
+
+test('the own integration home is allowlisted for every valid agent id, not only slug-shaped ones (Codex P2 4335097425)', async () => {
+  const fixture = await fixtureHome();
+  for (const agentId of ['my agent', 'team,alpha', 'Agënt']) {
+    await mkdir(path.join(fixture.stratusHome, 'integrations', agentId, 'home'), { recursive: true });
+    const { seen, result } = await policyOf({ writablePaths: [`~/.stratus/integrations/${agentId}/home`] }, fixture, { agentId });
+    assert.ok(seen, `${agentId}: ${JSON.stringify(result)}`);
+    assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', agentId, 'home')]);
   }
 });
