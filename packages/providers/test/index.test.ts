@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   ContextOverflowError,
+  OVERHEARD_IMAGES_NOTE,
   UNADDRESSED_TURN_NOTE,
   UNTRUSTED_TOOL_RESULT_NOTE,
   type ProviderCallUsage,
@@ -1238,6 +1239,40 @@ test('createOpenAICompatibleProvider sends tool_choice none on a wrap-up turn on
   assert.equal(bodies[0]!.tools.length, 1);
   assert.equal(bodies[0]!.tool_choice, 'none');
   assert.equal(bodies[1]!.tool_choice, undefined);
+});
+
+test('createOpenAICompatibleProvider sends an overheard message\'s framed text before its images, labeled (card 625)', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl });
+  const request = requestWithImage();
+  request.session.messages = [{ ...request.session.messages[0]!, content: 'Dylan: look at this', overheard: true }];
+
+  await provider.generate(request);
+
+  const sent = bodies[0]!.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(sent, [{
+    role: 'user',
+    content: [
+      { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: look at this\n\n' + UNADDRESSED_TURN_NOTE },
+      { type: 'text', text: OVERHEARD_IMAGES_NOTE },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+    ],
+  }]);
+});
+
+test('a harness prompt for an overheard message with inline images ends on the label the images follow (card 625)', () => {
+  const request = requestWithImage();
+  request.session.messages = [{ ...request.session.messages[0]!, content: 'Dylan: look at this', overheard: true }];
+  assert.equal(latestUserMessagePrompt(request, { inlineImages: true }), '(overheard, not addressed to you)\n> Dylan: look at this\n\n' + UNADDRESSED_TURN_NOTE + '\n\n' + OVERHEARD_IMAGES_NOTE);
+  // Named, not sent: no label, since nothing follows it.
+  assert.doesNotMatch(latestUserMessagePrompt(request), new RegExp(OVERHEARD_IMAGES_NOTE.replace(/[()]/g, '\\$&')));
 });
 
 test('createOpenAICompatibleProvider replaces images past the replay budget with a note', async () => {

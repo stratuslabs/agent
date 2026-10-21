@@ -71,8 +71,11 @@ they are the whole model:
    agent the sender last named, else the thread's owner (card 541). There
    is no window: an owner an hour past its last answer still takes an
    untagged instruction in its thread, and only one agent takes each
-   message. A judged turn does not take images (they are named, as for a
-   message that was overheard). Each decision is logged as one line with
+   message. A judged turn reads the message's images and text files as an
+   asked-for turn does, under the same limits; the model gets them after
+   the words that mark the message as not addressed to it, and may still
+   say nothing. An overheard message's files stay names only, and nothing
+   is downloaded for it. Each decision is logged as one line with
    the agent, the message's ts, and the reason (`addressed it last`,
    `owner`, or whose it was instead), never the text. An approver's
    untagged stop is never judged: it stops the holder's turn or, with

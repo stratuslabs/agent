@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ContextOverflowError, UNADDRESSED_TURN_NOTE, UNTRUSTED_TOOL_RESULT_NOTE, renderSystemPromptParts, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session, type ToolResult } from '@stratusagent/core';
+import { ContextOverflowError, OVERHEARD_IMAGES_NOTE, UNADDRESSED_TURN_NOTE, UNTRUSTED_TOOL_RESULT_NOTE, renderSystemPromptParts, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session, type ToolResult } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -1435,6 +1435,36 @@ test('a user message with images sends them as image blocks ahead of its text', 
       content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/4AAQ' } }],
     },
   ]);
+});
+
+test('an overheard message sends its framed text first, then its images, labeled as that message\'s (card 625)', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session = createSession({
+    messages: [{
+      id: 'session-1:user:1',
+      role: 'user',
+      content: 'Dylan: look at this',
+      createdAt: new Date().toISOString(),
+      overheard: true,
+      images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'shot.png' }],
+    }],
+  });
+
+  const response = await provider.generate({ session });
+
+  // Pixels never ride ahead of the frame that says nobody spoke to the
+  // agent: the words, the note, then the images, named as the message's.
+  assert.deepEqual(requests[0]!.body.messages, [{
+    role: 'user',
+    content: [
+      { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: look at this\n\n' + UNADDRESSED_TURN_NOTE },
+      { type: 'text', text: OVERHEARD_IMAGES_NOTE },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+    ],
+  }]);
+  // Silence is still an answer on this turn.
+  assert.deepEqual(response.parts, []);
 });
 
 test('images past the replay budget are replaced by a note, newest kept', async () => {

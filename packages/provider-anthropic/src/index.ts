@@ -27,6 +27,7 @@ import {
   type Session,
   type ToolCall,
   type ToolDescriptor,
+  OVERHEARD_IMAGES_NOTE,
   promptTextOf,
 } from '@stratusagent/core';
 
@@ -369,11 +370,14 @@ const rawTurnsFrom = (session: ProviderRequest['session']): RawTurns => {
 };
 
 /**
- * A user turn's blocks: its images first, then the text. An image outside
- * the replay budget becomes a note saying so. The API refuses an empty
- * text block, and a message that is only an image has no text — so the
- * text block is added only when there is text, and a message with neither
- * still sends one so the turn is never an empty content array.
+ * A user turn's blocks: its images first, then the text — except for an
+ * overheard message, whose framed text comes first, then
+ * `OVERHEARD_IMAGES_NOTE`, then its images, so no pixel reaches the model
+ * ahead of the frame (card 625). An image outside the replay budget
+ * becomes a note saying so. The API refuses an empty text block, and a
+ * message that is only an image has no text — so the text block is added
+ * only when there is text, and a message with neither still sends one so
+ * the turn is never an empty content array.
  */
 const imageBlocksFor = (
   images: readonly ImageAttachment[],
@@ -393,7 +397,16 @@ const userBlocks = (
   images: readonly ImageAttachment[] | undefined,
   replayed: ReadonlySet<ImageAttachment>,
   imageOf: WeakMap<ContentBlockParam, ImageAttachment>,
+  overheard = false,
 ): ContentBlockParam[] => {
+  if (overheard && images !== undefined && images.length > 0) {
+    // promptTextOf never returns an empty frame for an overheard message.
+    return [
+      { type: 'text', text: content },
+      { type: 'text', text: OVERHEARD_IMAGES_NOTE },
+      ...imageBlocksFor(images, replayed, imageOf),
+    ];
+  }
   const blocks: ContentBlockParam[] = imageBlocksFor(images ?? [], replayed, imageOf);
   if (content.length > 0 || blocks.length === 0) {
     blocks.push({ type: 'text', text: content });
@@ -539,8 +552,9 @@ const createAnthropicMessages = (
     // rendered as something said to somebody else, on this path as on the
     // harness ones. Consecutive user turns merge above, so a message
     // overheard between turns and the one that followed it reach the API
-    // as one user turn of two blocks. Its images, if any, ride ahead of it.
-    push('user', userBlocks(promptTextOf(message, { latest: message === latest }), message.images, replayed, imageOf));
+    // as one user turn of two blocks. Its images, if any, ride ahead of an
+    // addressed message and behind an overheard one's frame.
+    push('user', userBlocks(promptTextOf(message, { latest: message === latest }), message.images, replayed, imageOf, message.overheard === true));
   }
 
   const imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }> = [];

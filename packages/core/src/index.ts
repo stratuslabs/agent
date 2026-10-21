@@ -3572,6 +3572,16 @@ export const promptTextOf = (
 };
 
 /**
+ * What separates an overheard message's framed text from its images. The
+ * contract every provider keeps for a message with `overheard` and
+ * images: the text from `promptTextOf` first, then this, then the images,
+ * so pixels never reach a model ahead of the frame that says nobody spoke
+ * to it, and read as that message's attachments rather than as something
+ * the agent was sent. Like the frame, it states the fact, not advice.
+ */
+export const OVERHEARD_IMAGES_NOTE = '(attached to the overheard message above, not addressed to you)';
+
+/**
  * Whether the turn a session is on is one nobody asked for: its newest
  * user message is overheard, which only `addressed: false` produces at
  * turn time — `observe` appends between turns, and every dispatch since
@@ -5868,19 +5878,6 @@ export class AllowAllApprovalPolicy implements ApprovalPolicy {
 const userImages = (images: ImageAttachment[] | undefined): Pick<Message, 'images'> =>
   images !== undefined && images.length > 0 ? { images } : {};
 
-/**
- * See `RunInput.addressed`: an image reaches the model as pixels, before
- * and outside the text that frames what was said as somebody else's, so
- * a turn nobody asked for takes none.
- */
-const refuseUnaddressedImages = (input: Pick<RunInput, 'addressed' | 'images'>): void => {
-  if (input.addressed === false && input.images !== undefined && input.images.length > 0) {
-    throw new Error(
-      'A turn nobody asked for cannot carry images: an image enters the prompt ahead of the frame that marks the message as somebody else\'s. Name the attachment in the message instead.',
-    );
-  }
-};
-
 export interface RunInput {
   sessionId: string;
   /** See Session.agent: the allowlist travels with the run. */
@@ -5896,10 +5893,10 @@ export interface RunInput {
    * is told (`UNADDRESSED_TURN_NOTE`) that it may answer with nothing — an
    * empty reply is then a decision, not a failure, and the turn completes
    * with an empty assistant message: no text for a surface to post, and a
-   * boundary so the message is never judged twice. Such a turn carries no
-   * images: they enter a prompt ahead of any frame that could mark them as
-   * somebody else's, so a message nobody addressed to the agent names its
-   * attachments instead, as an overheard one does.
+   * boundary so the message is never judged twice. Such a turn may carry
+   * images: they are stored on the overheard message, and every provider
+   * renders them after its framed text, behind `OVERHEARD_IMAGES_NOTE`,
+   * never ahead of the frame that marks them as somebody else's.
    */
   addressed?: boolean;
   /**
@@ -6400,7 +6397,6 @@ export class AgentRunner {
   }
 
   async run(input: RunInput): Promise<Session> {
-    refuseUnaddressedImages(input);
     // The sender's trust is the turn's, not the session's: it is read here
     // and kept out of the persisted metadata, where a later reader would
     // take the first sender's label for every turn that follows.
@@ -6496,7 +6492,6 @@ export class AgentRunner {
   }
 
   async resume(input: ResumeInput): Promise<Session> {
-    refuseUnaddressedImages(input);
     const session = await this.store.get(input.sessionId);
     if (!session) {
       throw new Error(`Session not found: ${input.sessionId}`);

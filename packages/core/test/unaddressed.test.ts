@@ -79,18 +79,6 @@ test('a turn dispatched unaddressed stores its message overheard, is told so, an
   );
   assert.equal(latestTurnReply(again), undefined);
 
-  // No images on a turn nobody asked for: they would reach the model ahead
-  // of the frame that marks the message as somebody else's.
-  const image = { mediaType: 'image/png' as const, data: 'aGk=', name: 'shot.png' };
-  await assert.rejects(
-    () => runner.resume({ sessionId: 's', userMessage: 'Bea: look', addressed: false, images: [image] }),
-    /cannot carry images/,
-  );
-  await assert.rejects(
-    () => runner.run({ sessionId: 's2', agent: AGENT, userMessage: 'Bea: look', addressed: false, images: [image] }),
-    /cannot carry images/,
-  );
-
   // Addressed — the default, and `true` spelled out — is what every turn
   // was before: bare, no mark, no note, and the history it follows is
   // still framed as what it was.
@@ -101,6 +89,37 @@ test('a turn dispatched unaddressed stores its message overheard, is told so, an
   assert.equal(latestTurnReply(asked), 'here');
   const defaulted = await runner.resume({ sessionId: 's', userMessage: 'Dylan: Ava, once more' });
   assert.equal(defaulted.messages.findLast((message) => message.role === 'user')?.overheard, undefined);
+});
+
+test('a turn nobody asked for carries its images, stored with the overheard message, and may still end in silence (card 625)', async () => {
+  // The providers render an overheard message's images after its framed
+  // text (OVERHEARD_IMAGES_NOTE), so the kernel no longer refuses them.
+  const provider = decidingProvider(() => '');
+  const seen: ProviderRequest[] = [];
+  const watching: ModelProvider = {
+    name: provider.name,
+    async generate(request) {
+      seen.push(request);
+      return provider.generate(request);
+    },
+  };
+  const runner = new AgentRunner({ provider: watching, bus: new EventBus(), store: new InMemorySessionStore() });
+  const image = { mediaType: 'image/png' as const, data: 'aGk=', name: 'shot.png' };
+
+  const opened = await runner.run({ sessionId: 's', agent: AGENT, userMessage: 'Dylan: look', addressed: false, images: [image] });
+  assert.equal(opened.status, 'completed');
+  assert.equal(latestTurnReply(opened), undefined);
+  const first = opened.messages.find((message) => message.role === 'user');
+  assert.equal(first?.overheard, true);
+  assert.deepEqual(first?.images, [image]);
+  assert.deepEqual(seen[0]?.session.messages.find((message) => message.role === 'user')?.images, [image]);
+
+  const again = await runner.resume({ sessionId: 's', userMessage: 'Dylan: and this', addressed: false, images: [image] });
+  assert.equal(again.status, 'completed');
+  assert.equal(latestTurnReply(again), undefined);
+  const latest = again.messages.findLast((message) => message.role === 'user');
+  assert.equal(latest?.overheard, true);
+  assert.deepEqual(latest?.images, [image]);
 });
 
 test('a turn nobody asked for whose prompt the harness took before failing leaves its boundary', async () => {

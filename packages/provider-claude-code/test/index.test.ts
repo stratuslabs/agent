@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_TURNS, promptWasDelivered, TURN_LIMIT_NOTE, CONTINUE_NOTE, UNTRUSTED_TOOL_RESULT_NOTE } from '@stratusagent/core';
+import { DEFAULT_MAX_TURNS, OVERHEARD_IMAGES_NOTE, UNADDRESSED_TURN_NOTE, promptWasDelivered, TURN_LIMIT_NOTE, CONTINUE_NOTE, UNTRUSTED_TOOL_RESULT_NOTE } from '@stratusagent/core';
 import { test } from 'node:test';
 import type {
   MemoryEntry,
@@ -180,6 +180,39 @@ test('an image on the newest message reaches Claude Code as an image, not a note
     },
   }]);
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Three items: eggs, milk, bread.' }]);
+});
+
+test('an overheard message reaches Claude Code framed first, its images after the label (card 625)', async () => {
+  const prompts: unknown[] = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    prompts.push(params.prompt);
+    return (async function* () {
+      yield { type: 'result', subtype: 'success', is_error: false, result: '' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+  const session = createSession({
+    messages: [{
+      id: 'session-1:user:1',
+      role: 'user',
+      content: 'Dylan: look at this',
+      createdAt: new Date().toISOString(),
+      overheard: true,
+      images: [{ mediaType: 'image/jpeg', data: '/9j/4AAQ', name: 'IMG_3612.jpg' }],
+    }],
+  });
+
+  const response = await provider.generate({ session });
+
+  const sent: Array<{ message: { content: unknown[] } }> = [];
+  for await (const message of prompts[0] as AsyncIterable<{ message: { content: unknown[] } }>) {
+    sent.push(message);
+  }
+  assert.deepEqual(sent[0]!.message.content, [
+    { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: look at this\n\n' + UNADDRESSED_TURN_NOTE + '\n\n' + OVERHEARD_IMAGES_NOTE },
+    { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/4AAQ' } },
+  ]);
+  assert.deepEqual(response.parts, []);
 });
 
 test('an image sent with no words reaches Claude Code without an empty text block', async () => {
