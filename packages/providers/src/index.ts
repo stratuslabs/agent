@@ -24,6 +24,7 @@ import {
   type ToolCall,
   type ToolDescriptor,
   type ToolResult,
+  OVERHEARD_IMAGES_NOTE,
   promptTextOf,
 } from '@stratusagent/core';
 
@@ -925,6 +926,8 @@ const userContentParts = (
   }
   return [
     ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
+    // An overheard message's images are labeled as its own (card 625).
+    ...(message.overheard === true ? [{ type: 'text' as const, text: OVERHEARD_IMAGES_NOTE }] : []),
     ...message.images.map((image) => (replayed.has(image)
       ? { type: 'image_url' as const, image_url: { url: `data:${image.mediaType};base64,${image.data}` } }
       : { type: 'text' as const, text: droppedImageNote(image) })),
@@ -1146,14 +1149,19 @@ const describeImageAttachments = (images: readonly ImageAttachment[] | undefined
 /**
  * A user message's text as a prompt carries it, with its images named after
  * it. `latest` marks the newest user message of the turn — the one an
- * unaddressed turn's note follows; see `PromptTextOptions`.
+ * unaddressed turn's note follows; see `PromptTextOptions`. An overheard
+ * message whose images travel beside the text ends on
+ * `OVERHEARD_IMAGES_NOTE`, the label those images follow (card 625).
  */
 const userMessageText = (
   message: Pick<Message, 'content' | 'overheard' | 'images'>,
   latest = false,
   imagesTravel = false,
-): string =>
-  `${promptTextOf(message, { latest })}${describeImageAttachments(imagesTravel ? message.images?.filter((image) => !travels(image)) : message.images)}`;
+): string => {
+  const text = `${promptTextOf(message, { latest })}${describeImageAttachments(imagesTravel ? message.images?.filter((image) => !travels(image)) : message.images)}`;
+  const labeled = imagesTravel && message.overheard === true && (message.images ?? []).some(travels);
+  return labeled ? `${text}\n\n${OVERHEARD_IMAGES_NOTE}` : text;
+};
 
 /** Whether an image still has its bytes to send; one past the replay window is a name only. */
 const travels = (image: ImageAttachment): boolean => image.omitted !== true && image.data.length > 0;

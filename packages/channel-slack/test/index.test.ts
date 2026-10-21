@@ -2328,6 +2328,7 @@ test('an agent that judges takes a turn nobody asked for on every untagged reply
     editIntervalMs: 0,
     createSocketClient: () => socket,
     createWebClient: () => web,
+    fetchFile: async () => ({ status: 200, contentType: 'image/png', body: PNG_BYTES }),
   });
   await adapter.start(gateway);
 
@@ -2346,13 +2347,13 @@ test('an agent that judges takes a turn nobody asked for on every untagged reply
   await socket.deliver('message', channelMessage({ text: 'still there?', ts: '980.5', thread: '980.0' }));
   await socket.deliver('message', channelMessage({ text: 'much later', ts: '4600.0', thread: '980.0' }));
   // A mention, then a message carrying a screenshot: a turn nobody asked
-  // for takes no images (the kernel refuses them), so it is named the way
-  // an overheard message's attachment is.
+  // for still sees it (card 625). The kernel frames the message, pixels
+  // after the words, so judging is not blind to what was attached.
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> back?', ts: '4600.05', thread: '980.0' }));
   const withShot = channelMessage({ text: 'what about this', ts: '4600.1', thread: '980.0' });
   await socket.deliver('message', {
     ...withShot,
-    event: { ...withShot.event, files: [{ id: 'F1', name: 'shot.png', mimetype: 'image/png', url_private_download: 'https://files.example/shot.png' }] },
+    event: { ...withShot.event, files: [{ id: 'F1', name: 'shot.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.example/shot.png' }] },
   });
   await adapter.stop();
 
@@ -2364,7 +2365,7 @@ test('an agent that judges takes a turn nobody asked for on every untagged reply
     ['Dylan: still there?', false, undefined],
     ['Dylan: much later', false, undefined],
     ['Dylan: back?', undefined, undefined],
-    ['Dylan: what about this\n[Attached, name only: shot.png (not opened, since this message was not addressed to you). You have only the names, so say so rather than guessing at what is in them.]', false, undefined],
+    ['Dylan: what about this', false, [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'shot.png' }]],
   ]);
   assert.deepEqual(gateway.observes.map((observed) => observed.message), []);
   // The thread saw exactly three things from Ava: the two answers she was
@@ -13161,6 +13162,78 @@ const judgeV2Pair = async (listens: { ava: 'judge' | 'thread'; bea: 'judge' | 't
   };
   return { adapter, gateway, both, one, socketAva, socketBea, of, logged };
 };
+
+test('a judged thread reply brings its image and text file to the owner, and to nobody else (card 625)', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  // Ava stays silent on the turn with the files: a judged turn may still
+  // say nothing, attachments or not.
+  const gateway = createStubGateway(({ sessionId, userMessage }) =>
+    sessionWithReply(sessionId, userMessage.includes('here are the files') ? '' : `${sessionId.split(':')[1]} answers`));
+  gateway.agents = () => [
+    { id: 'ava', name: 'Ava', listens: 'judge' },
+    { id: 'bea', name: 'Bea', listens: 'judge' },
+  ];
+  const clock = stampsAfter();
+  webAva.stamp = clock.stamp;
+  webBea.stamp = clock.stamp;
+  const fetched: Array<{ url: string; token: string }> = [];
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', principals: ['U-DYLAN'], admit: 'principals' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', principals: ['U-DYLAN'], admit: 'principals' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    fetchFile: async (url, token) => {
+      fetched.push({ url, token });
+      return url.endsWith('.png')
+        ? { status: 200, contentType: 'image/png', body: PNG_BYTES }
+        : { status: 200, contentType: 'text/markdown', body: Buffer.from('# Notes\nATTACHMENT-TEXT\n') };
+    },
+  });
+  await adapter.start(gateway);
+  const files = [
+    { id: 'F1', name: 'shot.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.example/shot.png' },
+    { id: 'F2', name: 'notes.md', mimetype: 'text/markdown', size: 24, url_private_download: 'https://files.example/notes.md' },
+  ];
+  const both = async (input: { text: string; ts: string; thread?: string; user?: string }, withFiles = false) => {
+    clock.at(input.ts);
+    const message = channelMessage(input);
+    const delivered = withFiles ? { ...message, event: { ...message.event, files } } : message;
+    await Promise.all([socketAva.deliver('message', delivered), socketBea.deliver('message', delivered)]);
+  };
+
+  await both({ text: '<@B-AVA> kick this off', ts: '5000.0' });
+  // Untagged, in Ava's thread, from a principal: hers to judge, files and all.
+  await both({ text: 'here are the files', ts: '5001.0', thread: '5000.0' }, true);
+  // The same files from somebody the agents do not admit: nobody opens them.
+  await both({ text: 'and mine', ts: '5002.0', thread: '5000.0', user: 'U-EVE' }, true);
+  // Top level, untagged: nobody's message, so nobody's download.
+  await both({ text: 'unrelated', ts: '5003.0' }, true);
+  await settle();
+  await adapter.stop();
+
+  // Only Ava's token fetched, and only for the reply she judged.
+  assert.deepEqual(fetched, [
+    { url: 'https://files.example/shot.png', token: 'xoxb-a' },
+    { url: 'https://files.example/notes.md', token: 'xoxb-a' },
+  ]);
+  const judged = gateway.dispatches.filter((dispatch) => dispatch.agentId === 'ava' && dispatch.addressed === false);
+  assert.equal(judged.length, 1);
+  assert.equal(judged[0]!.userMessage, 'Dylan: here are the files\n[Attached: notes.md. Its contents follow.]\n# Notes\nATTACHMENT-TEXT\n[End of notes.md]');
+  assert.deepEqual(judged[0]!.images, [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'shot.png' }]);
+  // Bea took no turn on any of it.
+  assert.deepEqual(gateway.dispatches.filter((dispatch) => dispatch.agentId === 'bea'), []);
+  // Ava's silence posted nothing: the one placeholder is the mention's.
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['…']);
+  assert.deepEqual(webAva.updates.map((update) => update.text), ['ava answers']);
+});
 
 test('judge v2: the owner takes a principal\'s untagged instruction an hour after its last answer (Oct 16 Nova thread)', async () => {
   const { adapter, both, of } = await judgeV2Pair();

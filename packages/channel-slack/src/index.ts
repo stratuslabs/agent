@@ -7001,19 +7001,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // will answer: an overheard one is appended as text with no turn run
       // on it, and its attachments reach the transcript by name, as every
       // attachment did before images.
-      // Nor for one it will judge: the kernel refuses images on a turn
-      // nobody asked for, since they reach the model ahead of the frame
-      // that marks the message as somebody else's, and a judged message
-      // names its attachments the way an overheard one does.
+      // A judged message is one this agent will run a turn on, so its
+      // files are read too (card 625): the kernel stores them on the
+      // overheard message, and every provider shows the images after the
+      // frame that marks it as somebody else's. Text files land inside the
+      // message, so the frame quotes them with the rest of it.
       // Images and text files share the message's one download deadline.
       const deadline = AbortSignal.timeout(fileDownloadTimeoutMs);
       const reasons: UnreadReasons = new Map();
-      if (overhear || judged) {
+      if (overhear) {
         for (const file of event.files ?? []) {
           reasons.set(file, 'not-opened');
         }
       }
-      const { images, unread: notImages } = overhear || judged
+      const { images, unread: notImages } = overhear
         ? { images: [] as ImageAttachment[], unread: event.files ?? [] }
         : await readImageAttachments(
           event.files ?? [],
@@ -7024,7 +7025,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           reasons,
           deadline,
         );
-      const { texts, saved, unread } = overhear || judged
+      const { texts, saved, unread } = overhear
         ? { texts: [], saved: [] as SavedAttachment[], unread: notImages }
         : await readTextAttachments(
           notImages,
