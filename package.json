@@ -11,7 +11,8 @@
     "test": "pnpm -r test",
     "eval:room": "pnpm --filter @stratusagent/cli run eval:room",
     "eval:defaults": "pnpm --filter @stratusagent/cli run eval:defaults",
-    "eval:skill": "pnpm --filter @stratusagent/cli run eval:skill"
+    "eval:skill": "pnpm --filter @stratusagent/cli run eval:skill",
+    "smoke:release": "node scripts/release-smoke/run.mjs"
   },
   "license": "MIT",
   "repository": {
