@@ -7,6 +7,7 @@ import {
   DEFAULT_SUBPROCESS_PASS_ENV,
   leastTrusted,
   type AgentWorkspaces,
+  type CredentialResolver,
   type JsonObject,
   type JsonValue,
   type Plugin,
@@ -175,6 +176,7 @@ const settingsFor = (
   env: NodeJS.ProcessEnv,
   workspaces: AgentWorkspaces | undefined,
   home: string | undefined,
+  credentialEnv: Record<string, string> = {},
 ) => {
   // `env` merges rather than replacing: an agent given its own token keeps
   // the fleet's PATH (#205). A `null` withholds a shared variable from one
@@ -218,6 +220,11 @@ const settingsFor = (
       }
     }
   }
+
+  // Stored credentials last, over `env` and `passEnv`: the store is the one
+  // source of truth for a mapped name. Names the filters below would drop
+  // were refused when the mapping was read (credentialEnvFor).
+  Object.assign(granted, credentialEnv);
 
   // Variables that hand a judged command options the command line never
   // shows: `rg pattern` with RIPGREP_CONFIG_PATH can be `rg --pre … --follow
@@ -447,7 +454,66 @@ const canonicalPath = (target: string): string => {
   return current;
 };
 
+/**
+ * The variables `credentialsEnv` sets for this agent's commands, from the
+ * credential store: `{ GH_TOKEN: "github.token" }` puts the agent's stored
+ * `github.token` in `GH_TOKEN`. Per agent like the rest of the settings, and
+ * only names the agent's soul grants it (its `credentials:` list); a name it
+ * isn't granted is skipped, so a fleet-wide mapping gives each agent only
+ * its own. A granted name with nothing stored leaves the variable unset.
+ *
+ * The command can read the value (`echo $GH_TOKEN` prints it), which is
+ * the point and the cost: map only narrowly scoped tokens.
+ */
+const credentialEnvFor = async (
+  config: JsonObject,
+  session: Session,
+  credentials: CredentialResolver | undefined,
+): Promise<Record<string, string>> => {
+  const mapping = resolvePluginAgentConfig(config, session.agent.id, { mergeKeys: ['credentialsEnv'] }).credentialsEnv;
+  if (typeof mapping !== 'object' || mapping === null || Array.isArray(mapping) || Object.keys(mapping).length === 0) {
+    return {};
+  }
+  if (credentials === undefined) {
+    throw new Error(
+      'shell.run refused: credentialsEnv is set for @stratusagent/tool-shell, but this host hands the plugin no credential store, '
+      + 'so the mapped variables would be silently empty.',
+    );
+  }
+  const granted = new Set(session.agent.credentials ?? []);
+  const env: Record<string, string> = {};
+  for (const [variable, name] of Object.entries(mapping)) {
+    if (typeof name !== 'string' || name.length === 0) {
+      continue;
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable) || RESERVED_CREDENTIAL_VARIABLES.has(variable)
+      || (COMMAND_OPTION_VARIABLES as readonly string[]).includes(variable) || SHELL_STARTUP_VARIABLES.includes(variable)
+      || GIT_REPOSITORY_VARIABLES.includes(variable) || variable.startsWith('BASH_FUNC_')) {
+      throw new Error(
+        `shell.run refused: credentialsEnv can't set ${variable}. Map a credential to a variable a CLI reads its token from, such as GH_TOKEN.`,
+      );
+    }
+    if (!granted.has(name)) {
+      continue;
+    }
+    const value = await credentials.resolve(session.agent, name);
+    if (value !== undefined) {
+      env[variable] = value;
+    }
+  }
+  return env;
+};
+
+/** Variables a credential must not replace: what finds programs and where they keep their files. */
+const RESERVED_CREDENTIAL_VARIABLES = new Set(['PATH', 'HOME', 'SHELL', 'USER', 'LOGNAME', 'TMPDIR', 'PWD', 'IFS']);
+
 export interface ShellToolOptions {
+  /**
+   * The host's credential store, `PluginContext.credentials`, which
+   * `credentialsEnv` reads from. The plugin passes its `setup` context's
+   * resolver through.
+   */
+  credentials?: CredentialResolver;
   /** Where an unconfined-shell warning goes. Defaults to the plugin context's log, then stderr. */
   warn?: (message: string) => void;
   /** For tests: how a sandbox is planned on this host. */
@@ -571,6 +637,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
         options.processEnv ?? process.env,
         options.workspaces,
         options.home,
+        await credentialEnvFor(config, session, options.credentials),
       );
       if (settings.cwd) {
         // `spawn` fails with a bare `ENOENT` naming the *shell* when its
@@ -681,8 +748,10 @@ export const createShellPlugin = (config: JsonObject = {}, options: ShellToolOpt
       : undefined;
     const warn = options.warn ?? context.log;
     const protectedPaths = options.protectedPaths ?? context.protectedPaths;
+    const credentials = options.credentials ?? context.credentials;
     context.tools.register(createShellTool(config, {
       ...options,
+      ...(credentials !== undefined ? { credentials } : {}),
       ...(protectedPaths !== undefined ? { protectedPaths } : {}),
       ...(warn !== undefined ? { warn } : {}),
       ...(workspaces !== undefined ? { workspaces } : {}),

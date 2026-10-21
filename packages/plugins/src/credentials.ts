@@ -1,4 +1,4 @@
-import type { CredentialResolver } from '@stratusagent/core';
+import type { CredentialResolver, JsonObject, JsonValue } from '@stratusagent/core';
 
 import { PluginManifestError, type PluginManifest } from './manifest.ts';
 
@@ -26,8 +26,9 @@ import { PluginManifestError, type PluginManifest } from './manifest.ts';
 export const createManifestBoundCredentialResolver = (
   manifest: PluginManifest,
   resolver: CredentialResolver,
+  config?: JsonObject,
 ): CredentialResolver => {
-  const declared = new Set(manifest.credentials);
+  const declared = new Set([...manifest.credentials, ...configuredCredentialNames(manifest, config)]);
   return {
     async resolve(agent, name) {
       if (!declared.has(name)) {
@@ -39,4 +40,31 @@ export const createManifestBoundCredentialResolver = (
       return resolver.resolve(agent, name);
     },
   };
+};
+
+const isObject = (value: JsonValue | undefined): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The credential names an operator put under the key the manifest names in
+ * `credentialsFromConfig`, fleet-wide and in each agent's own entry: the
+ * values of that object (`{ GH_TOKEN: "github.token" }` names
+ * `github.token`). Read from the config the host loaded, never from
+ * anything the plugin hands back, so the plugin can't widen it.
+ */
+const configuredCredentialNames = (manifest: PluginManifest, config: JsonObject | undefined): string[] => {
+  const key = manifest.credentialsFromConfig;
+  if (key === undefined || config === undefined) {
+    return [];
+  }
+  const blocks: JsonValue[] = [config[key] ?? null];
+  if (isObject(config.agents)) {
+    for (const entry of Object.values(config.agents)) {
+      if (isObject(entry)) {
+        blocks.push(entry[key] ?? null);
+      }
+    }
+  }
+  return blocks.flatMap((block) => (isObject(block) ? Object.values(block) : []))
+    .filter((name): name is string => typeof name === 'string' && name.length > 0);
 };

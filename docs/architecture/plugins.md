@@ -338,6 +338,13 @@ A `"stratus"` field in `package.json`:
 }
 ```
 
+A plugin whose credential names are the operator's choice, such as
+tool-shell's `credentialsEnv`, declares the config key that holds them
+instead: `"credentialsFromConfig": "credentialsEnv"`. The names under that key
+(fleet-wide and in each `agents` entry) count as declared. They're read from
+the operator's config before the plugin's code runs, so the plugin can't add
+to them. The agent's own `credentials:` allowlist still applies to each one.
+
 The point of a manifest separate from the code is that **the daemon can see
 what a plugin contributes, and validate its configuration, without importing
 it**. A misconfigured or over-reaching plugin fails at config validation, not

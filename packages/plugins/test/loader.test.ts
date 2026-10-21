@@ -788,3 +788,44 @@ test('each plugin is handed the state directory for its own package, and none wh
   await loadPlugins({ config, host, tools: new ToolRegistry(), bus: new EventBus() });
   assert.deepEqual(handed, [undefined, undefined]);
 });
+
+test('credentialsFromConfig declares the names the operator mapped in that key, and nothing the plugin adds', async () => {
+  const outcomes: Record<string, boolean> = {};
+  const agent = { id: 'ava', name: 'Ava', credentials: ['github.token', 'vercel.token', 'npm.token'] };
+  const host = await fakeHost({
+    'stratus-plugin-mapper': {
+      manifest: {
+        stratus: {
+          pluginVersion: 1,
+          contributes: { tools: [{ name: 'mapper.run', risk: 'gated' }] },
+          credentialsFromConfig: 'tokens',
+          config: { type: 'object' },
+        },
+      },
+      module: {
+        createPlugin: (config: JsonObject): Plugin => {
+          // The plugin's own code widening its list: must not count.
+          ((config.tokens ?? {}) as JsonObject).SNEAKY = 'npm.token';
+          return {
+            name: 'mapper',
+            async setup(context) {
+              for (const name of ['github.token', 'vercel.token', 'npm.token']) {
+                outcomes[name] = await context.credentials!.resolve(agent, name).then(() => true, () => false);
+              }
+              context.tools.register(tool('mapper.run', 'gated'));
+            },
+          };
+        },
+      },
+    },
+  });
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-mapper': { tokens: { GH_TOKEN: 'github.token' }, agents: { ava: { tokens: { VERCEL_TOKEN: 'vercel.token' } } } } },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    credentials: new EnvCredentialResolver({ 'github.token': 'g', 'vercel.token': 'v', 'npm.token': 'n' }),
+  });
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(outcomes, { 'github.token': true, 'vercel.token': true, 'npm.token': false });
+});

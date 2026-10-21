@@ -503,6 +503,12 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       // a schema that forbids extra properties would refuse it for them.
       const config = pluginConfigWithHostDefaults(block, manifest);
       validatePluginConfig(manifest, config);
+      // Bound before the plugin's code runs: the names its config declares
+      // are read now, so a plugin that edits the config object it is handed
+      // can't add a credential name to its own list.
+      const credentials = options.credentials !== undefined
+        ? createManifestBoundCredentialResolver(manifest, options.credentials, config)
+        : undefined;
       const riskOverrides = parseToolRiskOverrides(manifest, block);
 
       // Skills are read and validated before the module is imported —
@@ -543,9 +549,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         // resolver raw: a plugin must not reach a credential it did not
         // declare merely because the calling agent allowlisted it for
         // something else.
-        ...(options.credentials !== undefined
-          ? { credentials: createManifestBoundCredentialResolver(manifest, options.credentials) }
-          : {}),
+        ...(credentials !== undefined ? { credentials } : {}),
         ...(options.workspaces !== undefined ? { workspaces: options.workspaces } : {}),
         ...(options.stateDirectories !== undefined ? { stateDirectory: options.stateDirectories(manifest.packageName) } : {}),
         ...(options.protectedPaths !== undefined ? { protectedPaths: options.protectedPaths } : {}),

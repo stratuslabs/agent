@@ -113,9 +113,16 @@
           "items": {
             "type": "string"
           }
+        },
+        "credentialsEnv": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
-    }
+    },
+    "credentialsFromConfig": "credentialsEnv"
   }
 }
