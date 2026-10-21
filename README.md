@@ -13,6 +13,9 @@ Each agent has its own name, memory, tools, and Slack presence, and it
 remembers tomorrow what you told it today. The core stays lean. Everything
 else is a plugin you add when you want it.
 
+> **Pre-1.0:** expect breaking changes between minor versions. Check
+> [Updating](docs/guides/updating.md) before you upgrade.
+
 ## Quickstart
 
 ```bash
