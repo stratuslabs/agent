@@ -883,3 +883,18 @@ test('granted writable paths come after the denials and the readable paths, and 
   assert.ok(bound < args.indexOf(`--bind ${workspace} ${workspace}`), args);
   assert.ok(args.lastIndexOf(`--tmpfs ${secret}`) > bound, args);
 });
+
+test('writablePaths that name the Stratus home, a directory above it, or one holding a protected file are refused', async () => {
+  // A named writable path wins over the denials around it, so one that
+  // holds the Stratus home would reopen writes to credentials and config.
+  const fixture = await fixtureHome();
+  for (const entry of ['~/.stratus', '~', path.dirname(fixture.userHome), '~/Stratus', '~/.stratus/agents']) {
+    let planned = false;
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, `${entry}: refused before any command is planned`);
+    assert.match(refused.error ?? "", /shell\.run refused: writablePaths names /, entry);
+  }
+  const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, fixture);
+  assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', 'ava', 'home')]);
+});

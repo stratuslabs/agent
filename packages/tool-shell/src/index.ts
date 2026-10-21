@@ -342,6 +342,21 @@ const sandboxed = async (
   const others = [...await options.workspaces?.all() ?? [], ...underRoot]
     .filter((dir) => !spellings(dir).some((spelling) => own.has(spelling)));
   const hostProtected = await options.protectedPaths?.all() ?? [];
+  // A named writable path wins over the denials around it (an agent's own
+  // home under ~/.stratus/integrations/<id>), so one that is or holds the
+  // Stratus home, another agent's workspace, or a file the host protects
+  // would reopen writes to them. Refused rather than quietly narrowed: the
+  // operator meant something by it, and the fix is to name the directory.
+  const guarded = [...stratusHomesFor(workspace, processEnv, userHome), ...hostProtected, ...others].flatMap(spellings);
+  for (const entry of settings.writablePaths) {
+    const holds = guarded.find((target) => spellings(entry).some((dir) => isWithin(dir, target)));
+    if (holds !== undefined) {
+      throw new Error(
+        `shell.run refused: writablePaths names ${entry}, which is or holds ${holds}, and a writable path there would open it to every command. `
+        + 'Name the directory a command needs inside it instead, such as the agent\'s own ~/.stratus/integrations/<id>/home.',
+      );
+    }
+  }
   const policy: SandboxPolicy = {
     workspace,
     ...(settings.cwd && settings.cwd !== workspace ? { cwd: settings.cwd } : {}),
