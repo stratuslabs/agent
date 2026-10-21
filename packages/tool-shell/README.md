@@ -175,10 +175,42 @@ git can find its repository), but nothing can be read from inside them.
 | `home` | `hidden` | `hidden`: only the toolchain paths above and `readablePaths` are readable in your home. `visible`: all of it is, apart from the denied paths. |
 | `readablePaths` | none | More paths a command may read (`~/projects`), read-only. They win over the default denials around them, so a path inside the Stratus home (an agent's own `~/.stratus/integrations/<id>` git and gh config) can be named. Denied paths inside them stay hidden. |
 | `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). Like `readablePaths`, they win over the default denials around them, so an agent's own home inside the Stratus home (`~/.stratus/integrations/<id>/home`, where CLIs like vercel, gh and gcloud save their config) can be named. Denied paths inside them stay denied. A path that is or holds the Stratus home, another agent's workspace, or a file the host protects is refused, with the command. Name the narrowest directory: `integrations/<id>/home`, not `integrations/<id>`, which can hold the agent's toolchain and git or gh config. On Linux, these and the default caches are created before the command if missing, since nothing under the read-only root can be. |
+| `credentialsEnv` | none | Environment variables filled from the credential store: `{ "GH_TOKEN": "github.token" }`. See below. |
 
 All of these can be set per agent under `agents`.
 
 A CLI that reads its login from a hidden path (`gh` from `~/.config/gh` or
 the keychain, `fly` from `~/.fly`) can't authenticate inside the sandbox.
-Give that agent a token through `env`, where it's visible in config, or set
-`sandbox: "off"` for it.
+Give that agent a stored credential through `credentialsEnv`, or a token
+through `env`, where it's visible in config, or set `sandbox: "off"` for it.
+
+### Stored credentials in the environment
+
+`credentialsEnv` maps a variable to a credential name, and each command gets
+the agent's stored value (`stratus credential set`, or `credential.request`
+from chat). Set it fleet-wide, per agent under `agents`, or both. The two are
+merged name by name, with the agent's own entry winning:
+
+```json
+"@stratusagent/tool-shell": {
+  "credentialsEnv": { "GH_TOKEN": "github.token" },
+  "agents": { "kai": { "credentialsEnv": { "VERCEL_TOKEN": "vercel.token" } } }
+}
+```
+
+- An agent gets a name only when its soul lists it under `credentials:`. A
+  fleet-wide mapping gives each agent its own value, and nothing for a name
+  it isn't granted. A granted name with nothing stored leaves the variable unset.
+- The value is read when the command starts, so a replaced key reaches the next
+  command without a restart. It wins over the same name in `env` or `passEnv`.
+- A command can read the value: `echo $GH_TOKEN` prints it, and so does the
+  tool result. Map only narrowly scoped tokens (a repo-scoped GitHub token,
+  a project-scoped Vercel one).
+- Variables that find or run programs (`PATH`, `HOME`, `BASH_ENV`,
+  `GIT_DIR` and the rest of the filtered list) are refused, along with names
+  that aren't valid variable names.
+
+`gh` prefers `GH_TOKEN` over its own `hosts.yml`, so the stored credential is
+the one source of truth. For `git push` over HTTPS to use it as well, point
+git's credential helper at gh in the agent's git config
+(`credential.helper = !gh auth git-credential`).

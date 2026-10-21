@@ -685,3 +685,92 @@ test('with the external-content gate on, a shell read of a tainted file closes t
   assert.equal(results[1]?.toolResult?.ok, false);
   assert.match(decisions[1]?.reason ?? '', /after this conversation read external content \(from shell\.run\)/);
 });
+
+// A store that holds ava's and blair's keys and records what it was asked.
+const credentialStore = (stored: Record<string, Record<string, string>>) => {
+  const asked: string[] = [];
+  return {
+    asked,
+    resolver: {
+      async resolve(agent: { id: string; credentials?: string[] }, name: string) {
+        if (!agent.credentials?.includes(name)) {
+          throw new Error(`Agent ${agent.id} is not allowed to access credential: ${name}`);
+        }
+        asked.push(`${agent.id}:${name}`);
+        return stored[agent.id]?.[name];
+      },
+    },
+  };
+};
+
+const runAs = async (
+  config: JsonObject,
+  options: ShellToolOptions,
+  command: string,
+  agent: { id: string; credentials?: string[] },
+) => {
+  const tool = createShellTool({ sandbox: 'off', passEnv: ['PATH'], ...config }, { processEnv: { PATH: process.env.PATH }, ...options });
+  return createLocalCommandExecutor().execute(
+    { id: 'call-1', toolName: 'shell.run', input: { command } },
+    tool,
+    { ...session(agent.id), agent: { name: agent.id, ...agent } },
+  );
+};
+
+test('credentialsEnv puts an agent\'s own stored credential in its shell, and only names its soul grants', async () => {
+  const { resolver, asked } = credentialStore({
+    ava: { 'github.token': 'ghs-ava', 'vercel.token': 'vc-ava' },
+    blair: { 'github.token': 'ghs-blair' },
+  });
+  const config = {
+    credentialsEnv: { GH_TOKEN: 'github.token' },
+    agents: { ava: { credentialsEnv: { VERCEL_TOKEN: 'vercel.token' } } },
+  };
+  const ava = await runAs(config, { credentials: resolver }, 'echo "[$GH_TOKEN][$VERCEL_TOKEN]"', { id: 'ava', credentials: ['github.token', 'vercel.token'] });
+  assert.equal(String((ava.output as JsonObject).stdout).trim(), '[ghs-ava][vc-ava]', JSON.stringify(ava));
+  // The fleet-wide mapping, resolved for blair: her own token, never ava's,
+  // and no VERCEL_TOKEN, which only ava's entry maps.
+  const blair = await runAs(config, { credentials: resolver }, 'echo "[$GH_TOKEN][$VERCEL_TOKEN]"', { id: 'blair', credentials: ['github.token'] });
+  assert.equal(String((blair.output as JsonObject).stdout).trim(), '[ghs-blair][]');
+  // An agent whose soul doesn't grant the name gets nothing, and the store
+  // is never asked for it.
+  const kai = await runAs(config, { credentials: resolver }, 'echo "[$GH_TOKEN]"', { id: 'kai' });
+  assert.equal(String((kai.output as JsonObject).stdout).trim(), '[]');
+  assert.ok(!asked.some((entry) => entry.startsWith('kai:')), asked.join());
+  // The stored value wins over the same name set in env: one source of truth.
+  const both = await runAs({ ...config, env: { GH_TOKEN: 'stale' } }, { credentials: resolver }, 'echo "[$GH_TOKEN]"', { id: 'ava', credentials: ['github.token'] });
+  assert.equal(String((both.output as JsonObject).stdout).trim(), '[ghs-ava]');
+});
+
+test('credentialsEnv refuses a variable that runs or finds programs, and a host with no credential store', async () => {
+  const { resolver } = credentialStore({ ava: { 'github.token': 'ghs-ava' } });
+  const agent = { id: 'ava', credentials: ['github.token'] };
+  for (const variable of ['PATH', 'HOME', 'BASH_ENV', 'GREP_OPTIONS', 'GIT_DIR', 'BASH_FUNC_x%%', 'not a name']) {
+    const refused = await runAs({ credentialsEnv: { [variable]: 'github.token' } }, { credentials: resolver }, 'true', agent);
+    assert.equal(refused.ok, false, variable);
+    assert.match(refused.error ?? '', /credentialsEnv can't set/, variable);
+    assert.ok(!(refused.error ?? '').includes('ghs-ava'), variable);
+  }
+  const noStore = await runAs({ credentialsEnv: { GH_TOKEN: 'github.token' } }, {}, 'true', agent);
+  assert.equal(noStore.ok, false);
+  assert.match(noStore.error ?? '', /no credential store/);
+  // No mapping, no store needed.
+  const plain = await runAs({}, {}, 'echo ok', agent);
+  assert.equal(String((plain.output as JsonObject).stdout).trim(), 'ok');
+});
+
+test('the plugin hands the host\'s credential store to the tool', async () => {
+  const { resolver } = credentialStore({ ava: { 'github.token': 'ghs-ava' } });
+  const tools = new ToolRegistry();
+  await createShellPlugin({ sandbox: 'off', passEnv: ['PATH'], credentialsEnv: { GH_TOKEN: 'github.token' } }, { processEnv: { PATH: process.env.PATH } }).setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools,
+    credentials: resolver as never,
+  });
+  const result = await createLocalCommandExecutor().execute(
+    { id: 'call-1', toolName: 'shell.run', input: { command: 'echo "[$GH_TOKEN]"' } },
+    tools.get('shell.run')!,
+    { ...session('ava'), agent: { id: 'ava', name: 'ava', credentials: ['github.token'] } },
+  );
+  assert.equal(String((result.output as JsonObject).stdout).trim(), '[ghs-ava]', JSON.stringify(result));
+});
