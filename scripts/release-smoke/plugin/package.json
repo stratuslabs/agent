@@ -1,0 +1,22 @@
+{
+  "name": "stratus-plugin-release-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Test-only plugin for scripts/release-smoke: a scripted provider that makes exactly the tool call its prompt names, and a tool that reports whether a named credential reached it.",
+  "type": "module",
+  "exports": "./index.js",
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "providers": [
+        { "name": "smoke" }
+      ],
+      "tools": [
+        { "name": "smoke.credential", "risk": "safe" }
+      ]
+    },
+    "credentials": [
+      "smoke.token"
+    ]
+  }
+}
