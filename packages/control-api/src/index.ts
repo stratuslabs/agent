@@ -28,7 +28,7 @@ export type { EventEnvelope, EventFilter } from './events.ts';
 export type { DaemonStartup } from './routes.ts';
 
 /** Kept in step with package.json, the way the CLI keeps its own version. */
-export const CONTROL_API_VERSION = '0.13.1';
+export const CONTROL_API_VERSION = '0.13.2';
 
 /** The default port `stratusd` serves its API on. Loopback only. */
 /** How long stop() lets an answer already being written finish before it closes the socket anyway. */
