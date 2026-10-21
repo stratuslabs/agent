@@ -1057,6 +1057,24 @@ test('a writablePaths entry inside the agent\'s own home or workspace that links
   }
 });
 
+test('an in-home writablePaths entry that links outside the Stratus home is refused too (Codex P1 4337364107)', async () => {
+  // The previous check held only placements inside the home to the owned
+  // subtree, so a link to ~/.ssh passed and its real path was re-granted
+  // after the credential denial. An in-home entry must stay owned whole.
+  const fixture = await fixtureHome();
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  await symlink(path.join(fixture.userHome, '.ssh'), path.join(agentHome, 'cache'));
+  for (const entry of ['~/.stratus/integrations/ava/home/cache', '~/.stratus/integrations/ava/home/cache/new']) {
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => unavailable(policy, '', []), warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*inside the Stratus home/, entry);
+  }
+  // The home itself, a real directory, is still granted.
+  const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, fixture);
+  assert.ok(seen, 'the own home still plans');
+});
+
 test('the own integration home is allowlisted for every valid agent id, not only slug-shaped ones (Codex P2 4335097425)', async () => {
   const fixture = await fixtureHome();
   for (const agentId of ['my agent', 'team,alpha', 'Agënt']) {

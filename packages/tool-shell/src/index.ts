@@ -403,9 +403,10 @@ const sandboxed = async (
     }
     const inHome = homePlaces.find((home) => places.some((dir) => isWithin(home, dir)));
     // Every placement, not just the written one: a link inside the agent's
-    // own subtree that lands elsewhere in the home is granted by its real
-    // path, so that is the one that has to stay inside.
-    if (inHome !== undefined && !places.every((dir) => !homePlaces.some((home) => isWithin(home, dir)) || ownPlaces.some((own) => isWithin(own, dir)))) {
+    // own subtree that lands elsewhere (in the home, or outside it at
+    // ~/.ssh) is granted by its real path, after the denials, so every
+    // placement has to stay inside the owned subtree.
+    if (inHome !== undefined && !places.every((dir) => ownPlaces.some((own) => isWithin(own, dir)))) {
       throw new Error(
         `shell.run refused: writablePaths names ${entry}, which is inside the Stratus home (${inHome}), and a writable path there would open daemon state or another agent's files to every command. `
         + 'Inside it, name only this agent\'s own ~/.stratus/integrations/<id>/home.',
