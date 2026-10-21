@@ -412,37 +412,45 @@ const sandboxed = async (
       );
     }
   }
+  // Every denial, assembled once: the check below and the policy read the
+  // same list, so nothing the policy hides escapes the check.
+  const deniedEntries = [...new Set([
+    ...stratusHomes,
+    ...hostProtected,
+    ...others,
+    ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
+    ...DEFAULT_DENIED_SOCKETS,
+    ...userRuntimeEndpoints(processEnv, process.getuid?.()),
+    ...credentialAgentEndpoints(processEnv, platform),
+    ...relocatedCredentials(processEnv, userHome, workspace),
+    ...settings.deniedPaths,
+  ])];
   // bwrap masks a denied path by mounting over it, so one that does not
   // exist yet has nothing to mount on, and inside a writable path the
-  // command could create and use it. Refused rather than made ahead of
-  // time: whether it should be a file or a directory is the operator's
-  // call. macOS denies an absent path as written, so only Linux refuses.
+  // command could create and use it. That holds for every denial, not only
+  // deniedPaths: a credential store or agent socket the environment moves
+  // inside a granted writable path is restored over just the same.
+  // Refused rather than made ahead of time: whether it should be a file or
+  // a directory is the operator's call. macOS denies an absent path as
+  // written, so only Linux refuses.
   if (platform === 'linux') {
-    for (const denied of settings.deniedPaths) {
+    const configured = new Set(settings.deniedPaths);
+    for (const denied of deniedEntries) {
       const deniedPlaces = placements(denied);
       const inside = settings.writablePaths.find((dir) => placements(dir).some((spelling) => deniedPlaces.some((place) => isWithin(spelling, place))));
       if (inside !== undefined && !existsSync(denied)) {
-        throw new Error(
-          `shell.run refused: deniedPaths names ${denied}, inside writablePaths ${inside}, and it does not exist, so the Linux sandbox cannot hide it from commands. `
-          + 'Create it (an empty file or directory) before running commands, or remove it from deniedPaths.',
-        );
+        throw new Error(configured.has(denied)
+          ? `shell.run refused: deniedPaths names ${denied}, inside writablePaths ${inside}, and it does not exist, so the Linux sandbox cannot hide it from commands. `
+            + 'Create it (an empty file or directory) before running commands, or remove it from deniedPaths.'
+          : `shell.run refused: ${denied}, a credential location that must stay hidden from commands, is inside writablePaths ${inside}, and does not exist, so the Linux sandbox cannot hide it. `
+            + 'Create it (an empty file or directory) before running commands, or narrow writablePaths so it is outside them.');
       }
     }
   }
   const policy: SandboxPolicy = {
     workspace,
     ...(settings.cwd && settings.cwd !== workspace ? { cwd: settings.cwd } : {}),
-    denied: [...new Set([
-      ...stratusHomesFor(workspace, processEnv, userHome),
-      ...hostProtected,
-      ...others,
-      ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
-      ...DEFAULT_DENIED_SOCKETS,
-      ...userRuntimeEndpoints(processEnv, process.getuid?.()),
-      ...credentialAgentEndpoints(processEnv, platform),
-      ...relocatedCredentials(processEnv, userHome, workspace),
-      ...settings.deniedPaths,
-    ].flatMap(spellings))],
+    denied: [...new Set(deniedEntries.flatMap(spellings))],
     writable: [
       ...writableHomePathsFor(platform).map((entry) => path.join(userHome, entry)),
       ...settings.writablePaths,

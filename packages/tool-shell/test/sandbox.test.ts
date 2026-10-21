@@ -570,7 +570,7 @@ test('stored tokens of common developer CLIs are denied', async () => {
 
 // ---- the hidden home ----
 
-const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>, extra: { platform?: NodeJS.Platform; agentId?: string } = {}) => {
+const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>, extra: { platform?: NodeJS.Platform; agentId?: string; processEnv?: NodeJS.ProcessEnv } = {}) => {
   let seen: Parameters<typeof planSandbox>[0] | undefined;
   const result = await run(config, fixture, 'true', { ...extra, planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
   return { seen, result };
@@ -902,6 +902,35 @@ test('on Linux, an absent deniedPaths entry reached through a symlinked parent i
   assert.equal(refused.ok, false, JSON.stringify(refused.output));
   assert.equal(planned, false);
   assert.match(refused.error ?? '', /shell\.run refused: deniedPaths names .*\.ssh, inside writablePaths .*, and it does not exist/);
+});
+
+test('on Linux, an absent credential location the environment names inside writablePaths is refused too', async () => {
+  // Codex P1 4336171867: the check read only settings.deniedPaths, while the
+  // writable bind is restored over every denial, so a relocated credential
+  // store or agent socket that did not exist yet could be created and used.
+  const fixture = await fixtureHome();
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  const config = { writablePaths: ['~/.stratus/integrations/ava/home'] };
+  for (const [name, value, absent] of [
+    ['GH_CONFIG_DIR', path.join(agentHome, '.config', 'gh'), path.join(agentHome, '.config', 'gh')],
+    ['SSH_AUTH_SOCK', path.join(agentHome, 'agent.sock'), path.join(agentHome, 'agent.sock')],
+  ] as const) {
+    const processEnv = { PATH: '/usr/bin:/bin', [name]: value };
+    let planned = false;
+    const refused = await run(config, fixture, 'true', { platform: 'linux', processEnv, planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${name}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, name);
+    assert.match(refused.error ?? '', /shell\.run refused: .*must stay hidden from commands, is inside writablePaths .*, and does not exist/, name);
+    assert.equal(existsSync(absent), false, `${name}: nothing is created on the host`);
+    // macOS denies an absent path as written, so it plans there.
+    const { seen: darwin } = await policyOf(config, fixture, { platform: 'darwin', processEnv });
+    assert.ok(darwin, `${name}: darwin plans with the path absent`);
+  }
+  // A credential location outside every writable path is masked or absent
+  // under a read-only root either way, so it does not refuse.
+  const { seen: elsewhere } = await policyOf(config, fixture, { platform: 'linux', processEnv: { PATH: '/usr/bin:/bin', GH_CONFIG_DIR: path.join(fixture.userHome, 'nowhere', 'gh') } });
+  assert.ok(elsewhere, 'linux plans when the absent denial is outside writablePaths');
 });
 
 test('granted writable paths come after the denials and the readable paths, and denials inside them come after that', async () => {
