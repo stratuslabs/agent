@@ -97,6 +97,13 @@ export interface PluginManifest {
   pluginVersion: number;
   contributes: PluginContributions;
   credentials: string[];
+  /**
+   * A key in the plugin's own config whose values are credential names the
+   * operator chose (tool-shell's `credentialsEnv`). Those names are declared
+   * too: the manifest says where they come from, and the operator's config
+   * says which they are, so the list stays one an operator can audit.
+   */
+  credentialsFromConfig?: string;
   /** JSON Schema for the plugin's own config block, if it declared one. */
   config?: JsonObject;
 }
@@ -343,6 +350,11 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
     credentials.push(...(stratus.credentials as string[]));
   }
 
+  if (stratus.credentialsFromConfig !== undefined
+    && (typeof stratus.credentialsFromConfig !== 'string' || stratus.credentialsFromConfig.length === 0)) {
+    throw new PluginManifestError(`Plugin ${packageName}: credentialsFromConfig must be the name of a config key.`);
+  }
+
   if (stratus.config !== undefined && !isObject(stratus.config)) {
     throw new PluginManifestError(`Plugin ${packageName}: config must be a JSON Schema object.`);
   }
@@ -352,6 +364,7 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
     pluginVersion: PLUGIN_MANIFEST_VERSION,
     contributes: { tools, toolsDiscovered, skills, ...named },
     credentials,
+    ...(typeof stratus.credentialsFromConfig === 'string' ? { credentialsFromConfig: stratus.credentialsFromConfig } : {}),
     ...(isObject(stratus.config) ? { config: stratus.config as JsonObject } : {}),
   };
 };
