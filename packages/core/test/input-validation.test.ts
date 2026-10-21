@@ -107,3 +107,52 @@ test('a malformed gated call is answered with the reason and never reaches the a
   assert.equal(first?.ok, false);
   assert.match(first?.error ?? '', /Invalid input for message\.send: input\.destination is missing "channel"/);
 });
+
+test('a call its tool refuses up front is answered with the reason and never reaches the approval policy', async () => {
+  const ran: string[] = [];
+  const read: Tool = {
+    name: 'message.read',
+    risk: 'gated',
+    async refusalFor(input) {
+      const to = (input.source as { to?: string } | undefined)?.to;
+      if (to === 'boom') {
+        throw new Error('lookup failed');
+      }
+      return to?.startsWith('D') ? 'direct messages cannot be read; approval cannot unlock it' : undefined;
+    },
+    async execute(input) {
+      ran.push((input.source as { to: string }).to);
+      return { ok: true };
+    },
+  };
+  const tools = new ToolRegistry();
+  tools.register(read);
+  const asked: string[] = [];
+  let turn = 0;
+  const targets = ['D1', 'C1', 'boom'];
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate(): Promise<ProviderResponse> {
+      const to = targets[turn];
+      turn += 1;
+      return to === undefined
+        ? { parts: [{ type: 'text', text: 'done' }] }
+        : { parts: [{ type: 'tool-call', call: { id: `c-${to}`, toolName: 'message.read', input: { source: { channel: 'slack', to } } } }] };
+    },
+  };
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    store: new InMemorySessionStore(),
+    approvals: { approve: async ({ call }) => { asked.push(call.id); return true; } },
+  });
+  await runner.initialize();
+  const session = await runner.run({ sessionId: 'r-1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'read' });
+
+  // A hook that throws is no answer: that call is asked about as before.
+  assert.deepEqual(asked, ['c-C1', 'c-boom']);
+  assert.deepEqual(ran, ['C1', 'boom']);
+  const refused = session.messages.find((message) => message.toolResult?.callId === 'c-D1')?.toolResult;
+  assert.equal(refused?.ok, false);
+  assert.equal(refused?.error, 'direct messages cannot be read; approval cannot unlock it');
+});

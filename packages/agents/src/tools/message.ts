@@ -190,9 +190,27 @@ const optionalId = (input: JsonObject, key: string, tool = MESSAGE_READ_TOOL_NAM
  * readable at all. Output is `external`: the messages are written by
  * whoever is in the conversation, not by the operator.
  */
-export const createMessageReadTool = (read: ConversationReader): Tool => ({
+/**
+ * Why a read of this conversation can never run, asked before anyone is
+ * asked to approve it. The gateway answers from the channel: a direct
+ * message, which no channel reads from outside it. Undefined when it is
+ * readable or the channel cannot say, and then the read asks as before.
+ */
+export type ConversationReadRefusal = (input: { agentId: string; sessionId: string; source: ScheduleDestination }) => Promise<string | undefined>;
+
+/** The refusal a direct-message read gets, before any approval prompt. */
+export const directMessageReadRefusal = (destination: string): string =>
+  `message.read cannot read ${destination}: it is a direct message, and direct messages are never read from outside them. `
+  + 'This is not a permission, so approval cannot unlock it; do not ask for one or try again. '
+  + 'Read a channel instead, or ask the person to paste what you need.';
+
+export const createMessageReadTool = (
+  read: ConversationReader,
+  options: { refusalFor?: ConversationReadRefusal } = {},
+): Tool => ({
   name: MESSAGE_READ_TOOL_NAME,
   description: 'Read recent messages in a channel your app is a member of, or one thread in it. '
+    + 'Direct messages and group DMs cannot be read with this, and approval does not change that. '
     + 'Without thread: the top level, newest first. With thread: that thread\'s root and replies, oldest first. '
     + 'For Slack, ids are channel ids and message ts values; a permalink '
     + '…/archives/C0123456789/p1791332967606559 is channel C0123456789 and message 1791332967.606559, '
@@ -218,6 +236,14 @@ export const createMessageReadTool = (read: ConversationReader): Tool => ({
     const source = parseDestinationInput(input.source);
     return source ? canonicalDestination(source) : undefined;
   },
+  ...(options.refusalFor !== undefined
+    ? {
+        async refusalFor(input: JsonObject, session: Session) {
+          const source = parseDestinationInput(input.source);
+          return source ? options.refusalFor?.({ agentId: session.agent.id, sessionId: session.id, source }) : undefined;
+        },
+      }
+    : {}),
   async execute(input: JsonObject, session: Session) {
     const source = parseDestinationInput(input.source);
     if (!source) {

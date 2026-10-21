@@ -515,9 +515,11 @@ loads it and says so in its startup log. An agent's list adds to the top-level o
 What it doesn't change:
 
 - **DMs still ask.** Only a conversation the agent's Slack app reports as a
-  channel, public or private, is covered. A DM or group DM asks as before,
-  even when its id is listed, and so does a conversation the app can't look
-  up at that moment. This is decided by asking Slack, not by the id's
+  channel, public or private, is covered. A `message.send` to a DM or group
+  DM asks as before, even when its id is listed, and so does a call on a
+  conversation the app can't look up at that moment. A `message.read` of a
+  DM never asks: it's refused before any prompt, because no approval could
+  make it run. This is decided by asking Slack, not by the id's
   first letter, since a `G…` id can be either.
 - **Slack still decides access.** The app must be a member of the channel,
   with the scopes `message.read` and `message.send` already need. A listed

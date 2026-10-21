@@ -535,7 +535,9 @@ The boundary is the outbound one plus a rule for DMs:
   it where it should read.
 - **DMs and group DMs are refused, member or not.** What someone says in a
   DM is said to the people in it; a read from elsewhere, a public thread
-  above all, would carry it to people who were never in the room.
+  above all, would carry it to people who were never in the room. This is
+  not an approval: the gateway refuses a DM read before anyone is asked,
+  and tells the agent approval can't unlock it.
 
 Messages come back as plain text with author ids and, where Slack supplies
 one cheaply, a display name. File contents are not downloaded; their names
