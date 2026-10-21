@@ -37,17 +37,21 @@ Needs Node 22.13+ ([Installation](docs/start/installation.md)). No key yet?
   background service, or on a server in Docker or under systemd.
   [Always on](docs/guides/always-on.md) ·
   [Deployment](docs/guides/deployment.md)
-- **Multiplayer.** A team of agents works alongside a team of people in
-  Slack: each agent is its own app, follows its threads, delegates to
-  the others, and asks a person before doing anything risky.
+- **Multiplayer and multi-tenant.** A team of agents works alongside a
+  team of people in Slack: each agent is its own app, follows its threads,
+  delegates to the others, and asks a person before doing anything risky.
+  One host can serve many teams, each kept to its own agents and data.
   [Slack](docs/guides/slack.md) · [Agents](docs/concepts/agents.md)
 - **Opinionated defaults.** Sandboxed shell, approvals for risky actions,
   memory that belongs to the agent, and schedules a human approves once.
   Loosen any of it in config. [Security](docs/concepts/security.md) ·
   [Approvals](docs/guides/approvals.md)
-- **A growing plugin ecosystem.** First-party packages for Claude,
+- **A growing plugin ecosystem.** Built-in packages for Claude,
   ChatGPT/Codex, OpenAI-compatible APIs, Slack, files, shell, web, and a
-  browser, with more on the way. [Tools](docs/guides/tools.md)
+  browser. [stratuslabs/plugins](https://github.com/stratuslabs/plugins)
+  adds nightly encrypted backups, parallel sub-agents, a macOS command
+  sandbox, and native UI screens via A2UI, with more on the way.
+  [Tools](docs/guides/tools.md)
 
 ## An agent is a file
 
@@ -66,6 +70,8 @@ listens: judge
 
 You are a sharp, warm generalist assistant. Answer first, explain second...
 ```
+
+Skip the name and Stratus picks one, with a matching avatar:
 
 ```bash
 stratus agent new
