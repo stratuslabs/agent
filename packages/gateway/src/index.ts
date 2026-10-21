@@ -163,6 +163,9 @@ import {
   grantSoulCredential,
   withSoulFileLock,
   addNamedCredential,
+  appendCredentialAudit,
+  replaceNamedCredential,
+  NamedCredentialMissingError,
   namedCredentialSource,
   NamedCredentialExistsError,
   CREDENTIAL_NAME_PATTERN,
@@ -297,8 +300,11 @@ export interface GatewayChannelAdapter {
     name: string;
     scope: CredentialScope;
     reason?: string;
+    replace?: boolean;
     metadata: JsonObject;
   }): Promise<void>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.credentialReplaceForms`. */
+  credentialReplaceForms?: boolean;
   /**
    * Issues a one-time link to a form for a credential request, for the
    * agent to pass on: what a request falls back to when its conversation
@@ -2568,6 +2574,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     name: string;
     scope: CredentialScope;
     soulPath: string;
+    /** A new value for a key already stored where `scope` says, swapped in place. */
+    replace?: boolean;
+    /** How it was put to someone, for the audit line. */
+    via?: CredentialDelivery;
   }>();
 
   tools.register(createCredentialRequestTool(async (request, session) => {
@@ -2590,17 +2600,47 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const source = await namedCredentialSource(env, agentId, request.name);
     const stored = source !== undefined;
     const granted = session.agent.credentials?.includes(request.name) === true;
-    if (stored && granted) {
-      throw new Error(`You already hold ${request.name}; the tools that need it use it for you. There is nothing to ask for.`);
-    }
-    if (stored) {
+    if (request.replace === true) {
+      // Checked here, before anyone is asked, so an approver is never shown
+      // a form whose answer could only be refused.
+      if (!stored || !granted) {
+        throw new Error(`You don't hold ${request.name}, so there is nothing to replace. Ask for it without replace.`);
+      }
+      if (source === 'environment') {
+        throw new Error(
+          `${request.name} comes from the daemon's environment, which a form can't change. `
+          + 'Ask your operator to change it where that environment is set.',
+        );
+      }
+      if (source === 'shared' && request.scope !== 'shared') {
+        throw new Error(
+          `${request.name} is a shared credential, so replacing it changes the key for every agent granted it. `
+          + 'Ask again with scope "shared" if that is what you mean.',
+        );
+      }
+      if (source === 'agent' && request.scope === 'shared') {
+        throw new Error(`${request.name} is your own credential, not a shared one. Ask again with scope "agent" to replace it.`);
+      }
+      if (request.via === 'link') {
+        throw new Error('A replacement is asked for in a form an approver answers, never a link. Nothing is pending.');
+      }
+    } else if (stored && granted) {
+      throw new Error(`You already hold ${request.name}; the tools that need it use it for you. To rotate it for a new value, ask again with replace: true.`);
+    } else if (stored) {
       throw new Error(
         `${request.name} is already ${source === 'environment' ? "supplied by the daemon's environment" : 'stored'} but not granted to you. `
         + 'Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.',
       );
     }
     const onMachine = `\`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\``;
-    const record = { agentId, sessionId: session.id, name: request.name, scope: request.scope, soulPath };
+    const record = {
+      agentId,
+      sessionId: session.id,
+      name: request.name,
+      scope: request.scope,
+      soulPath,
+      ...(request.replace === true ? { replace: true } : {}),
+    };
     const announce = async (requestId: string, via: CredentialDelivery): Promise<void> => {
       await bus.emit({
         type: 'credential.requested',
@@ -2611,6 +2651,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         scope: request.scope,
         ...(request.reason !== undefined ? { reason: request.reason } : {}),
         via,
+        ...(request.replace === true ? { replace: true } : {}),
         ...(session.metadata ? { metadata: session.metadata } : {}),
       });
     };
@@ -2630,15 +2671,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // sees while the agent tells its user the operator was asked.
       const kind = session.metadata?.channel;
       const { adapter } = typeof kind === 'string'
-        ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined)
+        ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined
+          && (request.replace !== true || candidate.credentialReplaceForms === true))
         : { adapter: undefined };
       if (!adapter?.requestCredential || !session.metadata) {
         formUnavailable = typeof kind === 'string'
-          ? `This conversation's channel (${kind}) cannot show your operator a credential form here.`
+          ? `This conversation's channel (${kind}) cannot show your operator a ${request.replace === true ? 'replacement' : 'credential'} form here.`
           : 'This conversation is not in a channel that can show your operator a form.';
       } else {
         const requestId = randomUUID();
-        credentialRequests.set(requestId, record);
+        credentialRequests.set(requestId, { ...record, via: 'form' });
         // Delivered before it is announced, and dropped if delivery fails: a
         // request whose post never landed has no button to answer it, so
         // keeping it would leave it pending for good behind a tool result
@@ -2651,6 +2693,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
             name: request.name,
             scope: request.scope,
             ...(request.reason !== undefined ? { reason: request.reason } : {}),
+            ...(request.replace === true ? { replace: true } : {}),
             metadata: session.metadata,
           });
           await announce(requestId, 'form');
@@ -2659,6 +2702,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           credentialRequests.delete(requestId);
           formUnavailable = `The form could not be shown here: ${error instanceof Error ? error.message : String(error)}`;
         }
+      }
+      if (request.replace === true) {
+        // Never a link: whoever holds one could change a key in use.
+        throw new Error(`${formUnavailable} Nothing is pending. A replacement needs a conversation that can show an approver a form.`);
       }
       if (request.via === 'form') {
         throw new Error(`${formUnavailable} Nothing is pending. ${linkAllowed ? 'Ask for a link instead (via: "link"), or ask' : 'Ask'} your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`);
@@ -2680,7 +2727,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
     const requestId = randomUUID();
-    credentialRequests.set(requestId, record);
+    credentialRequests.set(requestId, { ...record, via: 'link' });
     let link: { url: string; expiresAt: string; localOnly?: boolean };
     try {
       link = await linker.requestCredentialLink({
@@ -2734,6 +2781,30 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
   };
 
+  /**
+   * The audit line for a key changed from a chat or a link. After the
+   * store, since it records what happened; a line that can't be written is
+   * warned about rather than undoing a change that already landed.
+   */
+  const auditCredentialChange = async (
+    action: 'add' | 'replace',
+    request: NonNullable<ReturnType<typeof credentialRequests.get>>,
+    actor: string | undefined,
+  ): Promise<void> => {
+    try {
+      await appendCredentialAudit(env, {
+        action,
+        name: request.name,
+        ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
+        ...(actor !== undefined ? { actor } : {}),
+        via: request.via ?? 'form',
+        requestedBy: request.agentId,
+      });
+    } catch (error) {
+      warn(`credentials: ${request.name} was ${action === 'add' ? 'added' : 'replaced'}, but the audit line could not be written (${error instanceof Error ? error.message : String(error)}).`);
+    }
+  };
+
   const answerCredentialRequest = async (
     input: ProvideCredentialInput,
     request: NonNullable<ReturnType<typeof credentialRequests.get>>,
@@ -2772,11 +2843,56 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         message: `${request.soulPath} now belongs to ${owner}, not ${request.agentId}, so nothing was stored. Ask ${request.agentId} to request it again.`,
       };
     }
+    const store = request.scope === 'agent' ? { agentId: request.agentId } : {};
+    if (request.replace === true) {
+      // Re-read under the soul lock, so a grant removed while the form
+      // waited (a shared key most of all) is never rotated on its behalf.
+      let stillGranted: boolean;
+      try {
+        stillGranted = await withSoulFileLock(async () => {
+          const soul = await loadSoulFile(request.soulPath);
+          if (soul.agent.id !== request.agentId || soul.agent.credentials?.includes(request.name) !== true) {
+            return false;
+          }
+          await replaceNamedCredential(env, { name: request.name, value: input.value, ...store });
+          return true;
+        });
+      } catch (error) {
+        // Removed since the request was made: no value can land now.
+        if (error instanceof NamedCredentialMissingError) {
+          credentialRequests.delete(input.requestId);
+          return { ok: false, retired: true, message: error.message };
+        }
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+      if (!stillGranted) {
+        credentialRequests.delete(input.requestId);
+        return {
+          ok: false,
+          retired: true,
+          message: `${request.agentId} is no longer granted ${request.name} in ${request.soulPath}, so the stored key was kept. Ask ${request.agentId} to request it again if it still needs it.`,
+        };
+      }
+      credentialRequests.delete(input.requestId);
+      await auditCredentialChange('replace', request, input.actor);
+      await bus.emit({
+        type: 'credential.provided',
+        sessionId: request.sessionId,
+        agentId: request.agentId,
+        requestId: input.requestId,
+        name: request.name,
+        scope: request.scope,
+        replace: true,
+        ...(input.actor !== undefined ? { actor: input.actor } : {}),
+      });
+      // The soul already lists it: a replace is only asked for a key held.
+      return { ok: true, name: request.name, scope: request.scope, agentId: request.agentId, granted: false };
+    }
     try {
       await addNamedCredential(env, {
         name: request.name,
         value: input.value,
-        ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
+        ...store,
       });
     } catch (error) {
       // A name stored since the request was made (another form for the
@@ -2792,6 +2908,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
     credentialRequests.delete(input.requestId);
+    await auditCredentialChange('add', request, input.actor);
     // Stored first, granted second: a key nobody may use is recoverable by
     // editing the soul, while a soul naming a key that was never stored
     // fails every call that reaches for it. Announced either way, because

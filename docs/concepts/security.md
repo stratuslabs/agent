@@ -60,8 +60,9 @@ linked own the full story.
   yet and refuses one that is, for the fleet or for one agent, and refuses
   an agent's own entry over a shared one of that name, because the agent's
   is read first. Replacing a shared key would move every agent that uses it
-  onto whatever account the new value belongs to, so replacing and removing
-  stay with `stratus credential set` and `remove` at the machine.
+  onto whatever account the new value belongs to, so removing stays with
+  `stratus credential remove` at the machine, and replacing is done there or
+  through an approver's replace form in Slack, never a link or the API.
   ([Control API](../../packages/control-api/README.md))
 - **A credential an agent asks for never passes through the agent.**
   `credential.request` announces a name and a scope, nothing else; the
@@ -69,7 +70,12 @@ linked own the full story.
   through that same add-only rule, and is authorized by *who submitted it*
   against the agent's approvers, on the click and on the submission. It
   grants the name to the requesting agent's soul and to no other agent,
-  whatever scope the key was stored under.
+  whatever scope the key was stored under. A replace request
+  (`replace: true`) swaps a key the agent already holds, through a form
+  only, with the same approver checks, and only where it's stored: a shared
+  key needs the agent to have asked with `scope: "shared"`. Each add or
+  replace from chat or a link appends a names-only line to
+  `~/.stratus/credential-audit.log`.
   ([Slack](../guides/slack.md#adding-a-credential-from-slack))
 - **A credential link is a bearer capability, by choice.** Where no form
   can be shown, an agent whose soul lists `credential.request` (or has no

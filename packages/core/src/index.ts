@@ -4055,6 +4055,8 @@ export type StratusEvent =
       reason?: string;
       /** How it was put to someone. Absent from hosts before links existed, which only had forms. */
       via?: CredentialDelivery;
+      /** A new value for a key the agent already holds, swapped in place. Always a form, never a link. */
+      replace?: boolean;
       metadata?: JsonObject;
     }
   /**
@@ -4076,6 +4078,8 @@ export type StratusEvent =
       scope: CredentialScope;
       /** Who provided it. Channel-native id (a Slack user). */
       actor?: string;
+      /** The value replaced one already stored, rather than being added. */
+      replace?: boolean;
       /** Set when the key was stored but could not be added to the soul. */
       grantError?: string;
     }

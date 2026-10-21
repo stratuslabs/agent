@@ -13,7 +13,7 @@ export const CREDENTIAL_REQUEST_TOOL_NAME = 'credential.request';
  * was asked for.
  */
 export type CredentialRequester = (
-  request: { name: string; scope: CredentialScope; reason?: string; via?: CredentialDelivery },
+  request: { name: string; scope: CredentialScope; reason?: string; via?: CredentialDelivery; replace?: boolean },
   session: Session,
 ) => Promise<
   | { requestId: string; via: 'form' }
@@ -36,7 +36,8 @@ export type CredentialRequester = (
  */
 export const createCredentialRequestTool = (requestCredential: CredentialRequester): Tool => ({
   name: CREDENTIAL_REQUEST_TOOL_NAME,
-  description: 'Ask your operator for a named credential you do not hold (for example github.token). They are shown a form to add it, in this conversation where it can show one, or behind a one-time link you are given to pass on; you never see the value, and once they add it the tools that need it can use it from your next reply. Scope "agent" (the default) keeps it yours alone; "shared" stores it once for the fleet, but it is granted only to you: another agent can use it only once its own soul lists the name.',
+  description: 'Ask your operator for a named credential you do not hold (for example github.token). They are shown a form to add it, in this conversation where it can show one, or behind a one-time link you are given to pass on; you never see the value, and once they add it the tools that need it can use it from your next reply. Scope "agent" (the default) keeps it yours alone; "shared" stores it once for the fleet, but it is granted only to you: another agent can use it only once its own soul lists the name. '
+    + 'To rotate a key you already hold (expiring, revoked), set replace: true: an approver gets a form in this conversation to enter the new value, which swaps the stored one in place. A replace is never a link, and a shared key needs scope "shared" to say so, since it changes the key for every agent that uses it.',
   risk: 'safe',
   parameters: {
     type: 'object',
@@ -44,6 +45,10 @@ export const createCredentialRequestTool = (requestCredential: CredentialRequest
       name: { type: 'string', description: 'The credential name, as the tool that needs it documents it: search.apiKey, github.token.' },
       scope: { type: 'string', enum: ['agent', 'shared'], description: 'Where the key is stored. Default "agent", for you alone; "shared" stores one value other agents can be granted too.' },
       reason: { type: 'string', description: 'One sentence on what you need it for, shown to the person asked.' },
+      replace: {
+        type: 'boolean',
+        description: 'true to ask for a new value for a key you already hold, replacing the stored one. Form only.',
+      },
       via: {
         type: 'string',
         enum: ['form', 'link'],
@@ -65,16 +70,26 @@ export const createCredentialRequestTool = (requestCredential: CredentialRequest
     if (via !== undefined && via !== 'form' && via !== 'link') {
       throw new Error('credential.request "via" is "form" (in this conversation) or "link" (a one-time link to pass on); omit it to let the daemon choose.');
     }
+    if (input.replace !== undefined && typeof input.replace !== 'boolean') {
+      throw new Error('credential.request "replace" is true (a new value for a key you hold) or false; omit it to ask for a key you don\'t have.');
+    }
+    const replace = input.replace === true;
+    if (replace && via === 'link') {
+      throw new Error('A replacement is asked for in a form an approver answers, never a link: a link lets whoever holds it change a key every call you make uses. Ask without via, in a conversation that can show a form.');
+    }
     const reason = typeof input.reason === 'string' && input.reason.trim().length > 0 ? input.reason.trim() : undefined;
     const asked = await requestCredential({
       name,
       scope,
       ...(reason !== undefined ? { reason } : {}),
       ...(via !== undefined ? { via } : {}),
+      ...(replace ? { replace } : {}),
     }, session);
-    const after = 'You will not see the value; once they add it, the tools that need it can use it from your next reply.';
+    const after = replace
+      ? 'You will not see the value; once an approver enters it, it replaces the stored one and your tools use it from your next reply.'
+      : 'You will not see the value; once they add it, the tools that need it can use it from your next reply.';
     if (asked.via === 'form') {
-      return { requested: true, requestId: asked.requestId, name, scope, via: 'form', note: `Your operator was asked in this conversation. ${after}` };
+      return { requested: true, requestId: asked.requestId, name, scope, via: 'form', ...(replace ? { replace } : {}), note: `Your operator was asked in this conversation. ${after}` };
     }
     return {
       requested: true,

@@ -2832,6 +2832,7 @@ const credentialRequestBlocks = (
   scope: CredentialScope,
   reason: string | undefined,
   requestId: string,
+  replace = false,
 ): SlackBlock[] => {
   const shortReason = reason !== undefined && reason.length > CREDENTIAL_REASON_LIMIT
     ? `${reason.slice(0, CREDENTIAL_REASON_LIMIT)}…`
@@ -2841,7 +2842,9 @@ const credentialRequestBlocks = (
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*${escapeSlackText(agentName)}* is asking for a credential: \`${escapeSlackText(name)}\`, ${credentialWhose(escapeSlackText(agentName), scope)}.`,
+        text: replace
+          ? `*${escapeSlackText(agentName)}* is asking for a new value for a credential it holds: \`${escapeSlackText(name)}\`, ${credentialWhose(escapeSlackText(agentName), scope)}.`
+          : `*${escapeSlackText(agentName)}* is asking for a credential: \`${escapeSlackText(name)}\`, ${credentialWhose(escapeSlackText(agentName), scope)}.`,
       },
     },
     ...(shortReason !== undefined
@@ -2851,7 +2854,9 @@ const credentialRequestBlocks = (
       type: 'context',
       elements: [{
         type: 'mrkdwn',
-        text: 'Only an approver can add it. The value goes straight to the credential store, never into this conversation, and a key already stored is never replaced from here.',
+        text: replace
+          ? 'Only an approver can replace it. The new value goes straight to the credential store, never into this conversation, and the stored one is kept until it saves.'
+          : 'Only an approver can add it. The value goes straight to the credential store, never into this conversation, and a key already stored is never replaced by an add.',
       }],
     },
     {
@@ -2861,7 +2866,7 @@ const credentialRequestBlocks = (
         action_id: CREDENTIAL_ADD_ACTION,
         style: 'primary',
         value: requestId,
-        text: { type: 'plain_text', text: 'Add credential' },
+        text: { type: 'plain_text', text: replace ? 'Replace credential' : 'Add credential' },
       }],
     },
   ];
@@ -2876,16 +2881,19 @@ const credentialModal = (post: PendingCredentialPost, requestId: string): SlackB
   type: 'modal',
   callback_id: CREDENTIAL_VIEW,
   private_metadata: requestId,
-  title: { type: 'plain_text', text: 'Add a credential' },
-  submit: { type: 'plain_text', text: 'Add' },
+  title: { type: 'plain_text', text: post.replace === true ? 'Replace a credential' : 'Add a credential' },
+  submit: { type: 'plain_text', text: post.replace === true ? 'Replace' : 'Add' },
   close: { type: 'plain_text', text: 'Cancel' },
   blocks: [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `\`${escapeSlackText(post.name)}\`, ${credentialWhose(escapeSlackText(post.agentName), post.scope)}. `
-          + `It is stored add-only and granted to ${escapeSlackText(post.agentName)}; it never appears in the conversation.`,
+        text: post.replace === true
+          ? `\`${escapeSlackText(post.name)}\`, ${credentialWhose(escapeSlackText(post.agentName), post.scope)}. `
+            + 'The new value replaces the stored one once it saves; it never appears in the conversation.'
+          : `\`${escapeSlackText(post.name)}\`, ${credentialWhose(escapeSlackText(post.agentName), post.scope)}. `
+            + `It is stored add-only and granted to ${escapeSlackText(post.agentName)}; it never appears in the conversation.`,
       },
     },
     {
@@ -2907,6 +2915,8 @@ interface PendingCredentialPost {
   agentName: string;
   name: string;
   scope: CredentialScope;
+  /** A new value for a key the agent holds, rather than an add. */
+  replace?: boolean;
   /** Bound at render time, as an approval request's are. */
   approvers: Set<string>;
 }
@@ -5200,9 +5210,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     try {
       posted = await connection.web.chat.postMessage({
         channel,
-        text: escapeSlackText(`${agentName} is asking for a credential: ${request.name}, ${credentialWhose(agentName, request.scope)}.`),
+        text: escapeSlackText(`${agentName} is asking ${request.replace === true ? 'to replace' : 'for'} a credential: ${request.name}, ${credentialWhose(agentName, request.scope)}.`),
         ...(thread ? { thread_ts: thread } : {}),
-        blocks: credentialRequestBlocks(agentName, request.name, request.scope, request.reason, request.requestId),
+        blocks: credentialRequestBlocks(agentName, request.name, request.scope, request.reason, request.requestId, request.replace === true),
       });
     } catch (error) {
       credentialsPosting.delete(request.requestId);
@@ -5222,6 +5232,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       agentName,
       name: request.name,
       scope: request.scope,
+      ...(request.replace === true ? { replace: true } : {}),
       approvers,
     });
   };
@@ -5236,7 +5247,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ? `for ${escapeSlackText(post.agentName)} only`
       : `as a shared credential, granted to ${escapeSlackText(post.agentName)}`;
     const by = event.actor !== undefined && post.approvers.has(event.actor) ? `, by <@${event.actor}>` : '';
-    const text = event.grantError === undefined
+    const text = event.replace === true
+      ? `Replaced \`${escapeSlackText(post.name)}\` ${event.scope === 'agent' ? `for ${escapeSlackText(post.agentName)}` : 'as a shared credential'}${by}. `
+        + `${escapeSlackText(post.agentName)} uses the new value from its next reply; it is in the credential store, not here.`
+      : event.grantError === undefined
       ? `Added \`${escapeSlackText(post.name)}\` ${whose}${by}. ${escapeSlackText(post.agentName)} can use it from its next reply; the value is in the credential store, not here.`
       : `Stored \`${escapeSlackText(post.name)}\` ${event.scope === 'agent' ? `for ${escapeSlackText(post.agentName)}` : 'as a shared credential'}${by}, `
         + `but it could not be added to ${escapeSlackText(post.agentName)}'s soul (${escapeSlackText(event.grantError)}), so ${escapeSlackText(post.agentName)} cannot use it yet. `
@@ -7482,6 +7496,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     accountFor: (agentId: string) => botIdentities.get(agentId)?.teamId || undefined,
     conversationKindFor,
     requestCredential,
+    credentialReplaceForms: true,
 
     async start(gateway) {
       gatewayRef = gateway;

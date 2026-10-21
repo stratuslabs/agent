@@ -72,6 +72,10 @@ export const logsDirPath = (env: StateEnvironment): string =>
 export const credentialsPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), CREDENTIALS_FILENAME);
 
+/** Where credential changes made away from the machine are recorded, one JSON line each. Names only. */
+export const credentialAuditPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), 'credential-audit.log');
+
 export const agentsDirPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), AGENTS_DIRNAME);
 

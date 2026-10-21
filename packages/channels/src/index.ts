@@ -417,6 +417,12 @@ export interface ChannelCredentialRequest {
   scope: CredentialScope;
   /** The agent's own words for why; show them as the agent's. */
   reason?: string;
+  /**
+   * A new value for a key the agent already holds, swapped in place. Only
+   * an approver may answer it, as with an add; the form should say a key
+   * is being replaced.
+   */
+  replace?: boolean;
   /** The session's routing metadata: where the conversation is. */
   metadata: JsonObject;
 }
@@ -455,6 +461,13 @@ export interface ChannelAdapter {
    * tells its user the operator was asked.
    */
   requestCredential?(request: ChannelCredentialRequest): Promise<void>;
+  /**
+   * True when this adapter's `requestCredential` form honors `replace`:
+   * it tells the approver the stored key will be overwritten. Absent on an
+   * adapter written before replacements, which the gateway never hands one,
+   * since its ordinary add form would rotate a key without saying so.
+   */
+  credentialReplaceForms?: boolean;
   /**
    * The read side of an addressable conversation — what `message.read`
    * resolves. Optional, like `resolveOutbound`: a transport with no

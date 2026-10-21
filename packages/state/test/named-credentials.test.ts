@@ -245,3 +245,47 @@ test('a grant\'s check runs under the soul lock, after an edit holding it, and r
   assert.equal(sawEdit, true, 'the check ran once the edit holding the lock was done');
   assert.doesNotMatch(await readFile(soulFile, 'utf8'), /credentials/);
 });
+
+test('replace swaps a stored value in place and never creates one', async () => {
+  const { addNamedCredential, replaceNamedCredential, loadNamedCredentials, NamedCredentialMissingError } = await import('../src/index.ts');
+  const env = await newEnv();
+  await addNamedCredential(env, { name: 'github.token', value: 'ghp-old', agentId: 'kai' });
+  await addNamedCredential(env, { name: 'search.apiKey', value: 'sk-old' });
+
+  await replaceNamedCredential(env, { name: 'github.token', value: 'ghp-new', agentId: 'kai' });
+  await replaceNamedCredential(env, { name: 'search.apiKey', value: 'sk-new' });
+  let named = await loadNamedCredentials(env);
+  assert.equal(named.agents.kai?.['github.token'], 'ghp-new');
+  assert.equal(named.shared['search.apiKey'], 'sk-new');
+
+  // Nothing there to replace: refused, and nothing is created. An agent's
+  // own entry over a shared one would be an add under another name.
+  for (const entry of [
+    { name: 'npm.token', value: 'x', agentId: 'kai' },
+    { name: 'npm.token', value: 'x' },
+    { name: 'search.apiKey', value: 'x', agentId: 'kai' },
+    { name: 'github.token', value: 'x', agentId: 'ava' },
+  ]) {
+    await assert.rejects(replaceNamedCredential(env, entry), NamedCredentialMissingError, JSON.stringify(entry));
+  }
+  // An empty value keeps the stored one.
+  await assert.rejects(replaceNamedCredential(env, { name: 'github.token', value: '  ', agentId: 'kai' }), /empty, so the stored one was kept/);
+  named = await loadNamedCredentials(env);
+  assert.equal(named.agents.kai?.['github.token'], 'ghp-new');
+  assert.equal(named.agents.kai?.['npm.token'], undefined);
+  assert.equal(named.agents.ava, undefined);
+  assert.equal(named.shared['npm.token'], undefined);
+});
+
+test('the credential audit log is one owner-only JSON line per change, names only', async () => {
+  const { appendCredentialAudit, credentialAuditPath } = await import('../src/index.ts');
+  const env = await newEnv();
+  await appendCredentialAudit(env, { action: 'replace', name: 'github.token', agentId: 'kai', actor: 'U1', via: 'form', requestedBy: 'kai' });
+  await appendCredentialAudit(env, { action: 'add', name: 'search.apiKey', via: 'link', requestedBy: 'ava' });
+  const lines = (await readFile(credentialAuditPath(env), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+  assert.deepEqual(lines.map(({ at: _at, ...rest }) => rest), [
+    { action: 'replace', name: 'github.token', store: 'agent:kai', actor: 'U1', via: 'form', requestedBy: 'kai' },
+    { action: 'add', name: 'search.apiKey', store: 'shared', via: 'link', requestedBy: 'ava' },
+  ]);
+  assert.equal((await lstat(credentialAuditPath(env))).mode & 0o777, 0o600);
+});
