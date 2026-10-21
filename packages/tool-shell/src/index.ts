@@ -354,13 +354,19 @@ const sandboxed = async (
   // Stratus home, another agent's workspace, or a file the host protects
   // would reopen writes to them. Refused rather than quietly narrowed: the
   // operator meant something by it, and the fix is to name the directory.
-  // Another agent's workspace is refused in both directions: a writable
-  // path inside it opens that part of it as surely as one above it. The
-  // Stratus home is refused only from above, since an agent's own home
-  // lives inside it. Every path is compared by its written and its real
-  // spelling, the real one resolved through the nearest existing ancestor
-  // so an absent path behind a symlink is placed where it would land.
-  const guarded = [...stratusHomesFor(workspace, processEnv, userHome), ...hostProtected].flatMap(placements);
+  // Another agent's workspace and every other directory the host protects
+  // (a gateway's own stateDir) are refused in both directions: a writable
+  // path inside one opens that part of it as surely as one above it. The
+  // Stratus home is the one exception, refused only from above, since an
+  // agent's own home lives inside it. Every path is compared by its
+  // written and its real spelling, the real one resolved through the
+  // nearest existing ancestor so an absent path behind a symlink is placed
+  // where it would land.
+  const homePlaces = stratusHomesFor(workspace, processEnv, userHome).flatMap(placements);
+  const guarded = [...homePlaces, ...hostProtected.flatMap(placements)];
+  const sealed = hostProtected
+    .filter((target) => !placements(target).some((place) => homePlaces.includes(place)))
+    .flatMap(placements);
   const otherPlaces = others.flatMap(placements);
   for (const entry of settings.writablePaths) {
     const places = placements(entry);
@@ -369,6 +375,13 @@ const sandboxed = async (
       throw new Error(
         `shell.run refused: writablePaths names ${entry}, which is or holds ${holds}, and a writable path there would open it to every command. `
         + 'Name the directory a command needs inside it instead, such as the agent\'s own ~/.stratus/integrations/<id>/home.',
+      );
+    }
+    const within = sealed.find((target) => places.some((dir) => isWithin(target, dir)));
+    if (within !== undefined) {
+      throw new Error(
+        `shell.run refused: writablePaths names ${entry}, which is inside ${within}, a directory the host protects, and a writable path there would open that part of it to every command. `
+        + 'Name a directory outside it.',
       );
     }
     const overlaps = otherPlaces.find((target) => places.some((dir) => isWithin(dir, target) || isWithin(target, dir)));

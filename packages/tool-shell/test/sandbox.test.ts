@@ -951,3 +951,23 @@ test('writablePaths that name the Stratus home, a directory above it, or one hol
   const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, fixture);
   assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', 'ava', 'home')]);
 });
+
+test('a writablePaths entry inside a directory the host protects, other than the Stratus home, is refused (Codex P1 4334075011)', async () => {
+  // A gateway with its own stateDir protects it; a writable path under it
+  // would be re-granted after the denial and open the sessions to commands.
+  const fixture = await fixtureHome();
+  const stateDir = path.join(fixture.userHome, 'state-elsewhere');
+  await mkdir(path.join(stateDir, 'sessions'), { recursive: true });
+  const inner = fixture.protectedPaths;
+  const withState = { ...fixture, protectedPaths: { ...inner, all: async () => [...await inner.all(), stateDir] } };
+  for (const entry of [path.join(stateDir, 'sessions'), path.join(stateDir, 'not-yet')]) {
+    let planned = false;
+    const refused = await run({ writablePaths: [entry] }, withState, 'true', { planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, `${entry}: refused before any command is planned`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*, which is inside .*state-elsewhere, a directory the host protects/, entry);
+  }
+  // The Stratus home stays the one exception: an agent's own home inside it.
+  const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, withState);
+  assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', 'ava', 'home')]);
+});
