@@ -931,6 +931,10 @@ test('on Linux, an absent credential location the environment names inside writa
   // under a read-only root either way, so it does not refuse.
   const { seen: elsewhere } = await policyOf(config, fixture, { platform: 'linux', processEnv: { PATH: '/usr/bin:/bin', GH_CONFIG_DIR: path.join(fixture.userHome, 'nowhere', 'gh') } });
   assert.ok(elsewhere, 'linux plans when the absent denial is outside writablePaths');
+  // The fixed built-in list is not refused on (card 605 tracks it): a grant
+  // of ~/.gradle with no gradle.properties yet keeps working.
+  const { seen: gradle } = await policyOf({ writablePaths: ['~/.gradle'] }, fixture, { platform: 'linux', processEnv: { PATH: '/usr/bin:/bin' } });
+  assert.ok(gradle, 'linux plans a ~/.gradle grant with gradle.properties absent');
 });
 
 test('granted writable paths come after the denials and the readable paths, and denials inside them come after that', async () => {

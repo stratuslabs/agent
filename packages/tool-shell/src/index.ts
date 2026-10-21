@@ -432,10 +432,14 @@ const sandboxed = async (
   // inside a granted writable path is restored over just the same.
   // Refused rather than made ahead of time: whether it should be a file or
   // a directory is the operator's call. macOS denies an absent path as
-  // written, so only Linux refuses.
+  // written, so only Linux refuses. The fixed built-in list is left out:
+  // it names files inside ordinary toolchain dirs (~/.gradle, ~/.m2), so
+  // refusing on it would break existing grants; that pre-existing case is
+  // tracked separately rather than turned into a refusal here.
   if (platform === 'linux') {
     const configured = new Set(settings.deniedPaths);
-    for (const denied of deniedEntries) {
+    const builtIn = new Set([...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)), ...DEFAULT_DENIED_SOCKETS]);
+    for (const denied of deniedEntries.filter((entry) => configured.has(entry) || !builtIn.has(entry))) {
       const deniedPlaces = placements(denied);
       const inside = settings.writablePaths.find((dir) => placements(dir).some((spelling) => deniedPlaces.some((place) => isWithin(spelling, place))));
       if (inside !== undefined && !existsSync(denied)) {
