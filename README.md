@@ -8,56 +8,59 @@
 [![node](https://img.shields.io/badge/node-%E2%89%A522.13-brightgreen)](docs/start/installation.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Stratus Agent runs a team of AI agents on your own machine and meets you
-where you already are: the terminal, Slack, or a browser. Each agent is a
-persistent identity — its own name, avatar, memory, tools, and Slack
-presence — not a stateless chatbot. The runtime underneath is a tiny,
-readable TypeScript kernel; everything optional is a plugin you add only
-when you want it.
+Stratus is a small, readable runtime for a team of persistent AI agents.
+Each agent has its own name, memory, tools, and Slack presence, and it
+remembers tomorrow what you told it today. The core stays lean. Everything
+else is a plugin you add when you want it.
 
-A chatbot forgets you when the tab closes. A Stratus agent remembers
-tomorrow what you told it today — in the terminal, in Slack, everywhere it
-lives.
+> **Pre-1.0:** expect breaking changes between minor versions. Check
+> [Updating](docs/guides/updating.md) before you upgrade.
 
 ## Quickstart
 
 ```bash
 npm install -g @stratusagent/cli
-stratus setup     # sign in, create an agent, give it tools, connect Slack — one menu
+stratus setup     # sign in, create an agent, pick tools, connect Slack
 stratus chat      # talk; the conversation persists
 ```
 
-No API key or provider sign-in yet? `stratus run --provider demo "say hello"`
-works offline on the built-in demo model. With nothing configured, a plain
-run stops and points you to `stratus setup` rather than answering as the demo. Needs Node 22.13+ (on the 23.x
-line, 23.4+) — details in [Installation](docs/start/installation.md).
+Needs Node 22.13+ or 23.4+ ([Installation](docs/start/installation.md)). No key yet?
+[Quickstart](docs/start/quickstart.md) has an offline demo.
 
-## What your agents can do
+## Why Stratus
 
-| | Capability | |
-| --- | --- | --- |
-| 🕐 | **Always on** — the whole roster as a daemon that survives reboots, with durable sessions | [Always on](docs/guides/always-on.md) |
-| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, threads it keeps following without being re-tagged, replies that land finished behind Slack's own "is thinking…" status, screenshots it can look at | [Slack](docs/guides/slack.md) |
-| 🧠 | **Remember** — memory keyed to the agent: facts it pins, revises, and bounds by when they are true, an index of what it knows about, every fact labelled with where it came from | [Memory](docs/concepts/memory.md) |
-| 🛠 | **Use real tools** — files, a shell, the web, a browser; each an opt-in plugin, allowlisted per agent | [Tools](docs/guides/tools.md) |
-| 🔌 | **Mount MCP servers** — the whole MCP ecosystem under Stratus policy | [MCP](docs/guides/mcp.md) |
-| 🛡 | **Ask before acting** — safe calls run unattended; risky ones ask a human, in Slack if that's where you are | [Approvals](docs/guides/approvals.md) |
-| ⏰ | **Act on their own** — schedules an agent sets for itself, approved once by a human, reporting into Slack | [Schedules](docs/guides/schedules.md) |
-| 🔌 | **Bring your own** — a provider, a channel, a memory store, or an executor arrives as a plugin and registers itself; a soul or a trusted config selects it | [Extending](docs/guides/extending.md) |
-| 📚 | **Learn procedures** — skills installed from any GitHub repo, loaded only when relevant | [Skills](docs/guides/skills.md) |
-| 📦 | **Start from a template** — a folder or repo carrying an agent, its skills, and the plugins behind its tools, installed in one reviewed command | [Templates](docs/guides/templates.md) |
-| 🤝 | **Work as a team** — delegation between agents, routing that keeps the same face in the same places | [Agents](docs/concepts/agents.md) |
-| 🖥 | **Managed from anywhere** — one authenticated API, a web dashboard on top | [Remote access](docs/guides/remote-access.md) |
+- **Lightweight by default.** One package and a tiny TypeScript kernel.
+  Installing a tool runs nothing until your config enables it and an
+  agent's soul allows it. [Plugins](docs/concepts/plugins.md)
+- **Extensible.** Providers, channels, memory stores, tools, and executors
+  are all plugins. Mount any MCP server, or install skills from any GitHub
+  repo. [Extending](docs/guides/extending.md) ·
+  [MCP](docs/guides/mcp.md) · [Skills](docs/guides/skills.md)
+- **Local or cloud.** The same `stratus serve` runs on your laptop as a
+  background service, or on a server in Docker or under systemd.
+  [Always on](docs/guides/always-on.md) ·
+  [Deployment](docs/guides/deployment.md)
+- **Multiplayer and multi-tenant.** A team of agents works alongside a
+  team of people in Slack: each agent is its own app, follows its threads,
+  delegates to the others, and asks a person in Slack when approval is needed.
+  One host can serve many teams, each kept to its own agents and data.
+  [Slack](docs/guides/slack.md) · [Agents](docs/concepts/agents.md)
+- **Opinionated defaults.** A sandboxed shell, a human asked before
+  dangerous actions, memory that belongs to the agent, and schedules a
+  human approves once. Tighten it to ask before every gated tool, or loosen
+  it, in config. [Security](docs/concepts/security.md) ·
+  [Approvals](docs/guides/approvals.md)
+- **A growing plugin ecosystem.** Built-in packages for Claude,
+  ChatGPT/Codex, OpenAI-compatible APIs, Slack, files, shell, web, and a
+  browser. [stratuslabs/plugins](https://github.com/stratuslabs/plugins)
+  adds nightly encrypted backups, parallel sub-agents, a macOS command
+  sandbox, and native UI screens via A2UI, with more on the way.
+  [Tools](docs/guides/tools.md)
 
-Providers: Claude via the official Anthropic SDK, Claude subscription
-(Pro/Max) via the Claude Agent SDK, ChatGPT/Codex via the OpenAI Codex SDK,
-or any OpenAI-compatible API — with a fallback model that catches mid-run
-errors, even across providers.
+## An agent is a file
 
-## Feels like a teammate
-
-An agent's whole identity lives in a **soul file** — frontmatter for the
-structured parts, prose for the personality:
+Each agent's identity lives in a **soul file**: frontmatter for the
+structured parts, prose for the personality.
 
 ```markdown
 ---
@@ -72,56 +75,28 @@ listens: judge
 You are a sharp, warm generalist assistant. Answer first, explain second...
 ```
 
+Skip the name and Stratus picks one, with a matching avatar:
+
 ```bash
 stratus agent new
 # Say hello to Freya.
-#   id      freya-k3x9
-#   avatar  stratus theme, hue 211, palette #3d7dd9 #8fb8ea #d9993d
 ```
 
-Don't name them and Stratus will; every agent gets a deterministic avatar
-palette from their name, so the team looks cohesive on every surface. What
-they learn in one thread they know in every other — memory belongs to the
-agent, never to a session. More in [Agents](docs/concepts/agents.md).
-
-## How it fits together
-
-One package, `@stratusagent/cli`, carries the runtime: the kernel, the
-providers, the roster, and `stratusd` — the always-on gateway. Everything
-else arrives as a separate package, each behind its own explicit switch. A
-tool or MCP plugin **runs nothing by being installed**: a config you chose
-must enable it, and an agent's soul must allowlist its tools — two gates
-apart. The two surfaces are the deliberate exceptions: the Slack channel
-connects when an agent's tokens are stored (the decision you made
-connecting the app), and installing the control API + dashboard *is* the
-decision to open an authenticated local port (`--no-api` takes it back).
-`stratus setup` offers the packages your answers imply, and
-[`stratus plugins`](docs/guides/tools.md#which-link-in-the-chain-is-broken)
-says which of those gates a tool is currently stuck behind.
-
-The trust model behind that is in
-[Plugins](docs/concepts/plugins.md) and
-[Security](docs/concepts/security.md); the design itself in
-[`docs/architecture/`](docs/architecture/stratus-v2.md).
+More in [Agents](docs/concepts/agents.md).
 
 ## Documentation
 
 | I want to… | Read |
 | --- | --- |
-| Install and set up | [Installation](docs/start/installation.md) · [Setup](docs/start/setup.md) |
-| Run something right now | [Quickstart](docs/start/quickstart.md) |
-| Put my agents in Slack | [Slack](docs/guides/slack.md) |
-| Give agents real capability, safely | [Tools](docs/guides/tools.md) · [Shell commands](docs/guides/shell.md) · [Browser actions](docs/guides/browser.md) · [Approvals](docs/guides/approvals.md) |
-| Let agents act on a schedule | [Schedules](docs/guides/schedules.md) |
-| Run it as a service, read its logs, upgrade it | [Always on](docs/guides/always-on.md) · [Logs](docs/guides/logs.md) · [Updating](docs/guides/updating.md) |
-| Run it on a server, in Docker or under a system unit | [Deployment](docs/guides/deployment.md) |
+| Install and set up | [Installation](docs/start/installation.md) · [Setup](docs/start/setup.md) · [Quickstart](docs/start/quickstart.md) |
+| Put agents in Slack | [Slack](docs/guides/slack.md) |
+| Give agents tools, safely | [Tools](docs/guides/tools.md) · [Shell](docs/guides/shell.md) · [Approvals](docs/guides/approvals.md) |
+| Run it always on, or on a server | [Always on](docs/guides/always-on.md) · [Deployment](docs/guides/deployment.md) · [Updating](docs/guides/updating.md) |
 | Fix a surprise | [Troubleshooting](docs/guides/troubleshooting.md) |
-| Look up any command, flag, or config key | [CLI reference](docs/reference/cli.md) · [Configuration](docs/reference/config.md) |
-| Know what is on disk, and what belongs to one agent | [State layout](docs/reference/state-layout.md) |
-| Understand the ideas | [Agents](docs/concepts/agents.md) · [Memory](docs/concepts/memory.md) · [Plugins](docs/concepts/plugins.md) · [Security](docs/concepts/security.md) |
+| Look up a command or config key | [CLI](docs/reference/cli.md) · [Configuration](docs/reference/config.md) |
 | Build against it | [Control API](packages/control-api/README.md) · [Architecture](docs/architecture/stratus-v2.md) |
 
-The full index lives at [`docs/`](docs/README.md).
+Everything else is in [`docs/`](docs/README.md).
 
 ## From source
 
@@ -133,9 +108,7 @@ pnpm build && pnpm typecheck && pnpm test    # what CI runs
 node packages/cli/dist/bin.js setup          # the CLI from the checkout
 ```
 
-Conventions worth reading before a PR are in [`CLAUDE.md`](CLAUDE.md);
-the packages are laid out flat under [`packages/`](packages), one plugin or
-kernel piece each.
+Read [`CLAUDE.md`](CLAUDE.md) before opening a PR.
 
 ## License
 
