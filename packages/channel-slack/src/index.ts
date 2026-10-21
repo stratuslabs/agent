@@ -7496,6 +7496,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     accountFor: (agentId: string) => botIdentities.get(agentId)?.teamId || undefined,
     conversationKindFor,
     requestCredential,
+    credentialReplaceForms: true,
 
     async start(gateway) {
       gatewayRef = gateway;

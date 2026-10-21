@@ -14095,6 +14095,8 @@ test('a judged reply in the agent\'s own thread during a restart is kept for the
 
 test('a replace request says so on the post, the button and the form, and still only an approver opens it', async () => {
   const { socket, web, gateway, adapter, pending, ask, formPosts } = credentialAdapter(['U-DYLAN']);
+  // It declares that its forms honor replace; the gateway hands one to no other.
+  assert.equal(adapter.credentialReplaceForms, true);
   await adapter.start(gateway);
   pending.add('cred-r');
   await ask({ requestId: 'cred-r', replace: true });

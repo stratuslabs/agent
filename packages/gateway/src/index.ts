@@ -303,6 +303,8 @@ export interface GatewayChannelAdapter {
     replace?: boolean;
     metadata: JsonObject;
   }): Promise<void>;
+  /** See `@stratusagent/channels`' `ChannelAdapter.credentialReplaceForms`. */
+  credentialReplaceForms?: boolean;
   /**
    * Issues a one-time link to a form for a credential request, for the
    * agent to pass on: what a request falls back to when its conversation
@@ -2669,11 +2671,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // sees while the agent tells its user the operator was asked.
       const kind = session.metadata?.channel;
       const { adapter } = typeof kind === 'string'
-        ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined)
+        ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined
+          && (request.replace !== true || candidate.credentialReplaceForms === true))
         : { adapter: undefined };
       if (!adapter?.requestCredential || !session.metadata) {
         formUnavailable = typeof kind === 'string'
-          ? `This conversation's channel (${kind}) cannot show your operator a credential form here.`
+          ? `This conversation's channel (${kind}) cannot show your operator a ${request.replace === true ? 'replacement' : 'credential'} form here.`
           : 'This conversation is not in a channel that can show your operator a form.';
       } else {
         const requestId = randomUUID();
@@ -2842,8 +2845,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     const store = request.scope === 'agent' ? { agentId: request.agentId } : {};
     if (request.replace === true) {
+      // Re-read under the soul lock, so a grant removed while the form
+      // waited (a shared key most of all) is never rotated on its behalf.
+      let stillGranted: boolean;
       try {
-        await replaceNamedCredential(env, { name: request.name, value: input.value, ...store });
+        stillGranted = await withSoulFileLock(async () => {
+          const soul = await loadSoulFile(request.soulPath);
+          if (soul.agent.id !== request.agentId || soul.agent.credentials?.includes(request.name) !== true) {
+            return false;
+          }
+          await replaceNamedCredential(env, { name: request.name, value: input.value, ...store });
+          return true;
+        });
       } catch (error) {
         // Removed since the request was made: no value can land now.
         if (error instanceof NamedCredentialMissingError) {
@@ -2851,6 +2864,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           return { ok: false, retired: true, message: error.message };
         }
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+      if (!stillGranted) {
+        credentialRequests.delete(input.requestId);
+        return {
+          ok: false,
+          retired: true,
+          message: `${request.agentId} is no longer granted ${request.name} in ${request.soulPath}, so the stored key was kept. Ask ${request.agentId} to request it again if it still needs it.`,
+        };
       }
       credentialRequests.delete(input.requestId);
       await auditCredentialChange('replace', request, input.actor);

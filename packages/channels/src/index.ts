@@ -462,6 +462,13 @@ export interface ChannelAdapter {
    */
   requestCredential?(request: ChannelCredentialRequest): Promise<void>;
   /**
+   * True when this adapter's `requestCredential` form honors `replace`:
+   * it tells the approver the stored key will be overwritten. Absent on an
+   * adapter written before replacements, which the gateway never hands one,
+   * since its ordinary add form would rotate a key without saying so.
+   */
+  credentialReplaceForms?: boolean;
+  /**
    * The read side of an addressable conversation — what `message.read`
    * resolves. Optional, like `resolveOutbound`: a transport with no
    * history (or none it will share) lacks the method, and the gateway

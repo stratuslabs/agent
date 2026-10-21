@@ -36,12 +36,13 @@ type DeliveredRequest = Parameters<NonNullable<GatewayChannelAdapter['requestCre
  * A `slack` channel that shows credential forms by recording them, or
  * refuses to the way a failed post does.
  */
-const createFormChannel = (options: { refuse?: string } = {}) => {
+const createFormChannel = (options: { refuse?: string; replaceForms?: boolean } = {}) => {
   const delivered: DeliveredRequest[] = [];
   const adapter: GatewayChannelAdapter = {
     name: 'slack',
     start: async () => {},
     stop: async () => {},
+    ...(options.replaceForms === false ? {} : { credentialReplaceForms: true }),
     requestCredential: async (request) => {
       if (options.refuse !== undefined) {
         throw new Error(options.refuse);
@@ -620,6 +621,42 @@ test('an agent asks to replace a key it holds, an approver enters the new value,
     // Neither value is anywhere but the credential store.
     const auditText = await readFile(path.join(home, '.stratus', 'credential-audit.log'), 'utf8');
     assert.doesNotMatch(JSON.stringify([await gateway.store.get('kai-r1'), events]) + auditText, /ghp-old|ghp-new/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a channel whose forms predate replace is never handed one, so an approver cannot rotate a key from an add form', async () => {
+  // Codex P1 4332724257: an adapter that ignores `replace` would show its
+  // ordinary add form while the answer overwrote the stored key.
+  const plain = createFormChannel({ replaceForms: false });
+  const { home, gateway, events } = await startRequesting({ soul: KAI_HOLDS, channel: plain.adapter, request: { name: 'github.token', replace: true } });
+  try {
+    await storeNamed(home, { agents: { kai: { 'github.token': 'ghp-old' } } });
+    const session = await gateway.dispatch({ sessionId: 'kai-r9', agentId: 'kai', userMessage: 'rotate', metadata: SLACK });
+    assert.equal(requestedIn(events), undefined);
+    assert.equal(plain.delivered.length, 0, 'no form went up');
+    assert.match(toolError(session), /cannot show your operator a replacement form/);
+    assert.equal((await readNamed(home)).agents.kai?.['github.token'], 'ghp-old');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a replacement whose grant was removed from the soul while it waited is retired, and the key is kept', async () => {
+  // Codex P2 4332724265: the soul is re-read under the soul lock first.
+  const { home, soulFile, gateway, events } = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', replace: true } });
+  try {
+    await storeNamed(home, { agents: { kai: { 'github.token': 'ghp-old' } } });
+    await gateway.dispatch({ sessionId: 'kai-r10', agentId: 'kai', userMessage: 'rotate', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    assert.ok(requestId);
+    await writeFile(soulFile, '---\nname: Kai\nprovider: openai\nmodel: model-a\n---\n\nYou are Kai.\n');
+    const result = await gateway.provideCredential({ requestId, value: 'ghp-new', actor: 'U-DYLAN' });
+    assert.equal(result.ok, false);
+    assert.equal((result as { retired?: boolean }).retired, true);
+    assert.match((result as { message: string }).message, /no longer granted github\.token/);
+    assert.equal((await readNamed(home)).agents.kai?.['github.token'], 'ghp-old');
   } finally {
     await gateway.stop();
   }
