@@ -1,4 +1,4 @@
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -355,6 +355,22 @@ const sandboxed = async (
         `shell.run refused: writablePaths names ${entry}, which is or holds ${holds}, and a writable path there would open it to every command. `
         + 'Name the directory a command needs inside it instead, such as the agent\'s own ~/.stratus/integrations/<id>/home.',
       );
+    }
+  }
+  // bwrap masks a denied path by mounting over it, so one that does not
+  // exist yet has nothing to mount on, and inside a writable path the
+  // command could create and use it. Refused rather than made ahead of
+  // time: whether it should be a file or a directory is the operator's
+  // call. macOS denies an absent path as written, so only Linux refuses.
+  if (platform === 'linux') {
+    for (const denied of settings.deniedPaths) {
+      const inside = settings.writablePaths.find((dir) => spellings(dir).some((spelling) => isWithin(spelling, denied)));
+      if (inside !== undefined && !existsSync(denied)) {
+        throw new Error(
+          `shell.run refused: deniedPaths names ${denied}, inside writablePaths ${inside}, and it does not exist, so the Linux sandbox cannot hide it from commands. `
+          + 'Create it (an empty file or directory) before running commands, or remove it from deniedPaths.',
+        );
+      }
     }
   }
   const policy: SandboxPolicy = {

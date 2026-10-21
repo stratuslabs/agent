@@ -80,9 +80,10 @@ const run = async (
   config: JsonObject,
   fixture: Awaited<ReturnType<typeof fixtureHome>>,
   command: string,
-  extra: { planSandbox?: typeof planSandbox; warn?: (message: string) => void; processEnv?: NodeJS.ProcessEnv } = {},
+  extra: { planSandbox?: typeof planSandbox; warn?: (message: string) => void; processEnv?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {},
 ) => {
   const tool = createShellTool(config, {
+    ...(extra.platform ? { platform: extra.platform } : {}),
     workspaces: fixture.workspaces,
     protectedPaths: fixture.protectedPaths,
     home: fixture.userHome,
@@ -569,9 +570,9 @@ test('stored tokens of common developer CLIs are denied', async () => {
 
 // ---- the hidden home ----
 
-const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>) => {
+const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>, extra: { platform?: NodeJS.Platform } = {}) => {
   let seen: Parameters<typeof planSandbox>[0] | undefined;
-  const result = await run(config, fixture, 'true', { planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
+  const result = await run(config, fixture, 'true', { ...extra, planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
   return { seen, result };
 };
 
@@ -857,8 +858,34 @@ test('writablePaths inside the Stratus home are writable, and what is denied aro
     const denied = await run(config, fixture, `cat ${target}`);
     assert.equal(denied.ok, false, `${target}: ${JSON.stringify(denied.output)}`);
   }
-  const outside = await run(config, fixture, `echo x > ${path.join(fixture.stratusHome, 'integrations', 'ava', 'other.txt')}`);
-  assert.equal(outside.ok, false, JSON.stringify(outside.output));
+  // Beside the agent's home stays denied. On macOS the write fails; under
+  // bwrap the denial is an empty tmpfs, so the write may land there, but
+  // either way nothing reaches the real directory.
+  const beside = path.join(fixture.stratusHome, 'integrations', 'ava', 'other.txt');
+  const outside = await run(config, fixture, `echo x > ${beside}`);
+  assert.equal(existsSync(beside), false, JSON.stringify(outside.output));
+});
+
+test('on Linux, a deniedPaths entry inside writablePaths that does not exist yet is refused, since bwrap could not mask it', async () => {
+  // Codex P2 4332582670: realOnly drops an absent path, so the command could
+  // create and use it inside the writable bind.
+  const fixture = await fixtureHome();
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  const config = { writablePaths: ['~/.stratus/integrations/ava/home'], deniedPaths: ['~/.stratus/integrations/ava/home/.ssh'] };
+  let planned = false;
+  const refused = await run(config, fixture, 'true', { platform: 'linux', planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+  assert.equal(refused.ok, false, JSON.stringify(refused.output));
+  assert.equal(planned, false);
+  assert.match(refused.error ?? '', /shell\.run refused: deniedPaths names .*\.ssh, inside writablePaths .*, and it does not exist/);
+  assert.equal(existsSync(path.join(agentHome, '.ssh')), false, 'nothing is created on the host to make it maskable');
+  // Once it exists it can be masked, so the command is planned; and macOS
+  // denies an absent path natively, so it is never refused there.
+  const { seen: darwin } = await policyOf(config, fixture, { platform: 'darwin' });
+  assert.ok(darwin, 'darwin plans with the path absent');
+  await mkdir(path.join(agentHome, '.ssh'));
+  const { seen: linux } = await policyOf(config, fixture, { platform: 'linux' });
+  assert.ok(linux, 'linux plans once the path exists');
 });
 
 test('granted writable paths come after the denials and the readable paths, and denials inside them come after that', async () => {
