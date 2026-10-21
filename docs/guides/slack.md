@@ -364,7 +364,8 @@ submission; anyone else in the thread is told they cannot. What the form does:
   stored is refused, in the form, with the `stratus credential set` command
   that replaces it, and so is a name the daemon's environment already
   supplies, since a stored one would be read first and replace it.
-  Replacing or removing a key stays on the machine. A request whose name
+  Removing a key stays on the machine, and so does replacing one, except
+  through a replace request (below). A request whose name
   was stored since it was made (another form for the same shared key, or
   the machine) can never be answered, so the refusal also takes its button
   down; an empty value leaves the form open for another try.
@@ -388,6 +389,21 @@ submission; anyone else in the thread is told they cannot. What the form does:
   three-second window. When storing takes longer, the form closes first,
   and if the key then could not be added, the submitter gets a private
   message saying why.
+- **Replacing a key the agent holds** (`credential.request` with
+  `replace: true`, for an expiring or revoked token) puts up the same kind
+  of form, titled **Replace a credential**, with the same approver checks.
+  It's only asked for a key the agent already holds and is granted, always as
+  a form and never a link, and only where the key is stored: the agent's own
+  entry, or a shared one when the agent asked with `scope: "shared"` (that
+  changes the key for every agent granted it). A key the daemon's
+  environment supplies can't be replaced from here. The new value is written
+  beside the old file and renamed over it, so the old key stays until the
+  new one is saved, and the next command or tool call uses the new one with
+  no restart.
+- **Every key added or replaced from a form or a link writes an audit
+  line** to `~/.stratus/credential-audit.log`: when, which name, whose store,
+  added or replaced, the approver's Slack id, and form or link. It holds
+  names only, never a value.
 
 An agent asks only in a conversation a channel started, and only in a
 channel that can show the form, which today is Slack; a scheduled or HTTP

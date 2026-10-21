@@ -417,6 +417,12 @@ export interface ChannelCredentialRequest {
   scope: CredentialScope;
   /** The agent's own words for why; show them as the agent's. */
   reason?: string;
+  /**
+   * A new value for a key the agent already holds, swapped in place. Only
+   * an approver may answer it, as with an add; the form should say a key
+   * is being replaced.
+   */
+  replace?: boolean;
   /** The session's routing metadata: where the conversation is. */
   metadata: JsonObject;
 }

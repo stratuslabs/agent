@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { isValidAgentId } from '@stratusagent/agents';
 import {
@@ -8,7 +8,7 @@ import {
   assertCredentialAllowed,
 } from '@stratusagent/core';
 import { type StateEnvironment, readProcessEnv } from './environment.ts';
-import { credentialsPath } from './paths.ts';
+import { credentialAuditPath, credentialsPath } from './paths.ts';
 import { quoteShellArg } from './shell.ts';
 import {
   REGISTERED_PROVIDER_NAME_PATTERN,
@@ -637,6 +637,91 @@ export const addNamedCredential = async (
     }
     await saveNamedCredentials(env, named);
   });
+};
+
+/**
+ * A named credential a replace would swap that isn't stored there.
+ *
+ * Typed for the same reason as `NamedCredentialExistsError`: no value a
+ * person types can make it land, so a caller retires the request.
+ */
+export class NamedCredentialMissingError extends Error {
+  readonly credentialName: string;
+  readonly agentId: string | undefined;
+
+  constructor(credentialName: string, agentId: string | undefined, message: string) {
+    super(message);
+    this.name = 'NamedCredentialMissingError';
+    this.credentialName = credentialName;
+    this.agentId = agentId;
+  }
+}
+
+/**
+ * Swap the value of a named credential that is already stored, in place:
+ * the agent's own entry when `agentId` is given, the fleet's shared one
+ * otherwise. The add path's counterpart, for an approver rotating a key
+ * from chat.
+ *
+ * Only what's there is replaced. It never creates an entry, and never puts
+ * an agent's own entry over a shared one, which would be an add under
+ * another name. The file is written beside the old one and renamed over
+ * it, so the old value stays until the new one is saved; a failed write
+ * leaves it untouched. The check and the write share the add path's lock.
+ */
+export const replaceNamedCredential = async (
+  env: StateEnvironment,
+  entry: { name: string; value: string; agentId?: string },
+): Promise<void> => {
+  const { name, value, agentId } = entry;
+  if (!CREDENTIAL_NAME_PATTERN.test(name)) {
+    throw new Error(`${JSON.stringify(name)} is not a credential name, so there is nothing stored under it to replace.`);
+  }
+  if (agentId !== undefined && !isValidAgentId(agentId)) {
+    throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so nothing is stored under it to replace.`);
+  }
+  if (value.trim().length === 0) {
+    throw new Error(`The value for ${name} is empty, so the stored one was kept.`);
+  }
+  await withCredentialsFileLock(async () => {
+    const named = await loadNamedCredentials(env);
+    if (agentId === undefined) {
+      if (named.shared[name] === undefined) {
+        throw new NamedCredentialMissingError(name, undefined, `No shared credential named ${name} is stored, so there is nothing to replace.`);
+      }
+      named.shared[name] = value;
+    } else {
+      const own = named.agents[agentId];
+      if (own?.[name] === undefined) {
+        throw new NamedCredentialMissingError(name, agentId, `${agentId} has no credential of its own named ${name}, so there is nothing to replace.`);
+      }
+      own[name] = value;
+    }
+    await saveNamedCredentials(env, named);
+  });
+};
+
+/**
+ * One line in `~/.stratus/credential-audit.log` for a credential change
+ * made away from the machine: when, which name, whose, what was done, by
+ * whom, and through what. Names only, never a value. Owner-only, appended.
+ */
+export const appendCredentialAudit = async (
+  env: StateEnvironment,
+  entry: { action: 'add' | 'replace'; name: string; agentId?: string; actor?: string; via: string; requestedBy: string },
+): Promise<void> => {
+  const filePath = credentialAuditPath(env);
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const line = {
+    at: new Date().toISOString(),
+    action: entry.action,
+    name: entry.name,
+    store: entry.agentId === undefined ? 'shared' : `agent:${entry.agentId}`,
+    ...(entry.actor !== undefined ? { actor: entry.actor } : {}),
+    via: entry.via,
+    requestedBy: entry.requestedBy,
+  };
+  await appendFile(filePath, `${JSON.stringify(line)}\n`, { mode: 0o600 });
 };
 
 /**

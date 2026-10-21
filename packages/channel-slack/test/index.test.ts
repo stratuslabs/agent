@@ -8453,7 +8453,7 @@ test('a credential request is posted in the thread with a button only an approve
   const blocks = JSON.stringify(posted?.blocks);
   assert.match(blocks, /\*Ava\* is asking for a credential: `github.token`, for Ava only\./);
   assert.match(blocks, /_Ava says:_ To open pull requests on the website repo\./);
-  assert.match(blocks, /never into this conversation, and a key already stored is never replaced from here/);
+  assert.match(blocks, /never into this conversation, and a key already stored is never replaced by an add/);
   assert.deepEqual(buttonIds(posted?.blocks), ['stratus_credential_add']);
 
   // Anyone in the thread can see the button; only an approver gets the form.
@@ -14091,4 +14091,24 @@ test('a judged reply in the agent\'s own thread during a restart is kept for the
   assert.deepEqual(web.posts, []);
   const kept = (await readKept(file)) as Array<Record<string, unknown>>;
   assert.deepEqual(kept.map((entry) => [entry.ts, entry.threadTs]), [['980.3', '980.0']]);
+});
+
+test('a replace request says so on the post, the button and the form, and still only an approver opens it', async () => {
+  const { socket, web, gateway, adapter, pending, ask, formPosts } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-r');
+  await ask({ requestId: 'cred-r', replace: true });
+
+  const posted = formPosts().at(-1);
+  const blocks = JSON.stringify(posted?.blocks);
+  assert.match(blocks, /\*Ava\* is asking for a new value for a credential it holds: `github.token`, for Ava only\./);
+  assert.match(blocks, /Only an approver can replace it\. .*the stored one is kept until it saves/);
+  assert.match(blocks, /"text":"Replace credential"/);
+
+  await socket.deliver('interactive', credentialClick('cred-r', 'U-STRANGER'));
+  assert.equal(web.views_opened.length, 0);
+  await socket.deliver('interactive', credentialClick('cred-r', 'U-DYLAN'));
+  const view = web.views_opened.at(-1)?.view as { title?: { text?: string }; submit?: { text?: string } } | undefined;
+  assert.equal(view?.title?.text, 'Replace a credential');
+  assert.equal(view?.submit?.text, 'Replace');
 });

@@ -577,3 +577,145 @@ test('an agent whose tools: leaves out credential.request can still ask through 
     await granted.gateway.stop();
   }
 });
+
+const KAI_HOLDS = '---\nname: Kai\nprovider: openai\nmodel: model-a\ncredentials: [github.token]\n---\n\nYou are Kai.\n';
+
+const storeNamed = async (home: string, named: { shared?: Record<string, string>; agents?: Record<string, Record<string, string>> }) => {
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ named: { shared: {}, agents: {}, ...named } }));
+};
+
+const readNamed = async (home: string) => (JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+  named: { shared: Record<string, string>; agents: Record<string, Record<string, string>> };
+}).named;
+
+const toolError = (session: { messages: Array<{ role: string; toolResult?: { ok: boolean; error?: string } }> }) =>
+  session.messages.find((message) => message.role === 'tool')?.toolResult?.error ?? '';
+
+test('an agent asks to replace a key it holds, an approver enters the new value, and it is swapped in place with an audit line', async () => {
+  const { home, gateway, events, delivered } = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', replace: true, reason: 'It expires tomorrow.' } });
+  try {
+    await storeNamed(home, { agents: { kai: { 'github.token': 'ghp-old' } } });
+    const session = await gateway.dispatch({ sessionId: 'kai-r1', agentId: 'kai', userMessage: 'rotate', metadata: SLACK });
+    const requested = requestedIn(events);
+    assert.ok(requested, toolError(session));
+    assert.equal(requested.replace, true);
+    assert.equal(requested.via, 'form');
+    assert.equal(delivered[0]?.replace, true, 'the channel is told it is a replacement, to say so on the form');
+
+    // Until the answer, the old key is the one in use.
+    assert.equal((await readNamed(home)).agents.kai?.['github.token'], 'ghp-old');
+    const result = await gateway.provideCredential({ requestId: requested.requestId, value: 'ghp-new', actor: 'U-DYLAN' });
+    assert.deepEqual(result, { ok: true, name: 'github.token', scope: 'agent', agentId: 'kai', granted: false });
+    assert.equal((await readNamed(home)).agents.kai?.['github.token'], 'ghp-new');
+
+    const provided = events.find((event): event is Extract<StratusEvent, { type: 'credential.provided' }> => event.type === 'credential.provided');
+    assert.equal(provided?.replace, true);
+    assert.equal(provided?.actor, 'U-DYLAN');
+
+    const audit = (await readFile(path.join(home, '.stratus', 'credential-audit.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+    assert.equal(audit.length, 1);
+    assert.deepEqual({ ...audit[0], at: undefined }, { at: undefined, action: 'replace', name: 'github.token', store: 'agent:kai', actor: 'U-DYLAN', via: 'form', requestedBy: 'kai' });
+    assert.ok(!Number.isNaN(Date.parse(audit[0]!.at!)));
+    // Neither value is anywhere but the credential store.
+    const auditText = await readFile(path.join(home, '.stratus', 'credential-audit.log'), 'utf8');
+    assert.doesNotMatch(JSON.stringify([await gateway.store.get('kai-r1'), events]) + auditText, /ghp-old|ghp-new/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('an add from a form writes an audit line too', async () => {
+  const { home, gateway, events } = await startRequesting();
+  try {
+    await gateway.dispatch({ sessionId: 'kai-r2', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    assert.equal((await gateway.provideCredential({ requestId, value: 'ghp-first', actor: 'U-DYLAN' })).ok, true);
+    const line = JSON.parse((await readFile(path.join(home, '.stratus', 'credential-audit.log'), 'utf8')).trim()) as Record<string, string>;
+    assert.equal(line.action, 'add');
+    assert.equal(line.store, 'agent:kai');
+    assert.equal(line.actor, 'U-DYLAN');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a replace is refused before anyone is asked when there is nothing of the agent\'s to replace, or it would be a link', async () => {
+  const cases: Array<{ request: object; named?: Parameters<typeof storeNamed>[1]; soul?: string; processEnv?: Record<string, string>; metadata?: typeof SLACK; error: RegExp }> = [
+    { request: { name: 'github.token', replace: true }, soul: KAI_HOLDS, error: /You don't hold github\.token, so there is nothing to replace/ },
+    { request: { name: 'github.token', replace: true }, named: { agents: { kai: { 'github.token': 'ghp-x' } } }, error: /You don't hold github\.token/ },
+    { request: { name: 'github.token', replace: true }, soul: KAI_HOLDS, named: { shared: { 'github.token': 'ghp-fleet' } }, error: /shared credential, so replacing it changes the key for every agent/ },
+    { request: { name: 'github.token', replace: true, scope: 'shared' }, soul: KAI_HOLDS, named: { agents: { kai: { 'github.token': 'ghp-x' } } }, error: /your own credential, not a shared one/ },
+    { request: { name: 'github.token', replace: true }, soul: KAI_HOLDS, processEnv: { 'github.token': 'ghp-env' }, error: /daemon's environment, which a form can't change/ },
+    { request: { name: 'github.token', replace: true, via: 'link' }, soul: KAI_HOLDS, named: { agents: { kai: { 'github.token': 'ghp-x' } } }, error: /never a link/ },
+  ];
+  for (const entry of cases) {
+    const link = createLinkIssuer();
+    const started = await startRequesting({
+      request: entry.request,
+      ...(entry.soul !== undefined ? { soul: entry.soul } : {}),
+      ...(entry.processEnv !== undefined ? { processEnv: entry.processEnv } : {}),
+      also: [link.adapter],
+    });
+    try {
+      if (entry.named) {
+        await storeNamed(started.home, entry.named);
+      }
+      const session = await started.gateway.dispatch({ sessionId: 'kai-r3', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+      assert.match(toolError(session), entry.error, JSON.stringify(entry.request));
+      assert.equal(requestedIn(started.events), undefined, 'nothing pending');
+      assert.equal(started.delivered.length, 0);
+      assert.equal(link.issued.length, 0, 'never a link');
+    } finally {
+      await started.gateway.stop();
+    }
+  }
+});
+
+test('a replace where no form can go is refused instead of falling back to a link', async () => {
+  const link = createLinkIssuer();
+  const { home, gateway, events } = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', replace: true }, also: [link.adapter] });
+  try {
+    await storeNamed(home, { agents: { kai: { 'github.token': 'ghp-x' } } });
+    // No channel metadata: a scheduled or HTTP turn.
+    const session = await gateway.dispatch({ sessionId: 'kai-r4', agentId: 'kai', userMessage: 'go' });
+    assert.match(toolError(session), /A replacement needs a conversation that can show an approver a form/);
+    assert.equal(link.issued.length, 0);
+    assert.equal(requestedIn(events), undefined);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a replace whose key was removed while it waited is retired, and nothing is created', async () => {
+  const { home, gateway, events } = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', replace: true } });
+  try {
+    await storeNamed(home, { agents: { kai: { 'github.token': 'ghp-x' } } });
+    await gateway.dispatch({ sessionId: 'kai-r5', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    assert.ok(requestId);
+    await storeNamed(home, {});
+    const result = await gateway.provideCredential({ requestId, value: 'ghp-new' });
+    assert.equal(result.ok, false);
+    assert.equal(!result.ok && result.retired, true);
+    assert.equal((await readNamed(home)).agents.kai, undefined);
+    // An empty answer to a live replace keeps the old key and the request.
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a shared key is replaced only when the request says shared, and then for the fleet', async () => {
+  const { home, gateway, events } = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', replace: true, scope: 'shared' } });
+  try {
+    await storeNamed(home, { shared: { 'github.token': 'ghp-fleet-old' } });
+    await gateway.dispatch({ sessionId: 'kai-r6', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    assert.equal((await gateway.provideCredential({ requestId, value: 'ghp-fleet-new', actor: 'U-DYLAN' })).ok, true);
+    const named = await readNamed(home);
+    assert.equal(named.shared['github.token'], 'ghp-fleet-new');
+    assert.equal(named.agents.kai, undefined, 'no agent entry created');
+  } finally {
+    await gateway.stop();
+  }
+});
