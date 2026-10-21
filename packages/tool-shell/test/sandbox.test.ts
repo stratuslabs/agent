@@ -888,6 +888,22 @@ test('on Linux, a deniedPaths entry inside writablePaths that does not exist yet
   assert.ok(linux, 'linux plans once the path exists');
 });
 
+test('on Linux, an absent deniedPaths entry reached through a symlinked parent is still refused inside writablePaths', async () => {
+  // Codex P2 4332701171: the absent path cannot be realpath'd whole, so the
+  // check resolves its nearest existing ancestor before comparing.
+  const fixture = await fixtureHome();
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  const alias = path.join(fixture.userHome, 'alias');
+  await symlink(path.join(fixture.stratusHome, 'integrations', 'ava'), alias);
+  const config = { writablePaths: ['~/.stratus/integrations/ava/home'], deniedPaths: [path.join(alias, 'home', '.ssh')] };
+  let planned = false;
+  const refused = await run(config, fixture, 'true', { platform: 'linux', planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+  assert.equal(refused.ok, false, JSON.stringify(refused.output));
+  assert.equal(planned, false);
+  assert.match(refused.error ?? '', /shell\.run refused: deniedPaths names .*\.ssh, inside writablePaths .*, and it does not exist/);
+});
+
 test('granted writable paths come after the denials and the readable paths, and denials inside them come after that', async () => {
   const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-writable-')));
   const stratus = path.join(home, '.stratus');
@@ -921,6 +937,16 @@ test('writablePaths that name the Stratus home, a directory above it, or one hol
     assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
     assert.equal(planned, false, `${entry}: refused before any command is planned`);
     assert.match(refused.error ?? "", /shell\.run refused: writablePaths names /, entry);
+  }
+  // Codex P1 4332701160: a path inside another agent's workspace is refused
+  // too, by its hidden or its visible spelling, existing or not.
+  await mkdir(path.join(fixture.otherWorkspace, 'sub'), { recursive: true });
+  for (const entry of [path.join(fixture.otherWorkspace, 'sub'), path.join(fixture.visible, 'carl', 'workspace', 'sub'), '~/.stratus/agents/carl/workspace/new']) {
+    let planned = false;
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, `${entry}: refused before any command is planned`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*another agent's workspace/, entry);
   }
   const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, fixture);
   assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', 'ava', 'home')]);

@@ -347,13 +347,28 @@ const sandboxed = async (
   // Stratus home, another agent's workspace, or a file the host protects
   // would reopen writes to them. Refused rather than quietly narrowed: the
   // operator meant something by it, and the fix is to name the directory.
-  const guarded = [...stratusHomesFor(workspace, processEnv, userHome), ...hostProtected, ...others].flatMap(spellings);
+  // Another agent's workspace is refused in both directions: a writable
+  // path inside it opens that part of it as surely as one above it. The
+  // Stratus home is refused only from above, since an agent's own home
+  // lives inside it. Every path is compared by its written and its real
+  // spelling, the real one resolved through the nearest existing ancestor
+  // so an absent path behind a symlink is placed where it would land.
+  const guarded = [...stratusHomesFor(workspace, processEnv, userHome), ...hostProtected].flatMap(placements);
+  const otherPlaces = others.flatMap(placements);
   for (const entry of settings.writablePaths) {
-    const holds = guarded.find((target) => spellings(entry).some((dir) => isWithin(dir, target)));
+    const places = placements(entry);
+    const holds = guarded.find((target) => places.some((dir) => isWithin(dir, target)));
     if (holds !== undefined) {
       throw new Error(
         `shell.run refused: writablePaths names ${entry}, which is or holds ${holds}, and a writable path there would open it to every command. `
         + 'Name the directory a command needs inside it instead, such as the agent\'s own ~/.stratus/integrations/<id>/home.',
+      );
+    }
+    const overlaps = otherPlaces.find((target) => places.some((dir) => isWithin(dir, target) || isWithin(target, dir)));
+    if (overlaps !== undefined) {
+      throw new Error(
+        `shell.run refused: writablePaths names ${entry}, which overlaps another agent's workspace (${overlaps}), and a writable path there would open it to this agent's commands. `
+        + 'Name a directory outside every other agent\'s workspace.',
       );
     }
   }
@@ -364,7 +379,8 @@ const sandboxed = async (
   // call. macOS denies an absent path as written, so only Linux refuses.
   if (platform === 'linux') {
     for (const denied of settings.deniedPaths) {
-      const inside = settings.writablePaths.find((dir) => spellings(dir).some((spelling) => isWithin(spelling, denied)));
+      const deniedPlaces = placements(denied);
+      const inside = settings.writablePaths.find((dir) => placements(dir).some((spelling) => deniedPlaces.some((place) => isWithin(spelling, place))));
       if (inside !== undefined && !existsSync(denied)) {
         throw new Error(
           `shell.run refused: deniedPaths names ${denied}, inside writablePaths ${inside}, and it does not exist, so the Linux sandbox cannot hide it from commands. `
@@ -445,6 +461,9 @@ let unconfinedWarned = false;
 export const resetSandboxWarning = (): void => {
   unconfinedWarned = false;
 };
+
+/** A path as written and as it really is, for containment checks. */
+const placements = (target: string): string[] => [...new Set([...spellings(target), canonicalPath(path.resolve(target))])];
 
 const isWithin = (dir: string, candidate: string): boolean => {
   const relative = path.relative(dir, candidate);
