@@ -24,7 +24,7 @@ stratus setup     # sign in, create an agent, pick tools, connect Slack
 stratus chat      # talk; the conversation persists
 ```
 
-Needs Node 22.13+ ([Installation](docs/start/installation.md)). No key yet?
+Needs Node 22.13+ or 23.4+ ([Installation](docs/start/installation.md)). No key yet?
 [Quickstart](docs/start/quickstart.md) has an offline demo.
 
 ## Why Stratus
@@ -42,12 +42,13 @@ Needs Node 22.13+ ([Installation](docs/start/installation.md)). No key yet?
   [Deployment](docs/guides/deployment.md)
 - **Multiplayer and multi-tenant.** A team of agents works alongside a
   team of people in Slack: each agent is its own app, follows its threads,
-  delegates to the others, and asks a person before doing anything risky.
+  delegates to the others, and asks a person in Slack when approval is needed.
   One host can serve many teams, each kept to its own agents and data.
   [Slack](docs/guides/slack.md) · [Agents](docs/concepts/agents.md)
-- **Opinionated defaults.** Sandboxed shell, approvals for risky actions,
-  memory that belongs to the agent, and schedules a human approves once.
-  Loosen any of it in config. [Security](docs/concepts/security.md) ·
+- **Opinionated defaults.** A sandboxed shell, a human asked before
+  dangerous actions, memory that belongs to the agent, and schedules a
+  human approves once. Tighten it to ask before every gated tool, or loosen
+  it, in config. [Security](docs/concepts/security.md) ·
   [Approvals](docs/guides/approvals.md)
 - **A growing plugin ecosystem.** Built-in packages for Claude,
   ChatGPT/Codex, OpenAI-compatible APIs, Slack, files, shell, web, and a
