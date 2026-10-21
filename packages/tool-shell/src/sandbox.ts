@@ -317,6 +317,13 @@ export interface SandboxPolicy {
    * config) can be read; a denied path inside one stays denied.
    */
   readable?: string[];
+  /**
+   * Paths the operator named writable. Also in `writable`, and given back
+   * once more after the default denials, so one inside the Stratus home (an
+   * agent's own `~/.stratus/integrations/<id>/home`, where CLIs save their
+   * config) can be written; a denied path inside one stays denied.
+   */
+  grantedWritable?: string[];
 }
 
 export interface SandboxedCommand {
@@ -368,7 +375,7 @@ const isWithin = (parent: string, child: string): boolean => {
  * operator's `deniedPaths` entry inside it) must not show it again.
  */
 const deniedInside = (policy: SandboxPolicy): string[] => {
-  const given = [policy.workspace, ...(policy.readable ?? [])].flatMap(spellings);
+  const given = [policy.workspace, ...(policy.readable ?? []), ...(policy.grantedWritable ?? [])].flatMap(spellings);
   return [...new Set(policy.denied.flatMap(spellings))].filter((denied) => given.some((dir) => isWithin(dir, denied)));
 };
 
@@ -449,6 +456,9 @@ export const darwinProfile = (policy: SandboxPolicy): string => {
     // Operator-named readable paths, after the denials: they may sit inside
     // the hidden Stratus home. Denied paths inside them are denied again below.
     ...((policy.readable ?? []).length > 0 ? [`(allow file-read-data file-read-xattr ${subpaths(policy.readable!)})`] : []),
+    // Operator-named writable paths, likewise, and after the readable ones
+    // so one inside a readable path is still writable.
+    ...((policy.grantedWritable ?? []).length > 0 ? [`(allow file-read-data file-read-xattr file-read* file-write* ${subpaths(policy.grantedWritable!)})`] : []),
     // Named operation by operation: an allow of the `file-read*` wildcard
     // does not undo a deny that named `file-read-data`.
     `(allow file-read-data file-read-xattr file-read* file-write* ${subpaths([policy.workspace])})`,
@@ -539,6 +549,11 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
   // workspace so one that holds the workspace leaves it writable.
   for (const dir of new Set((policy.readable ?? []).flatMap(realOnly))) {
     args.push('--ro-bind', dir, dir);
+  }
+  // Operator-named writable paths over the denials and the readable paths,
+  // writable, before the workspace for the same reason.
+  for (const dir of new Set((policy.grantedWritable ?? []).flatMap(realOnly))) {
+    args.push('--bind', dir, dir);
   }
   const workspaceSpellings = spellings(policy.workspace);
   const workspaceSource = workspaceSpellings.at(-1)!;

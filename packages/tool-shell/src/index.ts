@@ -1,7 +1,8 @@
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { isValidAgentId } from '@stratusagent/agents';
 
 import {
   DEFAULT_SUBPROCESS_PASS_ENV,
@@ -306,6 +307,7 @@ const sandboxed = async (
   settings: ReturnType<typeof settingsFor>,
   shellArgs: string[],
   options: ShellToolOptions,
+  agentId: string,
 ): Promise<{ command: string; args: string[] }> => {
   const unconfined = { command: settings.shell, args: shellArgs };
   if (settings.sandbox === 'off') {
@@ -349,26 +351,118 @@ const sandboxed = async (
   const others = [...await options.workspaces?.all() ?? [], ...underRoot]
     .filter((dir) => !spellings(dir).some((spelling) => own.has(spelling)));
   const hostProtected = await options.protectedPaths?.all() ?? [];
+  // A named writable path wins over the denials around it (an agent's own
+  // home under ~/.stratus/integrations/<id>), so one that is or holds the
+  // Stratus home, another agent's workspace, or a file the host protects
+  // would reopen writes to them. Refused rather than quietly narrowed: the
+  // operator meant something by it, and the fix is to name the directory.
+  // Another agent's workspace and every other directory the host protects
+  // (a gateway's own stateDir) are refused in both directions: a writable
+  // path inside one opens that part of it as surely as one above it.
+  // Inside the Stratus home the rule is an allowlist, not a carve-out:
+  // only this agent's own integrations/<id>/home, and its own workspace
+  // when that sits inside the home, since every other descendant
+  // (sessions, daemon state, another agent's home) is what the denial is
+  // for. Every path is compared by its written and its real spelling, the
+  // real one resolved through the nearest existing ancestor so an absent
+  // path behind a symlink is placed where it would land.
+  const stratusHomes = stratusHomesFor(workspace, processEnv, userHome);
+  const homePlaces = stratusHomes.flatMap(placements);
+  const workspacePlaces = placements(workspace);
+  const ownPlaces = [
+    ...(isValidAgentId(agentId) ? stratusHomes.map((home) => path.join(home, 'integrations', agentId, 'home')).flatMap(placements) : []),
+    ...(workspacePlaces.some((dir) => homePlaces.some((home) => dir !== home && isWithin(home, dir))) ? workspacePlaces : []),
+  ];
+  const guarded = [...homePlaces, ...hostProtected.flatMap(placements)];
+  const sealed = hostProtected
+    .filter((target) => !placements(target).some((place) => homePlaces.includes(place)))
+    .flatMap(placements);
+  const otherPlaces = others.flatMap(placements);
+  for (const entry of settings.writablePaths) {
+    const places = placements(entry);
+    const holds = guarded.find((target) => places.some((dir) => isWithin(dir, target)));
+    if (holds !== undefined) {
+      throw new Error(
+        `shell.run refused: writablePaths names ${entry}, which is or holds ${holds}, and a writable path there would open it to every command. `
+        + 'Name the directory a command needs inside it instead, such as the agent\'s own ~/.stratus/integrations/<id>/home.',
+      );
+    }
+    const within = sealed.find((target) => places.some((dir) => isWithin(target, dir)));
+    if (within !== undefined) {
+      throw new Error(
+        `shell.run refused: writablePaths names ${entry}, which is inside ${within}, a directory the host protects, and a writable path there would open that part of it to every command. `
+        + 'Name a directory outside it.',
+      );
+    }
+    const overlaps = otherPlaces.find((target) => places.some((dir) => isWithin(dir, target) || isWithin(target, dir)));
+    if (overlaps !== undefined) {
+      throw new Error(
+        `shell.run refused: writablePaths names ${entry}, which overlaps another agent's workspace (${overlaps}), and a writable path there would open it to this agent's commands. `
+        + 'Name a directory outside every other agent\'s workspace.',
+      );
+    }
+    const inHome = homePlaces.find((home) => places.some((dir) => isWithin(home, dir)));
+    // Every placement, not just the written one: a link inside the agent's
+    // own subtree that lands elsewhere (in the home, or outside it at
+    // ~/.ssh) is granted by its real path, after the denials, so every
+    // placement has to stay inside the owned subtree.
+    if (inHome !== undefined && !places.every((dir) => ownPlaces.some((own) => isWithin(own, dir)))) {
+      throw new Error(
+        `shell.run refused: writablePaths names ${entry}, which is inside the Stratus home (${inHome}), and a writable path there would open daemon state or another agent's files to every command. `
+        + 'Inside it, name only this agent\'s own ~/.stratus/integrations/<id>/home.',
+      );
+    }
+  }
+  // Every denial, assembled once: the check below and the policy read the
+  // same list, so nothing the policy hides escapes the check.
+  const deniedEntries = [...new Set([
+    ...stratusHomes,
+    ...hostProtected,
+    ...others,
+    ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
+    ...DEFAULT_DENIED_SOCKETS,
+    ...userRuntimeEndpoints(processEnv, process.getuid?.()),
+    ...credentialAgentEndpoints(processEnv, platform),
+    ...relocatedCredentials(processEnv, userHome, workspace),
+    ...settings.deniedPaths,
+  ])];
+  // bwrap masks a denied path by mounting over it, so one that does not
+  // exist yet has nothing to mount on, and inside a writable path the
+  // command could create and use it. That holds for every denial, not only
+  // deniedPaths: a credential store or agent socket the environment moves
+  // inside a granted writable path is restored over just the same.
+  // Refused rather than made ahead of time: whether it should be a file or
+  // a directory is the operator's call. macOS denies an absent path as
+  // written, so only Linux refuses. The fixed built-in list is left out:
+  // it names files inside ordinary toolchain dirs (~/.gradle, ~/.m2), so
+  // refusing on it would break existing grants; that pre-existing case is
+  // tracked separately rather than turned into a refusal here.
+  if (platform === 'linux') {
+    const configured = new Set(settings.deniedPaths);
+    const builtIn = new Set([...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)), ...DEFAULT_DENIED_SOCKETS]);
+    for (const denied of deniedEntries.filter((entry) => configured.has(entry) || !builtIn.has(entry))) {
+      const deniedPlaces = placements(denied);
+      const inside = settings.writablePaths.find((dir) => placements(dir).some((spelling) => deniedPlaces.some((place) => isWithin(spelling, place))));
+      if (inside !== undefined && !existsSync(denied)) {
+        throw new Error(configured.has(denied)
+          ? `shell.run refused: deniedPaths names ${denied}, inside writablePaths ${inside}, and it does not exist, so the Linux sandbox cannot hide it from commands. `
+            + 'Create it (an empty file or directory) before running commands, or remove it from deniedPaths.'
+          : `shell.run refused: ${denied}, a credential location that must stay hidden from commands, is inside writablePaths ${inside}, and does not exist, so the Linux sandbox cannot hide it. `
+            + 'Create it (an empty file or directory) before running commands, or narrow writablePaths so it is outside them.');
+      }
+    }
+  }
   const policy: SandboxPolicy = {
     workspace,
     ...(settings.cwd && settings.cwd !== workspace ? { cwd: settings.cwd } : {}),
-    denied: [...new Set([
-      ...stratusHomesFor(workspace, processEnv, userHome),
-      ...hostProtected,
-      ...others,
-      ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
-      ...DEFAULT_DENIED_SOCKETS,
-      ...userRuntimeEndpoints(processEnv, process.getuid?.()),
-      ...credentialAgentEndpoints(processEnv, platform),
-      ...relocatedCredentials(processEnv, userHome, workspace),
-      ...settings.deniedPaths,
-    ].flatMap(spellings))],
+    denied: [...new Set(deniedEntries.flatMap(spellings))],
     writable: [
       ...writableHomePathsFor(platform).map((entry) => path.join(userHome, entry)),
       ...settings.writablePaths,
     ],
     tmp: os.tmpdir(),
     readable: settings.readablePaths,
+    grantedWritable: settings.writablePaths,
     ...(settings.home === 'hidden' ? {
       home: {
         path: userHome,
@@ -420,6 +514,9 @@ let unconfinedWarned = false;
 export const resetSandboxWarning = (): void => {
   unconfinedWarned = false;
 };
+
+/** A path as written and as it really is, for containment checks. */
+const placements = (target: string): string[] => [...new Set([...spellings(target), canonicalPath(path.resolve(target))])];
 
 const isWithin = (dir: string, candidate: string): boolean => {
   const relative = path.relative(dir, candidate);
@@ -658,7 +755,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
         }
       }
       const shellArgs = [...startupOff(settings.shell), '-c', command];
-      const run = await sandboxed(settings, shellArgs, options);
+      const run = await sandboxed(settings, shellArgs, options, session.agent.id);
       return {
         command: run.command,
         args: run.args,

@@ -80,9 +80,10 @@ const run = async (
   config: JsonObject,
   fixture: Awaited<ReturnType<typeof fixtureHome>>,
   command: string,
-  extra: { planSandbox?: typeof planSandbox; warn?: (message: string) => void; processEnv?: NodeJS.ProcessEnv } = {},
+  extra: { planSandbox?: typeof planSandbox; warn?: (message: string) => void; processEnv?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; agentId?: string } = {},
 ) => {
   const tool = createShellTool(config, {
+    ...(extra.platform ? { platform: extra.platform } : {}),
     workspaces: fixture.workspaces,
     protectedPaths: fixture.protectedPaths,
     home: fixture.userHome,
@@ -90,7 +91,7 @@ const run = async (
     ...(extra.planSandbox ? { planSandbox: extra.planSandbox } : {}),
     ...(extra.warn ? { warn: extra.warn } : {}),
   });
-  return createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command } }, tool, session('ava'));
+  return createLocalCommandExecutor().execute({ id: 'c', toolName: 'shell.run', input: { command } }, tool, session(extra.agentId ?? 'ava'));
 };
 
 const output = (result: Awaited<ReturnType<typeof run>>): { stdout: string; stderr: string } => {
@@ -569,9 +570,9 @@ test('stored tokens of common developer CLIs are denied', async () => {
 
 // ---- the hidden home ----
 
-const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>) => {
+const policyOf = async (config: JsonObject, fixture: Awaited<ReturnType<typeof fixtureHome>>, extra: { platform?: NodeJS.Platform; agentId?: string; processEnv?: NodeJS.ProcessEnv } = {}) => {
   let seen: Parameters<typeof planSandbox>[0] | undefined;
-  const result = await run(config, fixture, 'true', { planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
+  const result = await run(config, fixture, 'true', { ...extra, planSandbox: (policy) => { seen = policy; return unavailable(policy, '', []); }, warn: () => {} });
   return { seen, result };
 };
 
@@ -836,4 +837,250 @@ test('readable paths come after the denials, and denials inside them come after 
   assert.ok(bound > args.indexOf(`--tmpfs ${stratus} `), args);
   assert.ok(bound < args.indexOf(`--bind ${workspace} ${workspace}`), args);
   assert.ok(args.lastIndexOf(`--tmpfs ${secret}`) > bound, args);
+});
+
+test('writablePaths inside the Stratus home are writable, and what is denied around and inside them is not', { skip: !sandboxedHere && NEEDS }, async (t) => {
+  // An agent's own HOME that the host keeps under
+  // ~/.stratus/integrations/<id>/home: CLIs that save their own config
+  // (vercel, gh, gcloud) got EPERM there, since the Stratus home's denial
+  // came after the writable paths.
+  const root = await mkdtemp(path.join(process.cwd(), '.sandbox-agent-home-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = await fixtureHome(root);
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  await writeFile(path.join(agentHome, 'private.key'), 'integration-secret');
+  const config = { writablePaths: ['~/.stratus/integrations/ava/home'], deniedPaths: ['~/.stratus/integrations/ava/home/private.key'] };
+  const saved = path.join(agentHome, 'Library', 'Application Support', 'cli', 'auth.json');
+  const write = await run(config, fixture, `mkdir -p "${path.dirname(saved)}" && echo '{}' > "${saved}" && cat "${saved}"`);
+  assert.equal(output(write).stdout.trim(), '{}', JSON.stringify(write.output));
+  for (const target of [path.join(fixture.stratusHome, 'credentials.json'), path.join(fixture.otherWorkspace, 'notes.md'), path.join(agentHome, 'private.key')]) {
+    const denied = await run(config, fixture, `cat ${target}`);
+    assert.equal(denied.ok, false, `${target}: ${JSON.stringify(denied.output)}`);
+  }
+  // Beside the agent's home stays denied. On macOS the write fails; under
+  // bwrap the denial is an empty tmpfs, so the write may land there, but
+  // either way nothing reaches the real directory.
+  const beside = path.join(fixture.stratusHome, 'integrations', 'ava', 'other.txt');
+  const outside = await run(config, fixture, `echo x > ${beside}`);
+  assert.equal(existsSync(beside), false, JSON.stringify(outside.output));
+});
+
+test('on Linux, a deniedPaths entry inside writablePaths that does not exist yet is refused, since bwrap could not mask it', async () => {
+  // Codex P2 4332582670: realOnly drops an absent path, so the command could
+  // create and use it inside the writable bind.
+  const fixture = await fixtureHome();
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  const config = { writablePaths: ['~/.stratus/integrations/ava/home'], deniedPaths: ['~/.stratus/integrations/ava/home/.ssh'] };
+  let planned = false;
+  const refused = await run(config, fixture, 'true', { platform: 'linux', planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+  assert.equal(refused.ok, false, JSON.stringify(refused.output));
+  assert.equal(planned, false);
+  assert.match(refused.error ?? '', /shell\.run refused: deniedPaths names .*\.ssh, inside writablePaths .*, and it does not exist/);
+  assert.equal(existsSync(path.join(agentHome, '.ssh')), false, 'nothing is created on the host to make it maskable');
+  // Once it exists it can be masked, so the command is planned; and macOS
+  // denies an absent path natively, so it is never refused there.
+  const { seen: darwin } = await policyOf(config, fixture, { platform: 'darwin' });
+  assert.ok(darwin, 'darwin plans with the path absent');
+  await mkdir(path.join(agentHome, '.ssh'));
+  const { seen: linux } = await policyOf(config, fixture, { platform: 'linux' });
+  assert.ok(linux, 'linux plans once the path exists');
+});
+
+test('on Linux, an absent deniedPaths entry reached through a symlinked parent is still refused inside writablePaths', async () => {
+  // Codex P2 4332701171: the absent path cannot be realpath'd whole, so the
+  // check resolves its nearest existing ancestor before comparing.
+  const fixture = await fixtureHome();
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  const alias = path.join(fixture.userHome, 'alias');
+  await symlink(path.join(fixture.stratusHome, 'integrations', 'ava'), alias);
+  const config = { writablePaths: ['~/.stratus/integrations/ava/home'], deniedPaths: [path.join(alias, 'home', '.ssh')] };
+  let planned = false;
+  const refused = await run(config, fixture, 'true', { platform: 'linux', planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+  assert.equal(refused.ok, false, JSON.stringify(refused.output));
+  assert.equal(planned, false);
+  assert.match(refused.error ?? '', /shell\.run refused: deniedPaths names .*\.ssh, inside writablePaths .*, and it does not exist/);
+});
+
+test('on Linux, an absent credential location the environment names inside writablePaths is refused too', async () => {
+  // Codex P1 4336171867: the check read only settings.deniedPaths, while the
+  // writable bind is restored over every denial, so a relocated credential
+  // store or agent socket that did not exist yet could be created and used.
+  const fixture = await fixtureHome();
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  const config = { writablePaths: ['~/.stratus/integrations/ava/home'] };
+  for (const [name, value, absent] of [
+    ['GH_CONFIG_DIR', path.join(agentHome, '.config', 'gh'), path.join(agentHome, '.config', 'gh')],
+    ['SSH_AUTH_SOCK', path.join(agentHome, 'agent.sock'), path.join(agentHome, 'agent.sock')],
+  ] as const) {
+    const processEnv = { PATH: '/usr/bin:/bin', [name]: value };
+    let planned = false;
+    const refused = await run(config, fixture, 'true', { platform: 'linux', processEnv, planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${name}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, name);
+    assert.match(refused.error ?? '', /shell\.run refused: .*must stay hidden from commands, is inside writablePaths .*, and does not exist/, name);
+    assert.equal(existsSync(absent), false, `${name}: nothing is created on the host`);
+    // macOS denies an absent path as written, so it plans there.
+    const { seen: darwin } = await policyOf(config, fixture, { platform: 'darwin', processEnv });
+    assert.ok(darwin, `${name}: darwin plans with the path absent`);
+  }
+  // A credential location outside every writable path is masked or absent
+  // under a read-only root either way, so it does not refuse.
+  const { seen: elsewhere } = await policyOf(config, fixture, { platform: 'linux', processEnv: { PATH: '/usr/bin:/bin', GH_CONFIG_DIR: path.join(fixture.userHome, 'nowhere', 'gh') } });
+  assert.ok(elsewhere, 'linux plans when the absent denial is outside writablePaths');
+  // The fixed built-in list is not refused on (card 605 tracks it): a grant
+  // of ~/.gradle with no gradle.properties yet keeps working.
+  const { seen: gradle } = await policyOf({ writablePaths: ['~/.gradle'] }, fixture, { platform: 'linux', processEnv: { PATH: '/usr/bin:/bin' } });
+  assert.ok(gradle, 'linux plans a ~/.gradle grant with gradle.properties absent');
+});
+
+test('granted writable paths come after the denials and the readable paths, and denials inside them come after that', async () => {
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-writable-')));
+  const stratus = path.join(home, '.stratus');
+  const workspace = path.join(stratus, 'agents', 'ava', 'workspace');
+  const integration = path.join(stratus, 'integrations', 'ava');
+  const agentHome = path.join(integration, 'home');
+  const secret = path.join(agentHome, '.ssh');
+  await mkdir(workspace, { recursive: true });
+  await mkdir(secret, { recursive: true });
+  const policy = { workspace, denied: [stratus, secret], writable: [agentHome], readable: [integration], grantedWritable: [agentHome] };
+  const profile = darwinProfile(policy);
+  const allow = profile.indexOf(`(allow file-read-data file-read-xattr file-read* file-write* (subpath "${agentHome}"))`);
+  assert.ok(allow > profile.indexOf(`(deny file-read-data file-read-xattr file-write* (subpath "${stratus}")`), profile);
+  assert.ok(allow > profile.indexOf(`(allow file-read-data file-read-xattr (subpath "${integration}"))`), profile);
+  assert.ok(profile.lastIndexOf(`(subpath "${secret}")`) > allow, profile);
+  const args = bwrapArgs(policy, '/bin/sh', []).join(' ');
+  const bound = args.lastIndexOf(`--bind ${agentHome} ${agentHome}`);
+  assert.ok(bound > args.indexOf(`--tmpfs ${stratus} `), args);
+  assert.ok(bound > args.indexOf(`--ro-bind ${integration} ${integration}`), args);
+  assert.ok(bound < args.indexOf(`--bind ${workspace} ${workspace}`), args);
+  assert.ok(args.lastIndexOf(`--tmpfs ${secret}`) > bound, args);
+});
+
+test('writablePaths that name the Stratus home, a directory above it, or one holding a protected file are refused', async () => {
+  // A named writable path wins over the denials around it, so one that
+  // holds the Stratus home would reopen writes to credentials and config.
+  const fixture = await fixtureHome();
+  for (const entry of ['~/.stratus', '~', path.dirname(fixture.userHome), '~/Stratus', '~/.stratus/agents']) {
+    let planned = false;
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, `${entry}: refused before any command is planned`);
+    assert.match(refused.error ?? "", /shell\.run refused: writablePaths names /, entry);
+  }
+  // Codex P1 4332701160: a path inside another agent's workspace is refused
+  // too, by its hidden or its visible spelling, existing or not.
+  await mkdir(path.join(fixture.otherWorkspace, 'sub'), { recursive: true });
+  for (const entry of [path.join(fixture.otherWorkspace, 'sub'), path.join(fixture.visible, 'carl', 'workspace', 'sub'), '~/.stratus/agents/carl/workspace/new']) {
+    let planned = false;
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, `${entry}: refused before any command is planned`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*another agent's workspace/, entry);
+  }
+  const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, fixture);
+  assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', 'ava', 'home')]);
+});
+
+test('a writablePaths entry inside a directory the host protects, other than the Stratus home, is refused (Codex P1 4334075011)', async () => {
+  // A gateway with its own stateDir protects it; a writable path under it
+  // would be re-granted after the denial and open the sessions to commands.
+  const fixture = await fixtureHome();
+  const stateDir = path.join(fixture.userHome, 'state-elsewhere');
+  await mkdir(path.join(stateDir, 'sessions'), { recursive: true });
+  const inner = fixture.protectedPaths;
+  const withState = { ...fixture, protectedPaths: { ...inner, all: async () => [...await inner.all(), stateDir] } };
+  for (const entry of [path.join(stateDir, 'sessions'), path.join(stateDir, 'not-yet')]) {
+    let planned = false;
+    const refused = await run({ writablePaths: [entry] }, withState, 'true', { planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, `${entry}: refused before any command is planned`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*, which is inside .*state-elsewhere, a directory the host protects/, entry);
+  }
+  // The Stratus home stays the one exception: an agent's own home inside it.
+  const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, withState);
+  assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', 'ava', 'home')]);
+});
+
+test('inside the Stratus home only the agent\'s own integrations/<id>/home or its own workspace may be writable (Codex P1 4334240775)', async () => {
+  // The Stratus home is denied and writablePaths are granted after it, so
+  // any descendant named here would be reopened: sessions, the daemon's
+  // state, another agent's integration home, the agent's own credentials
+  // beside its home. Only the two places this agent already owns pass.
+  const fixture = await fixtureHome();
+  const stratus = fixture.stratusHome;
+  await mkdir(path.join(stratus, 'sessions'), { recursive: true });
+  await mkdir(path.join(stratus, 'integrations', 'bea', 'home'), { recursive: true });
+  await mkdir(path.join(stratus, 'integrations', 'ava', 'home'), { recursive: true });
+  const alias = path.join(fixture.userHome, 'sessions-alias');
+  await symlink(path.join(stratus, 'sessions'), alias);
+  for (const entry of [
+    '~/.stratus/sessions',
+    '~/.stratus/not-yet',
+    '~/.stratus/integrations/bea/home',
+    '~/.stratus/integrations/ava',
+    '~/.stratus/integrations/ava/other',
+    '~/.stratus/agents/ava',
+    alias,
+  ]) {
+    let planned = false;
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.equal(planned, false, `${entry}: refused before any command is planned`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*inside the Stratus home/, entry);
+  }
+  for (const entry of ['~/.stratus/integrations/ava/home', '~/.stratus/integrations/ava/home/.config', '~/.stratus/agents/ava/workspace/build']) {
+    const { seen } = await policyOf({ writablePaths: [entry] }, fixture);
+    assert.ok(seen, `${entry}: planned`);
+    assert.equal(seen!.grantedWritable!.length, 1, entry);
+  }
+});
+
+test('a writablePaths entry inside the agent\'s own home or workspace that links elsewhere in the Stratus home is refused (Codex P1 4335097416)', async () => {
+  // The written spelling is allowlisted, but the real one is what the
+  // sandbox grants, so a link out of the agent's own subtree would open
+  // sessions or daemon state. Every placement must stay inside it.
+  const fixture = await fixtureHome();
+  const stratus = fixture.stratusHome;
+  await mkdir(path.join(stratus, 'sessions'), { recursive: true });
+  await mkdir(path.join(stratus, 'integrations', 'ava', 'home'), { recursive: true });
+  await mkdir(fixture.workspaces.forAgent('ava'), { recursive: true });
+  await symlink(path.join(stratus, 'sessions'), path.join(stratus, 'integrations', 'ava', 'home', 'cache'));
+  await symlink(path.join(stratus, 'sessions'), path.join(fixture.workspaces.forAgent('ava'), 'out'));
+  for (const entry of ['~/.stratus/integrations/ava/home/cache', '~/.stratus/integrations/ava/home/cache/new', '~/.stratus/agents/ava/workspace/out']) {
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => unavailable(policy, '', []), warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*inside the Stratus home/, entry);
+  }
+});
+
+test('an in-home writablePaths entry that links outside the Stratus home is refused too (Codex P1 4337364107)', async () => {
+  // The previous check held only placements inside the home to the owned
+  // subtree, so a link to ~/.ssh passed and its real path was re-granted
+  // after the credential denial. An in-home entry must stay owned whole.
+  const fixture = await fixtureHome();
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  await symlink(path.join(fixture.userHome, '.ssh'), path.join(agentHome, 'cache'));
+  for (const entry of ['~/.stratus/integrations/ava/home/cache', '~/.stratus/integrations/ava/home/cache/new']) {
+    const refused = await run({ writablePaths: [entry] }, fixture, 'true', { planSandbox: (policy) => unavailable(policy, '', []), warn: () => {} });
+    assert.equal(refused.ok, false, `${entry}: ${JSON.stringify(refused.output)}`);
+    assert.match(refused.error ?? '', /shell\.run refused: writablePaths names .*inside the Stratus home/, entry);
+  }
+  // The home itself, a real directory, is still granted.
+  const { seen } = await policyOf({ writablePaths: ['~/.stratus/integrations/ava/home'] }, fixture);
+  assert.ok(seen, 'the own home still plans');
+});
+
+test('the own integration home is allowlisted for every valid agent id, not only slug-shaped ones (Codex P2 4335097425)', async () => {
+  const fixture = await fixtureHome();
+  for (const agentId of ['my agent', 'team,alpha', 'Agënt']) {
+    await mkdir(path.join(fixture.stratusHome, 'integrations', agentId, 'home'), { recursive: true });
+    const { seen, result } = await policyOf({ writablePaths: [`~/.stratus/integrations/${agentId}/home`] }, fixture, { agentId });
+    assert.ok(seen, `${agentId}: ${JSON.stringify(result)}`);
+    assert.deepEqual(seen!.grantedWritable, [path.join(fixture.userHome, '.stratus', 'integrations', agentId, 'home')]);
+  }
 });
