@@ -362,6 +362,7 @@ const sandboxed = async (
     ],
     tmp: os.tmpdir(),
     readable: settings.readablePaths,
+    grantedWritable: settings.writablePaths,
     ...(settings.home === 'hidden' ? {
       home: {
         path: userHome,

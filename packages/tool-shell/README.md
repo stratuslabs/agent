@@ -174,7 +174,7 @@ git can find its repository), but nothing can be read from inside them.
 | `deniedPaths` | none | More directories or files to hide, added to the list above, including ones inside the workspace (a repository's `.env`). A leading `~` is your home directory. |
 | `home` | `hidden` | `hidden`: only the toolchain paths above and `readablePaths` are readable in your home. `visible`: all of it is, apart from the denied paths. |
 | `readablePaths` | none | More paths a command may read (`~/projects`), read-only. They win over the default denials around them, so a path inside the Stratus home (an agent's own `~/.stratus/integrations/<id>` git and gh config) can be named. Denied paths inside them stay hidden. |
-| `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). On Linux, these and the default caches are created before the command if missing, since nothing under the read-only root can be. |
+| `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). Like `readablePaths`, they win over the default denials around them, so an agent's own home inside the Stratus home (`~/.stratus/integrations/<id>/home`, where CLIs like vercel, gh and gcloud save their config) can be named. Denied paths inside them stay denied. On Linux, these and the default caches are created before the command if missing, since nothing under the read-only root can be. |
 
 All of these can be set per agent under `agents`.
 

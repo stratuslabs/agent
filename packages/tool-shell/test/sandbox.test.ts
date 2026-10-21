@@ -837,3 +837,49 @@ test('readable paths come after the denials, and denials inside them come after 
   assert.ok(bound < args.indexOf(`--bind ${workspace} ${workspace}`), args);
   assert.ok(args.lastIndexOf(`--tmpfs ${secret}`) > bound, args);
 });
+
+test('writablePaths inside the Stratus home are writable, and what is denied around and inside them is not', { skip: !sandboxedHere && NEEDS }, async (t) => {
+  // An agent's own HOME that the host keeps under
+  // ~/.stratus/integrations/<id>/home: CLIs that save their own config
+  // (vercel, gh, gcloud) got EPERM there, since the Stratus home's denial
+  // came after the writable paths.
+  const root = await mkdtemp(path.join(process.cwd(), '.sandbox-agent-home-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = await fixtureHome(root);
+  const agentHome = path.join(fixture.stratusHome, 'integrations', 'ava', 'home');
+  await mkdir(agentHome, { recursive: true });
+  await writeFile(path.join(agentHome, 'private.key'), 'integration-secret');
+  const config = { writablePaths: ['~/.stratus/integrations/ava/home'], deniedPaths: ['~/.stratus/integrations/ava/home/private.key'] };
+  const saved = path.join(agentHome, 'Library', 'Application Support', 'cli', 'auth.json');
+  const write = await run(config, fixture, `mkdir -p "${path.dirname(saved)}" && echo '{}' > "${saved}" && cat "${saved}"`);
+  assert.equal(output(write).stdout.trim(), '{}', JSON.stringify(write.output));
+  for (const target of [path.join(fixture.stratusHome, 'credentials.json'), path.join(fixture.otherWorkspace, 'notes.md'), path.join(agentHome, 'private.key')]) {
+    const denied = await run(config, fixture, `cat ${target}`);
+    assert.equal(denied.ok, false, `${target}: ${JSON.stringify(denied.output)}`);
+  }
+  const outside = await run(config, fixture, `echo x > ${path.join(fixture.stratusHome, 'integrations', 'ava', 'other.txt')}`);
+  assert.equal(outside.ok, false, JSON.stringify(outside.output));
+});
+
+test('granted writable paths come after the denials and the readable paths, and denials inside them come after that', async () => {
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-writable-')));
+  const stratus = path.join(home, '.stratus');
+  const workspace = path.join(stratus, 'agents', 'ava', 'workspace');
+  const integration = path.join(stratus, 'integrations', 'ava');
+  const agentHome = path.join(integration, 'home');
+  const secret = path.join(agentHome, '.ssh');
+  await mkdir(workspace, { recursive: true });
+  await mkdir(secret, { recursive: true });
+  const policy = { workspace, denied: [stratus, secret], writable: [agentHome], readable: [integration], grantedWritable: [agentHome] };
+  const profile = darwinProfile(policy);
+  const allow = profile.indexOf(`(allow file-read-data file-read-xattr file-read* file-write* (subpath "${agentHome}"))`);
+  assert.ok(allow > profile.indexOf(`(deny file-read-data file-read-xattr file-write* (subpath "${stratus}")`), profile);
+  assert.ok(allow > profile.indexOf(`(allow file-read-data file-read-xattr (subpath "${integration}"))`), profile);
+  assert.ok(profile.lastIndexOf(`(subpath "${secret}")`) > allow, profile);
+  const args = bwrapArgs(policy, '/bin/sh', []).join(' ');
+  const bound = args.lastIndexOf(`--bind ${agentHome} ${agentHome}`);
+  assert.ok(bound > args.indexOf(`--tmpfs ${stratus} `), args);
+  assert.ok(bound > args.indexOf(`--ro-bind ${integration} ${integration}`), args);
+  assert.ok(bound < args.indexOf(`--bind ${workspace} ${workspace}`), args);
+  assert.ok(args.lastIndexOf(`--tmpfs ${secret}`) > bound, args);
+});
