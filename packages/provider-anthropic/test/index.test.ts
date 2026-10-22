@@ -97,7 +97,7 @@ test('generate sends the persona in the system block and memory at the tail', as
       id: 'ava:memory:1',
       agentId: 'ava',
       content: 'The user prefers short answers.',
-      createdAt: new Date().toISOString(),
+      createdAt: '2026-10-22T13:33:00.000Z',
       trust: 'agent',
     },
   ];
@@ -118,7 +118,7 @@ test('generate sends the persona in the system block and memory at the tail', as
   assert.doesNotMatch(body.system[0].text, /The user prefers short answers\./);
   assert.deepEqual(body.messages, [
     { role: 'user', content: [{ type: 'text', text: 'Hello there' }] },
-    { role: 'system', content: 'Things you remember from previous conversations (your own long-term memory):\n- The user prefers short answers.' },
+    { role: 'system', content: 'Things you remember from previous conversations (your own long-term memory):\n- (2026-10-22 13:33Z) The user prefers short answers.' },
   ]);
   assert.equal(requests[0]!.headers['x-api-key'], 'test-key');
 });

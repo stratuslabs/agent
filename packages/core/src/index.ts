@@ -5318,6 +5318,20 @@ const renderMemoryTopicLine = (topic: MemoryTopic): string =>
   + ` last ${escapeControlCharacters(topic.lastUpdatedAt.slice(0, 10))})`;
 
 /**
+ * A stored time as `YYYY-MM-DD HH:MMZ`, or nothing when it doesn't parse.
+ * Rebuilt from the parsed instant rather than sliced from the string, so a
+ * hand-edited `createdAt` can only ever render as a time, never as text.
+ */
+const utcMinute = (value: string): string | undefined => {
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) {
+    return undefined;
+  }
+  const iso = at.toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
+};
+
+/**
  * The memory block: the pinned core, the topic index, and the recency tail,
  * each grouped into trust regions, joined into **one** section.
  *
@@ -5341,7 +5355,17 @@ export const renderMemorySection = (
   }
   const injection = asMemoryInjection(memory);
   const blocks: string[] = [];
-  const fact = (entry: MemoryEntry): string => `- ${escapeControlCharacters(entry.content)}`;
+  // Each fact says when it was recorded, to the minute: a fact from three
+  // days ago otherwise reads exactly like one from this turn, and live
+  // state (a PR, a deploy) changes within a day. The model is shown
+  // `createdAt` here because it never called recall for these. Stored
+  // times only, never the clock: on the default Anthropic model this
+  // section rides in the system block, which must change only when a
+  // memory does, or every turn's thinking is dropped as a prefix mismatch.
+  const fact = (entry: MemoryEntry): string => {
+    const at = utcMinute(entry.createdAt);
+    return `- ${at ? `(${at}) ` : ''}${escapeControlCharacters(entry.content)}`;
+  };
   const push = (intro: string, regions: string[]): void => {
     if (regions.length > 0) {
       blocks.push(`${intro}\n\n${regions.join('\n\n')}`);
