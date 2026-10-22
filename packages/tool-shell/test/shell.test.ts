@@ -14,6 +14,7 @@ import {
   type JsonObject,
   type ModelProvider,
   type Session,
+  type TrustLevel,
 } from '@stratusagent/core';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import { createPermissionPolicy, type PermissionDecision } from '@stratusagent/permissions';
@@ -827,4 +828,55 @@ test('with the external-content gate on, a tainted ledger closes grants before t
   const results = finished.messages.filter((message) => message.role === 'tool');
   assert.equal(results[0]?.toolResult?.ok, false);
   assert.match(decisions[0]?.reason ?? '', /after this conversation read external content/);
+});
+
+test('shell.run answers trustBeforeCall with the ledger\'s label, so the decision sees it', async () => {
+  const { workspaces, workspace } = await ledgerHome();
+  const tools = await registryFor({}, undefined, workspaces);
+  const shell = tools.get('shell.run')!;
+  // Nothing on record: the decision is left as it was.
+  assert.equal(await shell.trustBeforeCall?.(session('ava')), undefined);
+  const notes = path.join(workspace, 'notes.txt');
+  await writeFile(notes, 'text a web page wrote\n');
+  await createFileLedger((id) => workspaces.forAgent(id)).recordWrite('ava', notes, 'external');
+  assert.equal(await shell.trustBeforeCall?.(session('ava')), 'external');
+  // Without a ledger there is nothing to answer from.
+  assert.equal(createShellTool({}).trustBeforeCall, undefined);
+});
+
+test('a tainted write recorded after the command was approved stops it before it starts', async () => {
+  const { workspaces, workspace } = await ledgerHome();
+  const notes = path.join(workspace, 'notes.txt');
+  await writeFile(notes, 'text a web page wrote\n');
+  await createFileLedger((id) => workspaces.forAgent(id)).recordWrite('ava', notes, 'external');
+  const tools = await registryFor({ sandbox: 'off' }, undefined, workspaces);
+  const run = (decidedTrust: TrustLevel, marker: string) => createLocalCommandExecutor().execute(
+    { id: 'call-1', toolName: 'shell.run', input: { command: `touch ${marker}` } },
+    tools.get('shell.run')!,
+    session('ava'),
+    { decidedTrust },
+  );
+
+  // Approved while the session read `unknown`; the ledger now says `external`.
+  const stale = await run('unknown', 'stale-ran');
+  assert.equal(stale.ok, false);
+  assert.match(stale.error ?? '', /after this command was approved, so it did not run/);
+  assert.equal(existsSync(path.join(workspace, 'stale-ran')), false, 'never spawned');
+
+  // A clean ledger never refuses, whatever the call was approved under.
+  const clean = await ledgerHome();
+  const cleanTools = await registryFor({ sandbox: 'off' }, undefined, clean.workspaces);
+  const fresh = await createLocalCommandExecutor().execute(
+    { id: 'call-2', toolName: 'shell.run', input: { command: 'touch fresh-ran' } },
+    cleanTools.get('shell.run')!,
+    session('ava'),
+    { decidedTrust: 'user' },
+  );
+  assert.equal(fresh.ok, true, JSON.stringify(fresh));
+  assert.equal(fresh.trust, 'unknown');
+
+  // Approved under the label the ledger holds: it runs.
+  const current = await run('external', 'current-ran');
+  assert.equal(current.ok, true, JSON.stringify(current));
+  assert.equal(existsSync(path.join(workspace, 'current-ran')), true);
 });
