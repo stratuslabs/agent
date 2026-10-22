@@ -459,12 +459,34 @@ const sandboxed = async (
         ? [{ dir: settings.cwd, named: `the working directory ${settings.cwd}`, fix: 'move it outside the working directory' }]
         : []),
     ];
+    // The binds bwrap applies after the first round of masks, which can give
+    // part of a masked directory back; it masks the denials inside them
+    // again at the end (see bwrapArgs).
+    const reopening = [workspace, ...settings.readablePaths, ...settings.writablePaths];
+    const existingDenied = deniedEntries.filter((entry) => existsSync(entry));
     for (const denied of deniedEntries.filter((entry) => configured.has(entry) || !builtIn.has(entry))) {
       if (existsSync(denied)) {
         continue;
       }
       const deniedPlaces = placements(denied);
       const holds = (dir: string) => placements(dir).some((spelling) => deniedPlaces.some((place) => isWithin(spelling, place)));
+      // An existing denied directory above it is masked whole, so nothing
+      // under it can be created (Codex P2 4349031916): unless a later bind
+      // inside that directory gives back the part holding this path, and
+      // the directory isn't masked again after it.
+      const covered = existingDenied.some((ancestor) => {
+        const ancestorPlaces = placements(ancestor);
+        const above = ancestorPlaces.some((up) => deniedPlaces.some((place) => place !== up && isWithin(up, place)));
+        if (!above) {
+          return false;
+        }
+        const maskedLast = reopening.some((dir) => placements(dir).some((spelling) => ancestorPlaces.some((up) => isWithin(spelling, up))));
+        const reopened = reopening.some((dir) => holds(dir) && placements(dir).some((spelling) => ancestorPlaces.some((up) => spelling !== up && isWithin(up, spelling))));
+        return maskedLast || !reopened;
+      });
+      if (covered) {
+        continue;
+      }
       const candidates = configured.has(denied) || environment.has(denied) ? [...binds, ...workBinds] : binds;
       const inside = candidates.find((bind) => holds(bind.dir));
       if (inside !== undefined) {

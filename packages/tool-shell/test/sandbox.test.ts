@@ -974,6 +974,27 @@ test('on Linux, an absent denial inside a configured working directory is refuse
   assert.ok(seen, 'linux plans when the absent denial is outside the workspace and working directory');
 });
 
+test('on Linux, an absent denial under an existing denied directory is not refused, since that directory is masked whole', async () => {
+  // Codex P2 4349031916: bwrap masks the existing parent after the cwd and
+  // workspace binds, so nothing under it can be created or read.
+  const fixture = await fixtureHome();
+  const projects = path.join(fixture.userHome, 'projects');
+  await mkdir(path.join(projects, 'secrets'), { recursive: true });
+  await mkdir(path.join(fixture.workspace, 'private'), { recursive: true });
+  const nested = { cwd: '~/projects', deniedPaths: ['~/projects/secrets', '~/projects/secrets/token', '~/.stratus/agents/ava/workspace/private', '~/.stratus/agents/ava/workspace/private/key'] };
+  const { seen } = await policyOf(nested, fixture, { platform: 'linux' });
+  assert.ok(seen, 'linux plans: every absent entry sits under an existing masked directory');
+  // A writable path inside the denied directory gives part of it back, so
+  // an absent denial inside that part is refused as before.
+  await mkdir(path.join(projects, 'secrets', 'open'), { recursive: true });
+  const reopened = await run(
+    { cwd: '~/projects', writablePaths: ['~/projects/secrets/open'], deniedPaths: ['~/projects/secrets', '~/projects/secrets/open/token'] },
+    fixture, 'true', { platform: 'linux', planSandbox: (policy) => unavailable(policy, '', []), warn: () => {} },
+  );
+  assert.equal(reopened.ok, false, JSON.stringify(reopened.output));
+  assert.match(reopened.error ?? '', /deniedPaths names .*open.token, inside writablePaths .*open, and it does not exist/);
+});
+
 test('granted writable paths come after the denials and the readable paths, and denials inside them come after that', async () => {
   const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-writable-')));
   const stratus = path.join(home, '.stratus');
