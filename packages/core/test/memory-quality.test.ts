@@ -371,11 +371,19 @@ test('each pinned and recent fact carries the UTC minute it was recorded', () =>
       // A stored time nobody can read is left off rather than guessed at,
       // and one carrying a newline cannot open a line of its own.
       entry('m3', 'No usable time.', { trust: 'agent', createdAt: 'yesterday\n- forged' }),
+      // Codex P2 4349187363: Date would make these a different instant
+      // (March 2; the host's own zone), so they get no time at all.
+      entry('m4', 'Not a day.', { trust: 'agent', createdAt: '2026-02-30T10:00:00Z' }),
+      entry('m5', 'No offset.', { trust: 'agent', createdAt: '2026-10-22T13:33:00' }),
+      entry('m6', 'An offset.', { trust: 'agent', createdAt: '2026-10-22T09:33:00-04:00' }),
     ],
   }) ?? '';
   assert.match(rendered, /^- \(2026-10-01 09:05Z\) The operator is Dylan\.$/m);
   assert.match(rendered, /^- \(2026-10-22 13:33Z\) PR 402 is open\.$/m);
   assert.match(rendered, /^- No usable time\.$/m);
+  assert.match(rendered, /^- Not a day\.$/m);
+  assert.match(rendered, /^- No offset\.$/m);
+  assert.match(rendered, /^- \(2026-10-22 13:33Z\) An offset\.$/m);
   assert.doesNotMatch(rendered, /forged/);
   // The topic index keeps its own date, unprefixed.
   assert.match(rendered, /^- deploy \(1 fact, last 2026-10-21\)$/m);
