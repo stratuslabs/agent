@@ -45,3 +45,11 @@ test('the capability table does not mistake a newer 4.x model for an old one', (
   assert.deepEqual(effortLevelsFor('claude-opus-4-5-20251101'), ['low', 'medium', 'high']);
   assert.equal(effortLevelsFor('claude-fable-5-1')?.includes('xhigh'), true);
 });
+
+test('provider-prefixed and versioned model ids resolve like the bare id', () => {
+  for (const model of ['anthropic.claude-opus-4-6', 'us.anthropic.claude-opus-4-6-v1:0', 'claude-opus-4-6@20260101', 'Claude-Opus-4-6']) {
+    assert.deepEqual(resolveEffort(model, 'xhigh'), { requested: 'xhigh', effort: 'high', status: 'lowered' }, model);
+  }
+  assert.deepEqual(effortLevelsFor('anthropic.claude-sonnet-4-20250514-v1:0'), []);
+  assert.deepEqual(effortLevelsFor('claude-opus-5-5@20260901'), effortLevelsFor('claude-opus-5-5'));
+});
