@@ -748,18 +748,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       // Before the process exists, so every result the executor makes from
       // here carries it: a failing command's stdout reaches the model too.
       if (options.ledger !== undefined) {
-        const recorded = await ledgerLabel(options.ledger, session.agent.id);
-        context?.markTrust?.(leastTrusted('unknown', recorded ?? 'unknown'));
-        // And the last check before spawn: a tainted write recorded after
-        // the call was approved (while a human was asked, or since) means
-        // it was judged as reading more trusted content than it now can.
-        const decided = context?.decidedTrust;
-        if (decided !== undefined && recorded !== undefined && leastTrusted(decided, recorded) !== decided) {
-          throw new Error(
-            'A file this agent can read was marked as written from external content after this command was approved, '
-            + 'so it did not run. Call again to have it judged as things stand now.',
-          );
-        }
+        context?.markTrust?.(await recordedLabel(options.ledger, session.agent.id));
       }
       const settings = settingsFor(
         config,
@@ -789,6 +778,21 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       }
       const shellArgs = [...startupOff(settings.shell), '-c', command];
       const run = await sandboxed(settings, shellArgs, options, session.agent.id);
+      // The last check before spawn, after every await above (a slow
+      // credential store, the sandbox's workspace lookup): a tainted write
+      // recorded since the call was approved, while a human was asked or
+      // during that setup, means it was judged as reading more trusted
+      // content than it now can.
+      const decided = context?.decidedTrust;
+      if (options.ledger !== undefined && decided !== undefined) {
+        const recorded = await ledgerLabel(options.ledger, session.agent.id);
+        if (recorded !== undefined && leastTrusted(decided, recorded) !== decided) {
+          throw new Error(
+            'A file this agent can read was marked as written from external content after this command was approved, '
+            + 'so it did not run. Call again to have it judged as things stand now.',
+          );
+        }
+      }
       return {
         command: run.command,
         args: run.args,

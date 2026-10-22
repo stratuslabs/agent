@@ -880,3 +880,33 @@ test('a tainted write recorded after the command was approved stops it before it
   assert.equal(current.ok, true, JSON.stringify(current));
   assert.equal(existsSync(path.join(workspace, 'current-ran')), true);
 });
+
+test('a tainted write recorded while the command is being set up still stops it before it starts', async () => {
+  // Codex P1 4348978459: the check has to come after every await in
+  // createCommand, not only before them. A credential store that is slow to
+  // answer is the window here: the write lands while it resolves.
+  const { workspaces, workspace } = await ledgerHome();
+  const notes = path.join(workspace, 'notes.txt');
+  await writeFile(notes, 'text a web page wrote\n');
+  const ledger = createFileLedger((id) => workspaces.forAgent(id));
+  const credentials = {
+    async resolve() {
+      await ledger.recordWrite('ava', notes, 'external');
+      return 'ghs-ava';
+    },
+  };
+  const tool = createShellTool(
+    { sandbox: 'off', cwd: workspace, passEnv: ['PATH'], credentialsEnv: { GH_TOKEN: 'github.token' } },
+    { processEnv: { PATH: process.env.PATH }, ledger, credentials },
+  );
+  const result = await createLocalCommandExecutor().execute(
+    { id: 'call-1', toolName: 'shell.run', input: { command: 'touch setup-ran' } },
+    tool,
+    { ...session('ava'), agent: { id: 'ava', name: 'ava', credentials: ['github.token'] } },
+    // Approved with nothing on record.
+    { decidedTrust: 'agent' },
+  );
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.match(result.error ?? '', /after this command was approved, so it did not run/);
+  assert.equal(existsSync(path.join(workspace, 'setup-ran')), false, 'never spawned');
+});
