@@ -937,6 +937,43 @@ test('on Linux, an absent credential location the environment names inside writa
   assert.ok(gradle, 'linux plans a ~/.gradle grant with gradle.properties absent');
 });
 
+test('on Linux, an absent deniedPaths entry inside the agent\'s workspace is refused, since bwrap could not mask it there either', async () => {
+  // Card 605: the workspace is a writable bind like writablePaths, so an
+  // absent denial inside it could be created and used by a command.
+  const fixture = await fixtureHome();
+  const secret = path.join(fixture.workspace, '.env');
+  const config = { deniedPaths: ['~/.stratus/agents/ava/workspace/.env'] };
+  let planned = false;
+  const refused = await run(config, fixture, 'true', { platform: 'linux', planSandbox: (policy) => { planned = true; return unavailable(policy, '', []); }, warn: () => {} });
+  assert.equal(refused.ok, false, JSON.stringify(refused.output));
+  assert.equal(planned, false);
+  assert.match(refused.error ?? '', /shell\.run refused: deniedPaths names .*\.env, inside the agent's workspace .*, and it does not exist/);
+  assert.match(refused.error ?? '', /Create it \(an empty file or directory\) before running commands, or remove it from deniedPaths/);
+  assert.equal(existsSync(secret), false, 'nothing is created on the host');
+  const { seen: darwin } = await policyOf(config, fixture, { platform: 'darwin' });
+  assert.ok(darwin, 'darwin plans with the path absent');
+  await writeFile(secret, '');
+  const { seen: linux } = await policyOf(config, fixture, { platform: 'linux' });
+  assert.ok(linux, 'linux plans once the path exists');
+});
+
+test('on Linux, an absent denial inside a configured working directory is refused, whether deniedPaths or the environment names it', async () => {
+  const fixture = await fixtureHome();
+  const projects = path.join(fixture.userHome, 'projects');
+  await mkdir(projects, { recursive: true });
+  const denied = await run({ cwd: '~/projects', deniedPaths: ['~/projects/secrets'] }, fixture, 'true', { platform: 'linux', planSandbox: (policy) => unavailable(policy, '', []), warn: () => {} });
+  assert.equal(denied.ok, false, JSON.stringify(denied.output));
+  assert.match(denied.error ?? '', /shell\.run refused: deniedPaths names .*secrets, inside the working directory .*projects, and it does not exist/);
+  const processEnv = { PATH: '/usr/bin:/bin', SSH_AUTH_SOCK: path.join(projects, 'agent.sock') };
+  const socket = await run({ cwd: '~/projects' }, fixture, 'true', { platform: 'linux', processEnv, planSandbox: (policy) => unavailable(policy, '', []), warn: () => {} });
+  assert.equal(socket.ok, false, JSON.stringify(socket.output));
+  assert.match(socket.error ?? '', /must stay hidden from commands, is inside the working directory .*projects, and does not exist/);
+  assert.equal(existsSync(path.join(projects, 'secrets')), false);
+  // Absent denials outside every writable bind still plan.
+  const { seen } = await policyOf({ cwd: '~/projects', deniedPaths: ['~/elsewhere/secrets'] }, fixture, { platform: 'linux' });
+  assert.ok(seen, 'linux plans when the absent denial is outside the workspace and working directory');
+});
+
 test('granted writable paths come after the denials and the readable paths, and denials inside them come after that', async () => {
   const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-writable-')));
   const stratus = path.join(home, '.stratus');

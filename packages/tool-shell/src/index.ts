@@ -415,15 +415,18 @@ const sandboxed = async (
   }
   // Every denial, assembled once: the check below and the policy read the
   // same list, so nothing the policy hides escapes the check.
+  const fromEnvironment = [
+    ...userRuntimeEndpoints(processEnv, process.getuid?.()),
+    ...credentialAgentEndpoints(processEnv, platform),
+    ...relocatedCredentials(processEnv, userHome, workspace),
+  ];
   const deniedEntries = [...new Set([
     ...stratusHomes,
     ...hostProtected,
     ...others,
     ...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)),
     ...DEFAULT_DENIED_SOCKETS,
-    ...userRuntimeEndpoints(processEnv, process.getuid?.()),
-    ...credentialAgentEndpoints(processEnv, platform),
-    ...relocatedCredentials(processEnv, userHome, workspace),
+    ...fromEnvironment,
     ...settings.deniedPaths,
   ])];
   // bwrap masks a denied path by mounting over it, so one that does not
@@ -437,18 +440,39 @@ const sandboxed = async (
   // it names files inside ordinary toolchain dirs (~/.gradle, ~/.m2), so
   // refusing on it would break existing grants; that pre-existing case is
   // tracked separately rather than turned into a refusal here.
+  // The workspace and the working directory are writable binds too, so an
+  // operator's deniedPaths entry or a credential location the environment
+  // names inside either is refused the same way (card 605). Only those two
+  // kinds there: another agent's workspace that does not exist yet under a
+  // broad cwd (~) is an ordinary state on a fresh install, and refusing
+  // every command for it would break setups that work today.
   if (platform === 'linux') {
     const configured = new Set(settings.deniedPaths);
+    const environment = new Set(fromEnvironment);
     const builtIn = new Set([...DEFAULT_DENIED_HOME_PATHS.map((entry) => path.join(userHome, entry)), ...DEFAULT_DENIED_SOCKETS]);
+    const binds = [
+      ...settings.writablePaths.map((dir) => ({ dir, named: `writablePaths ${dir}`, fix: 'narrow writablePaths so it is outside them' })),
+    ];
+    const workBinds = [
+      { dir: workspace, named: `the agent's workspace ${workspace}`, fix: 'move it outside the workspace' },
+      ...(settings.cwd && settings.cwd !== workspace
+        ? [{ dir: settings.cwd, named: `the working directory ${settings.cwd}`, fix: 'move it outside the working directory' }]
+        : []),
+    ];
     for (const denied of deniedEntries.filter((entry) => configured.has(entry) || !builtIn.has(entry))) {
+      if (existsSync(denied)) {
+        continue;
+      }
       const deniedPlaces = placements(denied);
-      const inside = settings.writablePaths.find((dir) => placements(dir).some((spelling) => deniedPlaces.some((place) => isWithin(spelling, place))));
-      if (inside !== undefined && !existsSync(denied)) {
+      const holds = (dir: string) => placements(dir).some((spelling) => deniedPlaces.some((place) => isWithin(spelling, place)));
+      const candidates = configured.has(denied) || environment.has(denied) ? [...binds, ...workBinds] : binds;
+      const inside = candidates.find((bind) => holds(bind.dir));
+      if (inside !== undefined) {
         throw new Error(configured.has(denied)
-          ? `shell.run refused: deniedPaths names ${denied}, inside writablePaths ${inside}, and it does not exist, so the Linux sandbox cannot hide it from commands. `
+          ? `shell.run refused: deniedPaths names ${denied}, inside ${inside.named}, and it does not exist, so the Linux sandbox cannot hide it from commands. `
             + 'Create it (an empty file or directory) before running commands, or remove it from deniedPaths.'
-          : `shell.run refused: ${denied}, a credential location that must stay hidden from commands, is inside writablePaths ${inside}, and does not exist, so the Linux sandbox cannot hide it. `
-            + 'Create it (an empty file or directory) before running commands, or narrow writablePaths so it is outside them.');
+          : `shell.run refused: ${denied}, a credential location that must stay hidden from commands, is inside ${inside.named}, and does not exist, so the Linux sandbox cannot hide it. `
+            + `Create it (an empty file or directory) before running commands, or ${inside.fix}.`);
       }
     }
   }
