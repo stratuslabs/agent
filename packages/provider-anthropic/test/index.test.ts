@@ -1766,3 +1766,17 @@ test('effort is sent as output_config.effort, lowered to what the model takes, a
   // Unset: the request is exactly what it was before effort existed.
   assert.equal('output_config' in (await send('claude-opus-5-5')), false);
 });
+
+test('disabled thinking with an effort above high is refused up front on Claude Opus 5, and allowed at high', async () => {
+  for (const effort of ['xhigh', 'max'] as const) {
+    assert.throws(
+      () => createAnthropicProvider({ apiKey: 'test-key', model: 'claude-opus-5', thinking: 'disabled', effort }),
+      /claude-opus-5 accepts disabled thinking only at high effort or below/,
+    );
+  }
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, model: 'claude-opus-5', thinking: 'disabled', effort: 'high' });
+  await provider.generate({ session: createSession() });
+  assert.deepEqual(requests[0]!.body.thinking, { type: 'disabled' });
+  assert.deepEqual(requests[0]!.body.output_config, { effort: 'high' });
+});

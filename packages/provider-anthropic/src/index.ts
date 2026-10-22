@@ -45,6 +45,9 @@ export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
  */
 const PREFIX_BOUND_THINKING_MODEL = /^claude-(?:opus-5-5|fable-5-1|sonnet-5-5)(?:$|[-@])/;
 
+/** Claude Opus 5 and its point releases. */
+const OPUS_5_FAMILY = /^claude-opus-5(?:$|[-@])/;
+
 /** Whether `model` binds its thinking blocks to the conversation prefix; see above. */
 const bindsThinkingToConversation = (model: string): boolean =>
   PREFIX_BOUND_THINKING_MODEL.test(model.replace(/^anthropic\./, ''));
@@ -698,6 +701,11 @@ export const createAnthropicProvider = ({
   const effort = requestedEffort ? resolveEffort(model, requestedEffort).effort : undefined;
   if (prefixBound && thinking === 'disabled') {
     throw new Error(`${model} always thinks and rejects disabled thinking. Leave thinking at its default for this model.`);
+  }
+  // Claude Opus 5 takes disabled thinking only at `high` effort or below
+  // (see `thinking` above); the pair would be refused on every request.
+  if (thinking === 'disabled' && (effort === 'xhigh' || effort === 'max') && OPUS_5_FAMILY.test(model.replace(/^anthropic\./, ''))) {
+    throw new Error(`${model} accepts disabled thinking only at high effort or below, not ${effort}. Lower the effort or leave thinking at its default.`);
   }
 
   const client = new Anthropic({
