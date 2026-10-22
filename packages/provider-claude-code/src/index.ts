@@ -19,6 +19,8 @@ import {
   renderSystemPromptSections,
   droppedImageNote,
   renderToolResultContent,
+  resolveEffort,
+  type EffortLevel,
   type JsonObject,
   type ModelProvider,
   type ProviderRequest,
@@ -332,6 +334,13 @@ export interface ClaudeCodeProviderConfig {
   authOwner?: string;
   /** Defaults to claude-opus-5-5. */
   model?: string;
+  /**
+   * The effort every query runs at, lowered to what `model` takes
+   * (`resolveEffort`) so the value sent is the value reported — the SDK
+   * would otherwise lower an unsupported level silently. Omit for the
+   * model's own default.
+   */
+  effort?: EffortLevel;
   name?: string;
   /** Extra system prompt, rendered before the agent's own persona. */
   systemPrompt?: string;
@@ -521,6 +530,7 @@ export const createClaudeCodeProvider = ({
   authToken,
   authOwner,
   model = DEFAULT_CLAUDE_CODE_MODEL,
+  effort: requestedEffort,
   name = 'claude-code',
   systemPrompt,
   executeTool,
@@ -532,6 +542,7 @@ export const createClaudeCodeProvider = ({
 }: ClaudeCodeProviderConfig = {}): ModelProvider => ({
   name,
   async generate(request: ProviderRequest) {
+    const effort = requestedEffort ? resolveEffort(model, requestedEffort).effort : undefined;
     // Kernel tools ride into the loop as an in-process MCP server; the
     // host executes each call (approvals and events included) and Claude
     // Code continues the turn with the result. Executions are counted so
@@ -612,6 +623,7 @@ export const createClaudeCodeProvider = ({
 
     const options: Options = {
       model,
+      ...(effort ? { effort } : {}),
       systemPrompt: createSystemPrompt(request, systemPrompt),
       // No built-in Claude Code tools: Stratus owns the tool surface.
       tools: [],

@@ -419,6 +419,9 @@ export const resolveRuntimeConfig = async (
       // fallback left on the default fails every request from the moment
       // it takes over.
       ...(fileConfig.maxTokens !== undefined ? { maxTokens: fileConfig.maxTokens } : {}),
+      // The agent's effort follows it onto an Anthropic fallback; the
+      // provider lowers it to what that model takes.
+      ...(fallbackProvider === 'anthropic' && soul?.effort ? { effort: soul.effort } : {}),
       // The one daemon-wide `vision` setting reaches an OpenAI-compatible
       // fallback too; the other providers never ask.
       ...(fallbackProvider === 'openai' && fileConfig.vision !== undefined ? { vision: fileConfig.vision } : {}),
@@ -639,6 +642,9 @@ export const resolveRuntimeConfig = async (
         // the OpenAI one: the harnesses choose their own output cap, and
         // the OpenAI-compatible adapter sends none at all.
         ...(fileConfig.maxTokens !== undefined ? { maxTokens: fileConfig.maxTokens } : {}),
+        // Per agent, from its soul. Both Anthropic modes take it: the
+        // Messages API as output_config.effort, the harness as an option.
+        ...(soul?.effort ? { effort: soul.effort } : {}),
         ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
       }
     : provider === 'codex'

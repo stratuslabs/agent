@@ -1505,3 +1505,31 @@ test('when auto-continue declines, a run out of turns wraps up as before', async
   assert.deepEqual(calls.map((call) => call.prompt).slice(1), [CONTINUE_NOTE, TURN_LIMIT_NOTE]);
   assert.equal(calls[2]!.options?.maxTurns, 1);
 });
+
+test('effort reaches the SDK options on fresh and resumed queries, lowered per model, and is absent when unset', async () => {
+  const result: ClaudeCodeStreamMessage[] = [
+    { type: 'system', subtype: 'init', session_id: 'sdk-1' } as ClaudeCodeStreamMessage,
+    { type: 'result', subtype: 'success', is_error: false, result: 'ok' },
+  ];
+  const optionsOf = async (model: string | undefined, effort: 'high' | 'xhigh' | undefined, session: Session) => {
+    const { queryFn, calls } = createFakeQuery(result);
+    const provider = createClaudeCodeProvider({ queryFn, ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+    await provider.generate({ session });
+    return calls[0]!.options as { effort?: string; resume?: string; model?: string };
+  };
+
+  const fresh = await optionsOf('claude-opus-5-5', 'high', createSession());
+  assert.equal(fresh.effort, 'high');
+  assert.equal(fresh.resume, undefined);
+
+  const resumed = await optionsOf('claude-opus-5-5', 'high', createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-earlier' } }));
+  assert.equal(resumed.resume, 'sdk-earlier');
+  assert.equal(resumed.effort, 'high');
+
+  // The SDK would lower xhigh on Opus 4.6 silently; the provider lowers it
+  // itself so what is sent is what Stratus reports.
+  assert.equal((await optionsOf('claude-opus-4-6', 'xhigh', createSession())).effort, 'high');
+
+  const unset = await optionsOf(undefined, undefined, createSession());
+  assert.equal('effort' in unset, false);
+});

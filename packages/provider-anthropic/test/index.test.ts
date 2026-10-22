@@ -1748,3 +1748,21 @@ test('a key configured with surrounding whitespace is redacted as sent', async (
   assert.ok(!error.message.includes(key), error.message);
   assert.match(error.message, /invalid x-api-key: \[redacted\]/);
 });
+
+test('effort is sent as output_config.effort, lowered to what the model takes, and omitted when unset', async () => {
+  const send = async (model: string, effort?: 'high' | 'xhigh') => {
+    const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
+    const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, model, ...(effort ? { effort } : {}) });
+    await provider.generate({ session: createSession() });
+    return requests[0]!.body;
+  };
+
+  assert.deepEqual((await send('claude-opus-5-5', 'high')).output_config, { effort: 'high' });
+  assert.deepEqual((await send('claude-opus-5-5', 'xhigh')).output_config, { effort: 'xhigh' });
+  // Opus 4.6 has no xhigh: the request carries what the model takes.
+  assert.deepEqual((await send('claude-opus-4-6', 'xhigh')).output_config, { effort: 'high' });
+  // A model with no effort setting is sent none rather than refused.
+  assert.equal((await send('claude-haiku-4-5', 'high')).output_config, undefined);
+  // Unset: the request is exactly what it was before effort existed.
+  assert.equal('output_config' in (await send('claude-opus-5-5')), false);
+});

@@ -1,4 +1,12 @@
-import { isLanguageTag, isListensMode, LISTENS_MODES, type AgentDefinition } from '@stratusagent/core';
+import {
+  EFFORT_LEVELS,
+  isEffortLevel,
+  isLanguageTag,
+  isListensMode,
+  LISTENS_MODES,
+  type AgentDefinition,
+  type EffortLevel,
+} from '@stratusagent/core';
 import { defineAgent } from './define.ts';
 import {
   unquote,
@@ -33,6 +41,13 @@ export interface ParsedSoul {
    * `language` and the `en-US` default. See `resolveRuntimeConfig`.
    */
   language?: string;
+  /**
+   * How hard this agent's Claude model works on each turn (`high`). Sent
+   * to the API and the Claude Code harness, lowered to what each model
+   * takes; see `resolveEffort` in core. Absent sends nothing, so every
+   * model stays on its own default.
+   */
+  effort?: EffortLevel;
 }
 
 export interface ParseSoulOptions {
@@ -40,7 +55,7 @@ export interface ParseSoulOptions {
   seed?: string;
 }
 
-const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model', 'listens', 'language'] as const;
+const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model', 'listens', 'language', 'effort'] as const;
 
 const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials', 'delegates'] as const;
 
@@ -98,6 +113,14 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     );
   }
 
+  // Strict too: a misspelled level silently left the agent on the model's
+  // default, which is the setting this key exists to change.
+  if (scalars.effort !== undefined && !isEffortLevel(scalars.effort)) {
+    throw new Error(
+      `Soul frontmatter effort: ${JSON.stringify(scalars.effort)} is not an effort level; use one of ${EFFORT_LEVELS.join(', ')}.`,
+    );
+  }
+
   const agent = defineAgent({
     ...(scalars.name ? { name: scalars.name } : {}),
     ...(scalars.id ? { id: scalars.id } : {}),
@@ -115,6 +138,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     ...(scalars.provider ? { provider: scalars.provider } : {}),
     ...(scalars.model ? { model: scalars.model } : {}),
     ...(isLanguageTag(scalars.language) ? { language: scalars.language } : {}),
+    ...(isEffortLevel(scalars.effort) ? { effort: scalars.effort } : {}),
   };
 };
 
@@ -132,6 +156,9 @@ export const formatSoul = (soul: ParsedSoul): string => {
   }
   if (soul.language) {
     lines.push(`language: ${soul.language}`);
+  }
+  if (soul.effort) {
+    lines.push(`effort: ${soul.effort}`);
   }
   for (const [key, values] of [
     ['tools', soul.agent.tools],

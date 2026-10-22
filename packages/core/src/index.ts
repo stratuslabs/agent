@@ -5376,6 +5376,89 @@ export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefin
 };
 
 /**
+ * How hard a Claude model works on a turn, lowest first: the API's
+ * `output_config.effort` and the Agent SDK's `effort` option. A soul's
+ * `effort:` sets it per agent; unset sends nothing, which leaves each
+ * model on its own default.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+export const isEffortLevel = (value: unknown): value is EffortLevel =>
+  typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value);
+
+/**
+ * The effort levels a Claude model takes, or `undefined` for a model this
+ * table does not know (a proxy's name, a model newer than this release).
+ * An empty list is a model known to take no effort at all.
+ *
+ * Kept to families the effort docs name. A model missing here is sent the
+ * configured value as written and reported as unverified, never as applied.
+ */
+export const effortLevelsFor = (model: string): readonly EffortLevel[] | undefined => {
+  const id = model.trim().toLowerCase();
+  if (/^claude-(opus|sonnet|fable|mythos)-5(-|$)/.test(id) || /^claude-opus-4-[78](-|$)/.test(id)) {
+    return EFFORT_LEVELS;
+  }
+  if (/^claude-(opus|sonnet)-4-6(-|$)/.test(id)) {
+    return ['low', 'medium', 'high', 'max'];
+  }
+  if (/^claude-opus-4-5(-|$)/.test(id)) {
+    return ['low', 'medium', 'high'];
+  }
+  if (/^claude-(haiku-4-5|sonnet-4-5|(sonnet|opus)-4(-20\d{6})?$|opus-4-[01](-|$)|3)/.test(id)) {
+    return [];
+  }
+  return undefined;
+};
+
+/**
+ * What one model does with a configured effort.
+ *
+ * - `applied`: the model takes it, and `effort` is what is sent.
+ * - `lowered`: the model lacks it; `effort` is the highest level it does
+ *   take below the request (Opus 4.6 asked for xhigh gets high).
+ * - `unsupported`: the model takes no effort; nothing is sent.
+ * - `unverified`: the model is not one {@link effortLevelsFor} knows; the
+ *   request is sent as written and the API decides.
+ */
+export interface EffortResolution {
+  requested: EffortLevel;
+  effort?: EffortLevel;
+  status: 'applied' | 'lowered' | 'unsupported' | 'unverified';
+}
+
+export const resolveEffort = (model: string, requested: EffortLevel): EffortResolution => {
+  const levels = effortLevelsFor(model);
+  if (levels === undefined) {
+    return { requested, effort: requested, status: 'unverified' };
+  }
+  if (levels.includes(requested)) {
+    return { requested, effort: requested, status: 'applied' };
+  }
+  const below = EFFORT_LEVELS.slice(0, EFFORT_LEVELS.indexOf(requested)).filter((level) => levels.includes(level));
+  const lowered = below.at(-1);
+  return lowered === undefined
+    ? { requested, status: 'unsupported' }
+    : { requested, effort: lowered, status: 'lowered' };
+};
+
+/** One line for logs and diagnostics: `high`, `high (asked xhigh; claude-opus-4-6 has no xhigh)`. */
+export const describeEffort = (model: string, resolution: EffortResolution): string => {
+  switch (resolution.status) {
+    case 'applied':
+      return resolution.requested;
+    case 'lowered':
+      return `${resolution.effort} (asked ${resolution.requested}; ${model} has no ${resolution.requested})`;
+    case 'unsupported':
+      return `not sent (asked ${resolution.requested}; ${model} takes no effort setting)`;
+    case 'unverified':
+      return `${resolution.requested} (sent; ${model} is not a model Stratus knows the effort levels of)`;
+  }
+};
+
+/**
  * The language agents write in when nothing says otherwise: American
  * English. A soul's `language:` and the config file's `language` override
  * it; see `resolveRuntimeConfig`, which decides between those two.
