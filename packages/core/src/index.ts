@@ -5371,8 +5371,12 @@ const utcMinute = (value: string): string | undefined => {
   if (typeof value !== 'string' || !isIsoInstant(value)) {
     return undefined;
   }
-  const at = new Date(value);
-  const iso = at.toISOString();
+  const iso = new Date(value).toISOString();
+  // An offset can carry year 0000 or 9999 across a UTC year boundary, where
+  // toISOString switches to the six-digit form (Codex P2 4349257583).
+  if (!/^\d{4}-/.test(iso)) {
+    return undefined;
+  }
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
 };
 

@@ -376,6 +376,9 @@ test('each pinned and recent fact carries the UTC minute it was recorded', () =>
       entry('m4', 'Not a day.', { trust: 'agent', createdAt: '2026-02-30T10:00:00Z' }),
       entry('m5', 'No offset.', { trust: 'agent', createdAt: '2026-10-22T13:33:00' }),
       entry('m6', 'An offset.', { trust: 'agent', createdAt: '2026-10-22T09:33:00-04:00' }),
+      // An offset that carries a boundary year out of four digits in UTC.
+      entry('m7', 'Before year zero.', { trust: 'agent', createdAt: '0000-01-01T00:00:00+14:00' }),
+      entry('m8', 'After year 9999.', { trust: 'agent', createdAt: '9999-12-31T23:59:00-14:00' }),
     ],
   }) ?? '';
   assert.match(rendered, /^- \(2026-10-01 09:05Z\) The operator is Dylan\.$/m);
@@ -384,6 +387,8 @@ test('each pinned and recent fact carries the UTC minute it was recorded', () =>
   assert.match(rendered, /^- Not a day\.$/m);
   assert.match(rendered, /^- No offset\.$/m);
   assert.match(rendered, /^- \(2026-10-22 13:33Z\) An offset\.$/m);
+  assert.match(rendered, /^- Before year zero\.$/m);
+  assert.match(rendered, /^- After year 9999\.$/m);
   assert.doesNotMatch(rendered, /forged/);
   // The topic index keeps its own date, unprefixed.
   assert.match(rendered, /^- deploy \(1 fact, last 2026-10-21\)$/m);
