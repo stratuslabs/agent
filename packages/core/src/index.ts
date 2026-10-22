@@ -5398,10 +5398,10 @@ export const isEffortLevel = (value: unknown): value is EffortLevel =>
  */
 export const effortLevelsFor = (model: string): readonly EffortLevel[] | undefined => {
   // The same model under its other established names: a Bedrock id
-  // (`anthropic.` behind an optional region, a `-v1:0` suffix) and a
+  // (`anthropic.` behind any region or `global.` qualifier, a `-v1:0` suffix) and a
   // Vertex one (`@` and a date). Missed, Opus 4.6 asked for xhigh would
   // be sent xhigh as unverified and refused.
-  const id = model.trim().toLowerCase().replace(/^(?:[a-z]{2,4}\.)?anthropic\./, '').split('@')[0]!.replace(/-v\d+(?::\d+)?$/, '');
+  const id = model.trim().toLowerCase().replace(/^(?:[a-z0-9-]+\.)*anthropic\./, '').split('@')[0]!.replace(/-v\d+(?::\d+)?$/, '');
   if (/^claude-(opus|sonnet|fable|mythos)-5(-|$)/.test(id) || /^claude-opus-4-[78](-|$)/.test(id)) {
     return EFFORT_LEVELS;
   }

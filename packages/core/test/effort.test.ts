@@ -47,7 +47,7 @@ test('the capability table does not mistake a newer 4.x model for an old one', (
 });
 
 test('provider-prefixed and versioned model ids resolve like the bare id', () => {
-  for (const model of ['anthropic.claude-opus-4-6', 'us.anthropic.claude-opus-4-6-v1:0', 'claude-opus-4-6@20260101', 'Claude-Opus-4-6']) {
+  for (const model of ['anthropic.claude-opus-4-6', 'us.anthropic.claude-opus-4-6-v1:0', 'global.anthropic.claude-opus-4-6-v1:0', 'apac.anthropic.claude-opus-4-6-v1:0', 'claude-opus-4-6@20260101', 'Claude-Opus-4-6']) {
     assert.deepEqual(resolveEffort(model, 'xhigh'), { requested: 'xhigh', effort: 'high', status: 'lowered' }, model);
   }
   assert.deepEqual(effortLevelsFor('anthropic.claude-sonnet-4-20250514-v1:0'), []);
