@@ -2383,6 +2383,51 @@ test('setup test run writes in the language the saved config would run in', asyn
   assert.match(system, /Write in British English \(en-GB\)/);
 });
 
+test('setup test run carries the soul effort the saved config would run at (Codex 4355847411)', async () => {
+  // The quick hello should run at the effort real turns use; a hello at the
+  // model default can pass while xhigh or max turns would not.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const soulPath = path.join(home, 'blair.md');
+  await writeFile(soulPath, '---\nname: Blair\nid: blair\neffort: xhigh\n---\n\nYou are Blair.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5-5',
+    soul: soulPath,
+  }));
+  const bodies: Array<{ output_config?: { effort?: string } }> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+    return new Response(JSON.stringify({
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-opus-5-5',
+      content: [{ type: 'text', text: 'Hello.' }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 5 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+      fetch: fetchImpl,
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['8\n', '9\n']),
+    },
+  });
+
+  assert.match(output.stdout, /Running a quick hello/);
+  assert.equal(bodies[0]?.output_config?.effort, 'xhigh');
+});
+
 test('setup warns when exported env vars override the saved config', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const { streams, output } = createStreams();
