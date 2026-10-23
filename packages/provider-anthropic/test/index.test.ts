@@ -120,7 +120,23 @@ test('generate sends the persona in the system block and memory at the tail', as
     { role: 'user', content: [{ type: 'text', text: 'Hello there' }] },
     { role: 'system', content: 'Things you remember from previous conversations (your own long-term memory):\n- (2026-10-22 13:33Z) The user prefers short answers.' },
   ]);
-  assert.equal(requests[0]!.headers['x-api-key'], 'test-key');
+  // SDK 1.x sends an API key as a bearer token, the header the API documents
+  // first; x-api-key is its legacy fallback.
+  assert.equal(requests[0]!.headers['authorization'], 'Bearer test-key');
+  assert.equal(requests[0]!.headers['x-api-key'], undefined);
+  assert.equal(requests[0]!.headers['anthropic-version'], '2026-10-21');
+});
+
+// A key exported in the shell next to a stored sign-in reaches the provider
+// as both. The API-key path is the one chosen then (runsOnHarness routes a
+// token-only config to Claude Code), and SDK 1.x refuses a client given two
+// credentials, so the key is the only one handed over.
+test('an apiKey and an authToken together send the key alone', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', authToken: 'test-token', fetch: fetchImpl });
+  await provider.generate({ session: createSession() });
+  assert.equal(requests[0]!.headers['authorization'], 'Bearer test-key');
+  assert.equal(requests[0]!.headers['x-api-key'], undefined);
 });
 
 test('the default model keeps the replayed history unedited: memory in the system block, mismatched thinking dropped', async () => {
@@ -1707,7 +1723,7 @@ test('a tool image the API cannot process is dropped from inside its tool_result
 test('a provider error that repeats the key comes back with the key redacted', async () => {
   const key = 'sk-ant-test-0123456789abcdef';
   const echoing = (async (_input: any, init?: any) => {
-    const sent = new Headers(init?.headers ?? {}).get('x-api-key') ?? '';
+    const sent = new Headers(init?.headers ?? {}).get('authorization') ?? '';
     return new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: `invalid x-api-key: ${sent}` } }), {
       status: 401,
       headers: { 'content-type': 'application/json' },
@@ -1724,15 +1740,17 @@ test('a provider error that repeats the key comes back with the key redacted', a
   assert.equal((error as Error & { status?: number }).status, 401);
   assert.ok(!error.message.includes(key), error.message);
   assert.ok(!String(error.stack).includes(key));
-  assert.match(error.message, /invalid x-api-key: \[redacted\]/);
+  assert.match(error.message, /invalid x-api-key: Bearer \[redacted\]/);
 });
 
-// Fetch trims surrounding spaces and tabs from a header value, so a key
-// configured with them is echoed trimmed, and that form is redacted too.
+// A key configured with surrounding whitespace is sent trimmed, and an
+// endpoint that echoes it has that form redacted.
 test('a key configured with surrounding whitespace is redacted as sent', async () => {
   const key = 'sk-ant-test-padded-0123456789';
+  let sentHeader = '';
   const echoing = (async (_input: any, init?: any) => {
-    const sent = new Headers(init?.headers ?? {}).get('x-api-key') ?? '';
+    const sent = new Headers(init?.headers ?? {}).get('authorization') ?? '';
+    sentHeader = sent;
     return new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: `invalid x-api-key: ${sent}` } }), {
       status: 401,
       headers: { 'content-type': 'application/json' },
@@ -1746,7 +1764,10 @@ test('a key configured with surrounding whitespace is redacted as sent', async (
   );
   assert.ok(error instanceof Error);
   assert.ok(!error.message.includes(key), error.message);
-  assert.match(error.message, /invalid x-api-key: \[redacted\]/);
+  assert.match(error.message, /invalid x-api-key: Bearer \[redacted\]/);
+  // Sent trimmed. Fetch trimmed a padded key in x-api-key; inside
+  // `Bearer <key>` the leading padding would become part of the token.
+  assert.equal(sentHeader, `Bearer ${key}`);
 });
 
 test('effort is sent as output_config.effort, lowered to what the model takes, and omitted when unset', async () => {

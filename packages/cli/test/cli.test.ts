@@ -3216,7 +3216,8 @@ test('the inline test run uses the same env-over-stored key precedence as real r
         new Headers(init?.headers ?? {}).forEach((value, key) => {
           headers[key] = value;
         });
-        seenKeys.push(headers['x-api-key']);
+        // SDK 1.x sends the key as a bearer token.
+        seenKeys.push(headers['authorization']?.replace(/^Bearer /, ''));
         return new Response(JSON.stringify({
           id: 'msg_1',
           type: 'message',
@@ -3989,7 +3990,8 @@ test('the inline test run honors the STRATUS_API_KEY_ENV selector', async () => 
         new Headers(init?.headers ?? {}).forEach((value, key) => {
           headers[key] = value;
         });
-        seenKeys.push(headers['x-api-key']);
+        // SDK 1.x sends the key as a bearer token.
+        seenKeys.push(headers['authorization']?.replace(/^Bearer /, ''));
         return new Response(JSON.stringify({
           id: 'msg_1',
           type: 'message',

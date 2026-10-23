@@ -46,7 +46,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | --- | --- |
 | `provider` | `anthropic`, `openai`, `codex`, `demo`, or the name a [plugin provider](../guides/extending.md#providers) registers (`ollama`) |
 | `model` | Model for that provider |
-| `baseUrl` | Override the provider API base URL (local models, proxies) |
+| `baseUrl` | Override the provider API base URL (local models, proxies). For `anthropic`, a proxy there receives the key as `Authorization: Bearer <key>` and API version `2026-10-21` |
 | `apiKeyEnv` | Name of the environment variable holding the API key — trusted configs only, see below |
 | `systemPrompt` | System prompt for the run — trusted configs only, see below |
 | `soul` | Path to a soul file, resolved relative to the working directory — trusted configs only, see below |
