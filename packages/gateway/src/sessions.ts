@@ -398,6 +398,14 @@ export class FleetSessionIndex {
     }));
   }
 
+  /** One session's status by id, or undefined when the index has no such row. */
+  statusOf(id: string): SessionStatus | undefined {
+    const row = this.db.prepare('SELECT status FROM session_index WHERE id = ?').get(id) as
+      | { status: SessionStatus }
+      | undefined;
+    return row?.status;
+  }
+
   idsByStatus(status: SessionStatus): string[] {
     const rows = this.db
       .prepare('SELECT id FROM session_index WHERE status = ? ORDER BY updated_at ASC')
@@ -605,6 +613,10 @@ export class ShardedSessionStore implements SessionStore {
 
   lastActivityByAgent(): Record<string, { lastActiveAt: string; activeSessions: number }> {
     return this.index.lastActivityByAgent();
+  }
+
+  statusOf(id: string): SessionStatus | undefined {
+    return this.index.statusOf(id);
   }
 
   list(agentId?: string, limit?: number): Array<Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt'> & { agentId: string }> {

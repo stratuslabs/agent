@@ -6,6 +6,7 @@ import type {
   AgentWorkspaces,
   CredentialResolver,
   EventBus,
+  FleetReader,
   JsonObject,
   Plugin,
   PluginStateDirectory,
@@ -301,6 +302,12 @@ export interface LoadPluginsOptions {
   warn?: (message: string) => void;
   /** Handed to every plugin's `setup` as `PluginContext.subAgents`. */
   subAgents?: SubAgentHandle;
+  /**
+   * The fleet reader for each plugin, by package name, handed to its
+   * `setup` as `PluginContext.fleet`. Asked per plugin so the host's read
+   * log names the plugin that read.
+   */
+  fleet?: (packageName: string) => FleetReader;
 }
 
 export interface LoadPluginsResult {
@@ -556,6 +563,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         ...(options.log !== undefined ? { log: options.log } : {}),
         ...(options.warn !== undefined ? { warn: options.warn } : {}),
         ...(options.subAgents !== undefined ? { subAgents: options.subAgents } : {}),
+        ...(options.fleet !== undefined ? { fleet: options.fleet(manifest.packageName) } : {}),
       });
 
       // Everything that can refuse happens before anything commits, so a

@@ -246,6 +246,23 @@ how their answers come back, is the plugin's. Each sub-agent's session is
 durable, a child of the parent's (`<parent>:subagent:<depth>:<n>`), with
 the delegation markers that trace it to its root.
 
+**Reading the fleet is the host's too, and read-only.** `setup` receives
+`context.fleet` (roadmap 26), for a plugin that reports on the fleet:
+`agents()` (id, name, last activity, how many sessions are running or
+parked), `sessions({ agentId, limit })` (id, agent, status, timestamps,
+newest first), `countByStatus()`, `schedules()` (cadence, destination,
+next and last firing, and the status of the last firing's session) and
+`pendingApprovals()` (which tool, which agent and session, its risk, when it
+parked and expires). These are the reads the control API's `/agents`,
+`/sessions`, `/health`, `/schedules` and `/approvals` make, so a report and
+the console agree. Content never crosses it: no persona, message, schedule
+prompt, call input or session metadata. Nothing on it writes. The host logs
+each read as `fleet read: <method> by plugin <package>`. Usage is not on it,
+because nothing aggregates usage yet. A host that omits it has no fleet to
+describe, and a plugin that needs it fails its `setup` naming it. Every
+loaded plugin is handed one, like `subAgents`: what limits a fleet report
+is the operator installing the plugin and a soul listing its tools.
+
 **`ledgerRoot` is the host's key and is stripped**, the way `toolRisks` is,
 so a plugin's code never sees it. Two plugins write the filesystem
 provenance ledger (`tool-fs` and `plugin-mcp`), and an operator who

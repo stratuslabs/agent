@@ -4781,6 +4781,70 @@ export interface SubAgentHandle {
   run(input: SubAgentRunInput): Promise<SubAgentOutcome>;
 }
 
+/** One agent the daemon is serving, as `FleetReader.agents` reports it. */
+export interface FleetAgent {
+  id: string;
+  name: string;
+  /** The newest session activity for this agent. Absent when it has none. */
+  lastActiveAt?: string;
+  /** Sessions `running` or `pending_approval` right now. */
+  activeSessions: number;
+}
+
+/** One session's lifecycle, never its content. */
+export interface FleetSession {
+  id: string;
+  agentId: string;
+  status: SessionStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One schedule, without its prompt. */
+export interface FleetSchedule {
+  id: string;
+  agentId: string;
+  /** As `stratus schedules` prints it: `every 2h`, `cron 5 19 * * *`, `once at <iso>`. */
+  cadence: string;
+  /** `channel:to` when the schedule reports somewhere. */
+  destination?: string;
+  createdAt: string;
+  nextFireAt?: string;
+  lastFiredAt?: string;
+  /** The status of the most recent firing's session, while it is still stored. */
+  lastSessionStatus?: SessionStatus;
+}
+
+/** One call parked on a human, without its input. */
+export interface FleetPendingApproval {
+  requestId: string;
+  agentId: string;
+  sessionId: string;
+  toolName: string;
+  risk: ToolRisk;
+  parkedAt: string;
+  expiresAt?: string;
+}
+
+/**
+ * Read-only fleet metadata for a plugin (roadmap 26), from the same reads
+ * the control API's `/agents`, `/sessions`, `/health`, `/schedules` and
+ * `/approvals` use, so a report and the console agree. Content never
+ * crosses it: no messages, no schedule prompts, no approval inputs. There
+ * is no write verb. The host logs every read with the plugin's name.
+ */
+export interface FleetReader {
+  agents(): Promise<FleetAgent[]>;
+  /** Newest first. `limit` bounds the rows; omitted, every stored session. */
+  sessions(options?: { agentId?: string; limit?: number }): Promise<FleetSession[]>;
+  /** Stored sessions by status, counted in the index. */
+  countByStatus(): Promise<Record<string, number>>;
+  /** Every schedule, oldest first. */
+  schedules(): Promise<FleetSchedule[]>;
+  /** Every parked call, oldest first. */
+  pendingApprovals(): Promise<FleetPendingApproval[]>;
+}
+
 export interface PluginContext {
   bus: EventBus;
   tools: ToolRegistry;
@@ -4862,6 +4926,12 @@ export interface PluginContext {
    * must fail its `setup` naming it.
    */
   subAgents?: SubAgentHandle;
+  /**
+   * Reads fleet metadata (roadmap 26). See {@link FleetReader}. A host that
+   * omits it has no fleet to describe; a plugin that needs it must fail its
+   * `setup` naming it.
+   */
+  fleet?: FleetReader;
 }
 
 export interface Plugin {

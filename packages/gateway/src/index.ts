@@ -98,6 +98,7 @@ import {
   loadStratusSkill,
   STRATUS_SKILL_PATH,
 } from '@stratusagent/agents';
+import { createFleetReader } from './fleet.ts';
 import {
   createSchedulerRuntime,
   isScheduleSessionId,
@@ -4935,6 +4936,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     });
   };
 
+  /** Every call parked on a human, oldest first: `pendingApprovals()` and the fleet reader's one rule. */
+  const listPendingApprovals = (): PendingApproval[] => [...pendingApprovals.values()]
+    .map((parked) => parked.pending)
+    .sort((a, b) => a.parkedAt.localeCompare(b.parkedAt));
+
   /**
    * Load what the config asked for, and say what did not load.
    *
@@ -4987,6 +4993,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       log,
       warn,
       subAgents,
+      // Metadata only, from the reads the control API makes, with a log
+      // line per read naming the plugin. See `createFleetReader`.
+      fleet: (packageName) => createFleetReader({
+        agents: () => registry.list(),
+        store,
+        schedules: () => scheduler.list(),
+        pendingApprovals: listPendingApprovals,
+        onRead: (method) => log(`fleet read: ${method} by plugin ${packageName}`),
+      }),
     });
     loadedPlugins = result.loaded;
     pluginFailures = result.failures;
@@ -5804,9 +5819,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     pendingApprovals() {
-      return [...pendingApprovals.values()]
-        .map((parked) => parked.pending)
-        .sort((a, b) => a.parkedAt.localeCompare(b.parkedAt));
+      return listPendingApprovals();
     },
 
     schedules() {
