@@ -5424,7 +5424,8 @@ export const effortLevelsFor = (model: string): readonly EffortLevel[] | undefin
   if (/^claude-(opus|sonnet|fable|mythos)-5(-|$)/.test(id) || /^claude-haiku-5-5(-|$)/.test(id) || /^claude-opus-4-[78](-|$)/.test(id)) {
     return EFFORT_LEVELS;
   }
-  if (/^claude-(opus|sonnet)-4-6(-|$)/.test(id)) {
+  // Mythos Preview takes max but not xhigh, like the 4.6 models.
+  if (/^claude-(opus|sonnet)-4-6(-|$)/.test(id) || /^claude-mythos-preview(-|$)/.test(id)) {
     return ['low', 'medium', 'high', 'max'];
   }
   if (/^claude-opus-4-5(-|$)/.test(id)) {

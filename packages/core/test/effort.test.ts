@@ -46,6 +46,11 @@ test('the capability table does not mistake a newer 4.x model for an old one', (
   assert.equal(effortLevelsFor('claude-fable-5-1')?.includes('xhigh'), true);
   // Haiku 5.5 takes all five levels (effort docs, Codex 4355791229).
   assert.deepEqual(effortLevelsFor('claude-haiku-5-5'), ['low', 'medium', 'high', 'xhigh', 'max']);
+  // Codex 4356367805: the effort docs list Mythos Preview for max but not
+  // xhigh, so xhigh is lowered to high rather than sent and refused.
+  assert.deepEqual(effortLevelsFor('claude-mythos-preview'), ['low', 'medium', 'high', 'max']);
+  assert.deepEqual(resolveEffort('claude-mythos-preview', 'xhigh'), { requested: 'xhigh', effort: 'high', status: 'lowered' });
+  assert.deepEqual(resolveEffort('claude-mythos-preview', 'max'), { requested: 'max', effort: 'max', status: 'applied' });
 });
 
 test('provider-prefixed and versioned model ids resolve like the bare id', () => {
