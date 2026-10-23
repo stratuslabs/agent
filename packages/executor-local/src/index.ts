@@ -102,6 +102,12 @@ export interface LocalCommandContext {
  */
 export interface LocalCommandCreateContext {
   markTrust?: (trust: TrustLevel) => void;
+  /**
+   * The label the call was approved under (`ExecutionContext.decidedTrust`),
+   * for a tool with `trustBeforeCall` to compare with what it reads now,
+   * the last moment before the process exists.
+   */
+  decidedTrust?: TrustLevel;
 }
 
 export interface LocalCommandTool extends Tool {
@@ -130,6 +136,8 @@ export interface LocalCommandToolDefinition {
   risk?: ToolRisk;
   /** See Tool.outputTrust in @stratusagent/core. Omitted means `agent`. */
   outputTrust?: TrustLevel;
+  /** See Tool.trustBeforeCall in @stratusagent/core. */
+  trustBeforeCall?(session: Session): TrustLevel | undefined | Promise<TrustLevel | undefined>;
   createCommand(
     input: ToolCall['input'],
     session: Session,
@@ -186,6 +194,7 @@ export const defineLocalCommandTool = ({
   parameters,
   risk,
   outputTrust,
+  trustBeforeCall,
   createCommand,
   settleTrust,
   parseResult,
@@ -197,6 +206,7 @@ export const defineLocalCommandTool = ({
   // processes, so it is the last place a declared risk should go missing.
   ...(risk ? { risk } : {}),
   ...(outputTrust ? { outputTrust } : {}),
+  ...(trustBeforeCall ? { trustBeforeCall } : {}),
   runtime: 'local-command',
   createCommand,
   ...(settleTrust ? { settleTrust } : {}),
@@ -243,7 +253,10 @@ export class LocalCommandExecutor implements Executor {
       if (signal?.aborted) {
         return failureResult(call, `Command aborted before start: ${call.toolName}`, null, trust());
       }
-      const invocation = await raceWithAbort(tool.createCommand(call.input, session, { markTrust: marking.context.markTrust! }), signal, 'Command construction');
+      const invocation = await raceWithAbort(tool.createCommand(call.input, session, {
+        markTrust: marking.context.markTrust!,
+        ...(context?.decidedTrust ? { decidedTrust: context.decidedTrust } : {}),
+      }), signal, 'Command construction');
       if (signal?.aborted) {
         return failureResult(call, `Command aborted before start: ${call.toolName}`, null, trust());
       }

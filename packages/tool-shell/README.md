@@ -44,10 +44,15 @@ Once the agent has a file on record as written from an `external` session
 (the ledger `fs.read` consults), every command's output is labelled
 `external` instead, because a command can print any file it can read and
 which ones it reads can't be told from its text. With
-`approvals.externalContent: "gate"` that closes the session's grants after
-any command, the same as `fs.read` of that file would. The ledger is read
-before the command starts and again after it exits, so a tainted write that
-lands while it runs counts too. To clear it, remove
+`approvals.externalContent: "gate"` that closes the session's grants for
+every command, the first one of a session included: the ledger's label
+reaches the session before the call is judged (`Tool.trustBeforeCall`), so
+an Always-allowed `python notes.py` asks rather than running the file
+unattended. A write recorded while the call waits for approval is judged
+again, and one recorded after approval stops the command before it starts.
+The ledger is read once more after the command exits, so a tainted write
+that lands while it runs labels its output too, though that command was
+already judged without it. To clear it, remove
 the path's lines from the agent's `fs-provenance.jsonl`. The ledger is
 opened from the host's workspaces, so a plugin built without that seam
 labels everything `unknown`.

@@ -854,6 +854,37 @@ const originForSession = (
   return reported === undefined ? undefined : originOf(reported);
 };
 
+/** The longest a tool's `trustBeforeCall` may take before the call is judged as reading `external`. */
+export const TRUST_BEFORE_CALL_TIMEOUT_MS = 2_000;
+
+/**
+ * A tool's `trustBeforeCall` answer, bounded. A throw, a rejection, a label
+ * nobody recognises or no answer in time reads `external`: the call is then
+ * about to read something nobody can vouch for, and judging it as such is
+ * the safe direction. Nothing, for a tool that answers nothing.
+ */
+const trustBeforeCallOf = async (tool: Pick<Tool, 'trustBeforeCall'>, session: Session): Promise<TrustLevel | undefined> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const label = await Promise.race([
+      Promise.resolve().then(() => tool.trustBeforeCall?.(session)),
+      new Promise<never>((_, reject) => {
+        // Not unref'd: cleared below either way, and an unref'd bound lets a
+        // process with nothing else running exit mid-turn.
+        timer = setTimeout(() => reject(new Error('trustBeforeCall timed out')), TRUST_BEFORE_CALL_TIMEOUT_MS);
+      }),
+    ]);
+    if (label === undefined) {
+      return undefined;
+    }
+    return isTrustLevel(label) ? label : 'external';
+  } catch {
+    return 'external';
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 /**
  * Whether an agent's `tools:` allowlist permits a tool name.
  *
@@ -2983,6 +3014,15 @@ export interface ExecutionContext {
    */
   markTrust?: (trust: TrustLevel) => void;
   /**
+   * The session label the approval policy decided this call under, for a
+   * tool with `trustBeforeCall`. The label can drop between the decision
+   * and the act (another turn of this agent records a tainted write), and
+   * the runner cannot see past its own dispatch, so a tool that can check
+   * again right before it acts compares this with what it reads then and
+   * refuses when that is lower. A tool without the hook can ignore it.
+   */
+  decidedTrust?: TrustLevel;
+  /**
    * Hand the model an image with this call's result — a screenshot a tool
    * took, an image file it read — so the agent can actually look at it
    * rather than be told a path. Checked as it is attached: a format the
@@ -3176,6 +3216,23 @@ export interface Tool {
    * up holds it the way it holds an approval wait.
    */
   refusalFor?(input: JsonObject, session: Session): string | undefined | Promise<string | undefined>;
+  /**
+   * The lowest label this call may read before it acts, for a tool whose
+   * input can't say what it reads (a shell command runs whatever file it
+   * names). The runner lowers the session to it immediately before the
+   * approval policy decides, so every rule that reads the session label
+   * (the external-content gate, workspace autonomy) judges this call as
+   * having read it, not only the calls after it. `outputTrust` and
+   * `markTrust` label the result; this labels the decision.
+   *
+   * Asked again once the call is approved: a label that dropped while a
+   * human was asked is decided once more under the lower one, and a second
+   * drop refuses the call. The decided label is then handed to `execute`
+   * as `ExecutionContext.decidedTrust`. Bounded like an executor's settle
+   * hook: an answer slower than `TRUST_BEFORE_CALL_TIMEOUT_MS`, or a throw,
+   * reads `external`. Answering nothing changes nothing.
+   */
+  trustBeforeCall?(session: Session): TrustLevel | undefined | Promise<TrustLevel | undefined>;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
@@ -7612,17 +7669,53 @@ export class AgentRunner {
      */
     let originWhenJudged: string | undefined;
 
+    // What the call may read, lowered into the session before the policy
+    // reads the session's label, so the decision covers this call and not
+    // only the next one. Asked again after an approval, because a human's
+    // answer can take minutes and the label can drop in that time; one
+    // re-decision, then a refusal, so a label that keeps moving cannot
+    // hold the call in a loop of questions.
+    const lowerBeforeCall = async (): Promise<TrustLevel | undefined> => {
+      if (!tool.trustBeforeCall) {
+        return undefined;
+      }
+      const label = await trustBeforeCallOf(tool, session);
+      if (label !== undefined) {
+        await this.taint(session, label, call.toolName);
+      }
+      return label;
+    };
+
     let approved: boolean;
+    let decidedTrust: TrustLevel = sessionTrustOf(session);
+    let movedTwice = false;
     try {
-      approved = await this.approvals.approve({
-        session,
-        call,
-        tool,
-        risk,
-        ...(signal ? { signal } : {}),
-        ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
-      });
-      originWhenJudged = originForSession(tool, session, call.input);
+      await lowerBeforeCall();
+      const decide = async (): Promise<boolean> => {
+        decidedTrust = sessionTrustOf(session);
+        const answer = await this.approvals.approve({
+          session,
+          call,
+          tool,
+          risk,
+          ...(signal ? { signal } : {}),
+          ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
+        });
+        // With nothing awaited since the policy returned (see above).
+        originWhenJudged = originForSession(tool, session, call.input);
+        return answer;
+      };
+      approved = await decide();
+      if (approved && tool.trustBeforeCall) {
+        const dropped = async (): Promise<boolean> => {
+          const label = await lowerBeforeCall();
+          return label !== undefined && leastTrusted(decidedTrust, label) !== decidedTrust;
+        };
+        if (await dropped()) {
+          approved = await decide();
+          movedTwice = approved && await dropped();
+        }
+      }
     } finally {
       // Cleared before anything executes and on every exit — an abort that
       // throws out of the policy must not leave the session looking parked
@@ -7630,6 +7723,19 @@ export class AgentRunner {
       if (checkpointed) {
         await this.checkpointPendingApproval(session, undefined);
       }
+    }
+
+    if (movedTwice) {
+      await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call });
+      return {
+        callId: call.id,
+        toolName: call.toolName,
+        ok: false,
+        output: null,
+        error: `${call.toolName} did not run: what it may read was marked less trusted twice while it was being approved. `
+          + 'Call again to have it judged as things stand now.',
+        trust: 'agent',
+      };
     }
 
     if (!approved) {
@@ -7673,6 +7779,7 @@ export class AgentRunner {
     const collector = createImageCollector();
     const executed = await this.executor.execute(call, tool, session, {
       ...(signal ? { signal } : {}),
+      decidedTrust,
       attachImage: collector.attach,
     });
     // Only a call that succeeded shows what it attached: a failure's error

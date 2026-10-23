@@ -801,6 +801,13 @@ Separately from those, a tool may name a call it will refuse whatever anyone
 approves (`Tool.refusalFor`, which `message.read` uses for a direct message);
 the runner answers it with that reason before the policy is asked. It is never
 a reason to allow, and the tool's own `execute` still refuses the same call.
+A tool whose input can't say what it reads (a shell command runs whatever file
+it names) may answer `Tool.trustBeforeCall` with the lowest label the call may
+read. The runner lowers the session to it before the policy decides, asks again
+after an approval (deciding once more if it dropped, refusing on a second drop),
+and hands the decided label to `execute` as `ExecutionContext.decidedTrust`
+so the tool can check once more before it acts. A throw or a slow answer reads
+`external`.
 
 **First-party, outside.** Same authors, separate repositories:
 

@@ -655,7 +655,18 @@ export interface ShellToolOptions {
  * the result `external` rather than refusing a command that may be how the
  * operator repairs it.
  */
-const recordedLabel = async (ledger: TaintedWriteLedger, agentId: string): Promise<TrustLevel> => {
+const recordedLabel = async (ledger: TaintedWriteLedger, agentId: string): Promise<TrustLevel> =>
+  leastTrusted('unknown', (await ledgerLabel(ledger, agentId)) ?? 'unknown');
+
+/**
+ * The lowest label on record for this agent's writes, or nothing when none
+ * is on record. Unfloored, unlike `recordedLabel`: this is what a call may
+ * read before it acts, and with nothing on record a command reads nothing
+ * the session hasn't already been judged on (its own output is `unknown`
+ * either way, by `outputTrust`). So a clean ledger leaves the decision as it
+ * was. An unreadable ledger is `external`, as below.
+ */
+const ledgerLabel = async (ledger: TaintedWriteLedger, agentId: string): Promise<TrustLevel | undefined> => {
   // Bounded as well, for a ledger this plugin did not open: the file ledger
   // refuses a FIFO or device before reading it, but a host-supplied one, or
   // a stalled network filesystem, could still never answer, and a command
@@ -670,7 +681,11 @@ const recordedLabel = async (ledger: TaintedWriteLedger, agentId: string): Promi
         timer = setTimeout(() => resolve(undefined), LEDGER_READ_TIMEOUT_MS);
       }),
     ]);
-    return snapshot === undefined ? 'external' : leastTrusted('unknown', ...Object.values(snapshot));
+    if (snapshot === undefined) {
+      return 'external';
+    }
+    const labels = Object.values(snapshot);
+    return labels.length === 0 ? undefined : leastTrusted(...labels);
   } catch {
     return 'external';
   } finally {
@@ -718,6 +733,13 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       },
       required: ['command'],
     },
+    // Before the decision, so the call is judged as reading what the ledger
+    // holds, not only the calls after it: an Always-allowed `python x.py`
+    // runs the file's code in this very call. The ledger's own label, not
+    // the result's `unknown` floor, so a clean ledger changes no decision.
+    ...(options.ledger !== undefined
+      ? { trustBeforeCall: (session: Session) => ledgerLabel(options.ledger!, session.agent.id) }
+      : {}),
     async createCommand(input, session, context): Promise<LocalCommandInvocation> {
       const command = typeof input.command === 'string' ? input.command.trim() : '';
       if (!command) {
@@ -756,6 +778,21 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       }
       const shellArgs = [...startupOff(settings.shell), '-c', command];
       const run = await sandboxed(settings, shellArgs, options, session.agent.id);
+      // The last check before spawn, after every await above (a slow
+      // credential store, the sandbox's workspace lookup): a tainted write
+      // recorded since the call was approved, while a human was asked or
+      // during that setup, means it was judged as reading more trusted
+      // content than it now can.
+      const decided = context?.decidedTrust;
+      if (options.ledger !== undefined && decided !== undefined) {
+        const recorded = await ledgerLabel(options.ledger, session.agent.id);
+        if (recorded !== undefined && leastTrusted(decided, recorded) !== decided) {
+          throw new Error(
+            'A file this agent can read was marked as written from external content after this command was approved, '
+            + 'so it did not run. Call again to have it judged as things stand now.',
+          );
+        }
+      }
       return {
         command: run.command,
         args: run.args,
