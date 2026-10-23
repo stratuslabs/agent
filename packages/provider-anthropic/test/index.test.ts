@@ -1774,6 +1774,14 @@ test('disabled thinking with an effort above high is refused up front on Claude 
       /claude-opus-5 accepts disabled thinking only at high effort or below/,
     );
   }
+  // The same model under its Bedrock and Vertex names (Codex 4355759526).
+  for (const model of ['global.anthropic.claude-opus-5-v1:0', 'us.anthropic.claude-opus-5-v1:0', 'claude-opus-5@20260801', 'Claude-Opus-5']) {
+    assert.throws(
+      () => createAnthropicProvider({ apiKey: 'test-key', model, thinking: 'disabled', effort: 'xhigh' }),
+      /accepts disabled thinking only at high effort or below/,
+      model,
+    );
+  }
   const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
   const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, model: 'claude-opus-5', thinking: 'disabled', effort: 'high' });
   await provider.generate({ session: createSession() });

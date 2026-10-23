@@ -5396,12 +5396,20 @@ export const isEffortLevel = (value: unknown): value is EffortLevel =>
  * Kept to families the effort docs name. A model missing here is sent the
  * configured value as written and reported as unverified, never as applied.
  */
+/**
+ * A Claude model id with its other established names folded away: a
+ * Bedrock id (`anthropic.` behind any region or `global.` qualifier, a
+ * `-v1:0` suffix) and a Vertex one (`@` and a date), lowercased. Every
+ * check on a model family goes through this, so one that recognizes a
+ * name and another that misses it cannot disagree about the same model.
+ */
+export const claudeModelBase = (model: string): string =>
+  model.trim().toLowerCase().replace(/^(?:[a-z0-9-]+\.)*anthropic\./, '').split('@')[0]!.replace(/-v\d+(?::\d+)?$/, '');
+
 export const effortLevelsFor = (model: string): readonly EffortLevel[] | undefined => {
-  // The same model under its other established names: a Bedrock id
-  // (`anthropic.` behind any region or `global.` qualifier, a `-v1:0` suffix) and a
-  // Vertex one (`@` and a date). Missed, Opus 4.6 asked for xhigh would
-  // be sent xhigh as unverified and refused.
-  const id = model.trim().toLowerCase().replace(/^(?:[a-z0-9-]+\.)*anthropic\./, '').split('@')[0]!.replace(/-v\d+(?::\d+)?$/, '');
+  // Missed, Opus 4.6 under its Bedrock name asked for xhigh would be sent
+  // xhigh as unverified and refused.
+  const id = claudeModelBase(model);
   if (/^claude-(opus|sonnet|fable|mythos)-5(-|$)/.test(id) || /^claude-opus-4-[78](-|$)/.test(id)) {
     return EFFORT_LEVELS;
   }

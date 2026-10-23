@@ -31,6 +31,7 @@ import {
   type ToolDescriptor,
   OVERHEARD_IMAGES_NOTE,
   promptTextOf,
+  claudeModelBase,
 } from '@stratusagent/core';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
@@ -704,7 +705,7 @@ export const createAnthropicProvider = ({
   }
   // Claude Opus 5 takes disabled thinking only at `high` effort or below
   // (see `thinking` above); the pair would be refused on every request.
-  if (thinking === 'disabled' && (effort === 'xhigh' || effort === 'max') && OPUS_5_FAMILY.test(model.replace(/^anthropic\./, ''))) {
+  if (thinking === 'disabled' && (effort === 'xhigh' || effort === 'max') && OPUS_5_FAMILY.test(claudeModelBase(model))) {
     throw new Error(`${model} accepts disabled thinking only at high effort or below, not ${effort}. Lower the effort or leave thinking at its default.`);
   }
 
