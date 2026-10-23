@@ -411,7 +411,8 @@ What the recipe sets, and what it leaves to you.
   MCP server, so also restrict egress at the network layer — a security
   group or firewall allowing the provider APIs, Slack, and what your agents
   are meant to reach.
-- [ ] **An outbound proxy, if you have one.** The provider SDKs call Node's
+- [ ] **An outbound proxy, if you have one.** The provider SDKs and the
+  Slack Web API client call Node's
   `fetch`, which ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` is set
   too — honoured from Node 22.21.0 on the 22.x line, so check `node
   --version` on a host install; the image's Node is newer. `web.fetch` and
