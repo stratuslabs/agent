@@ -11,6 +11,7 @@ import {
   matchesToolAllowlist,
   ToolRegistry,
   type AgentWorkspaces,
+  type FleetReader,
   type JsonObject,
   type Plugin,
   type PluginContext,
@@ -787,6 +788,50 @@ test('each plugin is handed the state directory for its own package, and none wh
   handed.length = 0;
   await loadPlugins({ config, host, tools: new ToolRegistry(), bus: new EventBus() });
   assert.deepEqual(handed, [undefined, undefined]);
+});
+
+test('each plugin is handed the fleet reader the host built for its package, and none when the host gives none', async () => {
+  const handed: Array<string | undefined> = [];
+  const asked: string[] = [];
+  const reader = (packageName: string): FleetReader => ({
+    agents: async () => [{ id: packageName, name: packageName, activeSessions: 0 }],
+    sessions: async () => [],
+    countByStatus: async () => ({}),
+    schedules: async () => [],
+    pendingApprovals: async () => [],
+  });
+  const host = await fakeHost({
+    'stratus-plugin-fleet': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'fleet.agents', risk: 'safe' }] } } },
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'fleet',
+          async setup(context) {
+            handed.push((await context.fleet?.agents())?.[0]?.id);
+            context.tools.register(tool('fleet.agents', 'safe'));
+          },
+        }),
+      },
+    },
+  });
+  const config = { 'stratus-plugin-fleet': {} };
+
+  await loadPlugins({
+    config,
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    fleet: (packageName) => {
+      asked.push(packageName);
+      return reader(packageName);
+    },
+  });
+  assert.deepEqual(asked, ['stratus-plugin-fleet'], 'built per package, so the host can say who read');
+  assert.deepEqual(handed, ['stratus-plugin-fleet']);
+
+  handed.length = 0;
+  await loadPlugins({ config, host, tools: new ToolRegistry(), bus: new EventBus() });
+  assert.deepEqual(handed, [undefined]);
 });
 
 test('credentialsFromConfig declares the names the operator mapped in that key, and nothing the plugin adds', async () => {
