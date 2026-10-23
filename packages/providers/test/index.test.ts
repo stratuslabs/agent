@@ -633,8 +633,8 @@ test('createOpenAICompatibleProvider renders agent memory as a system message', 
     (message) => message.role === 'system' && message.content.includes('long-term memory'),
   );
   assert.ok(memoryMessage, 'memory should be rendered as a system message');
-  assert.match(memoryMessage.content, /- The user prefers dark mode\./);
-  assert.match(memoryMessage.content, /- Their name is Sam\./);
+  assert.match(memoryMessage.content, /- \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z\) The user prefers dark mode\./);
+  assert.match(memoryMessage.content, /- \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z\) Their name is Sam\./);
 });
 
 test('createOpenAICompatibleProvider renders enabled skills as one line each, never a body', async () => {

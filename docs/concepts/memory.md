@@ -9,7 +9,10 @@ channel, and no read of theirs can reach anybody else's facts.
 Recall is something the agent does, not only something done to it. Every
 request carries three bounded blocks — the facts the agent **pinned**, an
 index of what it knows **about**, and a short tail of what it learned most
-recently — and everything else is reachable through `memory.recall`, a
+recently. Each pinned and recent fact starts with the UTC minute it was
+recorded (`- (2026-10-21 13:33Z) …`), so a fact from last week doesn't
+read like one from this turn.
+Everything else is reachable through `memory.recall`, a
 full-text search over the agent's own store: plain words in, matching facts
 out, newest first; a query like `C++` or an unmatched quote is a search,
 never an error. `memory.forget` retires a fact by id: it stops reaching

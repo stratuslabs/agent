@@ -5374,6 +5374,69 @@ const renderMemoryTopicLine = (topic: MemoryTopic): string =>
   `- ${escapeControlCharacters(topic.name)} (${topic.count} fact${topic.count === 1 ? '' : 's'},`
   + ` last ${escapeControlCharacters(topic.lastUpdatedAt.slice(0, 10))})`;
 
+// A date alone is UTC midnight by specification, so it is unambiguous
+// wherever the daemon runs. A *time* without an offset is not: it reads as
+// the host's local zone, so the same requested bound would become a
+// different instant in Los Angeles than in UTC, and a fact would activate
+// or expire at a deployment-dependent hour. So the offset is required
+// whenever a time is given.
+const ISO_8601_INSTANT = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))?$/;
+
+/**
+ * Whether the `YYYY-MM-DD` a bound opens with is a day that exists.
+ *
+ * `Date.parse` normalizes rather than refusing: `2026-02-30` parses fine and
+ * becomes March 2nd, and `2026-02-29` becomes March 1st in a non-leap year.
+ * The regex cannot see it either — both are ISO-*shaped*. A validity window
+ * is the field where that matters most and shows least: the fact starts or
+ * stops being true days from where the writer asked, and the record says
+ * only what it was normalized to.
+ *
+ * Checked on the calendar components as written, never by comparing the
+ * normalized instant back to the string — that was the first attempt at
+ * this and it rejected `2026-04-01T23:00:00-05:00`, whose UTC date is
+ * legitimately the 2nd. An offset is allowed to move the day; February 30th
+ * is not a day.
+ *
+ * `setUTCFullYear` rather than `Date.UTC`, which maps a two-digit year into
+ * the 1900s — the regex admits `0026-02-28`, and that is a real date.
+ */
+const isRealCalendarDate = (raw: string): boolean => {
+  const [year, month, day] = raw.slice(0, 10).split('-').map(Number) as [number, number, number];
+  const probe = new Date(0);
+  probe.setUTCFullYear(year, month - 1, day);
+  return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day;
+};
+
+/**
+ * Whether a stored time is an ISO-8601 instant that means one thing
+ * everywhere: the shape above, a day that exists, and a value that parses.
+ * The one reading of that rule, for `memory.remember`'s validity bounds and
+ * for the times the memory block shows.
+ */
+export const isIsoInstant = (raw: string): boolean =>
+  ISO_8601_INSTANT.test(raw) && !Number.isNaN(Date.parse(raw)) && isRealCalendarDate(raw);
+
+/**
+ * A stored time as `YYYY-MM-DD HH:MMZ`, or nothing when it isn't an
+ * unambiguous instant (`isIsoInstant`): `Date` would turn `2026-02-30` into
+ * March 2 and read an offset-less time in the host's zone. Rebuilt from the
+ * parsed instant rather than sliced from the string, so a hand-edited
+ * `createdAt` can only ever render as a time, never as text.
+ */
+const utcMinute = (value: string): string | undefined => {
+  if (typeof value !== 'string' || !isIsoInstant(value)) {
+    return undefined;
+  }
+  const iso = new Date(value).toISOString();
+  // An offset can carry year 0000 or 9999 across a UTC year boundary, where
+  // toISOString switches to the six-digit form (Codex P2 4349257583).
+  if (!/^\d{4}-/.test(iso)) {
+    return undefined;
+  }
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
+};
+
 /**
  * The memory block: the pinned core, the topic index, and the recency tail,
  * each grouped into trust regions, joined into **one** section.
@@ -5398,7 +5461,17 @@ export const renderMemorySection = (
   }
   const injection = asMemoryInjection(memory);
   const blocks: string[] = [];
-  const fact = (entry: MemoryEntry): string => `- ${escapeControlCharacters(entry.content)}`;
+  // Each fact says when it was recorded, to the minute: a fact from three
+  // days ago otherwise reads exactly like one from this turn, and live
+  // state (a PR, a deploy) changes within a day. The model is shown
+  // `createdAt` here because it never called recall for these. Stored
+  // times only, never the clock: on the default Anthropic model this
+  // section rides in the system block, which must change only when a
+  // memory does, or every turn's thinking is dropped as a prefix mismatch.
+  const fact = (entry: MemoryEntry): string => {
+    const at = utcMinute(entry.createdAt);
+    return `- ${at ? `(${at}) ` : ''}${escapeControlCharacters(entry.content)}`;
+  };
   const push = (intro: string, regions: string[]): void => {
     if (regions.length > 0) {
       blocks.push(`${intro}\n\n${regions.join('\n\n')}`);

@@ -154,7 +154,7 @@ test('the memory section renders three blocks as one section, each grouped by tr
   // A bare array is still the recency tail alone, rendered exactly as it
   // was before the three blocks existed — no block intro at all.
   const tailOnly = renderMemorySection([entry('m3', 'Just a fact.', { trust: 'agent' })]) ?? '';
-  assert.equal(tailOnly, 'Things you remember from previous conversations (your own long-term memory):\n- Just a fact.');
+  assert.equal(tailOnly, 'Things you remember from previous conversations (your own long-term memory):\n- (2026-01-01 00:00Z) Just a fact.');
   assert.deepEqual(asMemoryInjection(undefined), { pinned: [], topics: [], recent: [] });
   assert.equal(renderMemorySection(undefined), undefined);
   assert.equal(renderMemorySection(selectMemoryInjection({ pinned: [], topics: [], recent: [] })), undefined);
@@ -360,4 +360,40 @@ test('a topic line no budget could admit is skipped, not the end of the index', 
     memoryContentByteLength(rendered) <= MEMORY_INDEX_MAX_BYTES,
     `the index block ran to ${memoryContentByteLength(rendered)} bytes, over ${MEMORY_INDEX_MAX_BYTES}`,
   );
+});
+
+test('each pinned and recent fact carries the UTC minute it was recorded', () => {
+  const rendered = renderMemorySection({
+    pinned: [entry('m1', 'The operator is Dylan.', { trust: 'user', createdAt: '2026-10-01T09:05:30.000Z' })],
+    topics: [{ name: 'deploy', count: 1, lastUpdatedAt: '2026-10-21T00:00:00.000Z', trust: 'agent' }],
+    recent: [
+      entry('m2', 'PR 402 is open.', { trust: 'agent', createdAt: '2026-10-22T13:33:00.000Z' }),
+      // A stored time nobody can read is left off rather than guessed at,
+      // and one carrying a newline cannot open a line of its own.
+      entry('m3', 'No usable time.', { trust: 'agent', createdAt: 'yesterday\n- forged' }),
+      // Codex P2 4349187363: Date would make these a different instant
+      // (March 2; the host's own zone), so they get no time at all.
+      entry('m4', 'Not a day.', { trust: 'agent', createdAt: '2026-02-30T10:00:00Z' }),
+      entry('m5', 'No offset.', { trust: 'agent', createdAt: '2026-10-22T13:33:00' }),
+      entry('m6', 'An offset.', { trust: 'agent', createdAt: '2026-10-22T09:33:00-04:00' }),
+      // An offset that carries a boundary year out of four digits in UTC.
+      entry('m7', 'Before year zero.', { trust: 'agent', createdAt: '0000-01-01T00:00:00+14:00' }),
+      entry('m8', 'After year 9999.', { trust: 'agent', createdAt: '9999-12-31T23:59:00-14:00' }),
+    ],
+  }) ?? '';
+  assert.match(rendered, /^- \(2026-10-01 09:05Z\) The operator is Dylan\.$/m);
+  assert.match(rendered, /^- \(2026-10-22 13:33Z\) PR 402 is open\.$/m);
+  assert.match(rendered, /^- No usable time\.$/m);
+  assert.match(rendered, /^- Not a day\.$/m);
+  assert.match(rendered, /^- No offset\.$/m);
+  assert.match(rendered, /^- \(2026-10-22 13:33Z\) An offset\.$/m);
+  assert.match(rendered, /^- Before year zero\.$/m);
+  assert.match(rendered, /^- After year 9999\.$/m);
+  assert.doesNotMatch(rendered, /forged/);
+  // The topic index keeps its own date, unprefixed.
+  assert.match(rendered, /^- deploy \(1 fact, last 2026-10-21\)$/m);
+  // Read off the entries, never the clock: the same memory renders the same
+  // bytes on every turn, which the cached system block depends on.
+  assert.equal(renderMemorySection({ pinned: [], topics: [], recent: [entry('m2', 'PR 402 is open.', { trust: 'agent', createdAt: '2026-10-22T13:33:00.000Z' })] }),
+    'Things you remember from previous conversations (your own long-term memory):\n- (2026-10-22 13:33Z) PR 402 is open.');
 });

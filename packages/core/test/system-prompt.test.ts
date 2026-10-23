@@ -62,7 +62,7 @@ test('the string view is exactly the tagged parts with the labels dropped', () =
     'House rules.',
     renderSystemPromptParts(input, options)[1]?.text,
     'You are Ava. Be warm and concise.',
-    'Things you remember from previous conversations (your own long-term memory):\n- The user prefers short answers.',
+    'Things you remember from previous conversations (your own long-term memory):\n- (2026-01-01 00:00Z) The user prefers short answers.',
     renderSystemPromptParts(input, options)[4]?.text,
   ]);
 });
