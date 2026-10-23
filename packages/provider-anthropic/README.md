@@ -21,7 +21,7 @@ const provider = createAnthropicProvider({
 
 Pass the provider to `AgentRunner` from `@stratusagent/core` and it handles the loop: tools are executed locally and results are fed back to Claude until the model answers in plain text.
 
-Options: `model`, `maxTokens` (default 16000), `systemPrompt`, `baseUrl`, `thinking: 'disabled'`, and an injectable `fetch` for tests.
+Options: `model`, `maxTokens` (default 16000, or 64000 when streaming at `xhigh` or `max` effort), `systemPrompt`, `baseUrl`, `thinking: 'disabled'`, and an injectable `fetch` for tests.
 
 A turn that hits `maxTokens` before the model finished is **refused, not
 returned**: the reply would be a fragment, and a fragment delivered as an

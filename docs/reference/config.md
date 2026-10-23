@@ -55,7 +55,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `fallbackBaseUrl` | Base URL for an OpenAI-compatible fallback (e.g. a local model) |
 | `promptCache` | Cache the stable head of each Anthropic request. Default `true` — see below |
 | `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
-| `maxTokens` | Per-turn output cap sent to Anthropic. Default `16000`; lower it for a model or proxy whose ceiling is below that, raise it for longer answers — see below |
+| `maxTokens` | Per-turn output cap sent to Anthropic. Default `16000`, or `64000` on a streamed turn (what the daemon runs) at `xhigh` or `max` effort; lower it for a model or proxy whose ceiling is below that, raise it for longer answers — see below |
 | `language` | The language every agent writes in, as a tag (`en-GB`, `en-AU`, `fr`). Default `en-US`. A soul's own `language:` outranks it for that agent; anything that is not a tag is refused when the file is read. Allowed in a project-local config: it changes how agents write, nothing they may do — see [Agents](../concepts/agents.md#language) |
 | `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Approval policy: `posture` (`open`, the default, runs gated tools without asking; `guarded` asks), plus how a guarded daemon asks and what it remembers — trusted configs only, see below and [Approvals](../guides/approvals.md) |
@@ -100,7 +100,9 @@ credential, so no soul lists it and no tool resolves it. Add one with
 ## How long an answer may be
 
 Anthropic requires a per-turn output cap, and `maxTokens` sets it. The
-default is 16000.
+default is 16000. A streamed turn at `xhigh` or `max` effort defaults to
+64000 instead, the starting point the effort docs give for those levels,
+where thinking alone can outrun 16000. Setting `maxTokens` replaces both.
 
 ```json
 {
