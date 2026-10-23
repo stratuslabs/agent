@@ -1774,8 +1774,9 @@ test('disabled thinking with an effort above high is refused up front on Claude 
       /claude-opus-5 accepts disabled thinking only at high effort or below/,
     );
   }
-  // The same model under its Bedrock and Vertex names (Codex 4355759526).
-  for (const model of ['global.anthropic.claude-opus-5-v1:0', 'us.anthropic.claude-opus-5-v1:0', 'claude-opus-5@20260801', 'Claude-Opus-5']) {
+  // The same model under its Bedrock and Vertex names (Codex 4355759526),
+  // and Haiku 5.5, which has the same rule (Codex 4355791229).
+  for (const model of ['global.anthropic.claude-opus-5-v1:0', 'us.anthropic.claude-opus-5-v1:0', 'claude-opus-5@20260801', 'Claude-Opus-5', 'claude-haiku-5-5', 'anthropic.claude-haiku-5-5-v1:0']) {
     assert.throws(
       () => createAnthropicProvider({ apiKey: 'test-key', model, thinking: 'disabled', effort: 'xhigh' }),
       /accepts disabled thinking only at high effort or below/,

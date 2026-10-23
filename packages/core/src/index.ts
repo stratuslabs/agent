@@ -5406,11 +5406,22 @@ export const isEffortLevel = (value: unknown): value is EffortLevel =>
 export const claudeModelBase = (model: string): string =>
   model.trim().toLowerCase().replace(/^(?:[a-z0-9-]+\.)*anthropic\./, '').split('@')[0]!.replace(/-v\d+(?::\d+)?$/, '');
 
+/**
+ * The highest effort a Claude model takes with thinking disabled, for the
+ * models the effort docs name a ceiling for (Claude Opus 5 and Claude
+ * Haiku 5.5: `high`; above it the API answers 400). `undefined` is no
+ * known ceiling. Kept beside `effortLevelsFor` so both read one id.
+ */
+export const disabledThinkingEffortCeiling = (model: string): EffortLevel | undefined => {
+  const id = claudeModelBase(model);
+  return /^claude-opus-5(-|$)/.test(id) || /^claude-haiku-5-5(-|$)/.test(id) ? 'high' : undefined;
+};
+
 export const effortLevelsFor = (model: string): readonly EffortLevel[] | undefined => {
   // Missed, Opus 4.6 under its Bedrock name asked for xhigh would be sent
   // xhigh as unverified and refused.
   const id = claudeModelBase(model);
-  if (/^claude-(opus|sonnet|fable|mythos)-5(-|$)/.test(id) || /^claude-opus-4-[78](-|$)/.test(id)) {
+  if (/^claude-(opus|sonnet|fable|mythos)-5(-|$)/.test(id) || /^claude-haiku-5-5(-|$)/.test(id) || /^claude-opus-4-[78](-|$)/.test(id)) {
     return EFFORT_LEVELS;
   }
   if (/^claude-(opus|sonnet)-4-6(-|$)/.test(id)) {

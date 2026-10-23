@@ -44,6 +44,8 @@ test('the capability table does not mistake a newer 4.x model for an old one', (
   assert.equal(effortLevelsFor('claude-sonnet-4-7'), undefined);
   assert.deepEqual(effortLevelsFor('claude-opus-4-5-20251101'), ['low', 'medium', 'high']);
   assert.equal(effortLevelsFor('claude-fable-5-1')?.includes('xhigh'), true);
+  // Haiku 5.5 takes all five levels (effort docs, Codex 4355791229).
+  assert.deepEqual(effortLevelsFor('claude-haiku-5-5'), ['low', 'medium', 'high', 'xhigh', 'max']);
 });
 
 test('provider-prefixed and versioned model ids resolve like the bare id', () => {

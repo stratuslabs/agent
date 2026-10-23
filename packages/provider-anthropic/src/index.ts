@@ -31,7 +31,7 @@ import {
   type ToolDescriptor,
   OVERHEARD_IMAGES_NOTE,
   promptTextOf,
-  claudeModelBase,
+  disabledThinkingEffortCeiling,
 } from '@stratusagent/core';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
@@ -45,9 +45,6 @@ export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
  * model only, so it is not here.
  */
 const PREFIX_BOUND_THINKING_MODEL = /^claude-(?:opus-5-5|fable-5-1|sonnet-5-5)(?:$|[-@])/;
-
-/** Claude Opus 5 and its point releases. */
-const OPUS_5_FAMILY = /^claude-opus-5(?:$|[-@])/;
 
 /** Whether `model` binds its thinking blocks to the conversation prefix; see above. */
 const bindsThinkingToConversation = (model: string): boolean =>
@@ -703,9 +700,9 @@ export const createAnthropicProvider = ({
   if (prefixBound && thinking === 'disabled') {
     throw new Error(`${model} always thinks and rejects disabled thinking. Leave thinking at its default for this model.`);
   }
-  // Claude Opus 5 takes disabled thinking only at `high` effort or below
-  // (see `thinking` above); the pair would be refused on every request.
-  if (thinking === 'disabled' && (effort === 'xhigh' || effort === 'max') && OPUS_5_FAMILY.test(claudeModelBase(model))) {
+  // Claude Opus 5 and Claude Haiku 5.5 take disabled thinking only at
+  // `high` effort or below; the pair would be refused on every request.
+  if (thinking === 'disabled' && (effort === 'xhigh' || effort === 'max') && disabledThinkingEffortCeiling(model) === 'high') {
     throw new Error(`${model} accepts disabled thinking only at high effort or below, not ${effort}. Lower the effort or leave thinking at its default.`);
   }
 
