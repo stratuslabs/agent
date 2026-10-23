@@ -234,6 +234,37 @@ someone says now outranks an older memory saying otherwise, and something
 remembered in one conversation stays out of another whose people were not
 part of it.
 
+## Effort
+
+`effort:` in a soul sets how hard that agent's Claude model works on each
+turn: `low`, `medium`, `high`, `xhigh`, or `max`. Without it nothing is sent,
+and each model stays on its own default.
+
+```markdown
+---
+name: Blair
+model: claude-opus-5-5
+effort: high
+---
+```
+
+It is sent as `output_config.effort` on the Messages API and as the Agent
+SDK's `effort` option on a Claude subscription, for the agent's model and
+for its fallback. A model that lacks the level gets the highest one it
+takes below it (Claude Opus 4.6 asked for `xhigh` is sent `high`), and a
+model known to take no effort is sent none. `stratus serve` logs one line
+per agent that sets it, naming what each model is actually sent:
+
+```text
+blair: effort high on claude-opus-5-5 via Claude Code harness, from soul /Users/you/.stratus/agents/blair.md; fallback claude-opus-4-6: high
+```
+
+A model Stratus has no effort levels for (a proxy's name, a newer model) is
+sent the level as written and logged as unverified. The OpenAI-compatible,
+Codex, and plugin providers take no effort setting; the log says so. Any
+other value is refused when the soul is read. Like any soul edit, a change
+reaches conversations already under way on their next turn.
+
 ## Ids are not labels
 
 Frontmatter may set `id:` explicitly, and it keys the agent's sessions,

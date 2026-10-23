@@ -1748,3 +1748,44 @@ test('a key configured with surrounding whitespace is redacted as sent', async (
   assert.ok(!error.message.includes(key), error.message);
   assert.match(error.message, /invalid x-api-key: \[redacted\]/);
 });
+
+test('effort is sent as output_config.effort, lowered to what the model takes, and omitted when unset', async () => {
+  const send = async (model: string, effort?: 'high' | 'xhigh') => {
+    const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
+    const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, model, ...(effort ? { effort } : {}) });
+    await provider.generate({ session: createSession() });
+    return requests[0]!.body;
+  };
+
+  assert.deepEqual((await send('claude-opus-5-5', 'high')).output_config, { effort: 'high' });
+  assert.deepEqual((await send('claude-opus-5-5', 'xhigh')).output_config, { effort: 'xhigh' });
+  // Opus 4.6 has no xhigh: the request carries what the model takes.
+  assert.deepEqual((await send('claude-opus-4-6', 'xhigh')).output_config, { effort: 'high' });
+  // A model with no effort setting is sent none rather than refused.
+  assert.equal((await send('claude-haiku-4-5', 'high')).output_config, undefined);
+  // Unset: the request is exactly what it was before effort existed.
+  assert.equal('output_config' in (await send('claude-opus-5-5')), false);
+});
+
+test('disabled thinking with an effort above high is refused up front on Claude Opus 5, and allowed at high', async () => {
+  for (const effort of ['xhigh', 'max'] as const) {
+    assert.throws(
+      () => createAnthropicProvider({ apiKey: 'test-key', model: 'claude-opus-5', thinking: 'disabled', effort }),
+      /claude-opus-5 accepts disabled thinking only at high effort or below/,
+    );
+  }
+  // The same model under its Bedrock and Vertex names (Codex 4355759526),
+  // and Haiku 5.5, which has the same rule (Codex 4355791229).
+  for (const model of ['global.anthropic.claude-opus-5-v1:0', 'us.anthropic.claude-opus-5-v1:0', 'claude-opus-5@20260801', 'Claude-Opus-5', 'claude-haiku-5-5', 'anthropic.claude-haiku-5-5-v1:0']) {
+    assert.throws(
+      () => createAnthropicProvider({ apiKey: 'test-key', model, thinking: 'disabled', effort: 'xhigh' }),
+      /accepts disabled thinking only at high effort or below/,
+      model,
+    );
+  }
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, model: 'claude-opus-5', thinking: 'disabled', effort: 'high' });
+  await provider.generate({ session: createSession() });
+  assert.deepEqual(requests[0]!.body.thinking, { type: 'disabled' });
+  assert.deepEqual(requests[0]!.body.output_config, { effort: 'high' });
+});

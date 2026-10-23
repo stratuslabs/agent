@@ -5506,6 +5506,113 @@ export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefin
 };
 
 /**
+ * How hard a Claude model works on a turn, lowest first: the API's
+ * `output_config.effort` and the Agent SDK's `effort` option. A soul's
+ * `effort:` sets it per agent; unset sends nothing, which leaves each
+ * model on its own default.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+export const isEffortLevel = (value: unknown): value is EffortLevel =>
+  typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value);
+
+/**
+ * The effort levels a Claude model takes, or `undefined` for a model this
+ * table does not know (a proxy's name, a model newer than this release).
+ * An empty list is a model known to take no effort at all.
+ *
+ * Kept to families the effort docs name. A model missing here is sent the
+ * configured value as written and reported as unverified, never as applied.
+ */
+/**
+ * A Claude model id with its other established names folded away: a
+ * Bedrock id (`anthropic.` behind any region or `global.` qualifier, a
+ * `-v1:0` suffix) and a Vertex one (`@` and a date), lowercased. Every
+ * check on a model family goes through this, so one that recognizes a
+ * name and another that misses it cannot disagree about the same model.
+ */
+export const claudeModelBase = (model: string): string =>
+  model.trim().toLowerCase().replace(/^(?:[a-z0-9-]+\.)*anthropic\./, '').split('@')[0]!.replace(/-v\d+(?::\d+)?$/, '');
+
+/**
+ * The highest effort a Claude model takes with thinking disabled, for the
+ * models the effort docs name a ceiling for (Claude Opus 5 and Claude
+ * Haiku 5.5: `high`; above it the API answers 400). `undefined` is no
+ * known ceiling. Kept beside `effortLevelsFor` so both read one id.
+ */
+export const disabledThinkingEffortCeiling = (model: string): EffortLevel | undefined => {
+  const id = claudeModelBase(model);
+  return /^claude-opus-5(-|$)/.test(id) || /^claude-haiku-5-5(-|$)/.test(id) ? 'high' : undefined;
+};
+
+export const effortLevelsFor = (model: string): readonly EffortLevel[] | undefined => {
+  // Missed, Opus 4.6 under its Bedrock name asked for xhigh would be sent
+  // xhigh as unverified and refused.
+  const id = claudeModelBase(model);
+  if (/^claude-(opus|sonnet|fable|mythos)-5(-|$)/.test(id) || /^claude-haiku-5-5(-|$)/.test(id) || /^claude-opus-4-[78](-|$)/.test(id)) {
+    return EFFORT_LEVELS;
+  }
+  // Mythos Preview takes max but not xhigh, like the 4.6 models.
+  if (/^claude-(opus|sonnet)-4-6(-|$)/.test(id) || /^claude-mythos-preview(-|$)/.test(id)) {
+    return ['low', 'medium', 'high', 'max'];
+  }
+  if (/^claude-opus-4-5(-|$)/.test(id)) {
+    return ['low', 'medium', 'high'];
+  }
+  if (/^claude-(haiku-4-5|sonnet-4-5|(sonnet|opus)-4(-20\d{6})?$|opus-4-[01](-|$)|3)/.test(id)) {
+    return [];
+  }
+  return undefined;
+};
+
+/**
+ * What one model does with a configured effort.
+ *
+ * - `applied`: the model takes it, and `effort` is what is sent.
+ * - `lowered`: the model lacks it; `effort` is the highest level it does
+ *   take below the request (Opus 4.6 asked for xhigh gets high).
+ * - `unsupported`: the model takes no effort; nothing is sent.
+ * - `unverified`: the model is not one {@link effortLevelsFor} knows; the
+ *   request is sent as written and the API decides.
+ */
+export interface EffortResolution {
+  requested: EffortLevel;
+  effort?: EffortLevel;
+  status: 'applied' | 'lowered' | 'unsupported' | 'unverified';
+}
+
+export const resolveEffort = (model: string, requested: EffortLevel): EffortResolution => {
+  const levels = effortLevelsFor(model);
+  if (levels === undefined) {
+    return { requested, effort: requested, status: 'unverified' };
+  }
+  if (levels.includes(requested)) {
+    return { requested, effort: requested, status: 'applied' };
+  }
+  const below = EFFORT_LEVELS.slice(0, EFFORT_LEVELS.indexOf(requested)).filter((level) => levels.includes(level));
+  const lowered = below.at(-1);
+  return lowered === undefined
+    ? { requested, status: 'unsupported' }
+    : { requested, effort: lowered, status: 'lowered' };
+};
+
+/** One line for logs and diagnostics: `high`, `high (asked xhigh; claude-opus-4-6 has no xhigh)`. */
+export const describeEffort = (model: string, resolution: EffortResolution): string => {
+  switch (resolution.status) {
+    case 'applied':
+      return resolution.requested;
+    case 'lowered':
+      return `${resolution.effort} (asked ${resolution.requested}; ${model} has no ${resolution.requested})`;
+    case 'unsupported':
+      return `not sent (asked ${resolution.requested}; ${model} takes no effort setting)`;
+    case 'unverified':
+      return `${resolution.requested} (sent; ${model} is not a model Stratus knows the effort levels of)`;
+  }
+};
+
+/**
  * The language agents write in when nothing says otherwise: American
  * English. A soul's `language:` and the config file's `language` override
  * it; see `resolveRuntimeConfig`, which decides between those two.

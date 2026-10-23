@@ -18,6 +18,8 @@ import {
   omitImage,
   renderSystemPromptParts,
   renderToolResultContent,
+  resolveEffort,
+  type EffortLevel,
   type ImageAttachment,
   type ImageReplayBudget,
   type JsonObject,
@@ -29,6 +31,7 @@ import {
   type ToolDescriptor,
   OVERHEARD_IMAGES_NOTE,
   promptTextOf,
+  disabledThinkingEffortCeiling,
 } from '@stratusagent/core';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
@@ -121,6 +124,13 @@ export interface AnthropicProviderConfig {
    * and Sonnet 5.5 refuse it, so the provider refuses it for them up front.
    */
   thinking?: 'default' | 'disabled';
+  /**
+   * Sent as `output_config.effort`, lowered to what `model` takes
+   * (`resolveEffort`): Claude Opus 4.6 asked for `xhigh` is sent `high`,
+   * and a model that takes no effort is sent none. Omit for the model's
+   * own default.
+   */
+  effort?: EffortLevel;
   /**
    * How much of the transcript's images one request may replay, newest
    * first — decoded bytes and a count; older images past either are sent
@@ -675,6 +685,7 @@ export const createAnthropicProvider = ({
   systemPrompt,
   baseUrl,
   thinking = 'default',
+  effort: requestedEffort,
   promptCache = true,
   promptCacheTtl = '5m',
   imageReplayBudget,
@@ -685,8 +696,14 @@ export const createAnthropicProvider = ({
     throw new Error('The Anthropic provider needs an apiKey or an authToken.');
   }
   const prefixBound = bindsThinkingToConversation(model);
+  const effort = requestedEffort ? resolveEffort(model, requestedEffort).effort : undefined;
   if (prefixBound && thinking === 'disabled') {
     throw new Error(`${model} always thinks and rejects disabled thinking. Leave thinking at its default for this model.`);
+  }
+  // Claude Opus 5 and Claude Haiku 5.5 take disabled thinking only at
+  // `high` effort or below; the pair would be refused on every request.
+  if (thinking === 'disabled' && (effort === 'xhigh' || effort === 'max') && disabledThinkingEffortCeiling(model) === 'high') {
+    throw new Error(`${model} accepts disabled thinking only at high effort or below, not ${effort}. Lower the effort or leave thinking at its default.`);
   }
 
   const client = new Anthropic({
@@ -741,6 +758,7 @@ export const createAnthropicProvider = ({
           // Current models think adaptively when `thinking` is omitted.
           ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
           ...(prefixBound ? { thinking: DROP_MISMATCHED_THINKING } : {}),
+          ...(effort ? { output_config: { effort } } : {}),
           messages: prompt.memoryMessage === undefined
             ? messages
             : [...messages, { role: 'system' as const, content: prompt.memoryMessage }],

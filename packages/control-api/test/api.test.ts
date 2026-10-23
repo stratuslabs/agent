@@ -1137,6 +1137,27 @@ test('a soul language survives every field edit, and is editable by field only t
   }
 });
 
+test('a soul effort survives every field edit', async () => {
+  const home = await newHome();
+  const soulFile = path.join(home, '.stratus', 'agents', 'blair.md');
+  await writeSoul(home, 'blair.md', '---\nname: Blair\nid: blair\neffort: high\n---\n\nYou are Blair.\n');
+  const harness = await startApi({ home });
+  try {
+    // Rebuilt from fields: a rename must not drop the line and put the
+    // agent back on the model's default effort.
+    const edited = await harness.call('/api/v1/agents/blair', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Blair B', listens: 'judge', language: 'en-GB' }),
+    });
+    assert.equal(edited.status, 200);
+    assert.match(await readFile(soulFile, 'utf8'), /^effort: high$/m);
+    assert.equal((await json<{ effort?: string }>(await harness.call('/api/v1/agents/blair'))).effort, 'high');
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a malformed allowlist edit is refused rather than silently ignored', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');

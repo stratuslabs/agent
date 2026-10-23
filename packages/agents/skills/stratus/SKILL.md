@@ -42,7 +42,7 @@ Deleting a soul file takes the agent off the roster but keeps its `agents/<id>/`
 
 A soul is a markdown file: frontmatter for identity and allowlists, then the persona as prose.
 
-- `name`; `id` (derived from the name when absent, so renaming a soul with no `id:` changes it too; a changed id starts the agent fresh, and its old history, memories, and grants stay under the old id); `provider` and `model`; `language` (for example `en-GB`); `listens` (see "Slack").
+- `name`; `id` (derived from the name when absent, so renaming a soul with no `id:` changes it too; a changed id starts the agent fresh, and its old history, memories, and grants stay under the old id); `provider` and `model`; `language` (for example `en-GB`); `effort` (`low`, `medium`, `high`, `xhigh` or `max`: how hard that agent's Claude model works per turn, for its model and its fallback; a model without the level gets the highest one below it, unset sends nothing, and `stratus serve` logs what each model is actually sent); `listens` (see "Slack").
 - `tools:` is the allowlist of what you may call: exact names (`fs.read`) or toolset globs (`fs.*`). Omitted means every registered tool and `tools: []` means none. When you lack a tool, ask for that one name to be added. Never suggest deleting the list to fix it, because that grants every tool, the shell included.
 - `skills:` enables skills. Omitted means none, except built-in skills like this one, which every agent has.
 - `credentials:` names the credentials you may use. Omitted means none.

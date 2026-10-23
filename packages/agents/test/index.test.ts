@@ -897,3 +897,12 @@ test('credential.request passes a name, a scope defaulting to the agent, a reaso
   assert.equal(tool.risk, 'safe');
   assert.ok(GATEWAY_ONLY_TOOL_NAMES.includes(CREDENTIAL_REQUEST_TOOL_NAME));
 });
+
+test('effort: in soul frontmatter is a level, round-trips, and anything else is refused', () => {
+  const soul = parseSoul('---\nname: Blair\neffort: high\n---\n\nYou are Blair.\n');
+  assert.equal(soul.effort, 'high');
+  assert.match(formatSoul(soul), /^effort: high$/m);
+  assert.equal(parseSoul(formatSoul(soul)).effort, 'high');
+  assert.equal(parseSoul('---\nname: Ava\n---\n\nYou are Ava.\n').effort, undefined);
+  assert.throws(() => parseSoul('---\nname: Ava\neffort: extreme\n---\n\nYou are Ava.\n'), /not an effort level; use one of low, medium, high, xhigh, max/);
+});

@@ -870,7 +870,7 @@ export const runSetup = async (
 
   // Mirror the saved config's fallback so option 4 exercises the same
   // failover a real run would perform.
-  const buildTestFallback = (): FallbackRuntime | undefined => {
+  const buildTestFallback = (soul?: ParsedSoul): FallbackRuntime | undefined => {
     if (!state.fallbackModel || state.provider === 'demo') {
       return undefined;
     }
@@ -901,6 +901,9 @@ export const runSetup = async (
     return {
       provider: fallbackProvider,
       model: state.fallbackModel,
+      // The agent's effort follows it onto an Anthropic fallback, as
+      // resolveRuntimeConfig does.
+      ...(fallbackProvider === 'anthropic' && soul?.effort ? { effort: soul.effort } : {}),
       ...(fallbackProvider === 'openai'
         ? {
             baseUrl: (credential?.type === 'api_key' ? credential.baseUrl : undefined)
@@ -963,7 +966,7 @@ export const runSetup = async (
       // model; the test run selects it and no more, exactly as a real run
       // resolves it — the configured fallback included, so the test
       // exercises the failover the saved config would perform.
-      const fallback = buildTestFallback();
+      const fallback = buildTestFallback(soul);
       return {
         provider: state.provider,
         ...(state.model ? { model: state.model } : {}),
@@ -982,7 +985,7 @@ export const runSetup = async (
         writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export ANTHROPIC_API_KEY).');
         return undefined;
       }
-      const fallback = buildTestFallback();
+      const fallback = buildTestFallback(soul);
       const anthropicUrl = boundUrl ?? state.baseUrl;
       return {
         provider: 'anthropic',
@@ -993,6 +996,9 @@ export const runSetup = async (
         ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
         ...(env.fetch ? { fetch: env.fetch } : {}),
         ...(soul ? { soul } : {}),
+        // The hello runs at the effort the agent's real turns use, as
+        // resolveRuntimeConfig sets it from the soul.
+        ...(soul?.effort ? { effort: soul.effort } : {}),
         ...(fallback ? { fallback } : {}),
       };
     }
@@ -1012,7 +1018,7 @@ export const runSetup = async (
         writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export CODEX_API_KEY).');
         return undefined;
       }
-      const fallback = buildTestFallback();
+      const fallback = buildTestFallback(soul);
       return {
         provider: 'codex',
         model,
@@ -1029,7 +1035,7 @@ export const runSetup = async (
       writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export OPENAI_API_KEY).');
       return undefined;
     }
-    const fallback = buildTestFallback();
+    const fallback = buildTestFallback(soul);
     return {
       provider: 'openai',
       model,

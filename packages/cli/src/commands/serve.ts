@@ -39,6 +39,7 @@ import {
   surfaceAgentsHome,
   runStateMigrations,
   servedRuntimes,
+  describeRuntimeEffort,
   discoverIgnoredUntrustedConfig,
   trustedConfigError,
   grantReadSerializer,
@@ -534,6 +535,12 @@ const serveHeldHome = async (
     for (const served of await servedRuntimes(env, command.configPath)) {
       warnOnUntrustedConfig(served.runtime, captured, false);
       await warnOnCredentialOverride(served.runtime, captured, served.env);
+      // One line per agent whose soul sets an effort: what each of its
+      // models is actually sent. Agents without one print nothing.
+      const effort = describeRuntimeEffort(served.runtime);
+      if (effort !== undefined) {
+        log(effort);
+      }
     }
   }
 
