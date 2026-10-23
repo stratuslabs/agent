@@ -729,6 +729,7 @@ export const routes: Route[] = [
         ...(soul.provider ? { provider: soul.provider } : {}),
         ...(soul.model ? { model: soul.model } : {}),
         ...(soul.language ? { language: soul.language } : {}),
+        ...(soul.effort ? { effort: soul.effort } : {}),
       };
     },
   },
@@ -844,6 +845,9 @@ export const routes: Route[] = [
             ...(language === undefined
               ? (current.language ? { language: current.language } : {})
               : (language ? { language } : {})),
+            // Not editable through these fields, but rebuilt with them: a
+            // name change must not drop the agent's effort pin.
+            ...(current.effort ? { effort: current.effort } : {}),
           };
         }
 

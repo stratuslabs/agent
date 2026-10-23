@@ -268,6 +268,7 @@ export {
   type RegisteredProviders,
   createRuntimeProvider,
   runsOnHarness,
+  describeRuntimeEffort,
   harnessesUsedBy,
   HARNESS_PACKAGE_NAMES,
   type HarnessName,

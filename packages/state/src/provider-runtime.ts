@@ -1,5 +1,7 @@
 import {
   BUILTIN_PROVIDER_NAMES,
+  describeEffort,
+  resolveEffort,
   type AgentModelContext,
   type ContributionRegistry,
   type ProviderContribution,
@@ -299,6 +301,35 @@ export const runsOnHarness = (
   config.provider === 'codex' || (config.provider === 'anthropic' && Boolean(config.authToken) && !config.apiKey);
 
 /**
+ * What a run's effort setting does, for the daemon log: the agent's soul
+ * asked for a level, and this says what each model serving it is sent,
+ * on which runtime. `undefined` when the soul sets no effort — those
+ * agents send none and stay on each model's default.
+ *
+ * Read from the resolved config, the same fields provider construction
+ * reads, so the line cannot describe a request the providers do not make.
+ */
+export const describeRuntimeEffort = (config: RuntimeConfig): string | undefined => {
+  const requested = config.soul?.effort;
+  if (requested === undefined || config.provider === 'demo') {
+    return undefined;
+  }
+  const agent = config.soul?.agent.id ?? 'default agent';
+  const source = config.soulPath ? `soul ${config.soulPath}` : 'soul';
+  const primary = config.provider === 'anthropic'
+    ? `${agent}: effort ${describeEffort(config.model, resolveEffort(config.model, requested))} on ${config.model} via ${runsOnHarness(config) ? 'Claude Code harness' : 'Messages API'}, from ${source}`
+    : `${agent}: effort not sent (asked ${requested} in ${source}; the ${config.provider} provider takes no effort setting)`;
+  const fallback = config.fallback;
+  if (!fallback) {
+    return primary;
+  }
+  const fallbackEffort = fallback.provider === 'anthropic' && fallback.effort
+    ? describeEffort(fallback.model, resolveEffort(fallback.model, fallback.effort))
+    : `not sent (the ${fallback.provider} provider takes no effort setting)`;
+  return `${primary}; fallback ${fallback.model}: ${fallbackEffort}`;
+};
+
+/**
  * The two providers that wrap a harness with its own agent loop, by the
  * package that carries each. They are the heavy installs (each brings a
  * native binary), so they are loaded on first use rather than imported:
@@ -447,6 +478,7 @@ export const createRuntimeProvider = (
         authToken: config.authToken,
         ...(config.agentSignIn !== undefined ? { authOwner: config.agentSignIn } : {}),
         model: config.model,
+        ...(config.effort ? { effort: config.effort } : {}),
         // The transport is carried as a structural slice through config
         // (`ClaudeCodeTransport`) so `state` names no harness type; this is
         // the one reader.
@@ -472,6 +504,7 @@ export const createRuntimeProvider = (
       ...(config.promptCache !== undefined ? { promptCache: config.promptCache } : {}),
       ...(config.promptCacheTtl ? { promptCacheTtl: config.promptCacheTtl } : {}),
       ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
+      ...(config.effort ? { effort: config.effort } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
     });
   }

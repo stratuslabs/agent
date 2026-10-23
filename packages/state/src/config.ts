@@ -1,4 +1,4 @@
-import type { JsonObject } from '@stratusagent/core';
+import type { EffortLevel, JsonObject } from '@stratusagent/core';
 import type { ParsedSoul } from '@stratusagent/agents';
 import type { ClaudeCodeTransport, CodexTransport } from '@stratusagent/providers';
 import {
@@ -453,6 +453,12 @@ export interface FallbackRuntime {
   promptCache?: boolean;
   promptCacheTtl?: '5m' | '1h';
   /**
+   * The agent's effort (its soul's `effort:`), carried so an Anthropic
+   * fallback works at the level the agent was configured for, lowered to
+   * what the fallback model takes. Set only on an Anthropic fallback.
+   */
+  effort?: EffortLevel;
+  /**
    * The daemon's `maxTokens`, carried for the same reason as the caching
    * settings and more sharply: the setting exists because a model or proxy
    * may have a ceiling below the default, and a fallback is just another
@@ -536,6 +542,13 @@ type RuntimeConfigVariant =
       promptCache?: boolean;
       /** See StratusConfigFile.promptCacheTtl. Absent means the adapter's default ('5m'). */
       promptCacheTtl?: '5m' | '1h';
+      /**
+       * The soul's `effort:`, as configured. Each provider lowers it to what
+       * its model takes (`resolveEffort`); absent sends nothing. A
+       * provider-construction input, so it is part of the gateway's
+       * runner key and a changed effort builds a new provider.
+       */
+      effort?: EffortLevel;
       soul?: ParsedSoul;
       /** Absolute path the soul was loaded from, for callers that re-read it. */
       soulPath?: string;
