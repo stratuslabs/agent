@@ -19,6 +19,7 @@ import {
   renderSystemPromptParts,
   renderToolResultContent,
   resolveEffort,
+  claudeModelBase,
   type EffortLevel,
   type ImageAttachment,
   type ImageReplayBudget,
@@ -46,9 +47,13 @@ export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
  */
 const PREFIX_BOUND_THINKING_MODEL = /^claude-(?:opus-5-5|fable-5-1|sonnet-5-5)(?:$|[-@])/;
 
-/** Whether `model` binds its thinking blocks to the conversation prefix; see above. */
+/**
+ * Whether `model` binds its thinking blocks to the conversation prefix; see
+ * above. Read through core's `claudeModelBase`, so a Bedrock id behind a
+ * region or `global.` qualifier, or a Vertex `@date` id, is the same model.
+ */
 const bindsThinkingToConversation = (model: string): boolean =>
-  PREFIX_BOUND_THINKING_MODEL.test(model.replace(/^anthropic\./, ''));
+  PREFIX_BOUND_THINKING_MODEL.test(claudeModelBase(model));
 
 /**
  * What lets this provider replay thinking on those models without a 400:
@@ -86,6 +91,15 @@ const DROP_MISMATCHED_THINKING = {
  * streaming path, which is what the daemon runs.
  */
 const DEFAULT_MAX_TOKENS = 16_000;
+/**
+ * The default cap on a streamed request at `xhigh` or `max` effort, where
+ * the effort docs say to start at 64k: at those levels the thinking alone
+ * can outrun 16k, and the turn would end at the cap as a refused fragment.
+ * Streamed only, for the SDK check described above. Every model that takes
+ * either level allows at least 64k of output; one that lacks them has its
+ * effort lowered first and keeps the 16k default.
+ */
+const LONG_EFFORT_STREAMED_MAX_TOKENS = 64_000;
 // Session metadata key holding raw assistant turns, keyed by tool_use id.
 export const RAW_TURNS_METADATA_KEY = 'anthropicRawTurns';
 
@@ -112,7 +126,10 @@ export interface AnthropicProviderConfig {
   /** Defaults to claude-opus-5-5, the current Opus. */
   model?: string;
   name?: string;
-  /** Response token cap per turn (Anthropic requires one). Default 16000. */
+  /**
+   * Response token cap per turn (Anthropic requires one). Default 16000,
+   * or 64000 on a streamed request at `xhigh` or `max` effort.
+   */
   maxTokens?: number;
   /** Extra system prompt, rendered before the agent's own persona. */
   systemPrompt?: string;
@@ -681,7 +698,7 @@ export const createAnthropicProvider = ({
   authToken,
   model = DEFAULT_ANTHROPIC_MODEL,
   name = 'anthropic',
-  maxTokens = DEFAULT_MAX_TOKENS,
+  maxTokens: configuredMaxTokens,
   systemPrompt,
   baseUrl,
   thinking = 'default',
@@ -729,6 +746,10 @@ export const createAnthropicProvider = ({
   const provider: ModelProvider = {
     name,
     async generate(request: ProviderRequest) {
+      // The cap this request is sent with, and the one a max_tokens refusal
+      // names. Named by the operator, it is sent as named.
+      const maxTokens = configuredMaxTokens
+        ?? (request.onDelta && (effort === 'xhigh' || effort === 'max') ? LONG_EFFORT_STREAMED_MAX_TOKENS : DEFAULT_MAX_TOKENS);
       const rawTurns = rawTurnsFrom(request.session);
       const descriptors = sortedToolDescriptors(request.tools);
       const mapping = createToolNameMapping(descriptors);

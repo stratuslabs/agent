@@ -1789,3 +1789,112 @@ test('disabled thinking with an effort above high is refused up front on Claude 
   assert.deepEqual(requests[0]!.body.thinking, { type: 'disabled' });
   assert.deepEqual(requests[0]!.body.output_config, { effort: 'high' });
 });
+
+/** A streaming fetch that records each request body and answers with one short text reply. */
+const recordingSse = () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body ?? '{}')));
+    const frames: SseEvent[] = [
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_1', type: 'message', role: 'assistant', model: DEFAULT_ANTHROPIC_MODEL,
+          content: [], stop_reason: null, stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
+      { type: 'message_stop' },
+    ];
+    return new Response(
+      frames.map((frame) => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(''),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as typeof fetch;
+  return { fetchImpl, bodies };
+};
+
+test('at xhigh or max effort a streamed request defaults to a 64k output cap; elsewhere it stays 16k', async () => {
+  // The effort docs: at xhigh or max, start max_tokens at 64k so long
+  // thinking is not cut off at the cap. Only when streaming, because the
+  // SDK refuses a non-streaming request whose cap implies over ten minutes.
+  const streamed = async (config: Partial<Parameters<typeof createAnthropicProvider>[0]>) => {
+    const { fetchImpl, bodies } = recordingSse();
+    const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, ...config });
+    await provider.generate({ session: createSession(), onDelta: async () => {} } as ProviderRequest);
+    return bodies[0]!.max_tokens;
+  };
+  const unstreamed = async (config: Partial<Parameters<typeof createAnthropicProvider>[0]>) => {
+    const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
+    const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, ...config });
+    await provider.generate({ session: createSession() });
+    return requests[0]!.body.max_tokens;
+  };
+
+  assert.equal(await streamed({ effort: 'xhigh' }), 64_000);
+  assert.equal(await streamed({ effort: 'max' }), 64_000);
+  assert.equal(await streamed({ effort: 'high' }), 16_000);
+  assert.equal(await streamed({}), 16_000);
+  // Lowered first: Opus 4.6 asked for xhigh runs at high, so it keeps 16k.
+  assert.equal(await streamed({ model: 'claude-opus-4-6', effort: 'xhigh' }), 16_000);
+  assert.equal(await unstreamed({ effort: 'max' }), 16_000);
+  // A cap the operator named is sent as named, either way.
+  assert.equal(await streamed({ effort: 'max', maxTokens: 20_000 }), 20_000);
+  assert.equal(await unstreamed({ effort: 'max', maxTokens: 8_000 }), 8_000);
+});
+
+test('the max_tokens refusal names the cap that was sent on the streamed xhigh path', async () => {
+  const fetchImpl = (async () => {
+    const frames: SseEvent[] = [
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_1', type: 'message', role: 'assistant', model: DEFAULT_ANTHROPIC_MODEL,
+          content: [], stop_reason: null, stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'The three options are' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null }, usage: { output_tokens: 64_000 } },
+      { type: 'message_stop' },
+    ];
+    return new Response(
+      frames.map((frame) => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(''),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as typeof fetch;
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, effort: 'xhigh' });
+  await assert.rejects(
+    () => provider.generate({ session: createSession(), onDelta: async () => {} } as ProviderRequest),
+    /stopped at the 64000-token output cap/,
+  );
+});
+
+const DROP_BLOCK_THINKING = { type: 'adaptive', block_binding: { prefix_mismatch_behavior: 'drop_block' } };
+
+test('Bedrock and Vertex names of the prefix-bound models get the drop-mismatched-thinking handling', async () => {
+  for (const model of [
+    'anthropic.claude-opus-5-5',
+    'global.anthropic.claude-opus-5-5',
+    'us.anthropic.claude-sonnet-5-5-v1:0',
+    'eu.anthropic.claude-fable-5-1',
+    'claude-opus-5-5@20260901',
+  ]) {
+    const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
+    const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, model });
+    await provider.generate({ session: createSession() });
+    assert.deepEqual(requests[0]!.body.thinking, DROP_BLOCK_THINKING, model);
+    assert.match(requests[0]!.headers['anthropic-beta'] ?? '', /thinking-binding-controls-2026-08-01/, model);
+    assert.throws(() => createAnthropicProvider({ apiKey: 'test-key', model, thinking: 'disabled' }), /rejects disabled thinking/, model);
+  }
+  // Not prefix-bound under any name.
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'ok' }])]);
+  await createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, model: 'global.anthropic.claude-opus-5' }).generate({ session: createSession() });
+  assert.equal(requests[0]!.body.thinking, undefined);
+});
