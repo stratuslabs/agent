@@ -687,6 +687,9 @@ const extractUsage = (
   };
 };
 
+/** A credential as a header carries it: without surrounding HTTP whitespace. */
+const trimHeaderValue = (value: string): string => value.replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '');
+
 /**
  * Model provider backed by Anthropic's Claude API via the official SDK.
  * Supports multi-turn tool calling, renders the agent's persona and
@@ -723,10 +726,17 @@ export const createAnthropicProvider = ({
     throw new Error(`${model} accepts disabled thinking only at high effort or below, not ${effort}. Lower the effort or leave thinking at its default.`);
   }
 
+  // SDK 1.x sends either credential as `Authorization: Bearer <value>`.
+  // Fetch used to trim a padded key in x-api-key, but inside the bearer
+  // header leading padding would become part of the token, so it is trimmed
+  // here. The SDK also refuses a client given both; the key wins, as
+  // runsOnHarness already decided by routing only token-only configs away.
+  const sentKey = apiKey ? trimHeaderValue(apiKey) : undefined;
+  const sentToken = sentKey ? undefined : authToken ? trimHeaderValue(authToken) : undefined;
   const client = new Anthropic({
     // Explicit nulls stop the SDK from falling back to ambient env vars.
-    apiKey: apiKey ?? null,
-    authToken: authToken ?? null,
+    apiKey: sentKey || null,
+    authToken: sentToken || null,
     ...(baseUrl ? { baseURL: baseUrl } : {}),
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
   });
@@ -1031,11 +1041,11 @@ export const createAnthropicProvider = ({
   // Whatever leaves `generate` failed is stored on the turn, logged, and
   // posted to the channel, and an endpoint set through `baseUrl` may have
   // repeated the key in its error body. Redacted in place, so the SDK's
-  // error keeps its class and status for anything that reads them. Fetch
-  // trims surrounding spaces and tabs from a header value, so the trimmed
-  // form is what an endpoint would echo.
+  // error keeps its class and status for anything that reads them. The
+  // credential is sent trimmed, so the trimmed form is what an endpoint
+  // would echo.
   const secrets = [apiKey, authToken].flatMap((value) =>
-    typeof value === 'string' ? [value, value.replace(/^[\t ]+|[\t ]+$/g, '')] : [value]);
+    typeof value === 'string' ? [value, trimHeaderValue(value)] : [value]);
   return {
     ...provider,
     async generate(request: ProviderRequest) {

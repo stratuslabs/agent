@@ -71,6 +71,16 @@ const anthropicMessageStart = {
   },
 };
 
+/**
+ * The API key a request to the Anthropic endpoint carried. SDK 1.x sends it
+ * as a bearer token; a request to any other host counts as none, since an
+ * OpenAI-compatible request carries a bearer token of its own.
+ */
+const anthropicKeySent = (url: unknown, init?: RequestInit): string =>
+  String(url).includes('anthropic')
+    ? (new Headers(init?.headers ?? {}).get('authorization') ?? '').replace(/^Bearer /, '')
+    : '';
+
 const anthropicSseText = (text: string): Response =>
   anthropicSse([
     anthropicMessageStart,
@@ -1825,8 +1835,7 @@ test('generic credentials survive when the soul pins the config-file provider', 
 
   const authHeaders: string[] = [];
   const fetchImpl = (async (url: unknown, init?: RequestInit) => {
-    const headers = new Headers(init?.headers ?? {});
-    authHeaders.push(headers.get('x-api-key') ?? '');
+    authHeaders.push(anthropicKeySent(url, init));
     if (String(url).includes('anthropic')) {
       return anthropicSseText('ava with the generic key');
     }
@@ -1981,7 +1990,7 @@ test('an empty STRATUS_PROVIDER is no default at all for the credential scrub', 
 
   const apiKeys: string[] = [];
   const fetchImpl = (async (url: unknown, init?: RequestInit) => {
-    apiKeys.push(new Headers(init?.headers ?? {}).get('x-api-key') ?? '');
+    apiKeys.push(anthropicKeySent(url, init));
     if (String(url).includes('anthropic')) {
       return anthropicSseText('still anthropic');
     }
@@ -2075,7 +2084,7 @@ test('the generic key serves a pinned soul when nothing else selects a provider'
 
   const apiKeys: string[] = [];
   const fetchImpl = (async (url: unknown, init?: RequestInit) => {
-    apiKeys.push(new Headers(init?.headers ?? {}).get('x-api-key') ?? '');
+    apiKeys.push(anthropicKeySent(url, init));
     if (String(url).includes('anthropic')) {
       return anthropicSseText('soul-only selection works');
     }
@@ -2099,7 +2108,7 @@ test('a demo daemon default never sheds the generic key from a pinned soul', asy
 
   const apiKeys: string[] = [];
   const fetchImpl = (async (url: unknown, init?: RequestInit) => {
-    apiKeys.push(new Headers(init?.headers ?? {}).get('x-api-key') ?? '');
+    apiKeys.push(anthropicKeySent(url, init));
     if (String(url).includes('anthropic')) {
       return anthropicSseText('demo default, real soul');
     }
