@@ -159,14 +159,15 @@ const refuseProtected = async (
  * filter drivers) even for `git status`, so an agent that could write one
  * would turn any git command it is allowed into any command. A `.git` file
  * names a git directory anywhere, so that is refused too. Checked on the
- * path as asked and as resolved, below the root, because a `.git` that is
- * a link resolves to a name that doesn't say so.
+ * path as asked and as resolved, because a `.git` that is a link resolves
+ * to a name that doesn't say so.
  */
 const refuseGitDir = (resolved: ResolvedPath, requested: string): void => {
   const named = (relative: string): boolean => relative.split(/[\\/]/)
     .some((segment) => segment.normalize('NFC').toLowerCase() === '.git');
-  const asked = path.isAbsolute(requested) ? path.relative(resolved.root, path.normalize(requested)) : requested;
-  if (named(asked) || named(path.relative(resolved.root, resolved.path))) {
+  // The whole path, root included: a root that is itself a `.git` is a
+  // git directory like any other.
+  if (named(requested) || named(resolved.path)) {
     throw new Error(
       `Refusing ${requested}: it is inside a .git, which the fs tools don't change. `
       + 'Git runs programs its config names, so this is left to git itself and to you.',

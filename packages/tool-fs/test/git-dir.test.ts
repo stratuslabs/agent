@@ -80,3 +80,10 @@ test('fs.move never moves into or out of a .git directory', async () => {
   await run(tools, 'fs.move', { from: 'repo', to: 'elsewhere/repo' });
   assert.equal(await readFile(path.join(root, 'elsewhere', 'repo', '.git', 'config'), 'utf8'), '[core]\n\tbare = false\n');
 });
+
+test('a root that is itself a .git directory is refused like any other', async () => {
+  const { root } = await layout();
+  const tools = await registryFor({ roots: [path.join(root, 'repo', '.git')] });
+  await assert.rejects(run(tools, 'fs.write', { path: 'config', content: '[core]\n\tfsmonitor = x\n' }), /\.git/);
+  assert.equal(await readFile(path.join(root, 'repo', '.git', 'config'), 'utf8'), '[core]\n\tbare = false\n');
+});
