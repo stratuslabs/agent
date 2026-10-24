@@ -928,6 +928,15 @@ test('a granted git diff or blame scope never covers a path outside the reposito
     'git diff -- ../a ../b',
     'git diff .. x',
     'git diff sub/../../x y',
+    // Two operands can be two files through a symlinked directory, which a
+    // command string can't show (Codex 4368021817): those ask every time.
+    'git diff link/secret local',
+    'git diff --no-index a b',
+    'git diff HEAD~1 -- src/a.ts',
+    // Global options before the subcommand don't hide it (Codex 4368021819).
+    'git --no-pager diff link/secret local',
+    'git --work-tree=/ diff a',
+    'git --git-dir=/x/.git diff',
   ]) {
     assert.equal(matchesScope(analyzeCommand(command), diff), false, command);
   }
@@ -951,17 +960,20 @@ test('a granted git diff or blame scope never covers a path outside the reposito
     'git blame -S link/revs f',
     'git blame --contents src/a.ts src/a.ts',
     'git blame -w --cont src/a.ts src/a.ts',
+    'git --no-pager blame --contents link/secret tracked',
+    'git -p blame -S revs f',
+    'git --paginate blame --contents=x f',
   ]) {
     assert.equal(matchesScope(analyzeCommand(command), blame), false, command);
   }
   // Revision ranges and paths inside still match.
-  for (const command of ['git diff', 'git diff main..feature', 'git diff HEAD~1 -- src/a.ts', 'git diff ..feature']) {
+  for (const command of ['git diff', 'git diff main..feature', 'git diff ..feature', 'git diff origin/main', 'git diff -- src/a.ts']) {
     assert.equal(matchesScope(analyzeCommand(command), diff), true, command);
   }
   // A `-C` that leaves the directory, as a scope prefix the way an exact grant stores it.
   assert.equal(matchesScope(analyzeCommand('git -C .. diff a b'), { command: 'git', args: ['-C', '..', 'diff'] }), false);
   assert.equal(matchesScope(analyzeCommand('git -C /tmp diff a b'), { command: 'git', args: ['-C', '/tmp', 'diff'] }), false);
-  assert.equal(matchesScope(analyzeCommand('git -C sub diff a b'), { command: 'git', args: ['-C', 'sub', 'diff'] }), true);
+  assert.equal(matchesScope(analyzeCommand('git -C sub diff a'), { command: 'git', args: ['-C', 'sub', 'diff'] }), true);
   assert.equal(matchesScope(analyzeCommand('git blame -L 1,5 src/a.ts'), blame), true);
   assert.equal(matchesScope(analyzeCommand('git blame -wM src/a.ts'), blame), true);
 });

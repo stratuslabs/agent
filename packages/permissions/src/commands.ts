@@ -695,21 +695,39 @@ const blameFileOperand = (token: string): { value?: string; next?: true } | unde
  * `a..b`, never `../`, and refusing a `-C` that leaves the directory keeps
  * the paths relative to where the grant was given.
  */
+/** Git global options that take no value and change nothing about where a command reads. */
+const GIT_GLOBALS_WITHOUT_VALUE = new Set([
+  '--no-pager', '-p', '--paginate', '-P', '--no-optional-locks', '--no-replace-objects',
+  '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs',
+]);
+
 const gitReadsOutside = (args: string[]): boolean => {
+  const readsFiles = (token: string): boolean => token === 'diff' || token === 'blame';
   let at = 0;
-  while (args[at] === '-C' && args[at + 1] !== undefined) {
-    if (leavesDirectory(args[at + 1] as string)) {
-      if (args.slice(at + 2).some((token) => token === 'diff' || token === 'blame')) {
+  // Find the subcommand behind any global options. One that isn't known to
+  // be harmless (`--git-dir`, `--work-tree`, anything unrecognized) refuses
+  // the match outright when a diff or blame follows, rather than guess.
+  while (at < args.length && (args[at] as string).startsWith('-')) {
+    const token = args[at] as string;
+    if (token === '-C' && args[at + 1] !== undefined) {
+      if (leavesDirectory(args[at + 1] as string) && args.slice(at + 2).some(readsFiles)) {
         return true;
       }
+      at += 2;
+      continue;
     }
-    at += 2;
+    if (GIT_GLOBALS_WITHOUT_VALUE.has(token)) {
+      at += 1;
+      continue;
+    }
+    return args.slice(at + 1).some(readsFiles);
   }
   const subcommand = args[at];
   if (subcommand !== 'diff' && subcommand !== 'blame') {
     return false;
   }
   const tail = args.slice(at + 1);
+  let operands = 0;
   for (let index = 0; index < tail.length; index += 1) {
     const token = tail[index] as string;
     // A blame file flag never matches a stored scope, whatever it names: a
@@ -718,11 +736,21 @@ const gitReadsOutside = (args: string[]): boolean => {
     if (subcommand === 'blame' && blameFileOperand(token) !== undefined) {
       return true;
     }
-    if (!token.startsWith('-') && leavesDirectory(token)) {
+    if (subcommand === 'diff' && token === '--no-index') {
       return true;
     }
+    if (token === '--' || token.startsWith('-')) {
+      continue;
+    }
+    if (leavesDirectory(token)) {
+      return true;
+    }
+    operands += 1;
   }
-  return false;
+  // Two operands can be two files that git compares like `--no-index`
+  // (outside a repository, or through a symlinked directory), and a
+  // command string can't tell them from two revisions. They ask each time.
+  return subcommand === 'diff' && operands >= 2;
 };
 
 /** Whether an invocation falls inside one scope. */
