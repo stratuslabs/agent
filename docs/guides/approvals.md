@@ -411,13 +411,16 @@ directory (`~/.gitconfig`) applies too, including `push.followTags` and
 `remote.*.push`. The checks above refuse the forms they can see on the
 command line and in the repository's own config. To keep an agent from
 naming those programs itself, `fs.write` and `fs.move` never change git
-configuration: anything inside a `.git` (directory or file), any
-`.gitconfig`, git's config directory (`~/.config/git`, or under
-`XDG_CONFIG_HOME`), or a `GIT_CONFIG_GLOBAL` file. Shell commands run with
+configuration: anything inside a `.git` (directory or file) or another
+directory git takes for a git directory (one a `.git` file names, like
+`gitdir: ../metadata`), any `.gitconfig`, git's config directory
+(`~/.config/git`, or under `XDG_CONFIG_HOME`), or a `GIT_CONFIG_GLOBAL` or
+`GIT_CONFIG_SYSTEM` file in the daemon's environment. Shell commands run with
 `safe.bareRepository=explicit`, so git doesn't open a plain-named
 directory the agent wrote as a repository. Two gaps remain. A file your
-git config includes from some other path isn't recognized, so keep
-included files outside the agent's roots. And a shell command can still
+git config includes from some other path isn't recognized, and neither
+is a `GIT_CONFIG_GLOBAL` or `GIT_CONFIG_SYSTEM` set only in tool-shell's
+`env`, so keep those files outside the agent's roots. And a shell command can still
 write `.git/config` itself, so an agent with a grant for a command that
 writes files (an interpreter, `tee`, `cp`) can make any approved git
 command run anything. Turn on autonomy for agents you trust with that. A
