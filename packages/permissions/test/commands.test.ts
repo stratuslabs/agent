@@ -937,6 +937,12 @@ test('a granted git diff or blame scope never covers a path outside the reposito
     'git --no-pager diff link/secret local',
     'git --work-tree=/ diff a',
     'git --git-dir=/x/.git diff',
+    // The shell expands a glob or brace before git runs, so one token can be
+    // two files through a symlinked directory (Codex 4368040720).
+    'git diff link/*',
+    'git diff link/{a,b}',
+    'git diff $X',
+    'git diff -- link/?',
   ]) {
     assert.equal(matchesScope(analyzeCommand(command), diff), false, command);
   }
@@ -963,11 +969,12 @@ test('a granted git diff or blame scope never covers a path outside the reposito
     'git --no-pager blame --contents link/secret tracked',
     'git -p blame -S revs f',
     'git --paginate blame --contents=x f',
+    'git blame link/*',
   ]) {
     assert.equal(matchesScope(analyzeCommand(command), blame), false, command);
   }
   // Revision ranges and paths inside still match.
-  for (const command of ['git diff', 'git diff main..feature', 'git diff ..feature', 'git diff origin/main', 'git diff -- src/a.ts']) {
+  for (const command of ['git diff', 'git diff main..feature', 'git diff ..feature', 'git diff origin/main', 'git diff -- src/a.ts', "git diff -- 'src/*.ts'"]) {
     assert.equal(matchesScope(analyzeCommand(command), diff), true, command);
   }
   // A `-C` that leaves the directory, as a scope prefix the way an exact grant stores it.

@@ -701,7 +701,7 @@ const GIT_GLOBALS_WITHOUT_VALUE = new Set([
   '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs',
 ]);
 
-const gitReadsOutside = (args: string[]): boolean => {
+const gitReadsOutside = (args: string[], expands: readonly boolean[] = []): boolean => {
   const readsFiles = (token: string): boolean => token === 'diff' || token === 'blame';
   let at = 0;
   // Find the subcommand behind any global options. One that isn't known to
@@ -730,6 +730,11 @@ const gitReadsOutside = (args: string[]): boolean => {
   let operands = 0;
   for (let index = 0; index < tail.length; index += 1) {
     const token = tail[index] as string;
+    // The shell expands a glob, brace, `~` or `$` before git runs, so one
+    // token can become two files through a symlinked directory. Those ask.
+    if (expands[at + 1 + index]) {
+      return true;
+    }
     // A blame file flag never matches a stored scope, whatever it names: a
     // relative name can still leave through a symlinked directory, which the
     // command string can't show. Each such call is asked about.
@@ -761,7 +766,7 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   if (analysis.base !== scope.command) {
     return false;
   }
-  if (scope.command === 'git' && gitReadsOutside(analysis.tokens.slice(1))) {
+  if (scope.command === 'git' && gitReadsOutside(analysis.tokens.slice(1), analysis.expands?.slice(1))) {
     return false;
   }
 
