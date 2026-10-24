@@ -244,6 +244,16 @@ const settingsFor = (
       delete granted[name];
     }
   }
+  // A directory holding HEAD, config, objects and refs is a bare repository
+  // to git, whatever its name, and git runs programs its config names
+  // (`core.fsmonitor`, diff and filter drivers) even for `git status`. The
+  // fs tools never write a `.git`; this keeps a plain-named directory the
+  // agent wrote from being found instead. `--git-dir` still opens one on
+  // purpose. Added after any entries the operator set, which are kept.
+  const configured = /^[0-9]+$/.test(granted.GIT_CONFIG_COUNT ?? '') ? Number(granted.GIT_CONFIG_COUNT) : 0;
+  granted[`GIT_CONFIG_KEY_${configured}`] = 'safe.bareRepository';
+  granted[`GIT_CONFIG_VALUE_${configured}`] = 'explicit';
+  granted.GIT_CONFIG_COUNT = String(configured + 1);
   // A PATH entry the agent can write to is a program the agent chose
   // running under a command name the permission engine trusts: a workspace
   // `cat` or `git` would be approved as the real one. Relative entries (`.`,
