@@ -4635,6 +4635,21 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const origin = event.delegatedFrom;
     const viaOrigin = origin ? connectionFor(origin.agentId) : undefined;
     const connection = viaOrigin ?? connectionFor(event.agentId);
+    // A call whose conversation is another channel's (a Discord thread), or
+    // whose schedule reports through another channel, is that channel's to
+    // ask: it renders the request where the work was asked for. Asked or
+    // denied here, it would be refused before the person who can answer it
+    // ever saw it. An approval channel is the operator naming where to ask
+    // whatever the conversation, so it still applies, which needs a live
+    // connection; with none, this adapter has nothing to say about it.
+    const home = (origin ? origin.metadata : event.metadata) ?? {};
+    const homeChannel = typeof home.channel === 'string' ? home.channel.trim().toLowerCase() : undefined;
+    const reportsElsewhere = event.scheduleDestination !== undefined
+      && event.scheduleDestination.channel.trim().toLowerCase() !== 'slack';
+    const anotherChannels = (homeChannel !== undefined && homeChannel !== 'slack') || (homeChannel === undefined && reportsElsewhere);
+    if (anotherChannels && !connection?.config.approvalChannel) {
+      return;
+    }
     if (!connection) {
       // Two different situations, and only one of them is this adapter's
       // to answer.

@@ -5022,7 +5022,7 @@ test('a configured approval channel still wins over a schedule\'s destination', 
   await adapter.stop();
 });
 
-test('a schedule that reports through another channel is not asked in Slack', async () => {
+test('a schedule that reports through another channel is not asked in Slack, nor denied by it', async () => {
   const { web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
   ]);
@@ -5037,9 +5037,82 @@ test('a schedule that reports through another channel is not asked in Slack', as
   }));
 
   // A Discord channel id posted to as a Slack conversation would at best
-  // fail and at worst land somewhere unrelated.
+  // fail and at worst land somewhere unrelated. And the request is that
+  // channel's to ask: a Slack denial here would refuse it before the
+  // Discord adapter put it to anyone.
   assert.equal(web.posts.length, 0);
-  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-3', answer: 'deny', reason: 'undeliverable' }]);
+  assert.deepEqual(gateway.resolutions, []);
+  assert.equal(gateway.pendingApprovals.has('req-3'), true);
+
+  await adapter.stop();
+});
+
+test('a request from another channel\'s conversation is left to that channel, even for an agent Slack serves', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-4');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-4',
+    sessionId: 'discord:ava:@dm:777777777777777777',
+    metadata: { channel: 'discord', discordChannel: '777777777777777777' },
+  }));
+
+  // One agent on Slack and on Discord: its Discord conversation's gated
+  // call was denied by Slack the moment it was asked.
+  assert.equal(web.posts.length, 0);
+  assert.deepEqual(gateway.resolutions, []);
+
+  await adapter.stop();
+});
+
+test('an approval channel still asks a request from another channel\'s conversation', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'], approvalChannel: 'C-OPS' },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-5');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-5',
+    sessionId: 'discord:ava:@dm:777777777777777777',
+    metadata: { channel: 'discord', discordChannel: '777777777777777777' },
+  }));
+
+  assert.equal(web.posts.length, 1);
+  assert.equal(web.posts[0]?.channel, 'C-OPS');
+  assert.deepEqual(gateway.resolutions, []);
+
+  await adapter.stop();
+});
+
+test('a request from another channel\'s conversation is not denied when the agent\'s Slack app is down', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => ({
+      ...web,
+      auth: { async test() { throw new Error('invalid_auth'); } },
+    }),
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-6');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-6',
+    sessionId: 'discord:ava:@dm:777777777777777777',
+    metadata: { channel: 'discord', discordChannel: '777777777777777777' },
+  }));
+
+  assert.equal(web.posts.length, 0);
+  assert.deepEqual(gateway.resolutions, []);
 
   await adapter.stop();
 });
