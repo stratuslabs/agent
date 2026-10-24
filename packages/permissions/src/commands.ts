@@ -650,12 +650,68 @@ const allowsFlag = (allowed: string[], token: string): boolean => {
 /** Git subcommands whose own `-c` creates or reuses, never configures. */
 const GIT_SUBCOMMANDS_WITH_PLAIN_C = new Set(['switch', 'commit']);
 
+/** Whether a path argument can name something outside the directory git runs in. */
+const leavesDirectory = (value: string): boolean => value.startsWith('/') || value.startsWith('~')
+  || value === '..' || value.startsWith('../') || value.includes('/../') || value.endsWith('/..');
+
+/** `git blame` flags whose value is a file it reads. */
+const GIT_BLAME_FILE_FLAGS = ['--contents', '-S', '--ignore-revs-file'];
+
+/**
+ * Whether a `git diff` or `git blame` reads a path outside the repository.
+ * `git diff` with a path outside the worktree (or no repository at all)
+ * compares the two files like `--no-index` and prints both, with no flag
+ * saying so; `git blame --contents <file>` prints that file, and `-S` and
+ * `--ignore-revs-file` read one. Lexical on purpose: a revision range is
+ * `a..b`, never `../`, and refusing a `-C` that leaves the directory keeps
+ * the paths relative to where the grant was given.
+ */
+const gitReadsOutside = (args: string[]): boolean => {
+  let at = 0;
+  while (args[at] === '-C' && args[at + 1] !== undefined) {
+    if (leavesDirectory(args[at + 1] as string)) {
+      if (args.slice(at + 2).some((token) => token === 'diff' || token === 'blame')) {
+        return true;
+      }
+    }
+    at += 2;
+  }
+  const subcommand = args[at];
+  if (subcommand !== 'diff' && subcommand !== 'blame') {
+    return false;
+  }
+  const tail = args.slice(at + 1);
+  for (let index = 0; index < tail.length; index += 1) {
+    const token = tail[index] as string;
+    if (subcommand === 'blame') {
+      const [flag, value] = token.startsWith('--') ? [token.split('=')[0], token.includes('=') ? token.slice(token.indexOf('=') + 1) : undefined] : [token.slice(0, 2), token.length > 2 ? token.slice(2) : undefined];
+      if (flag !== undefined && GIT_BLAME_FILE_FLAGS.includes(flag)) {
+        const named = value ?? tail[index + 1];
+        if (named === undefined || leavesDirectory(named)) {
+          return true;
+        }
+        if (value === undefined) {
+          index += 1;
+        }
+        continue;
+      }
+    }
+    if (!token.startsWith('-') && leavesDirectory(token)) {
+      return true;
+    }
+  }
+  return false;
+};
+
 /** Whether an invocation falls inside one scope. */
 export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): boolean => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
     return false;
   }
   if (analysis.base !== scope.command) {
+    return false;
+  }
+  if (scope.command === 'git' && gitReadsOutside(analysis.tokens.slice(1))) {
     return false;
   }
 

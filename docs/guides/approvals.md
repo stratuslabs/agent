@@ -402,6 +402,13 @@ or a directory that happens to share a remote's spelling. Force in any spelling,
 way lands without review, which is what makes it safe to run unattended.
 Like local git, it stops once the external-content gate closes.
 
+`git diff` and `git blame` can't read a file elsewhere on the host on
+either path. A `git diff` path outside the worktree makes git compare the
+two files and print both, so under autonomy every `git diff` path must
+land inside the workspace, and a granted `git diff` or `git blame` scope
+doesn't cover a path that starts with `/`, `~` or `..` (or a `-C` that
+does), or a `blame --contents`, `-S` or `--ignore-revs-file` file outside.
+
 **What local git and push trust.** Turning these on trusts the agent's own
 repositories, not only its command lines. Git runs programs named in a
 repository's config and files: hooks, `diff.external` and textconv
