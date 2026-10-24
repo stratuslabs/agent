@@ -1,3 +1,5 @@
+import { GIT_SUBCOMMANDS, gitPositionals, type GitSubcommand } from './workspace.ts';
+
 /**
  * The command-scope engine: which *invocations* of a shell tool may run
  * unattended.
@@ -654,46 +656,20 @@ const GIT_SUBCOMMANDS_WITH_PLAIN_C = new Set(['switch', 'commit']);
 const leavesDirectory = (value: string): boolean => value.startsWith('/') || value.startsWith('~')
   || value === '..' || value.startsWith('../') || value.includes('/../') || value.endsWith('/..');
 
-/** `git blame` long flags whose value is a file it reads, and the short one. */
-const GIT_BLAME_FILE_FLAGS = ['--contents', '--ignore-revs-file'];
-const GIT_BLAME_FILE_SHORT = 'S';
-
 /**
- * The file a `git blame` option token names, if it is one of the file
- * flags: `{ value }` when attached, `{ next: true }` when the value is the
- * next token. Git accepts any unambiguous prefix of a long option
- * (`--cont`), so a prefix counts too, and inside a short bundle the rest of
- * the token after a value-taking letter is its value (`-wS/etc/hosts`).
- * Reading too much as a file flag only refuses a match, never widens one.
- */
-const blameFileOperand = (token: string): { value?: string; next?: true } | undefined => {
-  if (token.startsWith('--')) {
-    const equals = token.indexOf('=');
-    const name = equals === -1 ? token : token.slice(0, equals);
-    if (name.length > 2 && GIT_BLAME_FILE_FLAGS.some((flag) => flag.startsWith(name))) {
-      return equals === -1 ? { next: true } : { value: token.slice(equals + 1) };
-    }
-    return undefined;
-  }
-  if (token.startsWith('-') && token.length > 1) {
-    const at = token.indexOf(GIT_BLAME_FILE_SHORT, 1);
-    if (at === -1) {
-      return undefined;
-    }
-    const rest = token.slice(at + 1);
-    return rest.length > 0 ? { value: rest.startsWith('=') ? rest.slice(1) : rest } : { next: true };
-  }
-  return undefined;
-};
-
-/**
- * Whether a `git diff` or `git blame` reads a path outside the repository.
- * `git diff` with a path outside the worktree (or no repository at all)
- * compares the two files like `--no-index` and prints both, with no flag
- * saying so; `git blame --contents <file>` prints that file, and `-S` and
- * `--ignore-revs-file` read one, so those flags are refused outright. Lexical on purpose: a revision range is
- * `a..b`, never `../`, and refusing a `-C` that leaves the directory keeps
- * the paths relative to where the grant was given.
+ * Whether a `git diff` or `git blame` can read something a stored scope
+ * never approved. Matching is on the command string alone, which can't see
+ * where a symlinked directory leads, so this holds a stored scope to the
+ * forms workspace autonomy allows and asks about everything else:
+ * - only the flags in workspace autonomy's table (`GIT_SUBCOMMANDS`), spelled
+ *   exactly, so a flag that reads a file (`blame --contents`, `-S`,
+ *   `diff -O`), writes one (`--output`), or runs a driver (`--ext-diff`)
+ *   asks, and so do abbreviations and `--end-of-options`;
+ * - no `-C` and no global option that moves where git reads;
+ * - no token the shell expands (one glob can become two files);
+ * - no operand that leaves the directory, and for `diff` at most one
+ *   operand, since two can be two files git compares like `--no-index`.
+ * A revision range is `a..b`, never `../`.
  */
 /** Git global options that take no value and change nothing about where a command reads. */
 const GIT_GLOBALS_WITHOUT_VALUE = new Set([
@@ -704,58 +680,28 @@ const GIT_GLOBALS_WITHOUT_VALUE = new Set([
 const gitReadsOutside = (args: string[], expands: readonly boolean[] = []): boolean => {
   const readsFiles = (token: string): boolean => token === 'diff' || token === 'blame';
   let at = 0;
-  // Find the subcommand behind any global options. One that isn't known to
-  // be harmless (`--git-dir`, `--work-tree`, anything unrecognized) refuses
-  // the match outright when a diff or blame follows, rather than guess.
+  // Find the subcommand behind any global options. Any other global option
+  // (`-C`, `--git-dir`, `--work-tree`, anything unrecognized) refuses the
+  // match when a diff or blame follows, rather than guess.
   while (at < args.length && (args[at] as string).startsWith('-')) {
-    const token = args[at] as string;
-    if (token === '-C' && args[at + 1] !== undefined) {
-      if (leavesDirectory(args[at + 1] as string) && args.slice(at + 2).some(readsFiles)) {
-        return true;
-      }
-      at += 2;
-      continue;
+    if (!GIT_GLOBALS_WITHOUT_VALUE.has(args[at] as string)) {
+      return args.slice(at + 1).some(readsFiles);
     }
-    if (GIT_GLOBALS_WITHOUT_VALUE.has(token)) {
-      at += 1;
-      continue;
-    }
-    return args.slice(at + 1).some(readsFiles);
+    at += 1;
   }
   const subcommand = args[at];
   if (subcommand !== 'diff' && subcommand !== 'blame') {
     return false;
   }
   const tail = args.slice(at + 1);
-  let operands = 0;
-  for (let index = 0; index < tail.length; index += 1) {
-    const token = tail[index] as string;
-    // The shell expands a glob, brace, `~` or `$` before git runs, so one
-    // token can become two files through a symlinked directory. Those ask.
-    if (expands[at + 1 + index]) {
-      return true;
-    }
-    // A blame file flag never matches a stored scope, whatever it names: a
-    // relative name can still leave through a symlinked directory, which the
-    // command string can't show. Each such call is asked about.
-    if (subcommand === 'blame' && blameFileOperand(token) !== undefined) {
-      return true;
-    }
-    if (subcommand === 'diff' && token === '--no-index') {
-      return true;
-    }
-    if (token === '--' || token.startsWith('-')) {
-      continue;
-    }
-    if (leavesDirectory(token)) {
-      return true;
-    }
-    operands += 1;
+  if (tail.some((_, index) => expands[at + 1 + index])) {
+    return true;
   }
-  // Two operands can be two files that git compares like `--no-index`
-  // (outside a repository, or through a symlinked directory), and a
-  // command string can't tell them from two revisions. They ask each time.
-  return subcommand === 'diff' && operands >= 2;
+  const positionals = gitPositionals(GIT_SUBCOMMANDS[subcommand] as GitSubcommand, tail);
+  if (positionals === undefined || positionals.some(leavesDirectory)) {
+    return true;
+  }
+  return subcommand === 'diff' && positionals.length >= 2;
 };
 
 /** Whether an invocation falls inside one scope. */

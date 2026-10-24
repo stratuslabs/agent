@@ -405,13 +405,15 @@ Like local git, it stops once the external-content gate closes.
 `git diff` and `git blame` can't read a file elsewhere on the host on
 either path. A `git diff` path outside the worktree makes git compare the
 two files and print both, so under autonomy every `git diff` path must
-land inside the workspace, and a granted `git diff` or `git blame` scope
-doesn't cover a path that starts with `/`, `~` or `..` (or a `-C` that
-does), `--no-index`, or two or more operands, since two operands can be two
-files through a symlinked directory. Global options before the subcommand
-other than harmless ones like `--no-pager` refuse the match. A granted `git blame` scope never covers `--contents`, `-S` or
-`--ignore-revs-file`, because a relative path can still leave through a
-symlinked directory, so a blame that reads a file you name is asked every time.
+land inside the workspace. A granted `git diff` or `git blame` scope is
+matched on the command text alone, which can't see where a symlinked
+directory leads, so it covers only the same flags autonomy allows (spelled
+in full) and asks about anything else: `--contents`, `-S`,
+`--ignore-revs-file`, `-O`, `--output`, `--no-index`, abbreviations and
+`--end-of-options` all ask. So do a `-C` or any global option other than
+harmless ones like `--no-pager`, a path that starts with `/`, `~` or `..`,
+anything the shell would expand, and a `git diff` with two or more
+operands, since those can be two files through a symlinked directory.
 
 **What local git and push trust.** Turning these on trusts the agent's own
 repositories, not only its command lines. Git runs programs named in a

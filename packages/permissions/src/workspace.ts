@@ -390,7 +390,7 @@ export const readsInsideWorkspace = async (
  * has if somebody put them there; that's the policy-not-sandbox limit, and
  * the docs say so.
  */
-interface GitSubcommand {
+export interface GitSubcommand {
   /** Flags with no value. Short ones may be bundled. */
   flags?: string[];
   /** Flags that take a value, separately (`-m msg`), attached (`-mmsg`, `--message=msg`). */
@@ -414,7 +414,7 @@ const DIFF_FLAGS = [
   '--no-color', '--check', '-w', '--ignore-all-space', '-b', '--ignore-space-change', '--exit-code', '--quiet', '-R', '--merge-base', '--summary',
 ];
 
-const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
+export const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
   status: { flags: ['-s', '--short', '-b', '--branch', '--porcelain', '--long', '-u', '--untracked-files', '--ignored', '-z', '-v', '--verbose'] },
   log: { flags: LOG_FLAGS, values: LOG_VALUES, numeric: true },
   shortlog: { flags: ['-s', '--summary', '-n', '--numbered', '-e', '--email'], numeric: true },
@@ -458,7 +458,7 @@ const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
  * `--file=f`), so a check of a value reads exactly what this parse let
  * through.
  */
-const gitPositionals = (
+export const gitPositionals = (
   spec: GitSubcommand,
   rest: string[],
   onValue: (flag: string, value: string) => void = () => undefined,

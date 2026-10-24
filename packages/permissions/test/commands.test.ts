@@ -943,6 +943,20 @@ test('a granted git diff or blame scope never covers a path outside the reposito
     'git diff link/{a,b}',
     'git diff $X',
     'git diff -- link/?',
+    // Only the flags workspace autonomy allows: anything else asks, so a
+    // flag that reads a file (`-O`), writes one (`--output`), runs a driver
+    // (`--ext-diff`), or is spelled short or abbreviated can't slip through
+    // (Codex 4368212095, 4368212100).
+    'git diff -O/etc/hosts',
+    'git diff -O order',
+    'git diff --output=x',
+    'git diff --ext-diff',
+    'git diff --no-inde a b',
+    'git diff --end-of-options -x/hosts local',
+    'git diff -- -x/hosts local',
+    // A -C names a directory a symlink can point anywhere (Codex 4368212093).
+    'git -C sub diff',
+    'git -C link diff a',
   ]) {
     assert.equal(matchesScope(analyzeCommand(command), diff), false, command);
   }
@@ -980,7 +994,12 @@ test('a granted git diff or blame scope never covers a path outside the reposito
   // A `-C` that leaves the directory, as a scope prefix the way an exact grant stores it.
   assert.equal(matchesScope(analyzeCommand('git -C .. diff a b'), { command: 'git', args: ['-C', '..', 'diff'] }), false);
   assert.equal(matchesScope(analyzeCommand('git -C /tmp diff a b'), { command: 'git', args: ['-C', '/tmp', 'diff'] }), false);
-  assert.equal(matchesScope(analyzeCommand('git -C sub diff a'), { command: 'git', args: ['-C', 'sub', 'diff'] }), true);
+  assert.equal(matchesScope(analyzeCommand('git -C link diff a'), { command: 'git', args: ['-C', 'link', 'diff'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git -C sub blame f'), { command: 'git', args: ['-C', 'sub', 'blame'] }), false);
+  for (const command of ['git diff --stat', 'git diff --cached', 'git diff -U5 origin/main', 'git diff --unified=5', 'git diff --name-only main..feature', 'git diff -w --color']) {
+    assert.equal(matchesScope(analyzeCommand(command), diff), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand('git blame -L10,20 --porcelain src/a.ts'), blame), true);
   assert.equal(matchesScope(analyzeCommand('git blame -L 1,5 src/a.ts'), blame), true);
   assert.equal(matchesScope(analyzeCommand('git blame -wM src/a.ts'), blame), true);
 });
