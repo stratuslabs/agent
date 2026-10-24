@@ -34,7 +34,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # pnpm -r publish drops --provenance (security audit F5), so pnpm packs
+      # and npm publishes each tarball with the attestation.
       - name: Publish to npm
-        run: pnpm -r publish --access public --no-git-checks --provenance
+        run: ./scripts/publish.sh
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
