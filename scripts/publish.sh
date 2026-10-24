@@ -14,11 +14,17 @@ set -euo pipefail
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 
-pnpm --filter './packages/*' -r exec pnpm pack --pack-destination "$out" >/dev/null
+# Recursive exec runs in workspace dependency order (dependencies first), and
+# one at a time here, so the order file lists each tarball after everything
+# it depends on. Publishing in that order means an interrupted release never
+# leaves a package on the registry whose exact dependency isn't there yet.
+# `pnpm pack` prints the tarball's path as its last line.
+pnpm --filter './packages/*' -r --workspace-concurrency=1 exec \
+  sh -c 'pnpm pack --pack-destination "$1" | tail -n 1 >> "$1/order"' sh "$out" >/dev/null
 
 published=0
 skipped=0
-for tarball in "$out"/*.tgz; do
+while IFS= read -r tarball; do
   manifest="$(tar -xOzf "$tarball" package/package.json)"
   name="$(node -e 'const p = JSON.parse(process.argv[1]); process.stdout.write(p.name)' "$manifest")"
   version="$(node -e 'const p = JSON.parse(process.argv[1]); process.stdout.write(p.version)' "$manifest")"
@@ -45,5 +51,5 @@ for tarball in "$out"/*.tgz; do
     echo "published $name@$version"
   fi
   published=$((published + 1))
-done
+done < "$out/order"
 echo "done: $published published, $skipped skipped"
