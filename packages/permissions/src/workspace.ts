@@ -730,6 +730,18 @@ export const gitInsideWorkspace = async (
       return false;
     }
   }
+  // A path outside the worktree makes `git diff` compare two files like
+  // `--no-index` and print both, with no flag to say so: every positional
+  // must land inside. A revision (`main..feature`) is not a file, so it
+  // lands inside as a missing name.
+  if (subcommand === 'diff') {
+    for (const target of positionals) {
+      const landed = await walk(repoDir, target);
+      if (landed === undefined || !within(root, landed)) {
+        return false;
+      }
+    }
+  }
   // `git mv` writes its destination, and a symlinked directory on the way
   // can put it outside: every path it names must land inside.
   if (subcommand === 'mv') {

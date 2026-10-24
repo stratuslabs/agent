@@ -916,3 +916,39 @@ test('git switch -c is a subcommand flag, not git -c', () => {
   // And for anything that is not git.
   assert.equal(matchesScope(analyzeCommand('sh -c id'), { command: 'sh' }), false);
 });
+
+test('a granted git diff or blame scope never covers a path outside the repository', () => {
+  const diff = { command: 'git', args: ['diff'] };
+  const blame = { command: 'git', args: ['blame'] };
+  // git compares two paths like --no-index when one is outside the worktree
+  // or no repository is found, and prints both files.
+  for (const command of [
+    'git diff ../a.txt ../target.txt',
+    'git diff /etc/hosts a.txt',
+    'git diff -- ../a ../b',
+    'git diff .. x',
+    'git diff sub/../../x y',
+  ]) {
+    assert.equal(matchesScope(analyzeCommand(command), diff), false, command);
+  }
+  // blame prints the file --contents names, and reads -S/--ignore-revs-file.
+  for (const command of [
+    'git blame --contents ../target.txt f',
+    'git blame --contents=/etc/hosts f',
+    'git blame -S ../revs f',
+    'git blame --ignore-revs-file=/etc/hosts f',
+    'git blame ../f',
+  ]) {
+    assert.equal(matchesScope(analyzeCommand(command), blame), false, command);
+  }
+  // Revision ranges and paths inside still match.
+  for (const command of ['git diff', 'git diff main..feature', 'git diff HEAD~1 -- src/a.ts', 'git diff ..feature']) {
+    assert.equal(matchesScope(analyzeCommand(command), diff), true, command);
+  }
+  // A `-C` that leaves the directory, as a scope prefix the way an exact grant stores it.
+  assert.equal(matchesScope(analyzeCommand('git -C .. diff a b'), { command: 'git', args: ['-C', '..', 'diff'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git -C /tmp diff a b'), { command: 'git', args: ['-C', '/tmp', 'diff'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git -C sub diff a b'), { command: 'git', args: ['-C', 'sub', 'diff'] }), true);
+  assert.equal(matchesScope(analyzeCommand('git blame --contents src/a.ts src/a.ts'), blame), true);
+  assert.equal(matchesScope(analyzeCommand('git blame -L 1,5 src/a.ts'), blame), true);
+});
