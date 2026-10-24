@@ -87,3 +87,23 @@ test('a root that is itself a .git directory is refused like any other', async (
   await assert.rejects(run(tools, 'fs.write', { path: 'config', content: '[core]\n\tfsmonitor = x\n' }), /\.git/);
   assert.equal(await readFile(path.join(root, 'repo', '.git', 'config'), 'utf8'), '[core]\n\tbare = false\n');
 });
+
+test('fs.write never writes the global git config a root covers', async () => {
+  const { root } = await layout();
+  // A root at the home directory is an ordinary choice.
+  const tools = await registryFor({ roots: [root], home: root });
+  const planted = '[core]\n\tfsmonitor = x\n';
+  for (const target of ['.gitconfig', '~/.gitconfig', 'dotfiles/.gitconfig', '.config/git/config', '.config/git/attributes']) {
+    await assert.rejects(run(tools, 'fs.write', { path: target, content: planted }), /git/, target);
+  }
+  await assert.rejects(stat(path.join(root, '.gitconfig')), { code: 'ENOENT' });
+  await assert.rejects(stat(path.join(root, '.config', 'git')), { code: 'ENOENT' });
+  // Through a link, too: a dotfiles checkout linked into place.
+  await mkdir(path.join(root, 'dots'), { recursive: true });
+  await mkdir(path.join(root, '.config'), { recursive: true });
+  await symlink(path.join(root, 'dots'), path.join(root, '.config', 'git'));
+  await assert.rejects(run(tools, 'fs.write', { path: '.config/git/config', content: planted }), /git/);
+  await assert.rejects(stat(path.join(root, 'dots', 'config')), { code: 'ENOENT' });
+  // Other files under .config are ordinary.
+  await run(tools, 'fs.write', { path: '.config/app/settings.json', content: '{}' });
+});

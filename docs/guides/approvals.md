@@ -410,10 +410,14 @@ borrowed through `objects/info/alternates`. Git config in your home
 directory (`~/.gitconfig`) applies too, including `push.followTags` and
 `remote.*.push`. The checks above refuse the forms they can see on the
 command line and in the repository's own config. To keep an agent from
-naming those programs itself, `fs.write` and `fs.move` never change
-anything inside a `.git` (directory or file), and shell commands run with
+naming those programs itself, `fs.write` and `fs.move` never change git
+configuration: anything inside a `.git` (directory or file), any
+`.gitconfig`, git's config directory (`~/.config/git`, or under
+`XDG_CONFIG_HOME`), or a `GIT_CONFIG_GLOBAL` file. Shell commands run with
 `safe.bareRepository=explicit`, so git doesn't open a plain-named
-directory the agent wrote as a repository. A shell command can still
+directory the agent wrote as a repository. Two gaps remain. A file your
+git config includes from some other path isn't recognized, so keep
+included files outside the agent's roots. And a shell command can still
 write `.git/config` itself, so an agent with a grant for a command that
 writes files (an interpreter, `tee`, `cp`) can make any approved git
 command run anything. Turn on autonomy for agents you trust with that. A

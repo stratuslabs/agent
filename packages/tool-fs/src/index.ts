@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { constants, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, readFile, realpath, rename, rmdir, stat } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import os from 'node:os';
@@ -153,23 +153,55 @@ const refuseProtected = async (
   }
 };
 
+/** A path through its symlinks as far as it exists, lexical past that. */
+const canonicalOrSelf = (target: string): string => {
+  let existing = target;
+  const rest: string[] = [];
+  while (existing !== path.dirname(existing)) {
+    try {
+      return path.join(realpathSync(existing), ...rest);
+    } catch {
+      rest.unshift(path.basename(existing));
+      existing = path.dirname(existing);
+    }
+  }
+  return target;
+};
+
 /**
- * Refuse a write or move that touches a `.git`, as a directory or a file.
- * Git runs programs a repository's config names (`core.fsmonitor`, diff and
- * filter drivers) even for `git status`, so an agent that could write one
- * would turn any git command it is allowed into any command. A `.git` file
- * names a git directory anywhere, so that is refused too. Checked on the
- * path as asked and as resolved, because a `.git` that is a link resolves
- * to a name that doesn't say so.
+ * Refuse a write or move that touches git's config. Git runs programs its
+ * config names (`core.fsmonitor`, diff and filter drivers) even for `git
+ * status`, so an agent that could write it would turn any git command it
+ * is allowed into any command. That is any `.git`, directory or file (a
+ * `.git` file names a git directory anywhere), any `.gitconfig`, git's XDG
+ * directory, and a `GIT_CONFIG_GLOBAL` the daemon was given. Checked on the
+ * path as asked and as resolved, root included, because a link resolves to
+ * a name that doesn't say so.
  */
-const refuseGitDir = (resolved: ResolvedPath, requested: string): void => {
-  const named = (relative: string): boolean => relative.split(/[\\/]/)
-    .some((segment) => segment.normalize('NFC').toLowerCase() === '.git');
-  // The whole path, root included: a root that is itself a `.git` is a
-  // git directory like any other.
-  if (named(requested) || named(resolved.path)) {
+const refuseGitConfig = (resolved: ResolvedPath, requested: string, home: string): void => {
+  const segments = (target: string): string[] => target.split(/[\\/]/).map((segment) => segment.normalize('NFC').toLowerCase());
+  const named = (target: string): boolean => {
+    const parts = segments(target);
+    return parts.includes('.git') || parts.at(-1) === '.gitconfig';
+  };
+  const xdg = process.env.XDG_CONFIG_HOME && path.isAbsolute(process.env.XDG_CONFIG_HOME)
+    ? process.env.XDG_CONFIG_HOME
+    : path.join(home, '.config');
+  const configDirs = [path.join(xdg, 'git'), path.join(home, '.config', 'git')]
+    .flatMap((dir) => [dir, canonicalOrSelf(dir)]);
+  const globalFile = process.env.GIT_CONFIG_GLOBAL;
+  const configFiles = globalFile && path.isAbsolute(globalFile) ? [globalFile, canonicalOrSelf(globalFile)] : [];
+  const inside = (dir: string, target: string): boolean => {
+    const relative = path.relative(dir, target);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  };
+  const asked = path.resolve(resolved.root, requested.startsWith('~/') ? path.join(home, requested.slice(2)) : requested);
+  const hits = [asked, resolved.path].some((target) => named(target)
+    || configDirs.some((dir) => inside(dir, target))
+    || configFiles.includes(target));
+  if (named(requested) || hits) {
     throw new Error(
-      `Refusing ${requested}: it is inside a .git, which the fs tools don't change. `
+      `Refusing ${requested}: it is git configuration (a .git, a .gitconfig or git's config directory), which the fs tools don't change. `
       + 'Git runs programs its config names, so this is left to git itself and to you.',
     );
   }
@@ -1133,7 +1165,7 @@ const createWriteTool = (
       allowMissing: true,
     });
     await refuseProtected(isProtected, resolved, requested);
-    refuseGitDir(resolved, requested);
+    refuseGitConfig(resolved, requested, settings.home);
 
     // The ledger is the daemon's record of what this agent wrote while
     // tainted. An agent whose roots cover its own workspace could otherwise
@@ -1230,7 +1262,7 @@ const createWriteTool = (
         // A hard link to a protected file planted under the empty name is the
         // same trap as one to the ledger, so it gets the same second look.
         await refuseProtected(isProtected, present, requested);
-        refuseGitDir(present, requested);
+        refuseGitConfig(present, requested, settings.home);
         if (await (await isLedger())(present.path, present.identity)) {
           throw ledgerRefusal(present.path);
         }
@@ -1416,8 +1448,8 @@ const createMoveTool = (
     const checkGuards = async (): Promise<void> => {
       await refuseProtected(isProtected, source, fromRequested);
       await refuseProtected(isProtected, destination, toRequested);
-      refuseGitDir(source, fromRequested);
-      refuseGitDir(destination, toRequested);
+      refuseGitConfig(source, fromRequested, settings.home);
+      refuseGitConfig(destination, toRequested, settings.home);
       const view = await ledgerView();
       if (await view.guard(source.path, source.identity)) {
         throw refuseLedger(source.path);

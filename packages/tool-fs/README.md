@@ -167,12 +167,15 @@ reach a given workspace is still its roots' decision.
 This list comes from the host (`PluginContext.protectedPaths`). A host
 that wires this plugin by hand without it gets roots alone.
 
-`fs.write` and `fs.move` also never change anything inside a `.git`,
-directory or file, in any root. Git runs programs a repository's config
-names (`core.fsmonitor`, diff and filter drivers) even for `git status`,
-so writing one would turn an approved git command into any command.
-Reading `.git` is unaffected. A `.git` that is a symlink is caught by the
-path as asked, not only as resolved.
+`fs.write` and `fs.move` also never change git configuration in any root:
+anything inside a `.git` (directory or file), any `.gitconfig`, git's
+config directory (`~/.config/git`, or under `XDG_CONFIG_HOME`), or the
+daemon's `GIT_CONFIG_GLOBAL`. Git runs programs its config names
+(`core.fsmonitor`, diff and filter drivers) even for `git status`, so
+writing it would turn an approved git command into any command. Reading
+is unaffected. A link is caught by the path as asked, not only as
+resolved. A file your git config includes by some other path isn't
+recognized.
 
 ## The containment rule
 
