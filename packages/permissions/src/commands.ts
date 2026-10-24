@@ -654,8 +654,37 @@ const GIT_SUBCOMMANDS_WITH_PLAIN_C = new Set(['switch', 'commit']);
 const leavesDirectory = (value: string): boolean => value.startsWith('/') || value.startsWith('~')
   || value === '..' || value.startsWith('../') || value.includes('/../') || value.endsWith('/..');
 
-/** `git blame` flags whose value is a file it reads. */
-const GIT_BLAME_FILE_FLAGS = ['--contents', '-S', '--ignore-revs-file'];
+/** `git blame` long flags whose value is a file it reads, and the short one. */
+const GIT_BLAME_FILE_FLAGS = ['--contents', '--ignore-revs-file'];
+const GIT_BLAME_FILE_SHORT = 'S';
+
+/**
+ * The file a `git blame` option token names, if it is one of the file
+ * flags: `{ value }` when attached, `{ next: true }` when the value is the
+ * next token. Git accepts any unambiguous prefix of a long option
+ * (`--cont`), so a prefix counts too, and inside a short bundle the rest of
+ * the token after a value-taking letter is its value (`-wS/etc/hosts`).
+ * Reading too much as a file flag only refuses a match, never widens one.
+ */
+const blameFileOperand = (token: string): { value?: string; next?: true } | undefined => {
+  if (token.startsWith('--')) {
+    const equals = token.indexOf('=');
+    const name = equals === -1 ? token : token.slice(0, equals);
+    if (name.length > 2 && GIT_BLAME_FILE_FLAGS.some((flag) => flag.startsWith(name))) {
+      return equals === -1 ? { next: true } : { value: token.slice(equals + 1) };
+    }
+    return undefined;
+  }
+  if (token.startsWith('-') && token.length > 1) {
+    const at = token.indexOf(GIT_BLAME_FILE_SHORT, 1);
+    if (at === -1) {
+      return undefined;
+    }
+    const rest = token.slice(at + 1);
+    return rest.length > 0 ? { value: rest.startsWith('=') ? rest.slice(1) : rest } : { next: true };
+  }
+  return undefined;
+};
 
 /**
  * Whether a `git diff` or `git blame` reads a path outside the repository.
@@ -684,13 +713,13 @@ const gitReadsOutside = (args: string[]): boolean => {
   for (let index = 0; index < tail.length; index += 1) {
     const token = tail[index] as string;
     if (subcommand === 'blame') {
-      const [flag, value] = token.startsWith('--') ? [token.split('=')[0], token.includes('=') ? token.slice(token.indexOf('=') + 1) : undefined] : [token.slice(0, 2), token.length > 2 ? token.slice(2) : undefined];
-      if (flag !== undefined && GIT_BLAME_FILE_FLAGS.includes(flag)) {
-        const named = value ?? tail[index + 1];
+      const operand = blameFileOperand(token);
+      if (operand !== undefined) {
+        const named = operand.next ? tail[index + 1] : operand.value;
         if (named === undefined || leavesDirectory(named)) {
           return true;
         }
-        if (value === undefined) {
+        if (operand.next) {
           index += 1;
         }
         continue;

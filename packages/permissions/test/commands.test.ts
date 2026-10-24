@@ -938,6 +938,13 @@ test('a granted git diff or blame scope never covers a path outside the reposito
     'git blame -S ../revs f',
     'git blame --ignore-revs-file=/etc/hosts f',
     'git blame ../f',
+    // git takes any unambiguous prefix of a long option, and a value right
+    // after a short one inside a bundle.
+    'git blame --content=/etc/hosts f',
+    'git blame --cont ../target.txt f',
+    'git blame --ignore-revs=/etc/hosts f',
+    'git blame -wS/etc/hosts f',
+    'git blame -wS ../revs f',
   ]) {
     assert.equal(matchesScope(analyzeCommand(command), blame), false, command);
   }
@@ -951,4 +958,6 @@ test('a granted git diff or blame scope never covers a path outside the reposito
   assert.equal(matchesScope(analyzeCommand('git -C sub diff a b'), { command: 'git', args: ['-C', 'sub', 'diff'] }), true);
   assert.equal(matchesScope(analyzeCommand('git blame --contents src/a.ts src/a.ts'), blame), true);
   assert.equal(matchesScope(analyzeCommand('git blame -L 1,5 src/a.ts'), blame), true);
+  assert.equal(matchesScope(analyzeCommand('git blame -w --cont src/a.ts src/a.ts'), blame), true);
+  assert.equal(matchesScope(analyzeCommand('git blame -wM src/a.ts'), blame), true);
 });
