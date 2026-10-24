@@ -691,7 +691,7 @@ const blameFileOperand = (token: string): { value?: string; next?: true } | unde
  * `git diff` with a path outside the worktree (or no repository at all)
  * compares the two files like `--no-index` and prints both, with no flag
  * saying so; `git blame --contents <file>` prints that file, and `-S` and
- * `--ignore-revs-file` read one. Lexical on purpose: a revision range is
+ * `--ignore-revs-file` read one, so those flags are refused outright. Lexical on purpose: a revision range is
  * `a..b`, never `../`, and refusing a `-C` that leaves the directory keeps
  * the paths relative to where the grant was given.
  */
@@ -712,18 +712,11 @@ const gitReadsOutside = (args: string[]): boolean => {
   const tail = args.slice(at + 1);
   for (let index = 0; index < tail.length; index += 1) {
     const token = tail[index] as string;
-    if (subcommand === 'blame') {
-      const operand = blameFileOperand(token);
-      if (operand !== undefined) {
-        const named = operand.next ? tail[index + 1] : operand.value;
-        if (named === undefined || leavesDirectory(named)) {
-          return true;
-        }
-        if (operand.next) {
-          index += 1;
-        }
-        continue;
-      }
+    // A blame file flag never matches a stored scope, whatever it names: a
+    // relative name can still leave through a symlinked directory, which the
+    // command string can't show. Each such call is asked about.
+    if (subcommand === 'blame' && blameFileOperand(token) !== undefined) {
+      return true;
     }
     if (!token.startsWith('-') && leavesDirectory(token)) {
       return true;

@@ -407,7 +407,9 @@ either path. A `git diff` path outside the worktree makes git compare the
 two files and print both, so under autonomy every `git diff` path must
 land inside the workspace, and a granted `git diff` or `git blame` scope
 doesn't cover a path that starts with `/`, `~` or `..` (or a `-C` that
-does), or a `blame --contents`, `-S` or `--ignore-revs-file` file outside.
+does). A granted `git blame` scope never covers `--contents`, `-S` or
+`--ignore-revs-file`, because a relative path can still leave through a
+symlinked directory, so a blame that reads a file you name is asked every time.
 
 **What local git and push trust.** Turning these on trusts the agent's own
 repositories, not only its command lines. Git runs programs named in a

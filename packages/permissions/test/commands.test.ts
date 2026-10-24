@@ -945,6 +945,12 @@ test('a granted git diff or blame scope never covers a path outside the reposito
     'git blame --ignore-revs=/etc/hosts f',
     'git blame -wS/etc/hosts f',
     'git blame -wS ../revs f',
+    // A relative name can still leave through a symlinked directory, which a
+    // command string can't show (Codex 4367924334): a file flag never matches.
+    'git blame --contents link/secret tracked',
+    'git blame -S link/revs f',
+    'git blame --contents src/a.ts src/a.ts',
+    'git blame -w --cont src/a.ts src/a.ts',
   ]) {
     assert.equal(matchesScope(analyzeCommand(command), blame), false, command);
   }
@@ -956,8 +962,6 @@ test('a granted git diff or blame scope never covers a path outside the reposito
   assert.equal(matchesScope(analyzeCommand('git -C .. diff a b'), { command: 'git', args: ['-C', '..', 'diff'] }), false);
   assert.equal(matchesScope(analyzeCommand('git -C /tmp diff a b'), { command: 'git', args: ['-C', '/tmp', 'diff'] }), false);
   assert.equal(matchesScope(analyzeCommand('git -C sub diff a b'), { command: 'git', args: ['-C', 'sub', 'diff'] }), true);
-  assert.equal(matchesScope(analyzeCommand('git blame --contents src/a.ts src/a.ts'), blame), true);
   assert.equal(matchesScope(analyzeCommand('git blame -L 1,5 src/a.ts'), blame), true);
-  assert.equal(matchesScope(analyzeCommand('git blame -w --cont src/a.ts src/a.ts'), blame), true);
   assert.equal(matchesScope(analyzeCommand('git blame -wM src/a.ts'), blame), true);
 });
