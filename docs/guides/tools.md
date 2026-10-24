@@ -269,7 +269,11 @@ spawn every server you configured. Two consequences worth knowing:
   for an API client to answer. Stored tokens are a *configured* route and
   not a proven one — the adapter keeps a connection only once the app
   authenticates and its socket starts, and denies undeliverable for a
-  configured agent without one. This command starts no daemon, so it says
+  configured agent without one. A call from another channel's conversation
+  (a Discord thread from a channel plugin), or from a schedule that reports
+  through another channel, is left to that channel: Slack neither asks nor
+  denies it unless the agent has an `approvalChannel`, which is asked
+  whatever the conversation. This command starts no daemon, so it says
   so and points at `stratus logs`, where `slack: could not connect <agent>`
   is the actual answer. With neither — no stored tokens and no API —
   nothing receives the request at all, and the line says that rather than
