@@ -409,13 +409,17 @@ drivers, clean and smudge filters (run by `git add` and checkout), `core.sshComm
 borrowed through `objects/info/alternates`. Git config in your home
 directory (`~/.gitconfig`) applies too, including `push.followTags` and
 `remote.*.push`. The checks above refuse the forms they can see on the
-command line and in the repository's own config, but an agent that can
-write its repository's `.git` (an `fs.write` grant covering the
-workspace, for instance) can make any approved git command run anything.
-Turn on autonomy for agents you trust with that. A sandboxed executor is
-the boundary for agents you don't. The same is true of a git scope granted
-with **Always allow**, which is why no git command runs unattended out of
-the box.
+command line and in the repository's own config. To keep an agent from
+naming those programs itself, `fs.write` and `fs.move` never change
+anything inside a `.git` (directory or file), and shell commands run with
+`safe.bareRepository=explicit`, so git doesn't open a plain-named
+directory the agent wrote as a repository. A shell command can still
+write `.git/config` itself, so an agent with a grant for a command that
+writes files (an interpreter, `tee`, `cp`) can make any approved git
+command run anything. Turn on autonomy for agents you trust with that. A
+sandboxed executor is the boundary for agents you don't. The same is true
+of a git scope granted with **Always allow**, which is why no git command
+runs unattended out of the box.
 
 This is policy over command arguments, not a sandbox. It holds because
 these commands read only what they're told to. A program you list in

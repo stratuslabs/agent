@@ -514,6 +514,26 @@ test('git is never pointed at another repository through the environment', async
   assert.equal(String((await runCommand(tools, 'echo "[$GIT_DIR][$GIT_WORK_TREE][$GIT_CONFIG_GLOBAL]"')).stdout).trim(), '[][][/keep/gitconfig]');
 });
 
+// A directory with HEAD, config, objects and refs is a bare repository to
+// git, whatever it's called, and its config can name programs git runs.
+// The fs tools refuse to write a `.git`; this keeps a plain-named one from
+// being found instead. Explicit `--git-dir` still works.
+test('git never finds a bare repository it was not pointed at', async () => {
+  const cwd = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-bare-')));
+  const planted = path.join(cwd, 'notes');
+  await mkdir(path.join(planted, 'objects'), { recursive: true });
+  await mkdir(path.join(planted, 'refs'), { recursive: true });
+  await writeFile(path.join(planted, 'HEAD'), 'ref: refs/heads/main\n');
+  await writeFile(path.join(planted, 'config'), '[core]\n\trepositoryformatversion = 0\n\tbare = true\n');
+  const tools = await registryFor({ cwd, sandbox: 'off', passEnv: ['PATH'], env: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Ava' } }, { PATH: process.env.PATH });
+  const found = String((await runCommand(tools, 'cd notes && git rev-parse --git-dir 2>&1 || true')).stdout).trim();
+  assert.notEqual(found, '.');
+  assert.match(found, /bare repository/);
+  assert.equal(String((await runCommand(tools, 'git --git-dir=notes rev-parse --is-bare-repository')).stdout).trim(), 'true');
+  // An operator's own config entries are kept.
+  assert.equal(String((await runCommand(tools, 'git config user.name')).stdout).trim(), 'Ava');
+});
+
 // The tainted-write ledger `fs.read` consults. A shell read of the same
 // file must not come back cleaner than `fs.read` of it would.
 const ledgerHome = async (): Promise<{ workspaces: AgentWorkspaces; workspace: string }> => {

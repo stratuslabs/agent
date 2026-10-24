@@ -167,6 +167,13 @@ reach a given workspace is still its roots' decision.
 This list comes from the host (`PluginContext.protectedPaths`). A host
 that wires this plugin by hand without it gets roots alone.
 
+`fs.write` and `fs.move` also never change anything inside a `.git`,
+directory or file, in any root. Git runs programs a repository's config
+names (`core.fsmonitor`, diff and filter drivers) even for `git status`,
+so writing one would turn an approved git command into any command.
+Reading `.git` is unaffected. A `.git` that is a symlink is caught by the
+path as asked, not only as resolved.
+
 ## The containment rule
 
 Roots are an **access boundary between agents**, so they are resolved on

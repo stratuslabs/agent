@@ -154,6 +154,27 @@ const refuseProtected = async (
 };
 
 /**
+ * Refuse a write or move that touches a `.git`, as a directory or a file.
+ * Git runs programs a repository's config names (`core.fsmonitor`, diff and
+ * filter drivers) even for `git status`, so an agent that could write one
+ * would turn any git command it is allowed into any command. A `.git` file
+ * names a git directory anywhere, so that is refused too. Checked on the
+ * path as asked and as resolved, below the root, because a `.git` that is
+ * a link resolves to a name that doesn't say so.
+ */
+const refuseGitDir = (resolved: ResolvedPath, requested: string): void => {
+  const named = (relative: string): boolean => relative.split(/[\\/]/)
+    .some((segment) => segment.normalize('NFC').toLowerCase() === '.git');
+  const asked = path.isAbsolute(requested) ? path.relative(resolved.root, path.normalize(requested)) : requested;
+  if (named(asked) || named(path.relative(resolved.root, resolved.path))) {
+    throw new Error(
+      `Refusing ${requested}: it is inside a .git, which the fs tools don't change. `
+      + 'Git runs programs its config names, so this is left to git itself and to you.',
+    );
+  }
+};
+
+/**
  * The image format a file's own first bytes declare, for the four the
  * model APIs take — never its extension, which anyone can choose.
  */
@@ -1111,6 +1132,7 @@ const createWriteTool = (
       allowMissing: true,
     });
     await refuseProtected(isProtected, resolved, requested);
+    refuseGitDir(resolved, requested);
 
     // The ledger is the daemon's record of what this agent wrote while
     // tainted. An agent whose roots cover its own workspace could otherwise
@@ -1207,6 +1229,7 @@ const createWriteTool = (
         // A hard link to a protected file planted under the empty name is the
         // same trap as one to the ledger, so it gets the same second look.
         await refuseProtected(isProtected, present, requested);
+        refuseGitDir(present, requested);
         if (await (await isLedger())(present.path, present.identity)) {
           throw ledgerRefusal(present.path);
         }
@@ -1392,6 +1415,8 @@ const createMoveTool = (
     const checkGuards = async (): Promise<void> => {
       await refuseProtected(isProtected, source, fromRequested);
       await refuseProtected(isProtected, destination, toRequested);
+      refuseGitDir(source, fromRequested);
+      refuseGitDir(destination, toRequested);
       const view = await ledgerView();
       if (await view.guard(source.path, source.identity)) {
         throw refuseLedger(source.path);
