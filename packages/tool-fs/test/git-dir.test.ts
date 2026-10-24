@@ -107,3 +107,16 @@ test('fs.write never writes the global git config a root covers', async () => {
   // Other files under .config are ordinary.
   await run(tools, 'fs.write', { path: '.config/app/settings.json', content: '{}' });
 });
+
+test('fs.move never builds git config by moving a directory into place', async () => {
+  const { root } = await layout();
+  const tools = await registryFor({ roots: [root], home: root });
+  await mkdir(path.join(root, 'staged', 'git'), { recursive: true });
+  // Written before the guard could see where it would end up.
+  await writeFile(path.join(root, 'staged', 'git', 'config'), '[core]\n\tfsmonitor = x\n');
+  await assert.rejects(run(tools, 'fs.move', { from: 'staged', to: '.config' }), /git/);
+  await assert.rejects(stat(path.join(root, '.config')), { code: 'ENOENT' });
+  // Moving a directory somewhere unrelated is fine.
+  await run(tools, 'fs.move', { from: 'staged', to: 'archive' });
+  assert.equal(await readFile(path.join(root, 'archive', 'git', 'config'), 'utf8'), '[core]\n\tfsmonitor = x\n');
+});

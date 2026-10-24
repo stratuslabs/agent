@@ -178,7 +178,7 @@ const canonicalOrSelf = (target: string): string => {
  * path as asked and as resolved, root included, because a link resolves to
  * a name that doesn't say so.
  */
-const refuseGitConfig = (resolved: ResolvedPath, requested: string, home: string): void => {
+const refuseGitConfig = (resolved: ResolvedPath, requested: string, home: string, options: { receivesTree?: boolean } = {}): void => {
   const segments = (target: string): string[] => target.split(/[\\/]/).map((segment) => segment.normalize('NFC').toLowerCase());
   const named = (target: string): boolean => {
     const parts = segments(target);
@@ -196,9 +196,13 @@ const refuseGitConfig = (resolved: ResolvedPath, requested: string, home: string
     return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
   };
   const asked = path.resolve(resolved.root, requested.startsWith('~/') ? path.join(home, requested.slice(2)) : requested);
+  // A move's destination also receives everything under its source: moving
+  // a directory to `~/.config` would put whatever `git/config` it holds in
+  // place, though neither path names it. So a move may not land on any
+  // directory above a config location either.
   const hits = [asked, resolved.path].some((target) => named(target)
-    || configDirs.some((dir) => inside(dir, target))
-    || configFiles.includes(target));
+    || configDirs.some((dir) => inside(dir, target) || (options.receivesTree === true && inside(target, dir)))
+    || configFiles.some((file) => file === target || (options.receivesTree === true && inside(target, file))));
   if (named(requested) || hits) {
     throw new Error(
       `Refusing ${requested}: it is git configuration (a .git, a .gitconfig or git's config directory), which the fs tools don't change. `
@@ -1449,7 +1453,7 @@ const createMoveTool = (
       await refuseProtected(isProtected, source, fromRequested);
       await refuseProtected(isProtected, destination, toRequested);
       refuseGitConfig(source, fromRequested, settings.home);
-      refuseGitConfig(destination, toRequested, settings.home);
+      refuseGitConfig(destination, toRequested, settings.home, { receivesTree: true });
       const view = await ledgerView();
       if (await view.guard(source.path, source.identity)) {
         throw refuseLedger(source.path);
