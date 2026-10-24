@@ -390,7 +390,7 @@ export const readsInsideWorkspace = async (
  * has if somebody put them there; that's the policy-not-sandbox limit, and
  * the docs say so.
  */
-interface GitSubcommand {
+export interface GitSubcommand {
   /** Flags with no value. Short ones may be bundled. */
   flags?: string[];
   /** Flags that take a value, separately (`-m msg`), attached (`-mmsg`, `--message=msg`). */
@@ -414,7 +414,7 @@ const DIFF_FLAGS = [
   '--no-color', '--check', '-w', '--ignore-all-space', '-b', '--ignore-space-change', '--exit-code', '--quiet', '-R', '--merge-base', '--summary',
 ];
 
-const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
+export const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
   status: { flags: ['-s', '--short', '-b', '--branch', '--porcelain', '--long', '-u', '--untracked-files', '--ignored', '-z', '-v', '--verbose'] },
   log: { flags: LOG_FLAGS, values: LOG_VALUES, numeric: true },
   shortlog: { flags: ['-s', '--summary', '-n', '--numbered', '-e', '--email'], numeric: true },
@@ -458,7 +458,7 @@ const GIT_SUBCOMMANDS: Record<string, GitSubcommand> = {
  * `--file=f`), so a check of a value reads exactly what this parse let
  * through.
  */
-const gitPositionals = (
+export const gitPositionals = (
   spec: GitSubcommand,
   rest: string[],
   onValue: (flag: string, value: string) => void = () => undefined,
@@ -728,6 +728,18 @@ export const gitInsideWorkspace = async (
     const landed = file === '' || file === '-' ? undefined : await walk(repoDir, file);
     if (landed === undefined || !within(root, landed)) {
       return false;
+    }
+  }
+  // A path outside the worktree makes `git diff` compare two files like
+  // `--no-index` and print both, with no flag to say so: every positional
+  // must land inside. A revision (`main..feature`) is not a file, so it
+  // lands inside as a missing name.
+  if (subcommand === 'diff') {
+    for (const target of positionals) {
+      const landed = await walk(repoDir, target);
+      if (landed === undefined || !within(root, landed)) {
+        return false;
+      }
     }
   }
   // `git mv` writes its destination, and a symlinked directory on the way

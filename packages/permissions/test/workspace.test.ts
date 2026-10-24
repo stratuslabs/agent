@@ -478,3 +478,17 @@ test('pushing the agent\'s own branch runs, and every other push asks', async ()
   await writeFile(path.join(git, 'config'), '[remote "origin"]\n\turl = https://example.com/app.git\n');
   assert.equal(await pushes('git push origin nova/x'), true, 'back to an ordinary config');
 });
+
+test('local git diff under autonomy never compares a file outside the workspace', async () => {
+  const { workspace, repo } = await layout();
+  const inside = async (command: string) => gitInsideWorkspace(analyzeCommand(command), repo, workspace);
+  // A path outside the worktree turns `git diff` into a two-file compare
+  // that prints both, flag or no flag.
+  assert.equal(await inside('git diff ../../../../secret.txt src/main.ts'), false);
+  assert.equal(await inside('git diff -- ../../../../secret.txt src/main.ts'), false);
+  assert.equal(await inside('git diff leak.txt src/main.ts'), false);
+  // Ranges and paths in the workspace still run.
+  assert.equal(await inside('git diff main..feature'), true);
+  assert.equal(await inside('git diff HEAD~1 -- src/main.ts'), true);
+  assert.equal(await inside('git diff ../notes.txt src/main.ts'), true);
+});

@@ -916,3 +916,90 @@ test('git switch -c is a subcommand flag, not git -c', () => {
   // And for anything that is not git.
   assert.equal(matchesScope(analyzeCommand('sh -c id'), { command: 'sh' }), false);
 });
+
+test('a granted git diff or blame scope never covers a path outside the repository', () => {
+  const diff = { command: 'git', args: ['diff'] };
+  const blame = { command: 'git', args: ['blame'] };
+  // git compares two paths like --no-index when one is outside the worktree
+  // or no repository is found, and prints both files.
+  for (const command of [
+    'git diff ../a.txt ../target.txt',
+    'git diff /etc/hosts a.txt',
+    'git diff -- ../a ../b',
+    'git diff .. x',
+    'git diff sub/../../x y',
+    // Two operands can be two files through a symlinked directory, which a
+    // command string can't show (Codex 4368021817): those ask every time.
+    'git diff link/secret local',
+    'git diff --no-index a b',
+    'git diff HEAD~1 -- src/a.ts',
+    // Global options before the subcommand don't hide it (Codex 4368021819).
+    'git --no-pager diff link/secret local',
+    'git --work-tree=/ diff a',
+    'git --git-dir=/x/.git diff',
+    // The shell expands a glob or brace before git runs, so one token can be
+    // two files through a symlinked directory (Codex 4368040720).
+    'git diff link/*',
+    'git diff link/{a,b}',
+    'git diff $X',
+    'git diff -- link/?',
+    // Only the flags workspace autonomy allows: anything else asks, so a
+    // flag that reads a file (`-O`), writes one (`--output`), runs a driver
+    // (`--ext-diff`), or is spelled short or abbreviated can't slip through
+    // (Codex 4368212095, 4368212100).
+    'git diff -O/etc/hosts',
+    'git diff -O order',
+    'git diff --output=x',
+    'git diff --ext-diff',
+    'git diff --no-inde a b',
+    'git diff --end-of-options -x/hosts local',
+    'git diff -- -x/hosts local',
+    // A -C names a directory a symlink can point anywhere (Codex 4368212093).
+    'git -C sub diff',
+    'git -C link diff a',
+  ]) {
+    assert.equal(matchesScope(analyzeCommand(command), diff), false, command);
+  }
+  // blame prints the file --contents names, and reads -S/--ignore-revs-file.
+  for (const command of [
+    'git blame --contents ../target.txt f',
+    'git blame --contents=/etc/hosts f',
+    'git blame -S ../revs f',
+    'git blame --ignore-revs-file=/etc/hosts f',
+    'git blame ../f',
+    // git takes any unambiguous prefix of a long option, and a value right
+    // after a short one inside a bundle.
+    'git blame --content=/etc/hosts f',
+    'git blame --cont ../target.txt f',
+    'git blame --ignore-revs=/etc/hosts f',
+    'git blame -wS/etc/hosts f',
+    'git blame -wS ../revs f',
+    // A relative name can still leave through a symlinked directory, which a
+    // command string can't show (Codex 4367924334): a file flag never matches.
+    'git blame --contents link/secret tracked',
+    'git blame -S link/revs f',
+    'git blame --contents src/a.ts src/a.ts',
+    'git blame -w --cont src/a.ts src/a.ts',
+    'git --no-pager blame --contents link/secret tracked',
+    'git -p blame -S revs f',
+    'git --paginate blame --contents=x f',
+    'git blame link/*',
+  ]) {
+    assert.equal(matchesScope(analyzeCommand(command), blame), false, command);
+  }
+  // Revision ranges and paths inside still match.
+  for (const command of ['git diff', 'git diff main..feature', 'git diff ..feature', 'git diff origin/main', 'git diff -- src/a.ts', "git diff -- 'src/*.ts'"]) {
+    assert.equal(matchesScope(analyzeCommand(command), diff), true, command);
+  }
+  // A `-C` that leaves the directory, as a scope prefix the way an exact grant stores it.
+  assert.equal(matchesScope(analyzeCommand('git -C .. diff a b'), { command: 'git', args: ['-C', '..', 'diff'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git -C /tmp diff a b'), { command: 'git', args: ['-C', '/tmp', 'diff'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git -C link diff a'), { command: 'git', args: ['-C', 'link', 'diff'] }), false);
+  assert.equal(matchesScope(analyzeCommand('git -C sub blame f'), { command: 'git', args: ['-C', 'sub', 'blame'] }), false);
+  for (const command of ['git diff --stat', 'git diff --cached', 'git diff -U5 origin/main', 'git diff --unified=5', 'git diff --name-only main..feature', 'git diff -w --color']) {
+    assert.equal(matchesScope(analyzeCommand(command), diff), true, command);
+  }
+  assert.equal(matchesScope(analyzeCommand('git blame -L10,20 --porcelain src/a.ts'), blame), true);
+  assert.equal(matchesScope(analyzeCommand('git blame -L 1,5 src/a.ts'), blame), true);
+  assert.equal(matchesScope(analyzeCommand('git blame -wM src/a.ts'), blame), true);
+});
