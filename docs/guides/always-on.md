@@ -24,6 +24,15 @@ stratus service stop
 stratus service uninstall
 ```
 
+`install` and `start` ask the service manager afterwards whether the daemon
+is actually running, for up to about ten seconds, and say so only when it
+is. Otherwise they print the manager's reason and the log path, and exit
+non-zero: launchd can load a LaunchAgent without ever starting it, and
+systemd calls a unit started the moment it forks. `status` explains a
+loaded LaunchAgent that is not running: `runs = 0` means launchd has not
+started it since it was loaded (seen after a reboot), and a last exit code
+points at `~/.stratus/logs/stratusd.err.log`.
+
 `stratus setup` installs it for you at Save & finish unless you opt out, so
 most people never run these by hand. (On a server nobody logs in to, run it
 as a system service or in Docker instead — [Deployment](./deployment.md).)

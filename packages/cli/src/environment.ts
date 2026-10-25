@@ -47,6 +47,8 @@ export interface CliEnvironment {
   exitProcess?: (code: number) => void;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
   serviceRunner?: ServiceRunner;
+  /** Waits between a start's status checks. Injected so tests do not wait. */
+  serviceSleep?: (ms: number) => Promise<void>;
   /** Service-manager platform override (tests) — which unit format and manager commands apply. */
   servicePlatform?: NodeJS.Platform;
   /** Reports whether an optional package is installed. Injected so tests do not assert on their own node_modules. */

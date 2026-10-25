@@ -43,7 +43,14 @@ const subscriptionHome = async (): Promise<string> => {
 };
 
 // Setup installs the always-on service; a manager that says yes to all of it.
-const stubServiceRunner: ServiceRunner = async () => ({ code: 0, stdout: '', stderr: '' });
+// It also says the daemon is running when asked, as install asks afterwards.
+const stubServiceRunner: ServiceRunner = async (command, args) => ({
+  code: 0,
+  stdout: command === 'launchctl' && args[0] === 'print'
+    ? '\tstate = running\n'
+    : command === 'systemctl' && args.includes('is-active') ? 'active\n' : '',
+  stderr: '',
+});
 
 const missing = (...names: string[]) => (specifier: string) => !names.includes(specifier);
 

@@ -46,6 +46,7 @@ export const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
   // control API) decides the unit's PATH rather than this process.
   ...(readProcessEnv(env).PATH !== undefined ? { path: String(readProcessEnv(env).PATH) } : {}),
   ...(env.serviceRunner !== undefined ? { run: env.serviceRunner } : {}),
+  ...(env.serviceSleep !== undefined ? { sleep: env.serviceSleep } : {}),
   ...(env.servicePlatform !== undefined ? { platform: env.servicePlatform } : {}),
 });
 
