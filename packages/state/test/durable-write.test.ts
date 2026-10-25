@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, open, readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { runStateMigrations, saveCredentials, syncDirectory, writeFileSynced } from '../src/index.ts';
+import { agentsDirPath, claimAgentsHome, runStateMigrations, saveCredentials, syncDirectory, writeFileSynced, writeNewSoulFile } from '../src/index.ts';
 
 const newDir = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-durable-'));
 
@@ -117,5 +117,35 @@ for (const [name, write] of [
     assert.deepEqual(events[bytes]!.named, [], `${name} is synced as the temporary, before it is renamed into place`);
     const dirIno = await inode(stratus);
     assert.ok(events.some((event, index) => index > bytes && event.ino === dirIno), `then ${stratus} is synced`);
+  });
+}
+
+// A new agent's soul is published by linking its hidden name to the visible
+// soul: the bytes have to be on disk before that link is, and both
+// directories after, or a crash leaves a link to an empty soul.
+for (const replace of [false, true]) {
+  test(`a new soul in the agents folder is flushed before it is linked, then both directories (${replace ? 'replace' : 'new'})`, async (t) => {
+    const home = await realpath(await newDir());
+    const env = { homeDir: home, processEnv: {} };
+    const agentsHome = claimAgentsHome(env);
+    assert.ok(agentsHome !== undefined);
+    const visibleDir = path.join(agentsHome, 'ava');
+    const visible = path.join(visibleDir, 'soul.md');
+    const hidden = path.join(agentsDirPath(env), 'ava.md');
+    if (replace) {
+      await mkdir(visibleDir, { recursive: true });
+      await writeFile(visible, 'kept');
+    }
+    const events = await recordSyncs(t, [hidden]);
+    await writeNewSoulFile(env, 'ava.md', 'ava', '---\nid: ava\n---\nYou are ava.\n', { replace });
+    assert.equal(await readFile(hidden, 'utf8'), '---\nid: ava\n---\nYou are ava.\n');
+    const ino = await inode(visible);
+    const bytes = events.findIndex((event) => event.ino === ino);
+    assert.ok(bytes !== -1, 'the soul\'s bytes are synced');
+    assert.deepEqual(events[bytes]!.named, [], 'before the hidden name links to them');
+    for (const dir of [visibleDir, agentsDirPath(env)]) {
+      const dirIno = await inode(dir);
+      assert.ok(events.some((event, index) => index > bytes && event.ino === dirIno), `then ${dir} is synced`);
+    }
   });
 }

@@ -13,7 +13,6 @@ import {
   rm,
   symlink,
   unlink,
-  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -500,6 +499,7 @@ export const writeNewSoulFile = async (
       await symlink(visible, hidden, 'file');
       await rename(temporary, visible);
       await syncDirectory(path.dirname(visible));
+      await syncDirectory(path.dirname(hidden));
     } catch (error) {
       await rm(temporary, { force: true });
       throw error;
@@ -514,7 +514,7 @@ export const writeNewSoulFile = async (
   }
   let wrote = true;
   try {
-    await writeFile(visible, contents, { flag: 'wx', mode: 0o644 });
+    await writeFileSynced(visible, contents, { flag: 'wx', mode: 0o644 });
   } catch (error) {
     // A soul with these exact bytes and nothing linking to it is this
     // write's own, left by a run stopped before the link below: finish it.
@@ -524,6 +524,8 @@ export const writeNewSoulFile = async (
     }
     wrote = false;
   }
+  // The soul's name is on disk before the link to it is.
+  await syncDirectory(path.dirname(visible));
   try {
     await symlink(visible, hidden, 'file');
   } catch (error) {
@@ -536,6 +538,7 @@ export const writeNewSoulFile = async (
     }
     throw error;
   }
+  await syncDirectory(path.dirname(hidden));
   return hidden;
 };
 
