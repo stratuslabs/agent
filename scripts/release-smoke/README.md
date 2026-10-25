@@ -38,8 +38,9 @@ Each check prints `PASS`, `FAIL` or `NOT RUN`, then a summary line.
   from a plain terminal.
 
 `--repo <dir>` checks another checkout, such as a tag's worktree, with this
-copy of the script. `--no-build` skips `pnpm build`. `--keep` leaves the
-scratch directory behind and prints where it is.
+copy of the script. A checkout with no `node_modules` gets
+`pnpm install --frozen-lockfile` first. `--no-build` skips `pnpm build`.
+`--keep` leaves the scratch directory behind and prints where it is.
 
 ## What it does not cover
 

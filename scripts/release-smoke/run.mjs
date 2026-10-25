@@ -111,6 +111,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const prepareInstall = () => {
   console.log(`--- install ${repo}`);
+  // A fresh tag worktree has no dependencies yet, and its build would fail on
+  // that rather than on anything the release changed.
+  if (!existsSync(path.join(repo, 'node_modules'))) {
+    const installed = run('pnpm', ['install', '--frozen-lockfile'], { cwd: repo, stdio: 'inherit' });
+    if (installed.status !== 0) {
+      fail('pnpm install failed in the checkout under test');
+    }
+  }
   if (build) {
     const built = run('pnpm', ['build'], { cwd: repo, stdio: 'inherit' });
     if (built.status !== 0) {
