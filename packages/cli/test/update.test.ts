@@ -560,9 +560,15 @@ test('service start refuses a unit whose trusted config will not load', async ()
 
 test('update fails loudly when it cannot restore a deliberately stopped daemon', async () => {
   const home = await freshHome();
+  // Stopped until something starts it: install and start ask afterwards
+  // whether the daemon is running.
+  let active = false;
   const stoppedRunner: ServiceRunner = async (command, args) => {
     if (command === 'systemctl' && args.includes('is-active')) {
-      return { code: 0, stdout: 'inactive', stderr: '' };
+      return { code: 0, stdout: active ? 'active' : 'inactive', stderr: '' };
+    }
+    if (command === 'systemctl' && (args.includes('restart') || args.includes('start') || args.includes('--now'))) {
+      active = true;
     }
     if (command === 'systemctl' && args.includes('is-enabled')) {
       return { code: 0, stdout: 'enabled', stderr: '' };
@@ -576,6 +582,8 @@ test('update fails loudly when it cannot restore a deliberately stopped daemon',
     { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: stoppedRunner },
     {},
   );
+  // Deliberately stopped before the update.
+  active = false;
 
   const { streams, output } = createStreams();
   const code = await runCli({
@@ -594,6 +602,49 @@ test('update fails loudly when it cannot restore a deliberately stopped daemon',
   // state was not restored — a script must see that as a failure.
   assert.equal(code, 1);
   assert.match(output.stderr, /now RUNNING/);
+});
+
+test('an update that leaves the daemon down on its rewritten unit exits 1', async () => {
+  // The rewrite reinstalls and starts the unit. A daemon that was running
+  // before and is not running after is a failed update, whatever the
+  // manager accepted.
+  const home = await freshHome();
+  let rewritten = false;
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: rewritten ? 3 : 0, stdout: rewritten ? 'failed' : 'active', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 0, stdout: 'enabled', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('enable')) {
+      rewritten = true;
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    {},
+  );
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      serviceSleep: async () => {},
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.ok(rewritten, 'the unit was rewritten');
+  assert.equal(code, 1, `${output.stdout}\n${output.stderr}`);
+  assert.match(output.stderr, /is not running/);
+  assert.match(output.stderr, /systemd reports the unit failed/);
 });
 
 test('update and --check treat state from a newer build as a refusal, before any side effect', async () => {
@@ -1189,9 +1240,14 @@ test('the second half of an update restarts a daemon it refuses to migrate under
   // before the stop now comes after, and must not leave the fleet down.
   const home = await freshHome();
   const starts: string[][] = [];
+  // The first half stopped it; a restart brings it back.
+  let active = false;
   const runner: ServiceRunner = async (command, args) => {
     if (command === 'systemctl' && args.includes('is-active')) {
-      return { code: 3, stdout: 'inactive', stderr: '' };
+      return active ? { code: 0, stdout: 'active', stderr: '' } : { code: 3, stdout: 'inactive', stderr: '' };
+    }
+    if (command === 'systemctl' && (args.includes('restart') || args.includes('start') || args.includes('--now'))) {
+      active = true;
     }
     if (command === 'systemctl' && args.includes('is-enabled')) {
       return { code: 0, stdout: 'enabled', stderr: '' };
@@ -1208,6 +1264,7 @@ test('the second half of an update restarts a daemon it refuses to migrate under
   await mkdir(path.dirname(stateFilePath({ homeDir: home })), { recursive: true });
   await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));
   starts.length = 0;
+  active = false;
   const { streams, output } = createStreams();
   const code = await runCli({
     argv: ['update'],

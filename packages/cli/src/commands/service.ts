@@ -70,6 +70,9 @@ export const runService = async (
     if (status.detail) {
       writeLine(streams.stdout, `  note      ${status.detail}`);
     }
+    if (status.reason) {
+      writeLine(streams.stdout, `  reason    ${status.reason}`);
+    }
     if (status.installed) {
       writeLine(streams.stdout, `  at login  ${status.runAtLogin === undefined
         ? 'unknown — the service manager did not answer'
@@ -154,8 +157,11 @@ export const runService = async (
         : stopService(serviceEnv);
 
   const result = await action;
+  // An install or start the manager accepted still fails when the daemon
+  // is not running afterwards: the exit status is what a script checks.
+  const succeeded = result.ok && (!('running' in result) || result.running === true);
   for (const message of result.messages) {
-    writeLine(result.ok ? streams.stdout : streams.stderr, message);
+    writeLine(succeeded ? streams.stdout : streams.stderr, message);
   }
-  return result.ok ? 0 : 1;
+  return succeeded ? 0 : 1;
 };

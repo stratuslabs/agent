@@ -88,7 +88,15 @@ const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
 // `stratus setup` installs the always-on service when it saves. Tests get a
 // stub: the real launchctl/systemctl would touch the developer's machine,
 // and `systemctl --user` blocks without a session bus.
-const stubServiceRunner = async () => ({ code: 0, stdout: '', stderr: '' });
+// It answers like a healthy manager: install and start ask afterwards
+// whether the daemon is running, and only say so when it is.
+const stubServiceRunner = async (command: string, args: string[]) => ({
+  code: 0,
+  stdout: command === 'launchctl' && args[0] === 'print'
+    ? '\tstate = running\n'
+    : command === 'systemctl' && args.includes('is-active') ? 'active\n' : '',
+  stderr: '',
+});
 
 const createStreams = () => {
   let stdout = '';
@@ -7096,7 +7104,7 @@ test('the launchd plist runs the daemon by absolute path and starts at login', a
     execPath: '/opt/homebrew/bin/node',
     scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
     uid: 501,
-    run: async (command, args) => { calls.push({ command, args }); return { code: 0, stdout: '', stderr: '' }; },
+    run: async (command, args) => { calls.push({ command, args }); return stubServiceRunner(command, args); },
   });
 
   assert.equal(result.ok, true);
@@ -7112,7 +7120,8 @@ test('the launchd plist runs the daemon by absolute path and starts at login', a
 
   // bootout before bootstrap, or replacing an existing job is refused with
   // "service already loaded" and the new unit never takes effect.
-  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl bootout', 'launchctl bootstrap']);
+  // Then it asks whether the daemon is actually running before saying so.
+  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
   assert.equal(calls[1]?.args[1], 'gui/501');
   // The login-vs-power-on distinction is stated, not left to be discovered
   // after a reboot leaves the roster silent.
@@ -7166,7 +7175,7 @@ test('the systemd unit restarts on failure and enables at login', async () => {
     homeDir: home,
     execPath: '/usr/bin/node',
     scriptPath: '/usr/lib/node_modules/@stratusagent/cli/dist/bin.js',
-    run: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
   });
 
   assert.equal(result.ok, true);
@@ -7186,6 +7195,7 @@ test('the systemd unit restarts on failure and enables at login', async () => {
     'systemctl --user daemon-reload',
     'systemctl --user enable --now stratusd.service',
     'systemctl --user restart stratusd.service',
+    'systemctl --user is-active stratusd.service',
   ]);
 });
 
@@ -8958,7 +8968,7 @@ test('setup installs the always-on service when it saves', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
       // Straight to Save & finish: the service is on by default, because a
       // runtime you have to remember to start is not always-on.
       setupInput: Readable.from(['9\n']),
@@ -9055,7 +9065,7 @@ test('a --no-login LaunchAgent does not smuggle RunAtLoad back in', async () => 
       platform: 'darwin',
       homeDir: home,
       uid: 501,
-      run: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
     },
     { runAtLogin: false },
   );
@@ -9079,7 +9089,7 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
 
   const calls: string[] = [];
   await installService(
-    { platform: 'linux', homeDir: home, run: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; } },
+    { platform: 'linux', homeDir: home, run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); } },
     { runAtLogin: false },
   );
 
@@ -9090,6 +9100,7 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
     'systemctl --user disable stratusd.service',
     'systemctl --user start stratusd.service',
     'systemctl --user restart stratusd.service',
+    'systemctl --user is-active stratusd.service',
   ]);
 });
 
@@ -9347,6 +9358,193 @@ test('starting a LaunchAgent works after it has been booted out', async () => {
   assert.equal(result.ok, true);
   assert.equal(calls[0]?.includes('bootstrap'), true, `expected a bootstrap first, got ${calls.join(', ')}`);
   assert.ok(calls.some((call) => /kickstart/.test(call)));
+});
+
+// What launchd and systemd answer, in order, for the job's status: each
+// `launchctl print` or `systemctl is-active` takes the next one, and the
+// last repeats. Every other command succeeds quietly.
+const managerAnswering = (answers: string[], calls: string[] = []) => {
+  let asked = 0;
+  return async (command: string, args: string[]) => {
+    calls.push([command, ...args].join(' '));
+    if ((command === 'launchctl' && args[0] === 'print') || (command === 'systemctl' && args.includes('is-active'))) {
+      const answer = answers[Math.min(asked, answers.length - 1)] ?? '';
+      asked += 1;
+      return { code: 0, stdout: answer, stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+};
+
+const loadedNeverStarted = '\tstate = not running\n\truns = 0\n\tlast exit code = (never exited)\n';
+
+test('service install says stratusd is running only once launchd reports it running', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const slept: number[] = [];
+  const result = await installService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    sleep: async (ms) => { slept.push(ms); },
+    run: managerAnswering([loadedNeverStarted, loadedNeverStarted, '\tstate = running\n\truns = 1\n\tpid = 4242\n']),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.running, true);
+  assert.equal(slept.length, 2, 'it waited between asks until launchd said running');
+  assert.ok(result.messages.some((message) => /stratusd is running, and will start again when you log in/.test(message)), result.messages.join('\n'));
+});
+
+test('service install does not claim a LaunchAgent launchd loaded but never started is running', async () => {
+  // The Products host after a reboot: the job loaded, runs = 0, nothing
+  // spawned. "stratusd is running" over that left the fleet silent.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const result = await installService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    sleep: async () => {},
+    run: managerAnswering([loadedNeverStarted]),
+  });
+
+  assert.equal(result.ok, true, 'launchd accepted the job, so the unit is installed');
+  assert.equal(result.running, false);
+  const text = result.messages.join('\n');
+  assert.doesNotMatch(text, /stratusd is running/);
+  assert.match(text, /is not running/);
+  assert.match(text, /runs = 0/);
+  assert.match(text, /stratus service start/);
+});
+
+test('service start reports a unit systemd could not keep running', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, sleep: async () => {}, run: managerAnswering(['active\n']) });
+  const result = await startService({
+    platform: 'linux',
+    homeDir: home,
+    sleep: async () => {},
+    run: managerAnswering(['activating\n', 'failed\n']),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.running, false);
+  const text = result.messages.join('\n');
+  assert.doesNotMatch(text, /stratusd started/);
+  assert.match(text, /systemd reports the unit failed/);
+  assert.match(text, /journalctl --user -u stratusd\.service/);
+});
+
+test('service status says why a loaded LaunchAgent is not running', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, sleep: async () => {}, run: managerAnswering(['\tstate = running\n']) });
+
+  const neverStarted = await readServiceStatus({ platform: 'darwin', homeDir: home, uid: 501, run: managerAnswering([loadedNeverStarted]) });
+  assert.equal(neverStarted?.running, false);
+  assert.match(neverStarted?.reason ?? '', /has not started it since it was loaded \(runs = 0\)/);
+  assert.match(neverStarted?.reason ?? '', /stratus service start/);
+
+  const exited = await readServiceStatus({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: managerAnswering(['\tstate = not running\n\truns = 3\n\tlast exit code = 1\n']),
+  });
+  assert.match(exited?.reason ?? '', /last exited with code 1/);
+  assert.ok((exited?.reason ?? '').includes(path.join(home, '.stratus', 'logs', 'stratusd.err.log')), exited?.reason);
+
+  const running = await readServiceStatus({ platform: 'darwin', homeDir: home, uid: 501, run: managerAnswering(['\tstate = running\n\truns = 1\n']) });
+  assert.equal(running?.reason, undefined);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'status'],
+    streams,
+    env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'darwin', serviceRunner: managerAnswering([loadedNeverStarted]) },
+  });
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /installed, not running/);
+  assert.match(output.stdout, /reason {4}launchd has the job loaded but has not started it/);
+});
+
+test('stratus service start exits 1 when the daemon is not running afterwards', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, sleep: async () => {}, run: managerAnswering(['\tstate = running\n']) });
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'start'],
+    streams,
+    env: {
+      cwd: home,
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'darwin',
+      serviceSleep: async () => {},
+      serviceRunner: managerAnswering([loadedNeverStarted]),
+    },
+  });
+  assert.equal(exitCode, 1);
+  assert.doesNotMatch(output.stdout, /stratusd started/);
+  assert.match(output.stderr, /is not running/);
+});
+
+test('setup reports a service the manager accepted but is not running as a failed step', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceSleep: async () => {},
+      serviceRunner: async (command, args) => ({
+        code: 0,
+        stdout: command === 'launchctl' && args[0] === 'print'
+          ? loadedNeverStarted
+          : command === 'systemctl' && args.includes('is-active') ? 'failed\n' : '',
+        stderr: '',
+      }),
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.notEqual(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /stratusd is running/);
+  assert.match(output.stderr, /is not running/);
+  assert.match(output.stderr, /Setup is saved either way/);
+  assert.ok(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+});
+
+test('the wait between status checks keeps the CLI process alive', async () => {
+  // Between two asks the wait is the only thing pending. An unref'd timer
+  // there let node exit mid-check (code 13, an unsettled top-level await)
+  // before the retries ran or the result was printed.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const script = [
+    `import { installService } from ${JSON.stringify(path.join(packageDir, 'src', 'service.ts'))};`,
+    'let asked = 0;',
+    'const result = await installService({',
+    `  platform: 'linux', homeDir: ${JSON.stringify(home)},`,
+    "  run: async (command, args) => ({ code: 0, stdout: args.includes('is-active') ? (asked++ === 0 ? 'activating' : 'active') : '', stderr: '' }),",
+    '});',
+    'console.log(`running=${result.running}`);',
+  ].join('\n');
+  const child = spawn(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });
+  child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+  const code = await new Promise<number | null>((resolve) => { child.on('close', resolve); });
+  assert.equal(code, 0, `exit ${code}\n${stdout}\n${stderr}`);
+  assert.match(stdout, /running=true/);
 });
 
 test('stopping a --no-login service does not promise it comes back at login', async () => {
@@ -9641,7 +9839,7 @@ test('a demo setup still installs, since it needs no credential at all', async (
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
     },
   });
 

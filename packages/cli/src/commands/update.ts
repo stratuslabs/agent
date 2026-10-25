@@ -20,6 +20,7 @@ import {
   serviceUnitPath,
   startService,
   stopService,
+  type ServiceActionResult,
 } from '../service.ts';
 import { legacyDaemonServing, serviceEnvFor } from '../daemon.ts';
 import { installedUnitConfigError } from './service.ts';
@@ -186,15 +187,22 @@ export const runUpdate = async (
     if (resume === 'running') {
       const restarted = await startService(serviceEnvFor(env));
       for (const message of restarted.messages) {
-        writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+        writeLine(restartedRunning(restarted) ? streams.stdout : streams.stderr, message);
       }
-      writeLine(streams.stderr, restarted.ok
+      writeLine(streams.stderr, restartedRunning(restarted)
         ? 'stratusd was restarted. Fix the failure and run `stratus update` again.'
         : 'stratusd could not be restarted either — bring it back with `stratus service start`.');
     }
     return 1;
   }
 };
+
+/**
+ * Whether a restart left stratusd running, for the line that says so. The
+ * manager accepting the start is not enough; a manager that did not say
+ * is not called a failure here, since its own line already says so.
+ */
+const restartedRunning = (restarted: ServiceActionResult): boolean => restarted.ok && restarted.running !== false;
 
 const runUpdateSteps = async (
   command: ParsedUpdateCommand,
@@ -330,9 +338,9 @@ const runUpdateSteps = async (
     if (resume === 'running') {
       const restarted = await startService(serviceEnv);
       for (const message of restarted.messages) {
-        writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+        writeLine(restartedRunning(restarted) ? streams.stdout : streams.stderr, message);
       }
-      writeLine(streams.stderr, restarted.ok
+      writeLine(streams.stderr, restartedRunning(restarted)
         ? 'stratusd was restarted on its previous unit.'
         : 'stratusd could not be restarted either — bring it back with `stratus service start`.');
     }
@@ -523,9 +531,9 @@ const runUpdateSteps = async (
     if (wasRunning) {
       const restarted = await startService(serviceEnv);
       for (const message of restarted.messages) {
-        writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+        writeLine(restartedRunning(restarted) ? streams.stdout : streams.stderr, message);
       }
-      writeLine(streams.stderr, restarted.ok
+      writeLine(streams.stderr, restartedRunning(restarted)
         ? 'stratusd was restarted on its previous unit. Fix the migration failure and run `stratus update` again.'
         : 'stratusd could not be restarted either — bring it back with `stratus service start` once the failure is fixed.');
     }
@@ -561,7 +569,7 @@ const runUpdateSteps = async (
       },
     );
     for (const message of install.messages) {
-      writeLine(install.ok ? streams.stdout : streams.stderr, message);
+      writeLine(install.ok && install.running !== false ? streams.stdout : streams.stderr, message);
     }
     if (!install.ok) {
       if (wasRunning) {
@@ -576,13 +584,19 @@ const runUpdateSteps = async (
         }
         const restarted = await startService(serviceEnv);
         for (const message of restarted.messages) {
-          writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+          writeLine(restartedRunning(restarted) ? streams.stdout : streams.stderr, message);
         }
-        writeLine(streams.stderr, restarted.ok
+        writeLine(streams.stderr, restartedRunning(restarted)
           ? 'The unit rewrite failed, so stratusd was restarted on its previous unit. Fix the failure above and run `stratus update` again.'
           : 'The unit rewrite failed AND stratusd could not be restarted — bring it back with `stratus service start`, or `stratus service install` to rewrite the unit by hand.');
       }
       return 1;
+    }
+    if (wasRunning && install.running === false) {
+      // The unit is rewritten and loaded, and the lines above say why the
+      // daemon is not running on it. The exit status has to say so too:
+      // an update that left the fleet down is not a successful one.
+      upgradeFailed = true;
     }
     if (!wasRunning) {
       // installService starts the daemon; a service that was deliberately

@@ -21,7 +21,7 @@ stratus serve --approvals remote       # ask a human in Slack instead of refusin
 stratus serve --log-format json        # the log's records as JSON lines on stdout, for docker logs / journald
 stratus service install                # keep stratusd running under launchd/systemd
 stratus service status                 # asks the service manager; exits non-zero when not running
-stratus service start
+stratus service start                  # exits non-zero unless the manager then reports it running
 stratus service stop
 stratus service uninstall
 stratus logs -f                        # what the daemon has been doing

@@ -3059,11 +3059,17 @@ export const runSetup = async (
         ok: false,
         messages: [`Could not install the always-on service: ${error instanceof Error ? error.message : String(error)}`],
       }));
+      // Installed but not running is a failed step too: the always-on
+      // service is the part of setup that is meant to be answering.
+      const running = !('running' in result) || result.running === true;
       for (const message of result.messages) {
-        writeLine(result.ok ? streams.stdout : streams.stderr, message);
+        writeLine(result.ok && running ? streams.stdout : streams.stderr, message);
       }
       if (!result.ok) {
         writeLine(streams.stderr, `Setup is saved either way — start the daemon yourself with \`${serveCommand()}\`.`);
+        serviceStepFailed = true;
+      } else if (!running) {
+        writeLine(streams.stderr, 'Setup is saved either way. Check `stratus service status` once you have looked at the logs.');
         serviceStepFailed = true;
       }
     }

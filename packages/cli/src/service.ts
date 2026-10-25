@@ -43,6 +43,8 @@ export interface ServiceEnvironment {
   /** The installing shell's PATH; `serviceEnvFor` reads it from the CLI's environment. */
   path?: string;
   run?: ServiceRunner;
+  /** Waits between asking the manager whether a start took. Injectable so tests do not wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export const servicePlatform = (env: ServiceEnvironment = {}): ServicePlatform | undefined => {
@@ -306,7 +308,120 @@ export interface ServiceStatus {
   unitPath: string;
   /** Present when the platform's status command failed outright. */
   detail?: string;
+  /** Why the manager says it is not running, when its answer says. */
+  reason?: string;
 }
+
+const errorLogPath = (env: ServiceEnvironment): string => path.join(homeOf(env), '.stratus', 'logs', 'stratusd.err.log');
+
+interface RunningAnswer {
+  running: boolean | undefined;
+  /** Why it is not running, when the manager's answer says. */
+  reason?: string;
+  /** A state on its way somewhere (systemd's activating); worth asking again. */
+  transitional?: boolean;
+}
+
+/**
+ * Whether a daemon is alive is the manager's answer, never the unit file's.
+ * A manager that did not answer is undefined, not false: only a
+ * recognizable "no" (a job launchd cannot find, a state word) reads as
+ * stopped.
+ */
+const askRunning = async (env: ServiceEnvironment, platform: ServicePlatform): Promise<RunningAnswer> => {
+  const run = runnerFor(env);
+  if (platform === 'launchd') {
+    const printed = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
+    if (printed.code !== 0) {
+      return /could not find|no such/i.test(`${printed.stderr} ${printed.stdout}`)
+        ? { running: false, reason: 'launchd has not loaded the job. `stratus service start` loads and starts it.' }
+        : { running: undefined };
+    }
+    // `state = running` appears only while the process is alive; a loaded
+    // but stopped job prints `state = not running`. Output with no state
+    // line at all is not an answer.
+    const state = /^\s*state\s*=\s*(.+?)\s*$/m.exec(printed.stdout)?.[1];
+    if (state === undefined) {
+      return { running: undefined };
+    }
+    if (state === 'running') {
+      return { running: true };
+    }
+    // A job loaded at boot that launchd never spawned (the Products host
+    // after a reboot) reads exactly like a stopped one unless its run count
+    // is looked at: nothing has exited, nothing has been logged.
+    const runs = /^\s*runs\s*=\s*(\d+)/m.exec(printed.stdout)?.[1];
+    const exitCode = /^\s*last exit code\s*=\s*(-?\d+)/m.exec(printed.stdout)?.[1];
+    const reason = runs === '0'
+      ? 'launchd has the job loaded but has not started it since it was loaded (runs = 0). Start it with `stratus service start`.'
+      : exitCode !== undefined
+        ? `It last exited with code ${exitCode}; see ${errorLogPath(env)}.`
+        : undefined;
+    return { running: false, ...(reason !== undefined ? { reason } : {}) };
+  }
+  const active = await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT]);
+  const state = active.stdout.trim();
+  // `reloading` is an active unit re-reading its config — running.
+  if (state === 'active' || state === 'reloading') {
+    return { running: true };
+  }
+  if (state === 'failed') {
+    return { running: false, reason: `systemd reports the unit failed; see \`journalctl --user -u ${SYSTEMD_UNIT}\`.` };
+  }
+  if (state === 'inactive') {
+    return { running: false };
+  }
+  // Transitional states (activating, deactivating) are neither a "yes"
+  // nor a "no" a caller should act on, same as a manager that never
+  // answered — but they are worth asking about again.
+  return { running: undefined, transitional: state === 'activating' || state === 'deactivating' };
+};
+
+/** How often, and how many times, a start is checked on before it is called failed. */
+const START_CHECK_INTERVAL_MS = 500;
+const START_CHECK_ATTEMPTS = 20;
+
+// Referenced on purpose: between two asks this timer is the only thing
+// pending, and an unref'd one let the CLI exit mid-check (code 13, an
+// unsettled top-level await) without the retries or the result.
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+/**
+ * Asks the manager, after it accepted a start, whether the daemon is
+ * actually running — until it says yes, or for about ten seconds.
+ *
+ * The manager accepting a job is not the job running: launchd can load a
+ * LaunchAgent and never spawn it, and systemd reports a `Type=simple` unit
+ * started the moment it forks. A "no" is asked again, since a spawn takes
+ * a moment and systemd restarts a failed unit; a manager that did not
+ * answer at all is not, because asking twenty more times only multiplies
+ * its timeout.
+ */
+const confirmRunning = async (env: ServiceEnvironment, platform: ServicePlatform): Promise<RunningAnswer> => {
+  const sleep = env.sleep ?? defaultSleep;
+  let answer = await askRunning(env, platform);
+  for (let attempt = 1; attempt < START_CHECK_ATTEMPTS && answer.running !== true; attempt += 1) {
+    if (answer.running === undefined && !answer.transitional) {
+      break;
+    }
+    await sleep(START_CHECK_INTERVAL_MS);
+    answer = await askRunning(env, platform);
+  }
+  return answer;
+};
+
+/** The lines to show when a start the manager accepted did not leave a running daemon. */
+const notRunningMessages = (env: ServiceEnvironment, platform: ServicePlatform, answer: RunningAnswer): string[] => {
+  const manager = platform === 'launchd' ? 'launchd' : 'systemd';
+  if (answer.running === undefined) {
+    return [`${manager} accepted stratusd, but did not say whether it is running. Check \`stratus service status\`.`];
+  }
+  return [
+    `${manager} accepted stratusd, but it is not running ${(START_CHECK_INTERVAL_MS * START_CHECK_ATTEMPTS) / 1000}s later.`,
+    ...(answer.reason !== undefined ? [answer.reason] : []),
+    `Logs: ${errorLogPath(env)}, and \`stratus logs\`.`,
+  ];
+};
 
 export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<ServiceStatus | undefined> => {
   const platform = servicePlatform(env);
@@ -315,35 +430,10 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
   }
   const unitPath = serviceUnitPath(env);
   const run = runnerFor(env);
-  // Whether a daemon is alive is the manager's answer, never the file's —
-  // asked the same way whatever the unit file turned out to be. A manager
-  // that did not answer is undefined, not false: only a recognizable "no"
-  // (a job launchd cannot find, a systemd state word) reads as stopped.
-  const isRunning = async (): Promise<boolean | undefined> => {
-    if (platform === 'launchd') {
-      const printed = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
-      if (printed.code === 0) {
-        // `state = running` appears only while the process is alive; a
-        // loaded but stopped job prints `state = not running`.
-        return /state\s*=\s*running/.test(printed.stdout);
-      }
-      return /could not find|no such/i.test(`${printed.stderr} ${printed.stdout}`) ? false : undefined;
-    }
-    const active = await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT]);
-    const state = active.stdout.trim();
-    // `reloading` is an active unit re-reading its config — running.
-    if (state === 'active' || state === 'reloading') {
-      return true;
-    }
-    if (state === 'inactive' || state === 'failed') {
-      return false;
-    }
-    // Transitional states (activating, deactivating) are neither a "yes"
-    // nor a "no" a caller should act on, same as a manager that never
-    // answered.
-    return undefined;
+  const isRunning = async (): Promise<Pick<ServiceStatus, 'running' | 'reason'>> => {
+    const { running, reason } = await askRunning(env, platform);
+    return { running, ...(reason !== undefined ? { reason } : {}) };
   };
-
   let contents: string;
   try {
     contents = await readFile(unitPath, 'utf8');
@@ -355,7 +445,7 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
       return {
         platform,
         installed: true,
-        running: await isRunning(),
+        ...await isRunning(),
         runAtLogin: undefined,
         unitPath,
         detail: `${unitPath} exists but could not be read (${error instanceof Error ? error.message : String(error)})`,
@@ -383,16 +473,23 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
   return {
     platform,
     installed: true,
-    running: await isRunning(),
+    ...await isRunning(),
     runAtLogin,
     unitPath,
   };
 };
 
 export interface ServiceActionResult {
+  /** The manager did what was asked (wrote, loaded, started or stopped the unit). */
   ok: boolean;
   /** Lines to show the user, in order. */
   messages: string[];
+  /**
+   * For an install or start the manager accepted: whether it then reported
+   * the daemon running. undefined when it did not say. Accepted is not
+   * running — a LaunchAgent can be loaded and never spawned.
+   */
+  running?: boolean | undefined;
 }
 
 export interface ServiceCommandInfo {
@@ -521,15 +618,22 @@ export const installService = async (
       if (started.code !== 0) {
         return { ok: false, messages: [...messages, `launchctl kickstart failed: ${started.stderr.trim() || started.stdout.trim()}`] };
       }
+      const confirmed = await confirmRunning(env, platform);
+      if (confirmed.running !== true) {
+        return { ok: true, running: confirmed.running, messages: [...messages, ...notRunningMessages(env, platform, confirmed)] };
+      }
       messages.push('stratusd is running. It will not start at login, and will not be restarted if it crashes.');
-      return { ok: true, messages };
+      return { ok: true, running: true, messages };
     }
-    messages.push('stratusd is running, and will start again when you log in.');
+    const confirmed = await confirmRunning(env, platform);
+    messages.push(...(confirmed.running === true
+      ? ['stratusd is running, and will start again when you log in.']
+      : notRunningMessages(env, platform, confirmed)));
     // Said plainly rather than left to be discovered: a LaunchAgent is
     // tied to a login session, so a headless machine that reboots without
     // one comes back with no agents running.
     messages.push('Note: a LaunchAgent starts at login, not at power-on. For a machine that should recover from a reboot unattended, turn on automatic login in System Settings.');
-    return { ok: true, messages };
+    return { ok: true, running: confirmed.running, messages };
   }
 
   const reload = await run('systemctl', ['--user', 'daemon-reload']);
@@ -561,13 +665,18 @@ export const installService = async (
   if (restart.code !== 0) {
     return { ok: false, messages: [...messages, `systemctl restart failed: ${restart.stderr.trim() || restart.stdout.trim()}`] };
   }
-  messages.push(runAtLogin
-    ? 'stratusd is running, and will start again when you log in.'
-    : 'stratusd is running. It will not start automatically.');
+  const confirmed = await confirmRunning(env, platform);
+  if (confirmed.running !== true) {
+    messages.push(...notRunningMessages(env, platform, confirmed));
+  } else {
+    messages.push(runAtLogin
+      ? 'stratusd is running, and will start again when you log in.'
+      : 'stratusd is running. It will not start automatically.');
+  }
   if (runAtLogin) {
     messages.push('Note: a user service starts at login. `loginctl enable-linger` keeps it running on a machine you do not stay logged in to.');
   }
-  return { ok: true, messages };
+  return { ok: true, running: confirmed.running, messages };
 };
 
 export const uninstallService = async (env: ServiceEnvironment = {}): Promise<ServiceActionResult> => {
@@ -600,6 +709,13 @@ export const uninstallService = async (env: ServiceEnvironment = {}): Promise<Se
   return { ok: true, messages: [`Removed ${unitPath}. stratusd is stopped and will not start at login.`] };
 };
 
+const startedResult = async (env: ServiceEnvironment, platform: ServicePlatform): Promise<ServiceActionResult> => {
+  const confirmed = await confirmRunning(env, platform);
+  return confirmed.running === true
+    ? { ok: true, running: true, messages: ['stratusd started.'] }
+    : { ok: true, running: confirmed.running, messages: notRunningMessages(env, platform, confirmed) };
+};
+
 export const startService = async (env: ServiceEnvironment = {}): Promise<ServiceActionResult> => {
   const platform = servicePlatform(env);
   if (!platform) {
@@ -625,7 +741,7 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
     }
     const result = await run('systemctl', ['--user', 'restart', SYSTEMD_UNIT]);
     return result.code === 0
-      ? { ok: true, messages: ['stratusd started.'] }
+      ? startedResult(env, platform)
       : { ok: false, messages: [`Could not start stratusd: ${result.stderr.trim() || result.stdout.trim()}`, 'Is it installed? Run `stratus service install`.'] };
   }
 
@@ -640,7 +756,7 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
   // means after a config change.
   const result = await run('launchctl', ['kickstart', '-k', `${domain}/${SERVICE_LABEL}`]);
   return result.code === 0
-    ? { ok: true, messages: ['stratusd started.'] }
+    ? startedResult(env, platform)
     : { ok: false, messages: [`Could not start stratusd: ${result.stderr.trim() || result.stdout.trim()}`, 'Is it installed? Run `stratus service install`.'] };
 };
 
