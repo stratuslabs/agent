@@ -162,6 +162,22 @@ const provenanceOf = (entry: MemoryEntry): Pick<MemoryEntry, 'trust' | 'origin'>
   };
 };
 
+/** A whole record found between the zeros of a torn line, if the piece is one. */
+const tornPieceRecord = (piece: string): MemoryRecord | undefined => {
+  if (piece.trim().length === 0) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(piece);
+  } catch {
+    return undefined;
+  }
+  return isTombstoneRecord(parsed) || isReassertionRecord(parsed) || isPinRecord(parsed) || isEntryRecord(parsed)
+    ? parsed
+    : undefined;
+};
+
 /** Every record in the file, in file order — the shape the index applies. */
 const parseOrderedRecords = (raw: string, filePath: string): MemoryRecord[] => {
   const ordered: MemoryRecord[] = [];
@@ -174,8 +190,16 @@ const parseOrderedRecords = (raw: string, filePath: string): MemoryRecord[] => {
     // volume, can keep the size an append gave the file without the data,
     // which reads back as zeros. Refusing the line would take the agent's
     // whole memory out of every turn until someone repaired the file, for
-    // a record that is gone either way.
+    // a record that is gone either way. The zeros can also swallow a
+    // newline while a later append did land, so each piece between them
+    // that is a whole record is kept, and the rest is the damage.
     if (line.includes('\u0000')) {
+      for (const piece of line.split(/\u0000+/)) {
+        const record = tornPieceRecord(piece);
+        if (record !== undefined) {
+          ordered.push(record);
+        }
+      }
       continue;
     }
     let parsed: unknown;

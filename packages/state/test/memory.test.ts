@@ -297,6 +297,23 @@ test('a line of zero bytes left by a crash or a live snapshot is skipped, and th
   assert.equal((await reopened.search('ava', 'puffins')).entries.length, 1);
 });
 
+test('a record that landed after a hole that swallowed a newline is kept', async () => {
+  // Writeback order is not file order: a later append can reach the disk
+  // while an earlier one, newline and all, reads back as zeros.
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'a fact before the hole');
+  const lost = entryLine('ava:memory:lost', 'ava', 'a fact lost to the hole', '2026-10-25T07:37:48.000Z');
+  const later = entryLine('ava:memory:later', 'ava', 'a fact that landed after it', '2026-10-25T07:37:49.000Z');
+  await appendFile(filePath, Buffer.concat([Buffer.from(lost.slice(0, 30)), Buffer.alloc(lost.length - 30), Buffer.from(later)]));
+  const reopened = createFileMemoryStore(filePath);
+  assert.deepEqual(
+    (await reopened.list('ava')).entries.map((entry) => entry.content).sort(),
+    ['a fact before the hole', 'a fact that landed after it'],
+  );
+  assert.equal((await reopened.search('ava', 'landed')).entries.length, 1);
+});
+
 test('an index saved before the torn write reached the disk is not trusted by the next process', async () => {
   // The index is SQLite and flushes; the JSONL did not. Restored from a
   // live snapshot, the index can hold a record whose line is now zeros,
