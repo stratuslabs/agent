@@ -276,6 +276,40 @@ test('a hand-added line that parses but is not a record fails with the error tha
   await assert.rejects(() => createFileMemoryStore(missingField).list('ava'), /invalid line.*memory\.jsonl/);
 });
 
+test('a line of zero bytes left by a crash or a live snapshot is skipped, and the agent keeps remembering', async () => {
+  // What a running host's volume snapshot restored with (Fly, stratusd 0.13.5):
+  // the file's size covered the last append but its data block never reached
+  // the disk, so the tail read back as NUL bytes. A crash before writeback
+  // leaves the same thing.
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'the first fact about terns');
+  await appendFile(filePath, Buffer.alloc(2275));
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content), ['the first fact about terns']);
+  assert.equal((await store.search('ava', 'terns')).entries.length, 1);
+
+  await store.append('ava', 'the next fact about puffins');
+  const reopened = createFileMemoryStore(filePath);
+  assert.deepEqual(
+    (await reopened.list('ava')).entries.map((entry) => entry.content).sort(),
+    ['the first fact about terns', 'the next fact about puffins'],
+  );
+  assert.equal((await reopened.search('ava', 'puffins')).entries.length, 1);
+});
+
+test('a record cut off where its block was lost is skipped too, wherever it sits', async () => {
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'a fact before the tear');
+  const torn = entryLine('ava:memory:torn', 'ava', 'a fact that never fully landed', '2026-10-25T07:37:49.000Z');
+  await appendFile(filePath, Buffer.concat([Buffer.from(torn.slice(0, 40)), Buffer.alloc(300), Buffer.from('\n')]));
+  await store.append('ava', 'a fact after the tear');
+  assert.deepEqual(
+    (await createFileMemoryStore(filePath).list('ava')).entries.map((entry) => entry.content).sort(),
+    ['a fact after the tear', 'a fact before the tear'],
+  );
+});
+
 test('an over-budget hand-written entry cannot starve the entries behind it', async () => {
   const filePath = path.join(await tempDir(), 'memory.jsonl');
   const store = createFileMemoryStore(filePath);

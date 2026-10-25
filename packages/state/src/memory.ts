@@ -169,6 +169,15 @@ const parseOrderedRecords = (raw: string, filePath: string): MemoryRecord[] => {
     if (line.trim().length === 0) {
       continue;
     }
+    // A NUL byte is a torn write, never a record: JSON.stringify escapes
+    // U+0000, and nobody types one. A crash, or a snapshot of a running
+    // volume, can keep the size an append gave the file without the data,
+    // which reads back as zeros. Refusing the line would take the agent's
+    // whole memory out of every turn until someone repaired the file, for
+    // a record that is gone either way.
+    if (line.includes('\u0000')) {
+      continue;
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
