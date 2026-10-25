@@ -897,6 +897,14 @@ export const createFileMemoryStore = (
    * - Anything else — shrunk, edited in place, replaced, a stale schema
    *   stamp — → full rebuild. The failure direction is rebuild, never trust.
    */
+  // The stat-only shortcut trusts that bytes with an unchanged inode, size
+  // and mtime are the bytes indexed. Within one process that holds. Across
+  // a crash or a restored snapshot it need not: SQLite flushes the index,
+  // the JSONL append may not have reached the disk, and the lost bytes read
+  // back as zeros under the same stat. So the first catch-up in a process
+  // reads and digests the file before it trusts the index.
+  let digestChecked = false;
+
   const planCatchUp = async (snapshot: IndexWatermark & { schema?: string | undefined }): Promise<CatchUpPlan> => {
     // A stamp from another schema is a rebuild trigger, not an error.
     const schemaStale = snapshot.schema !== undefined && snapshot.schema !== INDEX_SCHEMA_VERSION;
@@ -916,7 +924,8 @@ export const createFileMemoryStore = (
     }
 
     if (
-      snapshot.schema === INDEX_SCHEMA_VERSION
+      digestChecked
+      && snapshot.schema === INDEX_SCHEMA_VERSION
       && String(fileStat.ino) === base.inode
       && fileStat.size === base.offset
       && String(fileStat.mtimeMs) === base.mtimeMs
@@ -936,6 +945,16 @@ export const createFileMemoryStore = (
       && consumedEnd >= base.offset
       && digestOf(buffer.subarray(0, base.offset)) === base.digest;
 
+    if (
+      pureAppend
+      && consumedEnd === base.offset
+      && snapshot.schema === INDEX_SCHEMA_VERSION
+      && String(fileStat.ino) === base.inode
+      && String(fileStat.mtimeMs) === base.mtimeMs
+    ) {
+      // The first look this process takes, and the bytes are the ones indexed.
+      return { action: 'none', clear: false, records: [], watermark: base };
+    }
     const from = pureAppend ? base.offset : 0;
     const records = parseOrderedRecords(buffer.subarray(from, consumedEnd).toString('utf8'), filePath);
     return {
@@ -969,6 +988,7 @@ export const createFileMemoryStore = (
       const snapshot = readWatermark(database);
       const plan = await planCatchUp(snapshot);
       if (plan.action === 'none') {
+        digestChecked = true;
         return;
       }
       database.exec('BEGIN IMMEDIATE;');
@@ -988,6 +1008,7 @@ export const createFileMemoryStore = (
           writeWatermark(database, finalPlan.watermark);
         }
         database.exec('COMMIT;');
+        digestChecked = true;
         return;
       } catch (error) {
         try {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -295,6 +295,35 @@ test('a line of zero bytes left by a crash or a live snapshot is skipped, and th
     ['the first fact about terns', 'the next fact about puffins'],
   );
   assert.equal((await reopened.search('ava', 'puffins')).entries.length, 1);
+});
+
+test('an index saved before the torn write reached the disk is not trusted by the next process', async () => {
+  // The index is SQLite and flushes; the JSONL did not. Restored from a
+  // live snapshot, the index can hold a record whose line is now zeros,
+  // with the file's inode, size and mtime exactly as the index recorded.
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'a fact about terns');
+  await store.append('ava', 'a fact about puffins');
+  // A whole-millisecond mtime, so putting it back below restores it exactly.
+  const mtime = new Date(Math.floor(Date.now() / 1000) * 1000 - 60_000);
+  await utimes(filePath, mtime, mtime);
+  assert.equal((await store.search('ava', 'puffins')).entries.length, 1);
+
+  const raw = await readFile(filePath);
+  const tornAt = raw.indexOf('\n') + 1;
+  const before = await stat(filePath);
+  const handle = await open(filePath, 'r+');
+  await handle.write(Buffer.alloc(raw.length - tornAt), 0, raw.length - tornAt, tornAt);
+  await handle.close();
+  await utimes(filePath, mtime, mtime);
+  const after = await stat(filePath);
+  assert.equal(String(after.mtimeMs), String(before.mtimeMs), 'the test must reproduce an unchanged stat');
+
+  const restarted = createFileMemoryStore(filePath);
+  assert.deepEqual((await restarted.search('ava', 'puffins')).entries, []);
+  assert.equal((await restarted.search('ava', 'terns')).entries.length, 1);
+  assert.deepEqual((await restarted.list('ava')).entries.map((entry) => entry.content), ['a fact about terns']);
 });
 
 test('a record cut off where its block was lost is skipped too, wherever it sits', async () => {
