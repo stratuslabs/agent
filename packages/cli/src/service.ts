@@ -381,7 +381,10 @@ const askRunning = async (env: ServiceEnvironment, platform: ServicePlatform): P
 const START_CHECK_INTERVAL_MS = 500;
 const START_CHECK_ATTEMPTS = 20;
 
-const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms).unref?.(); });
+// Referenced on purpose: between two asks this timer is the only thing
+// pending, and an unref'd one let the CLI exit mid-check (code 13, an
+// unsettled top-level await) without the retries or the result.
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 /**
  * Asks the manager, after it accepted a start, whether the daemon is

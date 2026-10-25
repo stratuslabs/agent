@@ -9523,6 +9523,30 @@ test('setup reports a service the manager accepted but is not running as a faile
   assert.ok(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
 });
 
+test('the wait between status checks keeps the CLI process alive', async () => {
+  // Between two asks the wait is the only thing pending. An unref'd timer
+  // there let node exit mid-check (code 13, an unsettled top-level await)
+  // before the retries ran or the result was printed.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const script = [
+    `import { installService } from ${JSON.stringify(path.join(packageDir, 'src', 'service.ts'))};`,
+    'let asked = 0;',
+    'const result = await installService({',
+    `  platform: 'linux', homeDir: ${JSON.stringify(home)},`,
+    "  run: async (command, args) => ({ code: 0, stdout: args.includes('is-active') ? (asked++ === 0 ? 'activating' : 'active') : '', stderr: '' }),",
+    '});',
+    'console.log(`running=${result.running}`);',
+  ].join('\n');
+  const child = spawn(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });
+  child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+  const code = await new Promise<number | null>((resolve) => { child.on('close', resolve); });
+  assert.equal(code, 0, `exit ${code}\n${stdout}\n${stderr}`);
+  assert.match(stdout, /running=true/);
+});
+
 test('stopping a --no-login service does not promise it comes back at login', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await installService(
