@@ -24,6 +24,7 @@ import { type StateEnvironment, readHomeDirectory, readNonEmptyString, readProce
 import { agentStateDirPath, agentWorkspacePath, agentsDirPath, foldedAgentId, stratusHomePath } from './paths.ts';
 import { DEFAULT_STRATUS_AGENT, loadSoulFile } from './souls.ts';
 import { remapLedger } from './workspace-migration.ts';
+import { syncDirectory, writeFileSynced } from './durable-write.ts';
 
 // ---- the agents folder ----------------------------------------------------
 //
@@ -483,7 +484,8 @@ export const writeNewSoulFile = async (
     ? claimAgentsHome(env)
     : undefined;
   if (agentsHome === undefined) {
-    await writeFile(hidden, contents, { flag: 'wx' });
+    await writeFileSynced(hidden, contents, { flag: 'wx' });
+    await syncDirectory(path.dirname(hidden));
     return hidden;
   }
   const visible = visibleSoulPathIn(agentsHome, agentId);
@@ -494,9 +496,10 @@ export const writeNewSoulFile = async (
     // the rename the link serves the old soul, which is still a whole soul.
     const temporary = `${visible}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporary, contents, { flag: 'wx', mode: 0o644 });
+      await writeFileSynced(temporary, contents, { flag: 'wx', mode: 0o644 });
       await symlink(visible, hidden, 'file');
       await rename(temporary, visible);
+      await syncDirectory(path.dirname(visible));
     } catch (error) {
       await rm(temporary, { force: true });
       throw error;
@@ -709,9 +712,10 @@ const surfaceWorkspace = async (env: StateEnvironment, agentsHome: string, agent
   await mkdir(path.dirname(visible), { recursive: true, mode: 0o700 });
   // Staged and renamed into place, so the marker is whole or absent.
   const stagedMarker = `${marker}.${randomUUID()}.tmp`;
-  await writeFile(stagedMarker, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+  await writeFileSynced(stagedMarker, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
   try {
     await rename(stagedMarker, marker);
+    await syncDirectory(path.dirname(marker));
   } catch (error) {
     await rm(stagedMarker, { force: true });
     throw error;

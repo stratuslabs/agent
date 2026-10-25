@@ -196,6 +196,8 @@ import {
   type RuntimeSelection,
   type StateEnvironment,
   foldedAgentId,
+  syncDirectory,
+  writeFileSynced,
 } from '@stratusagent/state';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
@@ -693,8 +695,9 @@ const writeIntakeState = async (env: StateEnvironment, state: IntakeState): Prom
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const staging = `${file}.${randomBytes(8).toString('hex')}`;
   try {
-    await writeFile(staging, `${JSON.stringify(state)}\n`, { flag: 'wx', mode: 0o600 });
+    await writeFileSynced(staging, `${JSON.stringify(state)}\n`, { flag: 'wx', mode: 0o600 });
     await rename(staging, file);
+    await syncDirectory(path.dirname(file));
   } finally {
     await rm(staging, { force: true });
   }

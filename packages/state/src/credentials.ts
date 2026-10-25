@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { isValidAgentId } from '@stratusagent/agents';
 import {
@@ -15,6 +15,7 @@ import {
   CREDENTIAL_PROVIDER_NAMES,
   type CredentialProviderName,
 } from './provider-names.ts';
+import { syncDirectory, writeFileSynced } from './durable-write.ts';
 
 /**
  * A stored sign-in for a provider, kept in ~/.stratus/credentials.json.
@@ -110,12 +111,13 @@ const writeRawCredentialsFile = async (env: StateEnvironment, contents: Record<s
   // Unique per write, so two writers never share a temporary file.
   const temporary = `${filePath}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, `${JSON.stringify(contents, null, 2)}\n`, { mode: 0o600 });
+    await writeFileSynced(temporary, `${JSON.stringify(contents, null, 2)}\n`, { mode: 0o600 });
     // Before the rename rather than after: the destination must never exist
     // at a looser mode, even briefly. `writeFile`'s mode applies only when
     // it creates the file, so the explicit chmod stays.
     await chmod(temporary, 0o600);
     await rename(temporary, filePath);
+    await syncDirectory(path.dirname(filePath));
   } catch (error) {
     // A failed write must not leave a file holding credentials behind.
     await rm(temporary, { force: true });

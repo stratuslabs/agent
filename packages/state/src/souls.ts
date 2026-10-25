@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { formatSoul, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { loadConfigFile } from './config-file.ts';
@@ -12,6 +12,7 @@ import {
   readNonEmptyString,
 } from './environment.ts';
 import { agentsDirPath, foldedAgentId } from './paths.ts';
+import { syncDirectory, writeFileSynced } from './durable-write.ts';
 
 // The agent every run uses when no soul is configured. A Stratus agent is
 // a Stratus agent — never "the model" — whichever provider serves it.
@@ -177,8 +178,9 @@ export const grantSoulCredential = async (
     const target = await realpath(soulPath);
     const temporary = `${target}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporary, rendered, { mode: (await stat(target)).mode & 0o777 });
+      await writeFileSynced(temporary, rendered, { mode: (await stat(target)).mode & 0o777 });
       await rename(temporary, target);
+      await syncDirectory(path.dirname(target));
     } catch (error) {
       await rm(temporary, { force: true });
       throw error;

@@ -584,3 +584,35 @@ test('an empty STRATUS_GATEWAY_TOKEN_FILE is the same as unset', async () => {
   const token = await ensureGatewayToken({ homeDir: home, processEnv: { STRATUS_GATEWAY_TOKEN_FILE: '' } });
   assert.ok(token.length >= 32);
 });
+
+// A Fly volume snapshot taken 65 s after a fresh start held a zero-byte
+// gateway-token, and the daemon refused to start on the restored volume:
+// the name had reached the disk before the bytes. The token is now flushed
+// while it is still the staging file, and the directory after the link.
+test('a new gateway token is flushed before it is linked into place, then its directory', async (t) => {
+  const { open } = await import('node:fs/promises');
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const stratus = path.join(home, '.stratus');
+  await mkdir(stratus, { recursive: true });
+  const tokenPath = path.join(stratus, 'gateway-token');
+  const probe = await open(path.join(stratus, 'probe'), 'w');
+  const proto = Object.getPrototypeOf(probe) as { sync: () => Promise<void>; stat: () => Promise<{ ino: number }> };
+  await probe.close();
+  const { sync } = proto;
+  const events: Array<{ ino: number; linked: boolean }> = [];
+  t.mock.method(proto, 'sync', async function (this: typeof proto) {
+    const { ino } = await this.stat();
+    const linked = (await stat(tokenPath).catch(() => undefined))?.ino === ino;
+    events.push({ ino, linked });
+    return sync.call(this);
+  });
+  const token = await ensureGatewayToken(env);
+  assert.ok(token.length > 0);
+  const tokenIno = (await stat(tokenPath)).ino;
+  const bytes = events.findIndex((event) => event.ino === tokenIno);
+  assert.ok(bytes !== -1, 'the token bytes are synced');
+  assert.equal(events[bytes]!.linked, false, 'while still the staging file, before the link publishes it');
+  const dirIno = (await stat(stratus)).ino;
+  assert.ok(events.some((event, index) => index > bytes && event.ino === dirIno), 'then the directory is synced');
+});
