@@ -73,12 +73,15 @@ ReadWritePaths=/var/lib/stratus
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
-ProtectHostname=yes
+# Not set: ProtectKernelTunables=, ProtectKernelLogs= and ProtectHostname=.
+# Each one mounts over a file under /proc, and the kernel refuses a fresh
+# /proc inside a user namespace while part of the outer one is hidden, so
+# bubblewrap (below) could start but never run a command. What they guard
+# needs a capability this account doesn't hold: writing /proc/sys, reading
+# the kernel log, setting the hostname.
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 # tool-shell runs every agent command in bubblewrap, which needs a user,
