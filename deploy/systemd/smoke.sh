@@ -176,6 +176,26 @@ if sudo systemctl start "$PROBE" 2>/dev/null; then
 else
   echo "shell sandbox: bwrap cannot start under the unit: $(sudo journalctl -u "$PROBE" -o cat --no-pager | grep -m 1 '^bwrap' || echo 'no message from bwrap')"
 fi
+# DIAGNOSIS (temporary): which of the unit's lines refuse bwrap.
+variant() { # name sed-expression...
+  local name=$1; shift
+  sudo sed "$@" "/etc/systemd/system/$PROBE" | sudo tee "/etc/systemd/system/stratus-diag-$name.service" >/dev/null
+  sudo systemctl daemon-reload
+  if sudo systemctl start "stratus-diag-$name.service" 2>/dev/null; then
+    echo "diag $name: bwrap starts"
+  else
+    echo "diag $name: bwrap fails: $(sudo journalctl -u "stratus-diag-$name.service" -o cat --no-pager | grep -m 1 '^bwrap' || echo '?')"
+  fi
+  sudo rm -f "/etc/systemd/system/stratus-diag-$name.service"
+}
+variant ns-no -e 's/^RestrictNamespaces=yes$/RestrictNamespaces=no/'
+variant ns-list -e 's/^RestrictNamespaces=yes$/RestrictNamespaces=user pid ipc mnt/'
+variant mount -e 's/^SystemCallFilter=@system-service$/SystemCallFilter=@system-service @mount/'
+variant ns-list-mount -e 's/^RestrictNamespaces=yes$/RestrictNamespaces=user pid ipc mnt/' -e 's/^SystemCallFilter=@system-service$/SystemCallFilter=@system-service @mount/'
+variant no-filter -e 's/^RestrictNamespaces=yes$/RestrictNamespaces=no/' -e '/^SystemCallFilter=/d'
+variant ns-list-mount-nodevs -e 's/^RestrictNamespaces=yes$/RestrictNamespaces=user pid ipc mnt/' -e 's/^SystemCallFilter=@system-service$/SystemCallFilter=@system-service @mount/' -e '/^PrivateDevices=/d'
+variant ns-list-mount-noprotect -e 's/^RestrictNamespaces=yes$/RestrictNamespaces=user pid ipc mnt/' -e 's/^SystemCallFilter=@system-service$/SystemCallFilter=@system-service @mount/' -e '/^Protect/d' -e '/^PrivateTmp/d' -e '/^PrivateDevices/d'
+sudo systemctl daemon-reload
 if out=$(sudo -u stratus /usr/bin/bwrap --ro-bind / / --unshare-pid -- /bin/true 2>&1); then
   echo "shell sandbox: bwrap starts as stratus outside the unit"
 else
