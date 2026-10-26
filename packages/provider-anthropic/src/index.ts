@@ -1030,7 +1030,10 @@ export const createAnthropicProvider = ({
         // a decision to stay quiet either.
         const ended = response.stop_reason === 'end_turn' || response.stop_reason === 'stop_sequence';
         if (!isUnaddressedTurn(request.session) || !ended) {
-          throw new Error('Claude returned an empty response.');
+          // With its stop reason, so a refusal reads as one and not as a
+          // fault of ours, the way the OpenAI-compatible adapter names its
+          // finish_reason.
+          throw new Error(`Claude returned an empty response (stop_reason: ${response.stop_reason ?? 'none'}).`);
         }
       }
 

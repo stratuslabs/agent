@@ -980,6 +980,22 @@ test('a cache bucket the API leaves null is absent rather than zero', async () =
   assert.equal(response.usage?.model, DEFAULT_ANTHROPIC_MODEL);
 });
 
+test('an empty response names the stop reason that ended it', async () => {
+  // A refusal ends a turn with no blocks. Without its stop reason the
+  // person sees only "empty response", which reads as a bug of ours.
+  const { fetchImpl } = createMockFetch([apiMessage([], 'refusal'), apiMessage([], 'pause_turn')]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+
+  await assert.rejects(
+    () => provider.generate({ session: createSession() }),
+    (error: Error) => error.message === 'Claude returned an empty response (stop_reason: refusal).',
+  );
+  await assert.rejects(
+    () => provider.generate({ session: createSession() }),
+    /Claude returned an empty response \(stop_reason: pause_turn\)\./,
+  );
+});
+
 test('a paid call that surfaces no parts still reports its tokens through the sink', async () => {
   // Adaptive thinking can consume the whole output budget without producing
   // a text or tool_use block. The API call completed and was billed, and the
