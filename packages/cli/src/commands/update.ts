@@ -36,6 +36,8 @@ import {
 import type { ParsedUpdateCommand } from '../parse.ts';
 import { readCompanions } from '../companions.ts';
 import { installHarnessPackages, missingHarnessPackages } from '../harness-packages.ts';
+import { installSpecifier } from '../plugin-index.ts';
+import { readPluginUpdates } from '../plugin-updates.ts';
 
 /**
  * `stratus update` — the whole upgrade dance, in the order that cannot lose
@@ -297,6 +299,29 @@ const runUpdateSteps = async (
     out(`  provider    ${name} — your agents use it and it is not installed`);
   }
 
+  // The configured plugins that release on their own, judged by this
+  // build. Asked here, before the first half stops anything, so the npm
+  // round trips are not downtime. On a CLI upgrade this is the outgoing
+  // build's view; the new build asks again in the second half and installs
+  // from its own.
+  const plugins = await readPluginUpdates(
+    unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
+    harnessConfigPath,
+  );
+  const pluginsBehind = plugins.flatMap((entry) => (entry.state === 'behind' ? [entry] : []));
+  if (plugins.length > 0) {
+    out(`  plugins     ${plugins.length} released apart from the CLI, ${pluginsBehind.length === 0 ? 'none behind' : `${pluginsBehind.length} behind`}`);
+    for (const entry of plugins) {
+      if (entry.state === 'behind') {
+        out(`              ${entry.name} ${entry.installed} → ${entry.version}`);
+      } else if (entry.state === 'held') {
+        out(`              ${entry.name} ${entry.installed}, held: ${entry.reason}`);
+      } else if (entry.state === 'unchecked') {
+        out(`              ${entry.name} ${entry.installed}, not checked: ${entry.reason}`);
+      }
+    }
+  }
+
   // The unstamped move into the visible agents folder, which `update`
   // applies below while it holds the home: decided by the same plan, so the
   // check and the apply never disagree about whether there is one.
@@ -320,7 +345,10 @@ const runUpdateSteps = async (
       out('This build cannot update that state — upgrade the package itself (`npm install -g @stratusagent/cli`).');
       return 1;
     }
-    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0 || missingHarnesses.length > 0 || agentsPending;
+    // Held and unchecked plugins are reported but not counted: no update
+    // can move them, and a check that kept saying it could would never go
+    // quiet.
+    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0 || missingHarnesses.length > 0 || agentsPending || pluginsBehind.length > 0;
     out(actionable
       ? 'Run `stratus update` to apply the above.'
       : 'Nothing to do.');
@@ -412,6 +440,9 @@ const runUpdateSteps = async (
   }
 
   let upgradeFailed = false;
+  // Set when npm put a new CLI on disk but the new build did not take the
+  // update over, so this process is the build being replaced.
+  let outgoingBuild = false;
   // The CLI and every companion that lags it, in one npm call: they are
   // one release, and installing them separately leaves a window where the
   // daemon and the adapter it loads disagree about their own version.
@@ -449,6 +480,7 @@ const runUpdateSteps = async (
       // Carry on here rather than leave a stopped daemon behind; this run
       // restarts it if its own migration fails.
       writeLine(streams.stderr, 'The new build did not take over the update — continuing on this one.');
+      outgoingBuild = true;
     } else if (installed.ok) {
       // Only companions changed. This process's own modules are untouched,
       // so the rest of the update is safe to run here.
@@ -477,6 +509,26 @@ const runUpdateSteps = async (
     : missingHarnesses;
   if (!(await installHarnessPackages(harnessesNow, streams, env))) {
     upgradeFailed = true;
+  }
+
+  // Plugins that release on their own, one npm call each so one broken
+  // release can't hold back the rest. On the build the update is heading
+  // for, like the harnesses, because whether a release loads is that
+  // build's question. A managed service is stopped by now, so it can't
+  // load a plugin half replaced.
+  if (pluginsBehind.length > 0 && outgoingBuild) {
+    upgradeFailed = true;
+    writeLine(streams.stderr, `Plugins were not updated: this process is the build being replaced, and only the new one can say which plugin releases it loads. Run \`stratus update\` again to update ${pluginsBehind.map((entry) => entry.name).join(', ')}.`);
+  } else {
+    for (const entry of pluginsBehind) {
+      out(`Upgrading ${entry.name} ${entry.installed} → ${entry.version}…`);
+      const result = await (env.packageInstaller ?? defaultPackageInstaller)([installSpecifier(entry.name, entry.version)])
+        .catch((error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
+      if (!result.ok) {
+        upgradeFailed = true;
+        writeLine(streams.stderr, `Could not upgrade ${entry.name}: ${result.message || 'unknown error'} — it stays at ${entry.installed}.`);
+      }
+    }
   }
 
   // Stopping the *managed* service is not the same as having the home to

@@ -27,7 +27,7 @@ stratus service uninstall
 stratus logs -f                        # what the daemon has been doing
 stratus logs --agent blair -n 200
 stratus doctor                         # what a run would use right now, and why
-stratus update                         # the whole upgrade dance, in the safe order — the CLI and its companions
+stratus update                         # the whole upgrade dance, in the safe order — the CLI, its companions and your plugins
 stratus update --check                 # report what an update would do, do nothing
 stratus --version                      # which build this is (also: stratus version, stratus -v)
 stratus agent new                      # create an agent (guided on a terminal)

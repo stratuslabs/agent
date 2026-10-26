@@ -250,7 +250,9 @@ Commands:
                    together with every optional first-party package this
                    machine has, which ship in lockstep with it — run
                    pending state migrations, rewrite the service unit with
-                   current node/entrypoint paths, restart. --check reports
+                   current node/entrypoint paths, restart. Configured
+                   plugins that release on their own go to their latest
+                   release when this build would load it. --check reports
                    what it would do without doing any of it (exits 1 when
                    something is actionable, a companion left behind
                    included). Works offline too — an unreachable npm skips

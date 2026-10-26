@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { isPackageName, parsePluginManifest, PLUGIN_MANIFEST_VERSION } from '@stratusagent/plugins';
+import { isPackageName, parsePluginManifest, PLUGIN_MANIFEST_VERSION, type PluginContributions } from '@stratusagent/plugins';
 import type { CliEnvironment } from './environment.ts';
 import { isInstallableSpecifier, runNpm, type NpmResult } from './npm.ts';
 
@@ -245,14 +245,76 @@ const listAllows = (field: unknown, value: string): boolean => {
 };
 
 /**
- * Whether setup offers a release, read from the release itself rather than
- * the index. An offer has to mean that picking it installs and loads, so
- * each check defers to the code that would refuse it later: the loader's
- * own manifest parser, npm's platform checks, and the installer's fence on
- * what reaches npm. It also has to add tools, since setup's Plugins menu is
- * a tools menu. Only the latest release is asked about, and setup installs
- * exactly that version. One that fails is not offered, so a publisher's
- * incompatible release can't break an older CLI's setup.
+ * Whether a release would install and load here, read from the release
+ * itself rather than the index. Each check defers to the code that would
+ * refuse it later: the loader's own manifest parser, npm's platform checks,
+ * and the installer's fence on what reaches npm. Only the latest release is
+ * asked about, and whoever installs it pins exactly that version. One that
+ * fails is never installed, so a publisher's incompatible release can't
+ * break an older CLI.
+ *
+ * `stratus update` uses this as it is. Setup's More plugins adds one more
+ * condition on top (`releaseVerdict`).
+ */
+export const loadableRelease = (
+  name: string,
+  release: PluginRelease,
+  host: PlatformHost,
+): { ok: true; version: string; contributes: PluginContributions } | { ok: false; reason: string } => {
+  if (release.status === 'unpublished') {
+    return { ok: false, reason: 'not on npm yet' };
+  }
+  if (release.status === 'unknown') {
+    return { ok: false, reason: 'npm did not answer' };
+  }
+  const { version, stratus } = release;
+  if (!isObject(stratus)) {
+    return { ok: false, reason: `its latest release (${version}) is not a Stratus plugin` };
+  }
+  if (stratus.pluginVersion !== PLUGIN_MANIFEST_VERSION) {
+    return {
+      ok: false,
+      reason: `its latest release (${version}) is plugin version ${JSON.stringify(stratus.pluginVersion)}, and this CLI loads version ${PLUGIN_MANIFEST_VERSION}`,
+    };
+  }
+  let contributes: PluginContributions;
+  try {
+    ({ contributes } = parsePluginManifest({ name, stratus }, name));
+  } catch (error) {
+    // The loader quotes what it refuses with JSON.stringify, and anything
+    // that still is not printable goes, since this is printed to a terminal.
+    const message = (error instanceof Error ? error.message : String(error)).replace(new RegExp(UNPRINTABLE.source, 'g'), '');
+    return { ok: false, reason: `its latest release (${version}) has a manifest this CLI would refuse: ${message}` };
+  }
+  // The checks npm makes before it installs (checkPlatform), so npm does
+  // not refuse with EBADPLATFORM what was just judged installable.
+  if (!listAllows(release.os, host.os)) {
+    return { ok: false, reason: `it does not run on ${host.os}` };
+  }
+  if (!listAllows(release.cpu, host.cpu)) {
+    return { ok: false, reason: `it does not run on ${host.cpu}` };
+  }
+  if (release.libc !== undefined && release.libc !== null && host.libc === null) {
+    return { ok: false, reason: 'it needs a libc this host does not report' };
+  }
+  if (host.libc !== null && !listAllows(release.libc, host.libc)) {
+    return { ok: false, reason: `it does not run with ${host.libc}` };
+  }
+  // Last, the installer's own fence on what reaches npm (a shell on
+  // Windows): a release the installer then refuses is a dead end.
+  if (!isInstallableSpecifier(installSpecifier(name, version))) {
+    return {
+      ok: false,
+      reason: `this CLI can't pass its latest release (${version}) to npm; run npm install -g ${installSpecifier(name, version)} yourself`,
+    };
+  }
+  return { ok: true, version, contributes };
+};
+
+/**
+ * Whether setup's More plugins offers a release: it has to be loadable
+ * (`loadableRelease`), and it has to add tools, since setup's Plugins menu
+ * is a tools menu.
  *
  * A package that is already installed but not configured goes to the
  * normal enable path, which checks the installed copy's manifest with the
@@ -264,57 +326,15 @@ export const releaseVerdict = (
   release: PluginRelease,
   host: PlatformHost,
 ): { offer: true; version: string } | { offer: false; reason: string } => {
-  if (release.status === 'unpublished') {
-    return { offer: false, reason: 'not on npm yet' };
+  const loadable = loadableRelease(name, release, host);
+  if (!loadable.ok) {
+    return { offer: false, reason: loadable.reason };
   }
-  if (release.status === 'unknown') {
-    return { offer: false, reason: 'npm did not answer' };
-  }
-  const { version, stratus } = release;
-  if (!isObject(stratus)) {
-    return { offer: false, reason: `its latest release (${version}) is not a Stratus plugin` };
-  }
-  if (stratus.pluginVersion !== PLUGIN_MANIFEST_VERSION) {
-    return {
-      offer: false,
-      reason: `its latest release (${version}) is plugin version ${JSON.stringify(stratus.pluginVersion)}, and this CLI loads version ${PLUGIN_MANIFEST_VERSION}`,
-    };
-  }
-  let contributes;
-  try {
-    ({ contributes } = parsePluginManifest({ name, stratus }, name));
-  } catch (error) {
-    // The loader quotes what it refuses with JSON.stringify, and anything
-    // that still is not printable goes, since this is printed to a terminal.
-    const message = (error instanceof Error ? error.message : String(error)).replace(new RegExp(UNPRINTABLE.source, 'g'), '');
-    return { offer: false, reason: `its latest release (${version}) has a manifest this CLI would refuse: ${message}` };
-  }
-  // The checks npm makes before it installs (checkPlatform), so npm does
-  // not refuse with EBADPLATFORM what setup just offered.
-  if (!listAllows(release.os, host.os)) {
-    return { offer: false, reason: `it does not run on ${host.os}` };
-  }
-  if (!listAllows(release.cpu, host.cpu)) {
-    return { offer: false, reason: `it does not run on ${host.cpu}` };
-  }
-  if (release.libc !== undefined && release.libc !== null && host.libc === null) {
-    return { offer: false, reason: 'it needs a libc this host does not report' };
-  }
-  if (host.libc !== null && !listAllows(release.libc, host.libc)) {
-    return { offer: false, reason: `it does not run with ${host.libc}` };
-  }
+  const { contributes } = loadable;
   if (contributes.tools.length === 0 && contributes.toolsDiscovered.length === 0) {
     return { offer: false, reason: 'it adds no tools' };
   }
-  // Last, the installer's own fence on what reaches npm (a shell on
-  // Windows): an offer the installer then refuses is a dead end.
-  if (!isInstallableSpecifier(installSpecifier(name, version))) {
-    return {
-      offer: false,
-      reason: `setup can't pass its latest release (${version}) to npm; run npm install -g ${installSpecifier(name, version)} yourself`,
-    };
-  }
-  return { offer: true, version };
+  return { offer: true, version: loadable.version };
 };
 
 /**
