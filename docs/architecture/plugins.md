@@ -834,9 +834,10 @@ and hands the decided label to `execute` as `ExecutionContext.decidedTrust`
 so the tool can check once more before it acts. A throw or a slow answer reads
 `external`.
 
-Four more packages ship from this repository today: `provider-openai`,
-`provider-codex`, `memory-sqlite`, and the MCP bridge `plugin-mcp`. Every
-package here is published under `@stratusagent/` at the same version.
+Four more packages ship from this repository today, all added before any
+plugin lived in `stratuslabs/plugins`: `provider-openai`, `provider-codex`,
+`memory-sqlite`, and the MCP bridge `plugin-mcp`. Every package here is
+published under `@stratusagent/` at the same version.
 
 **First-party, outside.** Same authors, separate repositories:
 
@@ -846,9 +847,9 @@ package here is published under `@stratusagent/` at the same version.
   publishes, with its own version, tests, and README; one that runs on only
   some platforms names them in its `os` field. Nightly encrypted backups,
   parallel sub-agents, the macOS command sandbox, and A2UI screens live there,
-  and the repository's README lists them all. A capability that is optional or
-  depends on somebody else's API starts there rather than here, so it can
-  break, version, and ship without turning this repository's CI red.
+  and the repository's README lists them all. A new first-party plugin that
+  the rule above puts outside this repository starts there, so it can break,
+  version, and ship without turning this repository's CI red.
 - **Skills** (`stratuslabs/skill-*`) — markdown with no build step. Putting them
   behind `pnpm build && pnpm typecheck && pnpm test` buys nothing and slows the
   loop that matters for them, which is editing prose.
