@@ -390,7 +390,13 @@ What the recipe sets, and what it leaves to you.
   Docker, a seccomp profile that permits `clone`/`unshare` with
   `CLONE_NEWUSER`), or set `sandbox: "auto"` for `@stratusagent/tool-shell`
   to run commands unconfined inside the container instead, accepting that a
-  command can then read the credential store in the volume.
+  command can then read the credential store in the volume. On a stock
+  Ubuntu 24.04 host (checked 2026-10-26 with Docker 29.4.2) the seccomp
+  profile isn't enough: with it unconfined, Docker's default AppArmor
+  profile refuses bwrap's mounts, and with both unconfined, the host's
+  `kernel.apparmor_restrict_unprivileged_userns=1` refuses the user
+  namespace's uid map. So there, bwrap can't start in a container without
+  a change to the host. `compose-smoke.sh` prints which case a host is in.
 - [ ] **The API on loopback only.** Compose publishes `127.0.0.1:4123`;
   the unit uses the config's `api.host`, which the VM profile sets to
   `127.0.0.1`. Reach it from elsewhere through a tunnel — Tailscale, or
