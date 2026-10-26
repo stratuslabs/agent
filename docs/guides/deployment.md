@@ -450,9 +450,10 @@ What the recipe sets, and what it leaves to you.
 - [ ] **Bounded.** `mem_limit`, `cpus`, and `pids_limit` in the compose
   file — size them to your roster, and give the `browser` target more
   memory than the slim one.
-- [ ] **Stopped gracefully.** `stop_grace_period: 75s` / `TimeoutStopSec=75`,
-  longer than the 30-second drain plus the 30 seconds an aborted turn
-  gets to record its failure, so a turn still running after the drain is
-  aborted and recorded by the daemon rather than killed with it.
+- [ ] **Stopped gracefully.** `stop_grace_period: 75s` / `TimeoutStopSec=75`
+  / `kill_timeout = 75` on Fly (whose default is 5 seconds), longer than
+  the 30-second drain plus the 30 seconds an aborted turn gets to record
+  its failure, so a turn still running after the drain is aborted and
+  recorded by the daemon rather than killed with it.
 - [ ] **Rebuilt.** The image carries Node and Debian; rebuild it for their
   security releases, not only for Stratus ones.
