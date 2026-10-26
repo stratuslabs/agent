@@ -64,7 +64,7 @@ type Check = (
   | { kind: 'readSkill' }
   | { kind: 'noToolCall'; tool: string }
   /** Every call to `tool` there was had `input[field] === equals`; no call at all passes. */
-  | { kind: 'toolInput'; tool: string; field: string; equals: string }
+  | { kind: 'toolInput'; tool: string; field: string; equals: string | boolean }
   /** No tool call carried `value` anywhere in its input, whatever the tool. */
   | { kind: 'noToolInputContaining'; value: string }
   /**
