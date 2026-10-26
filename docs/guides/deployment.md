@@ -454,6 +454,9 @@ What the recipe sets, and what it leaves to you.
   / `kill_timeout = 75` on Fly (whose default is 5 seconds), longer than
   the 30-second drain plus the 30 seconds an aborted turn gets to record
   its failure, so a turn still running after the drain is aborted and
-  recorded by the daemon rather than killed with it.
+  recorded by the daemon rather than killed with it. Fly treats
+  `kill_timeout` as best effort and can stop a machine sooner; a turn cut
+  off that way is marked failed when the daemon next starts, the same as
+  after a crash.
 - [ ] **Rebuilt.** The image carries Node and Debian; rebuild it for their
   security releases, not only for Stratus ones.
