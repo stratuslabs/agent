@@ -1,0 +1,49 @@
+name: systemd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes an older unit check moot.
+concurrency:
+  group: systemd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: System unit smoke test
+    # A real VM with systemd as PID 1, so the unit runs as it would on a server.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # tool-shell runs agent commands in bubblewrap; the guide's first-run
+      # steps install it on the host.
+      - name: Install bubblewrap
+        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # deploy/systemd/stratusd.service installed as the deployment guide
+      # says, then checked: the account, the private state directory, no
+      # capabilities, read-only system, hidden /home, private /tmp, JSON logs
+      # in the journal, state across a restart, a clean stop.
+      - name: Install the system unit and check it
+        run: deploy/systemd/smoke.sh
