@@ -100,9 +100,16 @@ without reading it back: see the control API's token under
 
 `deploy/docker/smoke.sh` builds the image and checks it end to end (a
 seeded token, a held start and its promotion, a pause that survives a
-restart). Run it from the repository root on any host with Docker. CI
-runs it on every pull request and push to `main`
-(`.github/workflows/docker.yml`).
+restart). `deploy/docker/compose-smoke.sh` brings up `compose.yaml` as
+documented, on the demo provider, and checks its limits: the home on the
+named volume and owned by the daemon's user, a read-only root with `/tmp`
+writable, no capabilities, no-new-privileges, and state kept when the
+container is recreated. It also
+says whether bubblewrap can start inside them (see the checklist below).
+It uses its own project, env file, port and volume, so it leaves an
+existing deployment alone, and it needs Compose 2.24.4 or later. Run
+either from the repository root on any host with Docker. CI runs both on
+every pull request and push to `main` (`.github/workflows/docker.yml`).
 
 ## First run: a system unit
 
@@ -384,7 +391,13 @@ What the recipe sets, and what it leaves to you.
   Docker, a seccomp profile that permits `clone`/`unshare` with
   `CLONE_NEWUSER`), or set `sandbox: "auto"` for `@stratusagent/tool-shell`
   to run commands unconfined inside the container instead, accepting that a
-  command can then read the credential store in the volume.
+  command can then read the credential store in the volume. On a stock
+  Ubuntu 24.04 host (checked 2026-10-26 with Docker 29.4.2) the seccomp
+  profile isn't enough: with it unconfined, Docker's default AppArmor
+  profile refuses bwrap's mounts, and with both unconfined, the host's
+  `kernel.apparmor_restrict_unprivileged_userns=1` refuses the user
+  namespace's uid map. So there, bwrap can't start in a container without
+  a change to the host. `compose-smoke.sh` prints which case a host is in.
 - [ ] **The API on loopback only.** Compose publishes `127.0.0.1:4123`;
   the unit uses the config's `api.host`, which the VM profile sets to
   `127.0.0.1`. Reach it from elsewhere through a tunnel — Tailscale, or
