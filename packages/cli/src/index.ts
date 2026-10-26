@@ -98,6 +98,7 @@ export {
   type ParsedGrantsCommand,
   type ParsedMemoryCommand,
   type ParsedSessionCommand,
+  type ParsedSessionsCommand,
   type ParsedDoctorCommand,
   type ParsedUpdateCommand,
   type ParsedServiceCommand,
@@ -167,6 +168,7 @@ export { runCredential } from './commands/credential.ts';
 export { runMemory } from './commands/memory.ts';
 
 export { runSessionRollover } from './commands/session.ts';
+export { runSessions } from './commands/sessions.ts';
 
 export { runRestart } from './commands/restart.ts';
 
