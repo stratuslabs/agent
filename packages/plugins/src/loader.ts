@@ -168,8 +168,9 @@ export const readPluginManifest = async (
  * Whether a package's code is trusted — which is to say whether its
  * manifest may declare a tool `safe`.
  *
- * First-party packages ship from this repository and pass its CI; anything
- * else floors at `gated`. An operator can widen the set deliberately, and
+ * First-party means the `@stratusagent` scope, judged by name: this
+ * repository's packages and those from stratuslabs/plugins. Anything else
+ * floors at `gated`. An operator can widen the set deliberately, and
  * doing so is the same act as enabling the plugin at all: enablement is the
  * security boundary, and this is a statement about how far it extends.
  */
