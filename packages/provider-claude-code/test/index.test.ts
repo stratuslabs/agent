@@ -411,6 +411,46 @@ test('a run that uses every turn resumes once to say where it got to', async () 
   assert.equal(calls[1]!.options?.maxTurns, 1);
 });
 
+// What the real CLI (agent SDK 0.3.233) yields when a Claude subscription's
+// usage window is spent: a `success` result flagged `is_error`, whose text
+// says which limit and when it resets. Seen against a mock API answering
+// 429 with `anthropic-ratelimit-unified-status: rejected`. The subtype says
+// nothing there, and "run failed (success)" reached Slack.
+const USAGE_LIMIT_TEXT = "You've hit your session limit · resets 1:27am (America/New_York)";
+
+test('an error result whose subtype is success reports its text, not the subtype', async () => {
+  const provider = createClaudeCodeProvider({
+    queryFn: createFakeQuery([{ type: 'result', subtype: 'success', is_error: true, result: USAGE_LIMIT_TEXT }]).queryFn,
+  });
+  await assert.rejects(
+    () => provider.generate({ session: createSession() }),
+    (error: unknown) => error instanceof Error && error.message === `Claude Code run failed: ${USAGE_LIMIT_TEXT}`,
+  );
+});
+
+test('a wrap-up stopped by an error result says what stopped it', async () => {
+  let calls = 0;
+  const queryFn: ClaudeCodeQueryFn = () => {
+    calls += 1;
+    const current = calls;
+    return (async function* () {
+      if (current === 1) {
+        yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-limit' } as ClaudeCodeStreamMessage;
+        return;
+      }
+      yield { type: 'result', subtype: 'success', is_error: true, result: USAGE_LIMIT_TEXT, session_id: 'sdk-limit' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn });
+  await assert.rejects(
+    () => provider.generate({ session: createSession() }),
+    (error: unknown) => error instanceof Error
+      && error.message.includes(`could not summarize its progress: ${USAGE_LIMIT_TEXT}.`)
+      && !error.message.includes('(success)'),
+  );
+  assert.equal(calls, 2);
+});
+
 test('a run that uses every turn still wraps up when the SDK then throws the CLI’s exit', async () => {
   const calls: Array<{ prompt: string; options?: Record<string, unknown> }> = [];
   const queryFn: ClaudeCodeQueryFn = (params) => {
