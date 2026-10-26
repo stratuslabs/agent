@@ -5,8 +5,8 @@
 # account, the state directory is that account's and private, no capability
 # or new privilege, the filesystem read-only outside the state directory,
 # /home hidden and /tmp private, JSON logs in the journal, state kept across
-# a restart, and a clean stop inside TimeoutStopSec. It also reports whether
-# the shell tool's sandbox (bubblewrap) can start under the unit's settings.
+# a restart, a clean stop inside TimeoutStopSec, and a shell command running
+# in the shell tool's sandbox (bubblewrap) under the unit's settings.
 #
 #   deploy/systemd/smoke.sh    # from the repository root, after `pnpm build`
 #
@@ -170,7 +170,7 @@ echo "--- the shell tool's sandbox under the unit's settings"
 # the bubblewrap invocation (probing bwrap first, and refusing when it can't
 # start), and the plan is spawned. It runs as a oneshot copy of the unit,
 # same account and every hardening line, with only ExecStart and the
-# restart policy changed. Reported, not required yet.
+# restart policy changed.
 sudo tee "$PREFIX/shell-probe.mjs" >/dev/null <<'PROBE_EOF'
 import { spawnSync } from 'node:child_process';
 import { createShellTool } from '@stratusagent/tool-shell';
@@ -192,18 +192,10 @@ sudo sed -e 's/^Type=simple$/Type=oneshot/' -e '/^ExecStart=/d' -e '/^Restart/d'
   "/etc/systemd/system/$UNIT" | sudo tee "/etc/systemd/system/$PROBE" >/dev/null
 echo "ExecStart=$NODE $PREFIX/shell-probe.mjs" | sudo tee -a "/etc/systemd/system/$PROBE" >/dev/null
 sudo systemctl daemon-reload
-if sudo systemctl start "$PROBE" 2>/dev/null; then
-  echo "shell sandbox: a command runs in bwrap under the unit"
-else
-  echo "shell sandbox: no command can run under the unit"
-fi
+probed=0
+sudo systemctl start "$PROBE" 2>/dev/null || probed=$?
 sudo journalctl -u "$PROBE" -o cat --no-pager | grep -m 1 '^shell\.run' || true
-if out=$(sudo -u stratus /usr/bin/bwrap --ro-bind / / --unshare-pid -- /bin/true 2>&1); then
-  echo "shell sandbox: bwrap starts as stratus outside the unit"
-else
-  echo "shell sandbox: bwrap cannot start as stratus even outside the unit: $out"
-fi
-echo "kernel.apparmor_restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo unset)"
+[ "$probed" = 0 ] || fail "no shell command can run sandboxed under the unit"
 sudo systemd-analyze security "$UNIT" --no-pager 2>/dev/null | tail -n 1 || true
 
 echo "systemd-smoke: ok"
