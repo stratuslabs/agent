@@ -75,7 +75,8 @@ import { writeLine } from '../io.ts';
 import { packageInstalled } from '../loaders.ts';
 import { isPackageName, isInstallableSpecifier, defaultPackageInstaller } from '../npm.ts';
 import type { CliProviderName, ParsedSetupCommand } from '../parse.ts';
-import { PLUGIN_MARKETPLACE_URL, FIRST_PARTY_CAPABILITY_PACKAGES } from '../plugin-catalog.ts';
+import { FIRST_PARTY_CAPABILITY_PACKAGES } from '../plugin-catalog.ts';
+import { checkPluginReleases, readPluginIndex, releaseVerdict } from '../plugin-index.ts';
 import {
   menuPrefixWidth,
   quoteShellArg,
@@ -1807,21 +1808,84 @@ export const runSetup = async (
             : 'installed, not enabled';
         return fitMenuRow(short.padEnd(18) + status, reserved);
       });
-      options.push('Back');
+      const more = options.length;
+      options.push('More plugins… (checks npm)', 'Back');
 
       const choice = await prompter.select(
         'Plugins — what your agents can do (installing one grants nothing on its own)',
         options,
-        { footnote: `More plugins — ${PLUGIN_MARKETPLACE_URL}` },
       );
       if (choice.kind !== 'index' || choice.index === options.length - 1) {
         return;
+      }
+      if (choice.index === more) {
+        await chooseMorePlugins();
+        continue;
       }
       const name = packages[choice.index];
       if (!name) {
         return;
       }
       await choosePlugin(name);
+    }
+  };
+
+  /**
+   * The plugins that release apart from this CLI, from the curated index
+   * (`plugin-index.ts`). Asked for, never fetched on its own: it runs npm,
+   * which reaches the registry, and the main menu has to work offline.
+   *
+   * An entry is offered only when its latest release says it can be used
+   * here — published, a plugin version this CLI loads, an `os` that
+   * includes this host, and tools to add. The rest are named with the
+   * reason, so a plugin missing from the list is not a mystery. Picking one
+   * goes to the same install-then-enable path as every other row, which
+   * still asks first and still reads what it contributes from its own
+   * manifest.
+   */
+  const chooseMorePlugins = async (): Promise<void> => {
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, 'Checking npm for plugins…');
+    const index = await readPluginIndex(env);
+    if (index.source === 'bundled') {
+      writeLine(streams.stdout, 'npm has no plugin index this CLI can read, so this is the list it shipped with.');
+    }
+    const listed = new Set(pluginPackages());
+    const candidates = index.entries.filter((entry) => !listed.has(entry.name));
+    const releases = await checkPluginReleases(candidates.map((entry) => entry.name), env);
+    const offered: typeof candidates = [];
+    const skipped: string[] = [];
+    for (const entry of candidates) {
+      const verdict = releaseVerdict(releases.get(entry.name) ?? { status: 'unknown' }, process.platform);
+      if (verdict.offer) {
+        offered.push(entry);
+      } else {
+        // At least one space after a name longer than the column: a
+        // third-party name has no @stratusagent/ to shorten.
+        skipped.push(`  ${entry.name.replace('@stratusagent/', '').padEnd(17)} ${verdict.reason}`);
+      }
+    }
+    if (skipped.length > 0) {
+      writeLine(streams.stdout, 'Not offered here:');
+      for (const line of skipped) {
+        writeLine(streams.stdout, line);
+      }
+    }
+    if (offered.length === 0) {
+      writeLine(streams.stdout, 'There are no more plugins to offer here right now.');
+      await prompter.ask('Press Enter to return to the menu… ');
+      return;
+    }
+    const reserved = menuPrefixWidth(offered.length + 1);
+    const options = offered.map((entry) => fitMenuRow(`${entry.name.replace('@stratusagent/', '').padEnd(17)} ${entry.description}`, reserved));
+    options.push('Back');
+    const choice = await prompter.select('More plugins — installing one grants nothing on its own', options);
+    if (choice.kind !== 'index' || choice.index === options.length - 1) {
+      return;
+    }
+    const entry = offered[choice.index];
+    if (entry) {
+      await choosePlugin(entry.name);
     }
   };
 
