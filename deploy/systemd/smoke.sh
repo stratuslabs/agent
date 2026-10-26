@@ -174,7 +174,7 @@ sudo systemctl daemon-reload
 if sudo systemctl start "$PROBE" 2>/dev/null; then
   echo "shell sandbox: bwrap starts under the unit"
 else
-  echo "shell sandbox: bwrap cannot start under the unit: $(sudo journalctl -u "$PROBE" -o cat --no-pager | grep -v '^$' | tail -n 3 | tr '\n' ' ')"
+  echo "shell sandbox: bwrap cannot start under the unit: $(sudo journalctl -u "$PROBE" -o cat --no-pager | grep -m 1 '^bwrap' || echo 'no message from bwrap')"
 fi
 if out=$(sudo -u stratus /usr/bin/bwrap --ro-bind / / --unshare-pid -- /bin/true 2>&1); then
   echo "shell sandbox: bwrap starts as stratus outside the unit"
