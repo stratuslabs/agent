@@ -79,9 +79,10 @@ ProtectClock=yes
 # Not set: ProtectKernelTunables=, ProtectKernelLogs= and ProtectHostname=.
 # Each one mounts over a file under /proc, and the kernel refuses a fresh
 # /proc inside a user namespace while part of the outer one is hidden, so
-# bubblewrap (below) could start but never run a command. What they guard
-# needs a capability this account doesn't hold: writing /proc/sys, reading
-# the kernel log, setting the hostname.
+# bubblewrap (below) could start but never run a command. Without them,
+# writing /proc/sys and setting the hostname still need a capability this
+# account doesn't hold, /dev/kmsg stays hidden by PrivateDevices=, and
+# reading the kernel log needs CAP_SYSLOG where kernel.dmesg_restrict is on.
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 # tool-shell runs every agent command in bubblewrap, which needs a user,

@@ -415,8 +415,10 @@ What the recipe sets, and what it leaves to you.
   ipc`) and the mount calls inside them (`@mount` in `SystemCallFilter=`).
   It leaves out `ProtectKernelTunables=`, `ProtectKernelLogs=` and
   `ProtectHostname=`, because each mounts over part of `/proc` and the
-  kernel then refuses the sandbox its own `/proc`. What they guard already
-  needs a capability the account doesn't hold.
+  kernel then refuses the sandbox its own `/proc`. Without them, writing
+  `/proc/sys` and setting the hostname still need a capability the account
+  doesn't hold, and `/dev/kmsg` stays hidden by `PrivateDevices=`; the unit's
+  comments say what's left.
   On a stock Ubuntu 24.04 host (checked 2026-10-26), bwrap can create its
   user namespace there even with `kernel.apparmor_restrict_unprivileged_userns=1`,
   so a host install works where a container doesn't. `deploy/systemd/smoke.sh`
