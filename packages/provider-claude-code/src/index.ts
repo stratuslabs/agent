@@ -526,6 +526,19 @@ const isMaxTurnsExit = (error: unknown): boolean =>
   error instanceof Error
   && /^Claude Code returned an error result: Reached maximum number of turns\b/.test(error.message);
 
+/**
+ * What a failed result says, for the error a turn ends with. The subtype
+ * names the failure, except when it is `success`: that is the CLI saying
+ * it finished with an answer that is itself an error, such as a spent
+ * subscription usage window ("You've hit your session limit · resets
+ * 1:27am"). There only the text means anything, and "(success)" in a
+ * failure confused the person reading it.
+ */
+const resultFailure = (message: ClaudeCodeStreamMessage): string => {
+  const text = message.result ? `: ${message.result}` : '';
+  return message.subtype === 'success' ? text : ` (${message.subtype ?? 'unknown error'})${text}`;
+};
+
 export const createClaudeCodeProvider = ({
   authToken,
   authOwner,
@@ -811,9 +824,7 @@ export const createClaudeCodeProvider = ({
             ranOutOfTurns = true;
             continue;
           }
-          throw new Error(
-            `Claude Code run failed (${message.subtype ?? 'unknown error'})${message.result ? `: ${message.result}` : ''}`,
-          );
+          throw new Error(`Claude Code run failed${resultFailure(message)}`);
         }
       } catch (error) {
         // The SDK does not stop at the out-of-turns result: the CLI then
@@ -866,7 +877,7 @@ export const createClaudeCodeProvider = ({
             continue;
           }
           throw new Error(
-            `Claude Code used all ${options.maxTurns ?? DEFAULT_MAX_TURNS} turns this message allows and could not summarize its progress (${message.subtype ?? 'unknown error'}). `
+            `Claude Code used all ${options.maxTurns ?? DEFAULT_MAX_TURNS} turns this message allows and could not summarize its progress${resultFailure(message)}. `
             + 'Raise maxTurns in ~/.stratus/config.json for agents that do long multi-step work, or reply to carry on from here.',
           );
         }
