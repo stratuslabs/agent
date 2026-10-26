@@ -589,7 +589,7 @@ export const bwrapProbeArgs: readonly string[] = [...BWRAP_BASE, ...BWRAP_NAMESP
 
 let bwrapProbe: { path: string } | { error: string } | undefined;
 
-/** Whether bwrap can actually start a namespace here (it can't in many containers). Probed once. */
+/** Whether bwrap can actually start a command's sandbox here (it can't in many containers). Probed once. */
 const probeBwrap = (): { path: string } | { error: string } => {
   if (bwrapProbe) {
     return bwrapProbe;
