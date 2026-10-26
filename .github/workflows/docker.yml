@@ -32,3 +32,16 @@ jobs:
       # capabilities, no-new-privileges, the named state volume, a restart.
       - name: Bring up compose.yaml and check its limits
         run: deploy/docker/compose-smoke.sh
+
+      # TEMPORARY diagnosis for the PR: which layer stops bwrap in a container.
+      - name: Diagnose bwrap (temporary)
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces 2>&1 || true
+          if unshare --user --map-root-user true 2>&1; then echo "host: unprivileged userns OK"; else echo "host: unprivileged userns refused"; fi
+          docker version --format 'docker {{.Server.Version}}'; docker compose version
+          docker build -q -f deploy/docker/Dockerfile --target slim -t stratusd:diag . >/dev/null
+          for opts in "" "--security-opt seccomp=unconfined" "--security-opt apparmor=unconfined" "--security-opt seccomp=unconfined --security-opt apparmor=unconfined"; do
+            printf '== docker run %s: ' "${opts:-(defaults)}"
+            if out=$(docker run --rm $opts stratusd:diag bwrap --ro-bind / / --unshare-pid -- /bin/true 2>&1); then echo OK; else echo "FAIL: $out"; fi
+          done
+          docker rmi stratusd:diag >/dev/null
