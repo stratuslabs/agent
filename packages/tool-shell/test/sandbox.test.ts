@@ -11,6 +11,7 @@ import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import {
   credentialAgentEndpoints,
   bwrapArgs,
+  bwrapProbeArgs,
   createShellTool,
   DEFAULT_VISIBLE_HOME_PATHS,
   darwinProfile,
@@ -259,6 +260,20 @@ test('bwrap binds the root read-only, covers denied paths, and binds the workspa
   assert.ok(!joined.includes('/does/not/exist'));
   assert.ok(joined.indexOf(`--bind ${fixture.workspace} ${fixture.workspace}`) > joined.indexOf(`--tmpfs ${fixture.stratusHome}`));
   assert.match(joined, /--unshare-pid --unshare-ipc --die-with-parent --new-session -- \/bin\/sh -c true$/);
+});
+
+test('the bwrap probe starts the same /dev, /proc, /tmp and namespaces every command gets', async () => {
+  // A container can allow bwrap's namespaces but refuse it a fresh /proc
+  // (Docker's masked /proc paths). A probe without --proc passed there, and
+  // then every command failed; the probe must ask for what commands need.
+  const fixture = await fixtureHome();
+  const command = bwrapArgs({ workspace: fixture.workspace, denied: [], writable: [] }, '/bin/true', []);
+  const probe = [...bwrapProbeArgs];
+  assert.deepEqual(probe.slice(-2), ['--', '/bin/true']);
+  const base = command.slice(0, command.indexOf('--tmpfs', command.indexOf('--proc')) + 2);
+  assert.deepEqual(probe.slice(0, base.length), base);
+  const namespaces = command.slice(command.indexOf('--unshare-pid'), command.indexOf('--'));
+  assert.deepEqual(probe.slice(base.length, -2), namespaces);
 });
 
 test('a workspace that is a symlink is bound from its real path under both names', async () => {
