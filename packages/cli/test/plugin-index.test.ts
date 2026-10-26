@@ -205,6 +205,20 @@ test('the install is pinned to the version that was checked', () => {
   assert.equal(installSpecifier('@stratusagent/plugin-x', '0.2.0'), '@stratusagent/plugin-x@0.2.0');
 });
 
+test('a release is offered only if the installer will take its pinned specifier', () => {
+  // Valid SemVer, but the installer's shell fence takes only lowercase
+  // letters, digits, dots and dashes in a version. Offering one would end in
+  // "not a package name npm can install" after the operator picked it.
+  for (const version of ['1.0.0+build.5', '1.0.0-RC.1']) {
+    const verdict = releaseVerdict('@stratusagent/plugin-x', published(toolManifest, { version }), linux);
+    assert.deepEqual(verdict, {
+      offer: false,
+      reason: `setup can't pass its latest release (${version}) to npm; run npm install -g @stratusagent/plugin-x@${version} yourself`,
+    });
+  }
+  assert.equal(releaseVerdict('@stratusagent/plugin-x', published(toolManifest, { version: '1.0.0-rc.1' }), linux).offer, true);
+});
+
 test('npm view output is read whether npm printed one field or several', () => {
   // `npm view pkg@latest version stratus os --json` prints an object when
   // more than one of the fields exists and the bare value when only one

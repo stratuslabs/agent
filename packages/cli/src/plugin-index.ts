@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { isPackageName, parsePluginManifest, PLUGIN_MANIFEST_VERSION } from '@stratusagent/plugins';
 import type { CliEnvironment } from './environment.ts';
-import { runNpm, type NpmResult } from './npm.ts';
+import { isInstallableSpecifier, runNpm, type NpmResult } from './npm.ts';
 
 /**
  * The curated plugin index: the plugins that release on their own, apart
@@ -246,11 +246,18 @@ const listAllows = (field: unknown, value: string): boolean => {
 
 /**
  * Whether setup offers a release, read from the release itself rather than
- * the index: published, a manifest the loader would accept (its own parser
- * decides), able to run here, and adding tools, since setup's Plugins menu
- * is a tools menu. Only the latest release is asked about; one that fails
- * is not offered, so a publisher's incompatible release can't break an
- * older CLI's setup.
+ * the index. An offer has to mean that picking it installs and loads, so
+ * each check defers to the code that would refuse it later: the loader's
+ * own manifest parser, npm's platform checks, and the installer's fence on
+ * what reaches npm. It also has to add tools, since setup's Plugins menu is
+ * a tools menu. Only the latest release is asked about, and setup installs
+ * exactly that version. One that fails is not offered, so a publisher's
+ * incompatible release can't break an older CLI's setup.
+ *
+ * A package that is already installed but not configured goes to the
+ * normal enable path, which checks the installed copy's manifest with the
+ * loader's preflight before writing anything. Setup doesn't replace a copy
+ * the operator installed; keeping it current is `stratus update`'s job.
  */
 export const releaseVerdict = (
   name: string,
@@ -298,6 +305,14 @@ export const releaseVerdict = (
   }
   if (contributes.tools.length === 0 && contributes.toolsDiscovered.length === 0) {
     return { offer: false, reason: 'it adds no tools' };
+  }
+  // Last, the installer's own fence on what reaches npm (a shell on
+  // Windows): an offer the installer then refuses is a dead end.
+  if (!isInstallableSpecifier(installSpecifier(name, version))) {
+    return {
+      offer: false,
+      reason: `setup can't pass its latest release (${version}) to npm; run npm install -g ${installSpecifier(name, version)} yourself`,
+    };
   }
   return { offer: true, version };
 };
