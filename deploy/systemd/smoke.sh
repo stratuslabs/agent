@@ -164,18 +164,38 @@ result=$(systemctl show -p Result --value "$UNIT")
 echo "stopped cleanly in ${took}s"
 
 echo "--- the shell tool's sandbox under the unit's settings"
-# tool-shell's own probe (packages/tool-shell/src/sandbox.ts), run as a
-# oneshot copy of the unit: same account and every hardening line, only
-# ExecStart and the restart policy changed. Reported, not required yet.
+# A command run the way shell.run runs it: tool-shell's createCommand plans
+# the bubblewrap invocation (probing bwrap first, and refusing when it can't
+# start), and the plan is spawned. It runs as a oneshot copy of the unit,
+# same account and every hardening line, with only ExecStart and the
+# restart policy changed. Reported, not required yet.
+sudo tee "$PREFIX/shell-probe.mjs" >/dev/null <<'PROBE_EOF'
+import { spawnSync } from 'node:child_process';
+import { createShellTool } from '@stratusagent/tool-shell';
+
+const tool = createShellTool({ workspaceRoot: '/var/lib/stratus/shell-probe' });
+const session = { id: 'systemd-smoke', agent: { id: 'smoke' }, metadata: {}, messages: [] };
+let run;
+try {
+  run = await tool.createCommand({ command: 'echo "sandboxed pid $$"' }, session, {});
+} catch (error) {
+  console.log(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+const result = spawnSync(run.command, run.args, { cwd: run.cwd, env: run.env, encoding: 'utf8' });
+console.log(`shell.run: exit ${result.status} via ${run.command}: ${(result.stdout + result.stderr).trim()}`);
+process.exit(result.status === 0 && /^sandboxed pid [12]$/m.test(result.stdout) ? 0 : 1);
+PROBE_EOF
 sudo sed -e 's/^Type=simple$/Type=oneshot/' -e '/^ExecStart=/d' -e '/^Restart/d' -e '/^\[Install\]/,$d' \
   "/etc/systemd/system/$UNIT" | sudo tee "/etc/systemd/system/$PROBE" >/dev/null
-echo 'ExecStart=/usr/bin/bwrap --ro-bind / / --unshare-pid -- /bin/true' | sudo tee -a "/etc/systemd/system/$PROBE" >/dev/null
+echo "ExecStart=$NODE $PREFIX/shell-probe.mjs" | sudo tee -a "/etc/systemd/system/$PROBE" >/dev/null
 sudo systemctl daemon-reload
 if sudo systemctl start "$PROBE" 2>/dev/null; then
-  echo "shell sandbox: bwrap starts under the unit"
+  echo "shell sandbox: a command runs in bwrap under the unit"
 else
-  echo "shell sandbox: bwrap cannot start under the unit: $(sudo journalctl -u "$PROBE" -o cat --no-pager | grep -m 1 '^bwrap' || echo 'no message from bwrap')"
+  echo "shell sandbox: no command can run under the unit"
 fi
+sudo journalctl -u "$PROBE" -o cat --no-pager | grep -m 1 '^shell\.run' || true
 if out=$(sudo -u stratus /usr/bin/bwrap --ro-bind / / --unshare-pid -- /bin/true 2>&1); then
   echo "shell sandbox: bwrap starts as stratus outside the unit"
 else

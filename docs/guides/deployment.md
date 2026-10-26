@@ -140,6 +140,17 @@ Run every other command as the account, so it reads the same home:
 decline the always-on service it offers at the end, because this unit is
 the service.
 
+`deploy/systemd/smoke.sh` runs these steps on a throwaway Linux machine
+with systemd, from this checkout's packed packages and on the demo
+provider, then checks what the unit promises: it runs as `stratus` with a
+private state directory, holds no capability and gains no privilege, sees
+the filesystem read-only outside that directory with `/home` hidden and its
+own `/tmp`, logs JSON to the journal, keeps state across a restart, and
+stops cleanly inside `TimeoutStopSec`. It also reports whether a shell
+command can run sandboxed under the unit's settings. It refuses to run on a
+machine that already has a Stratus system install. CI runs it on every pull
+request and push to `main` (`.github/workflows/systemd.yml`).
+
 ## Credentials
 
 What a container or a unit can take from its environment, and what it
