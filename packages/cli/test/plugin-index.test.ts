@@ -114,16 +114,16 @@ test('the index comes from npm when npm has one, and from the bundled copy other
 });
 
 test('a published plugin release with tools this CLI understands is offered', () => {
-  assert.deepEqual(releaseVerdict(published(toolManifest), 'linux'), { offer: true, version: '0.1.0' });
+  assert.deepEqual(releaseVerdict('p', published(toolManifest), 'linux'), { offer: true, version: '0.1.0' });
   assert.deepEqual(
-    releaseVerdict(published({ pluginVersion: 1, contributes: { toolsDiscovered: [{ namespace: 'mcp' }] } }), 'linux'),
+    releaseVerdict('p', published({ pluginVersion: 1, contributes: { toolsDiscovered: [{ namespace: 'mcp.*' }] } }), 'linux'),
     { offer: true, version: '0.1.0' },
   );
 });
 
 test('a release that is not published, not a plugin, or for another host is not offered, with the reason', () => {
   const reason = (release: PluginRelease, platform: NodeJS.Platform = 'linux'): string | undefined => {
-    const verdict = releaseVerdict(release, platform);
+    const verdict = releaseVerdict('p', release, platform);
     return verdict.offer ? undefined : verdict.reason;
   };
   assert.equal(reason({ status: 'unpublished' }), 'not on npm yet');
@@ -138,9 +138,26 @@ test('a release that is not published, not a plugin, or for another host is not 
   assert.equal(reason(published(toolManifest, { os: ['darwin'] }), 'darwin'), undefined);
 });
 
+test('a release whose manifest the loader would refuse is not offered', () => {
+  // Non-empty is not the same as loadable: the loader's own manifest parser
+  // decides, so setup never installs and enables a plugin that registers
+  // nothing at the next start.
+  const reason = (stratus: unknown): string | undefined => {
+    const verdict = releaseVerdict('@stratusagent/plugin-x', published(stratus), 'linux');
+    return verdict.offer ? undefined : verdict.reason;
+  };
+  const refused = /^its latest release \(0\.1\.0\) has a manifest this CLI would refuse: Plugin @stratusagent\/plugin-x: /;
+  assert.match(reason({ pluginVersion: 1, contributes: { tools: [{}] } }) ?? '', refused);
+  assert.match(reason({ pluginVersion: 1, contributes: { toolsDiscovered: [null] } }) ?? '', refused);
+  assert.match(reason({ pluginVersion: 1, contributes: { toolsDiscovered: [{ namespace: 'mcp' }] } }) ?? '', refused);
+  assert.match(reason({ pluginVersion: 1, contributes: { tools: [{ name: 'skill.read' }] } }) ?? '', /would refuse/);
+  // Whatever the registry put in a name reaches the reason only escaped.
+  assert.doesNotMatch(reason({ pluginVersion: 1, contributes: { tools: [{ name: 'x\u001b[2J' }] } }) ?? '', /\u001b/);
+});
+
 test('the os field is read the way npm reads it', () => {
   const offered = (os: unknown, platform: NodeJS.Platform): boolean =>
-    releaseVerdict(published(toolManifest, { os }), platform).offer;
+    releaseVerdict('p', published(toolManifest, { os }), platform).offer;
   assert.equal(offered('darwin', 'darwin'), true);
   assert.equal(offered('darwin', 'linux'), false);
   assert.equal(offered(['!win32'], 'linux'), true);

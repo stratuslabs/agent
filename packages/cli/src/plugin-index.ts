@@ -1,4 +1,4 @@
-import { isPackageName, PLUGIN_MANIFEST_VERSION } from '@stratusagent/plugins';
+import { isPackageName, parsePluginManifest, PLUGIN_MANIFEST_VERSION } from '@stratusagent/plugins';
 import type { CliEnvironment } from './environment.ts';
 import { runNpm, type NpmResult } from './npm.ts';
 
@@ -211,16 +211,16 @@ const osAllows = (os: unknown, platform: NodeJS.Platform): boolean => {
   return match || negated === list.length;
 };
 
-const nonEmptyList = (value: unknown): boolean => Array.isArray(value) && value.length > 0;
-
 /**
  * Whether setup offers a release, read from the release itself rather than
- * the index: published, a plugin this CLI loads, able to run here, and
- * adding tools, since setup's Plugins menu is a tools menu. Only the latest
- * release is asked about; one that fails is not offered, so a publisher's
- * incompatible release can't break an older CLI's setup.
+ * the index: published, a manifest the loader would accept (its own parser
+ * decides), able to run here, and adding tools, since setup's Plugins menu
+ * is a tools menu. Only the latest release is asked about; one that fails
+ * is not offered, so a publisher's incompatible release can't break an
+ * older CLI's setup.
  */
 export const releaseVerdict = (
+  name: string,
   release: PluginRelease,
   platform: NodeJS.Platform,
 ): { offer: true; version: string } | { offer: false; reason: string } => {
@@ -240,11 +240,19 @@ export const releaseVerdict = (
       reason: `its latest release (${version}) is plugin version ${JSON.stringify(stratus.pluginVersion)}, and this CLI loads version ${PLUGIN_MANIFEST_VERSION}`,
     };
   }
+  let contributes;
+  try {
+    ({ contributes } = parsePluginManifest({ name, stratus }, name));
+  } catch (error) {
+    // The loader quotes what it refuses with JSON.stringify, and anything
+    // that still is not printable goes, since this is printed to a terminal.
+    const message = (error instanceof Error ? error.message : String(error)).replace(new RegExp(UNPRINTABLE.source, 'g'), '');
+    return { offer: false, reason: `its latest release (${version}) has a manifest this CLI would refuse: ${message}` };
+  }
   if (!osAllows(release.os, platform)) {
     return { offer: false, reason: `it does not run on ${platform}` };
   }
-  const contributes = isObject(stratus.contributes) ? stratus.contributes : {};
-  if (!nonEmptyList(contributes.tools) && !nonEmptyList(contributes.toolsDiscovered)) {
+  if (contributes.tools.length === 0 && contributes.toolsDiscovered.length === 0) {
     return { offer: false, reason: 'it adds no tools' };
   }
   return { offer: true, version };

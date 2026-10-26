@@ -1856,7 +1856,7 @@ export const runSetup = async (
     const offered: typeof candidates = [];
     const skipped: string[] = [];
     for (const entry of candidates) {
-      const verdict = releaseVerdict(releases.get(entry.name) ?? { status: 'unknown' }, process.platform);
+      const verdict = releaseVerdict(entry.name, releases.get(entry.name) ?? { status: 'unknown' }, process.platform);
       if (verdict.offer) {
         offered.push(entry);
       } else {
