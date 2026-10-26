@@ -74,10 +74,12 @@ wait_healthy() {
 }
 
 [ "$(ps -p 1 -o comm=)" = systemd ] || fail "PID 1 is not systemd"
-for path in "$STATE" "$ETC" "$PREFIX" "/etc/systemd/system/$UNIT" "/etc/systemd/system/$PROBE"; do
+# Everything the cleanup removes must be something this run created.
+for path in "$STATE" "$ETC" "$PREFIX" "/etc/systemd/system/$UNIT" "/etc/systemd/system/$UNIT.d" "/etc/systemd/system/$PROBE"; do
   [ ! -e "$path" ] || fail "$path exists already; this test only runs on a machine without a Stratus system install"
 done
 ! id stratus >/dev/null 2>&1 || fail "a stratus account exists already; this test only runs on a machine without a Stratus system install"
+! getent group stratus >/dev/null 2>&1 || fail "a stratus group exists already; this test only runs on a machine without a Stratus system install"
 NODE=$(readlink -f "$(command -v node)")
 CLI="$PREFIX/node_modules/@stratusagent/cli/dist/bin.js"
 
