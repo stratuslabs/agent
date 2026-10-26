@@ -5,6 +5,7 @@
 # survive a reboot on a machine nobody logs in to. This one runs from boot as
 # a dedicated account. The full recipe is docs/guides/deployment.md:
 #
+#   sudo apt install bubblewrap                                        # the shell tool's sandbox
 #   sudo useradd --system --home-dir /var/lib/stratus --shell /usr/sbin/nologin stratus
 #   sudo npm install -g @stratusagent/cli @stratusagent/control-api    # + the plugins you use
 #   sudo install -d -m 0700 /etc/stratus
@@ -80,13 +81,19 @@ ProtectClock=yes
 ProtectHostname=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
-RestrictNamespaces=yes
+# tool-shell runs every agent command in bubblewrap, which needs a user,
+# mount, pid and ipc namespace of its own. So those four are allowed and the
+# rest (net, uts, cgroup, time) are not. `RestrictNamespaces=yes` would
+# refuse every shell.run.
+RestrictNamespaces=user mnt pid ipc
 LockPersonality=yes
 RemoveIPC=yes
 # Netlink is how Node and Chromium enumerate network interfaces.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
+# @mount for bubblewrap too: it mounts inside the namespaces above. With no
+# capability outside them, those mounts can't touch the host's.
+SystemCallFilter=@system-service @mount
 SystemCallErrorNumber=EPERM
 # Not set: MemoryDenyWriteExecute=yes. V8 compiles JavaScript into
 # executable memory, and node does not start under it.

@@ -116,6 +116,7 @@ every pull request and push to `main` (`.github/workflows/docker.yml`).
 Node `>=22.13 <23 || >=23.4` on the host, then:
 
 ```bash
+sudo apt install bubblewrap        # or dnf install bubblewrap: the shell tool's sandbox
 sudo useradd --system --home-dir /var/lib/stratus --shell /usr/sbin/nologin stratus
 sudo npm install -g @stratusagent/cli @stratusagent/control-api @stratusagent/channel-slack \
   @stratusagent/tool-fs @stratusagent/tool-shell @stratusagent/tool-web @stratusagent/tool-browser
@@ -146,8 +147,8 @@ provider, then checks what the unit promises: it runs as `stratus` with a
 private state directory, holds no capability and gains no privilege, sees
 the filesystem read-only outside that directory with `/home` hidden and its
 own `/tmp`, logs JSON to the journal, keeps state across a restart, and
-stops cleanly inside `TimeoutStopSec`. It also reports whether a shell
-command can run sandboxed under the unit's settings. It refuses to run on a
+stops cleanly inside `TimeoutStopSec`, and that a shell command runs in
+the shell tool's sandbox under the unit's settings. It refuses to run on a
 machine that already has a Stratus system install. CI runs it on every pull
 request and push to `main` (`.github/workflows/systemd.yml`).
 
@@ -409,6 +410,13 @@ What the recipe sets, and what it leaves to you.
   `kernel.apparmor_restrict_unprivileged_userns=1` refuses the user
   namespace's uid map. So there, bwrap can't start in a container without
   a change to the host. `compose-smoke.sh` prints which case a host is in.
+  The system unit allows exactly what bwrap needs and no more: its own
+  user, mount, pid and ipc namespaces (`RestrictNamespaces=user mnt pid
+  ipc`) and the mount calls inside them (`@mount` in `SystemCallFilter=`).
+  On a stock Ubuntu 24.04 host (checked 2026-10-26), bwrap can create its
+  user namespace there even with `kernel.apparmor_restrict_unprivileged_userns=1`,
+  so a host install works where a container doesn't. `deploy/systemd/smoke.sh`
+  runs a command through it under the unit.
 - [ ] **The API on loopback only.** Compose publishes `127.0.0.1:4123`;
   the unit uses the config's `api.host`, which the VM profile sets to
   `127.0.0.1`. Reach it from elsewhere through a tunnel — Tailscale, or
