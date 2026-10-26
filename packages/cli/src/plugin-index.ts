@@ -44,7 +44,6 @@ export const BUNDLED_PLUGIN_INDEX: readonly PluginIndexEntry[] = [
   { name: '@stratusagent/plugin-fleet', description: 'Read-only fleet metadata for an agent that reports what needs a person' },
   { name: '@stratusagent/plugin-a2ui', description: 'Show a native screen as A2UI, checked against your catalogs' },
   { name: '@stratusagent/plugin-dreams', description: 'Overnight experiment runs and a morning report (macOS)' },
-  { name: '@stratusagent/plugin-sandbox', description: 'An executor that runs agent commands under sandbox-exec (macOS)' },
 ];
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
