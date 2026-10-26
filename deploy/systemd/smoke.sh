@@ -202,12 +202,11 @@ variant() { # name sed-expression...
   fi
   sudo rm -f "/etc/systemd/system/stratus-diag-$name.service"
 }
-variant no-kernel3 -e '/^ProtectKernel/d'
-variant no-kernel3-hostname -e '/^ProtectKernel/d' -e '/^ProtectHostname=/d'
-variant no-tunables-logs-hostname -e '/^ProtectKernelTunables=/d' -e '/^ProtectKernelLogs=/d' -e '/^ProtectHostname=/d'
-variant no-tunables-hostname -e '/^ProtectKernelTunables=/d' -e '/^ProtectHostname=/d'
-variant no-private -e '/^Private/d'
-variant only-system-home -e '/^ProtectKernel/d' -e '/^ProtectControlGroups=/d' -e '/^ProtectClock=/d' -e '/^ProtectHostname=/d'
+variant no-ktunables -e '/^ProtectKernelTunables=/d'
+variant no-klogs -e '/^ProtectKernelLogs=/d'
+variant no-both -e '/^ProtectKernelTunables=/d' -e '/^ProtectKernelLogs=/d'
+variant no-cgroups -e '/^ProtectControlGroups=/d'
+variant no-devices -e '/^PrivateDevices=/d'
 variant no-protect-all -e '/^Protect/d' -e '/^Private/d'
 sudo systemctl daemon-reload
 probed=0
