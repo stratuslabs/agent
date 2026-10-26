@@ -76,7 +76,7 @@ import { packageInstalled } from '../loaders.ts';
 import { isPackageName, isInstallableSpecifier, defaultPackageInstaller } from '../npm.ts';
 import type { CliProviderName, ParsedSetupCommand } from '../parse.ts';
 import { FIRST_PARTY_CAPABILITY_PACKAGES } from '../plugin-catalog.ts';
-import { checkPluginReleases, readPluginIndex, releaseVerdict } from '../plugin-index.ts';
+import { checkPluginReleases, currentPlatformHost, installSpecifier, readPluginIndex, releaseVerdict } from '../plugin-index.ts';
 import {
   menuPrefixWidth,
   quoteShellArg,
@@ -1853,12 +1853,13 @@ export const runSetup = async (
     const listed = new Set(pluginPackages());
     const candidates = index.entries.filter((entry) => !listed.has(entry.name));
     const releases = await checkPluginReleases(candidates.map((entry) => entry.name), env);
-    const offered: typeof candidates = [];
+    const host = currentPlatformHost();
+    const offered: Array<(typeof candidates)[number] & { version: string }> = [];
     const skipped: string[] = [];
     for (const entry of candidates) {
-      const verdict = releaseVerdict(entry.name, releases.get(entry.name) ?? { status: 'unknown' }, process.platform);
+      const verdict = releaseVerdict(entry.name, releases.get(entry.name) ?? { status: 'unknown' }, host);
       if (verdict.offer) {
-        offered.push(entry);
+        offered.push({ ...entry, version: verdict.version });
       } else {
         // At least one space after a name longer than the column: a
         // third-party name has no @stratusagent/ to shorten.
@@ -1885,11 +1886,15 @@ export const runSetup = async (
     }
     const entry = offered[choice.index];
     if (entry) {
-      await choosePlugin(entry.name);
+      await choosePlugin(entry.name, installSpecifier(entry.name, entry.version));
     }
   };
 
-  const choosePlugin = async (name: string): Promise<void> => {
+  /**
+   * `install` is what `npm install -g` is handed, when it isn't the bare
+   * name: More plugins pins the version it checked.
+   */
+  const choosePlugin = async (name: string, install: string = name): Promise<void> => {
     const setup = PLUGIN_SETUP[name];
     const installed = packageInstalled(name, env);
     const enabled = pluginEnabled(name);
@@ -1963,15 +1968,15 @@ export const runSetup = async (
         disablePlugin(name);
         return;
       }
-      writeLine(streams.stdout, `Running: npm install -g ${name}`);
-      const result = await (env.packageInstaller ?? defaultPackageInstaller)([name])
+      writeLine(streams.stdout, `Running: npm install -g ${install}`);
+      const result = await (env.packageInstaller ?? defaultPackageInstaller)([install])
         .catch((error: unknown) => ({
           ok: false,
           message: error instanceof Error ? error.message : String(error),
         }));
       if (!result.ok) {
         writeLine(streams.stderr, `Could not install: ${result.message}`);
-        writeLine(streams.stderr, `Run \`npm install -g ${name}\` yourself, then re-run setup to enable it.`);
+        writeLine(streams.stderr, `Run \`npm install -g ${install}\` yourself, then re-run setup to enable it.`);
         return;
       }
       writeLine(streams.stdout, `Installed ${name}.`);

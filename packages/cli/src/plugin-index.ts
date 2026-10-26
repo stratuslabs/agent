@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { isPackageName, parsePluginManifest, PLUGIN_MANIFEST_VERSION } from '@stratusagent/plugins';
 import type { CliEnvironment } from './environment.ts';
 import { runNpm, type NpmResult } from './npm.ts';
@@ -115,14 +116,14 @@ export const readPluginIndex = async (
 
 /** What npm says about a package's latest release. */
 export type PluginRelease =
-  | { status: 'published'; version: string; stratus?: unknown; os?: unknown }
+  | { status: 'published'; version: string; stratus?: unknown; os?: unknown; cpu?: unknown; libc?: unknown }
   | { status: 'unpublished' }
   | { status: 'unknown' };
 
 export type PluginReleaseReader = (name: string) => Promise<PluginRelease>;
 
 /**
- * Reads `npm view <name>@latest version stratus os --json`.
+ * Reads `npm view <name>@latest version stratus os cpu libc --json`.
  *
  * npm prints an object when more than one requested field exists and the
  * bare value when only one does. `version` always exists, so a bare string
@@ -155,6 +156,8 @@ export const parseNpmView = (result: NpmResult | undefined): PluginRelease => {
     version: printed.version,
     ...('stratus' in printed ? { stratus: printed.stratus } : {}),
     ...('os' in printed ? { os: printed.os } : {}),
+    ...('cpu' in printed ? { cpu: printed.cpu } : {}),
+    ...('libc' in printed ? { libc: printed.libc } : {}),
   };
 };
 
@@ -162,7 +165,7 @@ export const defaultPluginReleaseReader: PluginReleaseReader = async (name) => {
   if (!isPackageName(name)) {
     return { status: 'unknown' };
   }
-  return parseNpmView(await runNpm(['view', `${name}@latest`, 'version', 'stratus', 'os', '--json']));
+  return parseNpmView(await runNpm(['view', `${name}@latest`, 'version', 'stratus', 'os', 'cpu', 'libc', '--json']));
 };
 
 /** How many `npm view` processes run at once. Each is a Node process. */
@@ -185,14 +188,44 @@ export const checkPluginReleases = async (
   return releases;
 };
 
+/** The host as npm's platform check sees it (npm-install-checks `current-env`). */
+export interface PlatformHost {
+  os: NodeJS.Platform;
+  cpu: string;
+  /** `glibc` or `musl` on Linux; `null` where it can't be told, and everywhere else. */
+  libc: string | null;
+}
+
+let libcFamily: string | null | undefined;
+
 /**
- * npm's own reading of an `os` field (npm-install-checks `checkList`): a
- * `!name` entry excludes that platform, any plain entry makes the list an
- * allowlist, and `any` alone allows everything. A field that is neither a
- * string nor a list of strings is one npm would not enforce either.
+ * This machine, read the way npm reads it before an install: libc only on
+ * Linux, from `/usr/bin/ldd` and then the process report.
  */
-const osAllows = (os: unknown, platform: NodeJS.Platform): boolean => {
-  const list = typeof os === 'string' ? [os] : Array.isArray(os) && os.every((entry) => typeof entry === 'string') ? os as string[] : undefined;
+export const currentPlatformHost = (): PlatformHost => {
+  if (process.platform === 'linux' && libcFamily === undefined) {
+    try {
+      const ldd = readFileSync('/usr/bin/ldd', 'utf8');
+      libcFamily = ldd.includes('musl') ? 'musl' : ldd.includes('GNU C Library') ? 'glibc' : null;
+    } catch {
+      const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string }; sharedObjects?: string[] } | undefined;
+      libcFamily = report?.header?.glibcVersionRuntime
+        ? 'glibc'
+        : report?.sharedObjects?.some((file) => file.includes('libc.musl-') || file.includes('ld-musl-')) ? 'musl' : null;
+    }
+  }
+  return { os: process.platform, cpu: process.arch, libc: process.platform === 'linux' ? libcFamily ?? null : null };
+};
+
+/**
+ * npm's own reading of an `os`, `cpu` or `libc` field (npm-install-checks
+ * `checkList`): a `!name` entry excludes that value, any plain entry makes
+ * the list an allowlist, and `any` alone allows everything. A field that is
+ * neither a string nor a list of strings is one npm would not enforce
+ * either.
+ */
+const listAllows = (field: unknown, value: string): boolean => {
+  const list = typeof field === 'string' ? [field] : Array.isArray(field) && field.every((entry) => typeof entry === 'string') ? field as string[] : undefined;
   if (list === undefined || list.length === 0 || (list.length === 1 && list[0] === 'any')) {
     return true;
   }
@@ -201,10 +234,10 @@ const osAllows = (os: unknown, platform: NodeJS.Platform): boolean => {
   for (const entry of list) {
     if (entry.startsWith('!')) {
       negated += 1;
-      if (entry.slice(1) === platform) {
+      if (entry.slice(1) === value) {
         return false;
       }
-    } else if (entry === platform) {
+    } else if (entry === value) {
       match = true;
     }
   }
@@ -222,7 +255,7 @@ const osAllows = (os: unknown, platform: NodeJS.Platform): boolean => {
 export const releaseVerdict = (
   name: string,
   release: PluginRelease,
-  platform: NodeJS.Platform,
+  host: PlatformHost,
 ): { offer: true; version: string } | { offer: false; reason: string } => {
   if (release.status === 'unpublished') {
     return { offer: false, reason: 'not on npm yet' };
@@ -249,11 +282,30 @@ export const releaseVerdict = (
     const message = (error instanceof Error ? error.message : String(error)).replace(new RegExp(UNPRINTABLE.source, 'g'), '');
     return { offer: false, reason: `its latest release (${version}) has a manifest this CLI would refuse: ${message}` };
   }
-  if (!osAllows(release.os, platform)) {
-    return { offer: false, reason: `it does not run on ${platform}` };
+  // The checks npm makes before it installs (checkPlatform), so npm does
+  // not refuse with EBADPLATFORM what setup just offered.
+  if (!listAllows(release.os, host.os)) {
+    return { offer: false, reason: `it does not run on ${host.os}` };
+  }
+  if (!listAllows(release.cpu, host.cpu)) {
+    return { offer: false, reason: `it does not run on ${host.cpu}` };
+  }
+  if (release.libc !== undefined && release.libc !== null && host.libc === null) {
+    return { offer: false, reason: 'it needs a libc this host does not report' };
+  }
+  if (host.libc !== null && !listAllows(release.libc, host.libc)) {
+    return { offer: false, reason: `it does not run with ${host.libc}` };
   }
   if (contributes.tools.length === 0 && contributes.toolsDiscovered.length === 0) {
     return { offer: false, reason: 'it adds no tools' };
   }
   return { offer: true, version };
 };
+
+/**
+ * What setup hands `npm install -g` for a release it checked: that exact
+ * version. A bare name installs whatever npm's configured `tag` points at,
+ * which need not be the `latest` release the checks above passed. The
+ * `plugins` key stays the bare name, since that is what the loader imports.
+ */
+export const installSpecifier = (name: string, version: string): string => `${name}@${version}`;

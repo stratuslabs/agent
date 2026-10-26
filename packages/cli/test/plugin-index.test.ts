@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   BUNDLED_PLUGIN_INDEX,
   checkPluginReleases,
+  currentPlatformHost,
+  installSpecifier,
   parseNpmView,
   parsePluginIndex,
   readPluginIndex,
@@ -20,6 +22,11 @@ const published = (stratus: unknown, extra: Record<string, unknown> = {}): Plugi
 });
 
 const toolManifest = { pluginVersion: 1, contributes: { tools: [{ name: 'agent.spawn' }] } };
+
+/** A host as npm's platform check sees it. */
+const linux = { os: 'linux', cpu: 'x64', libc: 'glibc' } as const;
+const host = (os: NodeJS.Platform, extra: { cpu?: string; libc?: string | null } = {}) =>
+  ({ os, cpu: extra.cpu ?? 'x64', libc: extra.libc === undefined ? (os === 'linux' ? 'glibc' : null) : extra.libc });
 
 test('the index reads entries with a package name and a description', () => {
   const entries = parsePluginIndex({
@@ -114,16 +121,16 @@ test('the index comes from npm when npm has one, and from the bundled copy other
 });
 
 test('a published plugin release with tools this CLI understands is offered', () => {
-  assert.deepEqual(releaseVerdict('p', published(toolManifest), 'linux'), { offer: true, version: '0.1.0' });
+  assert.deepEqual(releaseVerdict('p', published(toolManifest), linux), { offer: true, version: '0.1.0' });
   assert.deepEqual(
-    releaseVerdict('p', published({ pluginVersion: 1, contributes: { toolsDiscovered: [{ namespace: 'mcp.*' }] } }), 'linux'),
+    releaseVerdict('p', published({ pluginVersion: 1, contributes: { toolsDiscovered: [{ namespace: 'mcp.*' }] } }), linux),
     { offer: true, version: '0.1.0' },
   );
 });
 
 test('a release that is not published, not a plugin, or for another host is not offered, with the reason', () => {
   const reason = (release: PluginRelease, platform: NodeJS.Platform = 'linux'): string | undefined => {
-    const verdict = releaseVerdict('p', release, platform);
+    const verdict = releaseVerdict('p', release, host(platform));
     return verdict.offer ? undefined : verdict.reason;
   };
   assert.equal(reason({ status: 'unpublished' }), 'not on npm yet');
@@ -143,7 +150,7 @@ test('a release whose manifest the loader would refuse is not offered', () => {
   // decides, so setup never installs and enables a plugin that registers
   // nothing at the next start.
   const reason = (stratus: unknown): string | undefined => {
-    const verdict = releaseVerdict('@stratusagent/plugin-x', published(stratus), 'linux');
+    const verdict = releaseVerdict('@stratusagent/plugin-x', published(stratus), linux);
     return verdict.offer ? undefined : verdict.reason;
   };
   const refused = /^its latest release \(0\.1\.0\) has a manifest this CLI would refuse: Plugin @stratusagent\/plugin-x: /;
@@ -157,7 +164,7 @@ test('a release whose manifest the loader would refuse is not offered', () => {
 
 test('the os field is read the way npm reads it', () => {
   const offered = (os: unknown, platform: NodeJS.Platform): boolean =>
-    releaseVerdict('p', published(toolManifest, { os }), platform).offer;
+    releaseVerdict('p', published(toolManifest, { os }), host(platform)).offer;
   assert.equal(offered('darwin', 'darwin'), true);
   assert.equal(offered('darwin', 'linux'), false);
   assert.equal(offered(['!win32'], 'linux'), true);
@@ -165,6 +172,37 @@ test('the os field is read the way npm reads it', () => {
   assert.equal(offered(['any'], 'win32'), true);
   assert.equal(offered(['darwin', 'linux'], 'linux'), true);
   assert.equal(offered(undefined, 'win32'), true);
+});
+
+test('cpu and libc are checked the way npm checks them, so npm will not refuse what setup offers', () => {
+  const reason = (extra: Record<string, unknown>, on: ReturnType<typeof host>): string | undefined => {
+    const verdict = releaseVerdict('p', published(toolManifest, extra), on);
+    return verdict.offer ? undefined : verdict.reason;
+  };
+  assert.equal(reason({ cpu: ['arm64'] }, host('darwin', { cpu: 'x64' })), 'it does not run on x64');
+  assert.equal(reason({ cpu: ['arm64'] }, host('darwin', { cpu: 'arm64' })), undefined);
+  assert.equal(reason({ cpu: '!ia32' }, host('linux', { cpu: 'ia32' })), 'it does not run on ia32');
+  assert.equal(reason({ libc: ['musl'] }, host('linux', { libc: 'glibc' })), 'it does not run with glibc');
+  assert.equal(reason({ libc: ['glibc'] }, host('linux', { libc: 'glibc' })), undefined);
+  // npm refuses a package that names a libc wherever it can't tell one,
+  // which is every host that isn't Linux.
+  assert.equal(reason({ libc: ['glibc'] }, host('darwin')), 'it needs a libc this host does not report');
+});
+
+test('this host is read the way npm reads it', () => {
+  const here = currentPlatformHost();
+  assert.equal(here.os, process.platform);
+  assert.equal(here.cpu, process.arch);
+  // CI runs this on Linux too, where npm reports a libc family.
+  if (process.platform === 'linux') {
+    assert.ok(here.libc === 'glibc' || here.libc === 'musl', `libc ${here.libc}`);
+  } else {
+    assert.equal(here.libc, null);
+  }
+});
+
+test('the install is pinned to the version that was checked', () => {
+  assert.equal(installSpecifier('@stratusagent/plugin-x', '0.2.0'), '@stratusagent/plugin-x@0.2.0');
 });
 
 test('npm view output is read whether npm printed one field or several', () => {
@@ -177,8 +215,8 @@ test('npm view output is read whether npm printed one field or several', () => {
     version: '1.3.0',
   });
   assert.deepEqual(
-    parseNpmView({ code: 0, stdout: JSON.stringify({ version: '0.1.0', stratus: toolManifest, os: ['darwin'] }), stderr: '' }),
-    { status: 'published', version: '0.1.0', stratus: toolManifest, os: ['darwin'] },
+    parseNpmView({ code: 0, stdout: JSON.stringify({ version: '0.1.0', stratus: toolManifest, os: ['darwin'], cpu: ['arm64'], libc: ['glibc'] }), stderr: '' }),
+    { status: 'published', version: '0.1.0', stratus: toolManifest, os: ['darwin'], cpu: ['arm64'], libc: ['glibc'] },
   );
   const notFound = JSON.stringify({ error: { code: 'E404', summary: 'Not Found - GET https://registry.npmjs.org/x' } });
   assert.deepEqual(parseNpmView({ code: 1, stdout: notFound, stderr: 'npm error code E404' }), { status: 'unpublished' });

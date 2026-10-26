@@ -8896,7 +8896,10 @@ test('setup offers the index plugins whose latest release works here, and instal
     /Not offered here:\n {2}plugin-unreleased not on npm yet\n {2}stratus-plugin-newer its latest release \(3\.0\.0\) is plugin version 2, and this CLI loads version 1\n/,
   );
   assert.doesNotMatch(output.stdout, /npm has no plugin index/);
-  assert.deepEqual(installed, [['@stratusagent/plugin-example']]);
+  // The release that was checked, not whatever npm's configured tag
+  // resolves to; the config key stays the bare name the loader imports.
+  assert.deepEqual(installed, [['@stratusagent/plugin-example@0.2.0']]);
+  assert.match(output.stdout, /Running: npm install -g @stratusagent\/plugin-example@0\.2\.0/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.deepEqual(config.plugins, { '@stratusagent/plugin-example': { enabled: true } });
 });
