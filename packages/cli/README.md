@@ -51,6 +51,7 @@ stratus skill validate ./my-skill      # check a skill against the spec without 
 stratus plugins                        # installed → enabled → granted → what approvals does with it
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus health                         # is the running daemon serving? exit 0/1, for container and probe health checks
+stratus sessions --status failed       # what the daemon's sessions are doing, newest first (--agent, --limit, --format json)
 stratus credentials                    # stored credential names (never values)
 stratus signin set anthropic --agent remy  # one agent's own Claude subscription, token asked without echo (also `signins`, `signin remove`)
 stratus channel set imessage --agent blair apiKey  # a channel plugin's secrets for one agent, asked without echo (also `channels`, `channel remove`)
@@ -86,11 +87,12 @@ Full reference with every subcommand:
 | `--log-format` | `serve`: `text` (default) or `json` — the log's records as JSON lines on stdout, for `docker logs` and journald |
 | `--no-api` | `serve`: do not serve the control API |
 | `--api-host`, `--api-port` | `serve`: control API bind (default `127.0.0.1:4123`) |
-| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`, `grants`, `health`: a running daemon's control API |
+| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`, `sessions`, `grants`, `health`: a running daemon's control API |
 | `--tool`, `--scope`, `--origin` | `grants revoke`: which grant goes — exactly one |
 | `--trust <level>` | `memory list`: show only that label; `memory reassert`: the label to record (`user`, `agent`, `unknown`, `external`) |
 | `--all-unknown` | `memory reassert`: every live fact with no recorded origin |
-| `--limit <n>` | `memory search`: maximum hits |
+| `--limit <n>` | `memory search`: maximum hits; `sessions`: how many to list (default 20) |
+| `--status <status>` | `sessions`: only this state (`idle`, `running`, `pending_approval`, `completed`, `failed`) |
 | `--file <path>`, `--preserve-trust` | `memory export` / `memory import`: the JSONL, and keeping each recorded label instead of landing entries `external` |
 | `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one; `signin set`/`remove`: whose own sign-in it is; `channel set`/`remove`: whose binding it is |
 | `--port`, `--host`, `--no-open` | `dashboard`: where a daemon it starts should bind; skip opening the browser |

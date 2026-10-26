@@ -1,4 +1,4 @@
-import { isTrustLevel, TRUST_LEVELS, type TrustLevel } from '@stratusagent/core';
+import { isTrustLevel, TRUST_LEVELS, type SessionStatus, type TrustLevel } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
 import { CHANNEL_KIND_PATTERN, CREDENTIAL_NAME_PATTERN, parseProviderName, type StratusProviderName } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
@@ -266,6 +266,30 @@ export interface ParsedSessionCommand {
   token?: string;
 }
 
+export interface ParsedSessionsCommand {
+  command: 'sessions';
+  agentId?: string;
+  status?: SessionStatus;
+  /** How many to show, newest first; the command's default when unset. */
+  limit?: number;
+  format: 'text' | 'json';
+  gateway?: string;
+  token?: string;
+}
+
+// A record rather than a list, so a status added to `SessionStatus` fails
+// the build here instead of being refused as a typo at the command line.
+const SESSION_STATUS_NAMES: Record<SessionStatus, true> = {
+  idle: true,
+  running: true,
+  pending_approval: true,
+  completed: true,
+  failed: true,
+};
+export const SESSION_STATUSES = Object.keys(SESSION_STATUS_NAMES) as SessionStatus[];
+
+const isSessionStatus = (value: string): value is SessionStatus => Object.hasOwn(SESSION_STATUS_NAMES, value);
+
 export interface ParsedDoctorCommand {
   command: 'doctor';
   format: 'text' | 'json';
@@ -361,6 +385,7 @@ export type ParsedCommand =
   | ParsedGrantsCommand
   | ParsedMemoryCommand
   | ParsedSessionCommand
+  | ParsedSessionsCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
   | ParsedUpdateCommand
@@ -1406,13 +1431,74 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     };
   }
 
+  if (command === 'sessions' || (command === 'session' && rest[0] === 'list')) {
+    const sessionsRest = command === 'sessions' ? rest : rest.slice(1);
+    const parsed: ParsedSessionsCommand = { command: 'sessions', format: 'text' };
+    for (let index = 0; index < sessionsRest.length; index += 1) {
+      const token = sessionsRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--agent') {
+        parsed.agentId = readOptionValue(sessionsRest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token === '--status') {
+        const value = readOptionValue(sessionsRest, index, '--status');
+        if (!isSessionStatus(value)) {
+          throw new Error(`Unknown status: ${value}. One of: ${SESSION_STATUSES.join(', ')}`);
+        }
+        parsed.status = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--limit') {
+        const value = readOptionValue(sessionsRest, index, '--limit');
+        if (!/^\d+$/.test(value) || Number(value) < 1) {
+          throw new Error(`--limit takes a whole number of 1 or more, not ${value}`);
+        }
+        parsed.limit = Number(value);
+        index += 1;
+        continue;
+      }
+      if (token === '--format') {
+        const value = readOptionValue(sessionsRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        parsed.format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--gateway') {
+        parsed.gateway = readOptionValue(sessionsRest, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (token === '--token') {
+        parsed.token = readOptionValue(sessionsRest, index, '--token');
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('-')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: stratus sessions [--agent <id>] [--status <status>]`);
+    }
+    return parsed;
+  }
+
   if (command === 'session') {
     const [action, ...sessionRest] = rest;
     if (action === undefined || action === '--help' || action === '-h') {
       return { command: 'help' };
     }
     if (action !== 'rollover') {
-      throw new Error(`Unknown session subcommand: ${action}. Try: stratus session rollover <session-id>`);
+      throw new Error(`Unknown session subcommand: ${action}. Try: stratus session rollover <session-id>, stratus sessions`);
     }
     const parsed: ParsedSessionCommand = { command: 'session', action: 'rollover', sessionId: '' };
     for (let index = 0; index < sessionRest.length; index += 1) {

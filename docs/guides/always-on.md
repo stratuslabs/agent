@@ -251,6 +251,13 @@ bounds.
 - What it will and won't do with nobody watching: [Approvals](./approvals.md)
 - What it writes down, and how to read it from another terminal:
   [Logs](./logs.md)
+- What each conversation is doing: `stratus sessions` lists the running
+  daemon's sessions newest first, with each one's status (`running`,
+  `pending_approval` while it waits on a person, `failed`, `completed`, or
+  `idle`), agent, last update, and id. `--agent <id>` and `--status
+  <status>` narrow it, `--limit <n>` shows more than the default 20, and
+  `--format json` gives the same as data. It asks the daemon the way
+  `stratus health` does; `--gateway` and `--token` point it at another one.
 - `--idle-timeout <seconds>` — how long the watchdog lets a streaming
   provider stay silent before aborting the turn (default 120). An aborted
   turn's session comes back `failed` with a reason that says so — `Run

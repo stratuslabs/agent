@@ -16101,6 +16101,118 @@ test('stratus health fails in one sentence when no daemon is serving, and migrat
   assert.match(stale.output.stderr, /Could not reach the gateway at http:\/\/127\.0\.0\.1:1/);
 });
 
+test('parseCommand reads stratus sessions and its filters', () => {
+  assert.deepEqual(parseCommand(['sessions']), { command: 'sessions', format: 'text' });
+  assert.deepEqual(parseCommand(['session', 'list']), { command: 'sessions', format: 'text' });
+  assert.deepEqual(
+    parseCommand([
+      'sessions', '--agent', 'ava', '--status', 'failed', '--limit', '5', '--format', 'json',
+      '--gateway', 'http://10.0.0.5:4123', '--token', 't',
+    ]),
+    { command: 'sessions', agentId: 'ava', status: 'failed', limit: 5, format: 'json', gateway: 'http://10.0.0.5:4123', token: 't' },
+  );
+  assert.throws(
+    () => parseCommand(['sessions', '--status', 'done']),
+    /Unknown status: done\. One of: idle, running, pending_approval, completed, failed/,
+  );
+  assert.throws(() => parseCommand(['sessions', '--limit', '0']), /--limit takes a whole number of 1 or more/);
+  assert.throws(() => parseCommand(['sessions', '--limit', 'ten']), /--limit takes a whole number of 1 or more/);
+  assert.throws(() => parseCommand(['sessions', '--format', 'yaml']), /Unsupported format: yaml/);
+  assert.throws(() => parseCommand(['sessions', 'extra']), /Unexpected argument: extra/);
+  assert.deepEqual(parseCommand(['sessions', '--help']), { command: 'help' });
+});
+
+test('stratus sessions filters by status before it limits, and says when there are more', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sessions-filter-'));
+  // Newest first, the order GET /api/v1/sessions answers in.
+  const rows = [
+    { id: 's4', agentId: 'ava', status: 'running', createdAt: '2026-10-26T10:00:00.000Z', updatedAt: '2026-10-26T10:04:00.000Z' },
+    { id: 's3', agentId: 'ava', status: 'failed', createdAt: '2026-10-26T10:00:00.000Z', updatedAt: '2026-10-26T10:03:00.000Z' },
+    { id: 's2', agentId: 'bea', status: 'running', createdAt: '2026-10-26T10:00:00.000Z', updatedAt: '2026-10-26T10:02:00.000Z' },
+    { id: 's1', agentId: 'ava', status: 'failed', createdAt: '2026-10-26T10:00:00.000Z', updatedAt: '2026-10-26T10:01:00.000Z' },
+  ];
+  const asked: string[] = [];
+  // The route's own behavior: agent filters, limit cuts the newest-first list.
+  const fetchStub = (async (input: string | URL) => {
+    const url = new URL(String(input));
+    asked.push(`${url.pathname}${url.search}`);
+    const agent = url.searchParams.get('agent');
+    const limit = url.searchParams.get('limit');
+    const matching = rows.filter((row) => agent === null || row.agentId === agent);
+    const sessions = limit === null ? matching : matching.slice(0, Number(limit));
+    return new Response(JSON.stringify({ sessions }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: {}, fetch: fetchStub };
+  const run = async (argv: string[]) => {
+    const streams = createStreams();
+    const code = await runCli({ argv: ['sessions', '--gateway', 'http://127.0.0.1:9', '--token', 't', ...argv], streams: streams.streams, env });
+    return { code, ...streams.output };
+  };
+
+  // The newest row is running, so a server-side cut to one row would find
+  // no failed session at all. The filter has to see every row first.
+  const failed = await run(['--status', 'failed', '--limit', '1']);
+  assert.equal(failed.code, 0, failed.stderr);
+  assert.equal(asked.at(-1), '/api/v1/sessions');
+  assert.match(failed.stdout, /^failed +ava +2026-10-26T10:03:00\.000Z +s3\nShowing the newest 1\. --limit <n> shows more\.\n$/);
+
+  // Without a status the route does the cutting, asked for one row more
+  // than shown so the command knows whether to say there are more.
+  const newest = await run(['--limit', '2']);
+  assert.equal(asked.at(-1), '/api/v1/sessions?limit=3');
+  assert.match(newest.stdout, /^running +ava +\S+ +s4\nfailed +ava +\S+ +s3\nShowing the newest 2\. --limit <n> shows more\.\n$/);
+
+  const bea = await run(['--agent', 'bea']);
+  assert.equal(asked.at(-1), '/api/v1/sessions?agent=bea&limit=21');
+  assert.match(bea.stdout, /^running +bea +2026-10-26T10:02:00\.000Z +s2\n$/);
+
+  const json = await run(['--status', 'failed', '--format', 'json']);
+  assert.deepEqual(JSON.parse(json.stdout), { sessions: [rows[1], rows[3]], more: false });
+
+  const none = await run(['--status', 'pending_approval']);
+  assert.equal(none.stdout, 'No pending_approval sessions.\n');
+});
+
+test('stratus sessions lists the sessions of the running daemon', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sessions-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  for (const id of ['ava', 'bea']) {
+    await writeFile(path.join(home, '.stratus', 'agents', `${id}.md`), `---\nname: ${id}\nid: ${id}\nprovider: demo\n---\n\nYou are ${id}.\n`);
+  }
+
+  await withServedApi(home, async ({ url, token }) => {
+    const env = { homeDir: home, cwd: home, processEnv: {} };
+    const empty = createStreams();
+    assert.equal(await runCli({ argv: ['sessions'], streams: empty.streams, env }), 0, empty.output.stderr);
+    assert.equal(empty.output.stdout, 'No sessions.\n');
+
+    for (const [sessionId, agentId] of [['s-ava-1', 'ava'], ['s-ava-2', 'ava'], ['s-bea-1', 'bea']] as const) {
+      const queued = await postJson(`${url}/api/v1/sessions/${sessionId}/messages`, token, { message: 'hello', agentId });
+      assert.equal(queued.status, 202, queued.body);
+    }
+    const listed = async (argv: string[]) => {
+      const streams = createStreams();
+      assert.equal(await runCli({ argv: ['sessions', '--format', 'json', ...argv], streams: streams.streams, env }), 0, streams.output.stderr);
+      return (JSON.parse(streams.output.stdout) as { sessions: Array<{ id: string; agentId: string; status: string }> }).sessions;
+    };
+    // Found through gateway.json and gateway-token; each demo turn finishes.
+    const deadline = Date.now() + 5_000;
+    while ((await listed(['--status', 'completed'])).length < 3) {
+      assert.ok(Date.now() < deadline, 'the three demo turns complete');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.deepEqual((await listed(['--agent', 'ava'])).map((session) => session.id).sort(), ['s-ava-1', 's-ava-2']);
+
+    const text = createStreams();
+    assert.equal(await runCli({ argv: ['sessions', '--agent', 'bea'], streams: text.streams, env }), 0);
+    assert.match(text.output.stdout, /^completed +bea +\d{4}-\d{2}-\d{2}T\S+ +s-bea-1\n$/);
+  });
+
+  const down = createStreams();
+  assert.equal(await runCli({ argv: ['sessions'], streams: down.streams, env: { homeDir: home, cwd: home, processEnv: {} } }), 1);
+  assert.match(down.output.stderr, /^Error: no running daemon found/);
+});
+
 test('an announced restart under --log-format json keeps stdout JSON, and the next daemon writes it too', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-restart-json-'));
   const watched = watchedServeStreams();
