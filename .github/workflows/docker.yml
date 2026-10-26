@@ -32,4 +32,3 @@ jobs:
       # capabilities, no-new-privileges, the named state volume, a restart.
       - name: Bring up compose.yaml and check its limits
         run: deploy/docker/compose-smoke.sh
-
