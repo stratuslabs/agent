@@ -80,6 +80,7 @@ import {
 import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
 import { SESSION_TRUST_METADATA_KEY } from '@stratusagent/core';
 import type { Session, Tool } from '@stratusagent/core';
+import { BUNDLED_PLUGIN_INDEX } from '../src/plugin-index.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 // Isolated HOME so tests never read or write the real ~/.stratus.
@@ -7273,8 +7274,8 @@ test('setup enables a plugin and writes the setting it is useless without', asyn
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes, ~/work\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes, ~/work\n', '7\n', '9\n']),
     },
   });
 
@@ -7315,8 +7316,8 @@ test('setup says a plugin grants nothing yet when every soul has a tools list', 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
     },
   });
 
@@ -7341,8 +7342,8 @@ test('setup names the browser tool-browser needs but cannot install', async () =
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-browser (4) → Enable it (1) → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '4\n', '1\n', '6\n', '9\n']),
+      // Plugins (4) → tool-browser (4) → Enable it (1) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '4\n', '1\n', '7\n', '9\n']),
     },
   });
 
@@ -7376,8 +7377,8 @@ test('setup claims nothing about who can call a plugin when the roster will not 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
     },
   });
 
@@ -7412,8 +7413,8 @@ test('setup does not count a per-agent override for an agent that is gone', asyn
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
   });
 
@@ -7440,7 +7441,7 @@ test('setup does not write an enabled plugin block without the setting that make
       // Same path, but no roots typed. tool-fs loads fine with none and
       // then fails every call — the "installed, enabled, and useless"
       // state this menu exists to keep anyone from reaching by accident.
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
   });
 
@@ -7477,8 +7478,8 @@ test('setup keeps the settings it never asked about when a plugin is switched of
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Disable it (2) → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '2\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Disable it (2) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '2\n', '7\n', '9\n']),
     },
   });
 
@@ -7506,8 +7507,8 @@ test('setup does not offer to enable a plugin whose required settings it cannot 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → plugin-mcp (5) → Enter → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '5\n', '\n', '6\n', '9\n']),
+      // Plugins (4) → plugin-mcp (5) → Enter → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '\n', '7\n', '9\n']),
     },
   });
 
@@ -7660,8 +7661,8 @@ test('setup enables a plugin whose roots are configured per agent', async () => 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
   });
 
@@ -7705,8 +7706,8 @@ test('setup reports the entry a soul granted, not the namespace it overlaps', as
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '7\n', '9\n']),
     },
   });
 
@@ -7746,8 +7747,8 @@ test('setup counts a soul whose explicit tools list already names the plugin', a
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
   });
 
@@ -7783,9 +7784,9 @@ test('setup names every skill a plugin contributes, and no tools: advice', async
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (7)
+      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (8)
       // → Save (9)
-      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
     },
   });
 
@@ -7825,9 +7826,9 @@ test('setup spells the skill wildcard from the manifest, not the config key', as
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (7)
+      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (8)
       // → Save (9)
-      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
     },
   });
 
@@ -7857,9 +7858,9 @@ test('setup refuses a configured package that is not a plugin at all', async () 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (7)
+      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (8)
       // → Save (9)
-      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
     },
   });
 
@@ -7895,8 +7896,8 @@ test('setup does not call a plugin callable by an agent its required setting mis
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
   });
 
@@ -7932,8 +7933,8 @@ test('setup enables a plugin after the roots prompt repairs the value that was w
       processEnv: {},
       serviceRunner: stubServiceRunner,
       // Plugins (4) → tool-fs (1) → Enable it (1) → type real roots → Back
-      // (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '6\n', '9\n']),
+      // (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '7\n', '9\n']),
     },
   });
 
@@ -7966,8 +7967,8 @@ test('setup will not enable a plugin whose toolRisks override a daemon would ref
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-shell (2) → Enable it (1) → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '2\n', '1\n', '6\n', '9\n']),
+      // Plugins (4) → tool-shell (2) → Enable it (1) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '2\n', '1\n', '7\n', '9\n']),
     },
   });
 
@@ -8000,9 +8001,9 @@ test('setup says an already-enabled block stays enabled when its settings fail p
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Change roots (1) → new roots → Back (6)
+      // Plugins (4) → tool-fs (1) → Change roots (1) → new roots → Back (7)
       // → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '6\n', '9\n']),
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '7\n', '9\n']),
     },
   });
 
@@ -8040,8 +8041,8 @@ test('setup will not enable a plugin whose preserved settings fail its manifest'
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-shell (2) → Enable it (1) → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '2\n', '1\n', '6\n', '9\n']),
+      // Plugins (4) → tool-shell (2) → Enable it (1) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '2\n', '1\n', '7\n', '9\n']),
     },
   });
 
@@ -8076,8 +8077,8 @@ test('setup refuses to enable a plugin whose preserved settings a daemon would r
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → plugin-mcp (5) → Enter to return → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '5\n', '\n', '6\n', '9\n']),
+      // Plugins (4) → plugin-mcp (5) → Enter to return → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '\n', '7\n', '9\n']),
     },
   });
 
@@ -8112,8 +8113,8 @@ test('setup says what it did not check when enabling a plugin it could not have 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '7\n', '9\n']),
     },
   });
 
@@ -8189,8 +8190,8 @@ test('setup will not offer to install a plugins key that carries a version', asy
       processEnv: {},
       serviceRunner: stubServiceRunner,
       // Plugins (4) → the config's own key (6) → Back (1, the only action)
-      // → Back (7) → Save (9)
-      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+      // → Back (8) → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
     },
   });
 
@@ -8220,8 +8221,8 @@ test('setup will not offer to install a plugins key npm could never install', as
       processEnv: {},
       serviceRunner: stubServiceRunner,
       // Plugins (4) → the config's own key (6) → Back (1, the only action)
-      // → Back (7) → Save (9)
-      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+      // → Back (8) → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
     },
   });
 
@@ -8298,8 +8299,8 @@ test('setup does not treat per-agent roots of the wrong type as configured', asy
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
   });
 
@@ -8338,8 +8339,8 @@ test('setup can re-enable a configured plugin it would not have enabled from scr
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '7\n', '9\n']),
     },
   });
 
@@ -8796,8 +8797,8 @@ test('setup can switch off a plugin whose package is no longer installed', async
       processEnv: {},
       serviceRunner: stubServiceRunner,
       packageResolver: (specifier: string) => specifier !== '@stratusagent/tool-fs',
-      // Plugins (4) → tool-fs (1) → Switch it off (2) → Back (6) → Save (9)
-      setupInput: Readable.from(['4\n', '1\n', '2\n', '6\n', '9\n']),
+      // Plugins (4) → tool-fs (1) → Switch it off (2) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '2\n', '7\n', '9\n']),
     },
   });
 
@@ -8807,6 +8808,133 @@ test('setup can switch off a plugin whose package is no longer installed', async
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   // Switched off, not deleted: the roots are still the operator's.
   assert.deepEqual(config.plugins['@stratusagent/tool-fs'], { enabled: false, roots: ['~/notes'] });
+});
+
+const indexTool = { pluginVersion: 1, contributes: { tools: [{ name: 'example.run' }] } };
+
+test('setup asks npm for more plugins only when More plugins is picked', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // The main Plugins menu works offline; the registry is asked only
+      // from the row that says it checks npm.
+      pluginIndexReader: async () => {
+        throw new Error('the plugin index must not be read unless asked for');
+      },
+      pluginReleaseReader: async () => {
+        throw new Error('no release must be looked up unless asked for');
+      },
+      // Plugins (4) → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /6\) More plugins… \(checks npm\)/);
+  assert.doesNotMatch(output.stdout, /Checking npm for plugins/);
+});
+
+test('setup offers the index plugins whose latest release works here, and installs the one picked', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+  const looked: string[] = [];
+  const installed: string[][] = [];
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      pluginIndexReader: async () => ({
+        schemaVersion: 1,
+        plugins: [
+          { name: '@stratusagent/plugin-example', description: 'Runs examples' },
+          { name: '@stratusagent/plugin-unreleased', description: 'Not out yet' },
+          { name: 'stratus-plugin-newer', description: 'Needs a newer CLI' },
+          // Already a row of the main menu, so not offered twice.
+          { name: '@stratusagent/tool-fs', description: 'Files' },
+        ],
+      }),
+      pluginReleaseReader: async (name: string) => {
+        looked.push(name);
+        if (name === '@stratusagent/plugin-example') {
+          return { status: 'published', version: '0.2.0', stratus: indexTool };
+        }
+        if (name === 'stratus-plugin-newer') {
+          return { status: 'published', version: '3.0.0', stratus: { ...indexTool, pluginVersion: 2 } };
+        }
+        return { status: 'unpublished' };
+      },
+      packageInstaller: async (packages: string[]) => {
+        installed.push([...packages]);
+        return { ok: true, message: '' };
+      },
+      // Plugins (4) → More plugins (6) → plugin-example (1) → Install, then
+      // enable (1) → Back (8, the example is a row now) → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '1\n', '8\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.deepEqual(looked.sort(), ['@stratusagent/plugin-example', '@stratusagent/plugin-unreleased', 'stratus-plugin-newer']);
+  assert.match(output.stdout, /plugin-example\s+Runs examples/);
+  assert.match(
+    output.stdout,
+    /Not offered here:\n {2}plugin-unreleased not on npm yet\n {2}stratus-plugin-newer its latest release \(3\.0\.0\) is plugin version 2, and this CLI loads version 1\n/,
+  );
+  assert.doesNotMatch(output.stdout, /npm has no plugin index/);
+  // The release that was checked, not whatever npm's configured tag
+  // resolves to; the config key stays the bare name the loader imports.
+  assert.deepEqual(installed, [['@stratusagent/plugin-example@0.2.0']]);
+  assert.match(output.stdout, /Running: npm install -g @stratusagent\/plugin-example@0\.2\.0/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins, { '@stratusagent/plugin-example': { enabled: true } });
+});
+
+test('setup falls back to the index it shipped with when npm has none', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+  const looked: string[] = [];
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      pluginIndexReader: async () => undefined,
+      pluginReleaseReader: async (name: string) => {
+        looked.push(name);
+        return { status: 'unpublished' };
+      },
+      packageInstaller: async () => {
+        throw new Error('nothing was offered, so nothing is installed');
+      },
+      // Plugins (4) → More plugins (6) → Enter → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /npm has no plugin index this CLI can read, so this is the list it shipped with/);
+  assert.deepEqual(looked.sort(), BUNDLED_PLUGIN_INDEX.map((entry) => entry.name).sort());
+  assert.match(output.stdout, /There are no more plugins to offer here right now/);
 });
 
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {

@@ -154,6 +154,15 @@ entries alone.
 | [`@stratusagent/plugin-mcp`](../../packages/plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, [discovered at connect](./mcp.md) | `gated`, whatever the server says; per-tool `toolRisks` overrides |
 | a search backend plugin, [against the `web.search` contract](../../packages/search) | `web.search` | `gated` — the third-party floor, whatever the backend's manifest says |
 
+Those ship with the CLI. Plugins that release on their own, such as the ones
+in `stratuslabs/plugins`, are under **Plugins → More plugins** in `stratus
+setup`. That row reads the curated plugin index from npm, and falls back to
+the copy the CLI shipped with. It offers a plugin only when its latest release
+can load here: published, a plugin version this CLI loads, an `os` that
+includes this host, and tools to add. Every other entry is named with the
+reason. Picking one installs it and enables it the same way as the rows
+above. The main menu never asks npm anything.
+
 Each package's README carries its own settings and the reasoning behind its
 risk levels. Four things are worth knowing here:
 

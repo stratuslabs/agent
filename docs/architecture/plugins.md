@@ -850,6 +850,19 @@ published under `@stratusagent/` at the same version.
   and the repository's README lists them all. A new first-party plugin that
   the rule above puts outside this repository starts there, so it can break,
   version, and ship without turning this repository's CI red.
+
+  The same repository holds the **plugin index** that `stratus setup` offers
+  under Plugins → More plugins: a list of package names and one-line
+  descriptions, published as `@stratusagent/plugin-index` with the list in
+  its `stratusPluginIndex` field, which `npm view` reads without
+  downloading anything. The CLI carries a
+  copy for when npm has none or can't be reached
+  (`packages/cli/src/plugin-index.ts`). The index decides what setup
+  suggests, never what is trusted: an entry is offered only when its latest
+  release says it can load (published, the `pluginVersion` this CLI loads,
+  an `os` that includes the host, tools to add), and what it contributes is
+  read from its own manifest after install. Packages released with the CLI
+  aren't in it; they are always rows of the menu.
 - **Skills** (`stratuslabs/skill-*`) — markdown with no build step. Putting them
   behind `pnpm build && pnpm typecheck && pnpm test` buys nothing and slows the
   loop that matters for them, which is editing prose.

@@ -9,16 +9,33 @@ import type {
 /** How long `stratus update` waits for npm to answer a version lookup. */
 export const VERSION_LOOKUP_TIMEOUT_MS = 15_000;
 
-export const defaultPackageVersionFetcher: PackageVersionFetcher = async (packageName) => {
+/** What an npm command printed and how it exited. */
+export interface NpmResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Runs an npm command that only reads, capturing what it prints, and
+ * resolves `undefined` when npm could not be started or did not finish in
+ * time. Through npm rather than a fetch so the registry, proxy and auth the
+ * operator configured for `npm install -g` are the ones asked.
+ *
+ * Every argument reaches a shell on Windows (see `npmNeedsShell`), so a
+ * caller passes package names only after `isPackageName` has passed them.
+ */
+export const runNpm = async (args: string[], timeoutMs: number = VERSION_LOOKUP_TIMEOUT_MS): Promise<NpmResult | undefined> => {
   const { spawn } = await import('node:child_process');
   return new Promise((resolve) => {
-    const child = spawn('npm', ['view', packageName, 'version'], {
+    const child = spawn('npm', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: npmNeedsShell(process.platform),
     });
     let stdout = '';
+    let stderr = '';
     let settled = false;
-    const finish = (value: string | undefined): void => {
+    const finish = (value: NpmResult | undefined): void => {
       if (settled) {
         return;
       }
@@ -27,16 +44,22 @@ export const defaultPackageVersionFetcher: PackageVersionFetcher = async (packag
       resolve(value);
     };
     // An unreachable registry must degrade to "unknown", never hang the
-    // update on someone's terminal.
+    // command on someone's terminal.
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish(undefined);
-    }, VERSION_LOOKUP_TIMEOUT_MS);
+    }, timeoutMs);
     timer.unref?.();
     child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
     child.once('error', () => finish(undefined));
-    child.once('close', (code) => finish(code === 0 && stdout.trim().length > 0 ? stdout.trim() : undefined));
+    child.once('close', (code) => finish({ code, stdout, stderr }));
   });
+};
+
+export const defaultPackageVersionFetcher: PackageVersionFetcher = async (packageName) => {
+  const result = await runNpm(['view', packageName, 'version']);
+  return result !== undefined && result.code === 0 && result.stdout.trim().length > 0 ? result.stdout.trim() : undefined;
 };
 
 /**

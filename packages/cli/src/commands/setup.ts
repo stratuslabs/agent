@@ -75,7 +75,8 @@ import { writeLine } from '../io.ts';
 import { packageInstalled } from '../loaders.ts';
 import { isPackageName, isInstallableSpecifier, defaultPackageInstaller } from '../npm.ts';
 import type { CliProviderName, ParsedSetupCommand } from '../parse.ts';
-import { PLUGIN_MARKETPLACE_URL, FIRST_PARTY_CAPABILITY_PACKAGES } from '../plugin-catalog.ts';
+import { FIRST_PARTY_CAPABILITY_PACKAGES } from '../plugin-catalog.ts';
+import { checkPluginReleases, currentPlatformHost, installSpecifier, readPluginIndex, releaseVerdict } from '../plugin-index.ts';
 import {
   menuPrefixWidth,
   quoteShellArg,
@@ -1807,15 +1808,19 @@ export const runSetup = async (
             : 'installed, not enabled';
         return fitMenuRow(short.padEnd(18) + status, reserved);
       });
-      options.push('Back');
+      const more = options.length;
+      options.push('More plugins… (checks npm)', 'Back');
 
       const choice = await prompter.select(
         'Plugins — what your agents can do (installing one grants nothing on its own)',
         options,
-        { footnote: `More plugins — ${PLUGIN_MARKETPLACE_URL}` },
       );
       if (choice.kind !== 'index' || choice.index === options.length - 1) {
         return;
+      }
+      if (choice.index === more) {
+        await chooseMorePlugins();
+        continue;
       }
       const name = packages[choice.index];
       if (!name) {
@@ -1825,7 +1830,70 @@ export const runSetup = async (
     }
   };
 
-  const choosePlugin = async (name: string): Promise<void> => {
+  /**
+   * The plugins that release apart from this CLI, from the curated index
+   * (`plugin-index.ts`). Asked for, never fetched on its own: it runs npm,
+   * which reaches the registry, and the main menu has to work offline.
+   *
+   * An entry is offered only when its latest release would install and
+   * load here (`releaseVerdict` says what that takes), and the install is
+   * pinned to that release. The rest are named with the reason, so a plugin
+   * missing from the list is not a mystery. Picking one goes to the same
+   * install-then-enable path as every other row, which still asks first and
+   * still reads what it contributes from its own manifest.
+   */
+  const chooseMorePlugins = async (): Promise<void> => {
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, 'Checking npm for plugins…');
+    const index = await readPluginIndex(env);
+    if (index.source === 'bundled') {
+      writeLine(streams.stdout, 'npm has no plugin index this CLI can read, so this is the list it shipped with.');
+    }
+    const listed = new Set(pluginPackages());
+    const candidates = index.entries.filter((entry) => !listed.has(entry.name));
+    const releases = await checkPluginReleases(candidates.map((entry) => entry.name), env);
+    const host = currentPlatformHost();
+    const offered: Array<(typeof candidates)[number] & { version: string }> = [];
+    const skipped: string[] = [];
+    for (const entry of candidates) {
+      const verdict = releaseVerdict(entry.name, releases.get(entry.name) ?? { status: 'unknown' }, host);
+      if (verdict.offer) {
+        offered.push({ ...entry, version: verdict.version });
+      } else {
+        // At least one space after a name longer than the column: a
+        // third-party name has no @stratusagent/ to shorten.
+        skipped.push(`  ${entry.name.replace('@stratusagent/', '').padEnd(17)} ${verdict.reason}`);
+      }
+    }
+    if (skipped.length > 0) {
+      writeLine(streams.stdout, 'Not offered here:');
+      for (const line of skipped) {
+        writeLine(streams.stdout, line);
+      }
+    }
+    if (offered.length === 0) {
+      writeLine(streams.stdout, 'There are no more plugins to offer here right now.');
+      await prompter.ask('Press Enter to return to the menu… ');
+      return;
+    }
+    const reserved = menuPrefixWidth(offered.length + 1);
+    const options = offered.map((entry) => fitMenuRow(`${entry.name.replace('@stratusagent/', '').padEnd(17)} ${entry.description}`, reserved));
+    options.push('Back');
+    const choice = await prompter.select('More plugins — installing one grants nothing on its own', options);
+    if (choice.kind !== 'index' || choice.index === options.length - 1) {
+      return;
+    }
+    const entry = offered[choice.index];
+    if (entry) {
+      await choosePlugin(entry.name, installSpecifier(entry.name, entry.version));
+    }
+  };
+
+  /**
+   * `install` is what `npm install -g` is handed, when it isn't the bare
+   * name: More plugins pins the version it checked.
+   */
+  const choosePlugin = async (name: string, install: string = name): Promise<void> => {
     const setup = PLUGIN_SETUP[name];
     const installed = packageInstalled(name, env);
     const enabled = pluginEnabled(name);
@@ -1899,15 +1967,15 @@ export const runSetup = async (
         disablePlugin(name);
         return;
       }
-      writeLine(streams.stdout, `Running: npm install -g ${name}`);
-      const result = await (env.packageInstaller ?? defaultPackageInstaller)([name])
+      writeLine(streams.stdout, `Running: npm install -g ${install}`);
+      const result = await (env.packageInstaller ?? defaultPackageInstaller)([install])
         .catch((error: unknown) => ({
           ok: false,
           message: error instanceof Error ? error.message : String(error),
         }));
       if (!result.ok) {
         writeLine(streams.stderr, `Could not install: ${result.message}`);
-        writeLine(streams.stderr, `Run \`npm install -g ${name}\` yourself, then re-run setup to enable it.`);
+        writeLine(streams.stderr, `Run \`npm install -g ${install}\` yourself, then re-run setup to enable it.`);
         return;
       }
       writeLine(streams.stdout, `Installed ${name}.`);

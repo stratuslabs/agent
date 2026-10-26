@@ -1,5 +1,6 @@
 import type { StratusConfigFile } from '@stratusagent/state';
 import type { ServiceRunner } from './service.ts';
+import type { PluginIndexReader, PluginReleaseReader } from './plugin-index.ts';
 
 export interface CliStreams {
   stdout: Pick<typeof process.stdout, 'write'>;
@@ -57,6 +58,10 @@ export interface CliEnvironment {
   packageInstaller?: PackageInstaller;
   /** Looks up a package's latest published version. Injected so tests never ask npm. */
   packageVersionFetcher?: PackageVersionFetcher;
+  /** Reads the curated plugin index from npm (setup's More plugins). Injected so tests never ask npm. */
+  pluginIndexReader?: PluginIndexReader;
+  /** Reads what npm says about a plugin's latest release. Injected so tests never ask npm. */
+  pluginReleaseReader?: PluginReleaseReader;
   /** Reads the version an installed package declares. Injected so tests do not assert on their own node_modules. */
   installedVersionReader?: InstalledVersionReader;
   /** Loads `@stratusagent/gateway` for `stratus update` (tests observe when). Default a dynamic `import()`. */
