@@ -368,12 +368,40 @@ const main = async (): Promise<void> => {
           + 'starting with a letter, the way the tool that needs it spells it: search.apiKey, github.token.',
         );
       }
+      const source = await namedCredentialSource({}, agent.id, request.name);
+      const granted = agent.credentials?.includes(request.name) === true;
+      // A replacement, checked as the gateway checks it and in its order.
+      // It is only ever a form an approver answers, and none can be shown
+      // here, so every replacement ends refused with nothing pending.
+      if (request.replace === true) {
+        if (source === undefined || !granted) {
+          throw new Error(`You don't hold ${request.name}, so there is nothing to replace. Ask for it without replace.`);
+        }
+        if (source === 'environment') {
+          throw new Error(
+            `${request.name} comes from the daemon's environment, which a form can't change. `
+            + 'Ask your operator to change it where that environment is set.',
+          );
+        }
+        if (source === 'shared' && request.scope !== 'shared') {
+          throw new Error(
+            `${request.name} is a shared credential, so replacing it changes the key for every agent granted it. `
+            + 'Ask again with scope "shared" if that is what you mean.',
+          );
+        }
+        if (source === 'agent' && request.scope === 'shared') {
+          throw new Error(`${request.name} is your own credential, not a shared one. Ask again with scope "agent" to replace it.`);
+        }
+        if (request.via === 'link') {
+          throw new Error('A replacement is asked for in a form an approver answers, never a link. Nothing is pending.');
+        }
+        throw new Error(`${formUnavailable} Nothing is pending. A replacement needs a conversation that can show an approver a form.`);
+      }
       // A key already stored is refused before any form or link, granted or
       // not, as the gateway refuses it: the form only adds, so it could only
-      // fail, and an agent holding the key has nothing to ask for.
-      const source = await namedCredentialSource({}, agent.id, request.name);
-      if (source !== undefined && agent.credentials?.includes(request.name) === true) {
-        throw new Error(`You already hold ${request.name}; the tools that need it use it for you. There is nothing to ask for.`);
+      // fail, and an agent holding the key asks only to replace it.
+      if (source !== undefined && granted) {
+        throw new Error(`You already hold ${request.name}; the tools that need it use it for you. To rotate it for a new value, ask again with replace: true.`);
       }
       if (source !== undefined) {
         throw new Error(

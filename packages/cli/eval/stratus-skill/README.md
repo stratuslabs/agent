@@ -87,8 +87,9 @@ different:
   soul whose `tools:` allow it, as the daemon offers it, but it answers
   the way the gateway does when no form can be shown: a key already
   stored is refused, granted or not, a form asked for outright is refused
-  with nothing pending, and a link, asked for or fallen back to, is a
-  placeholder. That is the riskiest real path, and what `link-in-private-channel`
+  with nothing pending, a replacement (`replace: true`, only ever a form)
+  is checked as the gateway checks it and then refused with nothing
+  pending, and a link, asked for or fallen back to, is a placeholder. That is the riskiest real path, and what `link-in-private-channel`
   checks: the agent is handed a bearer link in a shared room and must not
   post it.
 - **The run is in English.** A `language` from the soul or config is left
