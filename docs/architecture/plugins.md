@@ -295,8 +295,11 @@ daemon, and in whatever embeds the runtime next.
 | Tool | `namespace.verb` | `fs.read`, `browser.goto`, `memory.remember` |
 | Toolset | the namespace | `fs`, `browser`, `agent` |
 | Skill | the [Agent Skills](https://agentskills.io) `name` rule: lowercase runs joined by single hyphens, at most 64 characters, equal to the directory name | `web-research`, `code-review` |
-| First-party package | `@stratusagent/<kind>-<name>` | `tool-fs`, `channel-slack`, `provider-anthropic` |
+| First-party package | `@stratusagent/<kind>-<name>` | `tool-fs`, `channel-slack`, `provider-anthropic`, `plugin-mcp` |
 | Third-party package | `stratus-plugin-<name>` | `stratus-plugin-github` |
+
+A first-party package that is not one kind is `plugin-<name>`: the MCP bridge
+here, and every package in [`stratuslabs/plugins`](#core-in-the-monorepo-core-outside-it).
 
 The tool shape is already what the repo does (`memory.remember`,
 `agent.delegate`, `demo.echo`); writing it down is what makes `tools: [fs.*]`
@@ -716,13 +719,17 @@ narrow. They are not a sandbox, and this document does not claim one:
   fail in — a tool that forgot to think about risk is held back, not waved
   through.
 
-  The trusted set is the first-party scope (`@stratusagent/*`), which ships
-  from this repository and is gated by its CI; a host may widen it
-  deliberately, and doing so is the same kind of act as enabling the plugin at
-  all. The effective risk is the riskiest of three claims — the manifest's
-  declaration, that floor, and whatever the registered object says about
-  itself — so a tool can raise itself above its manifest and can never talk
-  its way below it.
+  The trusted set is the first-party scope (`@stratusagent/*`): the packages
+  this repository ships and the ones in
+  [`stratuslabs/plugins`](#core-in-the-monorepo-core-outside-it). The loader
+  judges by package name (`isFirstPartyPackage`), not by where a package was
+  installed from, so a local checkout carrying a scoped name is trusted too,
+  and the scope is only as trustworthy as the right to publish under it. A
+  host may widen the set deliberately, and doing so is the same kind of act as
+  enabling the plugin at all. The effective risk is the riskiest of three
+  claims — the manifest's declaration, that floor, and whatever the registered
+  object says about itself — so a tool can raise itself above its manifest and
+  can never talk its way below it.
 
 - **A plugin says where its output comes from, and the label is not a risk
   word.** `outputTrust` and `markTrust` (above) are the plugin's statement
@@ -782,15 +789,16 @@ narrow. They are not a sandbox, and this document does not claim one:
 ## Core in the monorepo, core outside it
 
 > A package lives in this monorepo if the kernel's guarantees depend on it, or
-> if it depends on kernel contracts that are not published yet. It lives in its
-> own repository if it depends only on published contracts and on somebody
-> else's API.
+> if it depends on kernel contracts that are not published yet. It lives
+> outside it if it depends only on published contracts and on somebody else's
+> API.
 
 **In the monorepo.** The kernel and everything CI must gate: `core`, `agents`,
-`state`, `gateway`, `permissions`, `providers`, `channels`, `executors`,
-`executor-local`, `cli`, `control-api`, `dashboard`, `provider-anthropic`,
-`provider-claude-code`, `channel-slack` — plus the capability plugins that each
-carry a security invariant the kernel's promises rest on:
+`state`, `gateway`, `permissions`, `plugins` (the loader), `providers`,
+`channels`, `executors`, `executor-local`, `cli`, `control-api`, `dashboard`,
+`provider-anthropic`, `provider-claude-code`, `channel-slack` — plus the
+capability plugins that each carry a security invariant the kernel's promises
+rest on:
 
 | Plugin | The invariant it owns |
 | --- | --- |
@@ -826,8 +834,22 @@ and hands the decided label to `execute` as `ExecutionContext.decidedTrust`
 so the tool can check once more before it acts. A throw or a slow answer reads
 `external`.
 
+Four more packages ship from this repository today, all added before any
+plugin lived in `stratuslabs/plugins`: `provider-openai`, `provider-codex`,
+`memory-sqlite`, and the MCP bridge `plugin-mcp`. Every package here is
+published under `@stratusagent/` at the same version.
+
 **First-party, outside.** Same authors, separate repositories:
 
+- **Plugins** (`stratuslabs/plugins`) — the optional first-party plugins, one
+  repository with a directory per package. Each is
+  `@stratusagent/plugin-<name>`, built only on the contracts this repository
+  publishes, with its own version, tests, and README; one that runs on only
+  some platforms names them in its `os` field. Nightly encrypted backups,
+  parallel sub-agents, the macOS command sandbox, and A2UI screens live there,
+  and the repository's README lists them all. A new first-party plugin that
+  the rule above puts outside this repository starts there, so it can break,
+  version, and ship without turning this repository's CI red.
 - **Skills** (`stratuslabs/skill-*`) — markdown with no build step. Putting them
   behind `pnpm build && pnpm typecheck && pnpm test` buys nothing and slows the
   loop that matters for them, which is editing prose.
