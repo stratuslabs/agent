@@ -455,8 +455,9 @@ What the recipe sets, and what it leaves to you.
   the 30-second drain plus the 30 seconds an aborted turn gets to record
   its failure, so a turn still running after the drain is aborted and
   recorded by the daemon rather than killed with it. Fly treats
-  `kill_timeout` as best effort and can stop a machine sooner; a turn cut
-  off that way is marked failed when the daemon next starts, the same as
-  after a crash.
+  `kill_timeout` as best effort and can stop a machine sooner. The next
+  start then settles a turn cut off that way as it would after a crash: a
+  turn parked on an approval asks again, a turn whose message carried an
+  idempotency key is continued once, and any other is marked failed.
 - [ ] **Rebuilt.** The image carries Node and Debian; rebuild it for their
   security releases, not only for Stratus ones.
