@@ -32,3 +32,18 @@ jobs:
       # capabilities, no-new-privileges, the named state volume, a restart.
       - name: Bring up compose.yaml and check its limits
         run: deploy/docker/compose-smoke.sh
+
+      # TEMPORARY for the PR: the checks must fail when compose.yaml loses
+      # read_only or its named volume.
+      - name: Mutants (temporary)
+        run: |
+          cp deploy/docker/compose.yaml /tmp/compose.yaml.orig
+          sed -i '/^    read_only: true$/d' deploy/docker/compose.yaml
+          if out=$(deploy/docker/compose-smoke.sh 2>&1); then echo "MUTANT read_only SURVIVED"; exit 1; fi
+          printf '%s\n' "$out" | grep -E '^compose-smoke: ' | tail -1
+          cp /tmp/compose.yaml.orig deploy/docker/compose.yaml
+          sed -i '/^    volumes:$/,/^      - stratus-home:\/home\/node\/.stratus$/d' deploy/docker/compose.yaml
+          grep -n 'stratus-home' deploy/docker/compose.yaml || true
+          if out=$(deploy/docker/compose-smoke.sh 2>&1); then echo "MUTANT volume SURVIVED"; exit 1; fi
+          printf '%s\n' "$out" | grep -E '^compose-smoke: ' | tail -1
+          cp /tmp/compose.yaml.orig deploy/docker/compose.yaml
