@@ -403,3 +403,33 @@ An upgrade that goes around `stratus update` (a plain
 `npm install -g @stratusagent/cli`) leaves it missing. `stratus doctor`
 reports that as a problem and `stratus serve` warns at start; until it is
 installed, turns on that provider fail with the install command.
+
+### Plugins that release on their own
+
+Plugins from `stratuslabs/plugins`, or anyone else's, don't ship with the
+CLI, so they have versions of their own. `stratus update` keeps each one
+current that your trusted config's `plugins` block names and this machine
+has installed, whether setup's **More plugins** installed it or you did.
+It asks npm for each one's latest release and installs it only if this
+build would load it: the same checks More plugins makes (a plugin version
+this CLI loads, a manifest the loader accepts, an `os`, `cpu` and `libc`
+that include this host), except that it doesn't need to add tools. The
+install is pinned to the release it checked, one plugin at a time, while
+the service is stopped.
+
+On a CLI upgrade the new build does this part, since it's the one that
+loads the plugins. A newer release this build would refuse is reported as
+held and the installed copy stays. `stratus update --check` lists both:
+
+```
+  plugins     2 released apart from the CLI, 1 behind
+              @stratusagent/plugin-spawn 0.1.0 → 0.2.0
+              @acme/plugin-x 1.0.0, held: its latest release (2.0.0) is plugin version 2, and this CLI loads version 1
+```
+
+Only a plugin that is behind counts as something to do. One that is held,
+or that npm didn't answer about, is named but doesn't make `--check` exit 1,
+since another update can't change it. A plugin that fails to install
+leaves the update exiting 1, stays at its installed version, and doesn't
+stop the others. Only the latest release is checked: when it's held, the
+update doesn't look for an older one that would load.

@@ -161,7 +161,8 @@ the copy the CLI shipped with. It offers a plugin only when its latest release
 can load here: published, a plugin version this CLI loads, an `os` that
 includes this host, and tools to add. Every other entry is named with the
 reason. Picking one installs it and enables it the same way as the rows
-above. The main menu never asks npm anything.
+above. The main menu never asks npm anything. `stratus update` keeps the
+ones you enabled current ([Updating](./updating.md#plugins-that-release-on-their-own)).
 
 Each package's README carries its own settings and the reasoning behind its
 risk levels. Four things are worth knowing here:

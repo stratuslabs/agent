@@ -1353,3 +1353,189 @@ test('update --check counts a pending move into the agents folder as actionable'
   assert.doesNotMatch(check.output.stdout, /Nothing to do/);
   await assert.rejects(() => stat(path.join(home, 'Agents')), 'the check moves nothing');
 });
+
+// ---- plugins released apart from the CLI -------------------------------------
+
+const writePluginsConfig = async (home: string, plugins: Record<string, unknown>): Promise<void> => {
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ plugins })}\n`);
+};
+
+const toolPlugin = { pluginVersion: 1, contributes: { tools: [{ name: 'agent.spawn' }] } };
+const releaseOf = (version: string, stratus: unknown = toolPlugin) => ({ status: 'published' as const, version, stratus });
+
+test('update --check reports configured plugins that release apart from the CLI and lag their latest release', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await runStateMigrations(env, { exclusive: true });
+  await writePluginsConfig(home, {
+    '@stratusagent/plugin-spawn': {},
+    '@stratusagent/plugin-peer': { enabled: false },
+    '@acme/plugin-next': {},
+    // Released with the CLI: the companion line covers it, at the CLI's version.
+    '@stratusagent/tool-shell': {},
+    // Configured but not installed here: nothing to update.
+    '@acme/plugin-absent': {},
+  });
+  const installed: Record<string, string> = {
+    '@stratusagent/plugin-spawn': '0.1.0',
+    '@stratusagent/plugin-peer': '0.3.0',
+    '@acme/plugin-next': '1.0.0',
+    '@stratusagent/tool-shell': CLI_VERSION,
+  };
+  const releases: Record<string, ReturnType<typeof releaseOf>> = {
+    '@stratusagent/plugin-spawn': releaseOf('0.2.0'),
+    '@stratusagent/plugin-peer': releaseOf('0.3.0'),
+    // Newer, but this CLI would refuse to load it: held, never offered.
+    '@acme/plugin-next': releaseOf('2.0.0', { ...toolPlugin, pluginVersion: 2 }),
+  };
+  const asked: string[] = [];
+  const check = (versions: Record<string, string>) => {
+    const streams = createStreams();
+    return runCli({
+      argv: ['update', '--check'],
+      streams: streams.streams,
+      env: {
+        ...env,
+        serviceRunner: runningServiceRunner,
+        packageVersionFetcher: async () => CLI_VERSION,
+        installedVersionReader: async (specifier) => versions[specifier],
+        pluginReleaseReader: async (name) => {
+          asked.push(name);
+          return releases[name] ?? { status: 'unknown' };
+        },
+      },
+    }).then((code) => ({ code, stdout: streams.output.stdout }));
+  };
+
+  const behind = await check(installed);
+  assert.equal(behind.code, 1, behind.stdout);
+  assert.match(behind.stdout, /plugins +3 released apart from the CLI, 1 behind/);
+  assert.match(behind.stdout, /@stratusagent\/plugin-spawn 0\.1\.0 → 0\.2\.0/);
+  assert.match(behind.stdout, /@acme\/plugin-next 1\.0\.0, held: its latest release \(2\.0\.0\) is plugin version 2, and this CLI loads version 1/);
+  assert.doesNotMatch(behind.stdout, /plugin-peer 0\.3\.0/);
+  assert.doesNotMatch(behind.stdout, /Nothing to do/);
+  assert.deepEqual(asked.sort(), ['@acme/plugin-next', '@stratusagent/plugin-peer', '@stratusagent/plugin-spawn']);
+
+  // A held plugin is reported but is not something an update can do.
+  const level = await check({ ...installed, '@stratusagent/plugin-spawn': '0.2.0' });
+  assert.equal(level.code, 0, level.stdout);
+  assert.match(level.stdout, /plugins +3 released apart from the CLI, none behind/);
+  assert.match(level.stdout, /@acme\/plugin-next 1\.0\.0, held:/);
+  assert.match(level.stdout, /Nothing to do/);
+});
+
+test('update installs each plugin that lags, pinned to the checked release, while the daemon is stopped', async () => {
+  const home = await freshHome();
+  const events: string[] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('stop')) {
+      events.push('stop');
+    } else if (command === 'systemctl' && (args.includes('restart') || args.includes('start') || args.includes('--now'))) {
+      events.push('start');
+    }
+    return runningServiceRunner(command, args);
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    {},
+  );
+  events.length = 0;
+  await writePluginsConfig(home, { '@stratusagent/plugin-spawn': {}, '@stratusagent/plugin-peer': {} });
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) => ({ '@stratusagent/plugin-spawn': '0.1.0', '@stratusagent/plugin-peer': '0.1.0' } as Record<string, string>)[specifier],
+      pluginReleaseReader: async () => releaseOf('0.2.0'),
+      packageInstaller: async (packages) => {
+        events.push(`install ${packages.join(' ')}`);
+        // One plugin's broken release must not hold back the others.
+        return packages[0]?.startsWith('@stratusagent/plugin-peer@')
+          ? { ok: false, message: 'npm exited with code 1' }
+          : { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 1, 'a plugin left behind is a failed update');
+  const installs = events.filter((event) => event.startsWith('install'));
+  assert.deepEqual(installs.sort(), ['install @stratusagent/plugin-peer@0.2.0', 'install @stratusagent/plugin-spawn@0.2.0']);
+  const stop = events.indexOf('stop');
+  const start = events.indexOf('start', stop);
+  assert.ok(stop >= 0 && start > stop, events.join(', '));
+  for (const install of installs) {
+    const at = events.indexOf(install);
+    assert.ok(at > stop && at < start, `${install} ran outside the stop: ${events.join(', ')}`);
+  }
+  assert.match(output.stdout, /Upgrading @stratusagent\/plugin-spawn 0\.1\.0 → 0\.2\.0/);
+  assert.match(output.stderr, /Could not upgrade @stratusagent\/plugin-peer: npm exited with code 1 — it stays at 0\.1\.0/);
+  // The rest of the update still ran.
+  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION);
+  assert.match(output.stdout, /Rewriting the service unit/);
+});
+
+test('on a CLI upgrade the new build updates the plugins, since it is the one that loads them', async () => {
+  const home = await freshHome();
+  await writePluginsConfig(home, { '@stratusagent/plugin-spawn': {} });
+  const installs: string[][] = [];
+  const handoffs: string[] = [];
+  const { streams, output } = createStreams();
+  const env = (): CliEnvironment => ({
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    serviceRunner: runningServiceRunner,
+    packageVersionFetcher: async () => '99.0.0',
+    installedVersionReader: async (specifier) => (specifier === '@stratusagent/plugin-spawn' ? '0.1.0' : undefined),
+    pluginReleaseReader: async () => releaseOf('0.2.0'),
+    packageInstaller: async (packages) => {
+      installs.push(packages);
+      return { ok: true, message: '' };
+    },
+    updateContinuation: async (resume) => {
+      handoffs.push(resume);
+      return continueInProcess(streams, env)(resume);
+    },
+  });
+  const code = await runCli({ argv: ['update'], streams, env: env() });
+  assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(handoffs, ['stopped'], 'handed over once, and the second half does not hand over again');
+  assert.deepEqual(installs, [['@stratusagent/cli@latest'], ['@stratusagent/plugin-spawn@0.2.0']]);
+});
+
+test('a new build that did not take over leaves the plugins for the next update', async () => {
+  const home = await freshHome();
+  await writePluginsConfig(home, { '@stratusagent/plugin-spawn': {} });
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async (specifier) => (specifier === '@stratusagent/plugin-spawn' ? '0.1.0' : undefined),
+      pluginReleaseReader: async () => releaseOf('0.2.0'),
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+      updateContinuation: async () => undefined,
+    },
+  });
+  // This process is the build being replaced: it can't say what the new one loads.
+  assert.deepEqual(installs, [['@stratusagent/cli@latest']]);
+  assert.equal(code, 1);
+  assert.match(output.stderr, /Plugins were not updated/);
+  assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION);
+});

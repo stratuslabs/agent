@@ -6,6 +6,7 @@ import {
   checkPluginReleases,
   currentPlatformHost,
   installSpecifier,
+  loadableRelease,
   parseNpmView,
   parsePluginIndex,
   readPluginIndex,
@@ -213,10 +214,27 @@ test('a release is offered only if the installer will take its pinned specifier'
     const verdict = releaseVerdict('@stratusagent/plugin-x', published(toolManifest, { version }), linux);
     assert.deepEqual(verdict, {
       offer: false,
-      reason: `setup can't pass its latest release (${version}) to npm; run npm install -g @stratusagent/plugin-x@${version} yourself`,
+      reason: `this CLI can't pass its latest release (${version}) to npm; run npm install -g @stratusagent/plugin-x@${version} yourself`,
     });
   }
   assert.equal(releaseVerdict('@stratusagent/plugin-x', published(toolManifest, { version: '1.0.0-rc.1' }), linux).offer, true);
+});
+
+test('a loadable release need not add tools: update keeps channel and provider plugins current too', () => {
+  // Setup's More plugins is a tools menu, so it wants tools; `stratus update`
+  // only needs to know the release would install and load here.
+  const channelOnly = published({ pluginVersion: 1, contributes: { channels: [{ name: 'imessage' }] } }, { version: '0.2.0' });
+  assert.equal(releaseVerdict('p', channelOnly, linux).offer, false);
+  const loadable = loadableRelease('p', channelOnly, linux);
+  assert.equal(loadable.ok, true);
+  assert.equal(loadable.ok && loadable.version, '0.2.0');
+  // Everything else is the same check setup makes.
+  assert.deepEqual(loadableRelease('p', published({ ...toolManifest, pluginVersion: 2 }), linux), {
+    ok: false,
+    reason: 'its latest release (0.1.0) is plugin version 2, and this CLI loads version 1',
+  });
+  assert.deepEqual(loadableRelease('p', published(toolManifest, { os: ['darwin'] }), linux), { ok: false, reason: 'it does not run on linux' });
+  assert.deepEqual(loadableRelease('p', { status: 'unknown' }, linux), { ok: false, reason: 'npm did not answer' });
 });
 
 test('npm view output is read whether npm printed one field or several', () => {
