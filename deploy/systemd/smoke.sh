@@ -179,7 +179,7 @@ let run;
 try {
   run = await tool.createCommand({ command: 'echo "sandboxed pid $$"' }, session, {});
 } catch (error) {
-  console.log(`shell.run refused: ${error instanceof Error ? error.message : String(error)}`);
+  console.log(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }
 const result = spawnSync(run.command, run.args, { cwd: run.cwd, env: run.env, encoding: 'utf8' });
@@ -195,7 +195,7 @@ if sudo systemctl start "$PROBE" 2>/dev/null; then
 else
   echo "shell sandbox: no command can run under the unit"
 fi
-sudo journalctl -u "$PROBE" -o cat --no-pager | grep -m 1 '^shell.run' || true
+sudo journalctl -u "$PROBE" -o cat --no-pager | grep -m 1 '^shell\.run' || true
 if out=$(sudo -u stratus /usr/bin/bwrap --ro-bind / / --unshare-pid -- /bin/true 2>&1); then
   echo "shell sandbox: bwrap starts as stratus outside the unit"
 else
