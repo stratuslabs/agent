@@ -4,8 +4,8 @@
 # named volume and belongs to the daemon's user, the root filesystem is
 # read-only with /tmp writable, every capability is dropped and
 # no-new-privileges holds, and state survives recreating the container. It
-# also reports whether the shell tool's sandbox (bubblewrap) can start inside
-# these limits, which depends on the host.
+# also runs one command the way shell.run does, and reports whether it ran
+# in the shell tool's sandbox (bubblewrap) or was refused with the reason.
 #
 #   deploy/docker/compose-smoke.sh    # from the repository root
 #
@@ -138,13 +138,38 @@ call GET /intake | grep -q '"paused":true' || fail "the pause did not survive a 
 call PUT /intake '{"paused":false}' | grep -q '"paused":false' || fail "resume was refused"
 
 echo "--- the shell tool's sandbox inside these limits"
-# The probe tool-shell itself runs before it trusts bwrap. Reported, not
-# required: whether unprivileged user namespaces are allowed is the host's
-# call (docs/guides/deployment.md, "A shell sandbox that can start").
-if probe=$(in_container bwrap --ro-bind / / --unshare-pid -- /bin/true 2>&1); then
-  echo "shell sandbox: bwrap starts here"
-else
-  echo "shell sandbox: bwrap cannot start here: ${probe}"
-fi
+# One command planned the way shell.run plans it (tool-shell probes bwrap,
+# and refuses when it can't start) and then run. With Docker's defaults
+# bwrap can't start in a container (docs/guides/deployment.md, "A shell
+# sandbox that can start"), so either outcome is reported: the command ran
+# sandboxed, or shell.run refused it with bwrap's reason. Anything else
+# fails the check: a command that ran outside the sandbox, or a sandbox
+# that started for the probe and then failed the command.
+probe_js=
+IFS= read -r -d '' probe_js <<'PROBE_EOF' || true
+import { spawnSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import { createShellTool } from '@stratusagent/tool-shell';
+
+mkdirSync('/tmp/shell-probe', { recursive: true });
+const tool = createShellTool({ workspaceRoot: '/tmp/shell-probe' });
+const session = { id: 'compose-smoke', agent: { id: 'smoke' }, metadata: {}, messages: [] };
+let run;
+try {
+  run = await tool.createCommand({ command: 'echo "sandboxed pid $$"' }, session, {});
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.log(`shell.run: refused: ${message}`);
+  process.exit(/cannot create a sandbox here/.test(message) ? 0 : 1);
+}
+const result = spawnSync(run.command, run.args, { cwd: run.cwd, env: run.env, encoding: 'utf8' });
+console.log(`shell.run: exit ${result.status} via ${run.command}: ${(result.stdout + result.stderr).trim()}`);
+process.exit(result.status === 0 && /^sandboxed pid [12]$/m.test(result.stdout) ? 0 : 1);
+PROBE_EOF
+# From /opt/stratus, where the image installs the packages, so the import
+# resolves; the root is read-only, so the script comes in as an argument.
+shell_ok=0
+compose exec -T -w /opt/stratus stratusd node --input-type=module -e "$probe_js" || shell_ok=$?
+[ "$shell_ok" = 0 ] || fail "shell.run neither ran sandboxed nor refused with bwrap's reason"
 
 echo "compose-smoke: ok"
