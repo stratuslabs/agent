@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "scopes": [
+    {
+      "command": "git",
+      "args": [
+        "--version"
+      ],
+      "deniedFlags": [
+        "--force",
+        "--force-with-lease",
+        "--force-if-includes",
+        "--delete",
+        "--prune",
+        "--mirror",
+        "--hard",
+        "--no-verify",
+        "f",
+        "d",
+        "D",
+        "--move",
+        "--copy",
+        "m",
+        "M",
+        "C",
+        "u"
+      ],
+      "deniedArgs": [
+        "add",
+        "remove",
+        "rm",
+        "rename",
+        "set-url",
+        "set-head",
+        "set-branches",
+        "prune",
+        "update"
+      ],
+      "denyRefspecForms": true,
+      "listOnly": true,
+      "allowedFlags": []
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://example.com",
+      "tool": "web.fetch"
+    }
+  ],
+  "tools": [
+    {
+      "tool": "schedule.every",
+      "grantedAt": "2026-10-26T13:25:45.236Z",
+      "grantedBy": "api:make-home"
+    }
+  ]
+}

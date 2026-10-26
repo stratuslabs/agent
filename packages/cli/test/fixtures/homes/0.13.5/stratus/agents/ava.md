@@ -1,0 +1,1 @@
+/private/tmp/stratus-fixture-0.13.5-HpkQQI/home/Agents/ava/soul.md

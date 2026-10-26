@@ -1,0 +1,31 @@
+{
+  "provider": "demo",
+  "principals": {
+    "admit": "principals",
+    "slackUsers": [
+      "U0FIXTURE01"
+    ]
+  },
+  "approvals": {
+    "mode": "remote",
+    "posture": "guarded",
+    "slackApprovers": [
+      "U0FIXTURE01"
+    ],
+    "slackChannel": "C0FIXTURE01",
+    "agents": {
+      "bob": {
+        "posture": "open"
+      }
+    }
+  },
+  "plugins": {
+    "@stratusagent/tool-shell": {
+      "enabled": true,
+      "sandbox": "off"
+    },
+    "@stratusagent/tool-web": {
+      "enabled": true
+    }
+  }
+}

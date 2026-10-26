@@ -1,0 +1,5 @@
+This folder is managed by Stratus.
+
+Each folder in here is one agent: soul.md is the file that defines it (edit it freely),
+and workspace/ holds the files its tools produced.
+Stratus keeps its own state (sessions, memories, settings) in ~/.stratus.
