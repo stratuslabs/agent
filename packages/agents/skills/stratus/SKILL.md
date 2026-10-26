@@ -24,6 +24,7 @@ Everything is under `~/.stratus/` on the daemon's machine:
 | --- | --- |
 | `config.json` | The global config, and the trusted one (see "Config"). `0600`, because a plugin's config in it can hold secrets such as `tool-shell`'s `env`, and every save keeps it that way; `stratus doctor` flags one other users can read |
 | `credentials.json` | Provider sign-ins (shared, and any agent's own under `agentSignIns.<id>`), channel secrets (Slack's tokens and any channel plugin's, under `channels.<kind>.<agentId>`), and named credentials. `0600`, and kept that way by Stratus, which is why it is edited with `stratus credential set` and `stratus channel set` rather than by hand |
+| `credential-audit.log` | One line per named credential added or replaced from a Slack form or a link: when, which name, whose store, added or replaced, the approver (for a form), and form or link. Names only, never a value. `0600` |
 | `agents/<file>.md` | A soul: one agent's identity and allowlists. The file name is not the id; the id is the soul's `id:`, or derived from its `name:`. Use the id your instructions give |
 | `agents/<id>/` | That agent's state: `sessions.db`, `memory.jsonl`, `whitelist.json` (its standing approvals), and `workspace/` |
 | `agents/<id>/workspace/` | The agent's own working directory, where `shell.run` starts by default |
@@ -66,21 +67,26 @@ When a setting "isn't taking", these say why:
 
 ## Credentials and API keys
 
-This is the question you will be asked most. A secret reaches Stratus in one of four ways, and which one depends on what uses it:
+This is the question you will be asked most. A secret reaches Stratus in one of these ways, and which one depends on what uses it:
 
 - **Provider sign-ins** (the model's own key or subscription): `stratus setup` → Providers, or the dashboard. There is no `stratus login`.
 - **One agent on its own Claude subscription**: `stratus signin set anthropic --agent <id>` at the machine, with a token from `claude setup-token` typed at the hidden prompt or piped on stdin. It replaces the shared Anthropic sign-in for that agent only, from its next turn, no restart. `stratus signin remove anthropic --agent <id>` goes back to the shared one, and `stratus signins` lists who has one. It is not a named credential: you cannot request, read, or resolve it, and `credential.request` is the wrong tool for it. If its token is refused, the turn fails with an error naming that agent's sign-in rather than moving onto the shared account.
 - **Channel tokens** (a Slack app's tokens): `stratus setup` → Channels, or the dashboard. No agent can read them, yours included.
-- **Named credentials**, such as `search.apiKey`, are for tools whose plugin declares that name. A web search backend is the common one: its key is always `search.apiKey`, whatever the vendor. These are the only secrets you can ask for yourself.
-- **A shell command's or an MCP server's token** is not a named credential: `shell.run` and MCP servers never read the credential store. Your operator puts it in the trusted config at the machine, and the daemon needs a restart:
-  - for the shell, in `@stratusagent/tool-shell`'s `env`, under `agents.<id>` to keep it to one agent (whose commands can then read it). An agent's `env` is added to the shared one rather than replacing it, its own names win, and a name set to `null` there is withheld from that agent;
-  - for an MCP server, in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio), which every agent granted `mcp.<name>.*` uses. Its replies are labelled `external`, and so is everything you remember after reading them, unless the operator sets `servers.<name>.outputTrust` to `agent` (or `unknown`) for a server they run; never `user`.
+- **Named credentials**, such as `search.apiKey` or `github.token`, are for tools whose plugin declares that name, and for shell commands that `credentialsEnv` maps one into (next). A web search backend is the common one: its key is always `search.apiKey`, whatever the vendor. These are the only secrets you can ask for yourself.
+- **A shell command's token** reaches `shell.run` as an environment variable. Your operator sets that up in the trusted config at the machine, and a change there needs a daemon restart:
+  - from the credential store, with `@stratusagent/tool-shell`'s `credentialsEnv`: `{ "GH_TOKEN": "github.token" }` gives each of your commands your stored `github.token` in `GH_TOKEN`, so a CLI that reads its token from a variable just works. It is a named credential like any other: your soul must list it, you can ask for it with `credential.request`, and a replaced value reaches the next command with no restart. Fleet-wide, or under `agents.<id>` for one agent;
+  - or as a value written into tool-shell's `env`, under `agents.<id>` to keep it to one agent. An agent's `env` is added to the shared one rather than replacing it, its own names win, and a name set to `null` there is withheld from that agent.
 
-  `passEnv` beside them forwards variables, values included, from the daemon's own environment, and only ones that are not secret belong on it.
+  Either way your commands can read the value (`echo $GH_TOKEN` prints it), so only narrowly scoped tokens belong there.
+- **An MCP server's token** is not a named credential: MCP servers never read the credential store. Your operator puts it in `servers.<name>.headers` (HTTP) or `servers.<name>.env` (stdio) in the trusted config at the machine, which every agent granted `mcp.<name>.*` uses, and the daemon needs a restart. Its replies are labelled `external`, and so is everything you remember after reading them, unless the operator sets `servers.<name>.outputTrust` to `agent` (or `unknown`) for a server they run; never `user`.
 
-For a named credential to reach you, three things must all be true. It is **stored**, your soul's `credentials:` **lists its name**, and a tool you have **declares it**. Storing grants nothing by itself. You never see the value, and there is no file or variable for you to look in. Stored entries are read before an environment variable of the same name, and your own entry before a shared one.
+  `passEnv` beside tool-shell's or a server's `env` forwards variables, values included, from the daemon's own environment, and only ones that are not secret belong on it.
+
+For a named credential to reach you, three things must all be true. It is **stored**, your soul's `credentials:` **lists its name**, and a tool you have **declares it** (tool-shell declares the names its `credentialsEnv` maps). Storing grants nothing by itself. Tools use the value on your behalf, and there is no file for you to look in. The one place a value shows up is a `shell.run` command's environment, in the variable `credentialsEnv` maps it to. Stored entries are read before an environment variable of the same name, and your own entry before a shared one.
 
 When you need a named credential you do not hold, first make sure a tool you have uses that name. A key no tool reads does nothing once stored; if what you need is a tool, say which plugin or tool is missing instead. Then:
+
+**In Slack, the form comes first.** When someone in a Slack conversation asks how to give you a key, or you need one there, put up the form with `credential.request` instead of explaining terminal steps: the value never touches the conversation, and nobody has to be at the machine. Give the `stratus credential set` command only when they ask for it, when the tool says no form can go up here, or when they say they are at the machine. For example, asked in a Slack thread "how do I give you the GitHub token?", call `credential.request` with `name: "github.token"` and a reason, then reply: "I put a secure form in this thread. An approver enters the token there, it goes straight to the store, and I can use it from my next reply." Not a paragraph of `read -rs KEY` steps.
 
 1. **Ask with `credential.request`**. Under the daemon every agent has it, whatever its `tools:` says (the built-in `stratus` agent, which has no soul, cannot use it). Give the `name` the tool expects, a one-sentence `reason`, and a `scope`: `agent` (yours alone, the default) or `shared` (one value stored for the whole fleet, but still granted only to you; another agent needs the name in its own soul).
    - **A form**, in Slack, goes up in this conversation when one of `approvals.slackApprovers` can see it: a public channel, a private one with an approver in it, or a direct message with an approver.
@@ -94,7 +100,7 @@ When you need a named credential you do not hold, first make sure a tool you hav
 
    (leave out `--agent` for a shared one), and to add `<name>` to `credentials:` in your soul.
 
-Away from the machine, named credentials are **add-only**: the control API, the Slack form, and the link can add a name nobody has stored, and refuse one already stored or supplied by the daemon's environment. Replacing or removing one is `stratus credential set` or `stratus credential remove` at the machine, because a replaced shared key moves every agent using it onto another account. `stratus credentials` lists the names stored, shared and per agent, never the values.
+Away from the machine, the control API and a link only **add**: they store a name nobody has stored, and refuse one already stored or supplied by the daemon's environment. The Slack form adds too, and it is the one way to **replace** a key from chat. When one you hold is expiring or was revoked, call `credential.request` with `replace: true`. That is always a form an approver answers in this conversation, never a link. It is refused before anyone is asked when you don't hold the key, when it comes from the daemon's environment, or when your `scope` doesn't match where it is stored: a shared key needs `scope: "shared"`, because replacing it changes the key for every agent granted it. The new value is used from the next tool call or command. At the machine, `stratus credential set` replaces as well, and `stratus credential remove` is the only way to remove one. Each add or replace from a form or a link appends a line to `~/.stratus/credential-audit.log`, names only. `stratus credentials` lists the names stored, shared and per agent, never the values.
 
 A stored named credential or provider key takes effect on the next turn, with no restart. One that comes from an environment variable is fixed when the daemon starts, and the background service does not read a shell profile.
 
@@ -222,10 +228,10 @@ Only at the machine can someone:
 
 - enable or configure a plugin (its `env` and `headers` included), or choose an executor or memory store;
 - install or update packages;
-- replace or remove a named credential;
+- remove a named credential, or replace one without an approver's form;
 - raise a memory's trust (`stratus memory reassert`).
 
-When you need one of those, ask for it precisely, once: the exact command, the file and the line to change, and what it will let you do. For example: "Run `stratus credential set search.apiKey --agent kai` with the key on stdin, and add `search.apiKey` under `credentials:` in my soul. Once a search plugin is enabled, `web.search` is in my `tools:`, and approvals let it run, I can search." Not a list of possibilities, and not a guess presented as a step.
+When you need one of those, ask for it precisely, once: the exact command, the file and the line to change, and what it will let you do. For example: "In `~/.stratus/config.json`, add `"credentialsEnv": { "GH_TOKEN": "github.token" }` under `agents.kai` in the `@stratusagent/tool-shell` block, then run `stratus restart`. After that, `gh` in my shell uses the `github.token` I already hold." Not a list of possibilities, and not a guess presented as a step.
 
 ## Going further
 
