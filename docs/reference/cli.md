@@ -45,6 +45,8 @@ stratus plugins --format json          # the same chain as data
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus health                         # is the running daemon serving? one line, exit 0/1 — for health checks
 stratus health --format json           # the daemon's /health answer as data
+stratus sessions                       # what the daemon's sessions are doing, newest first (also: stratus session list)
+stratus sessions --agent blair --status failed   # filter by agent and status; --limit <n>, --format json
 printf %s "$KEY" | stratus credential set search.apiKey   # store a named credential (value from stdin, never a flag)
 stratus credential set search.apiKey --agent blair       # one agent's own key, over the shared one
 stratus credentials                    # stored names, never values (also: stratus credential list)
@@ -94,6 +96,7 @@ stratus dashboard                      # local browser dashboard
 | `channel set`, `channels`, `channel remove` | [Extending](../guides/extending.md#channels), [Slack](../guides/slack.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `health` | [Deployment](../guides/deployment.md#health-checks) |
+| `sessions` | [Always on](../guides/always-on.md#while-it-runs) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
 | `memory list`, `memory search`, `memory audit`, `memory forget` | [Memory](../concepts/memory.md#searching-it-yourself) — every `memory` subcommand works the built-in store, and refuses against a fleet whose config selects another |
@@ -129,11 +132,12 @@ stratus dashboard                      # local browser dashboard
 | `--api` | `stratus serve`: serve it even where the config says `api.enabled: false` (what `stratus dashboard` asks of the daemon it starts) |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
 | `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port). A port the daemon cannot bind stops it — it does not serve without the API |
-| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `grants`, `health`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
+| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `sessions`, `grants`, `health`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
 | `--tool`, `--scope`, `--origin` | `stratus grants revoke`: which grant goes — exactly one of them |
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
-| `--limit <n>` | `stratus memory search`: maximum hits. The store bounds the read either way |
+| `--limit <n>` | `stratus memory search`: maximum hits. The store bounds the read either way. `stratus sessions`: how many to list, newest first (default 20) |
+| `--status <status>` | `stratus sessions`: only sessions in this state — `idle`, `running`, `pending_approval`, `completed`, or `failed` |
 | `--file <path>` | `stratus memory export` (omit for stdout) / `stratus memory import`: the JSONL |
 | `--preserve-trust` | `stratus memory import`: keep each entry's recorded trust label instead of landing it `external`. For a file you own and vouch for |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |

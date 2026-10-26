@@ -27,6 +27,7 @@ Usage:
   stratus skill reload
   stratus restart
   stratus health
+  stratus sessions --status failed
   stratus schedules
   stratus schedules cancel <id>
   stratus grants blair
@@ -141,6 +142,11 @@ Commands:
                    approvals), or exit 1 and one sentence saying why not.
                    For a container HEALTHCHECK, a Kubernetes probe, or a
                    monitoring script (--gateway, --token, --format json)
+  sessions         What the running daemon's sessions are doing, newest
+                   first: status, agent, last update, id. --agent <id>,
+                   --status <idle|running|pending_approval|completed|failed>,
+                   --limit <n> (default 20), --format json
+                   (also: stratus session list)
   credential set   Store a named credential an agent can resolve — a search
                    backend asks for search.apiKey. The value is read from
                    stdin, never from a flag, so it stays out of your shell
@@ -284,13 +290,15 @@ Options:
   --port           dashboard: port for a daemon it starts (default: 4123)
   --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
-  --gateway        agents / skill reload / restart / session rollover / health: a
-                   running daemon's control API (all but agents default to the
-                   daemon ~/.stratus/gateway.json names)
+  --gateway        agents / skill reload / restart / session rollover /
+                   sessions / health: a running daemon's control API (all but
+                   agents default to the daemon ~/.stratus/gateway.json names)
   --trust          memory list: show only this label; memory reassert: the
                    label to record (user, agent, unknown, external)
   --all-unknown    memory reassert: every live entry with no recorded origin
-  --limit          memory search: maximum hits (the store bounds it too)
+  --limit          memory search: maximum hits (the store bounds it too);
+                   sessions: how many to list (default 20)
+  --status         sessions: only this status
   --file           memory export / import: the JSONL path
   --preserve-trust memory import: keep each entry's recorded trust label
                    instead of landing it external
