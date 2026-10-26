@@ -15,7 +15,7 @@ import {
   stat,
   symlink,
   unlink,
-  writeFile,
+  
 } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -39,6 +39,7 @@ import {
   legacyWorkspacesDirPath,
   stratusHomePath,
 } from './paths.ts';
+import { syncDirectory, writeFileSynced } from './durable-write.ts';
 
 // The fourth per-agent resource: the workspace, from
 // `workspaces/<id>` to `agents/<id>/workspace`.
@@ -1407,9 +1408,10 @@ const saveLinkRecord = async (env: StateEnvironment, record: LinkRecord): Promis
       [agentId, 'link' in proof ? { link: asStored(home, proof.link) } : proof])),
   };
   try {
-    await writeFile(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+    await writeFileSynced(replacement, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
     const written = inodeOf(await lstat(replacement));
     await rename(replacement, file);
+    await syncDirectory(path.dirname(file));
     // Adopted only if it is still the file just written. One swapped in
     // right after the rename is somebody else's: stop here, before the
     // caller acts on a save that no longer stands, such as unlinking a

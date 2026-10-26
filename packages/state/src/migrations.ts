@@ -11,7 +11,7 @@ import {
   rename,
   stat,
   unlink,
-  writeFile,
+  
 } from 'node:fs/promises';
 import path from 'node:path';
 import type { MemoryEntry } from '@stratusagent/core';
@@ -36,6 +36,7 @@ import {
   gatewayTokenPath,
   gatewayInfoPath,
 } from './paths.ts';
+import { syncDirectory, writeFileSynced } from './durable-write.ts';
 
 // Memory used to live under the working directory. Fold any such file into
 // the agents' own stores the first time a run happens from that directory,
@@ -625,8 +626,9 @@ const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promis
   // refusal. A rename either lands the whole stamp or leaves the old one.
   const target = stateFilePath(env);
   const temp = `${target}.tmp-${randomUUID()}`;
-  await writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`);
+  await writeFileSynced(temp, `${JSON.stringify(merged, null, 2)}\n`);
   await rename(temp, target);
+  await syncDirectory(path.dirname(target));
 };
 
 /** The refusal line, phrased for the person who just downgraded without meaning to. */

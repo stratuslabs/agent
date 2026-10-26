@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 
-import { promotedVersionPath, type StateEnvironment } from '@stratusagent/state';
+import { promotedVersionPath, type StateEnvironment, syncDirectory, writeFileSynced } from '@stratusagent/state';
 
 /**
  * The version last promoted on this home, or undefined when none was (or
@@ -28,8 +28,9 @@ export const recordPromotedVersion = async (env: StateEnvironment, version: stri
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const staging = `${file}.${randomBytes(8).toString('hex')}`;
   try {
-    await writeFile(staging, `${JSON.stringify({ version, promotedAt: new Date().toISOString() })}\n`, { flag: 'wx', mode: 0o600 });
+    await writeFileSynced(staging, `${JSON.stringify({ version, promotedAt: new Date().toISOString() })}\n`, { flag: 'wx', mode: 0o600 });
     await rename(staging, file);
+    await syncDirectory(path.dirname(file));
   } finally {
     await rm(staging, { force: true });
   }

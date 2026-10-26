@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, readFile, rename, rm } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
 
@@ -8,7 +8,9 @@ import {
   readNonEmptyString,
   readProcessEnv,
   stratusHomePath,
+  syncDirectory,
   type StateEnvironment,
+  writeFileSynced,
 } from '@stratusagent/state';
 
 /** How long a browser session lasts before it has to be re-opened. */
@@ -120,8 +122,9 @@ export const ensureGatewayToken = async (env: StateEnvironment): Promise<string>
     // value race to write the same bytes, which is harmless.
     const staging = `${tokenPath}.${randomBytes(8).toString('hex')}`;
     try {
-      await writeFile(staging, `${seeded}\n`, { flag: 'wx', mode: 0o600 });
+      await writeFileSynced(staging, `${seeded}\n`, { flag: 'wx', mode: 0o600 });
       await rename(staging, tokenPath);
+      await syncDirectory(path.dirname(tokenPath));
     } finally {
       await rm(staging, { force: true });
     }
@@ -143,8 +146,9 @@ export const ensureGatewayToken = async (env: StateEnvironment): Promise<string>
       // command to fix and cannot lock anybody out.
       //
       // Nothing here produces this state any more: the claim below publishes
-      // a fully-written file in a single atomic step, so a process killed
-      // mid-write leaves a stray staging file rather than an empty token.
+      // a fully-written, flushed file in a single atomic step, so a process
+      // killed mid-write, or a crash before the disk caught up, leaves a
+      // stray staging file rather than an empty token.
       throw new Error(
         `${tokenPath} is empty, which is not a usable gateway token. Delete it and start the daemon again.`,
       );
@@ -166,9 +170,13 @@ export const ensureGatewayToken = async (env: StateEnvironment): Promise<string>
   // in that window is what left the corrupt file refused above.
   const staging = `${tokenPath}.${randomBytes(8).toString('hex')}`;
   try {
-    await writeFile(staging, `${token}\n`, { flag: 'wx', mode: 0o600 });
+    // Flushed before it is linked: without that, the name can reach the
+    // disk before the bytes, and a crash or a volume snapshot finds an
+    // empty token (a Fly snapshot 65 s after a fresh start did).
+    await writeFileSynced(staging, `${token}\n`, { flag: 'wx', mode: 0o600 });
     try {
       await link(staging, tokenPath);
+      await syncDirectory(path.dirname(tokenPath));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw error;
