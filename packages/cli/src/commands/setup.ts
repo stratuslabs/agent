@@ -1835,13 +1835,12 @@ export const runSetup = async (
    * (`plugin-index.ts`). Asked for, never fetched on its own: it runs npm,
    * which reaches the registry, and the main menu has to work offline.
    *
-   * An entry is offered only when its latest release says it can be used
-   * here — published, a plugin version this CLI loads, an `os` that
-   * includes this host, and tools to add. The rest are named with the
-   * reason, so a plugin missing from the list is not a mystery. Picking one
-   * goes to the same install-then-enable path as every other row, which
-   * still asks first and still reads what it contributes from its own
-   * manifest.
+   * An entry is offered only when its latest release would install and
+   * load here (`releaseVerdict` says what that takes), and the install is
+   * pinned to that release. The rest are named with the reason, so a plugin
+   * missing from the list is not a mystery. Picking one goes to the same
+   * install-then-enable path as every other row, which still asks first and
+   * still reads what it contributes from its own manifest.
    */
   const chooseMorePlugins = async (): Promise<void> => {
     writeLine(streams.stdout);
