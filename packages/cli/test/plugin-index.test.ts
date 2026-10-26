@@ -62,6 +62,23 @@ test('the index drops entries npm could not be handed, and repeats', () => {
   assert.deepEqual(entries, [{ name: '@stratusagent/plugin-fleet', description: 'Fleet metadata' }]);
 });
 
+test('the index drops a description that would reach the terminal as more than one plain line', () => {
+  // Setup prints descriptions straight into its menu. A line break breaks
+  // the row, and an escape sequence is something the terminal would run.
+  const entries = parsePluginIndex({
+    schemaVersion: 1,
+    plugins: [
+      { name: 'stratus-plugin-a', description: 'Two\nlines' },
+      { name: 'stratus-plugin-b', description: 'Red \u001b[31mtext' },
+      { name: 'stratus-plugin-c', description: 'Carriage\rreturn' },
+      { name: 'stratus-plugin-d', description: 'C1 \u009b control' },
+      { name: 'stratus-plugin-e', description: 'Line\u2028separator' },
+      { name: 'stratus-plugin-f', description: 'Fine — with a dash' },
+    ],
+  });
+  assert.deepEqual(entries, [{ name: 'stratus-plugin-f', description: 'Fine — with a dash' }]);
+});
+
 test('the bundled index is a valid index of packages that ship apart from the CLI', () => {
   const entries = parsePluginIndex({ schemaVersion: 1, plugins: BUNDLED_PLUGIN_INDEX });
   assert.deepEqual(entries, [...BUNDLED_PLUGIN_INDEX]);
@@ -152,6 +169,17 @@ test('npm view output is read whether npm printed one field or several', () => {
   assert.deepEqual(parseNpmView({ code: 0, stdout: '', stderr: '' }), { status: 'unknown' });
   assert.deepEqual(parseNpmView({ code: 0, stdout: 'not json', stderr: '' }), { status: 'unknown' });
   assert.deepEqual(parseNpmView(undefined), { status: 'unknown' });
+  // The version is printed in a reason line, and the registry is whatever
+  // the operator's npm points at: anything but a plain version is unknown.
+  assert.deepEqual(parseNpmView({ code: 0, stdout: JSON.stringify('1.0.0\u001b[2J'), stderr: '' }), { status: 'unknown' });
+  assert.deepEqual(
+    parseNpmView({ code: 0, stdout: JSON.stringify({ version: '1.0.0\nnext', stratus: toolManifest }), stderr: '' }),
+    { status: 'unknown' },
+  );
+  assert.deepEqual(parseNpmView({ code: 0, stdout: '"1.0.0-beta.1+build.5"', stderr: '' }), {
+    status: 'published',
+    version: '1.0.0-beta.1+build.5',
+  });
 });
 
 test('release checks ask about each name once, a few at a time', async () => {

@@ -50,10 +50,22 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
+ * Line breaks and control characters (C0, DEL, C1, and the Unicode line and
+ * paragraph separators). Index text and registry versions are printed
+ * straight into setup's menu: a line break breaks the row, and an escape
+ * sequence is something the terminal would act on.
+ */
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+/** A version as npm publishes one: semver's characters and nothing else. */
+const PLAIN_VERSION = /^[0-9A-Za-z.+-]+$/;
+
+/**
  * The entries of an index this CLI can read, or `undefined` for anything
- * else. An entry without a package name npm could be handed, or without a
- * description, is dropped: the names reach `npm view` and `npm install -g`,
- * and on Windows those run through a shell.
+ * else. An entry without a package name npm could be handed is dropped,
+ * since the names reach `npm view` and `npm install -g`, and on Windows
+ * those run through a shell. So is one whose description is empty or has a
+ * line break or control character.
  */
 export const parsePluginIndex = (value: unknown): PluginIndexEntry[] | undefined => {
   if (!isObject(value) || value.schemaVersion !== PLUGIN_INDEX_SCHEMA_VERSION || !Array.isArray(value.plugins)) {
@@ -66,7 +78,7 @@ export const parsePluginIndex = (value: unknown): PluginIndexEntry[] | undefined
       continue;
     }
     const description = entry.description.trim();
-    if (!isPackageName(entry.name) || description.length === 0 || seen.has(entry.name)) {
+    if (!isPackageName(entry.name) || description.length === 0 || UNPRINTABLE.test(description) || seen.has(entry.name)) {
       continue;
     }
     seen.add(entry.name);
@@ -130,10 +142,12 @@ export const parseNpmView = (result: NpmResult | undefined): PluginRelease => {
     const code = isObject(printed) && isObject(printed.error) ? printed.error.code : undefined;
     return code === 'E404' || /\bE404\b/.test(result.stderr) ? { status: 'unpublished' } : { status: 'unknown' };
   }
-  if (typeof printed === 'string' && printed.length > 0) {
-    return { status: 'published', version: printed };
+  // The version is printed in setup's reason lines, and the registry is
+  // whichever one the operator's npm points at.
+  if (typeof printed === 'string') {
+    return PLAIN_VERSION.test(printed) ? { status: 'published', version: printed } : { status: 'unknown' };
   }
-  if (!isObject(printed) || typeof printed.version !== 'string') {
+  if (!isObject(printed) || typeof printed.version !== 'string' || !PLAIN_VERSION.test(printed.version)) {
     return { status: 'unknown' };
   }
   return {
