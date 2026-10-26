@@ -55,10 +55,10 @@ ENV PATH=/opt/stratus/node_modules/.bin:$PATH \
 # created here, owned by it, so a fresh named volume mounted over it copies
 # that ownership and mode instead of arriving root-owned.
 # bubblewrap: tool-shell runs agent commands in it, and refuses to run them
-# at all (sandbox: "required", the default) when it can't start. A runtime
-# that forbids unprivileged user namespaces needs them allowed (Docker:
-# --security-opt seccomp=unconfined, or a profile that permits clone with
-# CLONE_NEWUSER); see docs/guides/deployment.md.
+# at all (sandbox: "required", the default) when it can't start. In a Docker
+# container it can't with Docker's defaults: seccomp, AppArmor and the masked
+# /proc paths each refuse it. On a VM, such as a Fly Machine, it starts. See
+# "A shell sandbox that can start" in docs/guides/deployment.md.
 RUN apt-get update -q \
     && apt-get install -y -q --no-install-recommends bubblewrap \
     && rm -rf /var/lib/apt/lists/*

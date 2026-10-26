@@ -105,7 +105,8 @@ documented, on the demo provider, and checks its limits: the home on the
 named volume and owned by the daemon's user, a read-only root with `/tmp`
 writable, no capabilities, no-new-privileges, and state kept when the
 container is recreated. It also
-says whether bubblewrap can start inside them (see the checklist below).
+runs one command the way `shell.run` does and says whether it ran in
+bubblewrap's sandbox or was refused (see the checklist below).
 It uses its own project, env file, port and volume, so it leaves an
 existing deployment alone, and it needs Compose 2.24.4 or later. Run
 either from the repository root on any host with Docker. CI runs both on
@@ -397,19 +398,34 @@ What the recipe sets, and what it leaves to you.
   home needs its own `ReadWritePaths=` or mount.
 - [ ] **A shell sandbox that can start.** `tool-shell` runs each command in
   bubblewrap (installed in the image) and refuses commands when it can't
-  start one. bwrap needs unprivileged user namespaces. If the container
-  runtime forbids them, every `shell.run` fails with the reason (`bwrap
-  cannot create a sandbox here (…)`): allow them for this container (for
-  Docker, a seccomp profile that permits `clone`/`unshare` with
-  `CLONE_NEWUSER`), or set `sandbox: "auto"` for `@stratusagent/tool-shell`
-  to run commands unconfined inside the container instead, accepting that a
-  command can then read the credential store in the volume. On a stock
-  Ubuntu 24.04 host (checked 2026-10-26 with Docker 29.4.2) the seccomp
-  profile isn't enough: with it unconfined, Docker's default AppArmor
-  profile refuses bwrap's mounts, and with both unconfined, the host's
-  `kernel.apparmor_restrict_unprivileged_userns=1` refuses the user
-  namespace's uid map. So there, bwrap can't start in a container without
-  a change to the host. `compose-smoke.sh` prints which case a host is in.
+  start one, with bwrap's reason (`bwrap cannot create a sandbox here (…)`).
+  In a Docker container it can't, with Docker's defaults or with
+  `compose.yaml` as shipped. Checked 2026-10-26 with Docker 28.0.4 on
+  Ubuntu 22.04 and 24.04, in containers with `compose.yaml`'s hardening,
+  three layers refuse it, one after another:
+  1. Docker's default seccomp profile refuses the user namespace.
+  2. With seccomp relaxed (`seccomp=unconfined`, or a profile that also
+     allows `clone` with namespace flags, `unshare`, `mount`, `umount2`,
+     `pivot_root` and `chroot`), Docker's default AppArmor profile refuses
+     bwrap's mounts (`Failed to make / slave`).
+  3. With AppArmor unconfined too, the paths Docker masks under `/proc`
+     make the kernel refuse the sandbox its own `/proc`
+     (`Can't mount proc`) until `systempaths=unconfined` unmasks them. On
+     Ubuntu 24.04 the host's `kernel.apparmor_restrict_unprivileged_userns=1`
+     also refuses the namespace's uid map until the host turns it off.
+
+  Only with all of that loosened did a command run sandboxed, and each
+  step gives up part of the container's own confinement, so this guide
+  doesn't recommend it. For agents that run shell commands, run the image
+  where it's a VM rather than a container (on a Fly Machine bwrap starts;
+  checked 2026-10-26), or install on the host with the system unit below.
+  Under `compose.yaml` as it is, every `shell.run` is refused. Setting
+  `sandbox: "auto"` or `"off"` for `@stratusagent/tool-shell` runs commands
+  unconfined inside the container instead, and a command can then read the
+  credential store in the volume. `compose-smoke.sh` runs one command the
+  way `shell.run` does and prints whether it ran sandboxed or why it was
+  refused.
+
   The system unit allows exactly what bwrap needs and no more: its own
   user, mount, pid and ipc namespaces (`RestrictNamespaces=user mnt pid
   ipc`) and the mount calls inside them (`@mount` in `SystemCallFilter=`).
