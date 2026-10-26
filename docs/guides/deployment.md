@@ -101,9 +101,10 @@ without reading it back: see the control API's token under
 `deploy/docker/smoke.sh` builds the image and checks it end to end (a
 seeded token, a held start and its promotion, a pause that survives a
 restart). `deploy/docker/compose-smoke.sh` brings up `compose.yaml` as
-documented, on the demo provider, and checks its limits: the state volume
-owned by the daemon's user, a read-only root with `/tmp` writable, no
-capabilities, no-new-privileges, and state kept across a restart. It also
+documented, on the demo provider, and checks its limits: the home on the
+named volume and owned by the daemon's user, a read-only root with `/tmp`
+writable, no capabilities, no-new-privileges, and state kept when the
+container is recreated. It also
 says whether bubblewrap can start inside them (see the checklist below).
 It uses its own project, env file, port and volume, so it leaves an
 existing deployment alone, and it needs Compose 2.24.4 or later. Run

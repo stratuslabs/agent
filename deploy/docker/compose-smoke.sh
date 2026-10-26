@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Bring up compose.yaml as documented, on the offline demo provider, and check
-# what it promises: it starts and answers `stratus health`, the state volume
-# belongs to the daemon's user, the root filesystem is read-only with /tmp
-# writable, every capability is dropped and no-new-privileges holds, and state
-# survives a restart. It also reports whether the shell tool's sandbox
-# (bubblewrap) can start inside these limits, which depends on the host.
+# what it promises: it starts and answers `stratus health`, the home is the
+# named volume and belongs to the daemon's user, the root filesystem is
+# read-only with /tmp writable, every capability is dropped and
+# no-new-privileges holds, and state survives recreating the container. It
+# also reports whether the shell tool's sandbox (bubblewrap) can start inside
+# these limits, which depends on the host.
 #
 #   deploy/docker/compose-smoke.sh    # from the repository root
 #
@@ -93,14 +94,22 @@ UP=1
 compose up -d --build --wait --wait-timeout 300 || fail "compose up did not reach a healthy container"
 in_container stratus health >/dev/null || fail "stratus health failed in the container"
 
-echo "--- the state volume belongs to the daemon's user"
+echo "--- the state volume is the named one, and belongs to the daemon's user"
+# The Dockerfile declares the home a VOLUME, so without compose's named
+# volume Docker would quietly mount an anonymous one in the same place.
+mounts=$(docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} {{.Destination}}{{"\n"}}{{end}}' "$PROJECT")
+printf '%s\n' "$mounts" | grep -qx "volume ${PROJECT}_stratus-home /home/node/.stratus" \
+  || fail "the home is not the named volume ${PROJECT}_stratus-home: ${mounts}"
 owner=$(in_container stat -c '%u:%g' /home/node/.stratus)
 [ "$owner" = "1000:1000" ] || fail "the state volume is owned by $owner, not 1000:1000"
 in_container sh -c 'test -s /home/node/.stratus/gateway-token' || fail "the daemon wrote no gateway token into the volume"
 
 echo "--- read-only root, writable /tmp"
-if in_container sh -c 'touch /opt/stratus/.compose-smoke' 2>/dev/null; then
-  fail "the root filesystem is writable"
+[ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$PROJECT")" = true ] || fail "the container's root filesystem is not read-only"
+# A directory the daemon's user owns, so only read_only can refuse the write.
+[ "$(in_container stat -c '%u' /home/node)" = 1000 ] || fail "/home/node is not owned by uid 1000, so it can't show read_only"
+if in_container sh -c 'touch /home/node/.compose-smoke' 2>/dev/null; then
+  fail "the root filesystem is writable (/home/node)"
 fi
 in_container sh -c 'touch /tmp/.compose-smoke && rm /tmp/.compose-smoke' || fail "/tmp is not writable"
 
@@ -113,11 +122,16 @@ caps=$(in_container sh -c "awk '/^CapBnd:/ {print \$2}' /proc/1/status")
 nnp=$(in_container sh -c "awk '/^NoNewPrivs:/ {print \$2}' /proc/1/status")
 [ "$nnp" = "1" ] || fail "no-new-privileges is not set (NoNewPrivs: $nnp)"
 
-echo "--- state survives a restart"
+echo "--- state survives recreating the container"
 TOKEN=$(in_container cat /home/node/.stratus/gateway-token | tr -d '\r\n')
 find_api
 call PUT /intake '{"paused":true,"message":"Compose smoke test pause."}' | grep -q '"paused":true' || fail "pause was refused"
-compose restart stratusd >/dev/null
+before=$(docker inspect -f '{{.Id}}' "$PROJECT")
+# A new container with fresh anonymous volumes: only the named volume can
+# carry the pause across. A plain restart would keep any volume at all.
+compose up -d --force-recreate --renew-anon-volumes --wait --wait-timeout 300 stratusd >/dev/null 2>&1 \
+  || fail "the recreated container did not reach healthy"
+[ "$(docker inspect -f '{{.Id}}' "$PROJECT")" != "$before" ] || fail "the container was not recreated"
 wait_healthy
 find_api
 call GET /intake | grep -q '"paused":true' || fail "the pause did not survive a restart"
