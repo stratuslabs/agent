@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -274,6 +274,86 @@ test('a hand-added line that parses but is not a record fails with the error tha
   const missingField = path.join(await tempDir(), 'memory.jsonl');
   await writeFile(missingField, `${JSON.stringify({ id: 'x', agentId: 'ava', content: 'no createdAt' })}\n`);
   await assert.rejects(() => createFileMemoryStore(missingField).list('ava'), /invalid line.*memory\.jsonl/);
+});
+
+test('a line of zero bytes left by a crash or a live snapshot is skipped, and the agent keeps remembering', async () => {
+  // What a running host's volume snapshot restored with (Fly, stratusd 0.13.5):
+  // the file's size covered the last append but its data block never reached
+  // the disk, so the tail read back as NUL bytes. A crash before writeback
+  // leaves the same thing.
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'the first fact about terns');
+  await appendFile(filePath, Buffer.alloc(2275));
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content), ['the first fact about terns']);
+  assert.equal((await store.search('ava', 'terns')).entries.length, 1);
+
+  await store.append('ava', 'the next fact about puffins');
+  const reopened = createFileMemoryStore(filePath);
+  assert.deepEqual(
+    (await reopened.list('ava')).entries.map((entry) => entry.content).sort(),
+    ['the first fact about terns', 'the next fact about puffins'],
+  );
+  assert.equal((await reopened.search('ava', 'puffins')).entries.length, 1);
+});
+
+test('a record that landed after a hole that swallowed a newline is kept', async () => {
+  // Writeback order is not file order: a later append can reach the disk
+  // while an earlier one, newline and all, reads back as zeros.
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'a fact before the hole');
+  const lost = entryLine('ava:memory:lost', 'ava', 'a fact lost to the hole', '2026-10-25T07:37:48.000Z');
+  const later = entryLine('ava:memory:later', 'ava', 'a fact that landed after it', '2026-10-25T07:37:49.000Z');
+  await appendFile(filePath, Buffer.concat([Buffer.from(lost.slice(0, 30)), Buffer.alloc(lost.length - 30), Buffer.from(later)]));
+  const reopened = createFileMemoryStore(filePath);
+  assert.deepEqual(
+    (await reopened.list('ava')).entries.map((entry) => entry.content).sort(),
+    ['a fact before the hole', 'a fact that landed after it'],
+  );
+  assert.equal((await reopened.search('ava', 'landed')).entries.length, 1);
+});
+
+test('an index saved before the torn write reached the disk is not trusted by the next process', async () => {
+  // The index is SQLite and flushes; the JSONL did not. Restored from a
+  // live snapshot, the index can hold a record whose line is now zeros,
+  // with the file's inode, size and mtime exactly as the index recorded.
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'a fact about terns');
+  await store.append('ava', 'a fact about puffins');
+  // A whole-millisecond mtime, so putting it back below restores it exactly.
+  const mtime = new Date(Math.floor(Date.now() / 1000) * 1000 - 60_000);
+  await utimes(filePath, mtime, mtime);
+  assert.equal((await store.search('ava', 'puffins')).entries.length, 1);
+
+  const raw = await readFile(filePath);
+  const tornAt = raw.indexOf('\n') + 1;
+  const before = await stat(filePath);
+  const handle = await open(filePath, 'r+');
+  await handle.write(Buffer.alloc(raw.length - tornAt), 0, raw.length - tornAt, tornAt);
+  await handle.close();
+  await utimes(filePath, mtime, mtime);
+  const after = await stat(filePath);
+  assert.equal(String(after.mtimeMs), String(before.mtimeMs), 'the test must reproduce an unchanged stat');
+
+  const restarted = createFileMemoryStore(filePath);
+  assert.deepEqual((await restarted.search('ava', 'puffins')).entries, []);
+  assert.equal((await restarted.search('ava', 'terns')).entries.length, 1);
+  assert.deepEqual((await restarted.list('ava')).entries.map((entry) => entry.content), ['a fact about terns']);
+});
+
+test('a record cut off where its block was lost is skipped too, wherever it sits', async () => {
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'a fact before the tear');
+  const torn = entryLine('ava:memory:torn', 'ava', 'a fact that never fully landed', '2026-10-25T07:37:49.000Z');
+  await appendFile(filePath, Buffer.concat([Buffer.from(torn.slice(0, 40)), Buffer.alloc(300), Buffer.from('\n')]));
+  await store.append('ava', 'a fact after the tear');
+  assert.deepEqual(
+    (await createFileMemoryStore(filePath).list('ava')).entries.map((entry) => entry.content).sort(),
+    ['a fact after the tear', 'a fact before the tear'],
+  );
 });
 
 test('an over-budget hand-written entry cannot starve the entries behind it', async () => {
