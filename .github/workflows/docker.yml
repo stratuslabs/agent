@@ -1,0 +1,29 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes an older image check moot.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Docker smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds deploy/docker/Dockerfile (slim) from this checkout, then checks
+      # the image end to end: a seeded token, a held start and its promotion,
+      # and a pause that survives a container restart.
+      - name: Build the image and check it end to end
+        run: deploy/docker/smoke.sh

@@ -100,7 +100,9 @@ without reading it back: see the control API's token under
 
 `deploy/docker/smoke.sh` builds the image and checks it end to end (a
 seeded token, a held start and its promotion, a pause that survives a
-restart). Run it from the repository root on any host with Docker.
+restart). Run it from the repository root on any host with Docker. CI
+runs it on every pull request and push to `main`
+(`.github/workflows/docker.yml`).
 
 ## First run: a system unit
 
