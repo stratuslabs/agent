@@ -190,6 +190,25 @@ sudo sed -e 's/^Type=simple$/Type=oneshot/' -e '/^ExecStart=/d' -e '/^Restart/d'
   "/etc/systemd/system/$UNIT" | sudo tee "/etc/systemd/system/$PROBE" >/dev/null
 echo "ExecStart=$NODE $PREFIX/shell-probe.mjs" | sudo tee -a "/etc/systemd/system/$PROBE" >/dev/null
 sudo systemctl daemon-reload
+# DIAGNOSIS (temporary): which of the unit's lines refuse the real plan.
+variant() { # name sed-expression...
+  local name=$1; shift
+  sudo sed "$@" "/etc/systemd/system/$PROBE" | sudo tee "/etc/systemd/system/stratus-diag-$name.service" >/dev/null
+  sudo systemctl daemon-reload
+  if sudo systemctl start "stratus-diag-$name.service" 2>/dev/null; then
+    echo "diag $name: runs"
+  else
+    echo "diag $name: fails: $(sudo journalctl -u "stratus-diag-$name.service" -o cat --no-pager | grep -m 1 '^shell' || echo '?')"
+  fi
+  sudo rm -f "/etc/systemd/system/stratus-diag-$name.service"
+}
+variant no-ktunables -e '/^ProtectKernelTunables=/d'
+variant no-klogs -e '/^ProtectKernelLogs=/d'
+variant no-both -e '/^ProtectKernelTunables=/d' -e '/^ProtectKernelLogs=/d'
+variant no-cgroups -e '/^ProtectControlGroups=/d'
+variant no-devices -e '/^PrivateDevices=/d'
+variant no-protect-all -e '/^Protect/d' -e '/^Private/d'
+sudo systemctl daemon-reload
 probed=0
 sudo systemctl start "$PROBE" 2>/dev/null || probed=$?
 sudo journalctl -u "$PROBE" -o cat --no-pager | grep -m 1 '^shell\.run' || true
