@@ -107,6 +107,7 @@ export {
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
+  defaultModelFor,
   parseProviderName,
   defaultApiKeyEnvName,
 } from './provider-names.ts';
@@ -264,6 +265,7 @@ export {
   createDemoProvider,
   FALLBACK_ACTIVE_METADATA_KEY,
   PROVIDER_STATE_METADATA_KEYS,
+  redactProviderReplayState,
   createFallbackWrappedProvider,
   describeServingModel,
   type RegisteredProviders,

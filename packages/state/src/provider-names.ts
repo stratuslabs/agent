@@ -1,4 +1,5 @@
 import { BUILTIN_PROVIDER_NAMES, type BuiltinProviderName } from '@stratusagent/core';
+import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 
 /**
  * The prefix every consumer carries a plugin-registered provider under.
@@ -51,6 +52,27 @@ export const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
 export const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
+
+/**
+ * The model the Anthropic provider runs when nothing names one. Restated
+ * from `@stratusagent/provider-anthropic` rather than imported, so the CLI
+ * and the control API can name a default without loading the adapter; a
+ * state test holds the two equal.
+ */
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
+
+/**
+ * The model a built-in provider runs when no flag, environment variable,
+ * soul or config names one. The one table resolution, the roster, setup,
+ * `agent new` and the help text read. A provider a plugin registered has
+ * its own default, which nothing here knows.
+ */
+export const defaultModelFor = (provider: CredentialProviderName): string =>
+  provider === 'anthropic'
+    ? DEFAULT_ANTHROPIC_MODEL
+    : provider === 'codex'
+      ? DEFAULT_CODEX_MODEL
+      : DEFAULT_OPENAI_MODEL;
 
 /**
  * Read a provider selection into its resolved form. A built-in name is

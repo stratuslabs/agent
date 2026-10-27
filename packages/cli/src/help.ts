@@ -1,5 +1,4 @@
-import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
+import { defaultModelFor } from '@stratusagent/state';
 
 export const HELP_TEXT = `Stratus Agent CLI
 
@@ -272,7 +271,7 @@ Options:
   --prompt, -p     Prompt to send to the local agent loop
   --stdin          Read the prompt from stdin
   --provider       Provider to use: anthropic, openai, codex, demo, or the name a plugin registers
-  --model          Model name for real providers (anthropic default: ${DEFAULT_ANTHROPIC_MODEL}, openai default: gpt-4.1-mini, codex default: ${DEFAULT_CODEX_MODEL})
+  --model          Model name for real providers (anthropic default: ${defaultModelFor('anthropic')}, openai default: ${defaultModelFor('openai')}, codex default: ${defaultModelFor('codex')})
   --base-url       Override the provider API base URL
   --soul           Run as the agent defined by a soul file (markdown + frontmatter, see examples/souls)
   --config         Config file path (run: load settings from it, setup: write it)

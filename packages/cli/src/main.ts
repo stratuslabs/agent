@@ -1,4 +1,3 @@
-import { redactAnthropicRawTurns } from '@stratusagent/provider-anthropic';
 import {
   newerStateMessage,
   readStateStamp,
@@ -7,6 +6,7 @@ import {
   STATE_SCHEMA_VERSION,
   NoProviderConfiguredError,
   DEFAULT_STRATUS_AGENT,
+  redactProviderReplayState,
 } from '@stratusagent/state';
 import { defaultPosture, unflaggedApprovals } from './trusted-config.ts';
 import { runAgentNew } from './commands/agent-new.ts';
@@ -301,7 +301,7 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
         provider: runtime.provider,
         // Replay state (Claude's raw thinking turns) stays in the stored
         // session but never in user-facing output.
-        session: redactAnthropicRawTurns(session),
+        session: redactProviderReplayState(session),
       }, null, 2));
       return 0;
     }

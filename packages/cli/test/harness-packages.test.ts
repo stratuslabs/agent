@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -66,6 +66,29 @@ test('neither the CLI nor state depends on a harness provider package', async ()
       for (const name of [CLAUDE_CODE, CODEX]) {
         assert.equal(manifest[field]?.[name], undefined, `${pkg} ${field} still lists ${name}`);
       }
+    }
+  }
+});
+
+test('neither the CLI nor control-api depends on or imports a provider adapter', async () => {
+  // Naming a default model or hiding replay state is state's job
+  // (`defaultModelFor`, `redactProviderReplayState`), so these two hosts
+  // build with no adapter at all. Tests may still use one as a dev dependency.
+  const adapter = /^@stratusagent\/provider-/;
+  const importsAdapter = /(?:\bfrom\s*|\bimport\s*\(\s*)['"]@stratusagent\/provider-[^'"]*['"]/;
+  for (const pkg of ['cli', 'control-api']) {
+    const root = fileURLToPath(new URL(`../../${pkg}/`, import.meta.url));
+    const manifest = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as Record<string, Record<string, string> | undefined>;
+    for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies'] as const) {
+      const named = Object.keys(manifest[field] ?? {}).filter((name) => adapter.test(name));
+      assert.deepEqual(named, [], `${pkg} ${field} lists ${named.join(', ')}`);
+    }
+    const sources = (await readdir(path.join(root, 'src'), { recursive: true }))
+      .filter((file) => /\.(?:ts|mts|js|mjs)$/.test(file));
+    assert.ok(sources.length > 0, `no sources found under ${pkg}/src`);
+    for (const file of sources) {
+      const text = await readFile(path.join(root, 'src', file), 'utf8');
+      assert.doesNotMatch(text, importsAdapter, `${pkg}/src/${file} imports a provider adapter`);
     }
   }
 });

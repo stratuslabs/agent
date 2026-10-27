@@ -27,7 +27,6 @@ import {
   SCHEDULE_SESSION_ID_PREFIX,
   type Gateway,
 } from '@stratusagent/gateway';
-import { redactAnthropicRawTurns } from '@stratusagent/provider-anthropic';
 import {
   claimSoulFile,
   collectAvailableModels,
@@ -60,6 +59,7 @@ import {
   CREDENTIAL_NAME_PATTERN,
   NamedCredentialExistsError,
   NoProviderConfiguredError,
+  redactProviderReplayState,
   type AgentSummary,
   type CredentialProviderName,
   type RuntimeConfig,
@@ -1028,7 +1028,7 @@ export const routes: Route[] = [
       }
       // Provider replay state is an implementation detail of resumption, and
       // it carries raw model turns. It never leaves the daemon.
-      return { session: redactAnthropicRawTurns(session) };
+      return { session: redactProviderReplayState(session) };
     },
   },
   {

@@ -21,8 +21,6 @@ import {
   type MemoryReadResult,
 } from '@stratusagent/core';
 import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
-import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 import { assertDerivedStatePath } from '@stratusagent/permissions';
 import { createShardedFileMemoryStore } from './memory.ts';
 import { ConfigFileError } from './config-file.ts';
@@ -37,7 +35,8 @@ import { writeNewSoulFile } from './agents-home.ts';
 import { agentMemoryFilePath, agentsDirPath, foldedAgentId, stratusHomePath } from './paths.ts';
 import {
   isRegisteredProviderName,
-  DEFAULT_OPENAI_MODEL,
+  defaultModelFor,
+  type CredentialProviderName,
   parseProviderName,
 } from './provider-names.ts';
 import { type SoulPinContext, applySoulPins } from './served.ts';
@@ -728,13 +727,8 @@ export const listAgentSummaries = async (
       ?? (configModelApplies ? activeConfig.model : undefined)
       // A contributed provider's default model is its own; nothing here
       // knows it, and reporting a built-in's default would be a guess.
-      ?? (isRegisteredProviderName(provider)
-        ? undefined
-        : provider === 'openai'
-          ? DEFAULT_OPENAI_MODEL
-          : provider === 'codex'
-            ? DEFAULT_CODEX_MODEL
-            : DEFAULT_ANTHROPIC_MODEL);
+      // Demo and none returned above; parsing allows only built-in names.
+      ?? (isRegisteredProviderName(provider) ? undefined : defaultModelFor(provider as CredentialProviderName));
     return model !== undefined ? { provider, model } : { provider };
   };
 
