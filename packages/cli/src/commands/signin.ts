@@ -70,14 +70,21 @@ export const runSignIn = async (
   // A configured default soul that takes the reserved id over is on the
   // roster and carries its soul into every run, so it is accepted.
   const warnings: string[] = [];
-  const roster = await rosterSoulsWithConfigured(env, (line) => warnings.push(line));
+  const roster = await rosterSoulsWithConfigured(
+    env,
+    (line) => warnings.push(line),
+    command.configPath !== undefined ? { configPath: command.configPath } : {},
+  );
   if (roster.complete && !roster.entries.some((entry) => entry.soul.agent.id === agentId)) {
     writeLine(
       streams.stderr,
-      agentId === DEFAULT_STRATUS_AGENT.id
+      (agentId === DEFAULT_STRATUS_AGENT.id
         ? `${agentId} is the built-in agent. It has no soul file, so its turns always run on the shared sign-in from \`stratus setup\`, `
           + 'and a sign-in stored for it would never be used. Nothing was stored.'
-        : `No agent ${agentId} is on the roster, so a sign-in stored for it would never be used. \`stratus agents\` lists who is.`,
+        : `No agent ${agentId} is on the roster, so a sign-in stored for it would never be used. \`stratus agents\` lists who is.`)
+      + (command.configPath === undefined
+        ? ' If stratusd runs with --config, its default soul is named there: pass the same --config here.'
+        : ''),
     );
     return 1;
   }

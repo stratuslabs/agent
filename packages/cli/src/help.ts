@@ -163,7 +163,9 @@ Commands:
                    from a flag. It outranks the shared sign-in (and any
                    ANTHROPIC_API_KEY) for that agent only. Not a named
                    credential: no soul lists it and no tool can read it.
-                   A running daemon uses it from that agent's next turn
+                   A running daemon uses it from that agent's next turn.
+                   --config <path>: check the agent against the roster of
+                   the config the daemon runs on
   signin list      Which agents have a sign-in of their own — names only,
                    never tokens (also: signins)
   signin remove    Forget one agent's own sign-in; its next turn runs on the

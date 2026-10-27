@@ -141,6 +141,29 @@ test('stratus signin set accepts the built-in id once a configured default soul 
   assert.equal(stored.agentSignIns?.stratus?.anthropic?.value, TOKEN);
 });
 
+test('stratus signin set --config reads the default soul from the config the daemon was started with', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // `stratus serve --config custom.json`: the default soul that takes the
+  // reserved id over is named only in that file, not the default one.
+  const soul = path.join(home, 'main.md');
+  await writeFile(soul, '---\nname: Main\nid: stratus\nprovider: anthropic\n---\n\nYou are Main.\n');
+  const custom = path.join(home, 'custom.json');
+  await writeFile(custom, JSON.stringify({ provider: 'anthropic', soul }));
+
+  const without = await run(['signin', 'set', 'anthropic', '--agent', 'stratus'], { ...env, stdin: TOKEN });
+  assert.equal(without.code, 1, without.stdout);
+  assert.match(without.stderr, /pass the same --config here/);
+
+  const withConfig = await run(['signin', 'set', 'anthropic', '--agent', 'stratus', '--config', custom], { ...env, stdin: TOKEN });
+  assert.equal(withConfig.code, 0, withConfig.stderr);
+  assert.match(withConfig.stdout, /Stored stratus's own Claude sign-in/);
+
+  const removeWithConfig = await run(['signin', 'remove', 'anthropic', '--agent', 'stratus', '--config', custom], env);
+  assert.equal(removeWithConfig.code, 1);
+  assert.match(removeWithConfig.stderr, /--config is for signin set/);
+});
+
 test('stratus signin takes the token from stdin or a prompt, never from the command line', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
