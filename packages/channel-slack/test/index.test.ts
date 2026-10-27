@@ -8393,6 +8393,197 @@ test('an image the model API would refuse for its size in pixels is never stored
   assert.equal(warnings.filter((line) => /fake\.jpg/.test(line) && /not a complete image\/jpeg/.test(line)).length, 1);
 });
 
+// A minimal JPEG: start of image, one start-of-frame segment carrying the
+// size, end of image. Enough for the adapter to read a size out of.
+const jpegOf = (width: number, height: number): Buffer => {
+  const frame = Buffer.alloc(19);
+  frame.set([0xff, 0xc0, 0x00, 0x11, 0x08], 0);
+  frame.writeUInt16BE(height, 5);
+  frame.writeUInt16BE(width, 7);
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), frame, Buffer.from([0xff, 0xd9])]);
+};
+
+test('an image over the byte limit is sent as Slack\'s largest preview, and the turn is told it is one', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'I see it'));
+  const warnings: string[] = [];
+  const fetched: Array<{ url: string; maxBytes: number }> = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url, _token, _signal, maxBytes) => {
+      fetched.push({ url, maxBytes });
+      return { status: 200, contentType: 'image/png', body: pngHeader(1024, 709) };
+    },
+  });
+  await adapter.start(gateway);
+
+  // Slack's file object as files.info returned it for a 14 MB PNG on
+  // 2026-10-27: thumbnails up to 1024 pixels, each its own private URL.
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-preview' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> why does this keep happening',
+      ts: '968.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{
+        id: 'F20',
+        name: 'CleanShot.png',
+        mimetype: 'image/png',
+        size: 14_575_000,
+        url_private_download: 'https://files.slack.com/F20/download',
+        thumb_360: 'https://files.slack.com/F20/thumb_360.png',
+        thumb_720: 'https://files.slack.com/F20/thumb_720.png',
+        thumb_1024: 'https://files.slack.com/F20/thumb_1024.png',
+      }],
+    },
+  });
+  await adapter.stop();
+
+  // The original is never fetched; the largest preview is, under the
+  // same per-image cap any image has.
+  assert.deepEqual(fetched, [{ url: 'https://files.slack.com/F20/thumb_1024.png', maxBytes: 5 * 1024 * 1024 }]);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images?.map((image) => [image.name, image.mediaType])]), [[
+    'Dylan: why does this keep happening\n[CleanShot.png is shown as Slack\'s 1024×709 preview, because the original is 13.9 MB, over the 5 MB a model can be sent. Small text in it may not be legible: ask for a crop rather than guessing at it.]',
+    [['CleanShot.png', 'image/png']],
+  ]]);
+  assert.equal(warnings.filter((line) => /CleanShot\.png/.test(line) && /preview/.test(line) && !/cannot be read/.test(line)).length, 1);
+});
+
+test('an image over the pixel limit is sent as Slack\'s preview, typed by its own bytes', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'I see it'));
+  const fetched: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: () => {},
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    // The original is a small file 9000 pixels tall; Slack's preview of
+    // it happens to be a PNG though the original is a JPEG.
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return url.endsWith('/download')
+        ? { status: 200, contentType: 'image/jpeg', body: jpegOf(1200, 9000) }
+        : { status: 200, contentType: 'image/png', body: pngHeader(137, 1024) };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-preview-tall' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> the whole page',
+      ts: '969.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{
+        id: 'F21',
+        name: 'page.jpg',
+        mimetype: 'image/jpeg',
+        size: 23,
+        url_private_download: 'https://files.slack.com/F21/download',
+        thumb_960: 'https://files.slack.com/F21/thumb_960.png',
+      }],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(fetched, ['https://files.slack.com/F21/download', 'https://files.slack.com/F21/thumb_960.png']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images?.map((image) => [image.name, image.mediaType])]), [[
+    'Dylan: the whole page\n[page.jpg is shown as Slack\'s 137×1024 preview, because the original is 1200×9000, over the 8000 pixels a side a model can be sent. Small text in it may not be legible: ask for a crop rather than guessing at it.]',
+    [['page.jpg', 'image/png']],
+  ]]);
+});
+
+test('an unsized image cut off at the cap is sent as Slack\'s preview', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'I see it'));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: () => {},
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => url.endsWith('/download')
+      ? { status: 200, contentType: 'image/png', body: Buffer.alloc(0), truncated: true }
+      : { status: 200, contentType: 'image/png', body: pngHeader(1024, 640) },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-preview-unsized' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> unsized',
+      ts: '970.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F22', name: 'unsized.png', mimetype: 'image/png', url_private_download: 'https://files.slack.com/F22/download', thumb_1024: 'https://files.slack.com/F22/thumb_1024.png' }],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images?.length]), [[
+    'Dylan: unsized\n[unsized.png is shown as Slack\'s 1024×640 preview, because the original is over the 5 MB a model can be sent. Small text in it may not be legible: ask for a crop rather than guessing at it.]',
+    1,
+  ]]);
+});
+
+test('a preview that cannot be used either leaves the image named as too large', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    // Not an image at all: a preview is checked like any download.
+    fetchFile: async () => ({ status: 200, contentType: 'image/png', body: Buffer.from('not a png') }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-preview-bad' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> huge',
+      ts: '971.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F23', name: 'huge.png', mimetype: 'image/png', size: 9 * 1024 * 1024, url_private_download: 'https://files.slack.com/F23/download', thumb_1024: 'https://files.slack.com/F23/thumb_1024.png' }],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: huge\n[Attached, name only: huge.png (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /huge\.png/.test(line) && /preview/.test(line) && /cannot be read/.test(line)).length, 1);
+});
+
 test('an image left out for the message\'s budget closes the window to everything listed before it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

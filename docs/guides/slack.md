@@ -306,6 +306,11 @@ app installed before it needs the scope added under **OAuth & Permissions**
 and a reinstall, and until then `stratus serve` warns, naming the scope,
 whenever an image arrives.
 
+An image over 5 MB or 8000 pixels a side, the model API's limits, is sent as
+Slack's own preview of it, up to 1024 pixels a side, and the agent is told it
+is seeing a scaled preview. Small text in a full-screen Retina screenshot may
+not survive that, so send a crop of the part that matters.
+
 Text files are read too. Attach a Markdown plan, a CSV, a JSON file, or a
 log, and its contents reach the agent with your message, up to 100 KB a
 file and 200 KB a message. A larger text file, up to 10 MB, is saved under
@@ -315,7 +320,7 @@ sender's trust label, so reading it back counts as reading what that person
 sent. An agent keeps up to 256 MB, and 1,000 files, of saved attachments; past that, a new one
 reaches the agent by name only and the daemon log says which directory to
 clear. Nothing is deleted for you. Anything else — a PDF, a Word file, an image over 5 MB or 8000 pixels
-a side, one that would take a single message's images past 20 MB together,
+a side that Slack made no preview of, one that would take a single message's images past 20 MB together,
 or a text file over 10 MB — reaches the
 agent by name, with the reason it was not read: not a kind of file read
 here, too large, not downloaded (in time, or at all), or not readable as

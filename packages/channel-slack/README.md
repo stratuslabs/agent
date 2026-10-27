@@ -129,7 +129,10 @@ typed, is a question in its own right and gets an answer. That needs the
 without it should have the scope added under **OAuth & Permissions** and be
 reinstalled once, and until then `stratus serve` warns, naming the scope,
 each time an image arrives. An image over 5 MB or 8000 pixels a side (the
-model API's limits) is not kept, and one message's images stop at 20 MB
+model API's limits) is sent as Slack's own largest preview of it, up to 1024
+pixels a side, and the message tells the agent it is seeing a scaled preview,
+so it asks for a crop rather than guessing at small text; an image Slack made
+no preview of is not kept. One message's images stop at 20 MB
 together — a request has a size limit too, and images past it are named as
 unreadable; send them in a message of their own. The same 20 MB — and 20
 images — is what a whole thread's images may take on one request, spent
