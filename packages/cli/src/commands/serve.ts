@@ -54,7 +54,7 @@ import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
 import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
-import { harnessesMissingMessage, missingHarnessPackages } from '../harness-packages.ts';
+import { providerPackagesMissingMessage, missingProviderPackages } from '../provider-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
 import { startupConfigFiles } from '../config-digest.ts';
 import { holdsForVersion, recordPromotedVersion } from '../promotion.ts';
@@ -428,9 +428,9 @@ const serveHeldHome = async (
     warn(companionsBehindMessage(behind));
   }
 
-  const missingHarnesses = await missingHarnessPackages(env, command.configPath);
-  if (missingHarnesses.length > 0) {
-    warn(harnessesMissingMessage(missingHarnesses));
+  const missingProviders = await missingProviderPackages(env, command.configPath);
+  if (missingProviders.length > 0) {
+    warn(providerPackagesMissingMessage(missingProviders));
   }
 
   const channelCredentials = await loadChannelCredentials(env);

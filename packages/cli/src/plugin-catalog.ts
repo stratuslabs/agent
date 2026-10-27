@@ -50,8 +50,9 @@ export const FIRST_PARTY_COMPANION_PACKAGES = [
   '@stratusagent/channel-slack',
   '@stratusagent/control-api',
   '@stratusagent/dashboard',
-  // The harness providers, which the CLI no longer carries: setup installs
-  // the one chosen, and update keeps whichever this machine has level.
+  // The providers, which the CLI no longer carries: setup installs the one
+  // chosen, and update keeps whichever this machine has level.
+  '@stratusagent/provider-anthropic',
   '@stratusagent/provider-claude-code',
   '@stratusagent/provider-codex',
 ];

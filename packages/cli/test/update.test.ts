@@ -180,6 +180,35 @@ test('update upgrades the companion packages that lag the CLI, in the same npm c
   assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/control-api/);
 });
 
+test('update brings an installed Anthropic adapter level with the CLI', async () => {
+  // A separate global install since the CLI stopped carrying it, so it is a
+  // companion: left behind, it would answer for an older core than the
+  // daemon's.
+  const home = await freshHome();
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => '99.0.0',
+      installedVersionReader: async (specifier) => (specifier === '@stratusagent/provider-anthropic' ? '0.13.6' : undefined),
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+      updateContinuation: async () => 0,
+    },
+  });
+  assert.equal(code, 0, `update failed:\n${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(installs, [['@stratusagent/cli@latest', '@stratusagent/provider-anthropic@latest']]);
+  assert.match(output.stdout, /Upgrading @stratusagent\/provider-anthropic 0\.13\.6 → 99\.0\.0/);
+});
+
 test('update loads every module it will use before npm replaces them on disk', async () => {
   // A module first imported after the install is read from the new files,
   // while its own imports of a package this process already holds resolve

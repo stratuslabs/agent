@@ -43,7 +43,7 @@ import { writeLine, pathExists } from '../io.ts';
 import { ignoredConfigRemedy } from '../runtime.ts';
 import { loadSlackAdapter } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
-import { harnessesMissingMessage, missingHarnessPackages } from '../harness-packages.ts';
+import { providerPackagesMissingMessage, missingProviderPackages } from '../provider-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
 import type { ParsedDoctorCommand } from '../parse.ts';
 import { loadServePrincipals } from '../trusted-config.ts';
@@ -696,9 +696,9 @@ export const collectDoctorReport = async (
     problems.push(companionsBehindMessage(behind));
   }
 
-  const missingHarnesses = await missingHarnessPackages(env, command.configPath);
-  if (missingHarnesses.length > 0) {
-    problems.push(harnessesMissingMessage(missingHarnesses));
+  const missingProviders = await missingProviderPackages(env, command.configPath);
+  if (missingProviders.length > 0) {
+    problems.push(providerPackagesMissingMessage(missingProviders));
   }
 
   let rosterCount = 0;
