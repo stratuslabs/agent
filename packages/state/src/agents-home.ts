@@ -798,12 +798,17 @@ const recordAgentsFolder = async (env: StateEnvironment, recorded: string | unde
 /**
  * Whether the pass writes the record now. Always when there is none: the
  * links are this folder's from here on, or were never provably anything's.
- * Never while a link it might still re-point is broken: replacing the old
- * folder's name would lose the evidence for the next start.
+ * Never while a link it might still re-point is broken: a link into the
+ * recorded folder that failed or whose file is not here yet, since replacing
+ * the old folder's name would lose the evidence for the next start. A broken
+ * link into any other folder is no reason to keep it: the record never
+ * re-points that one, and keeping it would leave the record naming a folder
+ * the other links no longer do.
  */
 const shouldRecord = (plan: AgentsHomePlan, unfinished: boolean): boolean =>
   plan.recordUnreadable === undefined
-  && (plan.recorded === undefined || (!unfinished && plan.dangling.length === 0));
+  && (plan.recorded === undefined
+    || (!unfinished && !plan.elsewhere.some(({ folder }) => folder === plan.recorded)));
 
 /** The start's line for links into another agents folder that it leaves as they are. */
 const elsewhereLine = (plan: AgentsHomePlan): string | undefined => {

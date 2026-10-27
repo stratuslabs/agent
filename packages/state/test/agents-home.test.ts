@@ -854,6 +854,34 @@ test('a link that could not be re-pointed keeps the old folder recorded, so the 
   assert.equal(await readFile(record, 'utf8'), `${path.join(home, 'Agents')}\n`);
 });
 
+test('a broken link into some other folder does not hold the record back, so a second copy still re-points', async () => {
+  const { home, env } = await copiedHome(['ava', 'bob']);
+  // Bob's links name storage that is offline, not the folder the home was copied from.
+  const volume = await newHome();
+  for (const [link, target] of [
+    [path.join(agentsDirPath(env), 'bob.md'), path.join(volume, 'Agents', 'bob', 'soul.md')],
+    [agentWorkspacePath(env, 'bob'), path.join(volume, 'Agents', 'bob', 'workspace')],
+  ] as const) {
+    await fs.promises.unlink(link);
+    await symlink(target, link);
+  }
+  await fs.promises.rm(volume, { recursive: true, force: true });
+
+  assert.match((await surfaceAgentsHome(env)) ?? '', /re-pointed 2 link\(s\)/);
+  const record = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
+  assert.equal(await readFile(record, 'utf8'), `${path.join(home, 'Agents')}\n`, 'every link into the recorded folder was re-pointed');
+
+  // The repaired home is copied again, and this one removed.
+  const next = await newHome();
+  await fs.promises.cp(path.join(home, '.stratus'), path.join(next, '.stratus'), { recursive: true, verbatimSymlinks: true });
+  await fs.promises.cp(path.join(home, 'Agents'), path.join(next, 'Agents'), { recursive: true });
+  await fs.promises.rm(home, { recursive: true, force: true });
+  const nextEnv = { homeDir: next, processEnv: {} };
+  assert.match((await surfaceAgentsHome(nextEnv)) ?? '', /re-pointed 2 link\(s\)/);
+  assert.equal(await readlink(path.join(agentsDirPath(nextEnv), 'ava.md')), path.join(next, 'Agents', 'ava', 'soul.md'));
+  assert.equal(await readlink(path.join(agentsDirPath(nextEnv), 'bob.md')), path.join(volume, 'Agents', 'bob', 'soul.md'), 'still the operator\'s');
+});
+
 test('a start with nothing to move records the agents folder its links name', async () => {
   const { env, home } = await copiedHome(['ava']);
   await surfaceAgentsHome(env);

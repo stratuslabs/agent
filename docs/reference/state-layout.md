@@ -106,13 +106,15 @@ Sessions, memories, grants and everything else stay in `~/.stratus`.
   workspace link whose target is gone and that names the recorded folder at
   the same file in this home's folder (when the folder carries the marker
   and has that file), re-records a workspace's provenance ledger at the new
-  path, and says how many it re-pointed. A link into any other folder is
-  left as it is, because an operator's link to storage that is offline
-  looks exactly the same. A home last started by a build before the record
-  (0.13.6 or earlier) has none: `stratus doctor` names the folder its links
-  point into and gives the one command that records it, and the next start
-  re-points them. A home copied without its agents folder gets both steps
-  from `stratus doctor`: copy that folder's contents, hidden files
+  path, and says how many it re-pointed. The record then names this home's
+  folder, once no link into the old one is left broken, so a second copy
+  works the same way. A link into any other folder is left as it is, because
+  an operator's link to storage that is offline looks exactly the same, and
+  it doesn't hold the record back. A home last started by a build before the
+  record (0.13.6 or earlier) has none: `stratus doctor` names the folder its
+  links point into and gives the one command that records it, and the next
+  start re-points them. A home copied without its agents folder gets both
+  steps from `stratus doctor`: copy that folder's contents, hidden files
   included, into this home's folder, and record the old one unless the
   record already names it. A record that exists but can't be read is never
   replaced: nothing is re-pointed until it can be read, and the start line
