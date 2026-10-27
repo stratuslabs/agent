@@ -365,6 +365,30 @@ test('a home written by 0.13.5 and copied to another path starts with all its ag
   assert.doesNotMatch(second, /re-pointed|which is gone/, 'nothing left to re-point');
 });
 
+// Copied without its agents folder: copying the folder over afterwards is
+// not enough, since a 0.13.5 home has no record of where its links point.
+test('a copied 0.13.5 home without its agents folder starts with all its agents once doctor\'s steps are followed', async () => {
+  const written = (JSON.parse(await readFile(path.join(fixturesDir, '0.13.5', 'home.json'), 'utf8')) as { home: string }).home;
+  const home = await homeFrom('0.13.5', { relinked: false });
+  await rm(path.join(home, 'Agents'), { recursive: true });
+  const old = path.join(written, 'Agents');
+
+  const doctor = await doctorOutput(home);
+  assert.ok(doctor.includes(`3 of them name ${old}, and ${path.join(home, 'Agents')} doesn't have those files`), doctor);
+  assert.ok(doctor.includes(`copy everything in that folder, hidden files included, into ${path.join(home, 'Agents')}`), doctor);
+  const command = recordCommand(doctor);
+
+  // The operator's steps, in order: the folder, the record, the restart.
+  await cp(path.join(fixturesDir, '0.13.5', 'Agents'), path.join(home, 'Agents'), { recursive: true });
+  execFileSync('/bin/sh', ['-c', command]);
+  const output = await serving(home, async (api) => {
+    const ids = await rosterIds(api);
+    assert.ok(ids.includes('ava') && ids.includes('bob'), `roster: ${ids.join(', ')}`);
+  });
+  assert.match(output, /re-pointed 3 link\(s\)/);
+  assert.equal(await readlink(path.join(home, '.stratus', 'agents', 'ava.md')), path.join(home, 'Agents', 'ava', 'soul.md'));
+});
+
 test('a copied 0.13.5 home missing an agent\'s folder names the link and where it points', async () => {
   const written = (JSON.parse(await readFile(path.join(fixturesDir, '0.13.5', 'home.json'), 'utf8')) as { home: string }).home;
   const home = await homeFrom('0.13.5', { relinked: false });

@@ -793,6 +793,47 @@ test('a copied home with no record re-points nothing, names the folder, and re-p
   assert.equal(await readFile(record, 'utf8'), `${path.join(home, 'Agents')}\n`);
 });
 
+test('a copied home that left its agents folder behind names the folder its links need, and re-points once it is copied and recorded', async () => {
+  // Copied without ~/Agents, from a build with no record: nothing here has
+  // the files yet, so nothing can be re-pointed, and copying the folder over
+  // is not enough on its own.
+  const { home, env, old } = await copiedHome(['ava']);
+  const record = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
+  await fs.promises.rm(record);
+  const carried = await newHome();
+  await fs.promises.cp(path.join(home, 'Agents'), path.join(carried, 'Agents'), { recursive: true });
+  await fs.promises.rm(path.join(home, 'Agents'), { recursive: true });
+  const hiddenSoul = path.join(agentsDirPath(env), 'ava.md');
+
+  const plan = await planAgentsHome(env);
+  assert.deepEqual(plan.relink, []);
+  assert.deepEqual(plan.unconfirmed, [], 'this home has none of the files');
+  assert.deepEqual(plan.uncopied, [{ folder: path.join(old, 'Agents'), links: 2 }]);
+  assert.equal(plan.dangling.length, 2);
+
+  // What doctor tells the operator: copy the folder in, record where it was, restart.
+  await fs.promises.cp(path.join(carried, 'Agents'), path.join(home, 'Agents'), { recursive: true });
+  const copiedOnly = await planAgentsHome(env);
+  assert.deepEqual(copiedOnly.relink, [], 'copying alone re-points nothing without the record');
+  assert.deepEqual(copiedOnly.uncopied, []);
+  await writeFile(record, `${path.join(old, 'Agents')}\n`);
+  assert.match((await surfaceAgentsHome(env)) ?? '', /re-pointed 2 link\(s\)/);
+  assert.equal(await readlink(hiddenSoul), path.join(home, 'Agents', 'ava', 'soul.md'));
+});
+
+test('a copied home with its record, but not its agents folder, needs only the folder copied', async () => {
+  const { home, env, old } = await copiedHome(['ava']);
+  const carried = await newHome();
+  await fs.promises.cp(path.join(home, 'Agents'), path.join(carried, 'Agents'), { recursive: true });
+  await fs.promises.rm(path.join(home, 'Agents'), { recursive: true });
+
+  const plan = await planAgentsHome(env);
+  assert.equal(plan.recorded, path.join(old, 'Agents'));
+  assert.deepEqual(plan.uncopied, [{ folder: path.join(old, 'Agents'), links: 2 }]);
+  await fs.promises.cp(path.join(carried, 'Agents'), path.join(home, 'Agents'), { recursive: true });
+  assert.match((await surfaceAgentsHome(env)) ?? '', /re-pointed 2 link\(s\)/);
+});
+
 test('a link that could not be re-pointed keeps the old folder recorded, so the next start finishes it', async (t) => {
   if (process.getuid?.() === 0) {
     t.skip('root writes through the mode');
@@ -883,6 +924,9 @@ test('a dangling link is left alone, and named with where it points, unless this
     `${danSoul} -> ${path.join(old, 'Agents', 'dan', 'notes.md')}`,
     `${path.join(agentsDirPath(env), 'eve.md')} -> ${path.join(old, 'Agents', 'eve', 'soul.md')}`,
   ]);
+  // Only Bob's file is missing here; Cat's and Eve's are here (Eve's as a
+  // folder), and Dan's link does not name a soul.
+  assert.deepEqual(plan.uncopied, [{ folder: path.join(old, 'Agents'), links: 1 }]);
 
   await surfaceAgentsHome(env);
   assert.equal(await readlink(path.join(agentsDirPath(env), 'bob.md')), path.join(old, 'Agents', 'bob', 'soul.md'));

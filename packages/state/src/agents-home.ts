@@ -957,6 +957,14 @@ export interface AgentsHomePlan {
    * tell, and recording the folder by hand re-points them.
    */
   unconfirmed: Array<{ folder: string; links: number }>;
+  /**
+   * Folders that dangling links point into as `<folder>/<id>/soul.md` or
+   * `<folder>/<id>/workspace` while this home's folder has nothing at that
+   * agent's name: a home copied without its agents folder, or storage that
+   * is offline. Copying the folder's contents here makes them re-pointable,
+   * and {@link recorded} has to name the folder too before a start does it.
+   */
+  uncopied: Array<{ folder: string; links: number }>;
   /** Souls in the folder that no hidden name links to, so the roster never reads them. */
   unlinked: string[];
 }
@@ -1005,6 +1013,21 @@ const agentsHomeDevice = (agentsHome: string): number | undefined => {
 };
 
 /**
+ * The shape half of {@link movedHomeTarget}, with nothing read: a target
+ * `<folder>/<id>/soul.md` or `<folder>/<id>/workspace` outside this home's
+ * folder, and where the same file would be here.
+ */
+const movedHomeShape = (agentsHome: string, kind: MovedHomeLink['kind'], target: string): { from: string; to: string } | undefined => {
+  const leaf = kind === 'soul' ? VISIBLE_SOUL_FILENAME : VISIBLE_WORKSPACE_DIRNAME;
+  const agentDir = path.dirname(target);
+  const agentId = path.basename(agentDir);
+  if (path.basename(target) !== leaf || !isValidAgentId(agentId) || insideOrAt(agentsHome, target)) {
+    return undefined;
+  }
+  return { from: path.dirname(agentDir), to: path.join(visibleAgentDirIn(agentsHome, agentId), leaf) };
+};
+
+/**
  * Where a dangling soul or workspace link would belong in this home if it
  * was carried over from a home at another path: its target reads
  * `<folder>/<id>/soul.md` or `<folder>/<id>/workspace`, outside this home's
@@ -1012,18 +1035,26 @@ const agentsHomeDevice = (agentsHome: string): number | undefined => {
  * `<folder>` was this home's is the record's to say.
  */
 const movedHomeTarget = async (agentsHome: string, kind: MovedHomeLink['kind'], target: string): Promise<{ from: string; to: string } | undefined> => {
-  const leaf = kind === 'soul' ? VISIBLE_SOUL_FILENAME : VISIBLE_WORKSPACE_DIRNAME;
-  const agentDir = path.dirname(target);
-  const agentId = path.basename(agentDir);
-  if (path.basename(target) !== leaf || !isValidAgentId(agentId) || insideOrAt(agentsHome, target)) {
+  const shape = movedHomeShape(agentsHome, kind, target);
+  if (shape === undefined) {
     return undefined;
   }
-  const to = path.join(visibleAgentDirIn(agentsHome, agentId), leaf);
+  const { from, to } = shape;
   try {
     const info = await stat(to);
-    return (kind === 'soul' ? info.isFile() : info.isDirectory()) ? { from: path.dirname(agentDir), to } : undefined;
+    return (kind === 'soul' ? info.isFile() : info.isDirectory()) ? { from, to } : undefined;
   } catch {
     return undefined;
+  }
+};
+
+/** One more link into `folder`, in the order folders are first seen. */
+const countLink = (counts: Array<{ folder: string; links: number }>, folder: string): void => {
+  const known = counts.find((entry) => entry.folder === folder);
+  if (known !== undefined) {
+    known.links += 1;
+  } else {
+    counts.push({ folder, links: 1 });
   }
 };
 
@@ -1053,6 +1084,7 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     relink: [],
     dangling: [],
     unconfirmed: [],
+    uncopied: [],
     unlinked: [],
   };
   let entries;
@@ -1139,12 +1171,13 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     }
     plan.dangling.push(`${link} -> ${target}`);
     if (moved !== undefined && names.includes(path.basename(moved.from))) {
-      const known = plan.unconfirmed.find(({ folder }) => folder === moved.from);
-      if (known !== undefined) {
-        known.links += 1;
-      } else {
-        plan.unconfirmed.push({ folder: moved.from, links: 1 });
-      }
+      countLink(plan.unconfirmed, moved.from);
+      continue;
+    }
+    // Nothing at that agent's name here: the folder was left behind.
+    const shape = moved === undefined ? movedHomeShape(agentsHome, kind, target) : undefined;
+    if (shape !== undefined && await lstatOrUndefined(shape.to).then((info) => info === undefined, () => false)) {
+      countLink(plan.uncopied, shape.from);
     }
   }
   if (!plan.claimed) {

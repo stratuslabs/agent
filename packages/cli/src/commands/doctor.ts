@@ -794,14 +794,27 @@ export const collectDoctorReport = async (
       // nothing on disk tells the two apart. The operator can, and
       // recording the folder is how they say so.
       const record = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
-      const copied = plan.unconfirmed.map(({ folder, links }) => `${links} of them name ${folder}, and ${plan.agentsHome ?? 'this home\'s agents folder'} has the same files. `
-        + `If this home was copied or restored from there, rather than linked to storage that is offline, run \`printf '%s\\n' ${quoteShellArg(folder)} > ${quoteShellArg(record)}\` and restart: each link into it is then re-pointed at the same file here.`);
+      const here = plan.agentsHome ?? 'this home\'s agents folder';
+      const recordStep = (folder: string): string => `run \`printf '%s\\n' ${quoteShellArg(folder)} > ${quoteShellArg(record)}\``;
+      const copied = plan.unconfirmed.map(({ folder, links }) => `${links} of them name ${folder}, and ${here} has the same files. `
+        + `If this home was copied or restored from there, rather than linked to storage that is offline, ${recordStep(folder)} and restart: each link into it is then re-pointed at the same file here.`);
+      // Copying the folder in is half of it: a start re-points only links
+      // into the folder the record names, and a home from before the record
+      // (or one started here since) names another. Asked of the same folder
+      // as a line above, the copy goes before that line's restart.
+      const uncopied = plan.uncopied.map(({ folder, links }) => {
+        const copy = `copy everything in that folder, hidden files included, into ${here}`;
+        if (plan.unconfirmed.some((entry) => entry.folder === folder)) {
+          return `${links} more name ${folder} but have nothing at their agent's name in ${here}: ${copy} as well, before that restart.`;
+        }
+        const steps = folder === plan.recorded ? copy : `${copy}, ${recordStep(folder)}`;
+        return `${links} of them name ${folder}, and ${here} doesn't have those files. `
+          + `If this home was copied or restored from there, rather than linked to storage that is offline, ${steps} and restart: each link into it is then re-pointed at the same file here.`;
+      });
       problems.push(
         `These links point at something that is gone: ${plan.dangling.join(', ')}. `
-        + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace in the agents folder is recreated empty on the next write. '
-        + (copied.length > 0
-          ? copied.join(' ')
-          : `If this home was copied or restored from another path, copy that home's agents folder to ${plan.agentsHome ?? 'this home'} too and restart: each link into the old home's agents folder is then re-pointed at the same file here.`),
+        + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace in the agents folder is recreated empty on the next write.'
+        + [...copied, ...uncopied].map((line) => ` ${line}`).join(''),
       );
     }
     if (plan.unlinked.length > 0) {

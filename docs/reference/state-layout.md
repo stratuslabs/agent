@@ -111,7 +111,10 @@ Sessions, memories, grants and everything else stay in `~/.stratus`.
   looks exactly the same. A home last started by a build before the record
   (0.13.6 or earlier) has none: `stratus doctor` names the folder its links
   point into and gives the one command that records it, and the next start
-  re-points them. Every broken link left as it is is named by
+  re-points them. A home copied without its agents folder gets both steps
+  from `stratus doctor`: copy that folder's contents, hidden files
+  included, into this home's folder, and record the old one unless the
+  record already names it. Every broken link left as it is is named by
   `stratus doctor`, with where it points, and by the roster's warning when
   it skips that soul.
 
