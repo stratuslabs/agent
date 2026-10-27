@@ -85,9 +85,9 @@ key selects the other two. See [Extending](../guides/extending.md).
   See [Tools](../guides/tools.md).
 - [`@stratusagent/plugin-mcp`](../../packages/plugin-mcp) — any MCP
   server's tools under the same policy. See [MCP](../guides/mcp.md).
-- [`@stratusagent/provider-openai`](../../packages/provider-openai) — the
-  OpenAI-compatible adapter as a plugin: a provider named
-  `openai-compatible` a soul selects, credentialed per agent through
+- [`@stratusagent/provider-openai`](https://github.com/stratuslabs/plugins/tree/main/provider-openai) — the
+  OpenAI-compatible adapter as a plugin, released from
+  `stratuslabs/plugins`: a provider named `openai-compatible` a soul selects, credentialed per agent through
   `openai.apiKey`. See [Extending](../guides/extending.md#providers).
 - [`@stratusagent/memory-sqlite`](../../packages/memory-sqlite) — agent
   memory on one SQLite file, selected with `memoryStore: sqlite`. See

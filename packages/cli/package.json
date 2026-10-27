@@ -46,7 +46,6 @@
     "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/provider-claude-code": "workspace:*",
     "@stratusagent/provider-codex": "workspace:*",
-    "@stratusagent/provider-openai": "workspace:*",
     "@stratusagent/tool-browser": "workspace:*",
     "@stratusagent/tool-fs": "workspace:*",
     "@stratusagent/tool-shell": "workspace:*",

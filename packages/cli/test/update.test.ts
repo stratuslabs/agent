@@ -1454,6 +1454,33 @@ test('update --check reports configured plugins that release apart from the CLI 
   assert.match(level.stdout, /Nothing to do/);
 });
 
+test('provider-openai releases from the plugins repository now, so update moves a 0.13.x install to its own release', async () => {
+  // It shipped from this repository at the CLI's version up to 0.13.6, then
+  // moved to stratuslabs/plugins under the same name (0.14.0 there). The CLI
+  // must stop holding it to its own version and sweep it with the other
+  // separately released plugins, or `stratus update` never moves it on.
+  const home = await freshHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await runStateMigrations(env, { exclusive: true });
+  await writePluginsConfig(home, { '@stratusagent/provider-openai': { baseUrl: 'http://127.0.0.1:11434/v1' } });
+  const providerPlugin = { pluginVersion: 1, contributes: { providers: [{ name: 'openai-compatible' }] }, credentials: ['openai.apiKey'] };
+  const streams = createStreams();
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams: streams.streams,
+    env: {
+      ...env,
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) => (specifier === '@stratusagent/provider-openai' ? '0.13.6' : undefined),
+      pluginReleaseReader: async (name) => (name === '@stratusagent/provider-openai' ? releaseOf('0.14.0', providerPlugin) : { status: 'unknown' }),
+    },
+  });
+  assert.equal(code, 1, streams.output.stdout);
+  assert.match(streams.output.stdout, /plugins +1 released apart from the CLI, 1 behind/);
+  assert.match(streams.output.stdout, /@stratusagent\/provider-openai 0\.13\.6 → 0\.14\.0/);
+});
+
 test('update installs each plugin that lags, pinned to the checked release, while the daemon is stopped', async () => {
   const home = await freshHome();
   const events: string[] = [];
