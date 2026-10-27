@@ -33,6 +33,7 @@ export {
   claimAgentsHome,
   planAgentsHome,
   type AgentsHomePlan,
+  type MovedHomeLink,
   resolveAgentsHome,
   surfaceAgentsHome,
   visibleAgentDirIn,

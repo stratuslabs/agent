@@ -327,9 +327,13 @@ const runUpdateSteps = async (
   // applies below while it holds the home: decided by the same plan, so the
   // check and the apply never disagree about whether there is one.
   const agentsPlan = await planAgentsHome(env);
-  const agentsPending = agentsPlan.agentsHome !== undefined && (agentsPlan.souls.length > 0 || agentsPlan.workspaces.length > 0);
-  if (agentsPending) {
+  const agentsPending = agentsPlan.agentsHome !== undefined
+    && (agentsPlan.souls.length > 0 || agentsPlan.workspaces.length > 0 || agentsPlan.relink.length > 0);
+  if (agentsPending && (agentsPlan.souls.length > 0 || agentsPlan.workspaces.length > 0)) {
     out(`  agents      ${agentsPlan.souls.length} soul(s) and ${agentsPlan.workspaces.length} workspace(s) to move into ${agentsPlan.agentsHome}`);
+  }
+  if (agentsPending && agentsPlan.relink.length > 0) {
+    out(`  agents      ${agentsPlan.relink.length} link(s) from a home at another path to re-point at ${agentsPlan.agentsHome}`);
   }
   // Left in place for good, so named but never counted as pending: an
   // update cannot move them, and a check that kept saying it could would

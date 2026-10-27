@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { chmod, cp, lstat, mkdtemp, readFile, readdir, readlink, stat, symlink, unlink } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
@@ -45,7 +45,11 @@ const relink = async (dir: string, from: string, to: string): Promise<void> => {
   }
 };
 
-const homeFrom = async (release: string): Promise<string> => {
+/**
+ * `relinked: false` leaves the links naming the home the release wrote, as
+ * a home copied or restored to another path has them.
+ */
+const homeFrom = async (release: string, { relinked = true }: { relinked?: boolean } = {}): Promise<string> => {
   const home = await mkdtemp(path.join(os.tmpdir(), `stratus-upgrade-${release}-`));
   // Stored as `stratus/`, because the repository ignores `.stratus/`.
   await cp(path.join(fixturesDir, release, 'stratus'), path.join(home, '.stratus'), { recursive: true, verbatimSymlinks: true });
@@ -53,7 +57,9 @@ const homeFrom = async (release: string): Promise<string> => {
   if (existsSync(visible)) {
     await cp(visible, path.join(home, 'Agents'), { recursive: true });
     const written = JSON.parse(await readFile(path.join(fixturesDir, release, 'home.json'), 'utf8')) as { home: string };
-    await relink(path.join(home, '.stratus'), written.home, home);
+    if (relinked) {
+      await relink(path.join(home, '.stratus'), written.home, home);
+    }
   }
   // The release left its credentials owner-only, and its stamp already lists
   // the migration that tightens them, so the upgrade won't touch the mode.
@@ -298,4 +304,60 @@ test('a home written by 0.13.5 upgrades with its grants, schedule, sign-ins, con
   });
   assert.doesNotMatch(second, /state migration/);
   assert.deepEqual(await Promise.all(kept.map((file) => readFile(file, 'utf8'))), before);
+});
+
+const doctorOutput = async (home: string): Promise<string> => {
+  let output = '';
+  const write = (chunk: string) => {
+    output += chunk;
+    return true;
+  };
+  await runCli({ argv: ['doctor'], streams: { stdout: { write }, stderr: { write } }, env: { homeDir: home, cwd: home, processEnv: {} } });
+  return output;
+};
+
+test('a home written by 0.13.5 and copied to another path starts with all its agents', async () => {
+  const written = (JSON.parse(await readFile(path.join(fixturesDir, '0.13.5', 'home.json'), 'utf8')) as { home: string }).home;
+  assert.equal(existsSync(written), false, `${written} must not exist for this test`);
+  const home = await homeFrom('0.13.5', { relinked: false });
+  const agents = path.join(home, '.stratus', 'agents');
+  assert.equal(await readlink(path.join(agents, 'ava.md')), path.join(written, 'Agents', 'ava', 'soul.md'), 'the copy names the old home');
+
+  const doctor = await doctorOutput(home);
+  assert.match(doctor, /3 more to move or re-point there on the next start/);
+  assert.doesNotMatch(doctor, /point at something that is gone/);
+
+  const first = await serving(home, async (api) => {
+    const ids = ((await api('GET', '/agents')).json.agents as Array<{ id: string }>).map((agent) => agent.id);
+    assert.ok(ids.includes('ava') && ids.includes('bob'), `roster after the move: ${ids.join(', ')}`);
+    const sessionIds = ((await api('GET', '/sessions')).json.sessions as Array<{ id: string }>).map((session) => session.id);
+    assert.ok(sessionIds.includes('fixture-ava-1') && sessionIds.includes('fixture-bob-1'), sessionIds.join(', '));
+  });
+  assert.match(first, /re-pointed 3 link\(s\) at \S+\/Agents/);
+  assert.equal(await readlink(path.join(agents, 'ava.md')), path.join(home, 'Agents', 'ava', 'soul.md'));
+  assert.equal(await readlink(path.join(agents, 'bob.md')), path.join(home, 'Agents', 'bob', 'soul.md'));
+  assert.equal(await readlink(path.join(agents, 'ava', 'workspace')), path.join(home, 'Agents', 'ava', 'workspace'));
+  assert.equal(await readFile(path.join(agents, 'ava', 'workspace', 'notes.md'), 'utf8'), await readFile(path.join(fixturesDir, '0.13.5', 'Agents', 'ava', 'workspace', 'notes.md'), 'utf8'));
+
+  const second = await serving(home, async () => {});
+  assert.doesNotMatch(second, /re-pointed/, 'nothing left to re-point');
+});
+
+test('a copied 0.13.5 home missing an agent\'s folder names the link and where it points', async () => {
+  const written = (JSON.parse(await readFile(path.join(fixturesDir, '0.13.5', 'home.json'), 'utf8')) as { home: string }).home;
+  const home = await homeFrom('0.13.5', { relinked: false });
+  await rm(path.join(home, 'Agents', 'bob'), { recursive: true });
+  const bobSoul = path.join(home, '.stratus', 'agents', 'bob.md');
+
+  const doctor = await doctorOutput(home);
+  assert.ok(doctor.includes(`point at something that is gone: ${bobSoul} -> ${path.join(written, 'Agents', 'bob', 'soul.md')}`), doctor);
+  assert.match(doctor, /copied or restored from another path, copy that home's agents folder/);
+
+  const output = await serving(home, async (api) => {
+    const ids = ((await api('GET', '/agents')).json.agents as Array<{ id: string }>).map((agent) => agent.id);
+    assert.ok(ids.includes('ava') && !ids.includes('bob'), ids.join(', '));
+  });
+  assert.match(output, /re-pointed 2 link\(s\)/);
+  assert.ok(output.includes(`${bobSoul} is a link to ${path.join(written, 'Agents', 'bob', 'soul.md')}, which does not exist`), output);
+  assert.equal(await readlink(bobSoul), path.join(written, 'Agents', 'bob', 'soul.md'), 'left as it was');
 });

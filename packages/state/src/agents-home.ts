@@ -11,6 +11,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   symlink,
   unlink,
 } from 'node:fs/promises';
@@ -548,6 +549,7 @@ export const writeNewSoulFile = async (
 interface SurfaceReport {
   souls: number;
   workspaces: number;
+  relinked: number;
   skipped: string[];
 }
 
@@ -738,6 +740,21 @@ const surfaceWorkspace = async (env: StateEnvironment, agentsHome: string, agent
 };
 
 /**
+ * One link a copied or restored home carried over from its old path, re-
+ * pointed at the same file in this home's agents folder. Looked at again
+ * first: the plan is a moment old, and a link somebody changed meanwhile is
+ * theirs. Absolute, like every link the folder has.
+ */
+const relinkMovedHome = async (entry: MovedHomeLink, report: SurfaceReport): Promise<void> => {
+  if (path.resolve(path.dirname(entry.link), await readlink(entry.link)) !== entry.target
+    || await lstatOrUndefined(entry.target) !== undefined) {
+    return;
+  }
+  await replaceWithLink(entry.link, entry.to, entry.kind === 'soul' ? 'file' : 'dir');
+  report.relinked += 1;
+};
+
+/**
  * Move every agent's soul and workspace that is still a real file in
  * `~/.stratus/agents` into the agents folder, leaving links behind. Run by
  * `stratus serve` and `stratus update` while they hold the home, beside the
@@ -759,7 +776,7 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
   }
   // Still named on every start, as before the plan knew about them: the
   // operator resolves these by hand, and only a line here says so.
-  if (plan.souls.length === 0 && plan.workspaces.length === 0) {
+  if (plan.souls.length === 0 && plan.workspaces.length === 0 && plan.relink.length === 0) {
     return plan.blocked.length > 0 ? `left in place: ${plan.blocked.join('; ')}` : undefined;
   }
   await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
@@ -768,7 +785,7 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
     return undefined;
   }
   const { souls, workspaces: agentDirs } = plan;
-  const report: SurfaceReport = { souls: 0, workspaces: 0, skipped: [...plan.blocked] };
+  const report: SurfaceReport = { souls: 0, workspaces: 0, relinked: 0, skipped: [...plan.blocked] };
   // One agent's failure is that agent's line in the report, never a start
   // refused for the whole fleet: everything this does leaves the agent
   // working from wherever its files are now, and a workspace caught between
@@ -781,6 +798,9 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
       report.skipped.push(`${name} (${error instanceof Error ? error.message : String(error)})`);
     }
   };
+  for (const entry of plan.relink) {
+    await each(entry.link, () => relinkMovedHome(entry, report));
+  }
   for (const file of souls) {
     await each(file, () => surfaceSoul(env, agentsHome, file, report));
   }
@@ -788,6 +808,9 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
     await each(`${agentId}'s workspace`, () => surfaceWorkspace(env, agentsHome, agentId, report));
   }
   const parts: string[] = [];
+  if (report.relinked > 0) {
+    parts.push(`re-pointed ${report.relinked} link(s) at ${agentsHome} (they named the agents folder of a home at another path)`);
+  }
   if (report.souls > 0 || report.workspaces > 0) {
     parts.push(`moved ${report.souls} soul(s) and ${report.workspaces} workspace(s) into ${agentsHome}`);
   }
@@ -796,6 +819,17 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
   }
   return parts.length > 0 ? parts.join('; ') : undefined;
 };
+
+/** A hidden link {@link surfaceAgentsHome} would re-point. */
+export interface MovedHomeLink {
+  kind: 'soul' | 'workspace';
+  /** The hidden name, in `~/.stratus/agents`. */
+  link: string;
+  /** Where it points now, which does not exist. */
+  target: string;
+  /** The same file in this home's agents folder, which does. */
+  to: string;
+}
 
 /** What {@link planAgentsHome} found. */
 export interface AgentsHomePlan {
@@ -815,7 +849,16 @@ export interface AgentsHomePlan {
    * Not pending: nothing an update does changes them.
    */
   blocked: string[];
-  /** Hidden links of ours whose target is gone, as `link -> target`. */
+  /**
+   * Hidden soul and workspace links whose target is gone, which the next
+   * pass would re-point at the same file in this home's folder: the home
+   * was copied or restored from another path, and the links still name it.
+   */
+  relink: MovedHomeLink[];
+  /**
+   * Hidden soul and workspace links whose target is gone and that the next
+   * pass leaves as they are, as `link -> target`.
+   */
   dangling: string[];
   /** Souls in the folder that no hidden name links to, so the roster never reads them. */
   unlinked: string[];
@@ -865,6 +908,33 @@ const agentsHomeDevice = (agentsHome: string): number | undefined => {
 };
 
 /**
+ * Where a dangling soul or workspace link belongs in this home, when it was
+ * carried over from a home at another path. Its target has to read
+ * `<folder>/<id>/soul.md` or `<folder>/<id>/workspace`, with `<folder>`
+ * named the way an agents folder is (`Agents`, `Stratus`, or this one's
+ * name), and this home's folder has to hold that same file. The folder
+ * carries the marker by the time this is asked. Anything else, an
+ * operator's own link that went away above all, is named and left alone.
+ */
+const movedHomeTarget = async (agentsHome: string, kind: MovedHomeLink['kind'], target: string): Promise<string | undefined> => {
+  const leaf = kind === 'soul' ? VISIBLE_SOUL_FILENAME : VISIBLE_WORKSPACE_DIRNAME;
+  const agentDir = path.dirname(target);
+  const agentId = path.basename(agentDir);
+  const folderName = path.basename(path.dirname(agentDir));
+  const names: readonly string[] = [...AGENTS_HOME_NAMES, path.basename(agentsHome)];
+  if (path.basename(target) !== leaf || !isValidAgentId(agentId) || !names.includes(folderName) || insideOrAt(agentsHome, target)) {
+    return undefined;
+  }
+  const to = path.join(visibleAgentDirIn(agentsHome, agentId), leaf);
+  try {
+    const info = await stat(to);
+    return (kind === 'soul' ? info.isFile() : info.isDirectory()) ? to : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
  * The state of the agents folder, decided once for every caller: `serve`
  * and `update` (through {@link surfaceAgentsHome}), `update --check`, and
  * `stratus doctor`. Where the folder is, whether it can be used here at all
@@ -880,6 +950,7 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     souls: [],
     workspaces: [],
     blocked: [],
+    relink: [],
     dangling: [],
     unlinked: [],
   };
@@ -892,7 +963,7 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     }
     throw error;
   }
-  const links: Array<{ link: string; target: string }> = [];
+  const links: Array<{ kind: MovedHomeLink['kind']; link: string; target: string }> = [];
   // Souls first, then workspaces, the order the pass reports them in.
   const blockedWorkspaces: string[] = [];
   for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -919,7 +990,7 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
           }
         }
       } else if (entry.isSymbolicLink()) {
-        links.push({ link: entryPath, target: path.resolve(path.dirname(entryPath), await readlink(entryPath)) });
+        links.push({ kind: 'soul', link: entryPath, target: path.resolve(path.dirname(entryPath), await readlink(entryPath)) });
       }
       return;
     }
@@ -943,16 +1014,22 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
       }
     }
     if (info?.isSymbolicLink() === true) {
-      links.push({ link: workspace, target: path.resolve(path.dirname(workspace), await readlink(workspace)) });
+      links.push({ kind: 'workspace', link: workspace, target: path.resolve(path.dirname(workspace), await readlink(workspace)) });
     }
   }
   plan.blocked.push(...blockedWorkspaces);
   if (agentsHome === undefined) {
     return plan;
   }
-  for (const { link, target } of links) {
+  for (const { kind, link, target } of links) {
     const gone = await lstatOrUndefined(target).then((info) => info === undefined, () => false);
-    if (insideOrAt(agentsHome, target) && gone) {
+    if (!gone) {
+      continue;
+    }
+    const to = plan.claimed ? await movedHomeTarget(agentsHome, kind, target) : undefined;
+    if (to !== undefined) {
+      plan.relink.push({ kind, link, target, to });
+    } else {
       plan.dangling.push(`${link} -> ${target}`);
     }
   }

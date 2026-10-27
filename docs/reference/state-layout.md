@@ -96,6 +96,16 @@ Sessions, memories, grants and everything else stay in `~/.stratus`.
   comes back empty on the next write. `stratus doctor` lists the broken
   links. Its sessions, memories and grants are untouched in `~/.stratus`.
   Put the folder back, or rename it back, to restore the agent.
+- **Copying or restoring a whole home to another path** (another user, a
+  new host path, a backup restored elsewhere) carries the links as they
+  are, still naming the old path. Copy the agents folder along with
+  `~/.stratus`: the next `stratus serve` or `stratus update` re-points each
+  soul and workspace link whose target is gone at the same file in this
+  home's folder, when the folder carries the marker and has that file, and
+  says how many it re-pointed. The old folder has to have been named
+  `Agents`, `Stratus` or the same as this one. Any other broken link is left
+  as it is; `stratus doctor` names it and where it points, and so does the
+  roster's warning when it skips that soul.
 
 Per-agent directories are the point rather than a tidier listing. A store
 is opened on one agent's path, so there is no query another agent's

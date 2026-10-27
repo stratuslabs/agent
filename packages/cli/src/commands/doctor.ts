@@ -775,21 +775,23 @@ export const collectDoctorReport = async (
   }
 
   // The same plan `serve` acts on: where the folder is (or why there is
-  // none here), what the next start would move, and what is broken. A soul
-  // or workspace link whose folder was deleted or renamed: the soul drops
-  // out of the roster with a warning, and a missing workspace only comes
-  // back empty on the next write, so say which. And a soul in the folder
-  // nothing links to, which the roster never reads.
+  // none here), what the next start would move or re-point, and what is
+  // broken. A soul or workspace link whose target is gone and that the next
+  // start will not re-point: the soul drops out of the roster with a
+  // warning, and a missing workspace in the folder only comes back empty on
+  // the next write, so say which. And a soul in the folder nothing links
+  // to, which the roster never reads.
   let agentsFolder: DoctorReport['agentsFolder'];
   try {
     const plan = await planAgentsHome(env);
     agentsFolder = plan.agentsHome !== undefined
-      ? { path: plan.agentsHome, claimed: plan.claimed, pending: plan.souls.length + plan.workspaces.length }
+      ? { path: plan.agentsHome, claimed: plan.claimed, pending: plan.souls.length + plan.workspaces.length + plan.relink.length }
       : { reason: plan.reason ?? 'none available' };
     if (plan.dangling.length > 0) {
       problems.push(
-        `These link into the agents folder, but what they point at is gone: ${plan.dangling.join(', ')}. `
-        + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace is recreated empty on the next write.',
+        `These links point at something that is gone: ${plan.dangling.join(', ')}. `
+        + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace in the agents folder is recreated empty on the next write. '
+        + `If this home was copied or restored from another path, copy that home's agents folder to ${plan.agentsHome ?? 'this home'} too and restart: each link into the old home's agents folder is then re-pointed at the same file here.`,
       );
     }
     if (plan.unlinked.length > 0) {
@@ -928,7 +930,7 @@ export const runDoctor = async (
     : 'reason' in folder
       ? `no visible agents folder (${folder.reason}), so souls and workspaces stay in ~/.stratus/agents`
       : folder.claimed
-        ? `in ${folder.path}${folder.pending > 0 ? ` (${folder.pending} more to move there on the next start)` : ''}`
+        ? `in ${folder.path}${folder.pending > 0 ? ` (${folder.pending} more to move or re-point there on the next start)` : ''}`
         : `${folder.path} is created on the next start${folder.pending > 0 ? `, and ${folder.pending} soul(s) or workspace(s) move there` : ''}`}`);
 
   if (report.fallback) {
