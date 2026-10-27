@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -295,4 +295,100 @@ test('a daemon that is already serving is used as it is, with no offer', async (
     controller.abort();
     await serving;
   }
+});
+
+/**
+ * A daemon already answering with the control API and no dashboard package
+ * (the headless configuration), seen through `fetch`: health answers, and
+ * the page is the 404 the control API gives when the package is absent.
+ */
+const headlessDaemon = async (home: string) => {
+  const base = 'http://127.0.0.1:9';
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(gatewayFile(home), JSON.stringify({ url: base }));
+  await writeFile(path.join(home, '.stratus', 'gateway-token'), 'token\n');
+  const asked: string[] = [];
+  const fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    asked.push(url);
+    if (url === `${base}/api/v1/health`) {
+      return new Response(JSON.stringify({ status: 'ok' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === `${base}/api/v1/auth/ott`) {
+      return new Response(JSON.stringify({ path: '/api/v1/auth/session?ott=spent' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(
+      JSON.stringify({ error: { code: 'no_dashboard', message: 'This gateway serves the control API only. Install @stratusagent/dashboard for the web UI.' } }),
+      { status: 404, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof globalThis.fetch;
+  return { base, asked, fetch };
+};
+
+test('a running daemon with the control API but no dashboard is offered the page, then told to restart', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-headless-'));
+  const daemon = await headlessDaemon(home);
+  const box = machine([PAGE]);
+  const { streams, output } = createStreams();
+  let opened = false;
+
+  const exitCode = await runCli({
+    argv: ['dashboard'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      fetch: daemon.fetch,
+      packageResolver: box.packageResolver,
+      packageInstaller: box.packageInstaller,
+      setupInput: Readable.from(['1\n']),
+      openExternal: async () => { opened = true; },
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.ok(output.stdout.includes(`The daemon at ${daemon.base} serves the control API without the dashboard.`), output.stdout);
+  assert.deepEqual(box.installed, [[`${PAGE}@${CLI_VERSION}`]]);
+  assert.match(output.stdout + output.stderr, /`stratus restart`, then `stratus dashboard` again/);
+  // No session minted for a page that would only 404.
+  assert.ok(!daemon.asked.some((url) => url.endsWith('/api/v1/auth/ott')), daemon.asked.join(', '));
+  assert.equal(opened, false);
+});
+
+test('without a terminal, a running daemon with no dashboard gets the install command and no session', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-headless-piped-'));
+  const daemon = await headlessDaemon(home);
+  const box = machine([PAGE]);
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['dashboard', '--no-open'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: daemon.fetch, packageResolver: box.packageResolver, packageInstaller: box.packageInstaller },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(box.installed, []);
+  assert.ok(output.stderr.includes(`npm install -g ${PAGE}@${CLI_VERSION}`), output.stderr);
+  assert.ok(!daemon.asked.some((url) => url.endsWith('/api/v1/auth/ott')), daemon.asked.join(', '));
+});
+
+test('a running daemon started before the dashboard was installed is told to restart, with nothing to install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-headless-stale-'));
+  const daemon = await headlessDaemon(home);
+  const box = machine([]);
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['dashboard', '--no-open'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: daemon.fetch, packageResolver: box.packageResolver, packageInstaller: box.packageInstaller },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(box.installed, []);
+  assert.doesNotMatch(output.stdout, /needs @stratusagent/);
+  assert.match(output.stderr, /started before @stratusagent\/dashboard was installed.*`stratus restart`, then `stratus dashboard` again/);
+  assert.ok(!daemon.asked.some((url) => url.endsWith('/api/v1/auth/ott')), daemon.asked.join(', '));
 });

@@ -12,8 +12,10 @@ const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
 const CONTROL_API_PACKAGE = '@stratusagent/control-api';
 
+const DASHBOARD_PACKAGE = '@stratusagent/dashboard';
+
 /** What a daemon this command starts needs: the API that serves the page, and the page. */
-const DASHBOARD_PACKAGES = [CONTROL_API_PACKAGE, '@stratusagent/dashboard'];
+const DASHBOARD_PACKAGES = [CONTROL_API_PACKAGE, DASHBOARD_PACKAGE];
 
 /**
  * Offers the dashboard's missing packages. This command is the one place
@@ -93,6 +95,27 @@ export const openExternalUrl = async (url: string): Promise<void> => {
 };
 
 /**
+ * Whether the daemon at `base` serves the page, asked for it the way a
+ * signed-in browser would. A daemon running the control API alone (the
+ * headless configuration) answers health and mints sessions all the same,
+ * and the session would open on a 404. Only that refusal counts: anything
+ * else, a network blip or a daemon too old to say, is no reason to stop.
+ */
+const servesDashboard = async (env: CliEnvironment, base: string, fetchImpl: typeof fetch): Promise<boolean> => {
+  try {
+    const token = await gatewayToken(env, undefined);
+    const response = await fetchImpl(`${base}/`, { headers: { authorization: `Bearer ${token}` } });
+    if (response.status !== 404) {
+      return true;
+    }
+    const body = await response.json().catch(() => undefined) as { error?: { code?: unknown } } | undefined;
+    return body?.error?.code !== 'no_dashboard';
+  } catch {
+    return true;
+  }
+};
+
+/**
  * A one-time URL for the browser.
  *
  * This is the whole reason the exchange exists: the CLI can read the token
@@ -147,6 +170,23 @@ export const runDashboard = async (
 
   const existing = await readGatewayInfo(env);
   let base = existing && await gatewayAnswering(env, existing.url, fetchImpl) ? existing.url : undefined;
+
+  // A daemon already answering brought its own packages, so what this shell
+  // resolves says nothing about it, except for the page it is missing: then
+  // the package is offered here, and the daemon has to restart to load it.
+  if (base && !await servesDashboard(env, base, fetchImpl)) {
+    writeLine(streams.stdout, `The daemon at ${base} serves the control API without the dashboard.`);
+    const restart = 'Restart it to load the dashboard: `stratus restart`, then `stratus dashboard` again.';
+    if (packageInstalled(DASHBOARD_PACKAGE, env)) {
+      writeLine(streams.stderr, `Error: it started before ${DASHBOARD_PACKAGE} was installed. ${restart}`);
+      return 1;
+    }
+    if (await offerDashboardPackages([DASHBOARD_PACKAGE], streams, env) === 'missing') {
+      return 1;
+    }
+    writeLine(streams.stdout, restart);
+    return 0;
+  }
 
   const ownDaemon = new AbortController();
   let serving: Promise<number> | undefined;
