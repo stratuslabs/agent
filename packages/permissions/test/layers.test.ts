@@ -96,6 +96,14 @@ test('risk: a safe tool, an open posture, and a dangerous tool nobody can approv
     true,
   );
   expectLayer(await decide({ mode: 'headless' }, contextFor(plainTool('fs.delete', 'dangerous'))), 'risk', false);
+  // Still risk after external content: turning the gate off wouldn't let
+  // a dangerous call run unattended, so the gate isn't what to name.
+  const tainted = await decide(
+    { mode: 'headless', gateExternalContent: () => true } as never,
+    contextFor(plainTool('fs.delete', 'dangerous'), {}, { session: session(true) }),
+  );
+  expectLayer(tainted, 'risk', false);
+  assert.match(tainted.reason, /is dangerous and nobody is available to approve it/);
 });
 
 test('scope: a command inside an approved or built-in scope runs, and one outside every scope is refused', async () => {
@@ -123,9 +131,68 @@ test('autonomy: a read inside the workspace, alone and as a compound line', asyn
     commands: { workspace: { directoryFor: () => workspace }, grantRootFor: () => workspace },
   };
   expectLayer(await decide(options, contextFor(shellTool(workspace), { command: 'cat src/main.ts' })), 'autonomy', true);
-  const compound = await decide(options, contextFor(shellTool(workspace), { command: 'cat src/main.ts && ls src' }));
+  // `wc` with a path is a read only autonomy covers: not a safe scope (it
+  // takes no path there), not one of the plain workspace readers.
+  const compound = await decide(options, contextFor(shellTool(workspace), { command: 'wc -l src/main.ts && cat src/main.ts' }));
   expectLayer(compound, 'autonomy', true);
   assert.match(compound.reason, /may run unattended/);
+});
+
+test('compound lines name the check that covered them, not autonomy by default', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-layers-'));
+  const workspace = path.join(root, 'workspace');
+  await mkdir(path.join(workspace, 'src'), { recursive: true });
+  await writeFile(path.join(workspace, 'src', 'main.ts'), 'export const x = 1;\n');
+  const tool = shellTool(workspace);
+
+  // Built-in safe scopes only, autonomy off.
+  expectLayer(await decide({ mode: 'headless', commands: {} }, contextFor(tool, { command: 'pwd && whoami' })), 'scope', true);
+
+  // Approved scopes, each command on its own, autonomy off.
+  const approved = {
+    whitelist: {
+      scopesFor: async () => [{ command: 'git', args: ['status'] }, { command: 'git', args: ['log'] }],
+      remember: async () => {},
+    },
+  };
+  expectLayer(
+    await decide({ mode: 'headless', commands: approved }, contextFor(tool, { command: 'git status && git log' })),
+    'scope',
+    true,
+  );
+
+  // The plain workspace readers run without autonomy, so autonomy can't be
+  // what let them through.
+  expectLayer(
+    await decide({ mode: 'headless', commands: { grantRootFor: () => workspace } }, contextFor(tool, { command: 'cat src/main.ts && ls src' })),
+    'scope',
+    true,
+  );
+
+  // A command granted by name.
+  const names = {
+    commandNamesFor: async () => [{ command: 'grep', grantedAt: '2026-10-27T00:00:00.000Z' }],
+    rememberCommandName: async () => {},
+  };
+  expectLayer(
+    await decide(
+      { mode: 'headless', commands: { grantRootFor: () => workspace, names } },
+      contextFor(tool, { command: 'grep -r export src && cat src/main.ts' }),
+    ),
+    'grant',
+    true,
+  );
+
+  // A grant and autonomy on one line: the grant is named, since it is the
+  // answer a person gave for this agent and the one to revoke.
+  expectLayer(
+    await decide(
+      { mode: 'headless', commands: { grantRootFor: () => workspace, names, workspace: { directoryFor: () => workspace } } },
+      contextFor(tool, { command: 'wc -l src/main.ts && grep -r export src' }),
+    ),
+    'grant',
+    true,
+  );
 });
 
 test('grant: standing tool, session, destination, channel, site, trusted domain and schedule grants', async () => {

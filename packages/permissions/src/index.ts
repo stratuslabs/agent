@@ -139,6 +139,7 @@ export {
   SUBCOMMAND_COMMANDS,
   type CommandNameGrant,
   type CompoundCommand,
+  type CompoundCoverage,
   type CompoundJudgement,
   type CompoundStage,
   type Redirect,
@@ -240,7 +241,7 @@ export type ApprovalRequester = (request: ApprovalRequest) => Promise<ApprovalAn
  * - `scope`: a command scope, approved or built-in safe, covered the
  *   command, or none did.
  * - `parse`: the command couldn't be reduced to a scope at all.
- * - `autonomy`: workspace autonomy, or what the agent may run unattended.
+ * - `autonomy`: workspace autonomy.
  * - `grant`: a standing grant (tool, site, trusted domain, destination,
  *   channel authorization, the schedule's destination, or this session's
  *   "always"), or none covered the call.
@@ -1220,7 +1221,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             const names = compoundCommandNames(compound.pipelines.flat());
             return report(
               context,
-              'autonomy',
+              judgement.coveredBy,
               true,
               `${call.toolName} ran ${names.join(', ')}, each inside what ${session.agent.id} may run unattended`,
               command,
@@ -1375,35 +1376,40 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       if (mode === 'headless') {
         return report(
           context,
-          externalGate
-            ? 'gate'
-            : command !== undefined
-              ? 'scope'
-              : risk === 'dangerous'
-                ? 'risk'
+          // A `dangerous` tool before the gate: no grant covers one either
+          // way, so naming the gate would send the operator to a setting
+          // that changes nothing.
+          risk === 'dangerous'
+            ? 'risk'
+            : externalGate
+              ? 'gate'
+              : command !== undefined
+                ? 'scope'
                 : 'grant',
           false,
-          // Named first because it is the cause: the operator reading this
-          // has grants on file that look like they should have covered the
-          // call, and needs to be told why they did not. The source is a
-          // tool name or `sender`, never content.
-          externalGate
-            ? `${call.toolName} was called after this conversation read external content`
-              + ` (from ${sessionTaintedBy(session) ?? 'an unrecorded source'}); with approvals.externalContent`
-              + ' set to "gate" no grant covers it, and nobody is available to approve it'
-            : command !== undefined
-              ? `${call.toolName} was called outside every approved scope`
-                + `${commandNames(analysis) ? ` (${commandNames(analysis)})` : ''} and nobody is available to approve it`
-              : origin !== undefined
-                // Named, because it is the actionable half: an operator
-                // reading this at 3am needs to know which site to grant, and
-                // an origin carries no path or query to leak while saying so.
-                ? `${call.toolName} was called on ${origin}, which no approved site covers,`
-                  + ' and nobody is available to approve it'
-                : scopedByOrigin
-                  ? `${call.toolName} was called on a page with no origin a grant could name,`
+          // The gate named first otherwise, because it is the cause: the
+          // operator reading this has grants on file that look like they
+          // should have covered the call, and needs to be told why they did
+          // not. The source is a tool name or `sender`, never content.
+          risk === 'dangerous'
+            ? `${call.toolName} is dangerous and nobody is available to approve it`
+            : externalGate
+              ? `${call.toolName} was called after this conversation read external content`
+                + ` (from ${sessionTaintedBy(session) ?? 'an unrecorded source'}); with approvals.externalContent`
+                + ' set to "gate" no grant covers it, and nobody is available to approve it'
+              : command !== undefined
+                ? `${call.toolName} was called outside every approved scope`
+                  + `${commandNames(analysis) ? ` (${commandNames(analysis)})` : ''} and nobody is available to approve it`
+                : origin !== undefined
+                  // Named, because it is the actionable half: an operator
+                  // reading this at 3am needs to know which site to grant, and
+                  // an origin carries no path or query to leak while saying so.
+                  ? `${call.toolName} was called on ${origin}, which no approved site covers,`
                     + ' and nobody is available to approve it'
-                  : `${call.toolName} is ${risk} and nobody is available to approve it`,
+                  : scopedByOrigin
+                    ? `${call.toolName} was called on a page with no origin a grant could name,`
+                      + ' and nobody is available to approve it'
+                    : `${call.toolName} is ${risk} and nobody is available to approve it`,
           command,
           undefined,
           origin,
