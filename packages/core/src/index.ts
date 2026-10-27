@@ -5867,17 +5867,21 @@ const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
  * an agent with no Slack tool insisted it had no Slack connection, and
  * agents reported work as done that had only been drafted. The
  * look-before-you-ask pair is there because a conversation's session holds
- * its own messages and a slice of memory, nothing more: when work moved to a new channel, the agent's
- * session there asked the person what its own earlier thread and files
- * already said. Pointers, not a brief at session open, because the thread
- * and the file were both in reach and nothing said to look; looking stays
- * bound by the rule below that a conversation's content stays with its
- * people. The language
- * rule is here because the default persona is not: a custom soul replaces
- * it, and an agent wrote "favour" and "licence" into American website copy
- * because nothing shared said which English. A pasted British paragraph is
- * not a setting, so the rule says a task or a client's style guide decides
- * one deliverable and nothing is inferred from source text.
+ * its own messages and a slice of memory, nothing more: when work moved to
+ * a new channel, the agent's session there asked the person what its own
+ * earlier thread and files already said. Pointers, not a brief at session
+ * open, because the thread and the file were both in reach and nothing said
+ * to look. What it finds is linked, or asked about before it is repeated,
+ * unless it can tell everyone in the room could already see it. The room
+ * context gives only this room's kind and size, and a read returns no
+ * membership, so the agent cannot check another conversation's audience; a
+ * link is checked by the channel itself, and a file cannot be linked, so it
+ * asks. The language rule is here because the default persona is not: a
+ * custom soul replaces it, and an agent wrote "favour" and "licence" into
+ * American website copy because nothing shared said which English. A pasted
+ * British paragraph is not a setting, so the rule says a task or a client's
+ * style guide decides one deliverable and nothing is inferred from source
+ * text.
  *
  * The last sentence lets the soul and the person override length, format,
  * and language, and deliberately nothing else: a style preference never
@@ -5909,7 +5913,8 @@ export const renderReplySection = (language: string | undefined): string => {
       'Stay accurate: never invent a feature, a number, evidence, a fact about a customer, a personal experience, or work you did not do, however much better it would make the answer sound.',
       'Say which parts are proposals and which are facts, and say exactly how far something got, because drafted, saved, tested, sent, deployed, and verified are different claims.',
       'Judge what you can do from evidence. Having no Slack tool does not mean there is no Slack connection, and a lookup that came back empty does not prove an integration is disconnected. When someone corrects you, check the claim again instead of defending it.',
-      'When a message refers to work, a file, or a decision you cannot see in this conversation, look before you ask about it or answer: check your memory, your own files, and the recent messages of the channel or thread where it most likely happened, and keep what you find to people who could already see it.',
+      'When a message refers to work, a file, or a decision you cannot see in this conversation, look before you ask about it or answer: check your memory, your own files, and the recent messages of the channel or thread where it most likely happened.',
+      'Unless you can tell that everyone here could already see what you found, link to it or ask before repeating it.',
       'When you move work into a new thread, channel, or file, leave a pointer the next conversation can find: post its link where the work started, or remember where it now lives.',
       'Never promise to monitor, remind, follow up, or keep working in the background unless you have actually scheduled it or handed it to someone; say what you set up, or that you cannot.',
     ].join(' '),
