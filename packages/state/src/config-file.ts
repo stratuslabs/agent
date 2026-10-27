@@ -236,6 +236,68 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   return resolved;
 };
 
+/** A top-level config key that loading leaves unused. */
+export type IgnoredConfigKey =
+  | { key: string; reason: 'unknown' }
+  | { key: string; reason: 'dropped'; valueType: 'object' | 'array' | 'number' | 'string' | 'empty string' | 'boolean' | 'null' };
+
+/**
+ * The top-level keys of a config that loads but leaves them unused: a key
+ * the loader never reads (a typo, or a key from another version), and a key
+ * it reads but drops because of its value's type, the way `provider` is
+ * dropped when it is an object rather than a name.
+ *
+ * Both are worked out by running `validateConfigFile` itself and watching
+ * which keys it reads and which it keeps, so there is no second list of keys
+ * to fall out of step when the loader learns a new one. Loading does not
+ * change: these are for doctor to name, not errors, because refusing them
+ * would stop a daemon whose config runs today over a key that does nothing.
+ *
+ * A config that does not load reports nothing here. Its load error already
+ * says what is wrong, and the keys after the failing one were never read.
+ */
+export const ignoredConfigKeys = (parsed: unknown, label: string): IgnoredConfigKey[] => {
+  if (!isPlainObject(parsed)) {
+    return [];
+  }
+  const read = new Set<string | symbol>();
+  const watched = new Proxy(parsed, {
+    get: (target, key, receiver) => {
+      read.add(key);
+      return Reflect.get(target, key, receiver) as unknown;
+    },
+  });
+  let resolved: StratusConfigFile;
+  try {
+    resolved = validateConfigFile(watched, label);
+  } catch {
+    return [];
+  }
+  const ignored: IgnoredConfigKey[] = [];
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!read.has(key)) {
+      ignored.push({ key, reason: 'unknown' });
+    } else if (!Object.hasOwn(resolved, key)) {
+      ignored.push({ key, reason: 'dropped', valueType: jsonTypeOf(value) });
+    }
+  }
+  return ignored;
+};
+
+const jsonTypeOf = (value: unknown): Extract<IgnoredConfigKey, { reason: 'dropped' }>['valueType'] => {
+  if (value === null) {
+    return 'null';
+  }
+  if (Array.isArray(value)) {
+    return 'array';
+  }
+  if (value === '') {
+    return 'empty string';
+  }
+  const type = typeof value;
+  return type === 'number' || type === 'string' || type === 'boolean' ? type : 'object';
+};
+
 const isPlainObject = (value: unknown): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 

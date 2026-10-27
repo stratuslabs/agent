@@ -202,6 +202,8 @@ export {
 
 export {
   ConfigFileError,
+  type IgnoredConfigKey,
+  ignoredConfigKeys,
   loadConfigFile,
   normalizePublicUrl,
   validateConfigFile,
