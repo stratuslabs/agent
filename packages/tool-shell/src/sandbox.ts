@@ -509,8 +509,18 @@ const realOnly = (target: string): string[] => {
   }
 };
 
+/**
+ * What every command's sandbox starts from, before the policy's own mounts,
+ * and the namespaces it runs in. The probe starts exactly these, so a host
+ * that can't give them is refused up front with bwrap's reason instead of
+ * failing every command: a container can allow the namespaces but refuse a
+ * fresh /proc (Docker masks parts of its own).
+ */
+const BWRAP_BASE = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
+const BWRAP_NAMESPACES = ['--unshare-pid', '--unshare-ipc', '--die-with-parent', '--new-session'];
+
 export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: string[]): string[] => {
-  const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp'];
+  const args = [...BWRAP_BASE];
   // The hidden home first: an empty tmpfs over it, the visible entries
   // bound back read-only. Everything after binds over this.
   // Everything at real paths only (see realOnly): an entry is given back
@@ -563,7 +573,7 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
   for (const denied of new Set(deniedInside(policy).flatMap(realOnly))) {
     args.push(statSync(denied).isDirectory() ? '--tmpfs' : '--ro-bind', ...(statSync(denied).isDirectory() ? [denied] : ['/dev/null', denied]));
   }
-  args.push('--unshare-pid', '--unshare-ipc', '--die-with-parent', '--new-session');
+  args.push(...BWRAP_NAMESPACES);
   if (policy.cwd) {
     args.push('--chdir', policy.cwd);
   }
@@ -574,9 +584,12 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
 const DARWIN_SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const BWRAP_CANDIDATES = ['/usr/bin/bwrap', '/usr/local/bin/bwrap', '/bin/bwrap'];
 
+/** The sandbox the probe starts to decide whether bwrap works here: a command's, minus the policy. */
+export const bwrapProbeArgs: readonly string[] = [...BWRAP_BASE, ...BWRAP_NAMESPACES, '--', '/bin/true'];
+
 let bwrapProbe: { path: string } | { error: string } | undefined;
 
-/** Whether bwrap can actually start a namespace here (it can't in many containers). Probed once. */
+/** Whether bwrap can actually start a command's sandbox here (it can't in many containers). Probed once. */
 const probeBwrap = (): { path: string } | { error: string } => {
   if (bwrapProbe) {
     return bwrapProbe;
@@ -586,7 +599,7 @@ const probeBwrap = (): { path: string } | { error: string } => {
     bwrapProbe = { error: 'bubblewrap (bwrap) is not installed. Install it (apt install bubblewrap, dnf install bubblewrap)' };
     return bwrapProbe;
   }
-  const result = spawnSync(found, ['--ro-bind', '/', '/', '--unshare-pid', '--', '/bin/true'], { encoding: 'utf8', timeout: 5_000 });
+  const result = spawnSync(found, [...bwrapProbeArgs], { encoding: 'utf8', timeout: 5_000 });
   bwrapProbe = result.status === 0
     ? { path: found }
     : { error: `${found} cannot create a sandbox here (${(result.stderr || result.error?.message || `exit ${result.status}`).trim()})` };
