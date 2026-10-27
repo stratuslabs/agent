@@ -93,8 +93,13 @@ const boundBridgedText = (text: string): string => {
  */
 export type ClaudeCodeToolExecutor = HostedToolExecutor;
 
-const zodTypeFor = (schema: unknown): z.ZodType => {
-  if (typeof schema !== 'object' || schema === null) {
+// Deeper than this a parameter degrades to z.unknown(): the host's own
+// input check still judges it, and a schema object that refers back to
+// itself cannot recurse forever.
+const MAX_BRIDGED_SCHEMA_DEPTH = 8;
+
+const zodTypeFor = (schema: unknown, depth = 0): z.ZodType => {
+  if (typeof schema !== 'object' || schema === null || depth > MAX_BRIDGED_SCHEMA_DEPTH) {
     return z.unknown();
   }
   const spec = schema as Record<string, unknown>;
@@ -114,11 +119,16 @@ const zodTypeFor = (schema: unknown): z.ZodType => {
         type = z.boolean();
         break;
       case 'array':
-        type = z.array(zodTypeFor(spec.items));
+        type = z.array(zodTypeFor(spec.items, depth + 1));
         break;
-      case 'object':
-        type = z.record(z.string(), z.unknown());
+      case 'object': {
+        // Declared keys reach the model with their descriptions and the
+        // required list. Loose, so a key the schema does not declare still
+        // reaches the host, which judges it against the tool's schema.
+        const shape = zodShapeFor(spec, depth + 1);
+        type = Object.keys(shape).length > 0 ? z.looseObject(shape) : z.record(z.string(), z.unknown());
         break;
+      }
       default:
         type = z.unknown();
     }
@@ -126,11 +136,23 @@ const zodTypeFor = (schema: unknown): z.ZodType => {
   return typeof spec.description === 'string' ? type.describe(spec.description) : type;
 };
 
+// The Agent SDK turns a tool's shape into JSON Schema with its own bundled
+// zod, and copies only the top-level keys' descriptions into that zod's
+// registry. A nested key's description would never reach the model, so a
+// property with keys inside carries its JSON Schema, made here with ours,
+// through zod's toJSONSchema hook. A converter that ignores the hook still
+// shows the keys and the required list, only without their descriptions.
+const withNestedDescriptions = (type: z.ZodType): z.ZodType => {
+  const { $schema: _dialect, ...json } = z.toJSONSchema(type, { io: 'input', target: 'draft-7' }) as Record<string, unknown>;
+  type._zod.toJSONSchema = () => structuredClone(json);
+  return type;
+};
+
 // Kernel tools describe inputs as JSON Schema; the Agent SDK wants a Zod
 // shape. Unknown constructs degrade to z.unknown() rather than failing.
-const zodShapeFor = (parameters: JsonObject | undefined): Record<string, z.ZodType> => {
+const zodShapeFor = (parameters: Record<string, unknown> | undefined, depth = 0): Record<string, z.ZodType> => {
   const shape: Record<string, z.ZodType> = {};
-  if (!parameters || typeof parameters.properties !== 'object' || parameters.properties === null) {
+  if (!parameters || typeof parameters.properties !== 'object' || parameters.properties === null || Array.isArray(parameters.properties)) {
     return shape;
   }
   const required = new Set(
@@ -139,7 +161,9 @@ const zodShapeFor = (parameters: JsonObject | undefined): Record<string, z.ZodTy
       : [],
   );
   for (const [key, propSchema] of Object.entries(parameters.properties as Record<string, unknown>)) {
-    const type = zodTypeFor(propSchema);
+    const nested = depth === 0 && typeof propSchema === 'object' && propSchema !== null
+      && ['object', 'array'].includes((propSchema as Record<string, unknown>).type as string);
+    const type = nested ? withNestedDescriptions(zodTypeFor(propSchema, depth)) : zodTypeFor(propSchema, depth);
     shape[key] = required.has(key) ? type : type.optional();
   }
   return shape;

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { DEFAULT_MAX_TURNS, OVERHEARD_IMAGES_NOTE, UNADDRESSED_TURN_NOTE, promptWasDelivered, TURN_LIMIT_NOTE, CONTINUE_NOTE, UNTRUSTED_TOOL_RESULT_NOTE } from '@stratusagent/core';
 import { test } from 'node:test';
+import { z } from 'zod';
+import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import type {
   MemoryEntry,
   ProviderCallUsage,
@@ -577,6 +579,92 @@ test('bridged tool handlers execute through the host and report failures', async
   const failed = await bridged[1]!.handler({}, {});
   assert.equal(failed.isError, true);
   assert.match(JSON.stringify(failed.content), /denied by approval policy/);
+});
+
+/**
+ * What the Claude Code CLI is shown for a bridged tool: the in-process
+ * server the provider hands it, asked for tools/list over a bare MCP
+ * transport. The SDK converts the shape with its own bundled zod.
+ */
+const listedInputSchema = async (tools: ReturnType<typeof bridgeKernelTools>): Promise<Record<string, unknown>> => {
+  const server = createSdkMcpServer({ name: 'stratus', tools });
+  let reply: ((message: unknown) => void) | undefined;
+  const replied = new Promise<unknown>((resolve) => { reply = resolve; });
+  const transport = {
+    onmessage: undefined as ((message: unknown) => void) | undefined,
+    async start() {},
+    async close() {},
+    async send(message: unknown) { reply?.(message); },
+  };
+  await server.instance.connect(transport as never);
+  transport.onmessage?.({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+  const message = await replied as { result: { tools: Array<{ inputSchema: Record<string, unknown> }> } };
+  await server.instance.close();
+  return message.result.tools[0]!.inputSchema;
+};
+
+test('a nested object parameter reaches the model with its keys, descriptions and required list', async () => {
+  // message.read's `source` and the destination parameters are objects with
+  // declared keys. Bridged as an open record, the model saw no keys at all
+  // and guessed the shape, spending calls on errors.
+  const bridged = bridgeKernelTools([{
+    name: 'message.read',
+    parameters: {
+      type: 'object',
+      properties: {
+        source: {
+          type: 'object',
+          description: 'The conversation to read.',
+          properties: {
+            channel: { type: 'string', description: "Channel kind, e.g. 'slack'." },
+            to: { type: 'string', description: 'Channel-native conversation id.' },
+            thread: { type: 'string' },
+          },
+          required: ['channel', 'to'],
+        },
+        targets: {
+          type: 'array',
+          items: { type: 'object', properties: { id: { type: 'string', description: 'A member id.' } }, required: ['id'] },
+        },
+        meta: { type: 'object', description: 'Any keys.' },
+      },
+      required: ['source'],
+    },
+  }], createSession(), async (_session, call) => ({ callId: call.id, toolName: call.toolName, ok: true, output: null }));
+  const schema = await listedInputSchema(bridged) as {
+    properties: Record<string, {
+      description?: string;
+      properties?: Record<string, unknown>;
+      required?: string[];
+      items?: { properties?: Record<string, unknown>; required?: string[] };
+    }>;
+    required?: string[];
+  };
+
+  assert.deepEqual(schema.required, ['source']);
+  assert.equal(schema.properties.source?.description, 'The conversation to read.');
+  assert.deepEqual(schema.properties.source?.properties, {
+    channel: { type: 'string', description: "Channel kind, e.g. 'slack'." },
+    to: { type: 'string', description: 'Channel-native conversation id.' },
+    thread: { type: 'string' },
+  });
+  assert.deepEqual(schema.properties.source?.required, ['channel', 'to']);
+  assert.deepEqual(schema.properties.targets?.items?.properties, { id: { type: 'string', description: 'A member id.' } });
+  assert.deepEqual(schema.properties.targets?.items?.required, ['id']);
+  // An object with no declared keys stays an open record.
+  assert.equal(schema.properties.meta?.properties, undefined);
+  assert.equal(schema.properties.meta?.description, 'Any keys.');
+
+  // The SDK validates calls against the same shape: a call missing both
+  // keys is refused once, naming both.
+  const input = z.object(bridged[0]!.inputSchema);
+  const missing = input.safeParse({ source: {} });
+  assert.equal(missing.success, false);
+  assert.deepEqual(missing.error?.issues.map((issue) => issue.path.join('.')), ['source.channel', 'source.to']);
+  // Keys the schema does not declare still reach the host, which judges
+  // them against the tool's own schema as before.
+  const extra = input.safeParse({ source: { channel: 'slack', to: 'C1', extra: 'x' }, meta: { any: 1 } });
+  assert.deepEqual(extra.data, { source: { channel: 'slack', to: 'C1', extra: 'x' }, meta: { any: 1 } });
 });
 
 test('a bridged external result reaches the loop marked untrusted, and every other label as before', async () => {
