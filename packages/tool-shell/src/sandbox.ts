@@ -584,6 +584,21 @@ export const bwrapArgs = (policy: SandboxPolicy, shell: string, shellArgs: strin
 const DARWIN_SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const BWRAP_CANDIDATES = ['/usr/bin/bwrap', '/usr/local/bin/bwrap', '/bin/bwrap'];
 
+/** How a command ran: under one of the sandboxes below, or without one. */
+export type SandboxRunner = 'sandbox-exec' | 'bwrap' | 'off';
+
+/**
+ * Which sandbox ran a command, read from the program that was spawned: only
+ * the exact paths `planSandbox` starts count, so the operator's own shell,
+ * whatever it's called, is `off`.
+ */
+export const sandboxRunnerOf = (command: string): SandboxRunner => {
+  if (command === DARWIN_SANDBOX_EXEC) {
+    return 'sandbox-exec';
+  }
+  return BWRAP_CANDIDATES.includes(command) ? 'bwrap' : 'off';
+};
+
 /** The sandbox the probe starts to decide whether bwrap works here: a command's, minus the policy. */
 export const bwrapProbeArgs: readonly string[] = [...BWRAP_BASE, ...BWRAP_NAMESPACES, '--', '/bin/true'];
 

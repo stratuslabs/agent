@@ -38,7 +38,11 @@ a hidden file that something outside it put anywhere a command can read
 there. Where the host can't build a sandbox, commands are refused with
 the reason (`sandbox: "required"`, the default).
 `sandbox: "auto"` runs them unconfined there instead, and `sandbox: "off"`
-turns the sandbox off. The full list and settings are in
+turns the sandbox off. A path the sandbox refuses comes back as the
+program's own error, such as `Operation not permitted` or `Read-only file
+system`, so a failed command's result says it ran sandboxed (`sandbox`) and,
+for those errors, adds a `sandboxNote` telling the agent to ask you for the
+path instead of retrying. The full list and settings are in
 [the package README](../../packages/tool-shell/README.md#the-sandbox).
 
 ## Which commands run unattended

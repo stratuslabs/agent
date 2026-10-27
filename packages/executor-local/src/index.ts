@@ -124,6 +124,15 @@ export interface LocalCommandTool extends Tool {
    */
   settleTrust?(session: Session): TrustLevel | undefined | Promise<TrustLevel | undefined>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
+  /**
+   * Asked when the command exited non-zero (not on a timeout or an abort),
+   * for fields to add to the failed result's output beside the execution
+   * record: what the tool can say about why it failed. A key the record
+   * already has keeps the record's value. A hook that throws, returns
+   * anything but an object, or hasn't answered within 2 s or by the time
+   * the turn stops adds nothing, and the failure is reported as it was.
+   */
+  annotateFailure?(result: LocalCommandExecution, context: LocalCommandContext): JsonObject | undefined | Promise<JsonObject | undefined>;
 }
 
 export interface LocalCommandToolDefinition {
@@ -150,6 +159,15 @@ export interface LocalCommandToolDefinition {
    */
   settleTrust?(session: Session): TrustLevel | undefined | Promise<TrustLevel | undefined>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
+  /**
+   * Asked when the command exited non-zero (not on a timeout or an abort),
+   * for fields to add to the failed result's output beside the execution
+   * record: what the tool can say about why it failed. A key the record
+   * already has keeps the record's value. A hook that throws, returns
+   * anything but an object, or hasn't answered within 2 s or by the time
+   * the turn stops adds nothing, and the failure is reported as it was.
+   */
+  annotateFailure?(result: LocalCommandExecution, context: LocalCommandContext): JsonObject | undefined | Promise<JsonObject | undefined>;
 }
 
 export type LocalSpawn = (
@@ -196,6 +214,7 @@ export const defineLocalCommandTool = ({
   createCommand,
   settleTrust,
   parseResult,
+  annotateFailure,
 }: LocalCommandToolDefinition): LocalCommandTool => ({
   name,
   ...(description ? { description } : {}),
@@ -209,6 +228,7 @@ export const defineLocalCommandTool = ({
   createCommand,
   ...(settleTrust ? { settleTrust } : {}),
   ...(parseResult ? { parseResult } : {}),
+  ...(annotateFailure ? { annotateFailure } : {}),
   async execute() {
     throw new Error(`Local command tool must run through LocalCommandExecutor: ${name}`);
   },
@@ -315,7 +335,7 @@ export class LocalCommandExecutor implements Executor {
         return failureResult(
           call,
           `Command exited with code ${execution.exitCode}: ${execution.command}`,
-          serializeExecution(execution),
+          await annotatedFailure(execution, tool, { call, session, tool, ...(signal ? { signal } : {}) }),
           trust(),
         );
       }
@@ -346,6 +366,42 @@ export class LocalCommandExecutor implements Executor {
     }
   }
 }
+
+/** The longest a tool's `annotateFailure` may take before the failure is reported without its fields. */
+const ANNOTATE_FAILURE_TIMEOUT_MS = 2_000;
+
+/**
+ * A non-zero exit's execution record, plus what its tool's `annotateFailure`
+ * adds. The command has already run, so its failure is reported whatever
+ * the hook does: one that throws, stalls or outlives the turn loses only
+ * its own fields. It adds to the record and never rewrites it, so a key the
+ * record has keeps the record's value.
+ */
+const annotatedFailure = async (
+  execution: LocalCommandExecution,
+  tool: LocalCommandTool,
+  context: LocalCommandContext,
+): Promise<JsonObject> => {
+  const record = serializeExecution(execution);
+  if (!tool.annotateFailure) {
+    return record;
+  }
+  let fields: unknown;
+  try {
+    fields = await raceWithAbort(
+      settleWithin(tool.annotateFailure(execution, context), ANNOTATE_FAILURE_TIMEOUT_MS),
+      context.signal,
+      'Failure annotation',
+    );
+  } catch {
+    return record;
+  }
+  if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
+    return record;
+  }
+  const added = Object.entries(fields as JsonObject).filter(([key]) => !Object.hasOwn(record, key));
+  return { ...record, ...Object.fromEntries(added) };
+};
 
 /** The longest a tool's `settleTrust` may take before its output is labelled `external`. */
 const SETTLE_TRUST_TIMEOUT_MS = 2_000;
@@ -602,7 +658,7 @@ const unrefStream = (stream: NodeJS.ReadableStream): void => {
   }
 };
 
-const serializeExecution = (execution: LocalCommandExecution): JsonValue => ({
+const serializeExecution = (execution: LocalCommandExecution): JsonObject => ({
   command: execution.command,
   args: execution.args,
   ...(execution.cwd ? { cwd: execution.cwd } : {}),

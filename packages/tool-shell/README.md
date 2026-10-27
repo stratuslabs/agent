@@ -182,6 +182,15 @@ inside the sandbox can't make one: macOS refuses the link, and on Linux
 every writable directory is its own mount, which a hard link can't cross.
 No Stratus tool creates hard links.
 
+A path the sandbox refuses reaches the command as an ordinary error, so the
+result says how the command ran: `sandbox` is `sandbox-exec`, `bwrap` or
+`off`. When a sandboxed command exits non-zero and its stderr has
+`Operation not permitted`, `Read-only file system` or `Permission denied`,
+the result also gets a `sandboxNote` telling the agent the error may be the
+sandbox and to ask for `writablePaths` or `readablePaths` instead of
+retrying. It's a hint, not a verdict: a program can print those errors for
+reasons of its own.
+
 | Key | Default | What |
 | --- | --- | --- |
 | `sandbox` | `required` | `required`: refuse every command when no sandbox can start (no `bwrap`, or a container that forbids user namespaces, mounts or a fresh `/proc`), with the reason. A host wired by hand with no workspace and no `cwd` has nothing to confine commands to, so `required` refuses there too. `auto`: run unconfined there instead, and log why, once. `off`: run with the daemon user's full access. |
