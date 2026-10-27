@@ -146,6 +146,9 @@ test('a sandboxed command cannot write outside its workspace', { skip: !sandboxe
   await rm(target, { force: true });
   assert.equal(confined.ok, false);
   assert.equal(planted, false);
+  const said = confined.output as JsonObject;
+  assert.notEqual(said.sandbox, 'off');
+  assert.match(String(said.sandboxNote), /shell sandbox/);
   const rcFile = path.join(fixture.stratusHome, 'config.json');
   await run({}, fixture, `echo '{}' > ${rcFile}`);
   assert.equal(await readFile(rcFile, 'utf8'), '{"provider":"anthropic"}');

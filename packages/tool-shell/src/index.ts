@@ -47,6 +47,8 @@ import {
   userRuntimeEndpoints,
   writableHomePathsFor,
   type SandboxPolicy,
+  sandboxRunnerOf,
+  type SandboxRunner,
 } from './sandbox.ts';
 
 export {
@@ -62,11 +64,25 @@ export {
   darwinProfile,
   planSandbox,
   resetSandboxProbe,
+  sandboxRunnerOf,
   stratusHomesFor,
   userRuntimeEndpoints,
   type SandboxMode,
   type SandboxPolicy,
+  type SandboxRunner,
 } from './sandbox.ts';
+
+// What a sandbox refusal looks like from inside: the program's own error
+// for a denied open, write or link. A program can print these for reasons
+// of its own, which is why the note says "may".
+const SANDBOX_REFUSAL = /Operation not permitted|Read-only file system|Permission denied/;
+
+/** The hint a sandboxed command that failed with a permission error gets beside its output. */
+const sandboxNoteFor = (sandbox: SandboxRunner): string =>
+  `This command ran in the shell sandbox (${sandbox}). It can write only its workspace, temp, package caches and the paths in writablePaths, `
+  + 'and it can\'t read the Stratus home, credentials or the hidden parts of the home folder. '
+  + 'So this error may be the sandbox refusing a path, not the program failing, and retrying the same path won\'t help. '
+  + 'If the command needs that path, ask the operator to add it to writablePaths or readablePaths for @stratusagent/tool-shell.';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
@@ -885,6 +901,17 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
         truncated: stdout.truncated || stderr.truncated,
         ...(result.cwd ? { cwd: result.cwd } : {}),
         durationMs: result.durationMs,
+        sandbox: sandboxRunnerOf(result.command),
+      };
+    },
+    // A sandbox denial reaches the command as an ordinary error, so the
+    // result says the command ran sandboxed, and when the error is the kind
+    // a sandbox causes, what that may mean and what to change.
+    annotateFailure(result: LocalCommandExecution): JsonObject {
+      const sandbox = sandboxRunnerOf(result.command);
+      return {
+        sandbox,
+        ...(sandbox !== 'off' && SANDBOX_REFUSAL.test(result.stderr) ? { sandboxNote: sandboxNoteFor(sandbox) } : {}),
       };
     },
   });
