@@ -968,11 +968,13 @@ test('a host that keeps no guard list hands no handle, and a guard registered af
   const config = { 'stratus-plugin-late': {} };
 
   await loadPlugins({ config, host, tools: new ToolRegistry(), bus: new EventBus() });
-  assert.deepEqual(handles, [undefined]);
+  assert.equal(handles.length, 1);
+  assert.equal(handles[0], undefined);
 
-  handles.length = 0;
   const guards: ProviderCallGuard[] = [];
   await loadPlugins({ config, host, tools: new ToolRegistry(), bus: new EventBus(), providerCallGuards: guards });
-  assert.throws(() => handles[0]?.register(() => {}), /during setup/);
+  const late = handles[1];
+  assert.ok(late, 'a host keeping a list hands every plugin the slot');
+  assert.throws(() => late.register(() => {}), /during setup/);
   assert.deepEqual(guards, []);
 });
