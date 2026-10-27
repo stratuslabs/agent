@@ -10380,6 +10380,7 @@ test('readConversation reads the DM or group DM its session is in, and no other'
   await refused('slack:bea:T1:D-DYLAN'); // another agent's session
   await refused('slack:ava:T1:D-DYLAN', 'D-DYLAN', 'bea'); // another agent's app
   await refused('slack:ava:T1:D-DYLAN:delegate:bea:1'); // a delegation under it
+  await refused('slack:ava:T1:D-DYLAN:1791332967.606559:delegate:bea:1'); // or under a thread in it
   await refused('slack:ava:T1:D-DYLAN:rolledover:2026-10-27T05-00-00Z-ab12'); // an archive
   await refused('slack:ava:T1:D-DYLAN:not-a-ts'); // a suffix that is not a thread
   await refused('schedule:s1:2026-10-27T05:00:00.000Z'); // a scheduled turn
@@ -10394,6 +10395,15 @@ test('readConversation reads the DM or group DM its session is in, and no other'
   await adapter.stop();
   // A stopped app answers for no session.
   assert.equal(adapter.sessionConversation?.('ava', 'slack:ava:T1:D-DYLAN'), undefined);
+});
+
+test('sessionConversation answers nothing for an app whose workspace is not known', async () => {
+  const web = createFakeWeb('B-AVA', '');
+  web.knownConversations.set('D-DYLAN', { is_im: true });
+  const adapter = await startedAdapterWith(web);
+  assert.equal(adapter.sessionConversation?.('ava', 'slack:ava::D-DYLAN'), undefined);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', sessionId: 'slack:ava::D-DYLAN', conversation: 'D-DYLAN', limit: 10 }), /direct message/);
+  await adapter.stop();
 });
 
 test('readConversation refuses a channel the app is not a member of, or cannot see', async () => {

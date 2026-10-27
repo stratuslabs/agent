@@ -536,11 +536,23 @@ The boundary is the outbound one plus a rule for DMs:
   nothing, and another agent's app is never borrowed.
 - The app must be a **member** of the channel, public or private. `/invite`
   it where it should read.
-- **DMs and group DMs are refused, member or not.** What someone says in a
-  DM is said to the people in it; a read from elsewhere, a public thread
-  above all, would carry it to people who were never in the room. This is
-  not an approval: the gateway refuses a DM read before anyone is asked,
-  and tells the agent approval can't unlock it.
+- **DMs and group DMs are refused, member or not, except the one the
+  session reading is in.** What someone says in a DM is said to the people
+  in it; a read from elsewhere, a public thread above all, would carry it
+  to people who were never in the room. This is not an approval: the
+  gateway refuses a DM read before anyone is asked, and tells the agent
+  approval can't unlock it.
+- **The session's own DM is readable**, top level and threads, so an agent
+  in a DM can look back past what its session holds (a thread session, or
+  one started over). The check is the session id, read without a lookup
+  (`sessionConversation`): it must be exactly this app's key for that DM,
+  `slack:<agent>:<team>:<conversation>` or that plus one thread `ts`, and
+  the gateway and the adapter both ask it. A delegated or scheduled
+  session, an archived one, another agent's app and another workspace
+  never match. The read is still `gated` like any other, and
+  `approvals.channels` still never covers a DM. Anyone holding the
+  gateway token can open a session under any id; that is the operator,
+  who can read what the bot token reads anyway.
 
 Messages come back as plain text with author ids and, where Slack supplies
 one cheaply, a display name. File contents are not downloaded; their names

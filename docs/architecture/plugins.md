@@ -581,7 +581,13 @@ capability rather than an assumption:
 - `ChannelAdapter.readConversation` is optional too: it is what
   `message.read` reads through, and a channel without it cannot be read.
   An adapter that has it decides which conversations are readable at all
-  and refuses the rest — Slack reads only channels its app is in, never DMs.
+  and refuses the rest — Slack reads only channels its app is in, and of
+  DMs only the one the reading session lives in. `ConversationReadRequest`
+  names that session (`sessionId`), and the optional
+  `ChannelAdapter.sessionConversation(agentId, sessionId)` says which
+  conversation a session lives in, from the id alone; the gateway's
+  refusal and the adapter's read both ask it, so they agree. Without it no
+  DM is readable.
 - `ChannelAdapter.createConversation` is optional as well: it is what
   `channel.create` runs on, with the asking agent's own app, and a channel
   without it cannot create conversations. It must refuse what it can tell
@@ -865,7 +871,8 @@ browser pack contributes the origin of the page a conversation is on
 or none — with two, the engine judges it by neither and asks every time,
 because how two grants compose on one call is a decision nobody has made.
 Separately from those, a tool may name a call it will refuse whatever anyone
-approves (`Tool.refusalFor`, which `message.read` uses for a direct message);
+approves (`Tool.refusalFor`, which `message.read` uses for a direct message
+other than the session's own);
 the runner answers it with that reason before the policy is asked. It is never
 a reason to allow, and the tool's own `execute` still refuses the same call.
 A tool whose input can't say what it reads (a shell command runs whatever file
