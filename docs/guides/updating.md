@@ -386,14 +386,17 @@ exception below. Which ones are installed, and what each contributes, is
 
 ### The provider your agents run on
 
-The Claude subscription runtime (`@stratusagent/provider-claude-code`) and
-the Codex runtime (`@stratusagent/provider-codex`) each bring a native binary
-of a few hundred MB, so the CLI no longer carries them: `stratus setup`
-installs the one you choose. Builds before 0.12.3 carried both inside the
-CLI, so replacing that CLI removes them. `stratus update` therefore checks
-which of the two your agents use (the default, its fallback, and any soul
-that pins its own provider) and installs a missing one at the CLI's version
-before the daemon comes back. `stratus update --check` lists it:
+The Anthropic API provider (`@stratusagent/provider-anthropic`), the Claude
+subscription runtime (`@stratusagent/provider-claude-code`) and the Codex
+runtime (`@stratusagent/provider-codex`) are packages of their own, so the
+CLI carries none of them: `stratus setup` installs the one you choose.
+Earlier builds carried the Anthropic provider inside the CLI (and, before
+0.12.3, both runtimes), so replacing that CLI removes it. `stratus update`
+therefore checks which of the three your agents use (the default, its
+fallback, and any soul that pins its own provider) and installs a missing
+one at the CLI's version before the daemon comes back. An agent on an
+Anthropic API key keeps working through the update. `stratus update --check`
+lists it:
 
 ```
   provider    @stratusagent/provider-claude-code — your agents use it and it is not installed

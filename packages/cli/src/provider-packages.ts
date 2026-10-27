@@ -1,21 +1,22 @@
-import { HARNESS_PACKAGE_NAMES, harnessesUsedBy, readProcessEnv, servedRuntimes } from '@stratusagent/state';
+import { PROVIDER_PACKAGE_NAMES, providerPackagesUsedBy, readProcessEnv, servedRuntimes } from '@stratusagent/state';
 import type { CliEnvironment, CliStreams } from './environment.ts';
 import { writeLine } from './io.ts';
 import { packageInstalled } from './loaders.ts';
 import { CLI_VERSION, defaultPackageInstaller } from './npm.ts';
 
 /**
- * The harness provider packages (claude-code, codex) that the agents this
- * config serves run on and that are not installed here.
+ * The provider packages (anthropic, claude-code, codex) that the agents
+ * this config serves run on and that are not installed here.
  *
- * Neither ships with the CLI: each brings a native binary of a few hundred
- * MB, and most machines use one or neither. So whatever decides a provider
+ * None ships with the CLI: the harnesses each bring a native binary of a
+ * few hundred MB, and a fresh install carries no provider at all, so most
+ * machines have only the one they picked. Whatever decides a provider
  * (setup) or replaces the CLI (update) has to put the one in use beside it.
  * Read through `servedRuntimes`, the same resolution the daemon and doctor
  * use, so a soul that pins its own provider counts; a runtime that does not
  * resolve is left to the checks that report that.
  */
-export const missingHarnessPackages = async (
+export const missingProviderPackages = async (
   env: CliEnvironment,
   configPath?: string,
   /** Setup and update, which install what a service started later runs on. */
@@ -26,7 +27,7 @@ export const missingHarnessPackages = async (
   // The unit carries only PATH, so a provider key or STRATUS_* override
   // exported here (ANTHROPIC_API_KEY beside a stored Claude sign-in, say)
   // reaches a foreground run but never the daemon, which then needs the
-  // harness this shell's view would skip. Installing one a shell override
+  // package this shell's view would skip. Installing one a shell override
   // happens to avoid costs disk; missing one fails every turn.
   const shellEnv = readProcessEnv(env);
   const serviceEnv: CliEnvironment = {
@@ -39,19 +40,19 @@ export const missingHarnessPackages = async (
   const runtimes = (await Promise.all((options.asService ? [env, serviceEnv] : [env]).map(
     (view) => servedRuntimes(view, configPath).catch(() => []),
   ))).flat();
-  const used = new Set(runtimes.flatMap(({ runtime }) => harnessesUsedBy(runtime)));
+  const used = new Set(runtimes.flatMap(({ runtime }) => providerPackagesUsedBy(runtime)));
   return [...used]
-    .map((harness) => HARNESS_PACKAGE_NAMES[harness])
+    .map((pkg) => PROVIDER_PACKAGE_NAMES[pkg])
     .filter((name) => !packageInstalled(name, env));
 };
 
 /**
  * Installs `packages` at this CLI's own version (they ship in lockstep) and
  * says so. Returns whether npm succeeded. Never throws: the caller has
- * already saved what it saved, and a missing harness fails only the turns
+ * already saved what it saved, and a missing provider fails only the turns
  * that need it, with the install command.
  */
-export const installHarnessPackages = async (
+export const installProviderPackages = async (
   packages: readonly string[],
   streams: CliStreams,
   env: CliEnvironment,
@@ -74,11 +75,13 @@ export const installHarnessPackages = async (
 };
 
 /**
- * What doctor and serve say when an agent's harness is not installed: a
- * plain `npm install -g @stratusagent/cli` upgrade from a build that carried
- * both drops them, and every turn on that provider then fails.
+ * What doctor and serve say when an agent's provider package is not
+ * installed: a plain `npm install -g @stratusagent/cli` upgrade from a build
+ * that carried it drops it (the Anthropic adapter and, earlier, the
+ * harnesses were CLI dependencies), and every turn on that provider then
+ * fails.
  */
-export const harnessesMissingMessage = (packages: readonly string[]): string => {
+export const providerPackagesMissingMessage = (packages: readonly string[]): string => {
   const one = packages.length === 1;
   return `${packages.join(' and ')} ${one ? 'is' : 'are'} not installed, and ${one ? 'an agent runs on it' : 'agents run on them'}, so ${one ? 'its' : 'their'} turns fail. `
     + `Run \`stratus update\` or \`npm install -g ${packages.map((name) => `${name}@${CLI_VERSION}`).join(' ')}\`, then restart the daemon.`;

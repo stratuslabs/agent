@@ -17,16 +17,19 @@ npm install -g @stratusagent/cli
 stratus setup
 ```
 
-That one package is everything you need to run agents: the runtime, the
-API-key providers (Anthropic, OpenAI and OpenAI-compatible), the agent
-roster, and the always-on gateway all come with it. The two subscription
-runtimes are separate because each brings a native binary of a few hundred
-MB; `stratus setup` installs the one you pick:
+That one package carries the runtime, the agent roster and the always-on
+gateway. Model providers come separately, so an install carries only the one
+its agents use, and `stratus setup` installs the one you pick. The two
+subscription runtimes are the heavy ones, each with a native binary of a few
+hundred MB:
 
 ```bash
+npm install -g @stratusagent/provider-anthropic     # Claude with an Anthropic API key
 npm install -g @stratusagent/provider-claude-code   # Claude Pro/Max subscription
 npm install -g @stratusagent/provider-codex         # ChatGPT subscription or Codex key
 ```
+
+The OpenAI and OpenAI-compatible API-key providers need no extra package.
 [Setup](./setup.md) is the whole onboarding — no config files to edit and no
 env vars to export.
 

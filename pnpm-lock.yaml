@@ -135,6 +135,9 @@ importers:
       '@stratusagent/plugin-mcp':
         specifier: workspace:*
         version: link:../plugin-mcp
+      '@stratusagent/provider-anthropic':
+        specifier: workspace:*
+        version: link:../provider-anthropic
       '@stratusagent/provider-claude-code':
         specifier: workspace:*
         version: link:../provider-claude-code
@@ -473,13 +476,13 @@ importers:
       '@stratusagent/plugins':
         specifier: workspace:*
         version: link:../plugins
-      '@stratusagent/provider-anthropic':
-        specifier: workspace:*
-        version: link:../provider-anthropic
       '@stratusagent/providers':
         specifier: workspace:*
         version: link:../providers
     devDependencies:
+      '@stratusagent/provider-anthropic':
+        specifier: workspace:*
+        version: link:../provider-anthropic
       '@stratusagent/provider-claude-code':
         specifier: workspace:*
         version: link:../provider-claude-code
