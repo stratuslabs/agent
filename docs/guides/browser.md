@@ -60,7 +60,7 @@ at your permissions. Anything not granted asks, and in
 [`headless` mode](./approvals.md) anything not granted is refused:
 
 ```text
-09:14:36  —  warning: blair: browser.act was called on https://app.example.com, which no approved site covers, and nobody is available to approve it (session slack:blair:…)
+09:14:36  —  warning: blair: [grant] browser.act was called on https://app.example.com, which no approved site covers, and nobody is available to approve it (session slack:blair:…)
 ```
 
 ## Granting a site

@@ -893,8 +893,27 @@ export interface CompoundJudgeOptions {
   reads: (stage: CommandAnalysis, cwd: string, root: string) => Promise<boolean>;
 }
 
+/**
+ * What let a command of a compound line run: a scope (built-in safe or
+ * approved, or one of the plain workspace readers, which need no grant), a
+ * command granted by name, or workspace autonomy. Each command counts the
+ * first of these, in the order the judge tries them.
+ */
+export type CompoundCoverage = 'scope' | 'grant' | 'autonomy';
+
+// Which coverage a whole line is named by: a grant over autonomy, since it
+// is the answer a person gave for this agent and the one to revoke, and
+// either over a scope.
+const COVERAGE_RANK: Record<CompoundCoverage, number> = { scope: 0, autonomy: 1, grant: 2 };
+
 export interface CompoundJudgement {
   covered: boolean;
+  /**
+   * The check a covered line is named by, for the decision's layer: the
+   * highest-ranked coverage any of its commands needed (`COVERAGE_RANK`).
+   * `scope` for a line that needed nothing past the built-in list.
+   */
+  coveredBy: CompoundCoverage;
   /** The commands nothing covered, in order, for the prompt and for "always". */
   uncovered: CompoundStage[];
   /**
@@ -932,6 +951,7 @@ const redirectsInside = async (redirects: readonly Redirect[], cwds: readonly st
 export const judgeCompound = async (compound: CompoundCommand, options: CompoundJudgeOptions): Promise<CompoundJudgement> => {
   const uncovered: CompoundStage[] = [];
   let unfixable = false;
+  let coveredBy: CompoundCoverage = 'scope';
   const root = options.root === undefined ? undefined : await resolveReal(options.root);
   const start = options.cwd === undefined ? undefined : await resolveReal(options.cwd);
   let cwds: string[] | undefined = start === undefined ? undefined : [start];
@@ -985,17 +1005,23 @@ export const judgeCompound = async (compound: CompoundCommand, options: Compound
         }
         continue;
       }
-      let covered = findMatchingScope(analysis, options.safeScopes) !== undefined
-        || (alone && findMatchingScope(analysis, options.scopes) !== undefined);
-      if (!covered && !stale && cwds !== undefined && root !== undefined && insideRoot()) {
-        covered = await coveredByName(analysis, names, cwds, root);
-        if (!covered && WORKSPACE_READERS.has(analysis.base ?? '')) {
-          covered = (await Promise.all(cwds.map((cwd) => options.reads(analysis, cwd, root)))).every(Boolean);
+      let by: CompoundCoverage | undefined = findMatchingScope(analysis, options.safeScopes) !== undefined
+        || (alone && findMatchingScope(analysis, options.scopes) !== undefined)
+        ? 'scope'
+        : undefined;
+      if (by === undefined && !stale && cwds !== undefined && root !== undefined && insideRoot()) {
+        if (await coveredByName(analysis, names, cwds, root)) {
+          by = 'grant';
+        } else if (WORKSPACE_READERS.has(analysis.base ?? '')
+          && (await Promise.all(cwds.map((cwd) => options.reads(analysis, cwd, root)))).every(Boolean)) {
+          by = 'scope';
         }
       }
-      if (!covered && !stale && cwds !== undefined && options.autonomous) {
-        covered = (await Promise.all(cwds.map((cwd) => options.autonomous!(analysis, cwd)))).every(Boolean);
+      if (by === undefined && !stale && cwds !== undefined && options.autonomous
+        && (await Promise.all(cwds.map((cwd) => options.autonomous!(analysis, cwd)))).every(Boolean)) {
+        by = 'autonomy';
       }
+      const covered = by !== undefined;
       const wasStale = stale;
       if (mayRelink(stage)) {
         stale = true;
@@ -1010,13 +1036,15 @@ export const judgeCompound = async (compound: CompoundCommand, options: Compound
         if (cwds === undefined || !insideRoot() || wasStale) {
           unfixable = true;
         }
+      } else if (COVERAGE_RANK[by!] > COVERAGE_RANK[coveredBy]) {
+        coveredBy = by!;
       }
     }
     if (cwds !== undefined && targets.length > 0) {
       cwds = [...new Set([...cwds, ...targets])];
     }
   }
-  return { covered: uncovered.length === 0, uncovered, unfixable };
+  return { covered: uncovered.length === 0, coveredBy, uncovered, unfixable };
 };
 
 /** A name for a log line: the commands of a line, never their arguments. */

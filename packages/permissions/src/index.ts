@@ -139,6 +139,7 @@ export {
   SUBCOMMAND_COMMANDS,
   type CommandNameGrant,
   type CompoundCommand,
+  type CompoundCoverage,
   type CompoundJudgement,
   type CompoundStage,
   type Redirect,
@@ -231,6 +232,36 @@ export interface ApprovalRequest {
  */
 export type ApprovalRequester = (request: ApprovalRequest) => Promise<ApprovalAnswer | ApprovalOutcome>;
 
+/**
+ * Which check made a decision, so a person reading a refusal knows which
+ * setting to change instead of guessing from the wording.
+ *
+ * - `risk`: the tool's risk alone, a `safe` tool or a `gated` one under
+ *   `approvals.posture` open, or a `dangerous` one nobody could approve.
+ * - `scope`: a command scope, approved or built-in safe, covered the
+ *   command, or none did.
+ * - `parse`: the command couldn't be reduced to a scope at all.
+ * - `autonomy`: workspace autonomy.
+ * - `grant`: a standing grant (tool, site, trusted domain, destination,
+ *   channel authorization, the schedule's destination, or this session's
+ *   "always"), or none covered the call.
+ * - `gate`: `approvals.externalContent` "gate" set the grants aside.
+ * - `approver`: a person answered.
+ * - `cancelled`: the turn was cancelled before or during the wait.
+ *
+ * A refusal with nobody to ask names the check that failed to cover the
+ * call, not `approver`, because that's the one the operator can change.
+ */
+export type DecisionLayer =
+  | 'risk'
+  | 'scope'
+  | 'parse'
+  | 'autonomy'
+  | 'grant'
+  | 'gate'
+  | 'approver'
+  | 'cancelled';
+
 /** Why a call was allowed or refused, for logs and events. */
 export interface PermissionDecision {
   allowed: boolean;
@@ -290,6 +321,11 @@ export interface PermissionDecision {
    * "always" for). Logged by the daemon for the same reason as `grant`.
    */
   destinationGrant?: DestinationGrant;
+  /**
+   * Which check made this decision. Optional so a decision from an older
+   * emitter still type-checks; this policy always sets it.
+   */
+  layer?: DecisionLayer;
 }
 
 export interface PermissionPolicyOptions {
@@ -884,6 +920,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
 
   const report = (
     context: ApprovalContext,
+    layer: DecisionLayer,
     allowed: boolean,
     reason: string,
     command?: string,
@@ -905,6 +942,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       ...(origin === undefined ? {} : { origin }),
       ...(grant === undefined ? {} : { grant }),
       ...(destinationGrant === undefined ? {} : { destinationGrant }),
+      layer,
     });
     return allowed;
   };
@@ -914,13 +952,13 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       const { call, risk, session } = context;
 
       if (risk === 'safe') {
-        return report(context, true, `${call.toolName} is safe and runs without approval`);
+        return report(context, 'risk', true, `${call.toolName} is safe and runs without approval`);
       }
 
       if (risk === 'gated' && openFor?.(session.agent.id) === true) {
         const closedByContent = sessionTrustOf(session) === 'external' && gateExternalContent?.(session.agent.id) === true;
         if (!closedByContent) {
-          return report(context, true, `${call.toolName} runs without asking (approvals.posture is open)`);
+          return report(context, 'risk', true, `${call.toolName} runs without asking (approvals.posture is open)`);
         }
       }
 
@@ -1094,6 +1132,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           if (covering) {
             return report(
               context,
+              'scope',
               true,
               covering.length === 1
                 ? `${call.toolName} ran inside the approved scope "${describeCommandScope(covering[0] as CommandScope)}"`
@@ -1134,6 +1173,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             if (covered && read) {
               return report(
                 context,
+                'autonomy',
                 true,
                 `${call.toolName} worked inside ${session.agent.id}'s workspace (autonomy: workspace)`,
                 command,
@@ -1181,6 +1221,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             const names = compoundCommandNames(compound.pipelines.flat());
             return report(
               context,
+              judgement.coveredBy,
               true,
               `${call.toolName} ran ${names.join(', ')}, each inside what ${session.agent.id} may run unattended`,
               command,
@@ -1192,6 +1233,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           // exists for.
           return report(
             context,
+            'parse',
             false,
             `${call.toolName} cannot run unattended: ${analysis.disqualifiedBy}`,
             command,
@@ -1209,6 +1251,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (standing) {
           return report(
             context,
+            'grant',
             true,
             `${call.toolName} ran under a standing grant for ${session.agent.id}`,
             undefined,
@@ -1222,7 +1265,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         && !scopedByOrigin
         && !multiplyScoped
         && alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
-        return report(context, true, `${call.toolName} was approved for the rest of this session`);
+        return report(context, 'grant', true, `${call.toolName} was approved for the rest of this session`);
       }
 
       // Which workspace this destination is in right now, for binding a
@@ -1239,6 +1282,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (standing) {
           return report(
             context,
+            'grant',
             true,
             `${call.toolName} to ${destination} ran under a standing grant for ${session.agent.id}`,
             undefined,
@@ -1267,6 +1311,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         && await destinations?.conversationKindFor?.(session.agent.id, destination) === 'channel') {
         return report(
           context,
+          'grant',
           true,
           `${call.toolName} to ${destination} ran under the operator's standing channel authorization (approvals.channels)`,
           undefined,
@@ -1279,6 +1324,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (granted) {
           return report(
             context,
+            'grant',
             true,
             `${call.toolName} acted on the approved site ${describeOriginScope(granted)}`,
             undefined,
@@ -1292,6 +1338,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (trusted !== undefined) {
           return report(
             context,
+            'grant',
             true,
             `${call.toolName} read from ${origin}, under the trusted domain ${trusted}`,
             undefined,
@@ -1317,6 +1364,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           && await destinations.isPreauthorized(session, destination)) {
           return report(
             context,
+            'grant',
             true,
             `${call.toolName} to ${destination} was pre-authorized when this schedule was approved`,
             undefined,
@@ -1328,28 +1376,40 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       if (mode === 'headless') {
         return report(
           context,
+          // A `dangerous` tool before the gate: no grant covers one either
+          // way, so naming the gate would send the operator to a setting
+          // that changes nothing.
+          risk === 'dangerous'
+            ? 'risk'
+            : externalGate
+              ? 'gate'
+              : command !== undefined
+                ? 'scope'
+                : 'grant',
           false,
-          // Named first because it is the cause: the operator reading this
-          // has grants on file that look like they should have covered the
-          // call, and needs to be told why they did not. The source is a
-          // tool name or `sender`, never content.
-          externalGate
-            ? `${call.toolName} was called after this conversation read external content`
-              + ` (from ${sessionTaintedBy(session) ?? 'an unrecorded source'}); with approvals.externalContent`
-              + ' set to "gate" no grant covers it, and nobody is available to approve it'
-            : command !== undefined
-              ? `${call.toolName} was called outside every approved scope`
-                + `${commandNames(analysis) ? ` (${commandNames(analysis)})` : ''} and nobody is available to approve it`
-              : origin !== undefined
-                // Named, because it is the actionable half: an operator
-                // reading this at 3am needs to know which site to grant, and
-                // an origin carries no path or query to leak while saying so.
-                ? `${call.toolName} was called on ${origin}, which no approved site covers,`
-                  + ' and nobody is available to approve it'
-                : scopedByOrigin
-                  ? `${call.toolName} was called on a page with no origin a grant could name,`
+          // The gate named first otherwise, because it is the cause: the
+          // operator reading this has grants on file that look like they
+          // should have covered the call, and needs to be told why they did
+          // not. The source is a tool name or `sender`, never content.
+          risk === 'dangerous'
+            ? `${call.toolName} is dangerous and nobody is available to approve it`
+            : externalGate
+              ? `${call.toolName} was called after this conversation read external content`
+                + ` (from ${sessionTaintedBy(session) ?? 'an unrecorded source'}); with approvals.externalContent`
+                + ' set to "gate" no grant covers it, and nobody is available to approve it'
+              : command !== undefined
+                ? `${call.toolName} was called outside every approved scope`
+                  + `${commandNames(analysis) ? ` (${commandNames(analysis)})` : ''} and nobody is available to approve it`
+                : origin !== undefined
+                  // Named, because it is the actionable half: an operator
+                  // reading this at 3am needs to know which site to grant, and
+                  // an origin carries no path or query to leak while saying so.
+                  ? `${call.toolName} was called on ${origin}, which no approved site covers,`
                     + ' and nobody is available to approve it'
-                  : `${call.toolName} is ${risk} and nobody is available to approve it`,
+                  : scopedByOrigin
+                    ? `${call.toolName} was called on a page with no origin a grant could name,`
+                      + ' and nobody is available to approve it'
+                    : `${call.toolName} is ${risk} and nobody is available to approve it`,
           command,
           undefined,
           origin,
@@ -1360,7 +1420,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // answering for work that no longer exists, and an answer arriving
       // after the abort would be applied to nothing.
       if (context.signal?.aborted) {
-        return report(context, false, `${call.toolName} was cancelled before it could be approved`);
+        return report(context, 'cancelled', false, `${call.toolName} was cancelled before it could be approved`);
       }
 
       // Both remaining modes wait on a person; only the way of reaching one
@@ -1466,13 +1526,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         : await awaitPrompt(context, ask!, command, origin, alwaysMeans);
 
       if (outcome === ABORTED) {
-        return report(context, false, `${call.toolName} was cancelled while awaiting approval`);
+        return report(context, 'cancelled', false, `${call.toolName} was cancelled while awaiting approval`);
       }
       const { answer, actor } = outcome;
 
       if (answer === 'deny') {
         return report(
           context,
+          'approver',
           false,
           mode === 'remote'
             ? `${call.toolName} was not approved`
@@ -1508,15 +1569,16 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
        */
       const allowUnlessMoved = (reason: string, forCommand?: string): boolean => {
         if (!scopedByOrigin) {
-          return report(context, true, reason, forCommand, undefined, origin);
+          return report(context, 'approver', true, reason, forCommand, undefined, origin);
         }
         const settled = originScopeFor(context.tool.originFor?.(session, call.input) ?? '')?.origin;
         if (settled === origin) {
-          return report(context, true, reason, forCommand, undefined, origin);
+          return report(context, 'approver', true, reason, forCommand, undefined, origin);
         }
         const approvedOn = origin ?? 'a page with no origin';
         return report(
           context,
+          'approver',
           false,
           settled === undefined
             ? `${call.toolName} was approved on ${approvedOn}, and that page is no longer open`

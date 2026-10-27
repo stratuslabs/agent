@@ -274,7 +274,7 @@ so rolling back costs the grants rather than widening them.
 The scope, never the command:
 
 ```text
-09:14:36  —  warning: blair: shell.run was called outside every approved scope (git) and nobody is available to approve it
+09:14:36  —  warning: blair: [scope] shell.run was called outside every approved scope (git) and nobody is available to approve it (session slack:blair:…)
 09:16:02  —  blair: "git push" now runs without asking
 ```
 

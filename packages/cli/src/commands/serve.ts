@@ -81,6 +81,15 @@ import {
   loadServeMaxTurns,
 } from '../trusted-config.ts';
 
+/**
+ * The daemon's line for a refusal. It leads with the check that refused
+ * (`[scope]`, `[grant]`, `[gate]`...), so the operator knows which setting
+ * to change without decoding the wording. A decision from a policy that
+ * names no layer logs as it always did.
+ */
+export const refusalLogLine = (decision: PermissionDecision): string =>
+  `${decision.agentId}: ${decision.layer === undefined ? '' : `[${decision.layer}] `}${decision.reason} (session ${decision.sessionId})`;
+
 export const runServe = async (
   command: ParsedServeCommand,
   streams: CliStreams,
@@ -573,7 +582,7 @@ const serveHeldHome = async (
       }
       return;
     }
-    warn(`${decision.agentId}: ${decision.reason} (session ${decision.sessionId})`);
+    warn(refusalLogLine(decision));
   };
   // A factory, not a policy: remote mode parks turns on a transport the
   // gateway owns, so the policy cannot exist until the gateway is building
