@@ -937,6 +937,50 @@ test('a re-pointed workspace keeps the provenance labels its ledger recorded at 
   assert.ok(recorded.some((entry) => entry.path === path.join(workspace, 'mcp', 'chart.png') && entry.trust === 'external'), JSON.stringify(recorded));
 });
 
+test('a re-pointed workspace keeps the labels its ledger recorded under the old folder\'s real path', async () => {
+  // The old agents folder sat behind a link, so the ledger names files by
+  // the real path while the hidden links spell the linked one.
+  const old = await newHome();
+  await mkdir(path.join(old, 'real'));
+  await symlink(path.join(old, 'real'), path.join(old, 'via'));
+  const oldFolder = path.join(old, 'via', 'Agents');
+  const oldEnv = { homeDir: old, processEnv: { [AGENTS_DIR_ENV]: oldFolder } };
+  await mkdir(path.join(agentWorkspacePath(oldEnv, 'ava'), 'mcp'), { recursive: true });
+  await writeFile(path.join(agentsDirPath(oldEnv), 'ava.md'), soulText('ava'));
+  await surfaceAgentsHome(oldEnv);
+  assert.equal(await readlink(agentWorkspacePath(oldEnv, 'ava')), path.join(oldFolder, 'ava', 'workspace'));
+  const realWorkspace = path.join(old, 'real', 'Agents', 'ava', 'workspace');
+  await writeFile(path.join(realWorkspace, 'mcp', 'chart.png'), 'bytes');
+  await writeFile(path.join(realWorkspace, LEDGER_FILENAME), `${JSON.stringify({ path: path.join(realWorkspace, 'mcp', 'chart.png'), trust: 'external' })}\n`);
+  const home = await newHome();
+  await fs.promises.cp(path.join(old, '.stratus'), path.join(home, '.stratus'), { recursive: true, verbatimSymlinks: true });
+  await fs.promises.cp(path.join(old, 'real', 'Agents'), path.join(home, 'Agents'), { recursive: true });
+  await fs.promises.rm(old, { recursive: true, force: true });
+  const env = { homeDir: home, processEnv: {} };
+
+  assert.match((await surfaceAgentsHome(env)) ?? '', /re-pointed 2 link\(s\)/);
+  const workspace = path.join(home, 'Agents', 'ava', 'workspace');
+  const recorded = (await readFile(path.join(workspace, LEDGER_FILENAME), 'utf8'))
+    .split('\n').filter(Boolean).map((line) => JSON.parse(line) as { path: string; trust: string });
+  assert.ok(recorded.some((entry) => entry.path === path.join(workspace, 'mcp', 'chart.png') && entry.trust === 'external'), JSON.stringify(recorded));
+});
+
+test('a copy whose old home is still there keeps the record naming it, so a start after that home is gone still re-points', async () => {
+  const { home, env, old } = await copiedHome(['ava']);
+  // The old home is back (another user's, say), and its files still resolve.
+  await fs.promises.cp(path.join(home, 'Agents'), path.join(old, 'Agents'), { recursive: true });
+  const hiddenSoul = path.join(agentsDirPath(env), 'ava.md');
+  assert.equal(await surfaceAgentsHome(env), undefined, 'a link whose target exists is left alone');
+  assert.equal(await readlink(hiddenSoul), path.join(old, 'Agents', 'ava', 'soul.md'));
+  const record = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
+  assert.equal(await readFile(record, 'utf8'), `${path.join(old, 'Agents')}\n`, 'the links still name the old folder');
+
+  await fs.promises.rm(old, { recursive: true, force: true });
+  assert.match((await surfaceAgentsHome(env)) ?? '', /re-pointed 2 link\(s\)/);
+  assert.equal(await readlink(hiddenSoul), path.join(home, 'Agents', 'ava', 'soul.md'));
+  assert.equal(await readFile(record, 'utf8'), `${path.join(home, 'Agents')}\n`);
+});
+
 test('a dangling link is left alone, and named with where it points, unless this home has the same agent\'s file', async () => {
   const { home, env, old } = await copiedHome(['ava', 'bob', 'cat', 'dan', 'eve']);
   // Bob's soul is not in this home's folder.

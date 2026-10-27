@@ -768,7 +768,7 @@ const relinkMovedHome = async (entry: MovedHomeLink, report: SurfaceReport): Pro
     return;
   }
   if (entry.kind === 'workspace') {
-    await remapLedger(entry.to, [entry.target], await realpath(entry.to));
+    await remapLedger(entry.to, entry.from, await realpath(entry.to));
   }
   await replaceWithLink(entry.link, entry.to, entry.kind === 'soul' ? 'file' : 'dir');
   report.relinked += 1;
@@ -776,17 +776,24 @@ const relinkMovedHome = async (entry: MovedHomeLink, report: SurfaceReport): Pro
 
 /**
  * Write {@link AGENTS_FOLDER_RECORD}, staged and renamed so it is whole or
- * absent. Only when it would change, and only into a `~/.stratus/agents`
+ * absent: the folder as the links spell it, and on a second line its real
+ * path when a link on the way makes that another (the spelling a workspace
+ * ledger keys its records by, which nothing can work out once the folder is
+ * gone). Only when it would change, and only into a `~/.stratus/agents`
  * that exists: a home with no agent of its own has no links to vouch for.
  */
-const recordAgentsFolder = async (env: StateEnvironment, recorded: string | undefined, agentsHome: string): Promise<void> => {
-  if (recorded === agentsHome || await lstatOrUndefined(agentsDirPath(env)) === undefined) {
+const recordAgentsFolder = async (env: StateEnvironment, plan: AgentsHomePlan, agentsHome: string): Promise<void> => {
+  if (await lstatOrUndefined(agentsDirPath(env)) === undefined) {
+    return;
+  }
+  const canonical = await realpath(agentsHome).catch(() => agentsHome);
+  if (plan.recorded === agentsHome && (plan.recordedCanonical ?? agentsHome) === canonical) {
     return;
   }
   await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
   const file = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
   const staged = `${file}.${randomUUID()}.tmp`;
-  await writeFileSynced(staged, `${agentsHome}\n`, { flag: 'wx', mode: 0o600 });
+  await writeFileSynced(staged, `${agentsHome}\n${canonical === agentsHome ? '' : `${canonical}\n`}`, { flag: 'wx', mode: 0o600 });
   try {
     await rename(staged, file);
   } catch (error) {
@@ -798,17 +805,16 @@ const recordAgentsFolder = async (env: StateEnvironment, recorded: string | unde
 /**
  * Whether the pass writes the record now. Always when there is none: the
  * links are this folder's from here on, or were never provably anything's.
- * Never while a link it might still re-point is broken: a link into the
- * recorded folder that failed, whose file is not here yet, or whose target
- * can't be inspected, since replacing the old folder's name would lose the
- * evidence for the next start. A broken link into any other folder is no
- * reason to keep it: the record never re-points that one, and keeping it
- * would leave the record naming a folder the other links no longer do.
+ * Otherwise only once no link points into the recorded folder any more:
+ * the record names the folder the links were made into, and while one
+ * still does (its target still there, unreadable, or gone with no file
+ * here, or a re-point that failed) replacing that name would lose the
+ * evidence a later start needs. A link into any other folder doesn't count:
+ * the record never re-points that one.
  */
 const shouldRecord = (plan: AgentsHomePlan, unfinished: boolean): boolean =>
   plan.recordUnreadable === undefined
-  && (plan.recorded === undefined
-    || (!unfinished && ![...plan.elsewhere, ...plan.uninspected].some(({ folder }) => folder === plan.recorded)));
+  && (plan.recorded === undefined || (!unfinished && plan.recordedLeft === 0));
 
 /** The start's line for links into another agents folder that it leaves as they are. */
 const elsewhereLine = (plan: AgentsHomePlan): string | undefined => {
@@ -846,7 +852,7 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
     const quiet: string[] = [];
     if (plan.claimed && shouldRecord(plan, false)) {
       try {
-        await recordAgentsFolder(env, plan.recorded, plan.agentsHome);
+        await recordAgentsFolder(env, plan, plan.agentsHome);
       } catch (error) {
         quiet.push(`could not record the agents folder in ${AGENTS_FOLDER_RECORD} (${error instanceof Error ? error.message : String(error)})`);
       }
@@ -894,7 +900,7 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
     await each(`${agentId}'s workspace`, () => surfaceWorkspace(env, agentsHome, agentId, report));
   }
   if (shouldRecord(plan, unfinished)) {
-    await each(`the record in ${AGENTS_FOLDER_RECORD}`, () => recordAgentsFolder(env, plan.recorded, agentsHome));
+    await each(`the record in ${AGENTS_FOLDER_RECORD}`, () => recordAgentsFolder(env, plan, agentsHome));
   }
   const parts: string[] = [];
   const elsewhere = elsewhereLine(plan);
@@ -922,6 +928,11 @@ export interface MovedHomeLink {
   target: string;
   /** The same file in this home's agents folder, which does. */
   to: string;
+  /**
+   * Every spelling the old path had, for remapping a workspace's ledger:
+   * the link's, and the recorded folder's real path when it had another.
+   */
+  from: string[];
 }
 
 /** What {@link planAgentsHome} found. */
@@ -955,6 +966,12 @@ export interface AgentsHomePlan {
    */
   recorded?: string;
   /**
+   * The same folder with every link on its way resolved, when that differs
+   * from {@link recorded}: the record's second line. A workspace ledger keys
+   * its records by that spelling, so a re-point remaps from both.
+   */
+  recordedCanonical?: string;
+  /**
    * Why {@link AGENTS_FOLDER_RECORD} is there but could not be read, as a
    * line to show. Nothing is re-pointed and the record is never replaced
    * while it is set: it may be the only evidence of the old folder.
@@ -976,13 +993,12 @@ export interface AgentsHomePlan {
    */
   elsewhere: Array<{ folder: string; links: number }>;
   /**
-   * Folders that soul and workspace links point into, with how many, whose
-   * targets could not be inspected (`lstat` failed with something other
-   * than ENOENT, such as a folder on the way this user can't search). They
-   * may still be there, so nothing is re-pointed, and one into
-   * {@link recorded} keeps the record as it is.
+   * How many soul and workspace links point into {@link recorded}, when it
+   * is another home's folder, that the next pass leaves as they are: their
+   * target is still there, can't be inspected, or is gone with no file
+   * here to re-point at. While there are any, the record keeps that name.
    */
-  uninspected: Array<{ folder: string; links: number }>;
+  recordedLeft: number;
   /** Souls in the folder that no hidden name links to, so the roster never reads them. */
   unlinked: string[];
 }
@@ -1073,7 +1089,7 @@ const countLink = (counts: Array<{ folder: string; links: number }>, folder: str
  * `unreadable`, never taken for no record: a start would write a new one
  * over it and lose the old folder.
  */
-const readAgentsFolderRecord = async (env: StateEnvironment): Promise<{ folder?: string; unreadable?: string }> => {
+const readAgentsFolderRecord = async (env: StateEnvironment): Promise<{ folder?: string; canonical?: string; unreadable?: string }> => {
   const file = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
   let raw: string;
   try {
@@ -1084,8 +1100,14 @@ const readAgentsFolderRecord = async (env: StateEnvironment): Promise<{ folder?:
     }
     return { unreadable: `could not read ${file} (${error instanceof Error ? error.message : String(error)})` };
   }
-  const folder = raw.split('\n')[0]?.replace(/\r$/, '');
-  return folder !== undefined && path.isAbsolute(folder) ? { folder: path.resolve(folder) } : {};
+  const [folder, canonical] = raw.split('\n').map((line) => line.replace(/\r$/, ''));
+  if (folder === undefined || !path.isAbsolute(folder)) {
+    return {};
+  }
+  return {
+    folder: path.resolve(folder),
+    ...(canonical !== undefined && path.isAbsolute(canonical) ? { canonical: path.resolve(canonical) } : {}),
+  };
 };
 
 /**
@@ -1107,7 +1129,7 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     relink: [],
     dangling: [],
     elsewhere: [],
-    uninspected: [],
+    recordedLeft: 0,
     unlinked: [],
   };
   let entries;
@@ -1177,9 +1199,12 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
   if (agentsHome === undefined) {
     return plan;
   }
-  const { folder: recorded, unreadable } = await readAgentsFolderRecord(env);
+  const { folder: recorded, canonical: recordedCanonical, unreadable } = await readAgentsFolderRecord(env);
   if (recorded !== undefined) {
     plan.recorded = recorded;
+  }
+  if (recordedCanonical !== undefined) {
+    plan.recordedCanonical = recordedCanonical;
   }
   if (unreadable !== undefined) {
     plan.recordUnreadable = unreadable;
@@ -1189,29 +1214,36 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
   // start reads soon, never one nothing reads.
   const wanted = new Set<string>();
   for (const { kind, link, target } of links) {
+    // Only a link into another agents folder has a shape; one into this
+    // home's own folder is where every link ends up.
+    const shape = movedHomeShape(agentsHome, kind, target);
     let gone: boolean;
     try {
       gone = await lstatOrUndefined(target) === undefined;
     } catch {
       // Can't tell (a folder on the way this user can't search): it may
-      // still be there, so nothing is re-pointed, and a link into the
-      // recorded folder keeps the record naming it for a later start.
-      const shape = movedHomeShape(agentsHome, kind, target);
-      if (shape !== undefined) {
-        countLink(plan.uninspected, shape.from);
+      // still be there, so it is left as it is.
+      gone = false;
+    }
+    if (!gone) {
+      if (shape !== undefined && shape.from === recorded) {
+        plan.recordedLeft += 1;
       }
       continue;
     }
-    if (!gone) {
-      continue;
-    }
-    const shape = movedHomeShape(agentsHome, kind, target);
     if (shape !== undefined) {
       wanted.add(shape.to);
       // Only a claimed folder is one a start re-points links into.
       if (plan.claimed && shape.from === recorded && await holdsMovedTarget(kind, shape.to)) {
-        plan.relink.push({ kind, link, target, to: shape.to });
+        const from = [target];
+        if (recordedCanonical !== undefined) {
+          from.push(path.join(recordedCanonical, path.relative(recorded, target)));
+        }
+        plan.relink.push({ kind, link, target, to: shape.to, from });
         continue;
+      }
+      if (shape.from === recorded) {
+        plan.recordedLeft += 1;
       }
     }
     plan.dangling.push(`${link} -> ${target}`);
