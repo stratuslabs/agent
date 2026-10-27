@@ -173,6 +173,15 @@ the daemon or other agents. The denied directories keep their names (`stat`
 and directory listings of the workspace's parent directories still work, so
 git can find its repository), but nothing can be read from inside them.
 
+Both match paths, not files. A hard link is the same file under a second
+name, so a hard link to a hidden file that something outside the sandbox
+(you, or another program running as the daemon's user) puts anywhere a
+command can read (the workspace, `readablePaths`, `writablePaths`, the
+caches, or a `visible` home) can be read through that name. A command
+inside the sandbox can't make one: macOS refuses the link, and on Linux
+every writable directory is its own mount, which a hard link can't cross.
+No Stratus tool creates hard links.
+
 | Key | Default | What |
 | --- | --- | --- |
 | `sandbox` | `required` | `required`: refuse every command when no sandbox can start (no `bwrap`, or a container that forbids user namespaces, mounts or a fresh `/proc`), with the reason. A host wired by hand with no workspace and no `cwd` has nothing to confine commands to, so `required` refuses there too. `auto`: run unconfined there instead, and log why, once. `off`: run with the daemon user's full access. |
