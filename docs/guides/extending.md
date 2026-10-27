@@ -85,7 +85,7 @@ ollama` with a `fallbackModel` fails over to it when the primary errors
 mid-run, under the same sticky-fallback rules as a built-in.
 
 The first-party one is
-[`@stratusagent/provider-openai`](../../packages/provider-openai): the same
+[`@stratusagent/provider-openai`](https://github.com/stratuslabs/plugins/tree/main/provider-openai) (in `stratuslabs/plugins`): the same
 chat-completions adapter the built-in `openai` selection uses, registered
 as `openai-compatible`, with its endpoint in its config block and its key
 resolved per agent from the `openai.apiKey` named credential.

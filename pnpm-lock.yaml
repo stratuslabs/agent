@@ -144,9 +144,6 @@ importers:
       '@stratusagent/provider-codex':
         specifier: workspace:*
         version: link:../provider-codex
-      '@stratusagent/provider-openai':
-        specifier: workspace:*
-        version: link:../provider-openai
       '@stratusagent/tool-browser':
         specifier: workspace:*
         version: link:../tool-browser
@@ -398,28 +395,6 @@ importers:
         specifier: workspace:*
         version: link:../providers
     devDependencies:
-      '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-
-  packages/provider-openai:
-    dependencies:
-      '@stratusagent/core':
-        specifier: workspace:*
-        version: link:../core
-      '@stratusagent/providers':
-        specifier: workspace:*
-        version: link:../providers
-    devDependencies:
-      '@stratusagent/plugins':
-        specifier: workspace:*
-        version: link:../plugins
-      '@stratusagent/state':
-        specifier: workspace:*
-        version: link:../state
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

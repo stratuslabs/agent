@@ -24,14 +24,19 @@ export const FIRST_PARTY_CAPABILITY_PACKAGES = [
 
 /**
  * The first-party plugins that contribute something other than tools — a
- * provider a soul selects, a memory store a trusted config selects. Listed
- * apart from the capability packages because setup's Plugins menu is a
- * tools menu: it says what a package *grants* and prints the `tools:` line
- * to paste, neither of which means anything for these. `stratus plugins`
- * and `stratus update` sweep both lists.
+ * memory store a trusted config selects. Listed apart from the capability
+ * packages because setup's Plugins menu is a tools menu: it says what a
+ * package *grants* and prints the `tools:` line to paste, neither of which
+ * means anything for these. `stratus plugins` and `stratus update` sweep
+ * both lists.
+ *
+ * Only packages released from this repository at the CLI's version belong
+ * here: being listed holds a package to that version. One that moved to
+ * `stratuslabs/plugins` (`@stratusagent/provider-openai`, from 0.14.0)
+ * releases on its own, and `stratus update` keeps it current from the
+ * config's `plugins` block like any other plugin.
  */
 export const FIRST_PARTY_CONTRIBUTION_PACKAGES = [
-  '@stratusagent/provider-openai',
   '@stratusagent/memory-sqlite',
 ];
 
