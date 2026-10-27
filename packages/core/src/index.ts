@@ -4468,6 +4468,7 @@ export interface ChannelAdapterLike {
     after?: string;
     before?: string;
     limit: number;
+    sessionId?: string;
   }): Promise<{
     messages: Array<{
       id: string;
@@ -4503,6 +4504,8 @@ export interface ChannelAdapterLike {
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
   conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
+  /** See `ChannelAdapter.sessionConversation`. */
+  sessionConversation?(agentId: string, sessionId: string): string | undefined;
 }
 
 /**

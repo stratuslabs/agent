@@ -469,6 +469,10 @@ already turns on for approval buttons; no scope is added.
   under **OAuth & Permissions** and be reinstalled; until then the read
   returns the messages and tells the agent the scope is missing. Details in
   [Reading a channel](../../packages/channel-slack/README.md#reading-a-channel).
+- **Reading your own DM** — in a DM, `message.read` can read that DM's
+  earlier messages and threads, so an agent can look back past what its
+  session holds. Every other DM stays unreadable, whatever is approved.
+  Details in [Reading a channel](../../packages/channel-slack/README.md#reading-a-channel).
 - **Creating channels** — `channel.create` makes a channel with the agent's
   own app, sets its topic and purpose, and invites people (Slack user ids)
   and other agents on this host. It needs the `channels:manage` scope for

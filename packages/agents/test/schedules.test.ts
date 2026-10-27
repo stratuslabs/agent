@@ -396,7 +396,8 @@ test('message.read is gated and external, reads as the calling agent, and bounds
     { source: { channel: 'Slack', to: 'C9' }, thread: '1.000001', limit: 10_000 },
     sessionFor('ava'),
   ) as JsonObject;
-  assert.deepEqual(reads, [{ agentId: 'ava', source: { channel: 'slack', to: 'C9' }, thread: '1.000001', limit: MESSAGE_READ_MAX_LIMIT }]);
+  // The session reading is named, since a DM is readable only from its own.
+  assert.deepEqual(reads, [{ agentId: 'ava', sessionId: 'sess-1', source: { channel: 'slack', to: 'C9' }, thread: '1.000001', limit: MESSAGE_READ_MAX_LIMIT }]);
   assert.equal(result.source, 'slack:C9');
   assert.equal(result.count, 1);
 

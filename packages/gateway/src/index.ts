@@ -286,6 +286,7 @@ export interface GatewayChannelAdapter {
     after?: string;
     before?: string;
     limit: number;
+    sessionId?: string;
   }): ReturnType<ConversationReader>;
   /**
    * Creates a conversation with the agent's own app, mirroring
@@ -299,6 +300,8 @@ export interface GatewayChannelAdapter {
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
   conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
+  /** See `ChannelAdapter.sessionConversation`. */
+  sessionConversation?(agentId: string, sessionId: string): string | undefined;
   /**
    * Shows a person a form for a credential an agent asked for, mirroring
    * `ChannelAdapter.requestCredential`. Optional:
@@ -2568,6 +2571,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the channel will refuse anyway only teaches people to click yes.
     // Asked of the same app the read would go through; a channel that
     // cannot say leaves the call to ask, and its own rule still applies.
+    // The one DM let through is the one this session lives in, by the
+    // adapter's own `sessionConversation`, which its read checks again.
+    // It is still gated like any read, so the policy is asked next.
     //
     // Held as an approval wait, because that is the phase it stands in
     // for: it runs before any tool event, so on a streaming provider that
@@ -2587,7 +2593,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       } finally {
         release();
       }
-      return kind === 'direct' ? directMessageReadRefusal(`${source.channel}:${source.to}`) : undefined;
+      if (kind !== 'direct') {
+        return undefined;
+      }
+      let own: string | undefined;
+      try {
+        own = adapter.sessionConversation?.(agentId, sessionId);
+      } catch {
+        own = undefined;
+      }
+      return own !== undefined && own === source.to ? undefined : directMessageReadRefusal(`${source.channel}:${source.to}`);
     },
   }));
   /**

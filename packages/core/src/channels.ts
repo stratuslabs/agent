@@ -376,6 +376,12 @@ export interface ConversationReadRequest {
   before?: string;
   /** At most this many messages; the caller has already bounded it. */
   limit: number;
+  /**
+   * The session asking, which the gateway always names. A direct message
+   * is readable only from a session living in it, which the adapter
+   * decides with its own `sessionConversation`; absent, no DM is.
+   */
+  sessionId?: string;
 }
 
 /** One message as a read returns it: text and who wrote it, not markup. */
@@ -534,8 +540,23 @@ export interface ChannelAdapter {
    * is not a member of, and any kind of conversation the adapter keeps
    * private to the people in it. The result is quoted to the model, so
    * an implementation returns text, never platform markup or tokens.
+   * The one exception to private conversations is the one the asking
+   * session lives in (`request.sessionId`, through `sessionConversation`).
    */
   readConversation?(request: ConversationReadRequest): Promise<ConversationReadResult>;
+  /**
+   * The conversation a session lives in, as this agent's own app here
+   * sees it: the conversation id its session key names, when the session
+   * id is exactly that key (a thread inside it included). Undefined for
+   * any other session: another agent's, another workspace's, a delegated
+   * or scheduled one, an archived one, or one on another transport, and
+   * for an agent with no connected app here. Decided from the id alone,
+   * with no lookup. Both `message.read`'s refusal and the adapter's own
+   * `readConversation` ask it, so the two layers cannot disagree about
+   * which direct message a session may read: only its own. Optional:
+   * without it, no direct message is readable.
+   */
+  sessionConversation?(agentId: string, sessionId: string): string | undefined;
   /**
    * Creates a conversation with the agent's own app and invites people to
    * it — what `channel.create` resolves. Optional, like `readConversation`:
