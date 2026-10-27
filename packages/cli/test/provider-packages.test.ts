@@ -434,3 +434,130 @@ test('doctor reports an API-key agent whose Anthropic adapter is not installed',
   assert.match(output.stdout, /@stratusagent\/provider-anthropic is not installed, and an agent runs on it/);
   assert.match(output.stdout, /stratus update/);
 });
+
+/** A Messages API stand-in that records each call in `log`. */
+const helloFetch = (log: string[]): typeof fetch => (async () => {
+  log.push('hello');
+  return new Response(JSON.stringify({
+    id: 'msg_1',
+    type: 'message',
+    role: 'assistant',
+    model: 'claude-opus-5-5',
+    content: [{ type: 'text', text: 'Hello.' }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 5, output_tokens: 5 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+}) as typeof fetch;
+
+test('setup\'s test run installs the provider package first, so the first hello on a fresh install answers', async () => {
+  // The CLI carries no provider, and Save is where setup installed the one
+  // picked. The Test run row comes before Save, so on a fresh install the
+  // hello failed on the missing package and told someone already in setup
+  // to choose the provider again in setup.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const installed = new Set<string>();
+  const log: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-api-x' },
+      fetch: helloFetch(log),
+      serviceRunner: stubServiceRunner,
+      packageResolver: (specifier) => installed.has(specifier) || missing(ANTHROPIC, CLAUDE_CODE, CODEX)(specifier),
+      packageInstaller: async (packages) => {
+        log.push(`install ${packages.join(' ')}`);
+        for (const specifier of packages) installed.add(specifier.slice(0, specifier.lastIndexOf('@')));
+        return { ok: true, message: '' };
+      },
+      // Test run, then save & finish.
+      setupInput: Readable.from(['8\n', '9\n']),
+    },
+  });
+  assert.equal(exitCode, 0, `${output.stdout}\n${output.stderr}`);
+  // Installed once, before the hello; Save then finds it there.
+  assert.deepEqual(log, [`install ${ANTHROPIC}@${CLI_VERSION}`, 'hello']);
+  assert.doesNotMatch(output.stdout, /Test run failed/);
+});
+
+test('setup\'s test run that cannot install the provider package says so and sends no hello', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const log: string[] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-api-x' },
+      fetch: helloFetch(log),
+      serviceRunner: stubServiceRunner,
+      packageResolver: missing(ANTHROPIC, CLAUDE_CODE, CODEX),
+      packageInstaller: async (packages) => {
+        log.push(`install ${packages.join(' ')}`);
+        return { ok: false, message: 'npm exited with code 243' };
+      },
+      setupInput: Readable.from(['8\n', '9\n']),
+    },
+  });
+  // Tried by the test run and again by Save; never a hello.
+  assert.deepEqual(log, [`install ${ANTHROPIC}@${CLI_VERSION}`, `install ${ANTHROPIC}@${CLI_VERSION}`]);
+  assert.doesNotMatch(output.stdout, /Running a quick hello/);
+  assert.match(output.stderr, /Could not install: npm exited with code 243/);
+});
+
+test('setup\'s test run on the demo provider installs nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: missing(ANTHROPIC, CLAUDE_CODE, CODEX),
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+      // Providers → Demo, then Test run, then save & finish.
+      setupInput: Readable.from(['1\n', '4\n', '8\n', '9\n']),
+    },
+  });
+  assert.equal(exitCode, 0, `${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(installs, []);
+  assert.match(output.stdout, /Demo provider ready/);
+});
+
+test('setup\'s test run installs nothing when the provider package is already installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const log: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-api-x' },
+      fetch: helloFetch(log),
+      serviceRunner: stubServiceRunner,
+      packageResolver: missing(CLAUDE_CODE, CODEX),
+      packageInstaller: async (packages) => {
+        log.push(`install ${packages.join(' ')}`);
+        return { ok: true, message: '' };
+      },
+      setupInput: Readable.from(['8\n', '9\n']),
+    },
+  });
+  assert.equal(exitCode, 0, `${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(log, ['hello']);
+});

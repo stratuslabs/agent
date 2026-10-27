@@ -196,7 +196,10 @@ digits to jump, Esc to go back.
   setup. `stratus service install` and `stratus service uninstall` answer the
   same way for the same failures.
 - **Test run** — say hello with the current settings before saving anything.
-- **Save & finish** — writes everything, offers the Slack package if you
+  The CLI ships no provider, so on a fresh install this first installs the
+  package for the provider you picked, the same one Save would.
+- **Save & finish** — writes everything, installs the package your
+  agents' provider needs if it is missing, offers the Slack package if you
   connected Slack and it is missing, then installs the always-on service.
 
 ## What Save & finish offers

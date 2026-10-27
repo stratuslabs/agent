@@ -114,6 +114,9 @@ export {
   defaultApiKeyEnvName,
 } from './provider-names.ts';
 
+/** Whether an optional package is on disk before Node is asked, since Node 24+ remembers a miss; see the module. */
+export { packageOnDisk, packageResolvable } from './package-on-disk.ts';
+
 export {
   type AgentApprovalConfig,
   MAX_APPROVAL_TIMEOUT_MS,

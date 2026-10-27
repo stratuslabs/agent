@@ -31,6 +31,7 @@ import { ContextOverflowError, HostRefusalError } from '@stratusagent/core';
 import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
 import type { CodexRunTurn } from '@stratusagent/provider-codex';
 import type { RuntimeConfig } from './config.ts';
+import { packageOnDisk } from './package-on-disk.ts';
 import { registeredProviderNameOf } from './provider-names.ts';
 
 export const createDemoTool = () =>
@@ -469,10 +470,15 @@ export const providerPackagesUsedBy = (config: RuntimeConfig): ProviderPackage[]
  * contains the specifier) is a different fault with a different fix.
  */
 export const providerPackageNotInstalledError = (pkg: ProviderPackage, error: unknown): Error | undefined => {
-  const { specifier, label } = PROVIDER_PACKAGES[pkg];
+  const { specifier } = PROVIDER_PACKAGES[pkg];
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
   const message = error instanceof Error ? error.message : '';
   if (code !== 'ERR_MODULE_NOT_FOUND' || !message.startsWith(`Cannot find package '${specifier}'`)) return undefined;
+  return notInstalledError(pkg);
+};
+
+const notInstalledError = (pkg: ProviderPackage): Error => {
+  const { specifier, label } = PROVIDER_PACKAGES[pkg];
   return new Error(
     `This agent runs on ${label}, and ${specifier} is not installed. `
     + `Install it with \`npm install -g ${specifier}\` (or choose the provider again in \`stratus setup\`), then send the message again.`,
@@ -492,6 +498,12 @@ type ProviderOptions<P extends ProviderPackage> = P extends 'anthropic'
     : Parameters<ProviderModules['codex']['createCodexProvider']>[0];
 
 const loadProviderPackage = async <P extends ProviderPackage>(pkg: P): Promise<ProviderModules[P]> => {
+  // Disk first: Node 24+ remembers a failed import for the life of the
+  // process, and this one is retried once the operator installs the
+  // package ("then send the message again").
+  if (!packageOnDisk(PROVIDER_PACKAGES[pkg].specifier, import.meta.url)) {
+    throw notInstalledError(pkg);
+  }
   try {
     return await import(PROVIDER_PACKAGES[pkg].specifier) as ProviderModules[P];
   } catch (error) {

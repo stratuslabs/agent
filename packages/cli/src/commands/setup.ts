@@ -1,4 +1,4 @@
-import { providerPackagesMissingMessage, installProviderPackages, missingProviderPackages } from '../provider-packages.ts';
+import { providerPackagesMissingMessage, installProviderPackages, missingProviderPackages, uninstalledProviderPackages } from '../provider-packages.ts';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { JsonObject } from '@stratusagent/core';
@@ -2736,6 +2736,15 @@ export const runSetup = async (
   const testRun = async (): Promise<void> => {
     const runtime = await buildTestRuntime();
     if (!runtime) {
+      return;
+    }
+    // The CLI carries no provider package, and this row comes before Save,
+    // which installs the one picked. Without this, the first hello on a
+    // fresh install failed on the missing package and told someone already
+    // in setup to choose the provider again in setup. Installed the way
+    // Save does it, without a question: choosing the provider was the
+    // decision. A failed install has already said so, with the command.
+    if (!(await installProviderPackages(uninstalledProviderPackages([runtime], env), streams, env))) {
       return;
     }
     writeLine(streams.stdout, `Running a quick hello (${formatRuntimeBanner(runtime).replace('Starting Stratus Agent local loop with ', '')})…`);

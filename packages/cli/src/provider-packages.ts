@@ -1,4 +1,4 @@
-import { PROVIDER_PACKAGE_NAMES, providerPackagesUsedBy, readProcessEnv, servedRuntimes } from '@stratusagent/state';
+import { PROVIDER_PACKAGE_NAMES, providerPackagesUsedBy, readProcessEnv, servedRuntimes, type RuntimeConfig } from '@stratusagent/state';
 import type { CliEnvironment, CliStreams } from './environment.ts';
 import { writeLine } from './io.ts';
 import { packageInstalled } from './loaders.ts';
@@ -40,7 +40,20 @@ export const missingProviderPackages = async (
   const runtimes = (await Promise.all((options.asService ? [env, serviceEnv] : [env]).map(
     (view) => servedRuntimes(view, configPath).catch(() => []),
   ))).flat();
-  const used = new Set(runtimes.flatMap(({ runtime }) => providerPackagesUsedBy(runtime)));
+  return uninstalledProviderPackages(runtimes.map(({ runtime }) => runtime), env);
+};
+
+/**
+ * The provider packages `runtimes` load on their turns (a fallback's
+ * included) that are not installed here. The rule both of setup's
+ * installs go through: Save's, for the saved files, and the Test run's,
+ * for the selection setup is still holding.
+ */
+export const uninstalledProviderPackages = (
+  runtimes: readonly RuntimeConfig[],
+  env: CliEnvironment,
+): string[] => {
+  const used = new Set(runtimes.flatMap((runtime) => providerPackagesUsedBy(runtime)));
   return [...used]
     .map((pkg) => PROVIDER_PACKAGE_NAMES[pkg])
     .filter((name) => !packageInstalled(name, env));

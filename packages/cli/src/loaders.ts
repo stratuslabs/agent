@@ -1,3 +1,4 @@
+import { packageResolvable } from '@stratusagent/state';
 import type { CliEnvironment, PackageResolver } from './environment.ts';
 
 /**
@@ -9,14 +10,10 @@ import type { CliEnvironment, PackageResolver } from './environment.ts';
  * disabling a channel whose stored tokens say it should be running, or
  * leaving a daemon without the API an operator installed it to have.
  */
-const defaultPackageResolver: PackageResolver = (specifier) => {
-  try {
-    import.meta.resolve(specifier);
-    return true;
-  } catch {
-    return false;
-  }
-};
+const defaultPackageResolver: PackageResolver = (specifier) =>
+  // Disk first: Node 24+ remembers a miss for the life of the process, and
+  // setup installs a package it found missing, then loads it.
+  packageResolvable(specifier, import.meta.url, import.meta.resolve);
 
 /**
  * Whether an optional package is installed. The resolver is injectable
