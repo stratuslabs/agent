@@ -100,6 +100,11 @@ export const runSignIn = async (
         ? ' If stratusd runs with --config, its default soul is named there: pass the same --config here.'
         : ''),
     );
+    // Why it is not there, when the roster said: a configured soul the
+    // daemon ignores, or a soul file that did not parse.
+    for (const line of warnings) {
+      writeLine(streams.stderr, `  ${line}`);
+    }
     return 1;
   }
 

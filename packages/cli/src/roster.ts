@@ -1,5 +1,5 @@
 import { matchesToolAllowlist, toolScopesOverlap } from '@stratusagent/core';
-import { DEFAULT_STRATUS_AGENT, loadRosterSouls, resolveConfiguredSoul } from '@stratusagent/state';
+import { DEFAULT_STRATUS_AGENT, foldedAgentId, loadRosterSouls, resolveConfiguredSoul } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
 /**
@@ -81,7 +81,25 @@ export const rosterSoulsWithConfigured = async (
   let complete = true;
   try {
     const configured = await resolveConfiguredSoul(configPath !== undefined ? { configPath } : {}, env);
-    if (configured) {
+    // The gateway's rule for a default soul that never went through the
+    // roster's fold check (stateDirectoryPeer in defaultAgentId): an id
+    // that names another agent's state directory without being that id,
+    // `Stratus` beside the built-in or `Ava` beside roster `ava`, is
+    // dropped and default dispatches go to the built-in. The built-in is
+    // always registered there, so it is folded against here whether or not
+    // the caller lists it.
+    const id = configured?.soul.agent.id;
+    const peer = id === undefined
+      ? undefined
+      : [DEFAULT_STRATUS_AGENT.id, ...entries.map((candidate) => candidate.soul.agent.id)]
+        .find((other) => other !== id && foldedAgentId(other) === foldedAgentId(id));
+    if (configured && peer !== undefined) {
+      warn(
+        `the configured default soul at ${configured.path} declares the agent id ${id}, which names the same `
+        + `state directory as ${peer}, so the daemon ignores it and routes to ${DEFAULT_STRATUS_AGENT.id}. `
+        + 'Rename one of the two ids.',
+      );
+    } else if (configured) {
       const entry = { soul: configured.soul, path: configured.path };
       const clash = entries.findIndex((candidate) => candidate.soul.agent.id === configured.soul.agent.id);
       // Replaced, not skipped: a roster file claiming the configured

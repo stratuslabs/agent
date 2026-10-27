@@ -89,6 +89,11 @@ export const runChannel = async (
   const roster = await rosterSoulsWithConfigured(env, (line) => warnings.push(line), { includeBuiltIn: true });
   if (roster.complete && !roster.entries.some((entry) => entry.soul.agent.id === agentId)) {
     writeLine(streams.stderr, `No agent ${agentId} is on the roster, so a ${kind} binding for it would never come online. \`stratus agents\` lists who is.`);
+    // Why it is not there, when the roster said: a configured soul the
+    // daemon ignores, or a soul file that did not parse.
+    for (const line of warnings) {
+      writeLine(streams.stderr, `  ${line}`);
+    }
     return 1;
   }
 
