@@ -4,7 +4,6 @@ import {
   drainSharedMemory,
   runStateMigrations,
   STATE_SCHEMA_VERSION,
-  NoProviderConfiguredError,
   DEFAULT_STRATUS_AGENT,
   redactProviderReplayState,
 } from '@stratusagent/state';
@@ -57,6 +56,12 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
   // Chosen before anything can write — see `jsonRecordStreams`.
   const jsonLog = wantsJsonLog(argv);
   const streams = jsonLog ? jsonRecordStreams(given) : given;
+  // True only while argv is parsed. The help answers a mistake in how the
+  // command was typed, so it follows an error only the parser threw: a
+  // command that fails after parsing (a turn at its provider, a provider
+  // package that is not installed, a daemon that does not answer) was typed
+  // fine, and its error already says what failed.
+  let parsingArguments = false;
   try {
     const resolvedEnv = argv.includes('--stdin') && env.stdin === undefined
       ? {
@@ -65,7 +70,9 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
         }
       : env;
 
+    parsingArguments = true;
     const command = parseCommand(argv, resolvedEnv);
+    parsingArguments = false;
 
     if (command.command === 'help') {
       writeLine(streams.stdout, HELP_TEXT);
@@ -311,10 +318,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeLine(streams.stderr, `Error: ${message}`);
-    // The help is for a person at a terminal; under a log shipper it would
-    // be a hundred records burying the one that says what failed. A missing
-    // provider is not a usage mistake, and its message already says what to do.
-    if (!jsonLog && !(error instanceof NoProviderConfiguredError)) {
+    // The help is for a person at a terminal who mistyped; under a log
+    // shipper it would be a hundred records burying the one that says what
+    // failed.
+    if (parsingArguments && !jsonLog) {
       writeLine(streams.stderr, '');
       writeLine(streams.stderr, HELP_TEXT);
     }
