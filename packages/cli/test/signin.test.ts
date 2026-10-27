@@ -141,6 +141,26 @@ test('stratus signin set accepts the built-in id once a configured default soul 
   assert.equal(stored.agentSignIns?.stratus?.anthropic?.value, TOKEN);
 });
 
+test('stratus signin set refuses a configured soul whose id folds onto the built-in, which the daemon ignores', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const file = path.join(home, '.stratus', 'credentials.json');
+  const before = await readFile(file, 'utf8');
+  // `Stratus` names the built-in agent's state directory without being its
+  // id. The daemon drops that soul and routes to the built-in, so a token
+  // stored for `Stratus` would never be used.
+  const soul = path.join(home, 'main.md');
+  await writeFile(soul, '---\nname: Main\nid: Stratus\nprovider: anthropic\n---\n\nYou are Main.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+
+  const folded = await run(['signin', 'set', 'anthropic', '--agent', 'Stratus'], { ...env, stdin: TOKEN });
+  assert.equal(folded.code, 1, folded.stdout);
+  assert.match(folded.stderr, /No agent Stratus is on the roster/);
+  assert.match(folded.stderr, /declares the agent id Stratus, which names the same state directory as stratus/);
+  assert.equal(await readFile(file, 'utf8'), before, 'nothing stored');
+  assert.ok(!folded.stdout.includes(TOKEN) && !folded.stderr.includes(TOKEN));
+});
+
 test('stratus signin set --config reads the default soul from the config the daemon was started with', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
