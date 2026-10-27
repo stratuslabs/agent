@@ -21,12 +21,6 @@
       "path": "../core"
     },
     {
-      "path": "../providers"
-    },
-    {
-      "path": "../provider-anthropic"
-    },
-    {
       "path": "../provider-claude-code"
     },
     {

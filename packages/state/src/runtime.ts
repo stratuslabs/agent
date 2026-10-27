@@ -1,6 +1,4 @@
 import type { ParsedSoul } from '@stratusagent/agents';
-import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 import { loadConfigFile } from './config-file.ts';
 import { type ResolvedConfigLocation, resolveConfigLocation } from './config-location.ts';
 import type {
@@ -20,7 +18,7 @@ import {
   type CredentialProviderName,
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
-  DEFAULT_OPENAI_MODEL,
+  defaultModelFor,
   parseProviderName,
   defaultApiKeyEnvName,
 } from './provider-names.ts';
@@ -480,11 +478,9 @@ export const resolveRuntimeConfig = async (
     ?? readNonEmptyString(processEnv.STRATUS_MODEL)
     ?? (soulModelApplies ? readNonEmptyString(soul?.model) : undefined)
     ?? (fileConfigApplies ? fileConfig.model : undefined)
-    ?? (provider === 'anthropic'
-      ? DEFAULT_ANTHROPIC_MODEL
-      : provider === 'codex'
-        ? DEFAULT_CODEX_MODEL
-        : DEFAULT_OPENAI_MODEL);
+    // Demo and contributed providers returned above; parsing allows only
+    // built-in names, so what is left is one of the three.
+    ?? defaultModelFor(provider as CredentialProviderName);
 
   const apiKeyEnvName = apiKeyEnvNameFor(provider as CredentialProviderName, fileConfig, fileConfigApplies, env, configTrusted);
   // Read off the answer rather than re-deriving the rule that produced it:

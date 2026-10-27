@@ -1,9 +1,7 @@
-import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 import { defineAgent, formatSoul, generateAgentName } from '@stratusagent/agents';
 import {
   claimSoulFile,
-  DEFAULT_OPENAI_MODEL,
+  defaultModelFor,
   discoverActiveConfig,
   globalConfigPath,
   isRegisteredProviderName,
@@ -58,13 +56,7 @@ export const soulPinForNewAgent = (
     // A contributed provider's default model is its own — pinning a
     // built-in's into a new soul would point the plugin at a model it
     // never heard of.
-    ?? (isRegisteredProviderName(provider)
-      ? undefined
-      : provider === 'openai'
-        ? DEFAULT_OPENAI_MODEL
-        : provider === 'codex'
-          ? DEFAULT_CODEX_MODEL
-          : DEFAULT_ANTHROPIC_MODEL);
+    ?? (isRegisteredProviderName(provider) ? undefined : defaultModelFor(provider));
   return model !== undefined ? { provider, model } : { provider };
 };
 
@@ -202,7 +194,7 @@ export const runAgentNew = async (
 
   if (command.format === 'soul') {
     streams.stdout.write(
-      formatSoul({ agent, provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL }),
+      formatSoul({ agent, provider: 'anthropic', model: defaultModelFor('anthropic') }),
     );
     return 0;
   }

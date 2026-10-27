@@ -8,8 +8,6 @@ import {
   PluginConfigError,
   PluginManifestError,
 } from '@stratusagent/plugins';
-import { DEFAULT_ANTHROPIC_MODEL } from '@stratusagent/provider-anthropic';
-import { DEFAULT_CODEX_MODEL } from '@stratusagent/providers';
 import { formatSoul, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import {
   claimSoulFile,
@@ -18,7 +16,7 @@ import {
   defaultApiKeyEnvName,
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
-  DEFAULT_OPENAI_MODEL,
+  defaultModelFor as builtInModelDefault,
   DEFAULT_STRATUS_AGENT,
   globalConfigPath,
   loadChannelCredentials,
@@ -305,12 +303,10 @@ export const runSetup = async (
     consumeNotices: () => recentNotices.splice(0),
   });
 
+  // The demo model has none of its own; setup names Anthropic's for it,
+  // as it always has.
   const builtInDefaultModel = (provider: BuiltinProviderName): string =>
-    provider === 'openai'
-      ? DEFAULT_OPENAI_MODEL
-      : provider === 'codex'
-        ? DEFAULT_CODEX_MODEL
-        : DEFAULT_ANTHROPIC_MODEL;
+    builtInModelDefault(provider === 'demo' ? 'anthropic' : provider);
   // A contributed provider's default is its own, so setup has none to
   // name for it — and none to write into a config or a soul.
   const defaultModelFor = (provider: CliProviderName): string | undefined =>
