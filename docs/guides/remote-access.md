@@ -9,6 +9,7 @@ the API has three consumers and only one of them is a web page.
 npm install -g @stratusagent/control-api @stratusagent/dashboard
 ```
 
+`stratus dashboard` offers that install itself when either is missing.
 Install `@stratusagent/control-api` alone for a headless machine; add
 `@stratusagent/dashboard` and the API serves the web UI at `/` as well.
 With the API present, `stratus serve` also serves it on `127.0.0.1:4123`.

@@ -258,7 +258,8 @@ Commands:
                    the upgrade but still migrates and repairs the unit
   dashboard        Open the web dashboard: finds a running daemon (or starts one),
                    mints a single-use sign-in link, and opens your browser at it.
-                   Needs @stratusagent/control-api and @stratusagent/dashboard
+                   Needs @stratusagent/control-api and @stratusagent/dashboard,
+                   and offers to install them when they are missing
   help             Show this help message
   version          Print this build's version (also: --version, -v)
 

@@ -2,10 +2,80 @@ import { spawn } from 'node:child_process';
 import { gatewayToken, readGatewayInfo, gatewayAnswering, HomeHeldError } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
+import { packageInstalled } from '../loaders.ts';
+import { CLI_VERSION, defaultPackageInstaller } from '../npm.ts';
 import type { ParsedDashboardCommand } from '../parse.ts';
+import { createSetupPrompter } from '../prompter.ts';
 import { runServe } from './serve.ts';
 
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
+
+const CONTROL_API_PACKAGE = '@stratusagent/control-api';
+
+/** What a daemon this command starts needs: the API that serves the page, and the page. */
+const DASHBOARD_PACKAGES = [CONTROL_API_PACKAGE, '@stratusagent/dashboard'];
+
+/**
+ * Offers the dashboard's missing packages. This command is the one place
+ * they are offered (card 308): setup and the rest leave them alone, since
+ * the control API binds a port and the person to ask is the one who just
+ * asked for the dashboard. At this CLI's own version, as the provider
+ * packages are: they ship in lockstep, and an unpinned install would put
+ * the latest control API beside an older daemon.
+ *
+ * `ready` means this process can load them now and should carry on;
+ * `rerun` that npm installed them but this process cannot see them yet;
+ * `missing` that nothing changed. Never throws.
+ */
+const offerDashboardPackages = async (
+  missing: readonly string[],
+  streams: CliStreams,
+  env: CliEnvironment,
+): Promise<'ready' | 'rerun' | 'missing'> => {
+  const one = missing.length === 1;
+  const specifiers = missing.map((name) => `${name}@${CLI_VERSION}`);
+  const install = `npm install -g ${specifiers.join(' ')}`;
+  writeLine(streams.stdout, `\`stratus dashboard\` needs ${missing.join(' and ')}, which ${one ? 'is' : 'are'} not installed.`);
+  if (missing.includes(CONTROL_API_PACKAGE)) {
+    writeLine(streams.stdout, 'The control API serves the dashboard on an authenticated port, 127.0.0.1 unless you choose another host.');
+  }
+
+  // A person to ask, or a script that only gets the command: installing
+  // something that binds a port is not a default to take unattended.
+  if (env.setupInput === undefined && process.stdin.isTTY !== true) {
+    writeLine(streams.stderr, `Error: install ${one ? 'it' : 'them'} with \`${install}\`, then run \`stratus dashboard\` again.`);
+    return 'missing';
+  }
+  const prompter = createSetupPrompter(streams, env);
+  let answer;
+  try {
+    answer = await prompter.select(`Install ${one ? 'it' : 'them'} now with npm install -g?`, ['Install now', 'Cancel']);
+  } finally {
+    prompter.close();
+  }
+  if (answer.kind !== 'index' || answer.index !== 0) {
+    writeLine(streams.stdout, `Not installed. Install ${one ? 'it' : 'them'} yourself with: ${install}`);
+    return 'missing';
+  }
+
+  writeLine(streams.stdout, `Running: ${install}`);
+  const result = await (env.packageInstaller ?? defaultPackageInstaller)(specifiers)
+    .catch((error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : String(error) }));
+  if (!result.ok) {
+    writeLine(streams.stderr, `Could not install: ${result.message || 'unknown error'}`);
+    writeLine(streams.stderr, `Run \`${install}\` yourself, then \`stratus dashboard\` again.`);
+    return 'missing';
+  }
+  writeLine(streams.stdout, `Installed ${missing.join(' and ')}.`);
+  // npm's exit code says they are in the global prefix, not that this
+  // process resolves them there (an npx run, a CLI outside that prefix).
+  // A daemon started without the control API would only time out.
+  if (missing.some((name) => !packageInstalled(name, env))) {
+    writeLine(streams.stdout, 'This process cannot load them until it starts again: run `stratus dashboard` again.');
+    return 'rerun';
+  }
+  return 'ready';
+};
 
 export const openExternalUrl = async (url: string): Promise<void> => {
   const platform = process.platform;
@@ -81,7 +151,22 @@ export const runDashboard = async (
   const ownDaemon = new AbortController();
   let serving: Promise<number> | undefined;
 
+  // Set when this run just installed the control API: a daemon already
+  // holding the home started without it and will never publish an address.
+  let installedApi = false;
+
   if (!base) {
+    // Checked only for a daemon of our own. One already answering brought
+    // its own packages, whatever this shell resolves.
+    const missing = DASHBOARD_PACKAGES.filter((name) => !packageInstalled(name, env));
+    if (missing.length > 0) {
+      const offered = await offerDashboardPackages(missing, streams, env);
+      if (offered !== 'ready') {
+        return offered === 'rerun' ? 0 : 1;
+      }
+      installedApi = missing.includes(CONTROL_API_PACKAGE);
+    }
+
     writeLine(streams.stdout, 'No daemon is running — starting one. It stops when you do.');
     writeLine(streams.stdout, 'Run `stratus service install` to keep one running instead.');
 
@@ -147,7 +232,7 @@ export const runDashboard = async (
         break;
       }
       if (daemonSettled) {
-        if (!(daemonFailure instanceof HomeHeldError)) {
+        if (!(daemonFailure instanceof HomeHeldError) || installedApi) {
           break;
         }
         if (Date.now() - attemptedAt >= 1_000) {
@@ -161,7 +246,12 @@ export const runDashboard = async (
       await daemonExit;
       writeLine(
         streams.stderr,
-        daemonFailure instanceof HomeHeldError
+        daemonFailure instanceof HomeHeldError && installedApi
+          ? 'Error: a daemon is already running for this home, and it started before the dashboard packages were '
+            + 'installed, so it has no control API. Restart it to load them: `stratus service stop` and then '
+            + '`stratus service start` if it is the installed service, otherwise Ctrl+C where it runs and start it again. '
+            + 'Then run `stratus dashboard`.'
+          : daemonFailure instanceof HomeHeldError
           ? 'Error: another daemon holds this home but never published its address. It may still be starting or '
             + 'draining — try again in a moment, or check `stratus service status`.'
           : daemonFailure

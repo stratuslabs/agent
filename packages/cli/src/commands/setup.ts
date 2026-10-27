@@ -2784,130 +2784,48 @@ export const runSetup = async (
   };
 
   /**
-   * An optional package this setup's own choices imply, and why. Setup knows
-   * both facts before the daemon does — that Slack tokens were just stored,
-   * and that it is about to recommend `stratus dashboard` — so it is the one
-   * place that can offer the install rather than leave the gap to be found
-   * in a log after the fact.
-   */
-  interface PackageGroup {
-    id: 'slack' | 'dashboard';
-    label: string;
-    why: string;
-    packages: string[];
-  }
-
-  /**
-   * Whether `stratus dashboard` can work. Read before the offer and set by
-   * it, so the closing suggestions never name a command this machine cannot
-   * run — the failure that sends someone to the logs to find out why.
-   */
-  let dashboardReady = packageInstalled('@stratusagent/control-api', env)
-    && packageInstalled('@stratusagent/dashboard', env);
-
-  const missingPackageGroups = (): PackageGroup[] => {
-    const groups: PackageGroup[] = [];
-    const slackAgents = Object.keys(state.channels.slack ?? {}).length;
-    if (slackAgents > 0 && !packageInstalled('@stratusagent/channel-slack', env)) {
-      groups.push({
-        id: 'slack',
-        label: 'Slack channel',
-        why: `Slack tokens are stored for ${slackAgents} agent(s), but nothing connects to Slack without it`,
-        packages: ['@stratusagent/channel-slack'],
-      });
-    }
-    // Both, because the dashboard is what was offered: the control API is
-    // the port and the dashboard is the page served on it. Only the missing
-    // half is installed, so accepting this on a machine that already has
-    // the API does not reinstall it.
-    const dashboardPackages = ['@stratusagent/control-api', '@stratusagent/dashboard']
-      .filter((name) => !packageInstalled(name, env));
-    if (dashboardPackages.length > 0) {
-      groups.push({
-        id: 'dashboard',
-        label: 'Web dashboard',
-        why: '`stratus dashboard` needs it, and it opens an authenticated port on 127.0.0.1',
-        packages: dashboardPackages,
-      });
-    }
-    return groups;
-  };
-
-  /**
-   * Offers the packages above. Declining is a real answer and prints the
-   * command; the control API in particular binds a port, and installing it
-   * is how an operator says they want one open, so this asks rather than
-   * deciding for them.
+   * The Slack channel package, when this setup has Slack tokens stored and
+   * it is not installed. Setup knows that before the daemon does, so it is
+   * the one place that can offer the install rather than leave the gap to
+   * be found in a log after the fact.
+   *
+   * The dashboard is deliberately not offered here: its control API binds a
+   * port, and the time to ask about that is when someone runs
+   * `stratus dashboard`, which offers its own packages (card 308).
+   * Declining is a real answer and prints the command.
    */
   const offerOptionalPackages = async (): Promise<void> => {
-    const groups = missingPackageGroups();
-    if (groups.length === 0) {
+    const slackPackage = '@stratusagent/channel-slack';
+    const slackAgents = Object.keys(state.channels.slack ?? {}).length;
+    if (slackAgents === 0 || packageInstalled(slackPackage, env)) {
       return;
     }
     writeLine(streams.stdout);
-    writeLine(streams.stdout, groups.length === 1
-      ? 'One optional package is not installed:'
-      : `${groups.length} optional packages are not installed:`);
-    for (const group of groups) {
-      writeLine(streams.stdout, `  ${group.packages.join(' ')}`);
-      writeLine(streams.stdout, `    ${group.why}.`);
+    writeLine(streams.stdout, 'One optional package is not installed:');
+    writeLine(streams.stdout, `  ${slackPackage}`);
+    writeLine(streams.stdout, `    Slack tokens are stored for ${slackAgents} agent(s), but nothing connects to Slack without it.`);
+
+    const answer = await prompter.select('Install now with npm install -g?', ['Install it now', 'Skip']);
+    if (answer.kind !== 'index' || answer.index !== 0) {
+      writeLine(streams.stdout, `Skipped. Install it yourself with: npm install -g ${slackPackage}`);
+      return;
     }
 
-    const answer = await prompter.select('Install now with npm install -g?', groups.length === 1
-      ? ['Install it now', 'Skip']
-      : ['Install all of them now', ...groups.map((group) => `Install the ${group.label} only`), 'Skip']);
-
-    const chosen = ((): PackageGroup[] => {
-      if (answer.kind !== 'index') {
-        return [];
-      }
-      if (groups.length === 1) {
-        return answer.index === 0 ? groups : [];
-      }
-      if (answer.index === 0) {
-        return groups;
-      }
-      const only = groups[answer.index - 1];
-      return only ? [only] : [];
-    })();
-
-    // Held before the install rather than derived after it: picking one
-    // group is not a decision about the other, and the daemon starts a few
-    // lines below and warns about exactly what is still missing — the
-    // notice this whole offer exists to pre-empt.
-    const declined = groups.filter((group) => !chosen.includes(group));
-
-    if (chosen.length > 0) {
-      const packages = chosen.flatMap((group) => group.packages);
-      writeLine(streams.stdout, `Running: npm install -g ${packages.join(' ')}`);
-      // Never fails setup — not even its exit code, unlike the always-on
-      // service step below: the config and credentials are already written,
-      // and a package that did not install is a warning at the next start,
-      // not a broken machine.
-      const result = await (env.packageInstaller ?? defaultPackageInstaller)(packages)
-        .catch((error: unknown) => ({
-          ok: false,
-          message: error instanceof Error ? error.message : String(error),
-        }));
-      if (result.ok) {
-        writeLine(streams.stdout, `Installed ${packages.join(' ')}.`);
-        // npm's exit code, not a second resolve: a package written into the
-        // global prefix a moment ago need not be resolvable from THIS
-        // process, whose module resolution was fixed when it started.
-        if (chosen.some((group) => group.id === 'dashboard')) {
-          dashboardReady = true;
-        }
-      } else {
-        writeLine(streams.stderr, `Could not install: ${result.message}`);
-        writeLine(streams.stderr, `Setup is saved either way — run \`npm install -g ${packages.join(' ')}\` yourself.`);
-      }
-    }
-
-    if (declined.length > 0) {
-      const rest = declined.flatMap((group) => group.packages).join(' ');
-      writeLine(streams.stdout, chosen.length > 0
-        ? `Still missing. Install with: npm install -g ${rest}`
-        : `Skipped. Install them yourself with: npm install -g ${rest}`);
+    writeLine(streams.stdout, `Running: npm install -g ${slackPackage}`);
+    // Never fails setup — not even its exit code, unlike the always-on
+    // service step below: the config and credentials are already written,
+    // and a package that did not install is a warning at the next start,
+    // not a broken machine.
+    const result = await (env.packageInstaller ?? defaultPackageInstaller)([slackPackage])
+      .catch((error: unknown) => ({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    if (result.ok) {
+      writeLine(streams.stdout, `Installed ${slackPackage}.`);
+    } else {
+      writeLine(streams.stderr, `Could not install: ${result.message}`);
+      writeLine(streams.stderr, `Setup is saved either way — run \`npm install -g ${slackPackage}\` yourself.`);
     }
   };
 
@@ -3224,9 +3142,8 @@ export const runSetup = async (
       }
     }
     writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag}${shadowConfigFlag} "say hello"`);
-    if (dashboardReady) {
-      writeLine(streams.stdout, '  stratus dashboard');
-    }
+    // Whether or not its packages are here: the command offers them itself.
+    writeLine(streams.stdout, '  stratus dashboard');
     return !serviceStepFailed && !providerInstallFailed;
   };
 

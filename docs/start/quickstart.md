@@ -20,12 +20,16 @@ stratus run --provider demo --prompt "please use the echo tool"
 
 ## 2) Open the local dashboard
 
-The dashboard is two optional packages, so install them first:
-
 ```bash
-npm install -g @stratusagent/control-api @stratusagent/dashboard
 stratus dashboard
 ```
+
+The dashboard is two optional packages, `@stratusagent/control-api` and
+`@stratusagent/dashboard`. When they are missing, the command says so and
+offers to install them (at the CLI's own version) before it starts
+anything; without a terminal to ask at, it prints the `npm install -g`
+command instead. If an always-on daemon was already running, restart it
+after the install so it loads the control API.
 
 The command finds a running daemon (or starts one in the foreground, and
 says which it did), mints a single-use sign-in link, and opens your
