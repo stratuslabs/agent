@@ -75,6 +75,20 @@ export const runSignIn = async (
     (line) => warnings.push(line),
     command.configPath !== undefined ? { configPath: command.configPath } : {},
   );
+  // Without --config an unreadable default config skips the check, as
+  // `stratus channel set` does. A config named on purpose is different:
+  // skipping would store a token against a roster nobody could read, the
+  // same silent no-op this check exists to catch.
+  if (command.configPath !== undefined && !roster.complete) {
+    writeLine(
+      streams.stderr,
+      `Nothing was stored: could not read the default soul from --config ${command.configPath}, so ${agentId} could not be checked against its roster.`,
+    );
+    for (const line of warnings) {
+      writeLine(streams.stderr, `  ${line}`);
+    }
+    return 1;
+  }
   if (roster.complete && !roster.entries.some((entry) => entry.soul.agent.id === agentId)) {
     writeLine(
       streams.stderr,

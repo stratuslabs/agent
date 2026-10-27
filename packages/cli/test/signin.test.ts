@@ -159,6 +159,16 @@ test('stratus signin set --config reads the default soul from the config the dae
   assert.equal(withConfig.code, 0, withConfig.stderr);
   assert.match(withConfig.stdout, /Stored stratus's own Claude sign-in/);
 
+  // A config named on purpose that cannot be read is a mistake to report,
+  // not a roster to skip checking against.
+  const before = await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8');
+  for (const broken of [path.join(home, 'typo.json'), soul]) {
+    const unreadable = await run(['signin', 'set', 'anthropic', '--agent', 'stratus', '--config', broken], { ...env, stdin: ROTATED });
+    assert.equal(unreadable.code, 1, unreadable.stdout);
+    assert.match(unreadable.stderr, /could not read the default soul from --config/);
+    assert.equal(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'), before, 'nothing stored');
+  }
+
   const removeWithConfig = await run(['signin', 'remove', 'anthropic', '--agent', 'stratus', '--config', custom], env);
   assert.equal(removeWithConfig.code, 1);
   assert.match(removeWithConfig.stderr, /--config is for signin set/);
