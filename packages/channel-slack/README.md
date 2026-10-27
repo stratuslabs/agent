@@ -547,6 +547,21 @@ one cheaply, a display name. File contents are not downloaded; their names
 are listed. The tool labels the result `external`, so what an agent
 remembers after reading carries that label.
 
+A read of a channel's top level with no `before` or `after`, the first
+page, also lists the channel's bookmarks (`bookmarks.list`, asked beside
+the history and only after the checks above pass), so an agent told "the
+doc is in the bookmarks" can find it. Each comes back as a title and a
+link, nothing else: a title over 200 characters is cut, and a link over
+2,000 is replaced by a note, since a cut link is a broken one. A thread or
+a later page lists none, so paging costs no extra calls. This needs the
+`bookmarks:read` scope, which the manifest asks for. An app created before
+it reads messages exactly as before, and its first-page reads carry
+`bookmarksUnavailable`, a sentence telling the agent the scope is missing;
+any other failure to list them is said the same way, and the messages come
+back either way. In `message.read`, bookmarks come first and may use 16,000
+of its 40,000 characters, which holds Slack's limit of 100 at a typical
+length. Any that don't fit are counted in `bookmarksOmitted`.
+
 ## Speaking first: the outbound seam
 
 The adapter also implements the channel contract's `resolveOutbound` — how a

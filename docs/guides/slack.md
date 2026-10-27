@@ -458,6 +458,12 @@ already turns on for approval buttons; no scope is added.
   line per row with each value named by its column. The
   full list of what is converted is in the
   [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md).
+- **Bookmarks** — a `message.read` of a channel's top level also returns the
+  channel's bookmarks. It needs the `bookmarks:read` scope, which the
+  manifest asks for. An app created before it should have the scope added
+  under **OAuth & Permissions** and be reinstalled; until then the read
+  returns the messages and tells the agent the scope is missing. Details in
+  [Reading a channel](../../packages/channel-slack/README.md#reading-a-channel).
 - **Approval buttons** — with [`--approvals remote`](./approvals.md), a gated
   tool call parks the turn and asks in its thread with **Allow once** /
   **Always allow** / **Deny**. Clicks are authorized by *who clicked*, never

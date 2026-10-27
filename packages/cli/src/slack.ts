@@ -78,6 +78,10 @@ export const verifySlackAppToken = async (token: string, fetchImpl: typeof fetch
 // package being installed.
 const SLACK_BOT_SCOPES = [
   'app_mentions:read',
+  // A channel's bookmarks, which a top-level message.read returns beside
+  // its messages. An app installed without it reads messages as before,
+  // and the read tells the agent the scope is missing.
+  'bookmarks:read',
   // The history family is what lets an agent stay in a conversation it was
   // brought into: without it Slack delivers only mentions, and a reply in
   // the agent's own thread never reaches it. It is the workspace's switch

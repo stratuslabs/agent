@@ -135,6 +135,14 @@ const MESSAGE_READ_DEFAULT_LIMIT = 50;
  * agent pages on with `before`/`after`.
  */
 export const MESSAGE_READ_TEXT_BUDGET = 40_000;
+/**
+ * The share of `MESSAGE_READ_TEXT_BUDGET` a channel's bookmarks may take,
+ * counted first. It holds Slack's limit of 100 at a typical length; what
+ * it exists to stop is the people in a channel filling the agent's context
+ * with bookmarks. The ones that do not fit are counted, not paged: Slack
+ * lists them all in one call.
+ */
+export const MESSAGE_READ_BOOKMARK_BUDGET = 16_000;
 const TRUNCATED_MARK = ' [... the rest of this message is not shown]';
 
 /**
@@ -162,6 +170,9 @@ export type ConversationReader = (input: {
     files?: string[];
   }>;
   more: boolean;
+  bookmarks?: Array<{ title: string; link: string }>;
+  bookmarksUnavailable?: string;
+  bookmarksOmitted?: number;
 }>;
 
 const optionalId = (input: JsonObject, key: string, tool = MESSAGE_READ_TOOL_NAME): string | undefined => {
@@ -215,7 +226,9 @@ export const createMessageReadTool = (
     + 'For Slack, ids are channel ids and message ts values; a permalink '
     + '…/archives/C0123456789/p1791332967606559 is channel C0123456789 and message 1791332967.606559, '
     + 'and a thread_ts in the link is the thread to read. '
-    + 'When more is true, page on with before (top level) or after (thread) set to the last id returned.',
+    + 'When more is true, page on with before (top level) or after (thread) set to the last id returned. '
+    + 'A top-level read without before or after also returns the channel\'s bookmarks, when it has any; '
+    + 'if bookmarksOmitted is set, say that many were left out rather than guess them.',
   risk: 'gated',
   outputTrust: 'external',
   parameters: {
@@ -263,8 +276,28 @@ export const createMessageReadTool = (
       ...(after !== undefined ? { after } : {}),
       ...(before !== undefined ? { before } : {}),
     });
-    const messages: Array<Awaited<ReturnType<ConversationReader>>['messages'][number]> = [];
+    // Bookmarks first, from their own share, in the channel's order.
+    const bookmarks: Array<{ title: string; link: string }> = [];
     let used = 0;
+    for (const bookmark of result.bookmarks ?? []) {
+      // Counted as the list is serialized: each entry with its separator,
+      // plus the closing bracket.
+      const size = JSON.stringify(bookmark).length + 1;
+      if (used + size + 1 > MESSAGE_READ_BOOKMARK_BUDGET) {
+        break;
+      }
+      bookmarks.push({ title: bookmark.title, link: bookmark.link });
+      used += size;
+    }
+    if (bookmarks.length > 0) {
+      used += 1;
+    }
+    // Added to what the adapter itself already left out, if it said.
+    const upstreamOmitted = typeof result.bookmarksOmitted === 'number' && Number.isInteger(result.bookmarksOmitted) && result.bookmarksOmitted > 0
+      ? result.bookmarksOmitted
+      : 0;
+    const bookmarksOmitted = upstreamOmitted + (result.bookmarks?.length ?? 0) - bookmarks.length;
+    const messages: Array<Awaited<ReturnType<ConversationReader>>['messages'][number]> = [];
     let more = result.more;
     for (const message of result.messages) {
       const size = JSON.stringify(message).length;
@@ -276,13 +309,35 @@ export const createMessageReadTool = (
       // One message bigger than the whole budget is cut rather than
       // dropped, or the read could never get past it. Its file list goes
       // too, said by count, since a list can be as long as any text.
+      // One that would fit on its own, crowded out only by the bookmarks
+      // ahead of it, loses about what they took rather than half.
       if (messages.length === 0) {
         const { files, ...rest } = message;
-        const cut = {
+        const cutTo = (keep: number) => ({
           ...rest,
-          text: message.text.slice(0, MESSAGE_READ_TEXT_BUDGET / 2) + TRUNCATED_MARK,
+          text: message.text.slice(0, Math.max(0, keep)) + TRUNCATED_MARK,
           ...(files && files.length > 0 ? { files: [`${files.length} files, not listed`] } : {}),
-        };
+        });
+        let cut = cutTo(MESSAGE_READ_TEXT_BUDGET / 2);
+        if (used > 0 && size <= MESSAGE_READ_TEXT_BUDGET) {
+          // The longest cut that fits, measured as serialized, since
+          // escapes make the text longer and may sit anywhere in it.
+          const room = MESSAGE_READ_TEXT_BUDGET - used;
+          const fits = (keep: number) => JSON.stringify(cutTo(keep)).length <= room;
+          if (fits(0)) {
+            let low = 0;
+            let high = message.text.length;
+            while (low < high) {
+              const middle = Math.ceil((low + high) / 2);
+              if (fits(middle)) {
+                low = middle;
+              } else {
+                high = middle - 1;
+              }
+            }
+            cut = cutTo(low);
+          }
+        }
         messages.push(cut);
       }
       more = true;
@@ -293,6 +348,9 @@ export const createMessageReadTool = (
       ...(thread !== undefined ? { thread } : {}),
       count: messages.length,
       more,
+      ...(bookmarks.length > 0 ? { bookmarks } : {}),
+      ...(bookmarksOmitted > 0 ? { bookmarksOmitted } : {}),
+      ...(result.bookmarksUnavailable !== undefined ? { bookmarksUnavailable: result.bookmarksUnavailable } : {}),
       messages,
     } as JsonObject;
   },

@@ -397,10 +397,31 @@ export interface ConversationMessage {
   files?: string[];
 }
 
+/** One of a conversation's bookmarks: plain text, no markup and no ids. */
+export interface ConversationBookmark {
+  title: string;
+  link: string;
+}
+
 export interface ConversationReadResult {
   messages: ConversationMessage[];
   /** True when the platform had more messages past `limit`. */
   more: boolean;
+  /**
+   * The conversation's bookmarks, in the platform's order, on a read of its
+   * top level with no `before` or `after`, when it has any. Absent on
+   * threads and later pages, and on a platform without bookmarks. Written
+   * by the people in the conversation, like its messages.
+   */
+  bookmarks?: ConversationBookmark[];
+  /**
+   * Why the bookmarks could not be listed, as a sentence for the agent,
+   * when a read that would list them could not. The messages still come
+   * back.
+   */
+  bookmarksUnavailable?: string;
+  /** How many bookmarks did not fit in the read's budget and were left out. */
+  bookmarksOmitted?: number;
 }
 
 /**

@@ -111,6 +111,7 @@ export {
   type DefaultThreadResolver,
   MESSAGE_READ_TOOL_NAME,
   MESSAGE_READ_MAX_LIMIT,
+  MESSAGE_READ_BOOKMARK_BUDGET,
   MESSAGE_READ_TEXT_BUDGET,
   type ConversationReader,
   type ConversationReadRefusal,

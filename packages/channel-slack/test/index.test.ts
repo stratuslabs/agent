@@ -10338,6 +10338,126 @@ test('readConversation refuses a channel the app is not a member of, or cannot s
   await adapter.stop();
 });
 
+test('readConversation lists a channel\'s bookmarks on the first page of its top level, as a title and a link', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({ messages: [{ ts: '200.000001', user: 'U-X', text: 'b' }] });
+  const listed: string[] = [];
+  web.bookmarks = {
+    list: async (args) => {
+      listed.push(args.channel_id);
+      return {
+        bookmarks: [
+          { id: 'Bk1', channel_id: 'C-ENG', title: 'Spec', link: 'https://example.test/spec', emoji: ':page_facing_up:', type: 'link' },
+          { id: 'Bk2', title: 'T'.repeat(250), link: 'https://example.test/long-title' },
+          { id: 'Bk3', title: 'Huge', link: `https://example.test/${'a'.repeat(2100)}` },
+          { id: 'Bk4', title: 'No link' },
+        ],
+      };
+    },
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10 });
+  assert.deepEqual(listed, ['C-ENG']);
+  assert.equal(result.messages.length, 1);
+  assert.deepEqual(result.bookmarks, [
+    { title: 'Spec', link: 'https://example.test/spec' },
+    { title: `${'T'.repeat(199)}…`, link: 'https://example.test/long-title' },
+    { title: 'Huge', link: '(this link is longer than 2,000 characters, so it is not shown)' },
+  ]);
+  assert.equal(result.bookmarksUnavailable, undefined);
+  await adapter.stop();
+});
+
+test('readConversation lists no bookmarks for a thread or a later page, and none when the channel has none', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({ messages: [{ ts: '200.000001', user: 'U-X', text: 'b' }] });
+  web.conversations.replies = async () => ({ messages: [{ ts: '200.000001', user: 'U-X', text: 'b' }] });
+  let calls = 0;
+  web.bookmarks = {
+    list: async () => {
+      calls += 1;
+      return { bookmarks: [] };
+    },
+  };
+  const adapter = await startedAdapterWith(web);
+
+  for (const window of [{ thread: '200.000001' }, { before: '300.000000' }, { after: '100.000000' }]) {
+    const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, ...window });
+    assert.equal('bookmarks' in result, false);
+  }
+  assert.equal(calls, 0, 'paging costs no bookmark calls');
+
+  const empty = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10 });
+  assert.equal(calls, 1);
+  assert.equal('bookmarks' in empty, false);
+  assert.equal('bookmarksUnavailable' in empty, false);
+  await adapter.stop();
+});
+
+test('readConversation still returns the messages when the bookmarks cannot be listed, and says why', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({ messages: [{ ts: '200.000001', user: 'U-X', text: 'b' }] });
+  // How @slack/web-api throws a platform error: the code is on `data.error`.
+  const platformError = (code: string): Error => Object.assign(new Error(`An API error occurred: ${code}`), {
+    code: 'slack_webapi_platform_error',
+    data: { ok: false, error: code },
+  });
+  let failWith = platformError('missing_scope');
+  web.bookmarks = {
+    list: async () => {
+      throw failWith;
+    },
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const missing = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10 });
+  assert.equal(missing.messages.length, 1);
+  assert.equal(missing.bookmarks, undefined);
+  assert.equal(
+    missing.bookmarksUnavailable,
+    'This Slack app can\'t read bookmarks because it lacks the bookmarks:read scope. Add it to the app\'s manifest and reinstall the app.',
+  );
+
+  failWith = platformError('ratelimited');
+  const other = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10 });
+  assert.equal(other.messages.length, 1);
+  assert.equal(other.bookmarksUnavailable, 'The channel\'s bookmarks could not be listed (ratelimited).');
+  await adapter.stop();
+
+  // An older client without bookmarks.list reads exactly as before.
+  const older = createFakeWeb('B-AVA', 'T1');
+  older.knownConversations.set('C-ENG', { is_member: true });
+  older.conversations.history = async () => ({ messages: [{ ts: '200.000001', user: 'U-X', text: 'b' }] });
+  const olderAdapter = await startedAdapterWith(older);
+  const plain = await olderAdapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10 });
+  assert.deepEqual(Object.keys(plain).sort(), ['messages', 'more']);
+  await olderAdapter.stop();
+});
+
+test('readConversation never lists bookmarks of a conversation it refuses to read', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('D-DYLAN', { is_im: true, is_member: true });
+  web.knownConversations.set('C-OTHER', { is_member: false });
+  web.conversations.history = async () => ({ messages: [] });
+  let listed = false;
+  web.bookmarks = {
+    list: async () => {
+      listed = true;
+      return { bookmarks: [{ title: 'Secret', link: 'https://example.test/secret' }] };
+    },
+  };
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'D-DYLAN', limit: 10 }), /direct message/);
+  await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'C-OTHER', limit: 10 }), /not a member of C-OTHER/);
+  assert.equal(listed, false);
+  await adapter.stop();
+});
+
 test('under admit: principals a peer whose socket failed to start keeps its place in the backfill', async () => {
   const thread = [
     { ts: '520.1', user: 'U-DYLAN', text: 'what is prod?' },
