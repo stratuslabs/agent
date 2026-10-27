@@ -876,11 +876,11 @@ and hands the decided label to `execute` as `ExecutionContext.decidedTrust`
 so the tool can check once more before it acts. A throw or a slow answer reads
 `external`.
 
-Three more packages ship from this repository today, all added before any
-plugin lived in `stratuslabs/plugins`: `provider-codex`, `memory-sqlite`, and
-the MCP bridge `plugin-mcp`. Every package here is published under
-`@stratusagent/` at the same version. `provider-openai` was a fourth until
-0.13.6; it now releases from `stratuslabs/plugins` under the same name.
+Two more packages ship from this repository today, both added before any
+plugin lived in `stratuslabs/plugins`: `provider-codex` and the MCP bridge
+`plugin-mcp`. Every package here is published under `@stratusagent/` at the
+same version. `provider-openai` and `memory-sqlite` shipped from here until
+0.13.6; both now release from `stratuslabs/plugins` under the same names.
 
 **First-party, outside.** Same authors, separate repositories:
 

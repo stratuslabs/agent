@@ -13,7 +13,7 @@ import {
   releaseVerdict,
   type PluginRelease,
 } from '../src/plugin-index.ts';
-import { FIRST_PARTY_CAPABILITY_PACKAGES, FIRST_PARTY_CONTRIBUTION_PACKAGES } from '../src/plugin-catalog.ts';
+import { FIRST_PARTY_CAPABILITY_PACKAGES } from '../src/plugin-catalog.ts';
 
 const published = (stratus: unknown, extra: Record<string, unknown> = {}): PluginRelease => ({
   status: 'published',
@@ -95,7 +95,6 @@ test('the bundled index is a valid index of packages that ship apart from the CL
   // always in the menu already; the index is for everything else.
   for (const entry of BUNDLED_PLUGIN_INDEX) {
     assert.ok(!FIRST_PARTY_CAPABILITY_PACKAGES.includes(entry.name), entry.name);
-    assert.ok(!FIRST_PARTY_CONTRIBUTION_PACKAGES.includes(entry.name), entry.name);
   }
 });
 

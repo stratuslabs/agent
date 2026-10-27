@@ -57,7 +57,7 @@ Package READMEs stay canonical for their own surface:
 setup, [`control-api`](../packages/control-api/README.md) for the HTTP + WS
 contract, [`plugin-mcp`](../packages/plugin-mcp/README.md), the
 [`tool-*`](../packages/tool-fs/README.md) packages,
-[`provider-openai`](https://github.com/stratuslabs/plugins/tree/main/provider-openai) (in `stratuslabs/plugins`), and
-[`memory-sqlite`](../packages/memory-sqlite/README.md) for their own settings,
+[`provider-openai`](https://github.com/stratuslabs/plugins/tree/main/provider-openai) and
+[`memory-sqlite`](https://github.com/stratuslabs/plugins/tree/main/memory-sqlite) (both in `stratuslabs/plugins`) for their own settings,
 and [`search`](../packages/search/README.md) for the `web.search` contract
 every search backend implements.
