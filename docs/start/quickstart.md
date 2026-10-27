@@ -39,9 +39,13 @@ once — in [Remote access](../guides/remote-access.md).
 ## 3) Run a real provider path
 
 `stratus setup` is the easy way in, but every setting has an env var and a
-flag behind it. The flagship path is Claude via the official Anthropic SDK:
+flag behind it. Without setup, install the provider's package yourself: the
+CLI ships none, and setup is what installs the one you pick
+([Installation](./installation.md) lists them). The flagship path is Claude
+via the official Anthropic SDK:
 
 ```bash
+npm install -g @stratusagent/provider-anthropic
 export ANTHROPIC_API_KEY=your-key
 stratus run --provider anthropic "say hello"
 ```
@@ -68,6 +72,7 @@ agent's own tools to it under kernel policy
 has the details):
 
 ```bash
+npm install -g @stratusagent/provider-codex
 stratus run --provider codex "say hello"
 ```
 
