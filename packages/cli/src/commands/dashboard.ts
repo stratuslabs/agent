@@ -52,14 +52,15 @@ const installedBeforeOffer = (name: string, env: CliEnvironment): boolean => {
  * the latest control API beside an older daemon.
  *
  * `ready` means this process can load them now and should carry on;
- * `rerun` that npm installed them but this process cannot see them yet;
+ * `elsewhere` that npm installed them where this CLI does not look (it
+ * runs from npx or a checkout, say), so running it again would not help;
  * `missing` that nothing changed. Never throws.
  */
 const offerDashboardPackages = async (
   missing: readonly string[],
   streams: CliStreams,
   env: CliEnvironment,
-): Promise<'ready' | 'rerun' | 'missing'> => {
+): Promise<'ready' | 'elsewhere' | 'missing'> => {
   const one = missing.length === 1;
   const specifiers = missing.map((name) => `${name}@${CLI_VERSION}`);
   const install = `npm install -g ${specifiers.join(' ')}`;
@@ -95,14 +96,10 @@ const offerDashboardPackages = async (
     return 'missing';
   }
   writeLine(streams.stdout, `Installed ${missing.join(' and ')}.`);
-  // npm's exit code says they are in the global prefix, not that this
-  // process resolves them there (an npx run, a CLI outside that prefix).
-  // A daemon started without the control API would only time out.
-  if (missing.some((name) => !packageInstalled(name, env))) {
-    writeLine(streams.stdout, 'This process cannot load them until it starts again: run `stratus dashboard` again.');
-    return 'rerun';
-  }
-  return 'ready';
+  // npm's exit code says they are in the global prefix, not that this CLI
+  // resolves them there: an npx run, or a checkout, looks elsewhere, and
+  // starting it again would look in the same places.
+  return missing.some((name) => !packageInstalled(name, env)) ? 'elsewhere' : 'ready';
 };
 
 export const openExternalUrl = async (url: string): Promise<void> => {
@@ -204,7 +201,14 @@ export const runDashboard = async (
     writeLine(streams.stdout, `The daemon at ${base} serves the control API without the dashboard.`);
     const restart = 'Restart it to load the dashboard: `stratus restart`, then `stratus dashboard` again.';
     if (installedBeforeOffer(DASHBOARD_PACKAGE, env)) {
-      writeLine(streams.stderr, `Error: it started before ${DASHBOARD_PACKAGE} was installed. ${restart}`);
+      // Installed where this CLI looks, which need not be where the daemon
+      // does (a global service looked at from a checkout): say both.
+      writeLine(
+        streams.stderr,
+        `Error: this stratus can load ${DASHBOARD_PACKAGE} and the daemon cannot. If it started before the package was installed, `
+          + '`stratus restart` loads it. If it runs from another installation, install '
+          + `${DASHBOARD_PACKAGE}@${CLI_VERSION} into that one (\`npm install -g ${DASHBOARD_PACKAGE}@${CLI_VERSION}\` for a global install), then \`stratus restart\`.`,
+      );
       return 1;
     }
     if (await offerDashboardPackages([DASHBOARD_PACKAGE], streams, env) === 'missing') {
@@ -227,8 +231,17 @@ export const runDashboard = async (
     const missing = DASHBOARD_PACKAGES.filter((name) => !installedBeforeOffer(name, env));
     if (missing.length > 0) {
       const offered = await offerDashboardPackages(missing, streams, env);
+      if (offered === 'elsewhere') {
+        writeLine(
+          streams.stderr,
+          'Error: npm installed them into its global folder, and this stratus does not load packages from there '
+            + '(it runs from npx or a source checkout, say), so running it again would not help. '
+            + `Run \`stratus dashboard\` from a global install (\`npm install -g @stratusagent/cli@${CLI_VERSION}\`) instead.`,
+        );
+        return 1;
+      }
       if (offered !== 'ready') {
-        return offered === 'rerun' ? 0 : 1;
+        return 1;
       }
       installedApi = missing.includes(CONTROL_API_PACKAGE);
     }

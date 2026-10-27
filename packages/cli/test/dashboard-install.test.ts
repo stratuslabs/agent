@@ -193,7 +193,7 @@ test('a failed install is reported with the command, and no daemon is started', 
   assert.doesNotMatch(output.stdout, /No daemon is running/);
 });
 
-test('an install this process cannot load yet asks for one more run instead of starting a daemon without them', async () => {
+test('an install this CLI cannot load says so, instead of starting a daemon without them or promising a rerun', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-rerun-'));
   const box = machine(DASHBOARD, { ok: true, message: '', resolvesAfter: false });
   const { streams, output } = createStreams();
@@ -212,9 +212,12 @@ test('an install this process cannot load yet asks for one more run instead of s
     },
   });
 
-  assert.equal(exitCode, 0, output.stderr);
+  // Starting this CLI again would look in the same places, so it does not say to.
+  assert.equal(exitCode, 1);
   assert.match(output.stdout, /Installed /);
-  assert.match(output.stdout, /run `stratus dashboard` again/);
+  assert.match(output.stderr, /does not load packages from there.*running it again would not help/);
+  assert.ok(output.stderr.includes(`npm install -g @stratusagent/cli@${CLI_VERSION}`), output.stderr);
+  assert.doesNotMatch(output.stdout + output.stderr, /run `stratus dashboard` again/);
   assert.doesNotMatch(output.stdout, /No daemon is running/);
 });
 
@@ -389,6 +392,9 @@ test('a running daemon started before the dashboard was installed is told to res
   assert.equal(exitCode, 1);
   assert.deepEqual(box.installed, []);
   assert.doesNotMatch(output.stdout, /needs @stratusagent/);
-  assert.match(output.stderr, /started before @stratusagent\/dashboard was installed.*`stratus restart`, then `stratus dashboard` again/);
+  assert.match(output.stderr, /this stratus can load @stratusagent\/dashboard and the daemon cannot/);
+  assert.match(output.stderr, /started before the package was installed, `stratus restart` loads it/);
+  // A daemon from another installation: a restart alone would not give it the package.
+  assert.ok(output.stderr.includes(`npm install -g ${PAGE}@${CLI_VERSION}`), output.stderr);
   assert.ok(!daemon.asked.some((url) => url.endsWith('/api/v1/auth/ott')), daemon.asked.join(', '));
 });
