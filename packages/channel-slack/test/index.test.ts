@@ -10397,6 +10397,31 @@ test('readConversation reads the DM or group DM its session is in, and no other'
   assert.equal(adapter.sessionConversation?.('ava', 'slack:ava:T1:D-DYLAN'), undefined);
 });
 
+test('readConversation still needs membership of a group DM its session was in', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  // The app left the group DM (or was removed), and the session is stale.
+  // Only a one-to-one IM goes without is_member; a group DM keeps the check.
+  web.knownConversations.set('G-LEFT', { is_mpim: true, is_member: false });
+  web.knownConversations.set('G-SILENT', { is_mpim: true });
+  let read = false;
+  web.conversations.history = async () => {
+    read = true;
+    return { messages: [] };
+  };
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(
+    () => adapter.readConversation!({ agentId: 'ava', sessionId: 'slack:ava:T1:G-LEFT', conversation: 'G-LEFT', limit: 10 }),
+    /not a member of G-LEFT/,
+  );
+  await assert.rejects(
+    () => adapter.readConversation!({ agentId: 'ava', sessionId: 'slack:ava:T1:G-SILENT', conversation: 'G-SILENT', limit: 10 }),
+    /not a member of G-SILENT/,
+  );
+  assert.equal(read, false, 'nothing is read on a refusal');
+  await adapter.stop();
+});
+
 test('sessionConversation answers nothing for an app whose workspace is not known', async () => {
   const web = createFakeWeb('B-AVA', '');
   web.knownConversations.set('D-DYLAN', { is_im: true });

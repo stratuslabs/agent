@@ -4645,8 +4645,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (direct && (request.sessionId === undefined || sessionConversation(request.agentId, request.sessionId) !== info.id)) {
       throw new Error(`slack: ${channel} is a direct message this conversation is not in, and a direct message is read only from inside it. Approval cannot unlock this; read a channel instead.`);
     }
-    // An IM states no membership; the session living in it is the proof.
-    if (!direct && info.is_member !== true) {
+    // A one-to-one IM states no membership; the session living in it is
+    // the proof. A group DM does say, and an app that left one cannot read
+    // it however its stale session is named.
+    if (info.is_im !== true && info.is_member !== true) {
       throw new Error(`slack: ${request.agentId}'s app is not a member of ${channel} — invite it there before it can read.`);
     }
     const { history, replies } = connection.web.conversations;
