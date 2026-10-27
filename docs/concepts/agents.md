@@ -110,6 +110,14 @@ disconnected integration, and it rechecks a claim when corrected; and it
 never promises to monitor, remind, or keep working in the background unless
 it actually scheduled that or handed it off.
 
+A conversation's session holds its own messages and a slice of memory, so
+when someone mentions work, a file, or a decision the agent can't see there,
+it looks before it asks: its memory, its own files, and the recent messages
+where the work most likely happened, keeping what it finds to people who
+could already see it. When it moves work into a new thread, channel, or
+file, it leaves a pointer: a link where the work started, or a memory of
+where it now lives.
+
 Right after its persona, an agent is told how it runs: that its soul is the
 file it was loaded from (named by its real path), that the file's contents
 are already in its instructions so there is nothing to open or reread, and
