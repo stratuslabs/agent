@@ -8435,8 +8435,9 @@ export class AgentRunner {
  * (`@stratusagent/channels`, `@stratusagent/executors`): pure contract
  * code released in lockstep with core, which gave plugin authors another
  * package and version to line up and no boundary in return. They live in
- * their own modules here because each is a separately shared surface; the
- * old packages ship once more as deprecated re-exports of these names.
+ * their own modules here because each is a separately shared surface. The
+ * old packages shipped once more, in 0.13.7, as deprecated re-exports of
+ * these names, and are gone since.
  */
 export {
   createDirectExecutor,

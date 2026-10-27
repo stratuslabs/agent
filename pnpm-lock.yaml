@@ -83,19 +83,6 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
-  packages/channels:
-    dependencies:
-      '@stratusagent/core':
-        specifier: workspace:*
-        version: link:../core
-    devDependencies:
-      '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-
   packages/cli:
     dependencies:
       '@stratusagent/agents':
@@ -222,19 +209,6 @@ importers:
         version: 5.9.3
 
   packages/executor-local:
-    dependencies:
-      '@stratusagent/core':
-        specifier: workspace:*
-        version: link:../core
-    devDependencies:
-      '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-
-  packages/executors:
     dependencies:
       '@stratusagent/core':
         specifier: workspace:*
