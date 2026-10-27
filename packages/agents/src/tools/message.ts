@@ -320,17 +320,22 @@ export const createMessageReadTool = (
         });
         let cut = cutTo(MESSAGE_READ_TEXT_BUDGET / 2);
         if (used > 0 && size <= MESSAGE_READ_TEXT_BUDGET) {
-          // Measured as serialized, since escapes make the text longer.
+          // The longest cut that fits, measured as serialized, since
+          // escapes make the text longer and may sit anywhere in it.
           const room = MESSAGE_READ_TEXT_BUDGET - used;
-          let keep = message.text.length - (size - room) - TRUNCATED_MARK.length;
-          for (let tries = 0; tries < 8; tries += 1) {
-            const candidate = cutTo(keep);
-            const over = JSON.stringify(candidate).length - room;
-            if (over <= 0) {
-              cut = candidate.text.length > cut.text.length ? candidate : cut;
-              break;
+          const fits = (keep: number) => JSON.stringify(cutTo(keep)).length <= room;
+          if (fits(0)) {
+            let low = 0;
+            let high = message.text.length;
+            while (low < high) {
+              const middle = Math.ceil((low + high) / 2);
+              if (fits(middle)) {
+                low = middle;
+              } else {
+                high = middle - 1;
+              }
             }
-            keep -= over;
+            cut = cutTo(low);
           }
         }
         messages.push(cut);

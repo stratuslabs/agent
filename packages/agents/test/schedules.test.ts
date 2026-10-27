@@ -556,6 +556,21 @@ test('message.read cuts a message the bookmarks crowded out only by what they to
   const only = (fitted.messages as Array<{ text: string }>)[0]!;
   assert.ok(JSON.stringify(fitted.bookmarks).length + JSON.stringify(only).length <= MESSAGE_READ_TEXT_BUDGET);
   assert.ok(only.text.length > 19_000, `kept ${only.text.length}`);
+
+  // Short enough that cutting to half keeps it whole, which wouldn't fit.
+  const longer = '"'.repeat(19_950);
+  const tight = createMessageReadTool(async () => ({ messages: [{ id: '1.000001', author: 'U1', text: longer }], more: false, bookmarks: [bookmark] }));
+  const squeezed = await tight.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const kept = (squeezed.messages as Array<{ text: string }>)[0]!;
+  assert.ok(JSON.stringify(squeezed.bookmarks).length + JSON.stringify(kept).length <= MESSAGE_READ_TEXT_BUDGET, `sent ${JSON.stringify(squeezed.bookmarks).length + JSON.stringify(kept).length}`);
+  assert.ok(kept.text.length > 19_000, `kept ${kept.text.length}`);
+
+  // Escapes in the part that's cut off don't cost the part that's kept.
+  const mixed = 'm'.repeat(30_000) + '"'.repeat(4_950);
+  const tail = createMessageReadTool(async () => ({ messages: [{ id: '1.000001', author: 'U1', text: mixed }], more: false, bookmarks: [bookmark] }));
+  const trimmed = await tail.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const sent = JSON.stringify(trimmed.bookmarks).length + JSON.stringify((trimmed.messages as JsonObject[])[0]).length;
+  assert.ok(sent <= MESSAGE_READ_TEXT_BUDGET && sent > MESSAGE_READ_TEXT_BUDGET - 3, `sent ${sent}`);
 });
 
 test('message.send names its session as the speaker, at the label its words carry', async () => {
