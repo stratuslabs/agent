@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { Session, Tool } from '@stratusagent/core';
 import {
   createDirectExecutor,
   defineExecutor,
   failureResult,
   successResult,
+  type Session,
+  type Tool,
 } from '../src/index.ts';
 
 const session: Session = {

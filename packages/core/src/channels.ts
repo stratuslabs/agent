@@ -7,7 +7,7 @@ import type {
   JsonObject,
   Session,
   TrustLevel,
-} from '@stratusagent/core';
+} from './index.ts';
 
 /**
  * One message arriving from a chat platform, normalized. Adapters translate

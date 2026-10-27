@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { EventBus, type Session } from '@stratusagent/core';
 import {
   admitsSender,
   channelSessionKey,
+  EventBus,
   isPrincipal,
   senderTrustFor,
   type ChannelAdapter,
@@ -12,6 +12,7 @@ import {
   type InboundMessage,
   type OutboundConnection,
   type SenderPolicy,
+  type Session,
 } from '../src/index.ts';
 
 test('channel session keys are stable, agent-scoped, and thread-aware', () => {

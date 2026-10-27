@@ -9,7 +9,7 @@ import {
   type ToolCall,
   type ToolResult,
   type TrustLevel,
-} from '@stratusagent/core';
+} from './index.ts';
 
 export interface ExecutorResultCallRef {
   id: string;
