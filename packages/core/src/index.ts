@@ -2951,6 +2951,18 @@ export interface ProviderRequest {
    */
   onUsage?: (usage: ProviderCallUsage) => void;
   /**
+   * For a provider that makes another model call inside one `generate` on
+   * its own decision, the fallback wrapper's switch being the live example:
+   * await this before that call, naming the provider about to answer. The
+   * runner announces the usage reported so far, then asks the host's
+   * `ProviderCallGuard`s, so a budget the first call just spent is read
+   * before the next one starts. It resolves to allow the call and throws to
+   * refuse it; let the error propagate, because a refusal ends the turn.
+   *
+   * Not for a harness's own inner calls, which this interface never sees.
+   */
+  guardCall?: (provider: string) => Promise<void>;
+  /**
    * For a provider that runs its own tool loop (the harness runtimes): ask,
    * when its inner budget runs out mid-work, whether to carry on with a
    * fresh one instead of wrapping up. True grants it, and counts it against
@@ -2991,6 +3003,14 @@ export interface ProviderResponse {
 
 export interface ModelProvider {
   name: string;
+  /**
+   * For a provider that hands a session's calls to another provider while
+   * keeping its own `name` (the fallback wrapper, once a session has
+   * switched): the name of the provider that answers this session's next
+   * call. The `ProviderCallGuard`s are told it, so a rule about one model
+   * holds whichever wrapper it sits behind. Absent means `name`.
+   */
+  nameFor?(session: Session): string;
   generate(request: ProviderRequest): Promise<ProviderResponse>;
 }
 
@@ -2999,9 +3019,11 @@ export interface ProviderCallCheck {
   agentId: string;
   sessionId: string;
   /**
-   * The provider the runner is about to call, by name. Under a configured
-   * fallback this is the wrapper's name, which is the primary's: which of
-   * the two answers is decided inside the call.
+   * The provider about to answer, by name: the runner's provider, or the
+   * one it says answers this session (`ModelProvider.nameFor`). Under a
+   * configured fallback that is the primary until the session switches and
+   * the fallback after. A switch inside a call asks again before the
+   * fallback's call, naming the fallback (`ProviderRequest.guardCall`).
    */
   provider: string;
 }
@@ -3016,8 +3038,11 @@ export interface ProviderCallCheck {
  *
  * Asked once per `ModelProvider.generate`, which is one model call for the
  * kernel-loop adapters and one Stratus turn for a harness running its own
- * inner loop. The usage of every earlier call has been announced
- * (`session.usage`) before a guard is asked about the next one.
+ * inner loop, and again before any further call a provider makes inside one
+ * `generate` and asks about through `ProviderRequest.guardCall` (the
+ * fallback model's call after the primary fails). The usage of every
+ * earlier call has been announced (`session.usage`) before a guard is asked
+ * about the next one.
  */
 export type ProviderCallGuard = (check: ProviderCallCheck) => Promise<void> | void;
 
@@ -7292,10 +7317,13 @@ export class AgentRunner {
     });
   }
 
-  /** Ask every guard about the call the loop is about to make; the first refusal throws. */
-  private async guardProviderCall(session: Session): Promise<void> {
+  /** Ask every guard about the call about to be made; the first refusal throws. */
+  private async guardProviderCall(
+    session: Session,
+    provider = this.options.provider.nameFor?.(session) ?? this.options.provider.name,
+  ): Promise<void> {
     for (const guard of this.options.providerCallGuards ?? []) {
-      await guard({ agentId: session.agent.id, sessionId: session.id, provider: this.options.provider.name });
+      await guard({ agentId: session.agent.id, sessionId: session.id, provider });
     }
   }
 
@@ -7580,6 +7608,13 @@ export class AgentRunner {
             this.recordUsage(session, turnId, usage);
             void announcePending();
           };
+          // The same question as below, for a call the provider makes
+          // inside this attempt: what it has spent so far is announced
+          // first, so the guard reads it.
+          const guardCall = async (provider: string): Promise<void> => {
+            await announcePending();
+            await this.guardProviderCall(session, provider);
+          };
           // Inside the attempt loop, so a retry after an overflow is asked
           // about like any other call. Outside the try: a refusal is not an
           // overflow to trim and retry, and the call it refused spent nothing.
@@ -7612,6 +7647,7 @@ export class AgentRunner {
                 }
                 : {}),
               onUsage,
+              guardCall,
               ...(signal ? { signal } : {}),
             });
             // Recorded before the abort check below, deliberately: a turn

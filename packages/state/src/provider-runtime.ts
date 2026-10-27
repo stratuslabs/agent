@@ -191,16 +191,44 @@ export const createFallbackWrappedProvider = (
   persistSession?: (session: Session) => Promise<void>,
 ): ModelProvider => {
   const fallbackSessions = new Set<string>();
+  const switchedTo = (session: Session): boolean => session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true
+    || fallbackSessions.has(session.id);
+  // Either side may itself route to another model and say which.
+  const answering = (provider: ModelProvider, session: Session): string => provider.nameFor?.(session) ?? provider.name;
 
   return {
     name: primary.name,
+    // The guards are asked about the model that answers, and after a
+    // switch that is the fallback, under this wrapper's borrowed name.
+    nameFor: (session) => answering(switchedTo(session) ? fallback : primary, session),
     async generate(request) {
-      const switched = request.session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true
-        || fallbackSessions.has(request.session.id);
+      const switched = switchedTo(request.session);
       if (!switched) {
+        // A primary that asks about a call of its own (`guardCall`) and is
+        // refused, or whose guard could not decide, has not failed as a
+        // model: the guard said no. Remember what the guard threw, so the
+        // catch below ends the turn with it instead of switching.
+        let guardSaidNo: { error: unknown } | undefined;
+        const guardCall = request.guardCall;
+        const primaryRequest = guardCall
+          ? {
+              ...request,
+              guardCall: async (provider: string): Promise<void> => {
+                try {
+                  await guardCall(provider);
+                } catch (error) {
+                  guardSaidNo = { error };
+                  throw error;
+                }
+              },
+            }
+          : request;
         try {
-          return await primary.generate(request);
+          return await primary.generate(primaryRequest);
         } catch (error) {
+          if (guardSaidNo) {
+            throw guardSaidNo.error;
+          }
           // A turn that already executed tools must not be replayed on
           // another provider — the side effects (a remembered fact, a
           // command) would happen twice.
@@ -254,6 +282,14 @@ export const createFallbackWrappedProvider = (
           if (request.onDelta) {
             await request.onDelta({ type: 'reset', reason: 'fallback' });
           }
+          // The host allowed one call when it asked before this generate,
+          // and the primary has spent it. The fallback's call is another,
+          // so it is asked about on its own, after what the primary
+          // reported is announced. A refusal ends the turn here; the switch
+          // above stands, because the primary did fail. Once switched, the
+          // fallback is the only call a generate makes, and the runner's
+          // own question covers it under the fallback's name (`nameFor`).
+          await request.guardCall?.(answering(fallback, request.session));
         }
       }
       return attributeUsage(fallback, request);

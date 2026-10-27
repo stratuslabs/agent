@@ -268,7 +268,9 @@ is the operator installing the plugin and a soul listing its tools.
 `context.providerCalls`, and a guard registered with
 `providerCalls.register(guard)` is asked before every provider call the
 host makes, for every agent, sub-agents and recovered turns included,
-with the agent id, the session id and the provider's name. A token budget
+with the agent id, the session id and the name of the provider about to
+answer (a configured fallback's own name once a session has switched to
+it). A token budget
 is what it exists for. Resolving allows the call. Throwing a
 `HostRefusalError` refuses it on purpose: the turn fails with
 `session.failed` carrying `refused: true`, a configured fallback model does
@@ -283,7 +285,13 @@ attempt's included and a harness's while its turn is still running, and
 always before it asks the guards about the next call, so a guard metering
 from that event has seen everything spent so far. It is
 asked once per `generate`, which is one model call for the kernel-loop
-providers and one whole turn for a harness running its own loop.
+providers and one whole turn for a harness running its own loop. When the
+primary model fails and a configured fallback takes over inside that
+`generate`, the guards are asked again before the fallback's call, naming
+the fallback, so a budget the primary spent stops the fallback too. A
+provider plugin that makes a second model call inside one `generate` on its
+own decision does the same: it awaits `request.guardCall(providerName)`
+before that call and lets a refusal propagate.
 Registration is staged with the plugin's other contributions, so a plugin
 refused at load leaves no guard behind, and it closes when `setup`
 returns. The daemon and `stratus run` both enforce guards; a host that
