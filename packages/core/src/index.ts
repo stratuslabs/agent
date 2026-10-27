@@ -6721,6 +6721,74 @@ const throwIfAborted = (signal: AbortSignal | undefined): void => {
   }
 };
 
+/**
+ * How long a tool call gets, once its turn is stopped, to answer for
+ * itself. Long enough for a well-behaved tool to come back with what really
+ * happened (a killed command's partial output, a cancelled request's
+ * error); short against the drain window a stop or restart gives the turn
+ * after aborting it (30 s by default), so a tool that ignores its signal is
+ * left behind well inside it.
+ */
+const STOPPED_TOOL_GRACE_MS = 2_000;
+
+/**
+ * Waits for a tool call's result, but not past `STOPPED_TOOL_GRACE_MS`
+ * after the turn's signal fires.
+ *
+ * Card 826: a plugin tool that never settles and ignores its signal held
+ * its session `running` until the daemon restarted. Slack's `stop` could
+ * not end it, a stop or restart shut down around it, and the message
+ * queued behind it in the same session was lost with the process. Every
+ * executor (`DefaultExecutor`, `DirectExecutor`, `LocalCommandExecutor`,
+ * any plugin's) awaits the tool, so this is the one place that bounds it.
+ *
+ * Left behind means not waited for, not stopped: the kernel has no way to
+ * stop code that will not look at its signal. The result says so, because
+ * the call may yet have its effect. Whatever the work does later is
+ * dropped, a rejection included, so it can neither crash the process nor
+ * reach a session that has moved on.
+ */
+const untilStoppedFor = (
+  work: Promise<ToolResult>,
+  call: ToolCall,
+  signal: AbortSignal | undefined,
+): Promise<ToolResult> => {
+  if (signal === undefined) {
+    return work;
+  }
+  return new Promise<ToolResult>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const leaveBehind = (): void => {
+      timer = setTimeout(() => {
+        resolve({
+          callId: call.id,
+          toolName: call.toolName,
+          ok: false,
+          output: null,
+          error: `${call.toolName} did not return after the turn was stopped, so it was left behind. `
+            + 'It may still be running, and may still do what it was asked; check before calling it again.',
+          trust: 'agent',
+        });
+      }, STOPPED_TOOL_GRACE_MS);
+    };
+    const settled = (): void => {
+      signal.removeEventListener('abort', leaveBehind);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    };
+    if (signal.aborted) {
+      leaveBehind();
+    } else {
+      signal.addEventListener('abort', leaveBehind, { once: true });
+    }
+    work.then(
+      (result) => { settled(); resolve(result); },
+      (error: unknown) => { settled(); reject(error); },
+    );
+  });
+};
+
 export interface AgentRunnerOptions {
   provider: ModelProvider;
   tools?: ToolRegistry;
@@ -8333,11 +8401,11 @@ export class AgentRunner {
     }
 
     const collector = createImageCollector();
-    const executed = await this.executor.execute(call, tool, session, {
+    const executed = await untilStoppedFor(this.executor.execute(call, tool, session, {
       ...(signal ? { signal } : {}),
       decidedTrust,
       attachImage: collector.attach,
-    });
+    }), call, signal);
     // Only a call that succeeded shows what it attached: a failure's error
     // is the result, and an image ahead of it would read as the answer.
     const attached = executed.ok ? collector.images() : [];
