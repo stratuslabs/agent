@@ -7,7 +7,6 @@
     { "path": "./packages/provider-anthropic" },
     { "path": "./packages/provider-claude-code" },
     { "path": "./packages/provider-codex" },
-    { "path": "./packages/executors" },
     { "path": "./packages/executor-local" },
     { "path": "./packages/cli" }
   ]
