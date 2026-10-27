@@ -16,6 +16,8 @@ import {
 } from '@stratusagent/agents';
 import { assertDerivedStatePathSync } from '@stratusagent/state';
 
+import { tightenSqliteFile } from './sessions.ts';
+
 /**
  * Durable schedules, in the same database sessions live in — a schedule
  * survives a restart the way a parked approval does, and an operator has
@@ -44,35 +46,53 @@ export interface SqliteScheduleStoreOptions {
   stateHome?: string;
 }
 
+/**
+ * Open `fleet.db` the way every store sharing it must: the derived-path
+ * check, an owner-only directory and file, WAL with a busy timeout, then
+ * `schema`, then the sidecars tightened. One implementation, because the
+ * schedule store and the event store (card 590) each hold their own
+ * connection to this file, and a second copy of this sequence is the one
+ * that drifts.
+ */
+export const openFleetDatabase = (
+  filePath: string,
+  options: SqliteScheduleStoreOptions,
+  schema: string,
+): DatabaseSync => {
+  if (options.stateHome !== undefined) {
+    assertDerivedStatePathSync(options.stateHome, filePath, 'file');
+  }
+  // Same posture as the session store sharing this file: the directory
+  // and the database must not be readable by other local users, and the
+  // sidecar chmods cover databases created under a looser umask.
+  mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const db = new DatabaseSync(filePath);
+  try {
+    chmodSync(filePath, 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  db.exec('PRAGMA journal_mode = WAL');
+  // WAL serializes writers to one at a time across the whole file, and
+  // this database is shared between two processes: the daemon claims
+  // slots and saves sessions while `stratus schedules cancel` deletes a
+  // row from another connection. Without a busy timeout the loser of that
+  // lock throws `database is locked` immediately — a cancel that silently
+  // failed would leave the schedule (and its destination grant) live.
+  // Wait for the writer instead.
+  db.exec('PRAGMA busy_timeout = 5000');
+  db.exec(schema);
+  tightenSqliteFile(filePath);
+  return db;
+};
+
 export class SqliteScheduleStore {
   private readonly db: DatabaseSync;
 
   constructor(filePath: string, options: SqliteScheduleStoreOptions = {}) {
-    if (options.stateHome !== undefined) {
-      assertDerivedStatePathSync(options.stateHome, filePath, 'file');
-    }
-    // Same posture as the session store sharing this file: the directory
-    // and the database must not be readable by other local users, and the
-    // sidecar chmods cover databases created under a looser umask.
-    mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(filePath);
-    try {
-      chmodSync(filePath, 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-    }
-    this.db.exec('PRAGMA journal_mode = WAL');
-    // WAL serializes writers to one at a time across the whole file, and
-    // this database is shared between two processes: the daemon claims
-    // slots and saves sessions while `stratus schedules cancel` deletes a
-    // row from another connection. Without a busy timeout the loser of that
-    // lock throws `database is locked` immediately — a cancel that silently
-    // failed would leave the schedule (and its destination grant) live.
-    // Wait for the writer instead.
-    this.db.exec('PRAGMA busy_timeout = 5000');
-    this.db.exec(`
+    this.db = openFleetDatabase(filePath, options, `
       CREATE TABLE IF NOT EXISTS schedules (
         id TEXT PRIMARY KEY,
         agent_id TEXT NOT NULL,
@@ -81,15 +101,6 @@ export class SqliteScheduleStore {
         created_at TEXT NOT NULL
       )
     `);
-    for (const sensitive of [filePath, `${filePath}-wal`, `${filePath}-shm`, `${filePath}-journal`]) {
-      try {
-        chmodSync(sensitive, 0o600);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw error;
-        }
-      }
-    }
   }
 
   insert(record: ScheduleRecord): void {

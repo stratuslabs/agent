@@ -1,5 +1,7 @@
 import type { JsonObject, TrustLevel } from '@stratusagent/core';
 
+import type { EventFilter, QuietHours } from './events.ts';
+
 // The pure half of schedules: what a schedule *is* — its cadence, its prompt,
 // its optional destination — and the arithmetic of when it fires next. The
 // scheduler that arms timers, the store that makes rows durable, and the
@@ -37,15 +39,25 @@ export const canonicalDestination = (destination: ScheduleDestination): string =
   `${destination.channel.trim().toLowerCase()}:${destination.to.trim()}`;
 
 /**
- * When a schedule runs. Three shapes rather than one string, because the
- * three are advanced differently: an interval adds itself to the previous
- * slot, a cron expression is searched forward, and a one-shot has no next
- * at all.
+ * When a schedule runs. Separate shapes rather than one string, because each
+ * is advanced differently: an interval adds itself to the previous slot, a
+ * cron expression is searched forward, a one-shot has no next at all, and an
+ * event trigger (card 590) has no slots: it fires when a delivery from its
+ * operator-configured `source` passes its `filter`, so the due scan never
+ * sees it.
  */
 export type ScheduleCadence =
   | { kind: 'every'; intervalMs: number }
   | { kind: 'cron'; expression: string }
-  | { kind: 'at'; at: string };
+  | { kind: 'at'; at: string }
+  | {
+    kind: 'event';
+    source: string;
+    filter: EventFilter;
+    quietHours?: QuietHours;
+    /** Turns per hour at most; `DEFAULT_EVENT_MAX_PER_HOUR` when absent. */
+    maxPerHour?: number;
+  };
 
 /** One durable schedule, exactly as the human approved it. */
 export interface ScheduleRecord {
@@ -253,6 +265,9 @@ export const nextFireAfter = (cadence: ScheduleCadence, after: Date): Date | und
       }
       return at.getTime() > after.getTime() ? at : undefined;
     }
+    case 'event':
+      // Fired by deliveries, never by the clock.
+      return undefined;
     default:
       return undefined;
   }
@@ -274,6 +289,8 @@ export const describeCadence = (cadence: ScheduleCadence): string => {
       return `cron ${cadence.expression}`;
     case 'at':
       return `once at ${cadence.at}`;
+    case 'event':
+      return `on ${cadence.source} events`;
     default:
       return 'unknown';
   }

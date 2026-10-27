@@ -138,6 +138,23 @@ export {
   type SchedulerRuntime,
   type SchedulerRuntimeOptions,
 } from './schedules.ts';
+export {
+  SqliteEventStore,
+  EVENT_BLOCK_MAX_BYTES,
+  EVENT_DEDUP_WINDOW_MS,
+  EVENT_DELIVERY_ROW_CAP,
+  eventCoalescingKey,
+  eventDispatchKey,
+  eventSessionId,
+  renderEventBlock,
+  type AcceptedEventDelivery,
+  type EventDeliveryRow,
+  type EventDeliveryStatus,
+  type EventFiringRow,
+  type EventFiringStatus,
+  type NewEventFiring,
+  type RefusedEventDelivery,
+} from './events.ts';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import {
   loadPlugins,
