@@ -95,7 +95,9 @@ test('a tool that ignores the turn\'s abort is left behind after a short grace, 
 
   // The grace is the tool's chance to answer for itself; nothing ends early.
   assert.equal(await settledYet(run), false, 'the turn ended before the tool had its grace');
-  t.mock.timers.tick(5_000);
+  t.mock.timers.tick(1_000);
+  assert.equal(await settledYet(run), false, 'the turn ended a second into the grace');
+  t.mock.timers.tick(4_000);
   await assert.rejects(run, (error: Error) => error instanceof RunAbortedError);
 
   const session = await store.get('hung-1');
@@ -127,16 +129,17 @@ test('a tool that stops when asked keeps its own result', async (t) => {
   const tools = new ToolRegistry();
   let enter!: () => void;
   const entered = new Promise<void>((resolve) => { enter = resolve; });
+  let answer!: () => void;
   tools.register({
     name: 'shell.like',
     async execute(_input, _session, context) {
       enter();
-      // Answers on its own, a moment after the abort: a killed child's
-      // close event, say. That answer says what happened; the kernel's
-      // fallback would only guess.
+      // Answers on its own, a while after the abort: a killed child's close
+      // event, say, once its output is collected. That answer says what
+      // happened; the kernel's fallback would only guess.
       return new Promise((_resolve, reject) => {
         context?.signal?.addEventListener('abort', () => {
-          setImmediate(() => reject(new Error('Command aborted: sleep 600')));
+          answer = () => reject(new Error('Command aborted: sleep 600'));
         }, { once: true });
       });
     },
@@ -154,6 +157,8 @@ test('a tool that stops when asked keeps its own result', async (t) => {
   });
   await entered;
   controller.abort();
+  t.mock.timers.tick(1_000);
+  answer();
   await assert.rejects(run, (error: Error) => error instanceof RunAbortedError);
 
   const recorded = (await store.get('polite-1'))?.messages.find((message) => message.role === 'tool')?.toolResult;
