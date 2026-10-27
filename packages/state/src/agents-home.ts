@@ -800,6 +800,9 @@ const recordAgentsFolder = async (env: StateEnvironment, plan: AgentsHomePlan, a
     await rm(staged, { force: true });
     throw error;
   }
+  // Durable with the re-points it follows, so a crash or snapshot can't
+  // keep the new links and lose the record that names their folder.
+  await syncDirectory(path.dirname(file));
 };
 
 /**
