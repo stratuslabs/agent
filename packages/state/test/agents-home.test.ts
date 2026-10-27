@@ -882,6 +882,30 @@ test('a broken link into some other folder does not hold the record back, so a s
   assert.equal(await readlink(path.join(agentsDirPath(nextEnv), 'bob.md')), path.join(volume, 'Agents', 'bob', 'soul.md'), 'still the operator\'s');
 });
 
+test('a link into the recorded folder that cannot be inspected keeps the record, so the next start can still re-point it', async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip('root searches through the mode');
+    return;
+  }
+  // Copied to another user while the old home is still there, behind a
+  // folder this user can't search: lstat fails with EACCES, not ENOENT.
+  const { home, env, old } = await copiedHome(['ava']);
+  await mkdir(old, { mode: 0o000 });
+  t.after(() => fs.promises.chmod(old, 0o700).catch(() => undefined));
+  const plan = await planAgentsHome(env);
+  assert.deepEqual(plan.relink, [], 'it may still be there');
+  await surfaceAgentsHome(env);
+  const record = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
+  assert.equal(await readFile(record, 'utf8'), `${path.join(old, 'Agents')}\n`, 'still the old folder');
+
+  // The old home goes away: the next start re-points from the record.
+  await fs.promises.chmod(old, 0o700);
+  await fs.promises.rm(old, { recursive: true, force: true });
+  assert.match((await surfaceAgentsHome(env)) ?? '', /re-pointed 2 link\(s\)/);
+  assert.equal(await readlink(path.join(agentsDirPath(env), 'ava.md')), path.join(home, 'Agents', 'ava', 'soul.md'));
+  assert.equal(await readFile(record, 'utf8'), `${path.join(home, 'Agents')}\n`);
+});
+
 test('a start with nothing to move records the agents folder its links name', async () => {
   const { env, home } = await copiedHome(['ava']);
   await surfaceAgentsHome(env);

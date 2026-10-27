@@ -799,16 +799,16 @@ const recordAgentsFolder = async (env: StateEnvironment, recorded: string | unde
  * Whether the pass writes the record now. Always when there is none: the
  * links are this folder's from here on, or were never provably anything's.
  * Never while a link it might still re-point is broken: a link into the
- * recorded folder that failed or whose file is not here yet, since replacing
- * the old folder's name would lose the evidence for the next start. A broken
- * link into any other folder is no reason to keep it: the record never
- * re-points that one, and keeping it would leave the record naming a folder
- * the other links no longer do.
+ * recorded folder that failed, whose file is not here yet, or whose target
+ * can't be inspected, since replacing the old folder's name would lose the
+ * evidence for the next start. A broken link into any other folder is no
+ * reason to keep it: the record never re-points that one, and keeping it
+ * would leave the record naming a folder the other links no longer do.
  */
 const shouldRecord = (plan: AgentsHomePlan, unfinished: boolean): boolean =>
   plan.recordUnreadable === undefined
   && (plan.recorded === undefined
-    || (!unfinished && !plan.elsewhere.some(({ folder }) => folder === plan.recorded)));
+    || (!unfinished && ![...plan.elsewhere, ...plan.uninspected].some(({ folder }) => folder === plan.recorded)));
 
 /** The start's line for links into another agents folder that it leaves as they are. */
 const elsewhereLine = (plan: AgentsHomePlan): string | undefined => {
@@ -975,6 +975,14 @@ export interface AgentsHomePlan {
    * {@link recorded} names the folder and this home's folder has the files.
    */
   elsewhere: Array<{ folder: string; links: number }>;
+  /**
+   * Folders that soul and workspace links point into, with how many, whose
+   * targets could not be inspected (`lstat` failed with something other
+   * than ENOENT, such as a folder on the way this user can't search). They
+   * may still be there, so nothing is re-pointed, and one into
+   * {@link recorded} keeps the record as it is.
+   */
+  uninspected: Array<{ folder: string; links: number }>;
   /** Souls in the folder that no hidden name links to, so the roster never reads them. */
   unlinked: string[];
 }
@@ -1099,6 +1107,7 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     relink: [],
     dangling: [],
     elsewhere: [],
+    uninspected: [],
     unlinked: [],
   };
   let entries;
@@ -1180,7 +1189,19 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
   // start reads soon, never one nothing reads.
   const wanted = new Set<string>();
   for (const { kind, link, target } of links) {
-    const gone = await lstatOrUndefined(target).then((info) => info === undefined, () => false);
+    let gone: boolean;
+    try {
+      gone = await lstatOrUndefined(target) === undefined;
+    } catch {
+      // Can't tell (a folder on the way this user can't search): it may
+      // still be there, so nothing is re-pointed, and a link into the
+      // recorded folder keeps the record naming it for a later start.
+      const shape = movedHomeShape(agentsHome, kind, target);
+      if (shape !== undefined) {
+        countLink(plan.uninspected, shape.from);
+      }
+      continue;
+    }
     if (!gone) {
       continue;
     }
