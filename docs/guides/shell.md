@@ -33,9 +33,10 @@ connect to a container runtime's socket. The network stays on, so on a
 cloud VM a command can still reach the instance metadata service
 (`169.254.169.254`) and any credentials its role hands out; block that at
 the host if the role matters. The sandbox matches paths, so a hard link to
-a hidden file that something outside it put in the workspace reads like
-any other file there. Where the host can't build a sandbox, commands are
-refused with the reason (`sandbox: "required"`, the default).
+a hidden file that something outside it put anywhere a command can read
+(the workspace, a readable or writable path) reads like any other file
+there. Where the host can't build a sandbox, commands are refused with
+the reason (`sandbox: "required"`, the default).
 `sandbox: "auto"` runs them unconfined there instead, and `sandbox: "off"`
 turns the sandbox off. The full list and settings are in
 [the package README](../../packages/tool-shell/README.md#the-sandbox).

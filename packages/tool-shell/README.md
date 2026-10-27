@@ -175,8 +175,9 @@ git can find its repository), but nothing can be read from inside them.
 
 Both match paths, not files. A hard link is the same file under a second
 name, so a hard link to a hidden file that something outside the sandbox
-(you, or another program running as the daemon's user) puts in the
-workspace or a writable path can be read through that name. A command
+(you, or another program running as the daemon's user) puts anywhere a
+command can read (the workspace, `readablePaths`, `writablePaths`, the
+caches, or a `visible` home) can be read through that name. A command
 inside the sandbox can't make one: macOS refuses the link, and on Linux
 every writable directory is its own mount, which a hard link can't cross.
 No Stratus tool creates hard links.
