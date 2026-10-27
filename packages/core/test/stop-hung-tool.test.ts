@@ -9,9 +9,11 @@ import {
   RunAbortedError,
   ToolRegistry,
   type Executor,
+  type JsonValue,
   type ModelProvider,
   type Session,
   type StratusEvent,
+  type Tool,
   type ToolResult,
 } from '../src/index.ts';
 
@@ -21,15 +23,17 @@ import {
  * Slack's `stop` could not end it, and a stop shut down around it, losing
  * the message queued behind it.
  */
+interface HungOutcome { value?: JsonValue; error?: Error }
+
 const createHungTool = (): {
-  tool: { name: string; execute(): Promise<unknown> };
+  tool: Tool;
   entered: Promise<void>;
-  release: (outcome: { value?: unknown; error?: Error }) => void;
+  release: (outcome: HungOutcome) => void;
 } => {
   let enter!: () => void;
   const entered = new Promise<void>((resolve) => { enter = resolve; });
-  let settle!: (outcome: { value?: unknown; error?: Error }) => void;
-  const outcome = new Promise<{ value?: unknown; error?: Error }>((resolve) => { settle = resolve; });
+  let settle!: (outcome: HungOutcome) => void;
+  const outcome = new Promise<HungOutcome>((resolve) => { settle = resolve; });
   return {
     tool: {
       name: 'hang.wait',
@@ -39,7 +43,7 @@ const createHungTool = (): {
         if (error) {
           throw error;
         }
-        return value;
+        return value ?? null;
       },
     },
     entered,
