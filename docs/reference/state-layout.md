@@ -25,6 +25,7 @@ what moves when you rename an agent.
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
 | `plugins/<package>/` | What one [plugin](../architecture/plugins.md) keeps across restarts, such as a channel's read position, by package name; a scoped package nests under its scope (`plugins/@scope/name/`). Created only when a plugin asks for it. `0700` at every level. |
 | `agents/` | One `<id>.md` soul per agent, plus one directory per agent — below. Each soul, and each agent's `workspace/`, is normally a link into the [agents folder](#the-agents-folder). |
+| `agents/.agents-folder` | The agents folder those links were made into, one absolute path. Written by `serve` and `update`; a home copied or restored to another path uses it to re-point its links (see [the agents folder](#the-agents-folder)). |
 
 ## One directory per agent
 
@@ -99,13 +100,20 @@ Sessions, memories, grants and everything else stay in `~/.stratus`.
 - **Copying or restoring a whole home to another path** (another user, a
   new host path, a backup restored elsewhere) carries the links as they
   are, still naming the old path. Copy the agents folder along with
-  `~/.stratus`: the next `stratus serve` or `stratus update` re-points each
-  soul and workspace link whose target is gone at the same file in this
-  home's folder, when the folder carries the marker and has that file, and
-  says how many it re-pointed. The old folder has to have been named
-  `Agents`, `Stratus` or the same as this one. Any other broken link is left
-  as it is; `stratus doctor` names it and where it points, and so does the
-  roster's warning when it skips that soul.
+  `~/.stratus`. Each start records the folder the links were made into in
+  `~/.stratus/agents/.agents-folder`, and the copy carries that record: the
+  next `stratus serve` or `stratus update` re-points each soul and
+  workspace link whose target is gone and that names the recorded folder at
+  the same file in this home's folder (when the folder carries the marker
+  and has that file), re-records a workspace's provenance ledger at the new
+  path, and says how many it re-pointed. A link into any other folder is
+  left as it is, because an operator's link to storage that is offline
+  looks exactly the same. A home last started by a build before the record
+  (0.13.6 or earlier) has none: `stratus doctor` names the folder its links
+  point into and gives the one command that records it, and the next start
+  re-points them. Every broken link left as it is is named by
+  `stratus doctor`, with where it points, and by the roster's warning when
+  it skips that soul.
 
 Per-agent directories are the point rather than a tidier listing. A store
 is opened on one agent's path, so there is no query another agent's

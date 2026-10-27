@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   agentsDirPath,
+  AGENTS_FOLDER_RECORD,
   planAgentsHome,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
@@ -788,10 +789,19 @@ export const collectDoctorReport = async (
       ? { path: plan.agentsHome, claimed: plan.claimed, pending: plan.souls.length + plan.workspaces.length + plan.relink.length }
       : { reason: plan.reason ?? 'none available' };
     if (plan.dangling.length > 0) {
+      // A folder named like an agents folder whose files this home has:
+      // a copied home's, or an operator's storage that is offline, and
+      // nothing on disk tells the two apart. The operator can, and
+      // recording the folder is how they say so.
+      const record = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
+      const copied = plan.unconfirmed.map(({ folder, links }) => `${links} of them name ${folder}, and ${plan.agentsHome ?? 'this home\'s agents folder'} has the same files. `
+        + `If this home was copied or restored from there, rather than linked to storage that is offline, run \`printf '%s\\n' ${quoteShellArg(folder)} > ${quoteShellArg(record)}\` and restart: each link into it is then re-pointed at the same file here.`);
       problems.push(
         `These links point at something that is gone: ${plan.dangling.join(', ')}. `
         + 'Put the agent\'s folder back (or rename it back) to restore it; a missing workspace in the agents folder is recreated empty on the next write. '
-        + `If this home was copied or restored from another path, copy that home's agents folder to ${plan.agentsHome ?? 'this home'} too and restart: each link into the old home's agents folder is then re-pointed at the same file here.`,
+        + (copied.length > 0
+          ? copied.join(' ')
+          : `If this home was copied or restored from another path, copy that home's agents folder to ${plan.agentsHome ?? 'this home'} too and restart: each link into the old home's agents folder is then re-pointed at the same file here.`),
       );
     }
     if (plan.unlinked.length > 0) {

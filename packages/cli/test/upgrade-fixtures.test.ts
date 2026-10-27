@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, cp, lstat, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, unlink } from 'node:fs/promises';
 import os from 'node:os';
@@ -316,19 +317,40 @@ const doctorOutput = async (home: string): Promise<string> => {
   return output;
 };
 
-test('a home written by 0.13.5 and copied to another path starts with all its agents', async () => {
+/** The command doctor gives for recording the folder a copied home came from. */
+const recordCommand = (doctor: string): string => {
+  const found = /run `(printf [^`]+)` and restart/.exec(doctor);
+  assert.ok(found?.[1], doctor);
+  return found[1];
+};
+
+const rosterIds = async (api: (method: string, route: string) => Promise<{ json: any }>): Promise<string[]> =>
+  ((await api('GET', '/agents')).json.agents as Array<{ id: string }>).map((agent) => agent.id);
+
+// A 0.13.5 home has no record of the folder its links were made into, so
+// a copy of one cannot tell its own links from an operator's link to
+// storage that is offline: it names them, and the operator says which.
+test('a home written by 0.13.5 and copied to another path starts with all its agents once doctor\'s command is run', async () => {
   const written = (JSON.parse(await readFile(path.join(fixturesDir, '0.13.5', 'home.json'), 'utf8')) as { home: string }).home;
   assert.equal(existsSync(written), false, `${written} must not exist for this test`);
   const home = await homeFrom('0.13.5', { relinked: false });
   const agents = path.join(home, '.stratus', 'agents');
-  assert.equal(await readlink(path.join(agents, 'ava.md')), path.join(written, 'Agents', 'ava', 'soul.md'), 'the copy names the old home');
+  const old = path.join(written, 'Agents');
+  assert.equal(await readlink(path.join(agents, 'ava.md')), path.join(old, 'ava', 'soul.md'), 'the copy names the old home');
 
   const doctor = await doctorOutput(home);
-  assert.match(doctor, /3 more to move or re-point there on the next start/);
-  assert.doesNotMatch(doctor, /point at something that is gone/);
+  assert.ok(doctor.includes(`3 of them name ${old}, and ${path.join(home, 'Agents')} has the same files`), doctor);
+  const command = recordCommand(doctor);
 
+  const before = await serving(home, async (api) => {
+    assert.deepEqual(await rosterIds(api), ['stratus'], 'nothing re-pointed without the record');
+  });
+  assert.ok(before.includes(`3 link(s) name ${old}, which is gone`), before);
+  assert.equal(await readlink(path.join(agents, 'ava.md')), path.join(old, 'ava', 'soul.md'), 'left as it was');
+
+  execFileSync('/bin/sh', ['-c', command]);
   const first = await serving(home, async (api) => {
-    const ids = ((await api('GET', '/agents')).json.agents as Array<{ id: string }>).map((agent) => agent.id);
+    const ids = await rosterIds(api);
     assert.ok(ids.includes('ava') && ids.includes('bob'), `roster after the move: ${ids.join(', ')}`);
     const sessionIds = ((await api('GET', '/sessions')).json.sessions as Array<{ id: string }>).map((session) => session.id);
     assert.ok(sessionIds.includes('fixture-ava-1') && sessionIds.includes('fixture-bob-1'), sessionIds.join(', '));
@@ -340,7 +362,7 @@ test('a home written by 0.13.5 and copied to another path starts with all its ag
   assert.equal(await readFile(path.join(agents, 'ava', 'workspace', 'notes.md'), 'utf8'), await readFile(path.join(fixturesDir, '0.13.5', 'Agents', 'ava', 'workspace', 'notes.md'), 'utf8'));
 
   const second = await serving(home, async () => {});
-  assert.doesNotMatch(second, /re-pointed/, 'nothing left to re-point');
+  assert.doesNotMatch(second, /re-pointed|which is gone/, 'nothing left to re-point');
 });
 
 test('a copied 0.13.5 home missing an agent\'s folder names the link and where it points', async () => {
@@ -350,11 +372,12 @@ test('a copied 0.13.5 home missing an agent\'s folder names the link and where i
   const bobSoul = path.join(home, '.stratus', 'agents', 'bob.md');
 
   const doctor = await doctorOutput(home);
-  assert.ok(doctor.includes(`point at something that is gone: ${bobSoul} -> ${path.join(written, 'Agents', 'bob', 'soul.md')}`), doctor);
-  assert.match(doctor, /copied or restored from another path, copy that home's agents folder/);
+  assert.ok(doctor.includes(`point at something that is gone: `) && doctor.includes(`${bobSoul} -> ${path.join(written, 'Agents', 'bob', 'soul.md')}`), doctor);
+  assert.ok(doctor.includes(`2 of them name ${path.join(written, 'Agents')}`), doctor);
+  execFileSync('/bin/sh', ['-c', recordCommand(doctor)]);
 
   const output = await serving(home, async (api) => {
-    const ids = ((await api('GET', '/agents')).json.agents as Array<{ id: string }>).map((agent) => agent.id);
+    const ids = await rosterIds(api);
     assert.ok(ids.includes('ava') && !ids.includes('bob'), ids.join(', '));
   });
   assert.match(output, /re-pointed 2 link\(s\)/);

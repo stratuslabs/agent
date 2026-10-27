@@ -19,6 +19,7 @@ import {
 } from '../src/index.ts';
 import { defaultUpdateContinuation } from '../src/commands/update.ts';
 import {
+  AGENTS_FOLDER_RECORD,
   AGENTS_HOME_MARKER,
   agentsDirPath,
   agentWorkspacePath,
@@ -1395,6 +1396,8 @@ test('update --check counts links a copied home still points at its old path as 
   const hidden = path.join(agentsDirPath(env), 'ava.md');
   await mkdir(agentsDirPath(env), { recursive: true });
   await symlink(old, hidden);
+  // The folder the copied links were made into, as the old home recorded it.
+  await writeFile(path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD), `${path.dirname(path.dirname(old))}\n`);
 
   const check = createStreams();
   const code = await runCli({
