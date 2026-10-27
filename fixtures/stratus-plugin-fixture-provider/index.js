@@ -1,9 +1,10 @@
 // A provider registered through `context.providers`, built once per
-// selection. Two modes, chosen by config: `echo` answers with a line naming
+// selection. Three modes, chosen by config: `echo` answers with a line naming
 // the model it was built for, which is what a run-through-the-seam test
 // reads; `memory` remembers a fact, recalls it, and answers with what came
 // back, which is what a memory-store test needs from a provider — the
-// built-in demo provider calls only demo.echo.
+// built-in demo provider calls only demo.echo; `fail` throws `reply` from
+// every call, the way a provider that is down fails a turn.
 export const createPlugin = (config) => ({
   name: 'fixture-provider',
   setup(context) {
@@ -19,6 +20,9 @@ export const createPlugin = (config) => ({
         return {
           name: 'fixture',
           async generate({ session }) {
+            if (config.mode === 'fail') {
+              throw new Error(config.reply ?? 'the fixture provider failed');
+            }
             if (config.mode !== 'memory') {
               return { parts: [{ type: 'text', text: `${reply} (model: ${model})` }] };
             }

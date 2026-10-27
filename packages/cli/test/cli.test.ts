@@ -15769,6 +15769,62 @@ test('a plugin provider serves a run selected with --provider, through the real 
   assert.equal(payload.session.metadata.executor, 'local-command');
 });
 
+test('a run whose turn fails at its provider prints the error and not the help', async () => {
+  // The help answers a mistake in how the command was typed. A turn that
+  // started and then failed was typed fine, and 150 lines of usage under
+  // the one line saying what went wrong only bury it.
+  const home = await seamHome({
+    plugins: { 'stratus-plugin-fixture-provider': { mode: 'fail', reply: 'the fixture provider is down' } },
+  });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['run', '--provider', 'fixture', '--prompt', 'hi'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stderr, /^Error: .*the fixture provider is down/m);
+  assert.doesNotMatch(output.stderr, /Usage:/);
+});
+
+test('a command that fails after its arguments parsed prints the error and not the help', async () => {
+  // Not only `run`: what failed was reaching the daemon, not the typing.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['agents', '--gateway', 'http://127.0.0.1:7600', '--token', 't'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      fetch: async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:7600'); },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stderr, /^Error: Could not reach the gateway at http:\/\/127\.0\.0\.1:7600/);
+  assert.doesNotMatch(output.stderr, /Usage:/);
+});
+
+test('a mistyped command still prints the help under the error', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  for (const [argv, error] of [
+    [['run', '--bogus'], /^Error: Unknown option: --bogus$/m],
+    [['run', '--max-turns', 'many', '--prompt', 'hi'], /^Error: Invalid value for --max-turns: many$/m],
+    [['agents', '--gateway'], /^Error: Missing value for --gateway$/m],
+  ] as const) {
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({ argv: [...argv], streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    assert.equal(exitCode, 1, argv.join(' '));
+    assert.match(output.stderr, error);
+    assert.match(output.stderr, /Usage:/, argv.join(' '));
+  }
+});
+
 test('re-running setup keeps the executor and memoryStore selections it has no menu for', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

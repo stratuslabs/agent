@@ -16,7 +16,7 @@
       "type": "object",
       "properties": {
         "reply": { "type": "string" },
-        "mode": { "type": "string", "enum": ["echo", "memory"] }
+        "mode": { "type": "string", "enum": ["echo", "memory", "fail"] }
       },
       "additionalProperties": false
     }
