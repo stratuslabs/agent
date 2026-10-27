@@ -438,6 +438,77 @@ test('a guard that refuses the fallback by name keeps refusing it on the turns a
   assert.deepEqual(seen, ['primary', 'fallback', 'fallback']);
 });
 
+test('the fallback wrapper keeps the names a routing provider inside it reports', async () => {
+  // A provider that routes to another model says which through nameFor;
+  // the wrapper passes that on instead of the router's own name.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const seen: string[] = [];
+  const provider = createFallbackWrappedProvider(
+    {
+      name: 'primary',
+      nameFor: () => 'primary-backend',
+      async generate() {
+        throw new Error('primary down');
+      },
+    },
+    {
+      name: 'fallback',
+      nameFor: () => 'fallback-backend',
+      async generate() {
+        return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+      },
+    },
+    () => {},
+  );
+  const runner = new AgentRunner({ provider, store: new InMemorySessionStore(), providerCallGuards: [(check) => { seen.push(check.provider); }] });
+
+  await runner.run({ sessionId: 'routed', agent: { id: 'a', name: 'A' }, userMessage: 'one' });
+  await runner.resume({ sessionId: 'routed', userMessage: 'two' });
+
+  assert.deepEqual(seen, ['primary-backend', 'fallback-backend', 'fallback-backend']);
+});
+
+test('a guard that cannot decide inside the primary\'s own call fails the turn, and the fallback does not answer instead', async () => {
+  // A composite primary asks about its second call; the guard throws an
+  // ordinary error. That is the guard saying no, not the primary model
+  // failing, so the wrapper must not switch.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  let fallbackCalls = 0;
+  const switches: unknown[] = [];
+  const provider = createFallbackWrappedProvider(
+    {
+      name: 'primary',
+      async generate(request) {
+        await request.guardCall?.('primary-second-model');
+        return { parts: [{ type: 'text' as const, text: 'primary' }] };
+      },
+    },
+    {
+      name: 'fallback',
+      async generate() {
+        fallbackCalls += 1;
+        return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+      },
+    },
+    (error) => switches.push(error),
+  );
+  const store = new InMemorySessionStore();
+  const unreadable = (check: { provider: string }) => {
+    if (check.provider === 'primary-second-model') {
+      throw new Error('the budget file could not be read');
+    }
+  };
+
+  await assert.rejects(
+    new AgentRunner({ provider, store, providerCallGuards: [unreadable] })
+      .run({ sessionId: 'undecided', agent: { id: 'a', name: 'A' }, userMessage: 'hello' }),
+    /the budget file could not be read/,
+  );
+  assert.equal(fallbackCalls, 0);
+  assert.deepEqual(switches, []);
+  assert.equal((await store.get('undecided'))?.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], undefined);
+});
+
 test('fallback stickiness survives a wrapper rebuild via session metadata', async () => {
   const { createFallbackWrappedProvider, FALLBACK_ACTIVE_METADATA_KEY } = await import('../src/index.ts');
   const session = {
