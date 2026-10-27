@@ -84,7 +84,7 @@ test('an attribute the event lacks never matches, so `not` of it does', () => {
   assert.equal(matchesEventFilter(parseEventFilter({ not: { prefix: { subject: 'pull/' } } }), noSubject), true);
 });
 
-test('a data. key walks object keys and matches only a string; numbers, arrays and missing paths do not match', () => {
+test('a data. key walks own object keys and matches only a string; numbers, arrays, indexes and missing paths do not match', () => {
   const event: InboundEvent = {
     attributes: { specversion: '1.0', id: 'a', source: 's', type: 't' },
     data: { review: { state: 'approved', count: 3, labels: ['x'] }, 'dotted.key': 'v' },
@@ -92,6 +92,7 @@ test('a data. key walks object keys and matches only a string; numbers, arrays a
   assert.equal(matchesEventFilter(parseEventFilter({ exact: { 'data.review.state': 'approved' } }), event), true);
   assert.equal(matchesEventFilter(parseEventFilter({ exact: { 'data.review.count': '3' } }), event), false);
   assert.equal(matchesEventFilter(parseEventFilter({ exact: { 'data.review.labels': 'x' } }), event), false);
+  assert.equal(matchesEventFilter(parseEventFilter({ exact: { 'data.review.labels.0': 'x' } }), event), false, 'no array indexing');
   assert.equal(matchesEventFilter(parseEventFilter({ exact: { 'data.review.missing': 'x' } }), event), false);
   assert.equal(matchesEventFilter(parseEventFilter({ exact: { 'data.review': 'x' } }), event), false);
   // Inherited properties are not data: a path through the prototype must not match.

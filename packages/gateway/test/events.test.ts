@@ -116,14 +116,17 @@ test('the event block carries the attributes and data as JSON, so text in them c
 });
 
 test('the event block is capped at 16 KB with a note, and never splits a character', () => {
-  const event: InboundEvent = {
-    attributes: { specversion: '1.0', id: 'd1', source: 's', type: 't' },
-    data: { body: 'é'.repeat(20_000) },
-  };
-  const block = renderEventBlock('github', event);
-  assert.ok(Buffer.byteLength(block) <= EVENT_BLOCK_MAX_BYTES, `${Buffer.byteLength(block)} bytes`);
-  assert.match(block, /cut at 16 KB of 39 KB; fetch the rest with your own tools/);
-  assert.ok(!block.includes('�'), 'no broken character at the cut');
+  // Two id lengths, so the cut lands on each byte of a two-byte character.
+  for (const id of ['d1', 'd12']) {
+    const event: InboundEvent = {
+      attributes: { specversion: '1.0', id, source: 's', type: 't' },
+      data: { body: 'é'.repeat(20_000) },
+    };
+    const block = renderEventBlock('github', event);
+    assert.ok(Buffer.byteLength(block) <= EVENT_BLOCK_MAX_BYTES, `${Buffer.byteLength(block)} bytes`);
+    assert.match(block, /cut at 16 KB of 39 KB; fetch the rest with your own tools/);
+    assert.ok(!block.includes('\uFFFD'), `no broken character at the cut (id ${id})`);
+  }
   const small = renderEventBlock('github', { attributes: { specversion: '1.0', id: 'd', source: 's', type: 't' } });
   assert.doesNotMatch(small, /cut at/);
   assert.match(small, /^data:$/m);
