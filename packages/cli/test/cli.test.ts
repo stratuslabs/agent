@@ -6257,7 +6257,7 @@ test('doctor names a config key that loading ignores, without its value', async 
   // provider was configured. `modle` is a typo the loader never reads.
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
-    JSON.stringify({ provider: { name: 'anthropic' }, modle: 'claude-opus-5', systemPrompt: '' }),
+    JSON.stringify({ provider: { name: 'anthropic' }, modle: 'claude-opus-5', systemPrompt: '', promptCacheTtl: '10m' }),
     { mode: 0o600 },
   );
 
@@ -6269,8 +6269,12 @@ test('doctor names a config key that loading ignores, without its value', async 
   });
 
   assert.equal(exitCode, 1);
-  assert.match(output.stdout, /sets "provider" to an object, which Stratus doesn't accept there, so it is ignored/);
-  assert.match(output.stdout, /sets "systemPrompt" to an empty string, which Stratus doesn't accept there/);
+  assert.match(output.stdout, /sets "provider" to an object, but Stratus doesn't accept that value there, so it is ignored/);
+  assert.match(output.stdout, /sets "systemPrompt" to an empty string, but Stratus doesn't accept that value there/);
+  // A string is the right type here, just not this one: the line must not
+  // read as if strings were refused.
+  assert.match(output.stdout, /sets "promptCacheTtl" to a string, but Stratus doesn't accept that value there/);
+  assert.doesNotMatch(output.stdout, /10m/);
   assert.match(output.stdout, /has a key Stratus doesn't read: "modle"\. It does nothing, so check its spelling or remove it\./);
   // Named by key and type only: a value can be a secret pasted in the wrong place.
   assert.doesNotMatch(output.stdout, /claude-opus-5/);

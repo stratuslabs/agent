@@ -257,7 +257,7 @@ const ignoredConfigKeyProblems = async (configPath: string): Promise<string[]> =
       unknown.push(JSON.stringify(entry.key));
     } else {
       problems.push(
-        `${configPath} sets ${JSON.stringify(entry.key)} to ${VALUE_TYPE_PHRASE[entry.valueType]}, which Stratus doesn't accept there, `
+        `${configPath} sets ${JSON.stringify(entry.key)} to ${VALUE_TYPE_PHRASE[entry.valueType]}, but Stratus doesn't accept that value there, `
         + 'so it is ignored and runs go on as if it were not set.',
       );
     }
