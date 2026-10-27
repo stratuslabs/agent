@@ -4348,11 +4348,11 @@ export interface ProviderContribution {
 }
 
 /**
- * The slice of a channel adapter the kernel holds: structurally
- * `@stratusagent/channels`' `ChannelAdapter`, kept structural here so core
- * carries no dependency on the channels package — the same reason the
- * gateway declares its own copy. `name` is the channel kind (`slack`,
- * `discord`); the gateway it is started with is the host's.
+ * The slice of a channel adapter the kernel holds: structurally the
+ * `ChannelAdapter` in `channels.ts`, declared on its own because it
+ * predates that contract moving into core (the gateway keeps a copy for
+ * the same reason). `name` is the channel kind (`slack`, `discord`); the
+ * gateway it is started with is the host's.
  */
 export interface ChannelAdapterLike {
   name: string;
@@ -4362,7 +4362,7 @@ export interface ChannelAdapterLike {
   resolveOutbound?(address: { agentId: string; to: string; thread?: string }): Promise<{
     post(text: string): Promise<unknown>;
   }>;
-  /** See `@stratusagent/channels`' `ChannelAdapter.readConversation`. */
+  /** See `ChannelAdapter.readConversation`. */
   readConversation?(request: {
     agentId: string;
     conversation: string;
@@ -4383,9 +4383,9 @@ export interface ChannelAdapterLike {
     }>;
     more: boolean;
   }>;
-  /** See `@stratusagent/channels`' `ChannelAdapter.accountFor`. */
+  /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
-  /** See `@stratusagent/channels`' `ChannelAdapter.conversationKindFor`. */
+  /** See `ChannelAdapter.conversationKindFor`. */
   conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
 }
 
@@ -8048,3 +8048,45 @@ export class AgentRunner {
     return result;
   }
 }
+
+/*
+ * The channel contract and the executor helpers. Each was its own package
+ * (`@stratusagent/channels`, `@stratusagent/executors`): pure contract
+ * code released in lockstep with core, which gave plugin authors another
+ * package and version to line up and no boundary in return. They live in
+ * their own modules here because each is a separately shared surface; the
+ * old packages ship once more as deprecated re-exports of these names.
+ */
+export {
+  createDirectExecutor,
+  defineExecutor,
+  DirectExecutor,
+  failureResult,
+  normalizeExecutorError,
+  successResult,
+  type DirectExecutorErrorContext,
+  type DirectExecutorOptions,
+  type ExecutorDefinition,
+  type ExecutorResultCallRef,
+} from './executors.ts';
+
+export {
+  admitsSender,
+  channelSessionKey,
+  isPrincipal,
+  senderTrustFor,
+  type AdmitPolicy,
+  type ChannelAdapter,
+  type ChannelCredentialRequest,
+  type ChannelSessionKeyParts,
+  type ConversationMessage,
+  type ConversationReadRequest,
+  type ConversationReadResult,
+  type GatewayLike,
+  type InboundMessage,
+  type OutboundAddress,
+  type OutboundConnection,
+  type OutboundMessageRef,
+  type SenderPolicy,
+  type SessionRouting,
+} from './channels.ts';

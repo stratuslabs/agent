@@ -228,8 +228,9 @@ export { applySoulPins, type SoulPinContext } from '@stratusagent/state';
 /**
  * A channel adapter as the gateway sees it: started after the roster
  * loads, stopped before the store drains. Structurally identical to
- * @stratusagent/channels' ChannelAdapter — kept structural here so the
- * gateway does not depend on the channels package.
+ * `ChannelAdapter` in @stratusagent/core, declared here because it
+ * predates the channel contract moving into core, when the gateway could
+ * not import it without depending on the channels package.
  */
 export interface GatewayChannelAdapter {
   name: string;
@@ -258,9 +259,8 @@ export interface GatewayChannelAdapter {
    */
   servesWhileHeld?: boolean;
   /**
-   * The addressable outbound seam, mirroring
-   * `@stratusagent/channels`' `ChannelAdapter.resolveOutbound` structurally
-   * for the same reason the rest of this interface does. Optional: an
+   * The addressable outbound seam, mirroring `ChannelAdapter.resolveOutbound`
+   * structurally for the same reason the rest of this interface does. Optional: an
    * adapter with no concept of a destination simply lacks it, and the
    * gateway treats absence as "this channel cannot be spoken through".
    * Implementations MUST reject a destination they could not deliver to,
@@ -271,7 +271,7 @@ export interface GatewayChannelAdapter {
   }>;
   /**
    * The read side of an addressable conversation, mirroring
-   * `@stratusagent/channels`' `ChannelAdapter.readConversation`. Optional:
+   * `ChannelAdapter.readConversation`. Optional:
    * an adapter without it cannot be read through `message.read`.
    * Implementations MUST reject a conversation their app may not read,
    * with a sentence for the agent.
@@ -284,13 +284,13 @@ export interface GatewayChannelAdapter {
     before?: string;
     limit: number;
   }): ReturnType<ConversationReader>;
-  /** See `@stratusagent/channels`' `ChannelAdapter.accountFor`. */
+  /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
-  /** See `@stratusagent/channels`' `ChannelAdapter.conversationKindFor`. */
+  /** See `ChannelAdapter.conversationKindFor`. */
   conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
   /**
    * Shows a person a form for a credential an agent asked for, mirroring
-   * `@stratusagent/channels`' `ChannelAdapter.requestCredential`. Optional:
+   * `ChannelAdapter.requestCredential`. Optional:
    * a channel without it cannot take credentials, and a request made in
    * its conversations is refused instead of announced. Implementations
    * MUST reject when the form reached nobody who can answer it, with a
@@ -306,7 +306,7 @@ export interface GatewayChannelAdapter {
     replace?: boolean;
     metadata: JsonObject;
   }): Promise<void>;
-  /** See `@stratusagent/channels`' `ChannelAdapter.credentialReplaceForms`. */
+  /** See `ChannelAdapter.credentialReplaceForms`. */
   credentialReplaceForms?: boolean;
   /**
    * Issues a one-time link to a form for a credential request, for the
@@ -337,9 +337,8 @@ export interface GatewayChannelAdapter {
 
 /**
  * Where a session came from, as the gateway reports it. Structural for the
- * same reason as the adapter above — @stratusagent/channels declares the
- * matching shape for adapters to consume, and neither package imports the
- * other to agree on it.
+ * same reason as the adapter above: core's channel contract declares the
+ * matching shape (`SessionRouting`) for adapters to consume.
  */
 export interface SessionRouting {
   /** Whose app must do the talking. */
@@ -349,12 +348,12 @@ export interface SessionRouting {
   /**
    * When this agent last spoke, ISO-8601 — its newest reply's timestamp,
    * absent when it has never produced one. Not the session's modification
-   * time, which a mid-turn save moves; see `@stratusagent/channels`.
+   * time, which a mid-turn save moves; see `SessionRouting` in @stratusagent/core.
    */
   lastSpokeAt?: string;
-  /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
+  /** The latest turn's text (`latestTurnReply`), when it produced any — see `SessionRouting` in @stratusagent/core. */
   reply?: string;
-  /** Whether the turn the session is on is one nobody asked for (`isUnaddressedTurn`) — see `@stratusagent/channels`. */
+  /** Whether the turn the session is on is one nobody asked for (`isUnaddressedTurn`) — see `SessionRouting` in @stratusagent/core. */
   unaddressed?: boolean;
 }
 

@@ -117,11 +117,11 @@ hand and by review:
   values is the point: `0` and `false` are real settings here (`--api-port 0`
   asks for any free port). `any` appears nowhere in src; narrow from
   `unknown` instead.
-- **Tools throw plain `Error`s; the executor converts.** In any package
-  that can depend on `@stratusagent/executors`, build `ToolResult`s
-  through its `successResult`/`failureResult`, never hand-rolled
-  `{ ok, error }` — `core` is the one exception, since `executors`
-  depends on it and core stays dependency-free. A control API route
+- **Tools throw plain `Error`s; the executor converts.** Build
+  `ToolResult`s through core's `successResult`/`failureResult`, never
+  hand-rolled `{ ok, error }`. Core's own executor paths in `index.ts`
+  still hand-roll theirs: they predate the helpers moving into core from
+  `@stratusagent/executors`. A control API route
   handler reports failure by throwing `ApiError(status, code, message)`
   (internal to `control-api`); HTTP *clients* — `tool-web`, providers,
   the MCP bridge — throw plain `Error`s like any other tool code. Error text a user

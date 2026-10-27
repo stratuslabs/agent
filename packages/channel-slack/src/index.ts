@@ -37,8 +37,6 @@ import {
   type StratusEvent,
   type ToolResult,
   type TrustLevel,
-} from '@stratusagent/core';
-import {
   admitsSender,
   channelSessionKey,
   senderTrustFor,
@@ -53,7 +51,7 @@ import {
   type OutboundConnection,
   type OutboundMessageRef,
   type SessionRouting,
-} from '@stratusagent/channels';
+} from '@stratusagent/core';
 
 import { codeRunsOf, toSlackMrkdwn } from './mrkdwn.ts';
 

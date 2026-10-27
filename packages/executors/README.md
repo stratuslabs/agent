@@ -1,5 +1,14 @@
-# @stratusagent/executors
+# @stratusagent/executors (deprecated)
 
-Executor-side helpers for [Stratus Agent](https://github.com/stratuslabs/agent): small utilities for building, wrapping, and composing tool executors against the core executor contract, without pulling platform specifics into the kernel.
+The executor helpers for [Stratus Agent](https://github.com/stratuslabs/agent) (`successResult`, `failureResult`, `defineExecutor`, `createDirectExecutor` and the rest) now ship in `@stratusagent/core`. This release of `@stratusagent/executors` only re-exports the same names from there. No release after this one is planned.
 
-For a concrete executor that runs tools as real local child processes, see `@stratusagent/executor-local`. For the contracts themselves, see `@stratusagent/core`.
+Change your imports:
+
+```ts
+// before
+import { failureResult, successResult } from '@stratusagent/executors';
+// after
+import { failureResult, successResult } from '@stratusagent/core';
+```
+
+Then drop `@stratusagent/executors` from your dependencies. Nothing else changes: the names, types, and behavior are the ones this package exported before.

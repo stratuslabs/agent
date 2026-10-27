@@ -17,12 +17,10 @@ import {
   type ToolResult,
   type ToolRisk,
   type TrustLevel,
-} from '@stratusagent/core';
-import {
   createDirectExecutor,
   failureResult,
   successResult,
-} from '@stratusagent/executors';
+} from '@stratusagent/core';
 
 export interface LocalCommandInvocation {
   command: string;
