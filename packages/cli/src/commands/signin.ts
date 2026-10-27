@@ -1,4 +1,5 @@
 import {
+  DEFAULT_STRATUS_AGENT,
   credentialsPath,
   hasAgentSignInEntry,
   loadAgentSignIns,
@@ -61,10 +62,23 @@ export const runSignIn = async (
   // A token stored under an id nobody has would bill nothing and fail
   // nothing, so a typo would look like it worked. Checked only when the
   // roster loaded, as `stratus channel set` does.
+  //
+  // The built-in agent is left out of that roster on purpose: it has no
+  // soul file, and the runtime reads an agent's own sign-in only for a run
+  // that carries a soul (a soul-less run is the shared default by
+  // definition), so a token stored for it would be the same silent no-op.
+  // A configured default soul that takes the reserved id over is on the
+  // roster and carries its soul into every run, so it is accepted.
   const warnings: string[] = [];
-  const roster = await rosterSoulsWithConfigured(env, (line) => warnings.push(line), { includeBuiltIn: true });
+  const roster = await rosterSoulsWithConfigured(env, (line) => warnings.push(line));
   if (roster.complete && !roster.entries.some((entry) => entry.soul.agent.id === agentId)) {
-    writeLine(streams.stderr, `No agent ${agentId} is on the roster, so a sign-in stored for it would never be used. \`stratus agents\` lists who is.`);
+    writeLine(
+      streams.stderr,
+      agentId === DEFAULT_STRATUS_AGENT.id
+        ? `${agentId} is the built-in agent. It has no soul file, so its turns always run on the shared sign-in from \`stratus setup\`, `
+          + 'and a sign-in stored for it would never be used. Nothing was stored.'
+        : `No agent ${agentId} is on the roster, so a sign-in stored for it would never be used. \`stratus agents\` lists who is.`,
+    );
     return 1;
   }
 

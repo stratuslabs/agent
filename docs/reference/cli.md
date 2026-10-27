@@ -170,7 +170,9 @@ begins or ends with a space is stored as it is rather than quietly altered.
 terminal it asks for the token without echoing it, otherwise it reads it
 from stdin, and nothing prints it back. It refuses an Anthropic API key
 (`sk-ant-api…`), which would be refused on every turn as a subscription
-token, and an agent id that is not on the roster.
+token, an agent id that is not on the roster, and the built-in `stratus`
+agent, which has no soul file and always runs on the shared sign-in (a
+configured default soul that takes the `stratus` id over is accepted).
 
 `stratus channel set <kind> --agent <id> <name>...` names the secrets on
 the command line and never their values. At a terminal it asks for each

@@ -103,6 +103,44 @@ test('stratus signin set refuses what would never work, and stores nothing', asy
   assert.equal(await readFile(file, 'utf8'), before);
 });
 
+test('stratus signin set refuses the built-in agent, whose turns never read a sign-in of their own', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const file = path.join(home, '.stratus', 'credentials.json');
+  const before = await readFile(file, 'utf8');
+
+  // The built-in agent has no soul file, and the runtime reads an agent's
+  // own sign-in only for a run with a soul, so this would be stored and
+  // never used, after a CLI that said it worked.
+  const builtIn = await run(['signin', 'set', 'anthropic', '--agent', 'stratus'], { ...env, stdin: TOKEN });
+  assert.equal(builtIn.code, 1, builtIn.stdout);
+  assert.match(builtIn.stderr, /stratus is the built-in agent/);
+  assert.match(builtIn.stderr, /shared sign-in from `stratus setup`/);
+  assert.doesNotMatch(builtIn.stderr, /on the roster/);
+  assert.equal(await readFile(file, 'utf8'), before, 'nothing stored');
+  assert.ok(!builtIn.stdout.includes(TOKEN) && !builtIn.stderr.includes(TOKEN));
+});
+
+test('stratus signin set accepts the built-in id once a configured default soul takes it over', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // Only the configured default soul may claim the reserved id, and then
+  // its runs carry that soul, so the runtime reads its own sign-in.
+  const souls = path.join(home, 'souls');
+  await mkdir(souls, { recursive: true });
+  const soul = path.join(souls, 'main.md');
+  await writeFile(soul, '---\nname: Main\nid: stratus\nprovider: anthropic\n---\n\nYou are Main.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+
+  const set = await run(['signin', 'set', 'anthropic', '--agent', 'stratus'], { ...env, stdin: TOKEN });
+  assert.equal(set.code, 0, set.stderr);
+  assert.match(set.stdout, /Stored stratus's own Claude sign-in/);
+  const stored = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+    agentSignIns?: Record<string, { anthropic?: { value?: string } }>;
+  };
+  assert.equal(stored.agentSignIns?.stratus?.anthropic?.value, TOKEN);
+});
+
 test('stratus signin takes the token from stdin or a prompt, never from the command line', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
