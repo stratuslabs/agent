@@ -140,11 +140,16 @@ const zodTypeFor = (schema: unknown, depth = 0): z.ZodType => {
 // zod, and copies only the top-level keys' descriptions into that zod's
 // registry. A nested key's description would never reach the model, so a
 // property with keys inside carries its JSON Schema, made here with ours,
-// through zod's toJSONSchema hook. A converter that ignores the hook still
-// shows the keys and the required list, only without their descriptions.
+// through zod's toJSONSchema hook. A converter that ignores the hook, or a
+// shape ours cannot convert, still shows the keys and the required list,
+// only without their descriptions.
 const withNestedDescriptions = (type: z.ZodType): z.ZodType => {
-  const { $schema: _dialect, ...json } = z.toJSONSchema(type, { io: 'input', target: 'draft-7' }) as Record<string, unknown>;
-  type._zod.toJSONSchema = () => structuredClone(json);
+  try {
+    const { $schema: _dialect, ...json } = z.toJSONSchema(type, { io: 'input', target: 'draft-7' }) as Record<string, unknown>;
+    type._zod.toJSONSchema = () => structuredClone(json);
+  } catch {
+    // Keep the type as it is: a tool with plainer docs beats no tools.
+  }
   return type;
 };
 
