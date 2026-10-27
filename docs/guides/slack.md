@@ -276,7 +276,9 @@ Reply `stop` in the thread (or the DM) while the agent is working, or
 turn is cancelled, along with any of its turns queued behind it in that
 conversation, and the reply reads "Stopped by @you." A tool call in progress
 is cancelled the same way a timeout cancels it, and an approval it was
-waiting on is cancelled and its card says so.
+waiting on is cancelled and its card says so. A tool that doesn't stop when
+asked (usually a plugin's) gets 2 seconds, then the turn ends without it.
+Its result says it was left behind and may still be running.
 
 Only the agent's approvers (`approvals.slackApprovers`) can stop it. From
 anyone else, or when nothing is running, `stop` is an ordinary message. An

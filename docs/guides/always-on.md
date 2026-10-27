@@ -7,8 +7,11 @@ turns, and any installed channels connected. Ctrl+C or SIGTERM drains
 cleanly: new turns are refused, in-flight ones get up to 30 seconds to
 finish, and any still running after that are aborted and recorded as
 failed ("stratusd is stopping"), which also kills the shell commands they
-started. A second signal during the drain is ignored rather than cutting
-it short (SIGKILL ends the process at once).
+started. A tool call that ignores the abort is left behind after 2 seconds,
+so it can't hold the stop, and a message that was waiting behind its turn is
+refused with the same reason instead of disappearing with the process. A
+second signal during the drain is ignored rather than cutting it short
+(SIGKILL ends the process at once).
 
 It stays a foreground process on purpose — debuggable, and composable with
 whatever supervisor you already run. Surviving logout, crashes, and reboots

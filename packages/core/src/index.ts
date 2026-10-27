@@ -3064,7 +3064,9 @@ export const DEFAULT_SUBPROCESS_PASS_ENV: readonly string[] = ['PATH', 'HOME', '
 /**
  * Ambient context for one tool execution. The abort signal is the turn's:
  * executors kill in-flight subprocesses on abort, and long-running tools
- * should observe it too.
+ * should observe it too. One that does not is left behind a short grace
+ * after the abort (`untilStoppedFor`), still running, with a result that
+ * says so.
  */
 export interface ExecutionContext {
   signal?: AbortSignal;
