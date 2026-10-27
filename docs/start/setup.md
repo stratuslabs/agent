@@ -283,6 +283,10 @@ What it changes, and what it does not:
   sign-in, and the `ANTHROPIC_API_KEY` / `STRATUS_API_KEY` environment
   keys, for that agent and no other. Agents without one resolve exactly as
   before.
+- **Only an agent with a soul file.** The built-in `stratus` agent has
+  none, so its turns always run on the shared sign-in and `signin set`
+  refuses it. A configured default soul that takes the `stratus` id over
+  does have one, and can have its own sign-in.
 - **Only when Anthropic serves it.** An agent whose soul pins another
   provider ignores the entry. An Anthropic fallback model uses the agent's
   own sign-in too; a fallback on another provider is not used for that

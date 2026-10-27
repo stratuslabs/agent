@@ -127,6 +127,11 @@ export interface ParsedSignInCommand {
   provider?: 'anthropic';
   /** The agent whose own sign-in this is; required for set and remove. */
   agentId?: string;
+  /**
+   * `set` only: the config the daemon was started with, whose default soul
+   * is on the roster the agent id is checked against.
+   */
+  configPath?: string;
 }
 
 export interface ParsedChannelCommand {
@@ -918,6 +923,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
     const positional: string[] = [];
     let agentId: string | undefined;
+    let configPath: string | undefined;
     for (let index = 0; index < signInRest.length; index += 1) {
       const token = signInRest[index];
       if (!token) {
@@ -931,10 +937,20 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
+      if (token === '--config') {
+        configPath = readOptionValue(signInRest, index, '--config');
+        index += 1;
+        continue;
+      }
       if (token.startsWith('--')) {
         throw new Error(`Unknown option: ${token}`);
       }
       positional.push(token);
+    }
+    // Only `set` checks the roster; `remove` and `list` read the
+    // credentials file alone, whichever config the daemon runs on.
+    if (configPath !== undefined && subcommand !== 'set') {
+      throw new Error(`--config is for signin set, which checks the agent against that config's roster. signin ${subcommand} reads only the credentials file.`);
     }
     if (subcommand === 'list') {
       if (positional.length > 0 || agentId !== undefined) {
@@ -955,7 +971,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (!isValidAgentId(agentId)) {
       throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a sign-in stored under it could never be used.`);
     }
-    return { command: 'signin', action: subcommand, provider, agentId };
+    return { command: 'signin', action: subcommand, provider, agentId, ...(configPath !== undefined ? { configPath } : {}) };
   }
 
   if (command === 'channel' || command === 'channels') {

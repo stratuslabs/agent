@@ -1,4 +1,5 @@
 import {
+  DEFAULT_STRATUS_AGENT,
   credentialsPath,
   hasAgentSignInEntry,
   loadAgentSignIns,
@@ -61,10 +62,44 @@ export const runSignIn = async (
   // A token stored under an id nobody has would bill nothing and fail
   // nothing, so a typo would look like it worked. Checked only when the
   // roster loaded, as `stratus channel set` does.
+  //
+  // The built-in agent is left out of that roster on purpose: it has no
+  // soul file, and the runtime reads an agent's own sign-in only for a run
+  // that carries a soul (a soul-less run is the shared default by
+  // definition), so a token stored for it would be the same silent no-op.
+  // A configured default soul that takes the reserved id over is on the
+  // roster and carries its soul into every run, so it is accepted.
   const warnings: string[] = [];
-  const roster = await rosterSoulsWithConfigured(env, (line) => warnings.push(line), { includeBuiltIn: true });
+  const roster = await rosterSoulsWithConfigured(
+    env,
+    (line) => warnings.push(line),
+    command.configPath !== undefined ? { configPath: command.configPath } : {},
+  );
+  // Without --config an unreadable default config skips the check, as
+  // `stratus channel set` does. A config named on purpose is different:
+  // skipping would store a token against a roster nobody could read, the
+  // same silent no-op this check exists to catch.
+  if (command.configPath !== undefined && !roster.complete) {
+    writeLine(
+      streams.stderr,
+      `Nothing was stored: could not read the default soul from --config ${command.configPath}, so ${agentId} could not be checked against its roster.`,
+    );
+    for (const line of warnings) {
+      writeLine(streams.stderr, `  ${line}`);
+    }
+    return 1;
+  }
   if (roster.complete && !roster.entries.some((entry) => entry.soul.agent.id === agentId)) {
-    writeLine(streams.stderr, `No agent ${agentId} is on the roster, so a sign-in stored for it would never be used. \`stratus agents\` lists who is.`);
+    writeLine(
+      streams.stderr,
+      (agentId === DEFAULT_STRATUS_AGENT.id
+        ? `${agentId} is the built-in agent. It has no soul file, so its turns always run on the shared sign-in from \`stratus setup\`, `
+          + 'and a sign-in stored for it would never be used. Nothing was stored.'
+        : `No agent ${agentId} is on the roster, so a sign-in stored for it would never be used. \`stratus agents\` lists who is.`)
+      + (command.configPath === undefined
+        ? ' If stratusd runs with --config, its default soul is named there: pass the same --config here.'
+        : ''),
+    );
     return 1;
   }
 

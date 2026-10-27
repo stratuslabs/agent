@@ -103,6 +103,77 @@ test('stratus signin set refuses what would never work, and stores nothing', asy
   assert.equal(await readFile(file, 'utf8'), before);
 });
 
+test('stratus signin set refuses the built-in agent, whose turns never read a sign-in of their own', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const file = path.join(home, '.stratus', 'credentials.json');
+  const before = await readFile(file, 'utf8');
+
+  // The built-in agent has no soul file, and the runtime reads an agent's
+  // own sign-in only for a run with a soul, so this would be stored and
+  // never used, after a CLI that said it worked.
+  const builtIn = await run(['signin', 'set', 'anthropic', '--agent', 'stratus'], { ...env, stdin: TOKEN });
+  assert.equal(builtIn.code, 1, builtIn.stdout);
+  assert.match(builtIn.stderr, /stratus is the built-in agent/);
+  assert.match(builtIn.stderr, /shared sign-in from `stratus setup`/);
+  assert.doesNotMatch(builtIn.stderr, /on the roster/);
+  assert.equal(await readFile(file, 'utf8'), before, 'nothing stored');
+  assert.ok(!builtIn.stdout.includes(TOKEN) && !builtIn.stderr.includes(TOKEN));
+});
+
+test('stratus signin set accepts the built-in id once a configured default soul takes it over', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // Only the configured default soul may claim the reserved id, and then
+  // its runs carry that soul, so the runtime reads its own sign-in.
+  const souls = path.join(home, 'souls');
+  await mkdir(souls, { recursive: true });
+  const soul = path.join(souls, 'main.md');
+  await writeFile(soul, '---\nname: Main\nid: stratus\nprovider: anthropic\n---\n\nYou are Main.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+
+  const set = await run(['signin', 'set', 'anthropic', '--agent', 'stratus'], { ...env, stdin: TOKEN });
+  assert.equal(set.code, 0, set.stderr);
+  assert.match(set.stdout, /Stored stratus's own Claude sign-in/);
+  const stored = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+    agentSignIns?: Record<string, { anthropic?: { value?: string } }>;
+  };
+  assert.equal(stored.agentSignIns?.stratus?.anthropic?.value, TOKEN);
+});
+
+test('stratus signin set --config reads the default soul from the config the daemon was started with', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // `stratus serve --config custom.json`: the default soul that takes the
+  // reserved id over is named only in that file, not the default one.
+  const soul = path.join(home, 'main.md');
+  await writeFile(soul, '---\nname: Main\nid: stratus\nprovider: anthropic\n---\n\nYou are Main.\n');
+  const custom = path.join(home, 'custom.json');
+  await writeFile(custom, JSON.stringify({ provider: 'anthropic', soul }));
+
+  const without = await run(['signin', 'set', 'anthropic', '--agent', 'stratus'], { ...env, stdin: TOKEN });
+  assert.equal(without.code, 1, without.stdout);
+  assert.match(without.stderr, /pass the same --config here/);
+
+  const withConfig = await run(['signin', 'set', 'anthropic', '--agent', 'stratus', '--config', custom], { ...env, stdin: TOKEN });
+  assert.equal(withConfig.code, 0, withConfig.stderr);
+  assert.match(withConfig.stdout, /Stored stratus's own Claude sign-in/);
+
+  // A config named on purpose that cannot be read is a mistake to report,
+  // not a roster to skip checking against.
+  const before = await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8');
+  for (const broken of [path.join(home, 'typo.json'), soul]) {
+    const unreadable = await run(['signin', 'set', 'anthropic', '--agent', 'stratus', '--config', broken], { ...env, stdin: ROTATED });
+    assert.equal(unreadable.code, 1, unreadable.stdout);
+    assert.match(unreadable.stderr, /could not read the default soul from --config/);
+    assert.equal(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'), before, 'nothing stored');
+  }
+
+  const removeWithConfig = await run(['signin', 'remove', 'anthropic', '--agent', 'stratus', '--config', custom], env);
+  assert.equal(removeWithConfig.code, 1);
+  assert.match(removeWithConfig.stderr, /--config is for signin set/);
+});
+
 test('stratus signin takes the token from stdin or a prompt, never from the command line', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
