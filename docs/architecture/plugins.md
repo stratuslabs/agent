@@ -113,6 +113,18 @@ need not word a marker of its own. The transcript keeps the output as
 returned. The rule is a rule, not a list the kernel keeps — a newly registered
 third-party tool that declares itself a producer is labelled with no change
 to kernel code, which is what makes the ecosystem's tools first-class here.
+
+A tool also **stops when its turn does**. The `ExecutionContext` carries the
+turn's `signal`, which fires when someone stops the turn (Slack's `stop`, the
+watchdog, a daemon stop or restart). A tool that can run for more than a
+moment watches it and settles promptly when it fires, with an error or
+partial output that says what happened. The kernel waits 2 seconds for that
+answer. After that it records the call as left behind ("did not return after
+the turn was stopped… may still be running") and ends the turn without it,
+and whatever the tool returns or throws later is dropped. Left behind is not
+stopped: code that ignores its signal keeps running, and keeps its side
+effects, until it settles or the daemon exits.
+
 **All eight kinds now register.** The first-party implementations that
 predate the seams are still host-wired — `@stratusagent/channel-slack` is
 constructed by the CLI and handed to `createGateway({ channels: [...] })`,

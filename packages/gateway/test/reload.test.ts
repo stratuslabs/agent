@@ -427,6 +427,106 @@ test('a stop drains for a bounded window, then aborts what is still running and 
   }
 });
 
+test('a stop ends a turn whose tool ignores its abort, and the message queued behind it is refused with the stop\'s reason', async () => {
+  // Card 826, from the Infra runbook check: a plugin tool that never
+  // settles and never looks at its signal held the turn past the abort, the
+  // stop shut down around it, and the message waiting behind it in the
+  // same session (accepted, 202 with a turn id) died with the process: no
+  // refusal, so the control API never reported a failure on its turn id.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\ntools: [hang.wait]\n---\n\nYou are Ava.\n');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-hung-tool-'));
+  const directory = path.join(root, 'stratus-plugin-hang');
+  await mkdir(path.join(directory, 'dist'), { recursive: true });
+  await writeFile(path.join(directory, 'package.json'), JSON.stringify({
+    name: 'stratus-plugin-hang',
+    stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'hang.wait', risk: 'safe' }] } },
+  }));
+  let entered!: () => void;
+  const inTool = new Promise<void>((resolve) => { entered = resolve; });
+  const host: OptionalModuleHost = {
+    resolve: () => pathToFileURL(path.join(directory, 'dist', 'index.js')).href,
+    async import() {
+      return {
+        createPlugin: () => ({
+          name: 'hang',
+          setup(context: { tools: { register(tool: unknown): void } }) {
+            context.tools.register({
+              name: 'hang.wait',
+              description: 'Waits forever.',
+              risk: 'safe',
+              execute: () => {
+                entered();
+                return new Promise(() => {});
+              },
+            });
+          },
+        }),
+      };
+    },
+  };
+
+  const fetchImpl = ((_url: unknown, init?: RequestInit) => {
+    if (init?.signal?.aborted) {
+      return Promise.reject(new DOMException('aborted', 'AbortError'));
+    }
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }> };
+    const last = body.messages.at(-1);
+    return Promise.resolve(last?.role === 'user' && JSON.stringify(last.content).includes('hang')
+      ? openAiToolCall('hang.wait', {})
+      : openAiText('ok'));
+  }) as typeof fetch;
+
+  // The window has to outlast the grace a stopped tool gets to answer for
+  // itself, since the second window is where the left-behind call settles.
+  const window = 2_500;
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: window,
+    plugins: { 'stratus-plugin-hang': { enabled: true } },
+    pluginHost: host,
+    log: () => {},
+    warn: (line) => warnings.push(line),
+  });
+  await gateway.start();
+
+  const stuck = gateway.dispatch({ sessionId: 'stuck', agentId: 'ava', userMessage: 'hang' });
+  await inTool;
+  const queued = gateway.dispatch({ sessionId: 'stuck', agentId: 'ava', userMessage: 'hello behind it' });
+  const outcomes = Promise.allSettled([stuck, queued]);
+  await gateway.stop();
+
+  assert.ok(!warnings.some((line) => /did not stop after being aborted/.test(line)), warnings.join('\n'));
+  // Both settle inside the stop, with its reason. The queued one's
+  // rejection is what its caller hears: the control API turns it into
+  // session.failed on the turn id it handed out.
+  const [first, second] = await outcomes;
+  for (const outcome of [first, second]) {
+    assert.ok(
+      outcome.status === 'rejected' && outcome.reason instanceof RunAbortedError && outcome.reason.message === STOPPING_TURN_ERROR,
+      String(outcome.status === 'rejected' ? outcome.reason : 'fulfilled'),
+    );
+  }
+
+  const next = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await next.start();
+  try {
+    const stored = await next.store.get('stuck');
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.lastError, STOPPING_TURN_ERROR);
+    // The refused message stays out of the history, as any message refused
+    // in the queue does: input the model never processed is not replayed.
+    const said = stored?.messages.filter((message) => message.role === 'user').map((message) => message.content);
+    assert.deepEqual(said, ['hang']);
+    const left = stored?.messages.find((message) => message.role === 'tool')?.toolResult;
+    assert.match(left?.error ?? '', /hang\.wait did not return after the turn was stopped/);
+  } finally {
+    await next.stop();
+  }
+});
+
 test('a stop that has to shut down around a stuck firing and a stuck plugin still ends within two windows', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
