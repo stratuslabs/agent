@@ -571,6 +571,97 @@ test('a message.read of a direct message is refused before any approval prompt, 
   }
 });
 
+test('message.read reads the direct message its own session is in, and every other DM read is still refused before any prompt', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: reader\ntools: [message.read]\n---\n\nYou are Ava.\n');
+  const reads: Array<{ conversation: string; sessionId?: string }> = [];
+  const asked: string[] = [];
+  const OWN = 'fixture:ava:T1:D123';
+  const host = await hostFor({
+    'stratus-plugin-chan-a': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('a', (context) => {
+        context.channels!.register({
+          agents: ['ava'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async conversationKindFor(_agentId, conversation) {
+              return conversation.startsWith('D') ? 'direct' : undefined;
+            },
+            sessionConversation(agentId, sessionId) {
+              return agentId === 'ava' && sessionId === OWN ? 'D123' : undefined;
+            },
+            async readConversation(request) {
+              reads.push({ conversation: request.conversation, ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}) });
+              return { messages: [{ id: '1', author: 'U1', text: 'dm text' }], more: false };
+            },
+          },
+        });
+      }),
+    },
+    'stratus-plugin-reader': {
+      manifest: manifest({ providers: [{ name: 'reader' }] }),
+      module: plugin('reader', (context) => {
+        context.providers!.register({
+          name: 'reader',
+          create: () => ({
+            name: 'reader',
+            async generate({ session }): Promise<ProviderResponse> {
+              if (session.messages.at(-1)?.role === 'tool') {
+                return { parts: [{ type: 'text', text: 'done' }] };
+              }
+              const to = session.messages.at(-1)?.content ?? '';
+              const turn = session.messages.filter((message) => message.role === 'user').length;
+              return { parts: [{ type: 'tool-call', call: { id: `read-${turn}`, toolName: 'message.read', input: { source: { channel: 'fixture', to } } } }] };
+            },
+          }),
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-reader': {} },
+    pluginHost: host,
+    approvals: { approve: async ({ call }) => { asked.push(call.toolName); return true; } },
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  const resultOf = (session: { messages: Array<{ toolResult?: { callId: string; ok: boolean; error?: string; content?: unknown } }> }, callId: string) =>
+    session.messages.filter((message) => message.toolResult?.callId === callId).at(-1)?.toolResult;
+  try {
+    // Its own DM: still gated, so the policy is asked, and the adapter is
+    // told which session is reading.
+    const own = await gateway.dispatch({ sessionId: OWN, agentId: 'ava', userMessage: 'D123' });
+    assert.equal(resultOf(own, 'read-1')?.ok, true);
+    assert.match(JSON.stringify(own.messages), /dm text/);
+    assert.deepEqual(asked, ['message.read']);
+    assert.deepEqual(reads, [{ conversation: 'D123', sessionId: OWN }]);
+
+    // Another DM from the same session, a delegated session under it and a
+    // session living elsewhere (a scheduled turn's id is the adapter's to
+    // refuse, tested there): refused before the policy or the adapter is
+    // asked.
+    const other = await gateway.dispatch({ sessionId: OWN, agentId: 'ava', userMessage: 'D999' });
+    const delegated = await gateway.dispatch({ sessionId: `${OWN}:delegate:ava:1`, agentId: 'ava', userMessage: 'D123' });
+    const elsewhere = await gateway.dispatch({ sessionId: 'console-1', agentId: 'ava', userMessage: 'D123' });
+    for (const [session, callId] of [[other, 'read-2'], [delegated, 'read-1'], [elsewhere, 'read-1']] as const) {
+      const refused = resultOf(session, callId);
+      assert.equal(refused?.ok, false);
+      assert.match(refused?.error ?? '', /direct message/);
+      assert.match(refused?.error ?? '', /approval cannot unlock/);
+    }
+    assert.deepEqual(asked, ['message.read'], 'no refused read reaches the policy');
+    assert.equal(reads.length, 1, 'or the adapter');
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a slow DM lookup before message.read holds the watchdog on a provider that hosts its own loop', async () => {
   // The refusal check runs before any tool event, so on a streaming
   // provider that hosts its own loop nothing tells the watchdog a tool is

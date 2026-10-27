@@ -4583,13 +4583,40 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * The conversation a session lives in, read off its id, for this
+   * agent's connected app only: exactly `slack:<agent>:<this app's
+   * team>:<conversation>`, or that plus one thread `ts`, the keys this
+   * adapter opens sessions under. Anything longer (a delegation's
+   * `:delegate:…`, an archive's `:rolledover:…`) or of another shape (a
+   * schedule's) is no session of a conversation here. No lookup: the id
+   * is the identity check, and only the gateway names it.
+   */
+  const SLACK_TS = /^\d+\.\d+$/;
+  const sessionConversation = (agentId: string, sessionId: string): string | undefined => {
+    const connection = connectionFor(agentId);
+    if (!connection?.teamId) {
+      return undefined;
+    }
+    const prefix = channelSessionKey({ channel: 'slack', agentId, team: connection.teamId, conversation: '' });
+    if (!sessionId.startsWith(prefix)) {
+      return undefined;
+    }
+    const [conversation, thread, ...rest] = sessionId.slice(prefix.length).split(':');
+    if (!conversation || rest.length > 0 || (thread !== undefined && !SLACK_TS.test(thread))) {
+      return undefined;
+    }
+    return conversation;
+  };
+
+  /**
    * The read side of the same boundary `resolveOutbound` draws: a channel
    * the agent's own app is a member of, public or private. DMs and group
-   * DMs are refused outright, member or not. Their only members are the
-   * people in them, and a read from a conversation elsewhere — a public
-   * thread above all — would carry what they said to people who were never
-   * in the room. A thread in a channel is fine for the same reason the
-   * channel is.
+   * DMs are refused, member or not, except the one the reading session
+   * lives in (`sessionConversation`). Their only members are the people
+   * in them, and a read from a conversation elsewhere — a public thread
+   * above all — would carry what they said to people who were never in
+   * the room; from inside, it is what they already said to this agent. A
+   * thread in a channel is fine for the same reason the channel is.
    */
   const readConversation = async (request: ConversationReadRequest): Promise<ConversationReadResult> => {
     const channel = request.conversation.trim();
@@ -4614,10 +4641,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!info?.id) {
       throw new Error(`slack: ${request.agentId}'s app cannot see a conversation ${channel}.`);
     }
-    if (info.is_im === true || info.is_mpim === true) {
-      throw new Error(`slack: ${channel} is a direct message, and direct messages are never read from outside them. Approval cannot unlock this; read a channel instead.`);
+    const direct = info.is_im === true || info.is_mpim === true;
+    if (direct && (request.sessionId === undefined || sessionConversation(request.agentId, request.sessionId) !== info.id)) {
+      throw new Error(`slack: ${channel} is a direct message this conversation is not in, and a direct message is read only from inside it. Approval cannot unlock this; read a channel instead.`);
     }
-    if (info.is_member !== true) {
+    // An IM states no membership; the session living in it is the proof.
+    if (!direct && info.is_member !== true) {
       throw new Error(`slack: ${request.agentId}'s app is not a member of ${channel} — invite it there before it can read.`);
     }
     const { history, replies } = connection.web.conversations;
@@ -7765,6 +7794,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     name: 'slack',
     resolveOutbound,
     readConversation,
+    sessionConversation,
     createConversation,
     // A channel id is unique only within its workspace, so a standing
     // grant on one is bound to the team the agent's app authenticated in.

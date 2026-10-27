@@ -153,6 +153,8 @@ const TRUNCATED_MARK = ' [... the rest of this message is not shown]';
  */
 export type ConversationReader = (input: {
   agentId: string;
+  /** The session reading: a direct message is readable only from its own. */
+  sessionId: string;
   source: ScheduleDestination;
   thread?: string;
   after?: string;
@@ -211,7 +213,7 @@ export type ConversationReadRefusal = (input: { agentId: string; sessionId: stri
 
 /** The refusal a direct-message read gets, before any approval prompt. */
 export const directMessageReadRefusal = (destination: string): string =>
-  `message.read cannot read ${destination}: it is a direct message, and direct messages are never read from outside them. `
+  `message.read cannot read ${destination}: it is a direct message this conversation is not in, and a direct message is read only from inside it. `
   + 'This is not a permission, so approval cannot unlock it; do not ask for one or try again. '
   + 'Read a channel instead, or ask the person to paste what you need.';
 
@@ -221,7 +223,7 @@ export const createMessageReadTool = (
 ): Tool => ({
   name: MESSAGE_READ_TOOL_NAME,
   description: 'Read recent messages in a channel your app is a member of, or one thread in it. '
-    + 'Direct messages and group DMs cannot be read with this, and approval does not change that. '
+    + 'Direct messages and group DMs cannot be read with this, except the one this conversation is in, and approval does not change that. '
     + 'Without thread: the top level, newest first. With thread: that thread\'s root and replies, oldest first. '
     + 'For Slack, ids are channel ids and message ts values; a permalink '
     + '…/archives/C0123456789/p1791332967606559 is channel C0123456789 and message 1791332967.606559, '
@@ -270,6 +272,7 @@ export const createMessageReadTool = (
       : MESSAGE_READ_DEFAULT_LIMIT;
     const result = await read({
       agentId: session.agent.id,
+      sessionId: session.id,
       source,
       limit,
       ...(thread !== undefined ? { thread } : {}),
