@@ -6931,10 +6931,11 @@ export const inputProblem = (schema: JsonObject | undefined, input: JsonValue, w
   const properties = schema.properties !== null && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
     ? schema.properties as Record<string, JsonValue>
     : {};
-  for (const key of Array.isArray(schema.required) ? schema.required : []) {
-    if (typeof key === 'string' && input[key] === undefined) {
-      return `${where} is missing "${key}"`;
-    }
+  // Every missing key at once, so a model fixes the call in one try.
+  const missing = (Array.isArray(schema.required) ? schema.required : [])
+    .filter((key): key is string => typeof key === 'string' && input[key] === undefined);
+  if (missing.length > 0) {
+    return `${where} is missing ${missing.map((key) => `"${key}"`).join(', ')}`;
   }
   // With `patternProperties` a key may be declared by a pattern, and running
   // a pattern a schema supplied is a regex engine on untrusted input. Not

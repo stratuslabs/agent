@@ -28,7 +28,10 @@ const SEND_SCHEMA = {
 
 test('inputProblem names the first thing wrong with a call, and nothing when the shape fits', () => {
   assert.equal(inputProblem(SEND_SCHEMA, { destination: { channel: 'slack', to: 'C1' }, text: 'hi' }), undefined);
-  assert.equal(inputProblem(SEND_SCHEMA, { destination: { kind: 'slack', id: 'C1' }, text: 'hi' }), 'input.destination is missing "channel"');
+  // Every missing key in one answer, so a model fixes the call once instead
+  // of learning one key per failed call.
+  assert.equal(inputProblem(SEND_SCHEMA, { destination: { kind: 'slack', id: 'C1' }, text: 'hi' }), 'input.destination is missing "channel", "to"');
+  assert.equal(inputProblem(SEND_SCHEMA, { destination: { channel: 'slack' }, text: 'hi' }), 'input.destination is missing "to"');
   assert.equal(inputProblem(SEND_SCHEMA, { text: 'hi' }), 'input is missing "destination"');
   assert.equal(inputProblem(SEND_SCHEMA, { destination: 'C1', text: 'hi' }), 'input.destination should be object, not string');
   assert.equal(inputProblem(SEND_SCHEMA, { destination: { channel: 'slack', to: 'C1' }, text: 'hi', mode: 'soon' }), 'input.mode should be one of "now", "later"');
@@ -105,7 +108,7 @@ test('a malformed gated call is answered with the reason and never reaches the a
   assert.equal(sent.length, 1);
   const first = session.messages.find((message) => message.toolResult?.callId === 'c1')?.toolResult;
   assert.equal(first?.ok, false);
-  assert.match(first?.error ?? '', /Invalid input for message\.send: input\.destination is missing "channel"/);
+  assert.match(first?.error ?? '', /Invalid input for message\.send: input\.destination is missing "channel", "to"/);
 });
 
 test('a call its tool refuses up front is answered with the reason and never reaches the approval policy', async () => {
