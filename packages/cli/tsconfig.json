@@ -48,9 +48,6 @@
       "path": "../channel-slack"
     },
     {
-      "path": "../channels"
-    },
-    {
       "path": "../permissions"
     },
     {

@@ -34,7 +34,7 @@
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/channels"
   },
-  "description": "The Stratus channel contract: inbound messages, outbound streaming connections, adapter lifecycle, and stable per-conversation session keys",
+  "description": "Deprecated: the Stratus channel contract now ships in @stratusagent/core. This package re-exports it for one more release.",
   "keywords": [
     "stratus",
     "agent",

@@ -69,9 +69,6 @@ importers:
       '@slack/web-api':
         specifier: ^8.2.0
         version: 8.2.0
-      '@stratusagent/channels':
-        specifier: workspace:*
-        version: link:../channels
       '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
@@ -241,9 +238,6 @@ importers:
       '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
-      '@stratusagent/executors':
-        specifier: workspace:*
-        version: link:../executors
     devDependencies:
       '@types/node':
         specifier: ^24.6.0

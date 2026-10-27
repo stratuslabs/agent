@@ -34,7 +34,7 @@
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/executors"
   },
-  "description": "Shared executor helpers and result normalization for Stratus Agent tools",
+  "description": "Deprecated: the Stratus executor helpers now ship in @stratusagent/core. This package re-exports them for one more release.",
   "keywords": [
     "stratus",
     "agent",

@@ -284,8 +284,8 @@ plugin contributing one of those four kinds was configuration the host read,
 not code the plugin registered; that is no longer true, and the section
 below is the contract.
 
-A plugin depends on `core` (and on `channels` or `executors` where relevant) —
-**never on the gateway** — so it behaves identically in a CLI one-shot, in the
+A plugin depends on `core`, which carries the channel contract and the executor
+helpers too — **never on the gateway** — so it behaves identically in a CLI one-shot, in the
 daemon, and in whatever embeds the runtime next.
 
 ## Naming
@@ -546,7 +546,7 @@ capability rather than an assumption:
   `message.read` reads through, and a channel without it cannot be read.
   An adapter that has it decides which conversations are readable at all
   and refuses the rest — Slack reads only channels its app is in, never DMs.
-- Who counts as the operator is one rule in `@stratusagent/channels`, not
+- Who counts as the operator is one rule in core's channel contract, not
   one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
   `senderTrustFor` (the `user`/`unknown` label a turn carries). Which
   `admit` applies when config gives none is settled before the adapter
@@ -795,7 +795,7 @@ narrow. They are not a sandbox, and this document does not claim one:
 
 **In the monorepo.** The kernel and everything CI must gate: `core`, `agents`,
 `state`, `gateway`, `permissions`, `plugins` (the loader), `providers`,
-`channels`, `executors`, `executor-local`, `cli`, `control-api`, `dashboard`,
+`executor-local`, `cli`, `control-api`, `dashboard`,
 `provider-anthropic`, `provider-claude-code`, `channel-slack` — plus the
 capability plugins that each carry a security invariant the kernel's promises
 rest on:

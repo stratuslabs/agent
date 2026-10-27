@@ -4,8 +4,17 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rename, stat, symlink, uti
 import os from 'node:os';
 import path from 'node:path';
 
-import { EventBus, SENDER_TRUST_METADATA_KEY, type ApprovalAnswer, type ImageAttachment, type JsonObject, type Session, type StratusEvent } from '@stratusagent/core';
-import type { ChannelCredentialRequest, GatewayLike } from '@stratusagent/channels';
+import {
+  EventBus,
+  SENDER_TRUST_METADATA_KEY,
+  type ApprovalAnswer,
+  type ChannelCredentialRequest,
+  type GatewayLike,
+  type ImageAttachment,
+  type JsonObject,
+  type Session,
+  type StratusEvent,
+} from '@stratusagent/core';
 import {
   createSlackChannelAdapter as createAdapterAsShipped,
   createSlackFileFetcher,
@@ -6633,7 +6642,7 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
 
 // ---- addressable outbound (schedules) -------------------------------------
 
-const startedAdapterWith = async (web: FakeWeb, overrides?: { warn?: (msg: string) => void }): Promise<import('@stratusagent/channels').ChannelAdapter> => {
+const startedAdapterWith = async (web: FakeWeb, overrides?: { warn?: (msg: string) => void }): Promise<import('@stratusagent/core').ChannelAdapter> => {
   const socket = createFakeSocket();
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
   const adapter = createSlackChannelAdapter({
@@ -13019,7 +13028,7 @@ test('after a restart, a home channel thread stays its home agent\'s when anothe
 
 // ---- card 364 phase 2: an agent's own threaded post enters that thread's session
 
-const ownPostAdapter = async (): Promise<{ adapter: import('@stratusagent/channels').ChannelAdapter; web: FakeWeb; gateway: StubGateway; socket: ReturnType<typeof createFakeSocket> }> => {
+const ownPostAdapter = async (): Promise<{ adapter: import('@stratusagent/core').ChannelAdapter; web: FakeWeb; gateway: StubGateway; socket: ReturnType<typeof createFakeSocket> }> => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C-ENG', { is_member: true });

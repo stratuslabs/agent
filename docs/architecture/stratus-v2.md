@@ -69,7 +69,7 @@ Anything beyond this list gets decided in this document first, not in an impleme
 Everything optional is a package, installed only where needed:
 
 - **Providers** (exist): `provider-anthropic`, `provider-claude-code`, `provider-codex`, the OpenAI-compatible adapter in `providers`. The Codex provider is specified below; it shipped after that section settled its one open question.
-- **Channels** (new): `@stratusagent/channels` defines the contract — inbound message → router → session mapping, outbound post/edit/typing, per-agent bot identity. `@stratusagent/channel-slack` is the first adapter; others (Discord, Telegram, email) follow the same shape.
+- **Channels** (new): the channel contract (first `@stratusagent/channels`, now part of `@stratusagent/core`) defines it — inbound message → router → session mapping, outbound post/edit/typing, per-agent bot identity. `@stratusagent/channel-slack` is the first adapter; others (Discord, Telegram, email) follow the same shape.
 - **Tools** (new): `tool-fs`, `tool-shell`, `tool-browser`, `tool-web`, folding in the existing `stratuslabs/tool-browser` and `tool-screenshot` work. Each is a `Plugin` contributing a *toolset*; an agent opts in via its soul's tool allowlist.
 - **Skills** (new): markdown procedures — `SKILL.md` with frontmatter — enabled per agent and loaded into context only when the agent reaches for one. Tools are what an agent *can* do; skills are how it does them well.
 - **Permissions** (new): a policy engine behind the existing `ApprovalPolicy` seam — safe-command allowlist, per-agent persistent whitelist, shell control-operator detection, headless mode, remote approval.

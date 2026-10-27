@@ -11,18 +11,17 @@ ships — is specified in
 ## What one install brings
 
 Installing the CLI (`npm install -g @stratusagent/cli`) brings the whole
-runtime with it — these eleven packages are what you get, and you never
+runtime with it — these ten packages are what you get, and you never
 install them individually:
 
 - `@stratusagent/cli`, the `stratus` command: setup, chat, one-shot runs, the gateway, the dashboard
-- `@stratusagent/core`, the runtime primitives and agent loop
+- `@stratusagent/core`, the runtime primitives and agent loop, plus the contracts plugins build against: the channel contract and the executor helpers
 - `@stratusagent/agents`, agent identities, souls, memory, delegation, and routing
 - `@stratusagent/state`, shared state wiring: config resolution, credentials, the soul roster, file memory, provider construction
 - `@stratusagent/gateway`, stratusd — the always-on gateway with durable SQLite sessions and a per-provider runner pool
 - `@stratusagent/permissions`, the policy layer deciding what a tool call may do unattended, what needs a human, and what is refused
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/provider-anthropic`, the Claude provider on the official Anthropic SDK
-- `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 - `@stratusagent/plugins`, the plugin host: reads a plugin's manifest without importing it, holds `setup()` to what that manifest declared, and turns a config block into running capability
 
@@ -69,11 +68,9 @@ key selects the other two. See [Extending](../guides/extending.md).
 
 - [`@stratusagent/channel-slack`](../../packages/channel-slack) — talk to
   your agents in Slack, each as its own app. Adds ~9 MB of Slack SDKs.
-  See [Slack](../guides/slack.md).
-- [`@stratusagent/channels`](../../packages/channels) — the channel
-  contract itself: inbound messages, streaming outbound connections,
-  session keys. It arrives as a dependency of any channel package, and it
-  is what you build a new transport against.
+  See [Slack](../guides/slack.md). A new transport builds against the
+  channel contract in `@stratusagent/core` (inbound messages, streaming
+  outbound connections, session keys), the same one Slack implements.
 - [`@stratusagent/control-api`](../../packages/control-api) — the
   authenticated HTTP + WebSocket API over a running daemon.
   See [Remote access](../guides/remote-access.md).
