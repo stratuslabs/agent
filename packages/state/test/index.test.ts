@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ContextOverflowError, HostRefusalError, type Session } from '@stratusagent/core';
+import { AgentRunner, ContextOverflowError, EventBus, HostRefusalError, InMemorySessionStore, type Session } from '@stratusagent/core';
 import { chmod, mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -290,6 +290,114 @@ test('a refusal the host made on purpose is not a model failing, so the fallback
   assert.equal(fallbackCalls, 0);
   assert.deepEqual(switches, []);
   assert.equal(session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], undefined);
+});
+
+test('the fallback wrapper asks the host about the fallback call before making it, and a refusal stops it', async () => {
+  // The runner asks its guards once per generate, and this wrapper makes a
+  // second model call inside one: the fallback's. That call is asked about
+  // on its own, by name, or a budget the primary just spent is never read
+  // before the fallback spends more.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const makeSession = (id: string): Session => ({
+    id,
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  });
+  const log: string[] = [];
+  const wrapped = createFallbackWrappedProvider(
+    {
+      name: 'primary',
+      async generate() {
+        log.push('primary');
+        throw new Error('primary down');
+      },
+    },
+    {
+      name: 'fallback',
+      async generate() {
+        log.push('fallback');
+        return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+      },
+    },
+    () => {},
+  );
+
+  await wrapped.generate({ session: makeSession('allowed'), guardCall: async (provider: string) => { log.push(`asked ${provider}`); } } as never);
+  assert.deepEqual(log, ['primary', 'asked fallback', 'fallback']);
+
+  log.length = 0;
+  const refused = makeSession('refused');
+  await assert.rejects(
+    () => wrapped.generate({
+      session: refused,
+      guardCall: async (provider: string) => {
+        log.push(`asked ${provider}`);
+        throw new HostRefusalError('This agent has used its daily model budget.');
+      },
+    } as never),
+    (error: unknown) => error instanceof HostRefusalError,
+  );
+  assert.deepEqual(log, ['primary', 'asked fallback']);
+  // The primary did fail, so the switch stands for the next turn.
+  assert.equal(refused.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], true);
+
+  // Already switched: the fallback is the only call, and the runner's own
+  // guard covers it, so the wrapper does not ask again.
+  log.length = 0;
+  await wrapped.generate({ session: refused, guardCall: async (provider: string) => { log.push(`asked ${provider}`); } } as never);
+  assert.deepEqual(log, ['fallback']);
+});
+
+test('a budget the primary spent before failing stops the fallback call in a real runner', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const bus = new EventBus();
+  const store = new InMemorySessionStore();
+  let spent = 0;
+  const failures: Array<{ error: string; refused?: boolean }> = [];
+  bus.subscribe((event) => {
+    if (event.type === 'session.usage') {
+      spent += event.records.reduce((sum, record) => sum + (record.inputTokens ?? 0) + (record.outputTokens ?? 0), 0);
+    }
+    if (event.type === 'session.failed') {
+      failures.push({ error: event.error, ...(event.refused ? { refused: true } : {}) });
+    }
+  });
+  const budget = () => {
+    if (spent >= 100) {
+      throw new HostRefusalError('This agent has used its daily model budget.');
+    }
+  };
+  let fallbackCalls = 0;
+  const provider = createFallbackWrappedProvider(
+    {
+      // A harness primary: pays for an attempt, reports it, then fails.
+      name: 'primary',
+      async generate({ onUsage }) {
+        onUsage?.({ provider: 'primary', inputTokens: 150 });
+        throw new Error('primary down');
+      },
+    },
+    {
+      name: 'fallback',
+      async generate() {
+        fallbackCalls += 1;
+        return { parts: [{ type: 'text' as const, text: 'fallback' }], usage: { provider: 'fallback', inputTokens: 1 } };
+      },
+    },
+    () => {},
+  );
+
+  await assert.rejects(
+    new AgentRunner({ provider, bus, store, providerCallGuards: [budget] })
+      .run({ sessionId: 'over-budget', agent: { id: 'a', name: 'A' }, userMessage: 'hello' }),
+    HostRefusalError,
+  );
+  assert.equal(fallbackCalls, 0);
+  assert.equal(spent, 150);
+  assert.deepEqual(failures, [{ error: 'This agent has used its daily model budget.', refused: true }]);
 });
 
 test('fallback stickiness survives a wrapper rebuild via session metadata', async () => {

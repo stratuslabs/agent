@@ -254,6 +254,14 @@ export const createFallbackWrappedProvider = (
           if (request.onDelta) {
             await request.onDelta({ type: 'reset', reason: 'fallback' });
           }
+          // The host allowed one call when it asked before this generate,
+          // and the primary has spent it. The fallback's call is another,
+          // so it is asked about on its own, after what the primary
+          // reported is announced. A refusal ends the turn here; the switch
+          // above stands, because the primary did fail. Once switched, the
+          // fallback is the only call a generate makes and the runner's
+          // own question covers it.
+          await request.guardCall?.(fallback.name);
         }
       }
       return attributeUsage(fallback, request);
