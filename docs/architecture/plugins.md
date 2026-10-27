@@ -124,6 +124,7 @@ the turn was stopped… may still be running") and ends the turn without it,
 and whatever the tool returns or throws later is dropped. Left behind is not
 stopped: code that ignores its signal keeps running, and keeps its side
 effects, until it settles or the daemon exits.
+
 **All eight kinds now register.** The first-party implementations that
 predate the seams are still host-wired — `@stratusagent/channel-slack` is
 constructed by the CLI and handed to `createGateway({ channels: [...] })`,

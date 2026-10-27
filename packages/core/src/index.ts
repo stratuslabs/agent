@@ -6784,7 +6784,9 @@ const untilStoppedFor = (
     } else {
       signal.addEventListener('abort', leaveBehind, { once: true });
     }
-    work.then(
+    // `Promise.resolve`: a plugin executor typed loosely may hand back a
+    // plain result, which has no `then` of its own.
+    Promise.resolve(work).then(
       (result) => { settled(); resolve(result); },
       (error: unknown) => { settled(); reject(error); },
     );
