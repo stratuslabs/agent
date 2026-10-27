@@ -2,7 +2,6 @@ import type { CliEnvironment } from './environment.ts';
 import { compareVersions, defaultInstalledVersionReader, CLI_VERSION } from './npm.ts';
 import {
   FIRST_PARTY_CAPABILITY_PACKAGES,
-  FIRST_PARTY_CONTRIBUTION_PACKAGES,
   FIRST_PARTY_COMPANION_PACKAGES,
 } from './plugin-catalog.ts';
 
@@ -35,7 +34,7 @@ export const readCompanions = async (
 ): Promise<CompanionPackage[]> => {
   const read = env.installedVersionReader ?? defaultInstalledVersionReader;
   const found: CompanionPackage[] = [];
-  for (const name of [...FIRST_PARTY_COMPANION_PACKAGES, ...FIRST_PARTY_CAPABILITY_PACKAGES, ...FIRST_PARTY_CONTRIBUTION_PACKAGES]) {
+  for (const name of [...FIRST_PARTY_COMPANION_PACKAGES, ...FIRST_PARTY_CAPABILITY_PACKAGES]) {
     const version = await read(name);
     if (version !== undefined) {
       found.push({ name, version, stale: compareVersions(target, version) > 0 });

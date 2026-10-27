@@ -129,9 +129,6 @@ importers:
       '@stratusagent/dashboard':
         specifier: workspace:*
         version: link:../dashboard
-      '@stratusagent/memory-sqlite':
-        specifier: workspace:*
-        version: link:../memory-sqlite
       '@stratusagent/plugin-mcp':
         specifier: workspace:*
         version: link:../plugin-mcp
@@ -271,22 +268,6 @@ importers:
       '@stratusagent/permissions':
         specifier: workspace:*
         version: link:../permissions
-      '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-
-  packages/memory-sqlite:
-    dependencies:
-      '@stratusagent/core':
-        specifier: workspace:*
-        version: link:../core
-      '@stratusagent/plugins':
-        specifier: workspace:*
-        version: link:../plugins
-    devDependencies:
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

@@ -1481,6 +1481,34 @@ test('provider-openai releases from the plugins repository now, so update moves 
   assert.match(streams.output.stdout, /@stratusagent\/provider-openai 0\.13\.6 → 0\.14\.0/);
 });
 
+test('memory-sqlite releases from the plugins repository now, so update moves a 0.13.x install to its own release', async () => {
+  // Same move as provider-openai (stratuslabs/plugins#42): up to 0.13.6 it
+  // shipped from this repository at the CLI's version. Held to that version,
+  // an install would stay on 0.13.6 and read as an outgrown companion once
+  // the CLI moved on without it.
+  const home = await freshHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await runStateMigrations(env, { exclusive: true });
+  await writePluginsConfig(home, { '@stratusagent/memory-sqlite': { path: path.join(home, 'memories.sqlite') } });
+  const memoryPlugin = { pluginVersion: 1, contributes: { memory: [{ name: 'sqlite' }] } };
+  const streams = createStreams();
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams: streams.streams,
+    env: {
+      ...env,
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) => (specifier === '@stratusagent/memory-sqlite' ? '0.13.6' : undefined),
+      pluginReleaseReader: async (name) => (name === '@stratusagent/memory-sqlite' ? releaseOf('0.14.0', memoryPlugin) : { status: 'unknown' }),
+    },
+  });
+  assert.equal(code, 1, streams.output.stdout);
+  assert.match(streams.output.stdout, /plugins +1 released apart from the CLI, 1 behind/);
+  assert.match(streams.output.stdout, /@stratusagent\/memory-sqlite 0\.13\.6 → 0\.14\.0/);
+  assert.doesNotMatch(streams.output.stdout, /alongside the CLI/);
+});
+
 test('update installs each plugin that lags, pinned to the checked release, while the daemon is stopped', async () => {
   const home = await freshHome();
   const events: string[] = [];

@@ -4,7 +4,6 @@ import { CLI_PACKAGE_NAME, compareVersions, defaultInstalledVersionReader } from
 import {
   FIRST_PARTY_CAPABILITY_PACKAGES,
   FIRST_PARTY_COMPANION_PACKAGES,
-  FIRST_PARTY_CONTRIBUTION_PACKAGES,
 } from './plugin-catalog.ts';
 import { checkPluginReleases, currentPlatformHost, loadableRelease } from './plugin-index.ts';
 import { loadServePlugins } from './trusted-config.ts';
@@ -27,7 +26,6 @@ const RELEASED_WITH_THE_CLI: ReadonlySet<string> = new Set([
   CLI_PACKAGE_NAME,
   ...FIRST_PARTY_COMPANION_PACKAGES,
   ...FIRST_PARTY_CAPABILITY_PACKAGES,
-  ...FIRST_PARTY_CONTRIBUTION_PACKAGES,
 ]);
 
 /**

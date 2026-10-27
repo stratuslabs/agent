@@ -41,7 +41,6 @@
     "@stratusagent/channel-slack": "workspace:*",
     "@stratusagent/control-api": "workspace:*",
     "@stratusagent/dashboard": "workspace:*",
-    "@stratusagent/memory-sqlite": "workspace:*",
     "@stratusagent/plugin-mcp": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/provider-claude-code": "workspace:*",

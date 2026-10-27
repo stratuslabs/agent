@@ -209,8 +209,8 @@ memories somewhere the operator did not select is a daemon whose agents
 remember into the wrong place.
 
 The first-party one is
-[`@stratusagent/memory-sqlite`](../../packages/memory-sqlite): the same
-contract on one owner-only SQLite file, with no derived index, selected
+[`@stratusagent/memory-sqlite`](https://github.com/stratuslabs/plugins/tree/main/memory-sqlite),
+released from `stratuslabs/plugins`: the same contract on one owner-only SQLite file, with no derived index, selected
 with `memoryStore: sqlite` and a `path` in its config block. Nothing is
 migrated between stores when you switch.
 

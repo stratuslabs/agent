@@ -89,8 +89,8 @@ key selects the other two. See [Extending](../guides/extending.md).
   OpenAI-compatible adapter as a plugin, released from
   `stratuslabs/plugins`: a provider named `openai-compatible` a soul selects, credentialed per agent through
   `openai.apiKey`. See [Extending](../guides/extending.md#providers).
-- [`@stratusagent/memory-sqlite`](../../packages/memory-sqlite) — agent
-  memory on one SQLite file, selected with `memoryStore: sqlite`. See
+- [`@stratusagent/memory-sqlite`](https://github.com/stratuslabs/plugins/tree/main/memory-sqlite) — agent
+  memory on one SQLite file, released from `stratuslabs/plugins`, selected with `memoryStore: sqlite`. See
   [Extending](../guides/extending.md#memory-stores).
 - [`@stratusagent/egress`](../../packages/egress) — the shared address
   policy both network packs use; arrives as their dependency.
