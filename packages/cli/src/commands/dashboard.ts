@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gatewayToken, readGatewayInfo, gatewayAnswering, HomeHeldError } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -16,6 +19,29 @@ const DASHBOARD_PACKAGE = '@stratusagent/dashboard';
 
 /** What a daemon this command starts needs: the API that serves the page, and the page. */
 const DASHBOARD_PACKAGES = [CONTROL_API_PACKAGE, DASHBOARD_PACKAGE];
+
+/**
+ * Whether a package is installed, asked before any install. Asked of the
+ * filesystem, along the `node_modules` folders this module's own imports
+ * search, not through `import.meta.resolve`: Node remembers a scoped
+ * package it once failed to resolve, so probing that way before
+ * `npm install -g` keeps what it installs out of this process's reach and
+ * the daemon this command starts could not load it (a real install into a
+ * global prefix, Node 26). The check after the install is the resolver's.
+ */
+const installedBeforeOffer = (name: string, env: CliEnvironment): boolean => {
+  if (env.packageResolver !== undefined) {
+    return packageInstalled(name, env);
+  }
+  for (let dir = path.dirname(fileURLToPath(import.meta.url)); ; dir = path.dirname(dir)) {
+    if (path.basename(dir) !== 'node_modules' && existsSync(path.join(dir, 'node_modules', name, 'package.json'))) {
+      return true;
+    }
+    if (path.dirname(dir) === dir) {
+      return false;
+    }
+  }
+};
 
 /**
  * Offers the dashboard's missing packages. This command is the one place
@@ -177,7 +203,7 @@ export const runDashboard = async (
   if (base && !await servesDashboard(env, base, fetchImpl)) {
     writeLine(streams.stdout, `The daemon at ${base} serves the control API without the dashboard.`);
     const restart = 'Restart it to load the dashboard: `stratus restart`, then `stratus dashboard` again.';
-    if (packageInstalled(DASHBOARD_PACKAGE, env)) {
+    if (installedBeforeOffer(DASHBOARD_PACKAGE, env)) {
       writeLine(streams.stderr, `Error: it started before ${DASHBOARD_PACKAGE} was installed. ${restart}`);
       return 1;
     }
@@ -198,7 +224,7 @@ export const runDashboard = async (
   if (!base) {
     // Checked only for a daemon of our own. One already answering brought
     // its own packages, whatever this shell resolves.
-    const missing = DASHBOARD_PACKAGES.filter((name) => !packageInstalled(name, env));
+    const missing = DASHBOARD_PACKAGES.filter((name) => !installedBeforeOffer(name, env));
     if (missing.length > 0) {
       const offered = await offerDashboardPackages(missing, streams, env);
       if (offered !== 'ready') {
