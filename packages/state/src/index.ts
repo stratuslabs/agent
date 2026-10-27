@@ -28,11 +28,13 @@ export {
 
 export {
   AGENTS_DIR_ENV,
+  AGENTS_FOLDER_RECORD,
   AGENTS_HOME_MARKER,
   VISIBLE_SOUL_FILENAME,
   claimAgentsHome,
   planAgentsHome,
   type AgentsHomePlan,
+  type MovedHomeLink,
   resolveAgentsHome,
   surfaceAgentsHome,
   visibleAgentDirIn,

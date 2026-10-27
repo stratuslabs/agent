@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
+import { readdir, readFile, readlink, realpath, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { formatSoul, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { loadConfigFile } from './config-file.ts';
@@ -90,7 +90,12 @@ export const loadSoulFile = async (resolvedPath: string): Promise<ParsedSoul> =>
     raw = await readFile(resolvedPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(`Soul file not found: ${resolvedPath}`);
+      // A link whose target is gone reads as a missing file; say it is one,
+      // and where it points, since that is what has to be put back.
+      const target = await readlink(resolvedPath).catch(() => undefined);
+      throw new Error(target === undefined
+        ? `Soul file not found: ${resolvedPath}`
+        : `Soul file not found: ${resolvedPath} is a link to ${path.resolve(path.dirname(resolvedPath), target)}, which does not exist`);
     }
     throw error;
   }

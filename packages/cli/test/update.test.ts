@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -19,6 +19,8 @@ import {
 } from '../src/index.ts';
 import { defaultUpdateContinuation } from '../src/commands/update.ts';
 import {
+  AGENTS_FOLDER_RECORD,
+  AGENTS_HOME_MARKER,
   agentsDirPath,
   agentWorkspacePath,
   credentialsPath,
@@ -1381,6 +1383,32 @@ test('update --check counts a pending move into the agents folder as actionable'
   assert.match(check.output.stdout, /agents +1 soul\(s\) and 1 workspace\(s\) to move into .*Agents/);
   assert.doesNotMatch(check.output.stdout, /Nothing to do/);
   await assert.rejects(() => stat(path.join(home, 'Agents')), 'the check moves nothing');
+});
+
+test('update --check counts links a copied home still points at its old path as actionable', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await runStateMigrations(env, { exclusive: true });
+  await mkdir(path.join(home, 'Agents', 'ava'), { recursive: true });
+  await writeFile(path.join(home, 'Agents', AGENTS_HOME_MARKER), '');
+  await writeFile(path.join(home, 'Agents', 'ava', 'soul.md'), '---\nid: ava\nname: Ava\n---\nYou are Ava.\n');
+  const old = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-gone-')), 'home', 'Agents', 'ava', 'soul.md');
+  const hidden = path.join(agentsDirPath(env), 'ava.md');
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await symlink(old, hidden);
+  // The folder the copied links were made into, as the old home recorded it.
+  await writeFile(path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD), `${path.dirname(path.dirname(old))}\n`);
+
+  const check = createStreams();
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams: check.streams,
+    env: { ...env, serviceRunner: runningServiceRunner, packageVersionFetcher: async () => CLI_VERSION },
+  });
+  assert.equal(code, 1, check.output.stdout);
+  assert.match(check.output.stdout, /agents +1 link\(s\) from a home at another path to re-point at .*Agents/);
+  assert.doesNotMatch(check.output.stdout, /soul\(s\) and .* workspace\(s\) to move/);
+  assert.equal(await readlink(hidden), old, 'the check re-points nothing');
 });
 
 // ---- plugins released apart from the CLI -------------------------------------
