@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ContextOverflowError, type Session } from '@stratusagent/core';
+import { ContextOverflowError, HostRefusalError, type Session } from '@stratusagent/core';
 import { chmod, mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -249,6 +249,47 @@ test('an overflowing transcript reaches the runner instead of spending the fallb
   const ordinary = createFallbackWrappedProvider(flaky as never, fallback as never, () => {});
   const served = await ordinary.generate({ session: { ...session, id: 'flaky' } } as never);
   assert.equal((served.parts[0] as { text: string }).text, 'fallback');
+});
+
+test('a refusal the host made on purpose is not a model failing, so the fallback never answers instead', async () => {
+  // A spent budget is the agent's limit, not the primary model's: the
+  // fallback answering would spend what the limit exists to stop, and hide
+  // that it was reached.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session: Session = {
+    id: 'capped',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+  let fallbackCalls = 0;
+  const switches: unknown[] = [];
+  const wrapped = createFallbackWrappedProvider(
+    {
+      name: 'primary',
+      async generate() {
+        throw new HostRefusalError('This agent has used its daily model budget.');
+      },
+    },
+    {
+      name: 'fallback',
+      async generate() {
+        fallbackCalls += 1;
+        return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+      },
+    },
+    (error) => switches.push(error),
+  );
+
+  await assert.rejects(
+    () => wrapped.generate({ session } as never),
+    (error: unknown) => error instanceof HostRefusalError,
+  );
+  assert.equal(fallbackCalls, 0);
+  assert.deepEqual(switches, []);
+  assert.equal(session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], undefined);
 });
 
 test('fallback stickiness survives a wrapper rebuild via session metadata', async () => {

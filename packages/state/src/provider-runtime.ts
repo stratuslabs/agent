@@ -23,7 +23,7 @@ import {
   SDK_SESSION_METADATA_KEY,
   type HostedToolExecutor,
 } from '@stratusagent/providers';
-import { ContextOverflowError } from '@stratusagent/core';
+import { ContextOverflowError, HostRefusalError } from '@stratusagent/core';
 // Types only, erased at build: the provider packages are loaded with
 // `import()` when an agent first runs on one (see `loadProviderPackage`),
 // so a host never loads one its agents do not use, and the CLI installs
@@ -221,6 +221,13 @@ export const createFallbackWrappedProvider = (
           // The fallback would then take the same too-long transcript and,
           // where it has a smaller window, fail on it too.
           if (error instanceof ContextOverflowError) {
+            throw error;
+          }
+          // Nor is a refusal the host made on purpose (a spent budget). The
+          // limit is the agent's, not the primary model's, so the fallback
+          // answering would spend exactly what it exists to stop and make
+          // the stop invisible besides.
+          if (error instanceof HostRefusalError) {
             throw error;
           }
           fallbackSessions.add(request.session.id);

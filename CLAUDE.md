@@ -112,7 +112,8 @@ hand and by review:
   it by type (some, like `ApiError` and `McpConfigError`, deliberately
   stay internal). A core error that another package throws or builds
   for core to catch (`ContextOverflowError` from a provider,
-  `RunAbortedError` from a channel) is branded so `instanceof` works
+  `RunAbortedError` from a channel, `HostRefusalError` from a plugin) is
+  branded so `instanceof` works
   across copies of core: a real npm install has one per global package.
   Use `brandCoreError` and `isBrandedCoreError` in core for a new one.
   Plain values and

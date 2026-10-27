@@ -17,6 +17,7 @@ import {
   type JsonObject,
   type JsonValue,
   type MemoryStoreContribution,
+  type ProviderCallGuard,
   type ProviderContribution,
   type Session,
   type StratusEvent,
@@ -282,6 +283,9 @@ export const createAgentRuntime = async (
   const providers = new ContributionRegistry<ProviderContribution>();
   const memoryStores = new ContributionRegistry<MemoryStoreContribution>();
   const executors = new ContributionRegistry<ExecutorContribution>();
+  // A budget a plugin enforces in the daemon holds here too: same guards,
+  // asked before every model call this run makes.
+  const providerCallGuards: ProviderCallGuard[] = [];
   if (Object.keys(pluginsConfig).length > 0) {
     const result = await loadPlugins({
       config: pluginsConfig,
@@ -303,6 +307,7 @@ export const createAgentRuntime = async (
       workspaces: createAgentWorkspaces(runEnv),
       stateDirectories: createPluginStateDirectories(runEnv),
       protectedPaths: createHostProtectedPaths(runEnv, options.configPath !== undefined ? { configPath: options.configPath } : {}),
+      providerCallGuards,
     });
     loadedPlugins.push(...result.loaded);
     for (const failure of result.failures) {
@@ -407,6 +412,7 @@ export const createAgentRuntime = async (
       skills,
       memory,
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+      providerCallGuards,
     });
 
     hostedRunner = runner;

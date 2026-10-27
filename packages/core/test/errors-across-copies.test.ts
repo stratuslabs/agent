@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AgentRunner,
   ContextOverflowError,
+  HostRefusalError,
   RunAbortedError,
   type ModelProvider,
   type StratusEvent,
@@ -107,4 +108,35 @@ test('a stop reason from a channel on its own copy of core is the reason the tur
     (error: unknown) => error === reason,
   );
   assert.equal((await runner.store.get('copies-abort'))?.lastError, 'Run aborted: stopped from Slack by Dylan');
+});
+
+test('a refusal from a plugin on its own copy of core still fails the turn as refused', async () => {
+  // A budgets plugin installed on its own throws the HostRefusalError of
+  // the core it was installed with.
+  assert.ok(new otherCopy.HostRefusalError('out of budget') instanceof HostRefusalError);
+  assert.equal(new otherCopy.ContextOverflowError('too long') instanceof HostRefusalError, false);
+  const failures: StratusEvent[] = [];
+  const provider: ModelProvider = {
+    name: 'never-called',
+    async generate() {
+      throw new Error('the guard should have refused first');
+    },
+  };
+  const runner = new AgentRunner({
+    provider,
+    providerCallGuards: [() => {
+      throw new otherCopy.HostRefusalError('Ava has used her daily model budget.');
+    }],
+  });
+  runner.bus.subscribe((event) => {
+    if (event.type === 'session.failed') {
+      failures.push(event);
+    }
+  });
+  await assert.rejects(
+    () => runner.run({ sessionId: 'copies-refused', agent: { id: 'copies', name: 'Copies' }, userMessage: 'go' }),
+    /daily model budget/,
+  );
+  assert.equal(failures.length, 1);
+  assert.equal((failures[0] as { refused?: true }).refused, true);
 });

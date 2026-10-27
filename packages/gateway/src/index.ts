@@ -62,6 +62,7 @@ import {
   matchesToolAllowlist,
   type JsonObject,
   type MemoryStoreContribution,
+  type ProviderCallGuard,
   type ProviderContribution,
   type Session,
   type StratusEvent,
@@ -1544,6 +1545,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   }
   const memoryContributions = new ContributionRegistry<MemoryStoreContribution>();
   const executorContributions = new ContributionRegistry<ExecutorContribution>();
+  // The guards plugins registered (a budget), asked before every model call
+  // any runner below makes, sub-agents' included. Filled by the loader at
+  // start, before the first runner is built.
+  const providerCallGuards: ProviderCallGuard[] = [];
 
   // ---- schedules ----------------------------------------------------------
 
@@ -3269,6 +3274,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...(autoContinue !== undefined
         ? { autoContinue, waitingInput: (sessionId: string) => (waitingDispatches.get(sessionId) ?? 0) > 0 }
         : {}),
+      providerCallGuards,
     });
     hostedRunner = runner;
     runners.set(key, runner);
@@ -5004,6 +5010,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         pendingApprovals: listPendingApprovals,
         onRead: (method) => log(`fleet read: ${method} by plugin ${packageName}`),
       }),
+      providerCallGuards,
     });
     loadedPlugins = result.loaded;
     pluginFailures = result.failures;
@@ -5016,6 +5023,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...plugin.contributions.channels.map((channel) => `channel ${channel.kind} for ${channel.agents.join(', ') || 'no agent'}`),
         ...plugin.contributions.memory.map((name) => `memory store ${name}`),
         ...plugin.contributions.executors.map((name) => `executor ${name}`),
+        ...(plugin.providerCallGuards > 0 ? ['guards model calls'] : []),
       ];
       log(`plugin ${plugin.package} loaded — ${contributed.join(', ') || 'no tools'}`);
     }

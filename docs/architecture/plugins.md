@@ -39,6 +39,7 @@ plugin can *register* one through the entrypoint, and today most cannot:
 | channels | `ChannelAdapter`, as a `ChannelContribution` | **yes**, `context.channels` |
 | memory | `AgentMemoryStore`, as a `MemoryStoreContribution` | **yes**, `context.memory` |
 | executors | `Executor`, as an `ExecutorContribution` | **yes**, `context.executors` |
+| provider-call guards | `ProviderCallGuard` | **yes**, `context.providerCalls` |
 
 Skills are the one kind that never needed a registration handle: a skill is
 prose the manifest points at (`contributes.skills`, an id and a path inside
@@ -112,7 +113,7 @@ need not word a marker of its own. The transcript keeps the output as
 returned. The rule is a rule, not a list the kernel keeps — a newly registered
 third-party tool that declares itself a producer is labelled with no change
 to kernel code, which is what makes the ecosystem's tools first-class here.
-**All seven kinds now register.** The first-party implementations that
+**All eight kinds now register.** The first-party implementations that
 predate the seams are still host-wired — `@stratusagent/channel-slack` is
 constructed by the CLI and handed to `createGateway({ channels: [...] })`,
 and the three built-in providers are built inside `createRuntimeProvider` —
@@ -262,6 +263,33 @@ because nothing aggregates usage yet. A host that omits it has no fleet to
 describe, and a plugin that needs it fails its `setup` naming it. Every
 loaded plugin is handed one, like `subAgents`: what limits a fleet report
 is the operator installing the plugin and a soul listing its tools.
+
+**A plugin can refuse a model call before it is made.** `setup` receives
+`context.providerCalls`, and a guard registered with
+`providerCalls.register(guard)` is asked before every provider call the
+host makes, for every agent, sub-agents and recovered turns included,
+with the agent id, the session id and the provider's name. A token budget
+is what it exists for. Resolving allows the call. Throwing a
+`HostRefusalError` refuses it on purpose: the turn fails with
+`session.failed` carrying `refused: true`, a configured fallback model does
+not answer instead (the limit is the agent's, not one model's), and Slack
+posts the error's message as it is rather than as "Something went wrong",
+so write it as a sentence for the person in the conversation, naming what
+ran out and when it resets. Throwing anything else refuses the call too,
+because a budget that cannot be read has not said yes, and the turn's
+error names the plugin. The guard pairs with the `session.usage` event:
+the runner announces usage records as the provider reports them, a failed
+attempt's included and a harness's while its turn is still running, and
+always before it asks the guards about the next call, so a guard metering
+from that event has seen everything spent so far. It is
+asked once per `generate`, which is one model call for the kernel-loop
+providers and one whole turn for a harness running its own loop.
+Registration is staged with the plugin's other contributions, so a plugin
+refused at load leaves no guard behind, and it closes when `setup`
+returns. The daemon and `stratus run` both enforce guards; a host that
+does not hands no slot, and a plugin that needs one fails its `setup`
+naming it rather than loading with a limit nothing enforces. The load log
+line says `guards model calls`.
 
 **`ledgerRoot` is the host's key and is stripped**, the way `toolRisks` is,
 so a plugin's code never sees it. Two plugins write the filesystem

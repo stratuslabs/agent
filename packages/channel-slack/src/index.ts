@@ -21,6 +21,7 @@ import {
   IMAGE_ATTACHMENT_MAX_DIMENSION,
   IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   escapeControlCharacters,
+  HostRefusalError,
   RunAbortedError,
   type AlwaysMeans,
   type CredentialScope,
@@ -1783,7 +1784,13 @@ class ReplyRenderer {
     return this.finalize(`Stopped by <@${by}>.`);
   }
 
-  async fail(message: string): Promise<ReplyOutcome> {
+  /**
+   * `refused` is a turn the host stopped on purpose (`HostRefusalError`), a
+   * spent budget, whose message is already a sentence for the person
+   * reading it. Framed as something having gone wrong, it would read as a
+   * fault to report when it is a limit working.
+   */
+  async fail(message: string, refused = false): Promise<ReplyOutcome> {
     // The same wait `finalize` takes, for the same reason: a lazy turn's
     // first text may be opening its placeholder right now, and a failure
     // read as "before saying anything" would leave that placeholder saying
@@ -1800,7 +1807,7 @@ class ReplyRenderer {
       this.warn(`a turn nobody asked for failed before saying anything: ${message}`);
       return this.finalize('');
     }
-    return this.finalize(`Something went wrong: ${message}`);
+    return this.finalize(refused ? message : `Something went wrong: ${message}`);
   }
 
   /**
@@ -5056,7 +5063,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connection,
       channel,
       thread,
-      messageChunks(stoppedBy === undefined ? `Something went wrong: ${event.error}` : `Stopped by <@${stoppedBy}>.`),
+      messageChunks(
+        stoppedBy !== undefined
+          ? `Stopped by <@${stoppedBy}>.`
+          : event.refused ? event.error : `Something went wrong: ${event.error}`,
+      ),
       async () => {
         landed = await uploadUnrenderedFiles(connection, channel, thread, files);
       },
@@ -7487,7 +7498,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ? await renderer.stopped(renderer.stoppedBy)
         : refused
         ? await renderer.finalize(renderer.lazy ? '' : deferredText ?? (failure as Error).message)
-        : await renderer.fail(failure instanceof Error ? failure.message : String(failure));
+        : await renderer.fail(failure instanceof Error ? failure.message : String(failure), failure instanceof HostRefusalError);
       const { spoke, spokeAt } = refused && renderer.stoppedBy === undefined
         ? outcome
         : noteReplayOutcome(connection, event.channel, event.ts, outcome);

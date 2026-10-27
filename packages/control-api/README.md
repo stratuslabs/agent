@@ -628,7 +628,15 @@ is the stored form and a resumed session's earlier turns are just as real. It
 is absent when nothing reported, and a client must not read that as zero. A
 run that *fails* emits `session.failed` without them; its records are still
 saved on the session, so read them back rather than treating a failure as
-free.
+free. `session.usage` arrives as each provider call lands, failed calls
+included, with the records that call added (`sessionId`, `agentId`,
+`records`). Each record has an `id`, unique to the call, and `at`, when it
+was recorded, so a client that meters from both events counts each call once.
+
+`session.failed` carries `refused: true` when the host stopped the turn on
+purpose, a plugin's spent budget, rather than something breaking. Its
+`error` is then a sentence written for the person in the conversation: show
+it as it is, not as a failure.
 
 Deltas are dropped for a client whose socket has backed up past 1 MB, and only
 deltas: losing a token from a reply is a cosmetic gap, while losing a

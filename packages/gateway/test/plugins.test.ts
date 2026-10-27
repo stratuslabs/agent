@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { HostRefusalError, type Plugin, type ProviderCallCheck, type StratusEvent } from '@stratusagent/core';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 
 import { createGateway } from '../src/index.ts';
@@ -442,6 +443,65 @@ test('the daemon hands a plugin a credential resolver bound to the calling agent
       () => resolver!.resolve(ava, 'github.token'),
       /which its manifest does not declare/,
     );
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a plugin\'s provider-call guard is asked before the daemon\'s model calls, and its refusal fails the turn as refused', async () => {
+  const home = await newHome();
+  const log: string[] = [];
+  const checks: ProviderCallCheck[] = [];
+  let refuse = false;
+  const host = await hostFor({
+    'stratus-plugin-budget': {
+      manifest: { stratus: { pluginVersion: 1 } },
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'budget',
+          setup(context) {
+            if (!context.providerCalls) {
+              throw new Error('This host cannot enforce a budget: it gives plugins no providerCalls.');
+            }
+            context.providerCalls.register((check) => {
+              checks.push(check);
+              if (refuse) {
+                throw new HostRefusalError('Ava has used her daily model budget.');
+              }
+            });
+          },
+        }),
+      },
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-budget': { enabled: true } },
+    pluginHost: host,
+    log: (line) => log.push(line),
+    warn: () => {},
+  });
+  const failures: StratusEvent[] = [];
+  gateway.bus.subscribe((event) => {
+    if (event.type === 'session.failed') {
+      failures.push(event);
+    }
+  });
+
+  await gateway.start();
+  try {
+    assert.ok(log.some((line) => line === 'plugin stratus-plugin-budget loaded — guards model calls'), log.join('\n'));
+    const answered = await gateway.dispatch({ sessionId: 'budget-1', userMessage: 'hello' });
+    assert.equal(answered.status, 'completed');
+    assert.ok(checks.length > 0);
+    assert.ok(checks.every((check) => check.sessionId === 'budget-1' && check.agentId === answered.agent.id));
+
+    refuse = true;
+    await assert.rejects(gateway.dispatch({ sessionId: 'budget-2', userMessage: 'hello' }), HostRefusalError);
+    assert.deepEqual(failures, [
+      { type: 'session.failed', sessionId: 'budget-2', error: 'Ava has used her daily model budget.', refused: true },
+    ]);
   } finally {
     await gateway.stop();
   }

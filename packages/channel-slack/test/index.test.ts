@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   EventBus,
+  HostRefusalError,
   SENDER_TRUST_METADATA_KEY,
   type ApprovalAnswer,
   type ChannelCredentialRequest,
@@ -4148,6 +4149,51 @@ test('a failed turn edits the placeholder into an error note instead of going si
   await adapter.stop();
 
   assert.match(web.updates.at(-1)?.text ?? '', /Something went wrong: provider exploded/);
+});
+
+test('a turn the host refused on purpose shows the refusal as it is, not as something going wrong', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(() => {
+    throw new HostRefusalError('Ava has used her daily model budget. It resets at midnight UTC.');
+  });
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> one more'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, 'Ava has used her daily model budget. It resets at midnight UTC.');
+});
+
+test('a refused turn no renderer was showing is reported in its thread as the refusal itself', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async (sessionId) => (sessionId === 'slack:ava:T1:C1:300.1'
+    ? { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '300.1', sessionTrust: 'user' } }
+    : undefined);
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await gateway.bus.emit({
+    type: 'session.failed',
+    sessionId: 'slack:ava:T1:C1:300.1',
+    error: 'Ava has used her daily model budget.',
+    refused: true,
+  });
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Ava has used her daily model budget.', '300.1']]);
 });
 
 test('replies longer than one Slack message split across thread messages', async () => {
