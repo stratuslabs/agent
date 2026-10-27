@@ -272,9 +272,9 @@ export {
   createRuntimeProvider,
   runsOnHarness,
   describeRuntimeEffort,
-  harnessesUsedBy,
-  HARNESS_PACKAGE_NAMES,
-  type HarnessName,
+  providerPackagesUsedBy,
+  PROVIDER_PACKAGE_NAMES,
+  type ProviderPackage,
 } from './provider-runtime.ts';
 
 export {

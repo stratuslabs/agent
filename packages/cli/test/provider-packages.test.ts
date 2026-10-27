@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { CLI_VERSION, runCli, type ServiceRunner } from '../src/index.ts';
 import { runStateMigrations } from '@stratusagent/state';
 
+const ANTHROPIC = '@stratusagent/provider-anthropic';
 const CLAUDE_CODE = '@stratusagent/provider-claude-code';
 const CODEX = '@stratusagent/provider-codex';
 
@@ -29,6 +30,18 @@ const createStreams = () => {
 
 // No service manager answers: these tests are about packages, not units.
 const noService: ServiceRunner = async () => ({ code: 1, stdout: '', stderr: 'not here' });
+
+/** A home whose default agent runs on the Anthropic API with a stored key. */
+const apiKeyHome = async (): Promise<string> => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-api-x' } }),
+  );
+  return home;
+};
 
 /** A home whose default agent runs on the Claude subscription (the claude-code harness). */
 const subscriptionHome = async (): Promise<string> => {
@@ -54,16 +67,17 @@ const stubServiceRunner: ServiceRunner = async (command, args) => ({
 
 const missing = (...names: string[]) => (specifier: string) => !names.includes(specifier);
 
-test('neither the CLI nor state depends on a harness provider package', async () => {
-  // The whole point: a base install does not download claude-code's or
-  // codex's native binary. Dev-only, so tests and types still have them.
+test('neither the CLI nor state depends on a provider package', async () => {
+  // The whole point: a base install carries no provider, and never
+  // downloads claude-code's or codex's native binary. Setup installs the
+  // one picked. Dev-only, so tests and types still have them.
   for (const pkg of ['cli', 'state']) {
     const manifest = JSON.parse(await readFile(
       fileURLToPath(new URL(`../../${pkg}/package.json`, import.meta.url)),
       'utf8',
     )) as { dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>; peerDependencies?: Record<string, string> };
     for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies'] as const) {
-      for (const name of [CLAUDE_CODE, CODEX]) {
+      for (const name of [ANTHROPIC, CLAUDE_CODE, CODEX]) {
         assert.equal(manifest[field]?.[name], undefined, `${pkg} ${field} still lists ${name}`);
       }
     }
@@ -342,4 +356,81 @@ test('setup installs no harness for an API-key provider', async () => {
   });
   assert.equal(exitCode, 0, output.stderr);
   assert.deepEqual(installs, []);
+});
+
+test('setup installs the Anthropic adapter for an API key when it is not installed', async () => {
+  // The CLI ships with no provider, so the one picked is installed here,
+  // the same way the harnesses are.
+  const home = await apiKeyHome();
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: missing(ANTHROPIC, CLAUDE_CODE, CODEX),
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.deepEqual(installs, [[`${ANTHROPIC}@${CLI_VERSION}`]]);
+  assert.match(output.stdout, /Running: npm install -g @stratusagent\/provider-anthropic@/);
+});
+
+test('an update from a CLI that carried the Anthropic adapter puts it back, so the agent keeps working', async () => {
+  // Until this release the adapter came inside the CLI, so replacing the
+  // CLI removes it. The new build's half of the update installs it before
+  // the service starts again.
+  const home = await apiKeyHome();
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { STRATUS_UPDATE_RESUME: 'stopped' },
+      serviceRunner: noService,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async () => undefined,
+      packageResolver: missing(ANTHROPIC, CLAUDE_CODE, CODEX),
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(installs, [[`${ANTHROPIC}@${CLI_VERSION}`]]);
+  assert.match(output.stdout, /Installed @stratusagent\/provider-anthropic/);
+});
+
+test('doctor reports an API-key agent whose Anthropic adapter is not installed', async () => {
+  // A plain `npm install -g @stratusagent/cli` upgrade runs no update step,
+  // so this is where the missing adapter is named, with the fix.
+  const home = await apiKeyHome();
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      processEnv: {},
+      serviceRunner: noService,
+      packageResolver: missing(ANTHROPIC),
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stdout, /@stratusagent\/provider-anthropic is not installed, and an agent runs on it/);
+  assert.match(output.stdout, /stratus update/);
 });

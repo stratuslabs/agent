@@ -23,11 +23,11 @@ import {
   SDK_SESSION_METADATA_KEY,
   type HostedToolExecutor,
 } from '@stratusagent/providers';
-import { createAnthropicProvider } from '@stratusagent/provider-anthropic';
 import { ContextOverflowError } from '@stratusagent/core';
-// Types only, erased at build: the two harness packages are loaded with
-// `import()` when an agent first runs on one (see `loadHarness`), so a
-// host that uses neither never loads either.
+// Types only, erased at build: the provider packages are loaded with
+// `import()` when an agent first runs on one (see `loadProviderPackage`),
+// so a host never loads one its agents do not use, and the CLI installs
+// with none of them.
 import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
 import type { CodexRunTurn } from '@stratusagent/provider-codex';
 import type { RuntimeConfig } from './config.ts';
@@ -365,16 +365,22 @@ export const describeRuntimeEffort = (config: RuntimeConfig): string | undefined
 };
 
 /**
- * The two providers that wrap a harness with its own agent loop, by the
- * package that carries each. They are the heavy installs (each brings a
- * native binary), so they are loaded on first use rather than imported:
- * a host whose agents use neither never loads either, and a host where
+ * The built-in providers whose adapter is a package of its own, by the
+ * package that carries each: the Anthropic Messages API, and the two that
+ * wrap a harness with its own agent loop (each brings a native binary).
+ * None ships with the CLI, so a fresh install carries no provider; setup
+ * installs the one picked. Each is loaded on first use rather than
+ * imported: a host never loads one its agents do not use, and a host where
  * one is not installed fails the turn that needs it, with the fix, rather
  * than failing to start.
  */
-export type HarnessName = 'claude-code' | 'codex';
+export type ProviderPackage = 'anthropic' | 'claude-code' | 'codex';
 
-const HARNESS_PACKAGES: Record<HarnessName, { specifier: string; label: string }> = {
+const PROVIDER_PACKAGES: Record<ProviderPackage, { specifier: string; label: string }> = {
+  anthropic: {
+    specifier: '@stratusagent/provider-anthropic',
+    label: 'the Anthropic API',
+  },
   'claude-code': {
     specifier: '@stratusagent/provider-claude-code',
     label: 'the Claude subscription runtime',
@@ -385,40 +391,42 @@ const HARNESS_PACKAGES: Record<HarnessName, { specifier: string; label: string }
   },
 };
 
-/** The package that carries each harness provider, for whoever has to install one. */
-export const HARNESS_PACKAGE_NAMES: Readonly<Record<HarnessName, string>> = {
-  'claude-code': HARNESS_PACKAGES['claude-code'].specifier,
-  codex: HARNESS_PACKAGES.codex.specifier,
+/** The package that carries each provider, for whoever has to install one. */
+export const PROVIDER_PACKAGE_NAMES: Readonly<Record<ProviderPackage, string>> = {
+  anthropic: PROVIDER_PACKAGES.anthropic.specifier,
+  'claude-code': PROVIDER_PACKAGES['claude-code'].specifier,
+  codex: PROVIDER_PACKAGES.codex.specifier,
 };
 
 /**
- * The harnesses a resolved runtime loads on its turns: its own and its
- * fallback's, by the same rule `createRuntimeProvider` builds them with.
- * Neither package ships with the CLI, so this is what setup installs,
+ * The provider packages a resolved runtime loads on its turns: its own and
+ * its fallback's, by the same rule `createRuntimeProvider` builds them
+ * with. None ships with the CLI, so this is what setup installs,
  * `stratus update` keeps installed, and doctor checks for.
  */
-export const harnessesUsedBy = (config: RuntimeConfig): HarnessName[] => {
-  const of = (runtime: { provider: string; apiKey?: string | undefined; authToken?: string | undefined }): HarnessName | undefined => {
+export const providerPackagesUsedBy = (config: RuntimeConfig): ProviderPackage[] => {
+  const of = (runtime: { provider: string; apiKey?: string | undefined; authToken?: string | undefined }): ProviderPackage | undefined => {
     if (runtime.provider === 'codex') return 'codex';
-    return runtime.provider === 'anthropic' && runsOnHarness(runtime) ? 'claude-code' : undefined;
+    if (runtime.provider !== 'anthropic') return undefined;
+    return runsOnHarness(runtime) ? 'claude-code' : 'anthropic';
   };
-  const used = new Set<HarnessName>();
+  const used = new Set<ProviderPackage>();
   for (const runtime of [config, ...('fallback' in config && config.fallback ? [config.fallback] : [])]) {
-    const harness = of(runtime);
-    if (harness) used.add(harness);
+    const pkg = of(runtime);
+    if (pkg) used.add(pkg);
   }
   return [...used];
 };
 
 /**
- * The error a turn fails with when its harness package is missing, or
+ * The error a turn fails with when its provider package is missing, or
  * `undefined` when `error` is anything else. Matched on the package Node
- * names as missing, not just the code: a harness that is installed but
+ * names as missing, not just the code: a package that is installed but
  * fails to load one of its own dependencies (whose importer path also
  * contains the specifier) is a different fault with a different fix.
  */
-export const harnessNotInstalledError = (harness: HarnessName, error: unknown): Error | undefined => {
-  const { specifier, label } = HARNESS_PACKAGES[harness];
+export const providerPackageNotInstalledError = (pkg: ProviderPackage, error: unknown): Error | undefined => {
+  const { specifier, label } = PROVIDER_PACKAGES[pkg];
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
   const message = error instanceof Error ? error.message : '';
   if (code !== 'ERR_MODULE_NOT_FOUND' || !message.startsWith(`Cannot find package '${specifier}'`)) return undefined;
@@ -428,26 +436,29 @@ export const harnessNotInstalledError = (harness: HarnessName, error: unknown): 
   );
 };
 
-type HarnessModules = {
+type ProviderModules = {
+  anthropic: typeof import('@stratusagent/provider-anthropic');
   'claude-code': typeof import('@stratusagent/provider-claude-code');
   codex: typeof import('@stratusagent/provider-codex');
 };
 
-type HarnessOptions<H extends HarnessName> = H extends 'claude-code'
-  ? Parameters<HarnessModules['claude-code']['createClaudeCodeProvider']>[0]
-  : Parameters<HarnessModules['codex']['createCodexProvider']>[0];
+type ProviderOptions<P extends ProviderPackage> = P extends 'anthropic'
+  ? Parameters<ProviderModules['anthropic']['createAnthropicProvider']>[0]
+  : P extends 'claude-code'
+    ? Parameters<ProviderModules['claude-code']['createClaudeCodeProvider']>[0]
+    : Parameters<ProviderModules['codex']['createCodexProvider']>[0];
 
-const loadHarness = async <H extends HarnessName>(harness: H): Promise<HarnessModules[H]> => {
+const loadProviderPackage = async <P extends ProviderPackage>(pkg: P): Promise<ProviderModules[P]> => {
   try {
-    return await import(HARNESS_PACKAGES[harness].specifier) as HarnessModules[H];
+    return await import(PROVIDER_PACKAGES[pkg].specifier) as ProviderModules[P];
   } catch (error) {
-    throw harnessNotInstalledError(harness, error) ?? error;
+    throw providerPackageNotInstalledError(pkg, error) ?? error;
   }
 };
 
 /**
  * A provider whose adapter is built on its first request. `createRuntimeProvider`
- * stays synchronous for its callers, and the harness module is loaded only
+ * stays synchronous for its callers, and the provider module is loaded only
  * when a turn actually reaches it. A failed build is not cached, so a turn
  * after the package is installed loads it without a restart.
  */
@@ -509,7 +520,7 @@ export const createRuntimeProvider = (
       // The options are read from `config` now, and only the package load
       // waits for the first turn, so a config changed after this call cannot
       // reach a provider built from it.
-      const options: HarnessOptions<'claude-code'> = {
+      const options: ProviderOptions<'claude-code'> = {
         authToken: config.authToken,
         ...(config.agentSignIn !== undefined ? { authOwner: config.agentSignIn } : {}),
         model: config.model,
@@ -528,9 +539,9 @@ export const createRuntimeProvider = (
         // the outer runner never sees them.
         ...(maxTurns !== undefined ? { maxTurns } : {}),
       };
-      return createDeferredProvider('claude-code', async () => (await loadHarness('claude-code')).createClaudeCodeProvider(options));
+      return createDeferredProvider('claude-code', async () => (await loadProviderPackage('claude-code')).createClaudeCodeProvider(options));
     }
-    return createAnthropicProvider({
+    const options: ProviderOptions<'anthropic'> = {
       model: config.model,
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
       ...(config.authToken ? { authToken: config.authToken } : {}),
@@ -541,7 +552,8 @@ export const createRuntimeProvider = (
       ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
       ...(config.effort ? { effort: config.effort } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
-    });
+    };
+    return createDeferredProvider('anthropic', async () => (await loadProviderPackage('anthropic')).createAnthropicProvider(options));
   }
 
   if (config.provider === 'codex') {
@@ -550,7 +562,7 @@ export const createRuntimeProvider = (
     // intact) over the provider's loopback MCP endpoint, so this runtime
     // is the same agent as every other provider — with or without an API
     // key, which only decides billing.
-    const options: HarnessOptions<'codex'> = {
+    const options: ProviderOptions<'codex'> = {
       model: config.model,
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
@@ -561,7 +573,7 @@ export const createRuntimeProvider = (
       // calls inside one generate, and the outer runner never sees them.
       ...(maxTurns !== undefined ? { maxTurns } : {}),
     };
-    return createDeferredProvider('codex', async () => (await loadHarness('codex')).createCodexProvider(options));
+    return createDeferredProvider('codex', async () => (await loadProviderPackage('codex')).createCodexProvider(options));
   }
 
   if (config.provider === 'openai') {

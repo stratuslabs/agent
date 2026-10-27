@@ -35,7 +35,7 @@ import {
 } from '../npm.ts';
 import type { ParsedUpdateCommand } from '../parse.ts';
 import { readCompanions } from '../companions.ts';
-import { installHarnessPackages, missingHarnessPackages } from '../harness-packages.ts';
+import { installProviderPackages, missingProviderPackages } from '../provider-packages.ts';
 import { installSpecifier } from '../plugin-index.ts';
 import { readPluginUpdates } from '../plugin-updates.ts';
 
@@ -285,17 +285,18 @@ const runUpdateSteps = async (
     }
   }
 
-  // The harness providers the configured agents run on, when this machine
-  // does not have them: the CLI stopped carrying claude-code and codex, so
-  // an upgrade from a build that did removes them with the old CLI. Read
+  // The provider packages the configured agents run on, when this machine
+  // does not have them: the CLI stopped carrying claude-code and codex, and
+  // later the Anthropic adapter, so an upgrade from a build that did
+  // removes them with the old CLI. Read
   // against the config the service is pinned to, as the daemon reads it.
-  const harnessConfigPath = unit?.configPath;
-  const missingHarnesses = await missingHarnessPackages(
+  const providerConfigPath = unit?.configPath;
+  const missingProviders = await missingProviderPackages(
     unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
-    harnessConfigPath,
+    providerConfigPath,
     { asService: true },
   );
-  for (const name of missingHarnesses) {
+  for (const name of missingProviders) {
     out(`  provider    ${name} — your agents use it and it is not installed`);
   }
 
@@ -306,7 +307,7 @@ const runUpdateSteps = async (
   // from its own.
   const plugins = await readPluginUpdates(
     unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
-    harnessConfigPath,
+    providerConfigPath,
   );
   const pluginsBehind = plugins.flatMap((entry) => (entry.state === 'behind' ? [entry] : []));
   if (plugins.length > 0) {
@@ -348,7 +349,7 @@ const runUpdateSteps = async (
     // Held and unchecked plugins are reported but not counted: no update
     // can move them, and a check that kept saying it could would never go
     // quiet.
-    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0 || missingHarnesses.length > 0 || agentsPending || pluginsBehind.length > 0;
+    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0 || stale.length > 0 || missingProviders.length > 0 || agentsPending || pluginsBehind.length > 0;
     out(actionable
       ? 'Run `stratus update` to apply the above.'
       : 'Nothing to do.');
@@ -497,23 +498,23 @@ const runUpdateSteps = async (
 
   // Here rather than with the companions above: this runs on the build the
   // update is heading for, both when it resumed after replacing the CLI
-  // (the first half's package list came from the old build, which still
-  // carried both harnesses) and when the CLI was already current. A fresh
+  // (the first half's package list came from the old build, which may
+  // still have carried the provider) and when the CLI was already current. A fresh
   // read, because the CLI install above may have removed one.
-  const harnessesNow = resume !== undefined || upgrading.length > 0
-    ? await missingHarnessPackages(
+  const providersNow = resume !== undefined || upgrading.length > 0
+    ? await missingProviderPackages(
       unit?.workingDirectory !== undefined ? { ...env, cwd: unit.workingDirectory } : env,
-      harnessConfigPath,
+      providerConfigPath,
       { asService: true },
     )
-    : missingHarnesses;
-  if (!(await installHarnessPackages(harnessesNow, streams, env))) {
+    : missingProviders;
+  if (!(await installProviderPackages(providersNow, streams, env))) {
     upgradeFailed = true;
   }
 
   // Plugins that release on their own, one npm call each so one broken
   // release can't hold back the rest. On the build the update is heading
-  // for, like the harnesses, because whether a release loads is that
+  // for, like the provider packages, because whether a release loads is that
   // build's question. A managed service is stopped by now, so it can't
   // load a plugin half replaced.
   if (pluginsBehind.length > 0 && outgoingBuild) {

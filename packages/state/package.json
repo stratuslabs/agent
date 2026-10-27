@@ -27,10 +27,10 @@
     "@stratusagent/executor-local": "workspace:*",
     "@stratusagent/permissions": "workspace:*",
     "@stratusagent/plugins": "workspace:*",
-    "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
+    "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/provider-claude-code": "workspace:*",
     "@stratusagent/provider-codex": "workspace:*",
     "@types/node": "^24.6.0",
