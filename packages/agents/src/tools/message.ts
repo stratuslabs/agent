@@ -135,6 +135,14 @@ const MESSAGE_READ_DEFAULT_LIMIT = 50;
  * agent pages on with `before`/`after`.
  */
 export const MESSAGE_READ_TEXT_BUDGET = 40_000;
+/**
+ * The share of `MESSAGE_READ_TEXT_BUDGET` a channel's bookmarks may take,
+ * counted first. It holds Slack's limit of 100 at a typical length; what
+ * it exists to stop is the people in a channel filling the agent's context
+ * with bookmarks. The ones that do not fit are counted, not paged: Slack
+ * lists them all in one call.
+ */
+export const MESSAGE_READ_BOOKMARK_BUDGET = 16_000;
 const TRUNCATED_MARK = ' [... the rest of this message is not shown]';
 
 /**
@@ -162,6 +170,9 @@ export type ConversationReader = (input: {
     files?: string[];
   }>;
   more: boolean;
+  bookmarks?: Array<{ title: string; link: string }>;
+  bookmarksUnavailable?: string;
+  bookmarksOmitted?: number;
 }>;
 
 const optionalId = (input: JsonObject, key: string, tool = MESSAGE_READ_TOOL_NAME): string | undefined => {
@@ -215,7 +226,9 @@ export const createMessageReadTool = (
     + 'For Slack, ids are channel ids and message ts values; a permalink '
     + '…/archives/C0123456789/p1791332967606559 is channel C0123456789 and message 1791332967.606559, '
     + 'and a thread_ts in the link is the thread to read. '
-    + 'When more is true, page on with before (top level) or after (thread) set to the last id returned.',
+    + 'When more is true, page on with before (top level) or after (thread) set to the last id returned. '
+    + 'A top-level read without before or after also returns the channel\'s bookmarks, when it has any; '
+    + 'if bookmarksOmitted is set, say that many were left out rather than guess them.',
   risk: 'gated',
   outputTrust: 'external',
   parameters: {
@@ -263,8 +276,21 @@ export const createMessageReadTool = (
       ...(after !== undefined ? { after } : {}),
       ...(before !== undefined ? { before } : {}),
     });
-    const messages: Array<Awaited<ReturnType<ConversationReader>>['messages'][number]> = [];
+    // Bookmarks first, from their own share, in the channel's order.
+    const bookmarks: Array<{ title: string; link: string }> = [];
     let used = 0;
+    for (const bookmark of result.bookmarks ?? []) {
+      // Counted as the list is serialized: each entry with its separator,
+      // plus the closing bracket.
+      const size = JSON.stringify(bookmark).length + 1;
+      if (used + size + 1 > MESSAGE_READ_BOOKMARK_BUDGET) {
+        break;
+      }
+      bookmarks.push({ title: bookmark.title, link: bookmark.link });
+      used += size;
+    }
+    const bookmarksOmitted = (result.bookmarks?.length ?? 0) - bookmarks.length;
+    const messages: Array<Awaited<ReturnType<ConversationReader>>['messages'][number]> = [];
     let more = result.more;
     for (const message of result.messages) {
       const size = JSON.stringify(message).length;
@@ -293,6 +319,9 @@ export const createMessageReadTool = (
       ...(thread !== undefined ? { thread } : {}),
       count: messages.length,
       more,
+      ...(bookmarks.length > 0 ? { bookmarks } : {}),
+      ...(bookmarksOmitted > 0 ? { bookmarksOmitted } : {}),
+      ...(result.bookmarksUnavailable !== undefined ? { bookmarksUnavailable: result.bookmarksUnavailable } : {}),
       messages,
     } as JsonObject;
   },

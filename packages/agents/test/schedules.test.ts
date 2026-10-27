@@ -8,6 +8,7 @@ import {
   createMessageSendTool,
   createScheduleTools,
   MESSAGE_READ_MAX_LIMIT,
+  MESSAGE_READ_BOOKMARK_BUDGET,
   MESSAGE_READ_TEXT_BUDGET,
   describeCadence,
   nextFireAfter,
@@ -458,6 +459,62 @@ test('message.read counts names and file lists against its budget, not only the 
   assert.deepEqual(first.files, ['2000 files, not listed']);
   assert.ok(JSON.stringify(cut.messages).length <= MESSAGE_READ_TEXT_BUDGET);
   assert.equal(cut.more, true);
+});
+
+test('message.read passes a channel\'s bookmarks through ahead of the messages, and says when they could not be listed', async () => {
+  const bookmarks = Array.from({ length: 100 }, (_, index) => ({ title: `Runbook ${index}`, link: `https://example.test/docs/runbook-${index}` }));
+  const tool = createMessageReadTool(async () => ({
+    messages: [{ id: '1.000001', author: 'U1', text: 'hi' }],
+    more: false,
+    bookmarks,
+  }));
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  // Slack allows 100 per channel, and a typical 100 all fit.
+  assert.deepEqual(result.bookmarks, bookmarks);
+  assert.equal(result.bookmarksOmitted, undefined);
+  assert.equal(result.count, 1);
+  assert.deepEqual(Object.keys(result), ['source', 'count', 'more', 'bookmarks', 'messages']);
+
+  const unavailable = createMessageReadTool(async () => ({
+    messages: [{ id: '1.000001', author: 'U1', text: 'hi' }],
+    more: false,
+    bookmarksUnavailable: 'This Slack app can\'t read bookmarks because it lacks the bookmarks:read scope.',
+  }));
+  const said = await unavailable.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.equal(said.bookmarksUnavailable, 'This Slack app can\'t read bookmarks because it lacks the bookmarks:read scope.');
+  assert.equal(said.count, 1);
+
+  // A channel with none, or an adapter that has no bookmarks, reads as before.
+  const plain = createMessageReadTool(async () => ({ messages: [{ id: '1.000001', author: 'U1', text: 'hi' }], more: false }));
+  const before = await plain.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.deepEqual(Object.keys(before), ['source', 'count', 'more', 'messages']);
+  assert.match(tool.description ?? '', /bookmarks/);
+});
+
+test('message.read gives bookmarks their own share of the budget, says how many were left out, and the messages get the rest', async () => {
+  const long = Array.from({ length: 100 }, (_, index) => ({ title: `Link ${index}`, link: `https://example.test/${index}/${'l'.repeat(2000)}` }));
+  const half = 'x'.repeat(MESSAGE_READ_TEXT_BUDGET / 2 - JSON.stringify({ id: '3.000001', author: 'U1', text: '' }).length);
+  const tool = createMessageReadTool(async () => ({
+    messages: [
+      { id: '3.000001', author: 'U1', text: half },
+      { id: '2.000001', author: 'U1', text: half },
+    ],
+    more: false,
+    bookmarks: long,
+  }));
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const kept = result.bookmarks as Array<{ title: string; link: string }>;
+  // In Slack's order, as many as fit in their share.
+  assert.deepEqual(kept, long.slice(0, kept.length));
+  assert.ok(kept.length > 0);
+  assert.ok(JSON.stringify(kept).length <= MESSAGE_READ_BOOKMARK_BUDGET);
+  assert.ok(JSON.stringify([...kept, long[kept.length]]).length > MESSAGE_READ_BOOKMARK_BUDGET);
+  assert.equal(result.bookmarksOmitted, 100 - kept.length);
+  // The whole read stays inside the one budget, so the second long message
+  // no longer fits, and more says so.
+  assert.equal(result.count, 1);
+  assert.equal(result.more, true);
+  assert.ok(JSON.stringify(kept).length + JSON.stringify(result.messages).length <= MESSAGE_READ_TEXT_BUDGET);
 });
 
 test('message.send names its session as the speaker, at the label its words carry', async () => {

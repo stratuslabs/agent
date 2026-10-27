@@ -4453,6 +4453,9 @@ export interface ChannelAdapterLike {
       files?: string[];
     }>;
     more: boolean;
+    bookmarks?: Array<{ title: string; link: string }>;
+    bookmarksUnavailable?: string;
+    bookmarksOmitted?: number;
   }>;
   /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
@@ -8317,6 +8320,7 @@ export {
   type ChannelAdapter,
   type ChannelCredentialRequest,
   type ChannelSessionKeyParts,
+  type ConversationBookmark,
   type ConversationMessage,
   type ConversationReadRequest,
   type ConversationReadResult,

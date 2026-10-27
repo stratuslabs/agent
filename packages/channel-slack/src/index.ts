@@ -44,6 +44,7 @@ import {
   type AdmitPolicy,
   type ChannelAdapter,
   type ChannelCredentialRequest,
+  type ConversationBookmark,
   type ConversationMessage,
   type ConversationReadRequest,
   type ConversationReadResult,
@@ -530,6 +531,16 @@ export interface SlackWebLike {
   };
   users: {
     info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
+  };
+  /**
+   * A channel's bookmarks, all of them in one call (Slack has no paging
+   * here and allows 100 per channel), listed on the first page of a
+   * top-level `message.read`. Needs `bookmarks:read`, which the manifest
+   * asks for; an app without it reads messages as before and is told the
+   * scope is missing. Optional so an older SDK or fake still reads.
+   */
+  bookmarks?: {
+    list(args: { channel_id: string }): Promise<{ bookmarks?: Array<{ title?: string; link?: string }> }>;
   };
   /**
    * Opens a modal, which is how a credential is entered: its answer comes
@@ -3040,6 +3051,22 @@ interface AgentConnection {
 /** Uncached author names one `message.read` looks up; the rest keep their id. */
 const READ_NAME_LOOKUPS = 10;
 
+/** A bookmark title longer than this is cut, with an ellipsis. */
+const BOOKMARK_TITLE_LIMIT = 200;
+/** A bookmark link longer than this is replaced by `BOOKMARK_LINK_TOO_LONG`. */
+const BOOKMARK_LINK_LIMIT = 2000;
+const BOOKMARK_LINK_TOO_LONG = '(this link is longer than 2,000 characters, so it is not shown)';
+
+/**
+ * The error code of a failed Web API call (`missing_scope`, `ratelimited`),
+ * which `@slack/web-api` puts on the error's `data.error`. Undefined for a
+ * failure that never reached Slack.
+ */
+const slackErrorCode = (error: unknown): string | undefined => {
+  const code = (error as { data?: { error?: unknown } } | undefined)?.data?.error;
+  return typeof code === 'string' && code.length > 0 ? code : undefined;
+};
+
 /**
  * Orders two Slack message timestamps ("seconds.micros"). Compared as
  * integers, not floats: a current ts has more digits than a double holds.
@@ -4489,6 +4516,45 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * The bookmarks a first-page read returns beside the messages. Never
+   * throws: a failure is a sentence for the agent, and the messages come
+   * back either way.
+   */
+  const listBookmarks = async (
+    web: SlackWebLike,
+    channel: string,
+  ): Promise<Pick<ConversationReadResult, 'bookmarks' | 'bookmarksUnavailable'>> => {
+    if (!web.bookmarks) {
+      return {};
+    }
+    let listed: Awaited<ReturnType<NonNullable<SlackWebLike['bookmarks']>['list']>>;
+    try {
+      listed = await web.bookmarks.list({ channel_id: channel });
+    } catch (error) {
+      const code = slackErrorCode(error);
+      return {
+        bookmarksUnavailable: code === 'missing_scope'
+          ? 'This Slack app can\'t read bookmarks because it lacks the bookmarks:read scope. Add it to the app\'s manifest and reinstall the app.'
+          : `The channel's bookmarks could not be listed (${code ?? (error instanceof Error ? error.message : String(error))}).`,
+      };
+    }
+    const bookmarks: ConversationBookmark[] = [];
+    for (const entry of Array.isArray(listed?.bookmarks) ? listed.bookmarks : []) {
+      const link = typeof entry?.link === 'string' ? entry.link.trim() : '';
+      if (!link) {
+        continue;
+      }
+      const title = (typeof entry.title === 'string' && entry.title.trim()) || link;
+      bookmarks.push({
+        title: title.length > BOOKMARK_TITLE_LIMIT ? `${title.slice(0, BOOKMARK_TITLE_LIMIT - 1)}…` : title,
+        // A cut link is a broken one, so an over-long link is not shown.
+        link: link.length > BOOKMARK_LINK_LIMIT ? BOOKMARK_LINK_TOO_LONG : link,
+      });
+    }
+    return bookmarks.length > 0 ? { bookmarks } : {};
+  };
+
+  /**
    * The read side of the same boundary `resolveOutbound` draws: a channel
    * the agent's own app is a member of, public or private. DMs and group
    * DMs are refused outright, member or not. Their only members are the
@@ -4533,6 +4599,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!fetchPage) {
       throw new Error(`slack: this Slack client cannot read ${request.thread !== undefined ? 'threads' : 'channel history'}.`);
     }
+    // On the first page of the top level only, so paging costs no extra
+    // calls, and only once the checks above have said the read may happen.
+    // Asked beside the history, and settled without throwing.
+    const listing = request.thread === undefined && request.after === undefined && request.before === undefined
+      ? listBookmarks(connection.web, info.id)
+      : undefined;
     const base: SlackHistoryArgs = {
       channel: info.id,
       inclusive: false,
@@ -4610,7 +4682,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ...(files.length > 0 ? { files } : {}),
       });
     }
-    return { messages, more };
+    return { messages, more, ...(listing ? await listing : {}) };
   };
 
   /**
