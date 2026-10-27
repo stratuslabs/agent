@@ -364,8 +364,10 @@ test('a channel mention dispatches with a thread-rooted session key and streams 
   assert.equal(socket.disconnected, true);
 });
 
-const recordStatuses = (web: FakeWeb, refuse = false): Array<{ channel_id: string; thread_ts: string; status: string }> => {
-  const statuses: Array<{ channel_id: string; thread_ts: string; status: string }> = [];
+type RecordedStatus = { channel_id: string; thread_ts: string; status: string; loading_messages?: string[] };
+
+const recordStatuses = (web: FakeWeb, refuse = false): RecordedStatus[] => {
+  const statuses: RecordedStatus[] = [];
   web.assistant = {
     threads: {
       async setStatus(args) {
@@ -414,6 +416,42 @@ test('by default a turn posts what it says before each tool, then its finished r
   // interim post took it down.
   assert.deepEqual(statuses.map((status) => status.status).filter((status, index, all) => status !== all[index - 1]).slice(0, 2), ['is thinking…', 'is running shell.run…']);
   assert.ok(statuses.every((status) => status.channel_id === 'C1' && status.thread_ts === '100.1'));
+});
+
+test('the loading status also names the current step as Slack\'s loading message, and a clear carries none', async () => {
+  // Slack's agent sessions show their own generic text ("Finding
+  // answers…") in place of the `status` string; `loading_messages` is the
+  // field they still rotate through. Each status carries its step there
+  // too, and the clear sends none (Slack wants one to ten, and the empty
+  // status alone takes it down).
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'The build passes.');
+  });
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', mention('is the build green?', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  await adapter.stop();
+
+  const sent = statuses.map(({ status, loading_messages }) => [status, loading_messages]);
+  assert.deepEqual(sent.filter(([status], index, all) => status !== all[index - 1]?.[0]), [
+    ['is thinking…', ['Thinking…']],
+    ['is running shell.run…', ['Running shell.run…']],
+    ['is thinking…', ['Thinking…']],
+    ['', undefined],
+  ]);
+  assert.ok(statuses.filter((entry) => entry.status === '').every((entry) => !('loading_messages' in entry)), JSON.stringify(statuses));
 });
 
 test('the loading status comes back once an approval asked mid-turn is answered', async () => {
@@ -696,8 +734,8 @@ test('a DM queued behind a running turn shows its own status at once', async () 
   assert.deepEqual(
     statuses.filter((entry) => entry.status !== ''),
     [
-      { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…' },
-      { channel_id: 'D1', thread_ts: '300.2', status: 'is thinking…' },
+      { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…', loading_messages: ['Thinking…'] },
+      { channel_id: 'D1', thread_ts: '300.2', status: 'is thinking…', loading_messages: ['Thinking…'] },
     ],
   );
   releaseFirst();
@@ -727,7 +765,7 @@ test('a top-level DM reply takes down the loading status it was answered under',
 
   assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['hi back', undefined]]);
   assert.deepEqual(statuses, [
-    { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…' },
+    { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…', loading_messages: ['Thinking…'] },
     { channel_id: 'D1', thread_ts: '300.1', status: '' },
   ]);
 });

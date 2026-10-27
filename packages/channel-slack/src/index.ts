@@ -143,6 +143,17 @@ const PLACEHOLDER_TEXT = '…';
 /** What the loading status says while a turn works, and while it runs a tool. */
 const THINKING_STATUS = 'is thinking…';
 const toolStatus = (toolName: string): string => `is running ${toolName}…`;
+/**
+ * The same step as a line of its own, for Slack's `loading_messages`
+ * ("is running shell.run…" -> "Running shell.run…"). Slack's agent sessions
+ * show their own generic text ("Finding answers…") in place of `status`,
+ * and rotate these instead. None for the clear: Slack wants one to ten,
+ * and the empty status alone takes the indicator down.
+ */
+const loadingMessage = (status: string): string | undefined => {
+  const step = status.replace(/^is /, '');
+  return step === '' ? undefined : step.charAt(0).toUpperCase() + step.slice(1);
+};
 
 /**
  * How often a loading status is set again while its turn runs. Slack drops
@@ -478,7 +489,7 @@ export interface SlackWebLike {
    */
   assistant?: {
     threads: {
-      setStatus(args: { channel_id: string; thread_ts: string; status: string }): Promise<unknown>;
+      setStatus(args: { channel_id: string; thread_ts: string; status: string; loading_messages?: string[] }): Promise<unknown>;
     };
   };
   files: {
@@ -1209,13 +1220,19 @@ class ReplyRenderer {
     }
     this.statusText = text;
     const thread = this.statusThread;
+    const loading = loadingMessage(text);
     // Not awaited by the caller: the turn never waits on a status. Only
     // `finalize` does, for the ordering reason on `statusChain`. A refusal
     // — a workspace or plan without it, a token Slack will not honour for
     // it — is said once and then left alone; the reply still arrives,
     // just without the status ahead of it.
     this.statusChain = this.statusChain
-      .then(() => setStatus.call(this.web.assistant?.threads, { channel_id: this.channel, thread_ts: thread, status: text }))
+      .then(() => setStatus.call(this.web.assistant?.threads, {
+        channel_id: this.channel,
+        thread_ts: thread,
+        status: text,
+        ...(loading ? { loading_messages: [loading] } : {}),
+      }))
       .then(() => undefined, (error: unknown) => {
         if (!this.statusWarned.value) {
           this.statusWarned.value = true;

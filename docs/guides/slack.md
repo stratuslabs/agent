@@ -214,7 +214,10 @@ rewritten in front of you. Whatever it writes before it starts a tool is
 posted as that tool starts — "On it, checking the three PRs" reaches the
 thread at once, not an hour later — and the finished reply follows as its
 own message. While it works, Slack shows its own loading status under the
-agent's name: "is thinking…", or "is running shell.run…" while a tool runs. A turn nobody asked for (an agent that
+agent's name: "is thinking…", or "is running shell.run…" while a tool runs.
+The same step also goes out as Slack's loading message ("Running
+shell.run…"), for Slack's newer agent sessions, which replace the status
+line with their own text ("Finding answers…"). A turn nobody asked for (an agent that
 [judges](#how-an-agent-listens)) shows no status, since it may decide to
 say nothing.
 
