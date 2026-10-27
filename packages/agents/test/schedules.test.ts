@@ -531,6 +531,33 @@ test('message.read gives bookmarks their own share of the budget, says how many 
   assert.equal(added.bookmarksOmitted, 3 + 100 - (added.bookmarks as unknown[]).length);
 });
 
+test('message.read cuts a message the bookmarks crowded out only by what they took, not to half', async () => {
+  // It would fit the budget on its own; the bookmarks ahead of it took a
+  // little, so it loses about that much and no more.
+  const text = 'z'.repeat(MESSAGE_READ_TEXT_BUDGET - 50 - JSON.stringify({ id: '1.000001', author: 'U1', text: '' }).length);
+  const bookmark = { title: 'Spec', link: `https://example.test/${'s'.repeat(80)}` };
+  const tool = createMessageReadTool(async () => ({
+    messages: [{ id: '1.000001', author: 'U1', text }, { id: '0.000001', author: 'U1', text: 'older' }],
+    more: false,
+    bookmarks: [bookmark],
+  }));
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const messages = result.messages as Array<{ id: string; text: string }>;
+  assert.equal(messages.length, 1);
+  assert.match(messages[0]!.text, /the rest of this message is not shown\]$/);
+  assert.ok(messages[0]!.text.length > text.length - 300, `kept ${messages[0]!.text.length} of ${text.length}`);
+  assert.ok(JSON.stringify(result.bookmarks).length + JSON.stringify(messages[0]).length <= MESSAGE_READ_TEXT_BUDGET);
+  assert.equal(result.more, true);
+
+  // Text that escapes to twice its length is measured as sent.
+  const quotes = '"'.repeat(19_900);
+  const escaped = createMessageReadTool(async () => ({ messages: [{ id: '1.000001', author: 'U1', text: quotes }], more: false, bookmarks: [bookmark] }));
+  const fitted = await escaped.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  const only = (fitted.messages as Array<{ text: string }>)[0]!;
+  assert.ok(JSON.stringify(fitted.bookmarks).length + JSON.stringify(only).length <= MESSAGE_READ_TEXT_BUDGET);
+  assert.ok(only.text.length > 19_000, `kept ${only.text.length}`);
+});
+
 test('message.send names its session as the speaker, at the label its words carry', async () => {
   const sends: Array<Parameters<Parameters<typeof createMessageSendTool>[0]>[0]> = [];
   const tool = createMessageSendTool(async (input) => {

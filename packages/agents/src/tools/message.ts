@@ -289,6 +289,9 @@ export const createMessageReadTool = (
       bookmarks.push({ title: bookmark.title, link: bookmark.link });
       used += size;
     }
+    if (bookmarks.length > 0) {
+      used += 1;
+    }
     // Added to what the adapter itself already left out, if it said.
     const upstreamOmitted = typeof result.bookmarksOmitted === 'number' && Number.isInteger(result.bookmarksOmitted) && result.bookmarksOmitted > 0
       ? result.bookmarksOmitted
@@ -306,13 +309,30 @@ export const createMessageReadTool = (
       // One message bigger than the whole budget is cut rather than
       // dropped, or the read could never get past it. Its file list goes
       // too, said by count, since a list can be as long as any text.
+      // One that would fit on its own, crowded out only by the bookmarks
+      // ahead of it, loses about what they took rather than half.
       if (messages.length === 0) {
         const { files, ...rest } = message;
-        const cut = {
+        const cutTo = (keep: number) => ({
           ...rest,
-          text: message.text.slice(0, MESSAGE_READ_TEXT_BUDGET / 2) + TRUNCATED_MARK,
+          text: message.text.slice(0, Math.max(0, keep)) + TRUNCATED_MARK,
           ...(files && files.length > 0 ? { files: [`${files.length} files, not listed`] } : {}),
-        };
+        });
+        let cut = cutTo(MESSAGE_READ_TEXT_BUDGET / 2);
+        if (used > 0 && size <= MESSAGE_READ_TEXT_BUDGET) {
+          // Measured as serialized, since escapes make the text longer.
+          const room = MESSAGE_READ_TEXT_BUDGET - used;
+          let keep = message.text.length - (size - room) - TRUNCATED_MARK.length;
+          for (let tries = 0; tries < 8; tries += 1) {
+            const candidate = cutTo(keep);
+            const over = JSON.stringify(candidate).length - room;
+            if (over <= 0) {
+              cut = candidate.text.length > cut.text.length ? candidate : cut;
+              break;
+            }
+            keep -= over;
+          }
+        }
         messages.push(cut);
       }
       more = true;
