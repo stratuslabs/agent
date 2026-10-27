@@ -27,6 +27,7 @@ import {
   type CredentialScope,
   type ApprovalAnswer,
   type ImageAttachment,
+  type ImageAttachmentMediaType,
   type JsonObject,
   leastTrusted,
   sessionTrustOf,
@@ -379,6 +380,18 @@ export interface SlackInboundFile {
   size?: number;
   url_private?: string;
   url_private_download?: string;
+  /**
+   * Slack's scaled copies of an image, each behind its own private URL
+   * that the same `files:read` token opens, named for the longest side
+   * they fit. One of these is what an image too big for the model is sent
+   * as (see `readImageAttachments`).
+   */
+  thumb_360?: string;
+  thumb_480?: string;
+  thumb_720?: string;
+  thumb_800?: string;
+  thumb_960?: string;
+  thumb_1024?: string;
 }
 
 /**
@@ -2266,11 +2279,89 @@ const attachmentNote = (files: readonly SlackInboundFile[], reasons: UnreadReaso
 const fileLabel = (file: SlackInboundFile): string => file.name ?? file.title ?? file.id ?? 'an unnamed file';
 
 /**
+ * Slack's scaled copies of an image, largest first. Slack makes these for
+ * every image it hosts — a 14 MB, 2600×1800 PNG came back with thumbnails
+ * from 64 to 1024 pixels a side, each a PNG under 3 MB — so an image too
+ * big for the model still has a copy it can take, with no image library
+ * here to make one. Smaller than 360 is too small to read anything in.
+ */
+const SLACK_PREVIEW_KEYS = ['thumb_1024', 'thumb_960', 'thumb_800', 'thumb_720', 'thumb_480', 'thumb_360'] as const;
+
+/** The largest preview Slack lists for a file, if it lists one. */
+const slackPreviewUrl = (file: SlackInboundFile): string | undefined =>
+  SLACK_PREVIEW_KEYS.map((key) => file[key]).find((url) => typeof url === 'string' && url.length > 0);
+
+/**
+ * What an image's own bytes say it is. A preview's type is not in Slack's
+ * metadata — only the original's is — so it is read from the file itself,
+ * and anything that is none of the four the API takes is not an image here.
+ */
+const imageMediaTypeOf = (bytes: Buffer): ImageAttachmentMediaType | undefined => {
+  const ascii = (at: number, length: number): string => bytes.subarray(at, at + length).toString('latin1');
+  if (bytes.length >= 8 && bytes[0] === 0x89 && ascii(1, 3) === 'PNG') {
+    return 'image/png';
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (ascii(0, 4) === 'GIF8') {
+    return 'image/gif';
+  }
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WEBP') {
+    return 'image/webp';
+  }
+  return undefined;
+};
+
+/** An image the model is shown as Slack's preview of it, and why. */
+interface ImagePreview {
+  name: string;
+  width: number;
+  height: number;
+  /** Ends "because the original …": what made the original too big. */
+  original: string;
+}
+
+const MIB = 1024 * 1024;
+
+/**
+ * Says which images the model sees scaled down. Without it the agent reads
+ * a 1024-pixel preview of a 14 MB screenshot as the screenshot, and states
+ * what the small text says when it could only guess at it.
+ */
+const previewNote = (previews: readonly ImagePreview[]): string =>
+  previews.map(({ name, width, height, original }) =>
+    `\n[${name} is shown as Slack's ${width}×${height} preview, because the original ${original}. Small text in it may not be legible: ask for a crop rather than guessing at it.]`).join('');
+
+/** An image downloaded, checked, and measured. */
+interface DownloadedImage {
+  body: Buffer;
+  mediaType: ImageAttachmentMediaType;
+  width: number;
+  height: number;
+}
+
+/**
+ * An image left out, why, and the warning that says so. `oversized` is set
+ * only for the per-image limits — the refusal a smaller copy of the same
+ * image can get past — with the clause a warning about the preview reuses
+ * and what the turn is told made the original too big.
+ */
+interface RefusedImage {
+  reason: UnreadReason;
+  warning: string;
+  oversized?: { why: string; original: string };
+}
+
+/**
  * A message's attachments, sorted into the images the model will be shown
  * and everything else. An image is fetched only when Slack's own metadata
  * says it is one the API accepts and small enough to send; that keeps a
  * 40 MB PNG from being downloaded just to be dropped, and a PDF from being
- * fetched at all. What comes back is checked as well: without `files:read`
+ * fetched at all. An image over the per-image limits — 5 MB, or 8000
+ * pixels a side — is sent as Slack's own largest preview of it instead,
+ * when Slack made one, and the turn is told it is a preview. What comes
+ * back is checked as well: without `files:read`
  * Slack serves a sign-in page with a 200, and sending that to the model as
  * an image would fail the turn with an error naming nothing the person can
  * fix — the warning here names the scope instead, and the file falls back
@@ -2284,12 +2375,13 @@ const readImageAttachments = async (
   warn: (line: string) => void,
   reasons: UnreadReasons,
   deadline: AbortSignal = AbortSignal.timeout(timeoutMs),
-): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[] }> => {
+): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[]; previews: ImagePreview[] }> => {
   // Decided from the last file back, the way the replay window is spent:
   // when a message's images do not all fit, the ones kept are the ones it
   // listed last, so intake and replay agree about which survive. Delivered
   // in the message's own order, because that is how the person sees them.
   const kept = new Map<number, ImageAttachment>();
+  const previewed = new Map<number, ImagePreview>();
   const dropped = new Set<number>();
   // Recorded beside the drop, so the note says why and never guesses. A
   // non-image goes on to the text reader with no reason: it decides.
@@ -2307,16 +2399,91 @@ const readImageAttachments = async (
   // not slip in past a larger newer one that was left out.
   let windowClosed = false;
   // Why an image is being left out, or nothing when it fits. One place for
-  // both limits so the warning and the fallback cannot disagree.
-  const overLimit = (label: string, bytes: number): string | undefined => {
+  // both limits so the warning and the fallback cannot disagree. Over the
+  // per-image cap, the image can still be sent as Slack's preview; over
+  // what is left of the message's budget, it is not sent at all.
+  const overLimit = (label: string, bytes: number): RefusedImage | undefined => {
     if (bytes > IMAGE_ATTACHMENT_MAX_BYTES) {
-      return `slack: ${label} is ${bytes} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at; the turn is told it cannot be read.`;
+      const why = `${label} is ${bytes} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at`;
+      return {
+        reason: 'too-large',
+        warning: `slack: ${why}; the turn is told it cannot be read.`,
+        oversized: { why, original: `is ${(bytes / MIB).toFixed(1)} MB, over the ${IMAGE_ATTACHMENT_MAX_BYTES / MIB} MB a model can be sent` },
+      };
     }
     if (total + bytes > IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES) {
       windowClosed = true;
-      return `slack: ${label} would take this message's images past the ${IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES} bytes one request can carry; the turn is told it cannot be read. Send it in a message of its own.`;
+      return { reason: 'too-large', warning: `slack: ${label} would take this message's images past the ${IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES} bytes one request can carry; the turn is told it cannot be read. Send it in a message of its own.` };
     }
     return undefined;
+  };
+  // One download, checked the same way for an original and for a preview:
+  // the image and its size, or why not. `oversized` marks a refusal for the
+  // per-image limits alone — the only kind a smaller copy can get past.
+  // `mediaType` is Slack's word for an original; a preview's is read from
+  // its own bytes, since Slack's metadata describes only the original.
+  const download = async (url: string, label: string, mediaType: ImageAttachmentMediaType | undefined): Promise<DownloadedImage | RefusedImage> => {
+    // What this image may weigh: the per-image cap, or what is left of the
+    // message's budget if that is less. Handed to the fetcher so an
+    // oversized response is abandoned mid-body rather than buffered whole.
+    const maxBytes = Math.min(IMAGE_ATTACHMENT_MAX_BYTES, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES - total);
+    if (deadline.aborted) {
+      return { reason: 'timed-out', warning: `slack: ${label} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.` };
+    }
+    let fetched: SlackFileDownload;
+    try {
+      fetched = await fetchFile(url, botToken, deadline, maxBytes);
+    } catch (error) {
+      const timedOut = error instanceof Error && error.name === 'TimeoutError';
+      const cause = timedOut
+        ? `this message's downloads took longer than ${timeoutMs}ms`
+        : (error instanceof Error ? error.message : String(error));
+      return { reason: timedOut ? 'timed-out' : 'failed', warning: `slack: could not download ${label}: ${cause}. The turn is told it cannot be read.` };
+    }
+    // Refused on what Slack sends when it will not serve the file — a
+    // non-200, or a 200 whose body is a page — rather than on the label of
+    // what it does serve: a download URL may be typed as the image or as
+    // a plain octet stream, and either is the bytes Slack said it was.
+    const contentType = fetched.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
+    if (fetched.status !== 200 || contentType.startsWith('text/')) {
+      return { reason: 'failed', warning: `slack: ${label} came back as ${contentType || 'no content type'} (HTTP ${fetched.status}) rather than an image. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.` };
+    }
+    if (fetched.truncated === true) {
+      const why = `${label} is larger than the ${maxBytes} bytes this message could still take for an image; the download was abandoned`;
+      // Cut off at what was left of the message's budget, rather than at
+      // the per-image cap: the same overflow the size check closes the
+      // window on, learned from the bytes instead of the metadata.
+      if (maxBytes < IMAGE_ATTACHMENT_MAX_BYTES) {
+        windowClosed = true;
+        return { reason: 'too-large', warning: `slack: ${why} and the turn is told it cannot be read.` };
+      }
+      return {
+        reason: 'too-large',
+        warning: `slack: ${why} and the turn is told it cannot be read.`,
+        oversized: { why, original: `is over the ${IMAGE_ATTACHMENT_MAX_BYTES / MIB} MB a model can be sent` },
+      };
+    }
+    const tooBig = overLimit(label, fetched.body.length);
+    if (tooBig !== undefined) {
+      return tooBig;
+    }
+    // Read from the bytes, not from Slack's metadata: an image the model
+    // API refuses fails the turn it arrives on and, once stored, every turn
+    // after — so what is stored has to be what the API takes.
+    const type = mediaType ?? imageMediaTypeOf(fetched.body);
+    const dimensions = type === undefined ? undefined : imageDimensions(fetched.body, type);
+    if (type === undefined || dimensions === undefined) {
+      return { reason: 'unreadable', warning: `slack: ${label} is not a complete ${type ?? 'image'} — its header or trailer is missing; the turn is told it cannot be read.` };
+    }
+    if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
+      const why = `${label} is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take`;
+      return {
+        reason: 'too-large',
+        warning: `slack: ${why}; the turn is told it cannot be read.`,
+        oversized: { why, original: `is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION} pixels a side a model can be sent` },
+      };
+    }
+    return { body: fetched.body, mediaType: type, ...dimensions };
   };
   for (let position = files.length - 1; position >= 0; position -= 1) {
     const file = files[position]!;
@@ -2334,92 +2501,53 @@ const readImageAttachments = async (
       drop(position, 'too-large');
       continue;
     }
-    const tooBig = file.size === undefined ? undefined : overLimit(fileLabel(file), file.size);
-    if (tooBig !== undefined) {
-      warn(tooBig);
-      drop(position, 'too-large');
-      continue;
-    }
-    // What this image may weigh: the per-image cap, or what is left of the
-    // message's budget if that is less. Handed to the fetcher so an
-    // oversized response is abandoned mid-body rather than buffered whole.
-    const maxBytes = Math.min(IMAGE_ATTACHMENT_MAX_BYTES, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES - total);
-    if (deadline.aborted) {
-      warn(`slack: ${fileLabel(file)} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.`);
-      drop(position, 'timed-out');
-      continue;
-    }
-    let download: SlackFileDownload;
-    try {
-      download = await fetchFile(url, botToken, deadline, maxBytes);
-    } catch (error) {
-      const reason = error instanceof Error && error.name === 'TimeoutError'
-        ? `this message's downloads took longer than ${timeoutMs}ms`
-        : (error instanceof Error ? error.message : String(error));
-      warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
-      drop(position, error instanceof Error && error.name === 'TimeoutError' ? 'timed-out' : 'failed');
-      continue;
-    }
-    // Refused on what Slack sends when it will not serve the file — a
-    // non-200, or a 200 whose body is a page — rather than on the label of
-    // what it does serve: a download URL may be typed as the image or as
-    // a plain octet stream, and either is the bytes Slack said it was.
-    const contentType = download.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
-    if (download.status !== 200 || contentType.startsWith('text/')) {
-      warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than an image. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
-      drop(position, 'failed');
-      continue;
-    }
-    if (download.truncated === true) {
-      // Cut off at what was left of the message's budget, rather than at
-      // the per-image cap: the same overflow the size check closes the
-      // window on, learned from the bytes instead of the metadata.
-      if (maxBytes < IMAGE_ATTACHMENT_MAX_BYTES) {
-        windowClosed = true;
+    // Slack's own size is trusted before any bytes move: an original it
+    // says is too big is never fetched — only, when that is the per-image
+    // cap, its preview.
+    let result = (file.size === undefined ? undefined : overLimit(fileLabel(file), file.size))
+      ?? await download(url, fileLabel(file), file.mimetype);
+    const previewUrl = 'reason' in result && result.oversized !== undefined ? slackPreviewUrl(file) : undefined;
+    if ('reason' in result && result.oversized !== undefined && previewUrl !== undefined) {
+      const { why, original } = result.oversized;
+      const preview = await download(previewUrl, `Slack's preview of ${fileLabel(file)}`, undefined);
+      if ('reason' in preview) {
+        warn(`slack: ${why}. Slack's smaller preview of it could not be used either: ${preview.warning.replace(/^slack: /, '')}`);
+        drop(position, result.reason);
+        continue;
       }
-      warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes this message could still take for an image; the download was abandoned and the turn is told it cannot be read.`);
-      drop(position, 'too-large');
+      warn(`slack: ${why}; sent Slack's ${preview.width}×${preview.height} preview of it instead, and the turn is told it is a preview.`);
+      previewed.set(position, { name: fileLabel(file), width: preview.width, height: preview.height, original });
+      result = preview;
+    }
+    if ('reason' in result) {
+      warn(result.warning);
+      drop(position, result.reason);
       continue;
     }
-    const stillTooBig = overLimit(fileLabel(file), download.body.length);
-    if (stillTooBig !== undefined) {
-      warn(stillTooBig);
-      drop(position, 'too-large');
-      continue;
-    }
-    // Read from the bytes, not from Slack's metadata: an image the model
-    // API refuses fails the turn it arrives on and, once stored, every turn
-    // after — so what is stored has to be what the API takes.
-    const dimensions = imageDimensions(download.body, file.mimetype);
-    if (dimensions === undefined) {
-      warn(`slack: ${fileLabel(file)} is not a complete ${file.mimetype} — its header or trailer is missing; the turn is told it cannot be read.`);
-      drop(position, 'unreadable');
-      continue;
-    }
-    if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
-      warn(`slack: ${fileLabel(file)} is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take; the turn is told it cannot be read.`);
-      drop(position, 'too-large');
-      continue;
-    }
-    total += download.body.length;
+    total += result.body.length;
     const name = file.name ?? file.title;
     kept.set(position, {
-      mediaType: file.mimetype,
-      data: download.body.toString('base64'),
+      mediaType: result.mediaType,
+      data: result.body.toString('base64'),
       ...(name !== undefined ? { name } : {}),
     });
   }
   const images: ImageAttachment[] = [];
   const unread: SlackInboundFile[] = [];
+  const previews: ImagePreview[] = [];
   files.forEach((file, position) => {
     const image = kept.get(position);
     if (image !== undefined) {
       images.push(image);
+      const preview = previewed.get(position);
+      if (preview !== undefined) {
+        previews.push(preview);
+      }
     } else if (dropped.has(position)) {
       unread.push(file);
     }
   });
-  return { images, unread };
+  return { images, unread, previews };
 };
 
 /** The most one text attachment may weigh to be read into the message. */
@@ -7349,8 +7477,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           reasons.set(file, 'not-opened');
         }
       }
-      const { images, unread: notImages } = overhear
-        ? { images: [] as ImageAttachment[], unread: event.files ?? [] }
+      const { images, unread: notImages, previews } = overhear
+        ? { images: [] as ImageAttachment[], unread: event.files ?? [], previews: [] as ImagePreview[] }
         : await readImageAttachments(
           event.files ?? [],
           connection.config.botToken,
@@ -7391,7 +7519,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // In shared channels the model should know who is speaking; a DM is
       // unambiguous. A bare image in a channel still says who sent it.
       const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);
-      const userMessage = `${spoken}${textAttachmentBlocks(texts)}${savedAttachmentBlocks(saved)}${attachmentNote(unread, reasons)}`;
+      const userMessage = `${spoken}${textAttachmentBlocks(texts)}${savedAttachmentBlocks(saved)}${previewNote(previews)}${attachmentNote(unread, reasons)}`;
       // Who sent this, judged against the operator's list — per message,
       // never remembered from the first one in the thread. A DM proves
       // nothing about who is typing, so a DM from an unlisted member is
