@@ -196,39 +196,31 @@ digits to jump, Esc to go back.
   setup. `stratus service install` and `stratus service uninstall` answer the
   same way for the same failures.
 - **Test run** — say hello with the current settings before saving anything.
-- **Save & finish** — writes everything, offers any optional package your
-  choices imply, then installs the always-on service.
+- **Save & finish** — writes everything, offers the Slack package if you
+  connected Slack and it is missing, then installs the always-on service.
 
 ## What Save & finish offers
 
-The CLI ships no transport and no open port, so a fresh machine finishes
-setup missing the packages its own answers just asked for. Setup knows that
-before the daemon does — it stored the Slack tokens itself — so
-**Save & finish** names what is missing and offers to install it:
+The CLI ships no transport, so a fresh machine that connected Slack finishes
+setup without the package that talks to it. Setup knows that before the
+daemon does, because it stored the Slack tokens itself, so
+**Save & finish** names the package and offers to install it:
 
 ```text
-2 optional packages are not installed:
+One optional package is not installed:
   @stratusagent/channel-slack
     Slack tokens are stored for 1 agent(s), but nothing connects to Slack without it.
-  @stratusagent/control-api @stratusagent/dashboard
-    `stratus dashboard` needs it, and it opens an authenticated port on 127.0.0.1.
 
 Install now with npm install -g?
-> Install all of them now
-  Install the Slack channel only
-  Install the Web dashboard only
+> Install it now
   Skip
 ```
 
 Three things about it worth knowing:
 
-- **It asks, and anything left uninstalled prints its command** — whether you
-  skipped the offer entirely or took only one of the two, since choosing one
-  group is not a decision about the other. The control API binds a port, and
-  installing it is how an operator says they want one open, so this stays a
-  question rather than a default.
+- **It asks, and skipping prints the command** to run yourself later.
 - **It runs before the service install**, so the LaunchAgent comes up with
-  those packages already present. A package installed *after* a daemon starts
+  the package already present. A package installed *after* a daemon starts
   is invisible to it; that ordering is the whole reason the offer lives here
   rather than in a closing hint.
 - **A failed package install never fails setup.** Your config and credentials
@@ -236,9 +228,9 @@ Three things about it worth knowing:
   yourself, and setup's own exit code is unaffected. The always-on *service*
   is the exception, and the bullet above says why.
 
-Setup only suggests `stratus dashboard` at the end when it can actually
-work — a machine that skipped or failed that install is not told to run a
-command that would exit with an error.
+Setup never offers the dashboard. Its control API opens a port, so the time
+to ask is when you run `stratus dashboard`, which offers its own two
+packages if they are missing (see the [quickstart](quickstart.md#2-open-the-local-dashboard)).
 
 ## Where everything lands
 

@@ -9,8 +9,12 @@ the API has three consumers and only one of them is a web page.
 npm install -g @stratusagent/control-api @stratusagent/dashboard
 ```
 
+`stratus dashboard` offers that install itself when either is missing.
 Install `@stratusagent/control-api` alone for a headless machine; add
 `@stratusagent/dashboard` and the API serves the web UI at `/` as well.
+Against a daemon already running the API without the web UI,
+`stratus dashboard` offers `@stratusagent/dashboard` and then asks you to
+`stratus restart` the daemon so it loads it.
 With the API present, `stratus serve` also serves it on `127.0.0.1:4123`.
 Its full reference — endpoints, auth, the event envelope — lives in
 [its own README](../../packages/control-api/README.md), which the other

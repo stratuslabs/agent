@@ -172,7 +172,7 @@ When a stored key "isn't found", check in this order:
 - In a container or under a system unit, `stratus serve --log-format json` also writes the log's records to stdout, for `docker logs`, journald, or a log shipper. `stratus health` is the probe.
 - **`stratus logs`** (`-f` to follow, `--agent`, `--session`) reads the structured log. It records that tools ran and sessions finished, never prompts or replies. One exception: a failed session keeps the provider's error text, so skim a log before sharing it.
   - A daemon that fails *before* it starts serving writes nothing there. Its error is in `~/.stratus/logs/stratusd.err.log` on macOS, in `journalctl --user-unit=stratusd.service` on Linux, or on the terminal that ran `stratus serve`.
-- **The control API** is a separate install, `@stratusagent/control-api`, serving `/api/v1` on `127.0.0.1:4123`. The web dashboard is another, `@stratusagent/dashboard`, opened with `stratus dashboard`, which starts a daemon if none is running.
+- **The control API** is a separate install, `@stratusagent/control-api`, serving `/api/v1` on `127.0.0.1:4123`. The web dashboard is another, `@stratusagent/dashboard`, opened with `stratus dashboard`, which offers to install both when they are missing and starts a daemon if none is running.
   - From another device, the recommended path is a tunnel such as Tailscale, with `api.publicUrl` set to that address so credential links open there.
 
 ## When a reply stops or changes model

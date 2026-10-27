@@ -46,7 +46,7 @@ npm install -g @stratusagent/channel-slack     # talk to agents in Slack (~9 MB 
 npm install -g @stratusagent/tool-fs @stratusagent/tool-shell \
                @stratusagent/tool-web @stratusagent/tool-browser   # real capability
 npm install -g @stratusagent/plugin-mcp        # mount MCP servers' tools
-npm install -g @stratusagent/control-api @stratusagent/dashboard   # HTTP API + web UI
+npm install -g @stratusagent/control-api @stratusagent/dashboard   # HTTP API + web UI (stratus dashboard offers this)
 ```
 
 What each adds, and which switch turns each one on — a trusted config plus

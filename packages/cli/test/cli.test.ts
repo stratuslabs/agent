@@ -2494,7 +2494,7 @@ test('npm is spawned through a shell only where it is a batch file', () => {
   assert.equal(npmNeedsShell('linux'), false);
 });
 
-test('setup offers the optional packages its own choices imply', async () => {
+test('setup offers the Slack package its own choices imply, and nothing for the dashboard', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   // Slack tokens stored for one agent — the daemon would warn about this at
@@ -2520,23 +2520,58 @@ test('setup offers the optional packages its own choices imply', async () => {
         installed.push(packages);
         return { ok: true, message: '' };
       },
-      // Save & finish, then "install all of them".
+      // Save & finish, then "Install it now".
       setupInput: Readable.from(['9\n', '1\n']),
     },
   });
 
-  assert.match(output.stdout, /2 optional packages are not installed/);
+  assert.match(output.stdout, /One optional package is not installed/);
   assert.match(output.stdout, /Slack tokens are stored for 1 agent\(s\)/);
-  assert.match(output.stdout, /opens an authenticated port on 127\.0\.0\.1/);
-  assert.deepEqual(installed, [[
-    '@stratusagent/channel-slack',
-    '@stratusagent/control-api',
-    '@stratusagent/dashboard',
-  ]]);
+  // The dashboard is offered by `stratus dashboard` when someone runs it
+  // (card 308), never by setup.
+  assert.doesNotMatch(output.stdout, /control-api|@stratusagent\/dashboard/);
+  assert.deepEqual(installed, [['@stratusagent/channel-slack']]);
 });
 
-test('setup does not suggest the dashboard it could not install', async () => {
+test('setup never offers the dashboard, and still points at the command that does', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Nothing optional is installed on this machine, and no Slack tokens
+      // are stored: setup has nothing of its own to offer.
+      packageResolver: () => false,
+      packageInstaller: async () => {
+        throw new Error('setup offered a package nobody asked for');
+      },
+      // Save & finish, and nothing after it: a prompt would read past the end.
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /optional package/);
+  assert.doesNotMatch(output.stdout, /control-api|@stratusagent\/dashboard/);
+  // `stratus dashboard` offers the install itself, so it is a real
+  // suggestion on a machine without the packages too.
+  assert.match(output.stdout, /^ {2}stratus dashboard$/m);
+  assert.match(output.stdout, /Wrote /);
+});
+
+test('a Slack package setup could not install is reported, and setup still saves', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
+  );
 
   const { streams, output } = createStreams();
   await runCli({
@@ -2549,7 +2584,7 @@ test('setup does not suggest the dashboard it could not install', async () => {
       serviceRunner: stubServiceRunner,
       packageResolver: () => false,
       packageInstaller: async () => ({ ok: false, message: 'npm exited with code 243' }),
-      // Save & finish, then accept the one offer (no Slack tokens stored).
+      // Save & finish, then accept the one offer.
       setupInput: Readable.from(['9\n', '1\n']),
     },
   });
@@ -2557,9 +2592,6 @@ test('setup does not suggest the dashboard it could not install', async () => {
   assert.match(output.stdout, /One optional package is not installed/);
   assert.match(output.stderr, /Could not install: npm exited with code 243/);
   assert.match(output.stderr, /Setup is saved either way/);
-  // The whole point: a command that cannot work is not recommended.
-  assert.doesNotMatch(output.stdout, /^ {2}stratus dashboard$/m);
-  // ...and setup still saved.
   assert.match(output.stdout, /Wrote /);
 });
 
@@ -2630,6 +2662,11 @@ test('setup skips the offer for packages that are already installed', async () =
 
 test('declining the offer prints the command instead of running it', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
+  );
 
   const { streams, output } = createStreams();
   await runCli({
@@ -2651,46 +2688,8 @@ test('declining the offer prints the command instead of running it', async () =>
 
   assert.match(
     output.stdout,
-    /Skipped\. Install them yourself with: npm install -g @stratusagent\/control-api @stratusagent\/dashboard/,
+    /Skipped\. Install it yourself with: npm install -g @stratusagent\/channel-slack$/m,
   );
-});
-
-test('a partial install still names the group it left behind', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  await writeFile(
-    path.join(home, '.stratus', 'credentials.json'),
-    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
-  );
-
-  const installed: string[][] = [];
-  const { streams, output } = createStreams();
-  await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
-      homeDir: home,
-      processEnv: {},
-      serviceRunner: stubServiceRunner,
-      packageResolver: () => false,
-      packageInstaller: async (packages: string[]) => {
-        installed.push(packages);
-        return { ok: true, message: '' };
-      },
-      // Save & finish, then option 3 of 4: "Install the Web dashboard only".
-      setupInput: Readable.from(['9\n', '3\n']),
-    },
-  });
-
-  assert.deepEqual(installed, [['@stratusagent/control-api', '@stratusagent/dashboard']]);
-  // The group nobody chose is still missing, and the daemon is about to warn
-  // about it — saying so here is the entire point of the offer.
-  assert.match(output.stdout, /Still missing\. Install with: npm install -g @stratusagent\/channel-slack$/m);
-  // The half that WAS installed is not repeated as missing.
-  assert.doesNotMatch(output.stdout, /Still missing.*control-api/);
-  // ...and the dashboard it just installed is a real suggestion.
-  assert.match(output.stdout, /^ {2}stratus dashboard$/m);
 });
 
 test('setup honors STRATUS_CONFIG and --config for the write target', async () => {
