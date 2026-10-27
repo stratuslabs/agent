@@ -114,7 +114,9 @@ Sessions, memories, grants and everything else stay in `~/.stratus`.
   re-points them. A home copied without its agents folder gets both steps
   from `stratus doctor`: copy that folder's contents, hidden files
   included, into this home's folder, and record the old one unless the
-  record already names it. Every broken link left as it is is named by
+  record already names it. A record that exists but can't be read is never
+  replaced: nothing is re-pointed until it can be read, and the start line
+  and `stratus doctor` name it. Every broken link left as it is is named by
   `stratus doctor`, with where it points, and by the roster's warning when
   it skips that soul.
 

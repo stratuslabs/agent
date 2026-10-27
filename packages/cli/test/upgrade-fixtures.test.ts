@@ -339,13 +339,14 @@ test('a home written by 0.13.5 and copied to another path starts with all its ag
   assert.equal(await readlink(path.join(agents, 'ava.md')), path.join(old, 'ava', 'soul.md'), 'the copy names the old home');
 
   const doctor = await doctorOutput(home);
-  assert.ok(doctor.includes(`3 of them name ${old}, and ${path.join(home, 'Agents')} has the same files`), doctor);
+  assert.ok(doctor.includes(`3 of them point into ${old}. If this home was copied or restored from there`), doctor);
+  assert.ok(!doctor.includes('no agent reads them'), `the copied souls are the ones the links need, never ones to delete: ${doctor}`);
   const command = recordCommand(doctor);
 
   const before = await serving(home, async (api) => {
     assert.deepEqual(await rosterIds(api), ['stratus'], 'nothing re-pointed without the record');
   });
-  assert.ok(before.includes(`3 link(s) name ${old}, which is gone`), before);
+  assert.ok(before.includes(`3 link(s) point into ${old} at files that are gone`), before);
   assert.equal(await readlink(path.join(agents, 'ava.md')), path.join(old, 'ava', 'soul.md'), 'left as it was');
 
   execFileSync('/bin/sh', ['-c', command]);
@@ -362,7 +363,7 @@ test('a home written by 0.13.5 and copied to another path starts with all its ag
   assert.equal(await readFile(path.join(agents, 'ava', 'workspace', 'notes.md'), 'utf8'), await readFile(path.join(fixturesDir, '0.13.5', 'Agents', 'ava', 'workspace', 'notes.md'), 'utf8'));
 
   const second = await serving(home, async () => {});
-  assert.doesNotMatch(second, /re-pointed|which is gone/, 'nothing left to re-point');
+  assert.doesNotMatch(second, /re-pointed|are gone/, 'nothing left to re-point');
 });
 
 // Copied without its agents folder: copying the folder over afterwards is
@@ -374,8 +375,8 @@ test('a copied 0.13.5 home without its agents folder starts with all its agents 
   const old = path.join(written, 'Agents');
 
   const doctor = await doctorOutput(home);
-  assert.ok(doctor.includes(`3 of them name ${old}, and ${path.join(home, 'Agents')} doesn't have those files`), doctor);
-  assert.ok(doctor.includes(`copy everything in that folder, hidden files included, into ${path.join(home, 'Agents')}`), doctor);
+  assert.ok(doctor.includes(`3 of them point into ${old}. If this home was copied or restored from there`), doctor);
+  assert.ok(doctor.includes(`make sure ${path.join(home, 'Agents')} has everything that was in ${old}, hidden files included, then run`), doctor);
   const command = recordCommand(doctor);
 
   // The operator's steps, in order: the folder, the record, the restart.
@@ -397,7 +398,7 @@ test('a copied 0.13.5 home missing an agent\'s folder names the link and where i
 
   const doctor = await doctorOutput(home);
   assert.ok(doctor.includes(`point at something that is gone: `) && doctor.includes(`${bobSoul} -> ${path.join(written, 'Agents', 'bob', 'soul.md')}`), doctor);
-  assert.ok(doctor.includes(`2 of them name ${path.join(written, 'Agents')}`), doctor);
+  assert.ok(doctor.includes(`3 of them point into ${path.join(written, 'Agents')}`), doctor);
   execFileSync('/bin/sh', ['-c', recordCommand(doctor)]);
 
   const output = await serving(home, async (api) => {

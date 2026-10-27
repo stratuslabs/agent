@@ -802,13 +802,18 @@ const recordAgentsFolder = async (env: StateEnvironment, recorded: string | unde
  * folder's name would lose the evidence for the next start.
  */
 const shouldRecord = (plan: AgentsHomePlan, unfinished: boolean): boolean =>
-  plan.recorded === undefined || (!unfinished && plan.dangling.length === 0);
+  plan.recordUnreadable === undefined
+  && (plan.recorded === undefined || (!unfinished && plan.dangling.length === 0));
 
-/** The line for links that look like a copied home's with no record to say so. */
-const unconfirmedLine = (plan: AgentsHomePlan): string | undefined => plan.unconfirmed.length === 0
-  ? undefined
-  : plan.unconfirmed.map(({ folder, links }) => `${links} link(s) name ${folder}, which is gone; `
-    + 'if this home was copied or restored from there, `stratus doctor` says how to re-point them').join('; ');
+/** The start's line for links into another agents folder that it leaves as they are. */
+const elsewhereLine = (plan: AgentsHomePlan): string | undefined => {
+  const parts = plan.elsewhere.map(({ folder, links }) => `${links} link(s) point into ${folder} at files that are gone; `
+    + 'if this home was copied or restored from there, `stratus doctor` says how to re-point them');
+  if (plan.recordUnreadable !== undefined) {
+    parts.unshift(`${plan.recordUnreadable}, so no link is re-pointed and it is left as it is`);
+  }
+  return parts.length === 0 ? undefined : parts.join('; ');
+};
 
 /**
  * Move every agent's soul and workspace that is still a real file in
@@ -841,9 +846,9 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
         quiet.push(`could not record the agents folder in ${AGENTS_FOLDER_RECORD} (${error instanceof Error ? error.message : String(error)})`);
       }
     }
-    const unconfirmed = unconfirmedLine(plan);
-    if (unconfirmed !== undefined) {
-      quiet.push(unconfirmed);
+    const elsewhere = elsewhereLine(plan);
+    if (elsewhere !== undefined) {
+      quiet.push(elsewhere);
     }
     if (plan.blocked.length > 0) {
       quiet.push(`left in place: ${plan.blocked.join('; ')}`);
@@ -887,9 +892,9 @@ export const surfaceAgentsHome = async (env: StateEnvironment): Promise<string |
     await each(`the record in ${AGENTS_FOLDER_RECORD}`, () => recordAgentsFolder(env, plan.recorded, agentsHome));
   }
   const parts: string[] = [];
-  const unconfirmed = unconfirmedLine(plan);
-  if (unconfirmed !== undefined) {
-    parts.push(unconfirmed);
+  const elsewhere = elsewhereLine(plan);
+  if (elsewhere !== undefined) {
+    parts.push(elsewhere);
   }
   if (report.relinked > 0) {
     parts.push(`re-pointed ${report.relinked} link(s) at ${agentsHome} (they named the agents folder of a home at another path)`);
@@ -945,26 +950,26 @@ export interface AgentsHomePlan {
    */
   recorded?: string;
   /**
+   * Why {@link AGENTS_FOLDER_RECORD} is there but could not be read, as a
+   * line to show. Nothing is re-pointed and the record is never replaced
+   * while it is set: it may be the only evidence of the old folder.
+   */
+  recordUnreadable?: string;
+  /**
    * Hidden soul and workspace links whose target is gone and that the next
    * pass leaves as they are, as `link -> target`.
    */
   dangling: string[];
   /**
-   * Folders, named like an agents folder, that dangling links point into
-   * while this home's folder has the same files, when no record says they
-   * were this home's: the links of a home copied from there, or an
-   * operator's links to storage that is offline. Only the operator can
-   * tell, and recording the folder by hand re-points them.
-   */
-  unconfirmed: Array<{ folder: string; links: number }>;
-  /**
    * Folders that dangling links point into as `<folder>/<id>/soul.md` or
-   * `<folder>/<id>/workspace` while this home's folder has nothing at that
-   * agent's name: a home copied without its agents folder, or storage that
-   * is offline. Copying the folder's contents here makes them re-pointable,
-   * and {@link recorded} has to name the folder too before a start does it.
+   * `<folder>/<id>/workspace`, with how many, for links the next pass
+   * leaves as they are: the links of a home copied or restored from there
+   * (with or without that folder's files), or an operator's links to
+   * storage that is offline. Nothing on disk tells those apart unless the
+   * record names the folder; the operator can. A start re-points them once
+   * {@link recorded} names the folder and this home's folder has the files.
    */
-  uncopied: Array<{ folder: string; links: number }>;
+  elsewhere: Array<{ folder: string; links: number }>;
   /** Souls in the folder that no hidden name links to, so the roster never reads them. */
   unlinked: string[];
 }
@@ -1013,9 +1018,11 @@ const agentsHomeDevice = (agentsHome: string): number | undefined => {
 };
 
 /**
- * The shape half of {@link movedHomeTarget}, with nothing read: a target
- * `<folder>/<id>/soul.md` or `<folder>/<id>/workspace` outside this home's
- * folder, and where the same file would be here.
+ * Whether a dangling soul or workspace link looks carried over from a home
+ * at another path, with nothing read: its target reads
+ * `<folder>/<id>/soul.md` or `<folder>/<id>/workspace`, outside this home's
+ * folder. Gives `<folder>` and where the same file would be here. Shape
+ * only: whether `<folder>` was this home's is the record's to say.
  */
 const movedHomeShape = (agentsHome: string, kind: MovedHomeLink['kind'], target: string): { from: string; to: string } | undefined => {
   const leaf = kind === 'soul' ? VISIBLE_SOUL_FILENAME : VISIBLE_WORKSPACE_DIRNAME;
@@ -1027,24 +1034,13 @@ const movedHomeShape = (agentsHome: string, kind: MovedHomeLink['kind'], target:
   return { from: path.dirname(agentDir), to: path.join(visibleAgentDirIn(agentsHome, agentId), leaf) };
 };
 
-/**
- * Where a dangling soul or workspace link would belong in this home if it
- * was carried over from a home at another path: its target reads
- * `<folder>/<id>/soul.md` or `<folder>/<id>/workspace`, outside this home's
- * folder, and this home's folder holds that same file. Shape only: whether
- * `<folder>` was this home's is the record's to say.
- */
-const movedHomeTarget = async (agentsHome: string, kind: MovedHomeLink['kind'], target: string): Promise<{ from: string; to: string } | undefined> => {
-  const shape = movedHomeShape(agentsHome, kind, target);
-  if (shape === undefined) {
-    return undefined;
-  }
-  const { from, to } = shape;
+/** Whether this home's folder holds the file a moved link would be re-pointed at: a soul file, or a workspace folder. */
+const holdsMovedTarget = async (kind: MovedHomeLink['kind'], to: string): Promise<boolean> => {
   try {
     const info = await stat(to);
-    return (kind === 'soul' ? info.isFile() : info.isDirectory()) ? { from, to } : undefined;
+    return kind === 'soul' ? info.isFile() : info.isDirectory();
   } catch {
-    return undefined;
+    return false;
   }
 };
 
@@ -1058,11 +1054,25 @@ const countLink = (counts: Array<{ folder: string; links: number }>, folder: str
   }
 };
 
-/** {@link AGENTS_FOLDER_RECORD}'s folder, or undefined when there is none or it is not an absolute path. */
-const readAgentsFolderRecord = async (env: StateEnvironment): Promise<string | undefined> => {
-  const raw = await readFile(path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD), 'utf8').catch(() => undefined);
-  const folder = raw?.split('\n')[0]?.replace(/\r$/, '');
-  return folder !== undefined && path.isAbsolute(folder) ? path.resolve(folder) : undefined;
+/**
+ * {@link AGENTS_FOLDER_RECORD}'s folder; nothing when there is no record or
+ * it does not hold an absolute path. Any other failure to read it is
+ * `unreadable`, never taken for no record: a start would write a new one
+ * over it and lose the old folder.
+ */
+const readAgentsFolderRecord = async (env: StateEnvironment): Promise<{ folder?: string; unreadable?: string }> => {
+  const file = path.join(agentsDirPath(env), AGENTS_FOLDER_RECORD);
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {};
+    }
+    return { unreadable: `could not read ${file} (${error instanceof Error ? error.message : String(error)})` };
+  }
+  const folder = raw.split('\n')[0]?.replace(/\r$/, '');
+  return folder !== undefined && path.isAbsolute(folder) ? { folder: path.resolve(folder) } : {};
 };
 
 /**
@@ -1083,8 +1093,7 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
     blocked: [],
     relink: [],
     dangling: [],
-    unconfirmed: [],
-    uncopied: [],
+    elsewhere: [],
     unlinked: [],
   };
   let entries;
@@ -1154,37 +1163,40 @@ export const planAgentsHome = async (env: StateEnvironment): Promise<AgentsHomeP
   if (agentsHome === undefined) {
     return plan;
   }
-  const recorded = await readAgentsFolderRecord(env);
+  const { folder: recorded, unreadable } = await readAgentsFolderRecord(env);
   if (recorded !== undefined) {
     plan.recorded = recorded;
   }
-  const names: readonly string[] = [...AGENTS_HOME_NAMES, path.basename(agentsHome)];
+  if (unreadable !== undefined) {
+    plan.recordUnreadable = unreadable;
+  }
+  // Every soul here that a link into another agents folder would be
+  // re-pointed at, now or once the operator records that folder: one a
+  // start reads soon, never one nothing reads.
+  const wanted = new Set<string>();
   for (const { kind, link, target } of links) {
     const gone = await lstatOrUndefined(target).then((info) => info === undefined, () => false);
     if (!gone) {
       continue;
     }
-    const moved = plan.claimed ? await movedHomeTarget(agentsHome, kind, target) : undefined;
-    if (moved !== undefined && moved.from === recorded) {
-      plan.relink.push({ kind, link, target, to: moved.to });
-      continue;
+    const shape = movedHomeShape(agentsHome, kind, target);
+    if (shape !== undefined) {
+      wanted.add(shape.to);
+      // Only a claimed folder is one a start re-points links into.
+      if (plan.claimed && shape.from === recorded && await holdsMovedTarget(kind, shape.to)) {
+        plan.relink.push({ kind, link, target, to: shape.to });
+        continue;
+      }
     }
     plan.dangling.push(`${link} -> ${target}`);
-    if (moved !== undefined && names.includes(path.basename(moved.from))) {
-      countLink(plan.unconfirmed, moved.from);
-      continue;
-    }
-    // Nothing at that agent's name here: the folder was left behind.
-    const shape = moved === undefined ? movedHomeShape(agentsHome, kind, target) : undefined;
-    if (shape !== undefined && await lstatOrUndefined(shape.to).then((info) => info === undefined, () => false)) {
-      countLink(plan.uncopied, shape.from);
+    if (shape !== undefined) {
+      countLink(plan.elsewhere, shape.from);
     }
   }
   if (!plan.claimed) {
     return plan;
   }
-  // A soul a link is about to be re-pointed at is read once it is.
-  const linkedTargets = new Set([...links.map(({ target }) => target), ...plan.relink.map(({ to }) => to)]);
+  const linkedTargets = new Set([...links.map(({ target }) => target), ...wanted]);
   let folders;
   try {
     folders = await readdir(agentsHome, { withFileTypes: true });
