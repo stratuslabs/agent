@@ -78,8 +78,10 @@ import {
   createPinTool,
   createMessageSendTool,
   createMessageReadTool,
+  createChannelCreateTool,
   directMessageReadRefusal,
   type ConversationReader,
+  type ConversationCreator,
   createRecallTool,
   createRememberTool,
   createScheduleTools,
@@ -285,6 +287,14 @@ export interface GatewayChannelAdapter {
     before?: string;
     limit: number;
   }): ReturnType<ConversationReader>;
+  /**
+   * Creates a conversation with the agent's own app, mirroring
+   * `ChannelAdapter.createConversation`. Optional: an adapter without it
+   * cannot serve `channel.create`. Implementations MUST reject what they
+   * can tell is invalid before creating anything, and MUST resolve once
+   * the conversation exists, reporting what did not happen after it.
+   */
+  createConversation?(request: Omit<Parameters<ConversationCreator>[0], 'channel'>): ReturnType<ConversationCreator>;
   /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
@@ -2530,6 +2540,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const ts = typeof posted === 'object' && posted !== null ? (posted as { ts?: unknown }).ts : undefined;
     return typeof ts === 'string' && ts.length > 0 ? { id: ts } : {};
   }, { defaultThread: (session, destination) => scheduler.reportThreadFor(session, destination) }));
+  // The same carrying rule again: a channel is created by the asking
+  // agent's own app, whose token never leaves the adapter, and so becomes
+  // that app's to post in and read.
+  tools.register(createChannelCreateTool(async ({ agentId, channel, ...request }) => {
+    const { adapter, carriesOthers } = channelCarrying(channel, agentId, (candidate) => candidate.createConversation !== undefined);
+    if (!adapter?.createConversation) {
+      throw new Error(carriesOthers
+        ? `No running '${channel}' channel carries agent ${agentId}, so it has no app to create a channel with.`
+        : `No running channel can create '${channel}' conversations.`);
+    }
+    return adapter.createConversation({ agentId, ...request });
+  }));
   tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
     // The same carrying rule as outbound: a read goes through the app of
     // the agent asking, never whichever adapter of that kind is running,

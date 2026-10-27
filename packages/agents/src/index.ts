@@ -120,6 +120,12 @@ export {
 } from './tools/message.ts';
 
 export {
+  CHANNEL_CREATE_TOOL_NAME,
+  type ConversationCreator,
+  createChannelCreateTool,
+} from './tools/channel.ts';
+
+export {
   CREDENTIAL_REQUEST_TOOL_NAME,
   type CredentialRequester,
   createCredentialRequestTool,

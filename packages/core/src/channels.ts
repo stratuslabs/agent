@@ -425,6 +425,40 @@ export interface ConversationReadResult {
 }
 
 /**
+ * A request to create a conversation through the agent's own app — what
+ * `channel.create` resolves. Every id is channel-native, like
+ * `ConversationReadRequest`'s.
+ */
+export interface ConversationCreateRequest {
+  /** Whose app creates it: that app becomes its first member. */
+  agentId: string;
+  /** The new conversation's name, without a leading `#`. */
+  name: string;
+  /** Private rather than public. */
+  private?: boolean;
+  topic?: string;
+  purpose?: string;
+  /**
+   * Who to invite: channel-native user ids, or ids of agents on this host,
+   * which the adapter resolves to the user its app for that agent posts as.
+   */
+  invite?: string[];
+}
+
+export interface ConversationCreateResult {
+  /** Channel-native id of the new conversation (Slack: `C…`). */
+  conversation: string;
+  /** Its name as the platform stored it. */
+  name: string;
+  /** Each `invite` entry that was invited, as the caller named it. */
+  invited: string[];
+  /** Each `invite` entry that was not, with a sentence for the agent. */
+  notInvited: Array<{ who: string; reason: string }>;
+  /** A topic or purpose that was asked for and not set, and why. */
+  notSet: Array<{ field: 'topic' | 'purpose'; reason: string }>;
+}
+
+/**
  * A credential an agent asked for, handed to the channel its conversation
  * is in so a person there can be shown a form. Everything the answer needs
  * stays with the gateway under `requestId`; the channel only has to show
@@ -502,6 +536,22 @@ export interface ChannelAdapter {
    * an implementation returns text, never platform markup or tokens.
    */
   readConversation?(request: ConversationReadRequest): Promise<ConversationReadResult>;
+  /**
+   * Creates a conversation with the agent's own app and invites people to
+   * it — what `channel.create` resolves. Optional, like `readConversation`:
+   * a transport that cannot create conversations lacks the method, and the
+   * gateway says so.
+   *
+   * MUST reject, with a sentence for the agent, a request it can tell is
+   * invalid before creating anything (a name, topic or purpose the
+   * platform would refuse), so a bad request leaves nothing behind, and a
+   * create the platform refuses (no app here, a missing permission, a
+   * taken name). Once the conversation exists it MUST resolve: an invite,
+   * topic or purpose that then fails goes in `notInvited` or `notSet`,
+   * never undoes the conversation, and never turns into a rejection the
+   * agent would retry into a second one.
+   */
+  createConversation?(request: ConversationCreateRequest): Promise<ConversationCreateResult>;
   /**
    * The workspace this agent's app is connected to, for a transport whose
    * conversation ids are unique only within one: a Slack team id.

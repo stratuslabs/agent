@@ -1,3 +1,4 @@
+import { CHANNEL_CREATE_TOOL_NAME } from './channel.ts';
 import { CREDENTIAL_REQUEST_TOOL_NAME } from './credentials.ts';
 import { DELEGATE_TOOL_NAME } from './delegate.ts';
 import { MESSAGE_READ_TOOL_NAME, MESSAGE_SEND_TOOL_NAME } from './message.ts';
@@ -32,6 +33,7 @@ export const GATEWAY_ONLY_TOOL_NAMES: readonly string[] = [
   SCHEDULE_CANCEL_TOOL_NAME,
   MESSAGE_SEND_TOOL_NAME,
   MESSAGE_READ_TOOL_NAME,
+  CHANNEL_CREATE_TOOL_NAME,
   DELEGATE_TOOL_NAME,
   CREDENTIAL_REQUEST_TOOL_NAME,
 ];
