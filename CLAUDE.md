@@ -110,7 +110,12 @@ hand and by review:
   an error is `class X extends Error` that sets `this.name` in its
   constructor, exported from the barrel when callers are meant to catch
   it by type (some, like `ApiError` and `McpConfigError`, deliberately
-  stay internal). Plain values and
+  stay internal). A core error that another package throws or builds
+  for core to catch (`ContextOverflowError` from a provider,
+  `RunAbortedError` from a channel) is branded so `instanceof` works
+  across copies of core: a real npm install has one per global package.
+  Use `brandCoreError` and `isBrandedCoreError` in core for a new one.
+  Plain values and
   stateless behavior come from a `create*` (construct a live thing) or
   `define*` (canonicalize a definition literal) factory returning a
   plain object.
