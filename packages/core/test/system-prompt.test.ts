@@ -132,6 +132,27 @@ test('every agent is held to grounded claims, whatever its persona', () => {
   assert.match(replies, /stays out of another whose people were not part of it/);
 });
 
+test('work the agent cannot see here is looked for before it is asked about, and moved work leaves a pointer', () => {
+  // Work moved to a new channel: the new channel's session started empty
+  // and asked the person something the agent's own earlier thread and
+  // workspace already answered. The thread and the file were both within
+  // reach; nothing said to look.
+  const replies = renderSystemPromptParts(request()).find((part) => part.kind === 'replies')?.text ?? '';
+
+  assert.match(replies, /When a message refers to work, a file, or a decision you cannot see in this conversation, look before you ask about it or answer: check your memory, your own files, and the recent messages of the channel or thread where it most likely happened\./);
+  // Looking is not a license to carry content to a new audience, and the
+  // agent cannot see who else can read the other conversation: the room
+  // context has only this room's kind and size, and a read returns no
+  // membership. A link is checked by the channel itself, and a file can't
+  // be linked, so by default it links or asks rather than repeats.
+  assert.match(replies, /Unless you can tell that everyone here could already see what you found, link to it or ask before repeating it\./);
+  assert.doesNotMatch(replies, /keep what you find to people who could already see it/);
+  assert.match(replies, /When you move work into a new thread, channel, or file, leave a pointer the next conversation can find: post its link where the work started, or remember where it now lives\./);
+  // Part of the accuracy rules, so a custom soul does not lose it.
+  assert.ok(replies.indexOf('When a message refers to work') > replies.indexOf('Stay accurate:'));
+  assert.ok(replies.indexOf('When a message refers to work') < replies.indexOf('Write in '));
+});
+
 test('every agent writes American English unless its soul or config says otherwise', () => {
   // An agent wrote "favour" and "licence" into American website copy: the
   // only locale rule was in souls, and a custom soul replaces the default.
