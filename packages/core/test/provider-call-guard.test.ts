@@ -219,3 +219,23 @@ test('a guard that refuses the second call inside one generate fails the turn as
   // The first call's tokens were recorded even though the turn failed.
   assert.deepEqual((await store.get('guard-6'))?.usage?.map((record) => record.inputTokens), [40]);
 });
+
+test('a provider that answers under another provider\'s name for a session says so, and the guards are told that name', async () => {
+  const seen: string[] = [];
+  const provider: ModelProvider = {
+    name: 'router',
+    nameFor: (session) => (session.id === 'guard-7' ? 'backup' : 'router'),
+    async generate() {
+      return { parts: [{ type: 'text' as const, text: 'done' }] };
+    },
+  };
+  const guard: ProviderCallGuard = (check) => {
+    seen.push(`${check.sessionId} ${check.provider}`);
+  };
+  const runner = new AgentRunner({ provider, providerCallGuards: [guard] });
+
+  await runner.run({ sessionId: 'guard-7', agent: AGENT, userMessage: 'hello' });
+  await runner.run({ sessionId: 'guard-8', agent: AGENT, userMessage: 'hello' });
+
+  assert.deepEqual(seen, ['guard-7 backup', 'guard-8 router']);
+});

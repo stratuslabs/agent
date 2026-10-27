@@ -3003,6 +3003,14 @@ export interface ProviderResponse {
 
 export interface ModelProvider {
   name: string;
+  /**
+   * For a provider that hands a session's calls to another provider while
+   * keeping its own `name` (the fallback wrapper, once a session has
+   * switched): the name of the provider that answers this session's next
+   * call. The `ProviderCallGuard`s are told it, so a rule about one model
+   * holds whichever wrapper it sits behind. Absent means `name`.
+   */
+  nameFor?(session: Session): string;
   generate(request: ProviderRequest): Promise<ProviderResponse>;
 }
 
@@ -3011,11 +3019,11 @@ export interface ProviderCallCheck {
   agentId: string;
   sessionId: string;
   /**
-   * The provider about to be called, by name. Before each `generate` that
-   * is the runner's provider, which under a configured fallback is the
-   * wrapper answering to the primary's name. When the wrapper switches
-   * inside a call, it asks again before the fallback's call, naming the
-   * fallback (`ProviderRequest.guardCall`).
+   * The provider about to answer, by name: the runner's provider, or the
+   * one it says answers this session (`ModelProvider.nameFor`). Under a
+   * configured fallback that is the primary until the session switches and
+   * the fallback after. A switch inside a call asks again before the
+   * fallback's call, naming the fallback (`ProviderRequest.guardCall`).
    */
   provider: string;
 }
@@ -7310,7 +7318,10 @@ export class AgentRunner {
   }
 
   /** Ask every guard about the call about to be made; the first refusal throws. */
-  private async guardProviderCall(session: Session, provider = this.options.provider.name): Promise<void> {
+  private async guardProviderCall(
+    session: Session,
+    provider = this.options.provider.nameFor?.(session) ?? this.options.provider.name,
+  ): Promise<void> {
     for (const guard of this.options.providerCallGuards ?? []) {
       await guard({ agentId: session.agent.id, sessionId: session.id, provider });
     }

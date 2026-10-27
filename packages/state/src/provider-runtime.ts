@@ -191,12 +191,16 @@ export const createFallbackWrappedProvider = (
   persistSession?: (session: Session) => Promise<void>,
 ): ModelProvider => {
   const fallbackSessions = new Set<string>();
+  const switchedTo = (session: Session): boolean => session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true
+    || fallbackSessions.has(session.id);
 
   return {
     name: primary.name,
+    // The guards are asked about the model that answers, and after a
+    // switch that is the fallback, under this wrapper's borrowed name.
+    nameFor: (session) => (switchedTo(session) ? fallback.name : primary.name),
     async generate(request) {
-      const switched = request.session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true
-        || fallbackSessions.has(request.session.id);
+      const switched = switchedTo(request.session);
       if (!switched) {
         try {
           return await primary.generate(request);
@@ -259,8 +263,8 @@ export const createFallbackWrappedProvider = (
           // so it is asked about on its own, after what the primary
           // reported is announced. A refusal ends the turn here; the switch
           // above stands, because the primary did fail. Once switched, the
-          // fallback is the only call a generate makes and the runner's
-          // own question covers it.
+          // fallback is the only call a generate makes, and the runner's
+          // own question covers it under the fallback's name (`nameFor`).
           await request.guardCall?.(fallback.name);
         }
       }

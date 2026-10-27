@@ -268,7 +268,9 @@ is the operator installing the plugin and a soul listing its tools.
 `context.providerCalls`, and a guard registered with
 `providerCalls.register(guard)` is asked before every provider call the
 host makes, for every agent, sub-agents and recovered turns included,
-with the agent id, the session id and the provider's name. A token budget
+with the agent id, the session id and the name of the provider about to
+answer (a configured fallback's own name once a session has switched to
+it). A token budget
 is what it exists for. Resolving allows the call. Throwing a
 `HostRefusalError` refuses it on purpose: the turn fails with
 `session.failed` carrying `refused: true`, a configured fallback model does

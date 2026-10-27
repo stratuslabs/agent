@@ -400,6 +400,44 @@ test('a budget the primary spent before failing stops the fallback call in a rea
   assert.deepEqual(failures, [{ error: 'This agent has used its daily model budget.', refused: true }]);
 });
 
+test('a guard that refuses the fallback by name keeps refusing it on the turns after the switch', async () => {
+  // Once a session has switched, the fallback answers every call while the
+  // wrapper still carries the primary's name. The guards are told the
+  // fallback's, so a rule about one model holds on the next turn too.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const seen: string[] = [];
+  const noFallback = (check: { provider: string }) => {
+    seen.push(check.provider);
+    if (check.provider === 'fallback') {
+      throw new HostRefusalError('This agent may not use its fallback model.');
+    }
+  };
+  let fallbackCalls = 0;
+  const provider = createFallbackWrappedProvider(
+    {
+      name: 'primary',
+      async generate() {
+        throw new Error('primary down');
+      },
+    },
+    {
+      name: 'fallback',
+      async generate() {
+        fallbackCalls += 1;
+        return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+      },
+    },
+    () => {},
+  );
+  const runner = new AgentRunner({ provider, store: new InMemorySessionStore(), providerCallGuards: [noFallback] });
+
+  await assert.rejects(runner.run({ sessionId: 'switched', agent: { id: 'a', name: 'A' }, userMessage: 'one' }), HostRefusalError);
+  await assert.rejects(runner.resume({ sessionId: 'switched', userMessage: 'two' }), HostRefusalError);
+
+  assert.equal(fallbackCalls, 0);
+  assert.deepEqual(seen, ['primary', 'fallback', 'fallback']);
+});
+
 test('fallback stickiness survives a wrapper rebuild via session metadata', async () => {
   const { createFallbackWrappedProvider, FALLBACK_ACTIVE_METADATA_KEY } = await import('../src/index.ts');
   const session = {
