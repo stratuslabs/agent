@@ -58,6 +58,7 @@ export {
   DEFAULT_VISIBLE_HOME_PATHS,
   parseHomeMode,
   bwrapArgs,
+  bwrapProbeArgs,
   darwinProfile,
   planSandbox,
   resetSandboxProbe,

@@ -6382,6 +6382,44 @@ export interface ObserveInput {
 }
 
 /**
+ * Mark `error` as one of core's errors that cross package boundaries, so a
+ * copy of core other than the one that built it still recognizes it.
+ *
+ * There is more than one copy of core in a real install. npm gives every
+ * global package its own dependency tree, so the CLI, `channel-slack` and
+ * every provider or plugin package installed beside it each carry their
+ * own `@stratusagent/core`, with classes of their own. A plain
+ * `instanceof` then answers no for an error that is exactly what it
+ * checks for, and the kernel takes a recoverable failure for a final one.
+ * The brand is a registry symbol (`Symbol.for`), the one value every copy
+ * agrees on. Copies from before the brand existed are not recognized.
+ */
+const brandCoreError = (error: Error, brand: symbol): void => {
+  Object.defineProperty(error, brand, { value: true });
+};
+
+/**
+ * `instanceof` for a branded error class: any copy's instance of it, and
+ * for a subclass the ordinary prototype check, so narrowing to a subclass
+ * still means that subclass.
+ */
+const isBrandedCoreError = (
+  checked: abstract new (...args: never[]) => unknown,
+  base: abstract new (...args: never[]) => unknown,
+  brand: symbol,
+  value: unknown,
+): boolean => {
+  if (checked !== base) {
+    return Function.prototype[Symbol.hasInstance].call(checked, value);
+  }
+  return typeof value === 'object' && value !== null && (value as Record<symbol, unknown>)[brand] === true;
+};
+
+const CONTEXT_OVERFLOW_BRAND: unique symbol = Symbol.for('stratus.error.ContextOverflowError');
+const RUN_ABORTED_BRAND: unique symbol = Symbol.for('stratus.error.RunAbortedError');
+const HOST_REFUSAL_BRAND: unique symbol = Symbol.for('stratus.error.HostRefusalError');
+
+/**
  * Thrown by a provider when the request did not fit the model's context
  * window — the transcript, not the answer, is what was too long.
  *
@@ -6397,9 +6435,15 @@ export interface ObserveInput {
  * shorten. A provider that never throws this behaves exactly as it did.
  */
 export class ContextOverflowError extends Error {
+  /** Recognized across copies of core: a provider package carries its own. */
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    return isBrandedCoreError(this, ContextOverflowError, CONTEXT_OVERFLOW_BRAND, value);
+  }
+
   constructor(message: string) {
     super(message);
     this.name = 'ContextOverflowError';
+    brandCoreError(this, CONTEXT_OVERFLOW_BRAND);
   }
 }
 
@@ -6420,9 +6464,15 @@ export class ContextOverflowError extends Error {
  * kernel only ever asks `instanceof`.
  */
 export class HostRefusalError extends Error {
+  /** Recognized across copies of core: a plugin package refuses with its own. */
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    return isBrandedCoreError(this, HostRefusalError, HOST_REFUSAL_BRAND, value);
+  }
+
   constructor(message: string) {
     super(message);
     this.name = 'HostRefusalError';
+    brandCoreError(this, HOST_REFUSAL_BRAND);
   }
 }
 
@@ -6576,9 +6626,15 @@ export const raiseContextFloor = (session: Session): boolean => {
  * distinguishable from a genuine failure.
  */
 export class RunAbortedError extends Error {
+  /** Recognized across copies of core: a channel package aborts with its own. */
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    return isBrandedCoreError(this, RunAbortedError, RUN_ABORTED_BRAND, value);
+  }
+
   constructor(message = 'Run aborted') {
     super(message);
     this.name = 'RunAbortedError';
+    brandCoreError(this, RUN_ABORTED_BRAND);
   }
 }
 

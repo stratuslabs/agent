@@ -35,8 +35,6 @@
     "@stratusagent/gateway": "workspace:*",
     "@stratusagent/permissions": "workspace:*",
     "@stratusagent/plugins": "workspace:*",
-    "@stratusagent/provider-anthropic": "workspace:*",
-    "@stratusagent/providers": "workspace:*",
     "@stratusagent/state": "workspace:*"
   },
   "devDependencies": {

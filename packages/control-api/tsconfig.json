@@ -26,9 +26,6 @@
       "path": "../permissions"
     },
     {
-      "path": "../provider-anthropic"
-    },
-    {
       "path": "../dashboard"
     }
   ],

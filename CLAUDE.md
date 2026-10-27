@@ -82,6 +82,10 @@ immediately:
   `collectAvailableModels`; whether a key works → `verifyProviderKey`. All in
   `@stratusagent/state`, all previously private to the CLI, all now with two
   consumers.
+- A built-in provider's default model → `defaultModelFor`; what a session
+  shown to people leaves out → `redactProviderReplayState`. Both in
+  `@stratusagent/state`, so the CLI and control-api import no provider
+  adapter (a CLI test fails if one does).
 
 If you need a rule that is not exported, export it. Do not copy it.
 
@@ -106,7 +110,13 @@ hand and by review:
   an error is `class X extends Error` that sets `this.name` in its
   constructor, exported from the barrel when callers are meant to catch
   it by type (some, like `ApiError` and `McpConfigError`, deliberately
-  stay internal). Plain values and
+  stay internal). A core error that another package throws or builds
+  for core to catch (`ContextOverflowError` from a provider,
+  `RunAbortedError` from a channel, `HostRefusalError` from a plugin) is
+  branded so `instanceof` works
+  across copies of core: a real npm install has one per global package.
+  Use `brandCoreError` and `isBrandedCoreError` in core for a new one.
+  Plain values and
   stateless behavior come from a `create*` (construct a live thing) or
   `define*` (canonicalize a definition literal) factory returning a
   plain object.
@@ -320,8 +330,9 @@ These are deliberate. Changing one is a decision, not a refactor.
   answer, never on a `GET`, and the page loads nothing that could carry the
   token elsewhere. Widening what a token can do is a decision, not a refactor.
 - **No endpoint returns a secret.** Credential reads report presence, type,
-  and bound endpoint. Session reads strip the Anthropic raw-turn cache
-  (`redactAnthropicRawTurns`), which exists for replay and carries raw model
+  and bound endpoint. Session reads strip provider replay content
+  (`redactProviderReplayState` from `@stratusagent/state`: today the
+  Anthropic raw-turn cache), which exists for replay and carries raw model
   turns.
 
 ## Two asymmetries that documentation keeps getting wrong

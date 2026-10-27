@@ -23,7 +23,7 @@ import {
   SDK_SESSION_METADATA_KEY,
   type HostedToolExecutor,
 } from '@stratusagent/providers';
-import { createAnthropicProvider, RAW_TURNS_METADATA_KEY } from '@stratusagent/provider-anthropic';
+import { createAnthropicProvider } from '@stratusagent/provider-anthropic';
 import { ContextOverflowError, HostRefusalError } from '@stratusagent/core';
 // Types only, erased at build: the two harness packages are loaded with
 // `import()` when an agent first runs on one (see `loadHarness`), so a
@@ -108,6 +108,41 @@ export const createDemoProvider = (): ModelProvider =>
 export const FALLBACK_ACTIVE_METADATA_KEY = 'fallbackActive';
 
 /**
+ * Where the Anthropic provider keeps the raw assistant turns it replays
+ * (its `RAW_TURNS_METADATA_KEY`). Restated here so state can list and
+ * redact it without importing the adapter; a state test holds the two equal.
+ */
+export const ANTHROPIC_RAW_TURNS_METADATA_KEY = 'anthropicRawTurns';
+
+/**
+ * Session metadata that holds model output deliberately never shown to
+ * people: the raw turns, thinking blocks included, that a provider hands
+ * back verbatim on the next request. Stores keep them, because replay
+ * needs them; anything that exports, prints or serves a session for people
+ * passes it through `redactProviderReplayState` first.
+ */
+const REPLAY_CONTENT_METADATA_KEYS: readonly string[] = [ANTHROPIC_RAW_TURNS_METADATA_KEY];
+
+/**
+ * A copy of the session without provider replay content (see
+ * `REPLAY_CONTENT_METADATA_KEYS`), or the session itself when it has none.
+ * Metadata left empty is dropped. The provider-neutral form of the
+ * Anthropic adapter's `redactAnthropicRawTurns`, so the CLI and the
+ * control API need no adapter to hide it.
+ */
+export const redactProviderReplayState = (session: Session): Session => {
+  const metadata = session.metadata;
+  if (!metadata || !REPLAY_CONTENT_METADATA_KEYS.some((key) => key in metadata)) {
+    return session;
+  }
+  const kept = Object.fromEntries(
+    Object.entries(metadata).filter(([key]) => !REPLAY_CONTENT_METADATA_KEYS.includes(key)),
+  );
+  const { metadata: _metadata, ...rest } = session;
+  return Object.keys(kept).length > 0 ? { ...rest, metadata: kept } : rest;
+};
+
+/**
  * The session metadata keys that describe a provider's view of *this
  * transcript* — the Anthropic raw-turn replay cache, the Claude Code SDK
  * session id, the Codex thread id, and the sticky fallback switch. They
@@ -119,7 +154,7 @@ export const FALLBACK_ACTIVE_METADATA_KEY = 'fallbackActive';
  */
 export const PROVIDER_STATE_METADATA_KEYS: readonly string[] = [
   FALLBACK_ACTIVE_METADATA_KEY,
-  RAW_TURNS_METADATA_KEY,
+  ANTHROPIC_RAW_TURNS_METADATA_KEY,
   SDK_SESSION_METADATA_KEY,
   SDK_SESSION_AUTH_METADATA_KEY,
   CODEX_THREAD_METADATA_KEY,
