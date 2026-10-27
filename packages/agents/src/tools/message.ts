@@ -289,7 +289,11 @@ export const createMessageReadTool = (
       bookmarks.push({ title: bookmark.title, link: bookmark.link });
       used += size;
     }
-    const bookmarksOmitted = (result.bookmarks?.length ?? 0) - bookmarks.length;
+    // Added to what the adapter itself already left out, if it said.
+    const upstreamOmitted = typeof result.bookmarksOmitted === 'number' && Number.isInteger(result.bookmarksOmitted) && result.bookmarksOmitted > 0
+      ? result.bookmarksOmitted
+      : 0;
+    const bookmarksOmitted = upstreamOmitted + (result.bookmarks?.length ?? 0) - bookmarks.length;
     const messages: Array<Awaited<ReturnType<ConversationReader>>['messages'][number]> = [];
     let more = result.more;
     for (const message of result.messages) {

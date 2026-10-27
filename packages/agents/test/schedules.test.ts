@@ -515,6 +515,20 @@ test('message.read gives bookmarks their own share of the budget, says how many 
   assert.equal(result.count, 1);
   assert.equal(result.more, true);
   assert.ok(JSON.stringify(kept).length + JSON.stringify(result.messages).length <= MESSAGE_READ_TEXT_BUDGET);
+
+  // An adapter that already left some out says how many, and the tool adds
+  // its own to that count rather than replacing it.
+  const trimmed = createMessageReadTool(async () => ({
+    messages: [],
+    more: false,
+    bookmarks: [{ title: 'Spec', link: 'https://example.test/spec' }],
+    bookmarksOmitted: 3,
+  }));
+  const counted = await trimmed.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.equal(counted.bookmarksOmitted, 3);
+  const both = createMessageReadTool(async () => ({ messages: [], more: false, bookmarks: long, bookmarksOmitted: 3 }));
+  const added = await both.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.equal(added.bookmarksOmitted, 3 + 100 - (added.bookmarks as unknown[]).length);
 });
 
 test('message.send names its session as the speaker, at the label its words carry', async () => {
