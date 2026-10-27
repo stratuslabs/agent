@@ -11,11 +11,13 @@ import type {
   Plugin,
   PluginStateDirectory,
   ProtectedPaths,
+  ProviderCallGuard,
   SubAgentHandle,
   Skill,
   SkillRegistry,
   ToolRegistry,
 } from '@stratusagent/core';
+import { HostRefusalError } from '@stratusagent/core';
 import { createLazySkill, parseSkillDocument } from '@stratusagent/agents';
 
 import {
@@ -220,6 +222,8 @@ export interface LoadedPlugin {
   skills: PluginSkillRecord[];
   /** The providers, channels, memory stores, and executors it registered. */
   contributions: PluginContributionRecords;
+  /** How many provider-call guards it registered; see `LoadPluginsOptions.providerCallGuards`. */
+  providerCallGuards: number;
   /**
    * The plugin itself, so the host can shut it down. A browser plugin holds
    * a Chromium and a listening socket; a daemon that stopped without
@@ -309,7 +313,37 @@ export interface LoadPluginsOptions {
    * log names the plugin that read.
    */
   fleet?: (packageName: string) => FleetReader;
+  /**
+   * The host's provider-call guards, which it hands every runner as
+   * `AgentRunnerOptions.providerCallGuards`. Given, every plugin's `setup`
+   * receives `PluginContext.providerCalls`, and the guards a plugin
+   * registers there are appended here once it loads whole, never for a
+   * plugin that was refused. Omitted, no plugin is handed the slot, so a
+   * plugin that needs one fails its `setup` rather than loading with a
+   * limit nobody enforces.
+   */
+  providerCallGuards?: ProviderCallGuard[];
 }
+
+/**
+ * A plugin's guard as the host runs it. A refusal on purpose passes
+ * through as thrown; anything else still refuses the call (a guard that
+ * cannot answer has not said yes) and names the plugin, because the person
+ * reading the failed turn has no other way to learn which plugin stopped it.
+ */
+const guardNamingPlugin = (packageName: string, guard: ProviderCallGuard): ProviderCallGuard => async (check) => {
+  try {
+    await guard(check);
+  } catch (error) {
+    if (error instanceof HostRefusalError) {
+      throw error;
+    }
+    throw new Error(
+      `The model call was not made: the plugin ${packageName} could not check it `
+      + `(${error instanceof Error ? error.message : String(error)}). See \`stratus logs\` and that plugin's settings.`,
+    );
+  }
+};
 
 export interface LoadPluginsResult {
   loaded: LoadedPlugin[];
@@ -546,26 +580,51 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         owners: contributionOwners,
         ...(options.channelSecrets !== undefined ? { channelSecrets: options.channelSecrets } : {}),
       });
-      await plugin.setup({
-        bus: options.bus,
-        tools: view,
-        providers: contributions.providers,
-        channels: contributions.channels,
-        memory: contributions.memory,
-        executors: contributions.executors,
-        // Bound to what this plugin's manifest declares, never the host's
-        // resolver raw: a plugin must not reach a credential it did not
-        // declare merely because the calling agent allowlisted it for
-        // something else.
-        ...(credentials !== undefined ? { credentials } : {}),
-        ...(options.workspaces !== undefined ? { workspaces: options.workspaces } : {}),
-        ...(options.stateDirectories !== undefined ? { stateDirectory: options.stateDirectories(manifest.packageName) } : {}),
-        ...(options.protectedPaths !== undefined ? { protectedPaths: options.protectedPaths } : {}),
-        ...(options.log !== undefined ? { log: options.log } : {}),
-        ...(options.warn !== undefined ? { warn: options.warn } : {}),
-        ...(options.subAgents !== undefined ? { subAgents: options.subAgents } : {}),
-        ...(options.fleet !== undefined ? { fleet: options.fleet(manifest.packageName) } : {}),
-      });
+      // Staged like every other contribution, so a plugin refused after
+      // registering one leaves no guard behind; and closed when `setup`
+      // returns, because a guard registered later would land nowhere.
+      const stagedGuards: ProviderCallGuard[] = [];
+      let guardsOpen = true;
+      const providerCalls = options.providerCallGuards !== undefined
+        ? {
+            register: (guard: ProviderCallGuard): void => {
+              if (!guardsOpen) {
+                throw new PluginManifestError(
+                  `Plugin ${manifest.packageName} registered a provider-call guard after setup. Register guards during setup.`,
+                );
+              }
+              if (typeof guard !== 'function') {
+                throw new PluginManifestError(`Plugin ${manifest.packageName} registered a provider-call guard that is not a function.`);
+              }
+              stagedGuards.push(guardNamingPlugin(manifest.packageName, guard));
+            },
+          }
+        : undefined;
+      try {
+        await plugin.setup({
+          bus: options.bus,
+          tools: view,
+          providers: contributions.providers,
+          channels: contributions.channels,
+          memory: contributions.memory,
+          executors: contributions.executors,
+          // Bound to what this plugin's manifest declares, never the host's
+          // resolver raw: a plugin must not reach a credential it did not
+          // declare merely because the calling agent allowlisted it for
+          // something else.
+          ...(credentials !== undefined ? { credentials } : {}),
+          ...(options.workspaces !== undefined ? { workspaces: options.workspaces } : {}),
+          ...(options.stateDirectories !== undefined ? { stateDirectory: options.stateDirectories(manifest.packageName) } : {}),
+          ...(options.protectedPaths !== undefined ? { protectedPaths: options.protectedPaths } : {}),
+          ...(options.log !== undefined ? { log: options.log } : {}),
+          ...(options.warn !== undefined ? { warn: options.warn } : {}),
+          ...(options.subAgents !== undefined ? { subAgents: options.subAgents } : {}),
+          ...(options.fleet !== undefined ? { fleet: options.fleet(manifest.packageName) } : {}),
+          ...(providerCalls !== undefined ? { providerCalls } : {}),
+        });
+      } finally {
+        guardsOpen = false;
+      }
 
       // Everything that can refuse happens before anything commits, so a
       // plugin never lands half — tools registered, skills not. The
@@ -604,8 +663,11 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         tools,
         skills,
         contributions: contributed,
+        providerCallGuards: stagedGuards.length,
         instance: plugin,
       });
+      // Last, once nothing else can refuse the plugin.
+      options.providerCallGuards?.push(...stagedGuards);
     } catch (error) {
       // Refused, and then released. A plugin whose `dispose` also throws is
       // ignored: it is already being reported as failed, and the second

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AgentRunner,
   EventBus,
+  HostRefusalError,
   InMemorySessionStore,
   ToolRegistry,
   totalTokenUsage,
@@ -16,6 +17,10 @@ import {
 } from '../src/index.ts';
 
 const AGENT = { id: 'accountant', name: 'Accountant' };
+
+/** The records as a test can spell them out: `id` and `at` are minted per call. */
+const withoutIds = (records: readonly UsageRecord[] | undefined): Array<Omit<UsageRecord, 'id' | 'at'>> | undefined =>
+  records?.map(({ id: _id, at: _at, ...record }) => record);
 
 /** Records every completion event's usage, in emission order. */
 const createCompletionSink = (bus: EventBus): UsageRecord[][] => {
@@ -63,7 +68,7 @@ test('a session against a provider reporting known counts emits exactly those co
     userMessage: 'hello',
   });
 
-  assert.deepEqual(session.usage, [
+  assert.deepEqual(withoutIds(session.usage), [
     { turnId: 'usage-1:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 120, outputTokens: 34 },
   ]);
   assert.deepEqual(completions, [session.usage]);
@@ -94,7 +99,7 @@ test('a subscriber cannot edit the session\'s records through the completion eve
     bus,
   }).run({ sessionId: 'usage-11', agent: AGENT, userMessage: 'hello' });
 
-  assert.deepEqual(session.usage, [
+  assert.deepEqual(withoutIds(session.usage), [
     { turnId: 'usage-11:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 120 },
   ]);
   assert.deepEqual((await store.get('usage-11'))?.usage, session.usage);
@@ -266,7 +271,7 @@ test('a failed attempt reported through the sink survives on the session', async
 
   const stored = await store.get('usage-6');
   assert.equal(stored?.status, 'failed');
-  assert.deepEqual(stored?.usage, [
+  assert.deepEqual(withoutIds(stored?.usage), [
     { turnId: 'usage-6:turn:1', provider: 'flaky', model: 'flaky-1', inputTokens: 9, outputTokens: 0 },
   ]);
 });
@@ -299,7 +304,7 @@ test('a turn cancelled after the response still records what the response cost',
 
   const stored = await store.get('usage-9');
   assert.equal(stored?.status, 'failed');
-  assert.deepEqual(stored?.usage, [
+  assert.deepEqual(withoutIds(stored?.usage), [
     { turnId: 'usage-9:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 12, outputTokens: 5 },
   ]);
 });
@@ -315,7 +320,7 @@ test('a bucket reported as an explicit undefined is written as absent', async ()
     provider: createReportingProvider('fake', [{ text: 'done', usage }]),
   }).run({ sessionId: 'usage-10', agent: AGENT, userMessage: 'hello' });
 
-  assert.deepEqual(Object.keys(session.usage?.[0] ?? {}), ['turnId', 'provider', 'inputTokens']);
+  assert.deepEqual(Object.keys(session.usage?.[0] ?? {}), ['id', 'at', 'turnId', 'provider', 'inputTokens']);
 });
 
 test('a resumed session adds to its stored usage rather than replacing it', async () => {
@@ -331,7 +336,7 @@ test('a resumed session adds to its stored usage rather than replacing it', asyn
   await runner.run({ sessionId: 'usage-7', agent: AGENT, userMessage: 'first' });
   const resumed = await runner.resume({ sessionId: 'usage-7', userMessage: 'second' });
 
-  assert.deepEqual(resumed.usage, [
+  assert.deepEqual(withoutIds(resumed.usage), [
     { turnId: 'usage-7:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 10, outputTokens: 1 },
     { turnId: 'usage-7:turn:2', provider: 'fake', model: 'fake-1', inputTokens: 20, outputTokens: 2 },
   ]);
@@ -357,7 +362,7 @@ test('an unnamed usage report is attributed to the provider the runner asked', a
     userMessage: 'hello',
   });
 
-  assert.deepEqual(session.usage, [{ turnId: 'usage-8:turn:1', provider: 'minimal', inputTokens: 7 }]);
+  assert.deepEqual(withoutIds(session.usage), [{ turnId: 'usage-8:turn:1', provider: 'minimal', inputTokens: 7 }]);
 });
 
 test('totalTokenUsage leaves a bucket nobody measured absent', () => {
@@ -374,4 +379,137 @@ test('uncachedInputTokens subtracts the cache buckets and never goes negative', 
   assert.equal(uncachedInputTokens(100, 30, 10), 60);
   assert.equal(uncachedInputTokens(100, undefined), 100);
   assert.equal(uncachedInputTokens(10, 40), 0);
+});
+
+test('each record carries its own id and the time it was recorded', async () => {
+  const before = Date.now();
+  const runner = new AgentRunner({
+    provider: createReportingProvider('fake', [
+      { text: 'first', usage: { provider: 'fake', inputTokens: 1 } },
+      { text: 'second', usage: { provider: 'fake', inputTokens: 2 } },
+    ]),
+    store: new InMemorySessionStore(),
+  });
+  await runner.run({ sessionId: 'usage-ids', agent: AGENT, userMessage: 'hello' });
+  const resumed = await runner.resume({ sessionId: 'usage-ids', userMessage: 'again' });
+
+  const ids = resumed.usage?.map((record) => record.id) ?? [];
+  assert.equal(ids.length, 2);
+  assert.equal(new Set(ids).size, 2);
+  for (const record of resumed.usage ?? []) {
+    assert.match(record.id ?? '', /^[0-9a-f-]{36}$/);
+    const at = Date.parse(record.at ?? '');
+    assert.ok(at >= before - 1000 && at <= Date.now() + 1000, `at ${record.at}`);
+    assert.equal(new Date(at).toISOString(), record.at);
+  }
+});
+
+test('each attempt announces the usage it added, before the next call is made, a failed one included', async () => {
+  const store = new InMemorySessionStore();
+  const bus = new EventBus();
+  const seen: string[] = [];
+  const announced: UsageRecord[] = [];
+  bus.subscribe((event) => {
+    if (event.type === 'session.usage') {
+      announced.push(...event.records);
+      seen.push(`usage ${event.sessionId} ${event.agentId} ${event.records.map((record) => record.inputTokens).join(',')}`);
+    }
+  });
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'metered',
+    async generate(request) {
+      calls += 1;
+      // What a budget check ahead of this call would see: every earlier
+      // call's tokens, already announced.
+      seen.push(`call ${calls}`);
+      if (calls === 1) {
+        return {
+          parts: [{ type: 'tool-call' as const, call: { id: 'c1', toolName: 'missing.tool', input: {} } }],
+          usage: { provider: 'metered', inputTokens: 10, outputTokens: 1 },
+        };
+      }
+      request.onUsage?.({ provider: 'metered', inputTokens: 20, outputTokens: 0 });
+      throw new Error('upstream exploded');
+    },
+  };
+
+  await assert.rejects(
+    new AgentRunner({ provider, store, bus }).run({ sessionId: 'usage-announce', agent: AGENT, userMessage: 'hello' }),
+    /upstream exploded/,
+  );
+
+  assert.deepEqual(seen, [
+    'call 1',
+    'usage usage-announce accountant 10',
+    'call 2',
+    'usage usage-announce accountant 20',
+  ]);
+  // The very records the session keeps, ids included, so a consumer
+  // metering from the event and one reading the session back count each
+  // call once.
+  assert.deepEqual(announced, (await store.get('usage-announce'))?.usage);
+});
+
+test('an attempt that reported nothing announces nothing', async () => {
+  const bus = new EventBus();
+  const types: string[] = [];
+  bus.subscribe((event) => {
+    types.push(event.type);
+  });
+  await new AgentRunner({ provider: createReportingProvider('quiet', [{ text: 'done' }]), bus })
+    .run({ sessionId: 'usage-none', agent: AGENT, userMessage: 'hello' });
+  assert.equal(types.includes('session.usage'), false);
+});
+
+test('a subscriber cannot edit the session\'s records through the usage event', async () => {
+  const store = new InMemorySessionStore();
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    if (event.type === 'session.usage') {
+      event.records.push({ turnId: 'forged', provider: 'nobody' });
+      const first = event.records[0];
+      if (first) {
+        first.inputTokens = 999_999;
+      }
+    }
+  });
+  const session = await new AgentRunner({
+    provider: createReportingProvider('fake', [{ text: 'done', usage: { provider: 'fake', inputTokens: 5 } }]),
+    store,
+    bus,
+  }).run({ sessionId: 'usage-12', agent: AGENT, userMessage: 'hello' });
+  assert.deepEqual(withoutIds(session.usage), [{ turnId: 'usage-12:turn:1', provider: 'fake', inputTokens: 5 }]);
+  assert.deepEqual(withoutIds((await store.get('usage-12'))?.usage), withoutIds(session.usage));
+});
+
+test('a turn the host refused on purpose is failed as refused, so a channel does not call it a malfunction', async () => {
+  const bus = new EventBus();
+  const failures: StratusEvent[] = [];
+  bus.subscribe((event) => {
+    if (event.type === 'session.failed') {
+      failures.push(event);
+    }
+  });
+  const refusing: ModelProvider = {
+    name: 'capped',
+    async generate() {
+      throw new HostRefusalError('This agent has used its daily model budget.');
+    },
+  };
+  const broken: ModelProvider = {
+    name: 'broken',
+    async generate() {
+      throw new Error('upstream exploded');
+    },
+  };
+  await assert.rejects(
+    new AgentRunner({ provider: refusing, bus }).run({ sessionId: 'refused-1', agent: AGENT, userMessage: 'hi' }),
+    HostRefusalError,
+  );
+  await assert.rejects(new AgentRunner({ provider: broken, bus }).run({ sessionId: 'refused-2', agent: AGENT, userMessage: 'hi' }));
+  assert.deepEqual(failures, [
+    { type: 'session.failed', sessionId: 'refused-1', error: 'This agent has used its daily model budget.', refused: true },
+    { type: 'session.failed', sessionId: 'refused-2', error: 'upstream exploded' },
+  ]);
 });

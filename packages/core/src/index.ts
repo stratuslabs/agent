@@ -2633,6 +2633,21 @@ export interface UsageRecord extends TokenUsage {
   turnId: string;
   provider: string;
   model?: string;
+  /**
+   * Unique to this one provider call, assigned when the record is made and
+   * saved with it. What lets a consumer that meters spend outside the
+   * session (a usage ledger) count each call exactly once however many
+   * times it sees it: from the `session.usage` announcement, and again from
+   * the saved session after a crash that came between the save and the
+   * announcement. Absent on records saved before it existed.
+   */
+  id?: string;
+  /**
+   * When the call's usage was recorded, ISO 8601. A consumer that learns of
+   * a call late (reconciling a session after a crash) still files it under
+   * the day it was spent. Absent on records saved before it existed.
+   */
+  at?: string;
 }
 
 /**
@@ -2978,6 +2993,33 @@ export interface ModelProvider {
   name: string;
   generate(request: ProviderRequest): Promise<ProviderResponse>;
 }
+
+/** Who is about to spend a provider call: what a `ProviderCallGuard` is asked about. */
+export interface ProviderCallCheck {
+  agentId: string;
+  sessionId: string;
+  /**
+   * The provider the runner is about to call, by name. Under a configured
+   * fallback this is the wrapper's name, which is the primary's: which of
+   * the two answers is decided inside the call.
+   */
+  provider: string;
+}
+
+/**
+ * A host's say over each provider call before it is made: a token budget
+ * is the case it exists for. Resolving allows the call. Throwing refuses
+ * it and fails the turn: a `HostRefusalError` for a refusal made on purpose,
+ * whose message is a sentence for the person in the conversation, and any
+ * other error for a guard that could not decide, which refuses as well,
+ * because a budget that cannot be read is not a budget that said yes.
+ *
+ * Asked once per `ModelProvider.generate`, which is one model call for the
+ * kernel-loop adapters and one Stratus turn for a harness running its own
+ * inner loop. The usage of every earlier call has been announced
+ * (`session.usage`) before a guard is asked about the next one.
+ */
+export type ProviderCallGuard = (check: ProviderCallCheck) => Promise<void> | void;
 
 /**
  * What a scrubbed subprocess inherits by name when its operator granted
@@ -4165,7 +4207,33 @@ export type StratusEvent =
        */
       usage?: UsageRecord[];
     }
-  | { type: 'session.failed'; sessionId: string; error: string }
+  | {
+      type: 'session.failed';
+      sessionId: string;
+      error: string;
+      /**
+       * True when the host stopped the turn on purpose (`HostRefusalError`):
+       * `error` is then a sentence meant for the person in the conversation,
+       * and a renderer shows it as it is rather than as a malfunction.
+       */
+      refused?: true;
+    }
+  /**
+   * Usage a provider call just reported, as it lands: the records one
+   * attempt added to the session, in the order they were recorded.
+   *
+   * Per attempt rather than once per turn because a turn can make many
+   * calls, and a host enforcing a budget has to know what the call before
+   * this one spent before it allows the next. `session.completed` arrives
+   * too late for that and is never sent for a turn that failed. Emitted
+   * for a failed attempt too, whenever it reported anything: the tokens of
+   * a call that threw were still spent. `agentId` rides along so a consumer
+   * attributing spend to an agent needs no store read.
+   *
+   * Counts and attribution only, the same records `session.completed`
+   * carries, ids included.
+   */
+  | { type: 'session.usage'; sessionId: string; agentId: string; records: UsageRecord[] }
   /**
    * The session's trust label went down. `source` names what lowered it —
    * a tool, by name, or `memory` (an injected or recalled entry), `sender`
@@ -4932,6 +5000,19 @@ export interface PluginContext {
    * `setup` naming it.
    */
   fleet?: FleetReader;
+  /**
+   * Registers a guard the host asks before every provider call. See
+   * {@link ProviderCallGuard}. A host passing it enforces what is
+   * registered for every agent it runs, sub-agents included. A host that
+   * omits it cannot enforce one, and a plugin that needs it (a budget) must
+   * fail its `setup` naming it: a limit nothing enforces must not report
+   * itself loaded.
+   */
+  providerCalls?: ProviderCallGuardHandle;
+}
+
+export interface ProviderCallGuardHandle {
+  register(guard: ProviderCallGuard): void;
 }
 
 export interface Plugin {
@@ -6320,6 +6401,29 @@ export class ContextOverflowError extends Error {
 }
 
 /**
+ * A turn the host stopped on purpose (a spent token budget) rather than
+ * one that broke.
+ *
+ * A kernel type because layers that know nothing of budgets have to treat
+ * it differently from every other failure. A fallback provider must not
+ * answer instead: the limit applies to the agent, not to one model, and a
+ * silent switch would spend what the limit exists to stop while hiding
+ * that it was reached. And a channel must not frame it as something going
+ * wrong: the message is a sentence written for the person reading it,
+ * naming what ran out and what changes it, and `session.failed` says so
+ * with `refused`.
+ *
+ * Thrown by a `ProviderCallGuard`, or subclassed by whoever refuses; the
+ * kernel only ever asks `instanceof`.
+ */
+export class HostRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HostRefusalError';
+  }
+}
+
+/**
  * How many of a session's oldest messages are no longer sent to the
  * provider.
  *
@@ -6560,6 +6664,13 @@ export interface AgentRunnerOptions {
    * runs, tests) keep the simpler non-streaming provider path.
    */
   streaming?: boolean;
+  /**
+   * Asked, in order, before every provider call; see `ProviderCallGuard`.
+   * Read on each call, so a host may add to the list after constructing
+   * the runner. A host that omits it puts no limit on model calls beyond
+   * `maxTurns`.
+   */
+  providerCallGuards?: readonly ProviderCallGuard[];
 }
 
 /**
@@ -7084,6 +7195,10 @@ export class AgentRunner {
    */
   private recordUsage(session: Session, turnId: string, usage: ProviderCallUsage): void {
     const record: UsageRecord = {
+      // Web Crypto: present in every runtime core supports, and core
+      // imports nothing.
+      id: globalThis.crypto.randomUUID(),
+      at: new Date().toISOString(),
       turnId,
       // The adapter's own name wins. `provider.name` is the fallback
       // wrapper's under a configured fallback, and that name is the
@@ -7094,6 +7209,34 @@ export class AgentRunner {
       ...definedTokenCounts(usage),
     };
     (session.usage ??= []).push(record);
+  }
+
+  /**
+   * Emit `session.usage` for whatever one attempt added to the session.
+   *
+   * Awaited by the loop before the next provider call, which is the point:
+   * a host that meters spend from this event has seen every earlier call's
+   * tokens before a guard is asked to allow another one. Copies, so a
+   * subscriber cannot edit the session's accounting through the event.
+   */
+  private async announceUsage(session: Session, recordedBefore: number): Promise<void> {
+    const records = (session.usage ?? []).slice(recordedBefore);
+    if (records.length === 0) {
+      return;
+    }
+    await this.bus.emit({
+      type: 'session.usage',
+      sessionId: session.id,
+      agentId: session.agent.id,
+      records: records.map((record) => ({ ...record })),
+    });
+  }
+
+  /** Ask every guard about the call the loop is about to make; the first refusal throws. */
+  private async guardProviderCall(session: Session): Promise<void> {
+    for (const guard of this.options.providerCallGuards ?? []) {
+      await guard({ agentId: session.agent.id, sessionId: session.id, provider: this.options.provider.name });
+    }
   }
 
   /**
@@ -7357,6 +7500,11 @@ export class AgentRunner {
             sinkReported = true;
             this.recordUsage(session, turnId, usage);
           };
+          // Inside the attempt loop, so a retry after an overflow is asked
+          // about like any other call. Outside the try: a refusal is not an
+          // overflow to trim and retry, and the call it refused spent nothing.
+          await this.guardProviderCall(session);
+          const recordedBefore = session.usage?.length ?? 0;
           try {
             response = await this.options.provider.generate({
               // The real session, always: providers persist it. The window
@@ -7393,8 +7541,13 @@ export class AgentRunner {
             if (!sinkReported && response.usage) {
               this.recordUsage(session, turnId, response.usage);
             }
+            await this.announceUsage(session, recordedBefore);
             break;
           } catch (error) {
+            // Before anything else the failure does: an attempt that threw
+            // after reporting through the sink spent those tokens, and a
+            // guard judging the next call has to have seen them.
+            await this.announceUsage(session, recordedBefore);
             // Not an overflow, or nothing left to drop: the turn fails, and
             // the message says which — a single turn too big for the model
             // is a different problem from a conversation that got long, and
@@ -7543,7 +7696,12 @@ export class AgentRunner {
       const stored = await this.store.get(session.id);
       session = stored ?? session;
       await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
-      await this.bus.emit({ type: 'session.failed', sessionId: session.id, error: lastError });
+      await this.bus.emit({
+        type: 'session.failed',
+        sessionId: session.id,
+        error: lastError,
+        ...(error instanceof HostRefusalError ? { refused: true as const } : {}),
+      });
       throw error;
     }
   }

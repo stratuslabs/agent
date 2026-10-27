@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import {
   EnvCredentialResolver,
   EventBus,
+  HostRefusalError,
   matchesToolAllowlist,
   ToolRegistry,
   type AgentWorkspaces,
@@ -15,6 +16,8 @@ import {
   type JsonObject,
   type Plugin,
   type PluginContext,
+  type ProviderCallGuard,
+  type ProviderCallGuardHandle,
   type Tool,
 } from '@stratusagent/core';
 
@@ -873,4 +876,103 @@ test('credentialsFromConfig declares the names the operator mapped in that key, 
   });
   assert.deepEqual(result.failures, []);
   assert.deepEqual(outcomes, { 'github.token': true, 'vercel.token': true, 'npm.token': false });
+});
+
+const CHECK = { agentId: 'ava', sessionId: 's1', provider: 'anthropic' };
+
+test('a plugin\'s provider-call guards reach the host\'s list once it loads whole, naming the plugin when one breaks', async () => {
+  const host = await fakeHost({
+    'stratus-plugin-budget': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'usage.report', risk: 'safe' }] } } },
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'budget',
+          setup(context) {
+            context.providerCalls?.register((check) => {
+              if (check.agentId === 'ava') {
+                throw new HostRefusalError('Ava has used her daily model budget.');
+              }
+            });
+            context.providerCalls?.register(() => {
+              throw new Error('ledger.jsonl is unreadable');
+            });
+            context.tools.register(tool('usage.report', 'safe'));
+          },
+        }),
+      },
+    },
+  });
+  const guards: ProviderCallGuard[] = [];
+
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-budget': {} },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    providerCallGuards: guards,
+  });
+
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.loaded[0]?.providerCallGuards, 2);
+  assert.equal(guards.length, 2);
+  // A refusal on purpose arrives as it was thrown: its sentence is for the
+  // person in the conversation, and its type is what tells the runner so.
+  await assert.rejects(async () => guards[0]?.(CHECK), (error: unknown) =>
+    error instanceof HostRefusalError && error.message === 'Ava has used her daily model budget.');
+  await guards[0]?.({ ...CHECK, agentId: 'bo' });
+  // Anything else still refuses, and says which plugin could not answer.
+  await assert.rejects(async () => guards[1]?.(CHECK), (error: unknown) =>
+    error instanceof Error
+    && !(error instanceof HostRefusalError)
+    && /stratus-plugin-budget/.test(error.message)
+    && /ledger\.jsonl is unreadable/.test(error.message));
+});
+
+test('a plugin refused after registering a guard leaves no guard behind', async () => {
+  const host = await fakeHost({
+    'stratus-plugin-half': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'half.ok', risk: 'safe' }] } } },
+      module: pluginModule('half', (tools, _config, context) => {
+        context.providerCalls?.register(() => {
+          throw new HostRefusalError('never');
+        });
+        tools.register(tool('half.undeclared', 'safe'));
+      }),
+    },
+  });
+  const guards: ProviderCallGuard[] = [];
+
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-half': {} },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    providerCallGuards: guards,
+  });
+
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(guards, []);
+});
+
+test('a host that keeps no guard list hands no handle, and a guard registered after setup is refused', async () => {
+  const handles: Array<ProviderCallGuardHandle | undefined> = [];
+  const host = await fakeHost({
+    'stratus-plugin-late': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'late.ok', risk: 'safe' }] } } },
+      module: pluginModule('late', (tools, _config, context) => {
+        handles.push(context.providerCalls);
+        tools.register(tool('late.ok', 'safe'));
+      }),
+    },
+  });
+  const config = { 'stratus-plugin-late': {} };
+
+  await loadPlugins({ config, host, tools: new ToolRegistry(), bus: new EventBus() });
+  assert.deepEqual(handles, [undefined]);
+
+  handles.length = 0;
+  const guards: ProviderCallGuard[] = [];
+  await loadPlugins({ config, host, tools: new ToolRegistry(), bus: new EventBus(), providerCallGuards: guards });
+  assert.throws(() => handles[0]?.register(() => {}), /during setup/);
+  assert.deepEqual(guards, []);
 });
