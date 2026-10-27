@@ -4219,15 +4219,18 @@ export type StratusEvent =
       refused?: true;
     }
   /**
-   * Usage a provider call just reported, as it lands: the records one
-   * attempt added to the session, in the order they were recorded.
+   * Usage a provider call just reported, as it lands: the records added to
+   * the session since the last announcement, in the order they were
+   * recorded. A harness reporting inner calls through the sink is announced
+   * as each report arrives, while its `generate` is still running, so a
+   * daemon that dies mid-call has already told a ledger what was spent.
    *
-   * Per attempt rather than once per turn because a turn can make many
-   * calls, and a host enforcing a budget has to know what the call before
-   * this one spent before it allows the next. `session.completed` arrives
-   * too late for that and is never sent for a turn that failed. Emitted
-   * for a failed attempt too, whenever it reported anything: the tokens of
-   * a call that threw were still spent. `agentId` rides along so a consumer
+   * Per call rather than once per turn because a turn can make many calls,
+   * and a host enforcing a budget has to know what the call before this one
+   * spent before it allows the next. `session.completed` arrives too late
+   * for that and is never sent for a turn that failed. Emitted for a failed
+   * attempt too, whenever it reported anything: the tokens of a call that
+   * threw were still spent. `agentId` rides along so a consumer
    * attributing spend to an agent needs no store read.
    *
    * Counts and attribution only, the same records `session.completed`
@@ -7212,12 +7215,13 @@ export class AgentRunner {
   }
 
   /**
-   * Emit `session.usage` for whatever one attempt added to the session.
+   * Emit `session.usage` for the records added to the session since
+   * `recordedBefore`.
    *
-   * Awaited by the loop before the next provider call, which is the point:
-   * a host that meters spend from this event has seen every earlier call's
-   * tokens before a guard is asked to allow another one. Copies, so a
-   * subscriber cannot edit the session's accounting through the event.
+   * The loop drains these before the next provider call, which is the
+   * point: a host that meters spend from this event has seen every earlier
+   * call's tokens before a guard is asked to allow another one. Copies, so
+   * a subscriber cannot edit the session's accounting through the event.
    */
   private async announceUsage(session: Session, recordedBefore: number): Promise<void> {
     const records = (session.usage ?? []).slice(recordedBefore);
@@ -7496,15 +7500,35 @@ export class AgentRunner {
           // answered. The turn id is deliberately not per attempt: one
           // Stratus turn, however many provider calls it took to fit.
           let sinkReported = false;
+          // Announced as reported, not when the call settles. A harness
+          // reports each inner call and keeps working, sometimes for
+          // minutes, and a daemon that dies in that time must not take the
+          // spent tokens with it: `session.usage` is what a ledger writes
+          // down. The sink is synchronous by contract, so the announcement
+          // is queued on a serial chain rather than awaited in it, and a
+          // report of several records at once (one per model) goes out as
+          // one event. The chain is drained before this attempt is over,
+          // so a guard asked about the next call has seen all of it.
+          let usageChain: Promise<void> = Promise.resolve();
+          let announcedThrough = session.usage?.length ?? 0;
+          const announcePending = (): Promise<void> => {
+            usageChain = usageChain.then(() => {
+              const from = announcedThrough;
+              announcedThrough = session.usage?.length ?? 0;
+              return this.announceUsage(session, from);
+            });
+            return usageChain;
+          };
           const onUsage = (usage: ProviderCallUsage): void => {
             sinkReported = true;
             this.recordUsage(session, turnId, usage);
+            void announcePending();
           };
           // Inside the attempt loop, so a retry after an overflow is asked
           // about like any other call. Outside the try: a refusal is not an
           // overflow to trim and retry, and the call it refused spent nothing.
           await this.guardProviderCall(session);
-          const recordedBefore = session.usage?.length ?? 0;
+          announcedThrough = session.usage?.length ?? 0;
           try {
             response = await this.options.provider.generate({
               // The real session, always: providers persist it. The window
@@ -7541,13 +7565,13 @@ export class AgentRunner {
             if (!sinkReported && response.usage) {
               this.recordUsage(session, turnId, response.usage);
             }
-            await this.announceUsage(session, recordedBefore);
+            await announcePending();
             break;
           } catch (error) {
             // Before anything else the failure does: an attempt that threw
             // after reporting through the sink spent those tokens, and a
             // guard judging the next call has to have seen them.
-            await this.announceUsage(session, recordedBefore);
+            await announcePending();
             // Not an overflow, or nothing left to drop: the turn fails, and
             // the message says which — a single turn too big for the model
             // is a different problem from a conversation that got long, and

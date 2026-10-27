@@ -451,6 +451,52 @@ test('each attempt announces the usage it added, before the next call is made, a
   assert.deepEqual(announced, (await store.get('usage-announce'))?.usage);
 });
 
+test('usage a harness reports mid-call is announced as it arrives, not when the call settles', async () => {
+  // A harness reports each inner call through the sink and keeps working
+  // (codex per completed turn, claude-code per attempt before carrying on).
+  // A daemon that dies before generate settles must not take those tokens
+  // with it: the event is what a ledger writes down.
+  const store = new InMemorySessionStore();
+  const bus = new EventBus();
+  const announced: UsageRecord[][] = [];
+  let heard!: () => void;
+  const heardUsage = new Promise<'announced'>((resolve) => {
+    heard = () => resolve('announced');
+  });
+  bus.subscribe((event) => {
+    if (event.type === 'session.usage') {
+      announced.push(event.records);
+      heard();
+    }
+  });
+  let waited: string | undefined;
+  const provider: ModelProvider = {
+    name: 'harness',
+    async generate(request) {
+      // Two models in one report, the way claude-code reports an attempt.
+      request.onUsage?.({ provider: 'harness', model: 'large', inputTokens: 30, outputTokens: 3 });
+      request.onUsage?.({ provider: 'harness', model: 'small', inputTokens: 4 });
+      // Still running: the next inner call has not finished.
+      waited = await Promise.race([
+        heardUsage,
+        new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 300)),
+      ]);
+      request.onUsage?.({ provider: 'harness', model: 'large', inputTokens: 50, outputTokens: 5 });
+      return { parts: [{ type: 'text' as const, text: 'done' }] };
+    },
+  };
+
+  const session = await new AgentRunner({ provider, store, bus })
+    .run({ sessionId: 'usage-midcall', agent: AGENT, userMessage: 'hello' });
+
+  assert.equal(waited, 'announced');
+  // Each record once, in order, the very records the session keeps; the
+  // two reported together go out together.
+  assert.deepEqual(announced.map((records) => records.map((record) => record.inputTokens)), [[30, 4], [50]]);
+  assert.deepEqual(announced.flat(), (await store.get('usage-midcall'))?.usage);
+  assert.equal(session.usage?.length, 3);
+});
+
 test('an attempt that reported nothing announces nothing', async () => {
   const bus = new EventBus();
   const types: string[] = [];

@@ -278,9 +278,10 @@ so write it as a sentence for the person in the conversation, naming what
 ran out and when it resets. Throwing anything else refuses the call too,
 because a budget that cannot be read has not said yes, and the turn's
 error names the plugin. The guard pairs with the `session.usage` event:
-the runner announces each provider attempt's usage records, a failed
-attempt's included, before it asks the guards about the next call, so a
-guard metering from that event has seen everything spent so far. It is
+the runner announces usage records as the provider reports them, a failed
+attempt's included and a harness's while its turn is still running, and
+always before it asks the guards about the next call, so a guard metering
+from that event has seen everything spent so far. It is
 asked once per `generate`, which is one model call for the kernel-loop
 providers and one whole turn for a harness running its own loop.
 Registration is staged with the plugin's other contributions, so a plugin
