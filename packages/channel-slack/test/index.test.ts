@@ -2428,23 +2428,35 @@ test('a turn nobody asked for opens its placeholder on its first text, never on 
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const warnings: string[] = [];
-  // A macrotask, so the streaming edit scheduled by an event gets to run
-  // before the turn ends — the same wait the streaming tests use.
+  // A macrotask, so an edit a tool line scheduled gets its chance to run,
+  // and to open a placeholder it must not, before the turn moves on.
   const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+  // Turns that have returned. The gateway runs one turn of a session at a
+  // time and the stub does not, so each message below waits for the turn
+  // before it: two turns of one thread running at once is something the
+  // daemon never does, and a slow runner made this test do it (card 821).
+  let ended = 0;
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
-    if (userMessage.includes('tool only')) {
-      await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'demo.echo', input: {} } });
-      await tick();
-      await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'demo.echo', ok: true, output: null } });
-      await tick();
-      return sessionWithReply(sessionId, '');
+    try {
+      if (userMessage.includes('tool only')) {
+        await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'demo.echo', input: {} } });
+        await tick();
+        await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'demo.echo', ok: true, output: null } });
+        await tick();
+        return sessionWithReply(sessionId, '');
+      }
+      if (userMessage.includes('streams')) {
+        await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Thinking' } });
+        // Until the text has opened the placeholder and is in it, not a
+        // fixed wait: on a cold start the turn ended first, and the reply
+        // went out as a message of its own.
+        await until(() => web.updates.some((update) => update.text === 'Thinking'));
+        return sessionWithReply(sessionId, 'Done');
+      }
+      throw new Error('provider exploded');
+    } finally {
+      ended += 1;
     }
-    if (userMessage.includes('streams')) {
-      await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Thinking' } });
-      await tick();
-      return sessionWithReply(sessionId, 'Done');
-    }
-    throw new Error('provider exploded');
   });
   gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
   gateway.sessionRouting = async () => ({
@@ -2464,8 +2476,10 @@ test('a turn nobody asked for opens its placeholder on its first text, never on 
   await adapter.start(gateway);
 
   await socket.deliver('message', channelMessage({ text: 'tool only', ts: '990.1', thread: '990.0' }));
+  await until(() => ended === 1);
   assert.equal(web.posts.length, 0, 'a tool line alone is not a reason to post');
   await socket.deliver('message', channelMessage({ text: 'it streams', ts: '990.2', thread: '990.0' }));
+  await until(() => ended === 2);
   await socket.deliver('message', channelMessage({ text: 'it breaks', ts: '990.3', thread: '990.0' }));
   await adapter.stop();
 
@@ -11392,7 +11406,11 @@ const stopAdapter = (approvers: string[], replies: 'stream' | 'final' = 'stream'
 };
 
 const until = async (check: () => boolean): Promise<void> => {
-  for (let i = 0; i < 200 && !check(); i += 1) {
+  // At least 200 turns of the event loop and at least two seconds: on a
+  // fast machine 200 turns can pass before a timer of a few milliseconds
+  // fires (card 821).
+  const deadline = Date.now() + 2000;
+  for (let i = 0; (i < 200 || Date.now() < deadline) && !check(); i += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.ok(check(), 'condition never held');
