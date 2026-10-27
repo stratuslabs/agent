@@ -45,6 +45,8 @@ import {
   type ChannelAdapter,
   type ChannelCredentialRequest,
   type ConversationBookmark,
+  type ConversationCreateRequest,
+  type ConversationCreateResult,
   type ConversationMessage,
   type ConversationReadRequest,
   type ConversationReadResult,
@@ -528,6 +530,25 @@ export interface SlackWebLike {
     history?(args: SlackHistoryArgs): Promise<SlackHistoryPage>;
     /** One thread, root first, a page at a time. Same scopes as `history`. */
     replies?(args: SlackHistoryArgs & { ts: string }): Promise<SlackHistoryPage>;
+    /**
+     * Makes a channel, with the calling app as its first member — what
+     * `channel.create` runs on. Needs `channels:manage` for a public one and
+     * `groups:write` for a private one, which the default manifest leaves
+     * out; the same two cover `setTopic`, `setPurpose` and `invite`.
+     * Optional, like everything below it: an older SDK or fake without them
+     * says it cannot create channels.
+     */
+    create?(args: { name: string; is_private: boolean }): Promise<{ channel?: { id?: string; name?: string } }>;
+    setTopic?(args: { channel: string; topic: string }): Promise<unknown>;
+    setPurpose?(args: { channel: string; purpose: string }): Promise<unknown>;
+    /**
+     * Invites up to 1,000 users at once. With `force`, the valid ones are
+     * invited even when another id fails; each failure is listed in
+     * `errors`, on the answer or on the error the SDK throws.
+     */
+    invite?(args: { channel: string; users: string; force?: boolean }): Promise<{
+      errors?: Array<{ user?: string; error?: string }>;
+    }>;
   };
   users: {
     info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
@@ -3051,6 +3072,13 @@ interface AgentConnection {
 /** Uncached author names one `message.read` looks up; the rest keep their id. */
 const READ_NAME_LOOKUPS = 10;
 
+/** Slack's longest channel name. */
+const CHANNEL_NAME_LIMIT = 80;
+/** Slack's longest channel topic, and its longest purpose. */
+const CHANNEL_TEXT_LIMIT = 250;
+/** The most users one `conversations.invite` call takes. */
+const CHANNEL_INVITE_LIMIT = 1000;
+
 /** A bookmark title longer than this is cut, with an ellipsis. */
 const BOOKMARK_TITLE_LIMIT = 200;
 /** A bookmark link longer than this is replaced by `BOOKMARK_LINK_TOO_LONG`. */
@@ -4683,6 +4711,155 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       });
     }
     return { messages, more, ...(listing ? await listing : {}) };
+  };
+
+  /**
+   * Creates a channel with the asking agent's own app — `channel.create`.
+   * Everything Slack would refuse once the channel exists is refused here
+   * first, so a bad request leaves no channel behind. After the create
+   * nothing throws: a topic, purpose or invitation that fails is reported,
+   * and the channel stays. Slack names are unique, so an agent that
+   * retries a create gets `name_taken`, never a second channel.
+   */
+  const createConversation = async (request: ConversationCreateRequest): Promise<ConversationCreateResult> => {
+    const name = request.name.trim().replace(/^#/, '');
+    if (!name) {
+      throw new Error('slack: a channel needs a name.');
+    }
+    if (!/^[a-z0-9_-]+$/.test(name)) {
+      throw new Error(`slack: "${name}" can't be a channel name: Slack names use only lowercase letters, numbers, hyphens and underscores. Nothing was created.`);
+    }
+    if (name.length > CHANNEL_NAME_LIMIT) {
+      throw new Error(`slack: a channel name is at most ${CHANNEL_NAME_LIMIT} characters; this one is ${name.length}. Nothing was created.`);
+    }
+    for (const field of ['topic', 'purpose'] as const) {
+      const length = [...(request[field] ?? '')].length;
+      if (length > CHANNEL_TEXT_LIMIT) {
+        throw new Error(`slack: the ${field} is ${length} characters; Slack allows ${CHANNEL_TEXT_LIMIT}. Nothing was created.`);
+      }
+    }
+    const invite = request.invite ?? [];
+    if (invite.length > CHANNEL_INVITE_LIMIT) {
+      throw new Error(`slack: that invites ${invite.length.toLocaleString('en-US')} people; Slack invites at most ${CHANNEL_INVITE_LIMIT.toLocaleString('en-US')} at once. Nothing was created.`);
+    }
+    const connection = connectionFor(request.agentId);
+    if (!connection) {
+      throw new Error(configuredAgents.has(request.agentId)
+        ? `slack: ${request.agentId}'s Slack app is not connected right now, so it cannot create a channel.`
+        : `slack: agent ${request.agentId} has no Slack app, so it cannot create a Slack channel.`);
+    }
+    const { create, setTopic, setPurpose, invite: inviteUsers } = connection.web.conversations;
+    if (!create || !setTopic || !setPurpose || !inviteUsers) {
+      throw new Error('slack: this Slack client cannot create channels.');
+    }
+    // Who each entry is, before anything exists: agents on this host become
+    // the user their app posts as, in the same workspace only.
+    const invited: string[] = [];
+    const notInvited: Array<{ who: string; reason: string }> = [];
+    const toInvite = new Map<string, string>();
+    for (const who of invite) {
+      const identity = botIdentities.get(who);
+      if (who === request.agentId || identity?.botUserId === connection.botUserId) {
+        invited.push(who);
+      } else if (configuredAgents.has(who) && !identity?.botUserId) {
+        notInvited.push({ who, reason: `Agent ${who}'s Slack app is not connected, so its Slack user is unknown.` });
+      } else if (identity) {
+        if (identity.teamId !== connection.teamId) {
+          notInvited.push({ who, reason: `Agent ${who}'s Slack app is in another Slack workspace.` });
+        } else {
+          toInvite.set(who, identity.botUserId);
+        }
+      } else if (/^[UW][A-Z0-9]+$/.test(who)) {
+        toInvite.set(who, who);
+      } else {
+        notInvited.push({ who, reason: 'Not a Slack user id (U… or W…) or an agent with a Slack app on this host.' });
+      }
+    }
+
+    const kind = request.private === true ? 'private' : 'public';
+    let created: Awaited<ReturnType<typeof create>>;
+    try {
+      created = await create({ name, is_private: request.private === true });
+    } catch (error) {
+      const code = slackErrorCode(error);
+      if (code === 'missing_scope') {
+        throw new Error(`slack: ${request.agentId}'s Slack app can't create ${kind} channels because it lacks the ${request.private === true ? 'groups:write' : 'channels:manage'} scope. Add it to the app's manifest and reinstall the app.`);
+      }
+      if (code === 'name_taken') {
+        throw new Error(`slack: there is already a channel named #${name} in this workspace, perhaps archived. Pick another name, or use that channel.`);
+      }
+      throw new Error(`slack: Slack could not create #${name} (${code ?? (error instanceof Error ? error.message : String(error))}).`);
+    }
+    const conversation = created.channel?.id;
+    if (!conversation) {
+      throw new Error(`slack: Slack answered the create of #${name} without a channel id, so whether it exists is unknown. Read the channel list before trying again.`);
+    }
+
+    const notSet: Array<{ field: 'topic' | 'purpose'; reason: string }> = [];
+    const describe = (error: unknown): string => slackErrorCode(error) ?? (error instanceof Error ? error.message : String(error));
+    if (request.topic) {
+      await setTopic({ channel: conversation, topic: request.topic })
+        .catch((error: unknown) => notSet.push({ field: 'topic', reason: `Slack did not set the topic (${describe(error)}).` }));
+    }
+    if (request.purpose) {
+      await setPurpose({ channel: conversation, purpose: request.purpose })
+        .catch((error: unknown) => notSet.push({ field: 'purpose', reason: `Slack did not set the purpose (${describe(error)}).` }));
+    }
+
+    if (toInvite.size > 0) {
+      // Slack's per-id failures, by user id: on the answer, or on the error
+      // the SDK throws for an ok: false answer.
+      const refusedOf = (errors: unknown): Map<string, string> => new Map(
+        (Array.isArray(errors) ? errors : []).flatMap((entry: { user?: unknown; error?: unknown }) =>
+          typeof entry?.user === 'string' && typeof entry.error === 'string' ? [[entry.user, entry.error] as const] : []),
+      );
+      let refused: Map<string, string>;
+      let failure: string | undefined;
+      try {
+        refused = refusedOf((await inviteUsers({ channel: conversation, users: [...new Set(toInvite.values())].join(','), force: true })).errors);
+      } catch (error) {
+        refused = refusedOf((error as { data?: { errors?: unknown } } | undefined)?.data?.errors);
+        failure = describe(error);
+      }
+      // A failed call that does not name everyone leaves the rest unknown,
+      // so the channel's members decide; who cannot be checked is not claimed.
+      let members: Set<string> | undefined;
+      let membersFailure: string | undefined;
+      if (failure !== undefined && [...toInvite.values()].some((user) => !refused.has(user))) {
+        try {
+          members = new Set();
+          let cursor: string | undefined;
+          do {
+            const page = await connection.web.conversations.members({ channel: conversation, limit: 1000, ...(cursor ? { cursor } : {}) });
+            for (const member of page.members ?? []) {
+              members.add(member);
+            }
+            cursor = page.response_metadata?.next_cursor || undefined;
+          } while (cursor);
+        } catch (error) {
+          members = undefined;
+          membersFailure = describe(error);
+        }
+      }
+      for (const [who, user] of toInvite) {
+        const code = refused.get(user);
+        if (code === 'already_in_channel' || (code === undefined && (failure === undefined || members?.has(user)))) {
+          invited.push(who);
+        } else if (code !== undefined || members !== undefined) {
+          notInvited.push({ who, reason: `Slack did not invite them (${code ?? failure}).` });
+        } else {
+          notInvited.push({
+            who,
+            reason: `The invitation failed (${failure}) and the channel's members could not be checked (${membersFailure}), so they may or may not have been added.`,
+          });
+        }
+      }
+    }
+    const order = new Map(invite.map((who, index) => [who, index]));
+    const byRequest = (left: string, right: string): number => (order.get(left) ?? 0) - (order.get(right) ?? 0);
+    invited.sort(byRequest);
+    notInvited.sort((left, right) => byRequest(left.who, right.who));
+    return { conversation, name: created.channel?.name ?? name, invited, notInvited, notSet };
   };
 
   /**
@@ -7588,6 +7765,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     name: 'slack',
     resolveOutbound,
     readConversation,
+    createConversation,
     // A channel id is unique only within its workspace, so a standing
     // grant on one is bound to the team the agent's app authenticated in.
     accountFor: (agentId: string) => botIdentities.get(agentId)?.teamId || undefined,

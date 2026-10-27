@@ -562,6 +562,40 @@ back either way. In `message.read`, bookmarks come first and may use 16,000
 of its 40,000 characters, which holds Slack's limit of 100 at a typical
 length. Any that don't fit are counted in `bookmarksOmitted`.
 
+## Creating a channel
+
+The adapter implements the channel contract's `createConversation`, which
+is what the gateway's `channel.create` tool runs on. The agent's **own**
+app creates the channel, so it is the first member, and its token never
+leaves the adapter. The order:
+
+1. Everything Slack would refuse once the channel exists is refused first,
+   with a sentence and nothing created: a name that isn't lowercase
+   letters, numbers, hyphens and underscores, or is over 80 characters (a
+   leading `#` is dropped); a topic or purpose over 250 characters; more
+   than 1,000 people to invite.
+2. Each `invite` entry is resolved. An agent id on this host becomes the
+   Slack user its app posts as, in the same workspace only; the creating
+   agent is a member already. Anything else must be a Slack user id
+   (`U…` or `W…`).
+3. `conversations.create`, then `setTopic` and `setPurpose` if given, then
+   one `conversations.invite` with `force`, so a bad id doesn't stop the
+   good ones.
+
+A create Slack refuses is a sentence: a missing scope names
+`channels:manage` (public) or `groups:write` (private) and the reinstall
+step, and a taken name says so in words (Slack's names are unique, archived
+channels included, so a retried create can't make a second channel).
+Anything that fails after the channel exists doesn't undo it: the result
+lists `notInvited` and `notSet`, each with the reason. When an invitation
+call fails without naming everyone, the channel's members decide who was
+added, and anyone that can't be checked is reported as unknown rather than
+claimed.
+
+Both scopes are left out of the default manifest, because they let an app
+create and manage channels and most agents never need that. Add them to
+the apps that should, under **OAuth & Permissions**, and reinstall.
+
 ## Speaking first: the outbound seam
 
 The adapter also implements the channel contract's `resolveOutbound` — how a

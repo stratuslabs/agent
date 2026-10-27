@@ -582,6 +582,12 @@ capability rather than an assumption:
   `message.read` reads through, and a channel without it cannot be read.
   An adapter that has it decides which conversations are readable at all
   and refuses the rest — Slack reads only channels its app is in, never DMs.
+- `ChannelAdapter.createConversation` is optional as well: it is what
+  `channel.create` runs on, with the asking agent's own app, and a channel
+  without it cannot create conversations. It must refuse what it can tell
+  is invalid before creating anything, and once the conversation exists it
+  must resolve, reporting an invitation, topic or purpose that failed
+  rather than throwing, so an agent never retries into a second one.
 - Who counts as the operator is one rule in core's channel contract, not
   one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
   `senderTrustFor` (the `user`/`unknown` label a turn carries). Which
