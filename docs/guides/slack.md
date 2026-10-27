@@ -464,6 +464,15 @@ already turns on for approval buttons; no scope is added.
   under **OAuth & Permissions** and be reinstalled; until then the read
   returns the messages and tells the agent the scope is missing. Details in
   [Reading a channel](../../packages/channel-slack/README.md#reading-a-channel).
+- **Creating channels** — `channel.create` makes a channel with the agent's
+  own app, sets its topic and purpose, and invites people (Slack user ids)
+  and other agents on this host. It needs the `channels:manage` scope for
+  public channels and `groups:write` for private ones. The default manifest
+  leaves both out, since most agents never create channels; add them under
+  **OAuth & Permissions** for the agents that should, and reinstall. Without
+  them the call says which scope is missing. It is a gated tool, so it goes
+  through approvals like `message.send`. Details in
+  [Creating a channel](../../packages/channel-slack/README.md#creating-a-channel).
 - **Approval buttons** — with [`--approvals remote`](./approvals.md), a gated
   tool call parks the turn and asks in its thread with **Allow once** /
   **Always allow** / **Deny**. Clicks are authorized by *who clicked*, never

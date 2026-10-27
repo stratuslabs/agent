@@ -422,6 +422,74 @@ test('message.read goes through the adapter that carries the calling agent, and 
   }
 });
 
+test('channel.create goes through the adapter that carries the calling agent, and is refused where none can create', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: maker\ntools: [channel.create]\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: maker\ntools: [channel.create]\n---\n\nYou are Mia.\n');
+  const creates: string[] = [];
+  let kind = 'fixture';
+  const host = await hostFor({
+    'stratus-plugin-chan-a': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('a', (context) => {
+        context.channels!.register({
+          agents: ['ava'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async createConversation(request) {
+              creates.push(`${request.agentId}:${request.name}:${request.private === true}:${(request.invite ?? []).join(',')}`);
+              return { conversation: 'C77', name: request.name, invited: request.invite ?? [], notInvited: [], notSet: [] };
+            },
+          },
+        });
+      }),
+    },
+    'stratus-plugin-maker': {
+      manifest: manifest({ providers: [{ name: 'maker' }] }),
+      module: plugin('maker', (context) => {
+        context.providers!.register({
+          name: 'maker',
+          create: () => ({
+            name: 'maker',
+            async generate({ session }): Promise<ProviderResponse> {
+              if (session.messages.at(-1)?.role === 'tool') {
+                return { parts: [{ type: 'text', text: 'made' }] };
+              }
+              return { parts: [{ type: 'tool-call', call: { id: `${session.id}:create`, toolName: 'channel.create', input: { channel: kind, name: 'client-acme', private: true, invite: ['U1', 'mia'] } } }] };
+            },
+          }),
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-maker': {} },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    const ava = await gateway.dispatch({ sessionId: 'create-ava', agentId: 'ava', userMessage: 'make the client channel' });
+    assert.deepEqual(creates, ['ava:client-acme:true:U1,mia']);
+    assert.match(JSON.stringify(ava.messages.find((message) => message.role === 'tool')), /\\"conversation\\":\\"C77\\"/);
+    // No adapter carries mia: never served by ava's app.
+    const mia = await gateway.dispatch({ sessionId: 'create-mia', agentId: 'mia', userMessage: 'make the client channel' });
+    assert.match(JSON.stringify(mia.messages), /No running 'fixture' channel carries agent mia/);
+    // A kind nothing running can create in.
+    kind = 'discord';
+    const elsewhere = await gateway.dispatch({ sessionId: 'create-elsewhere', agentId: 'ava', userMessage: 'make the client channel' });
+    assert.match(JSON.stringify(elsewhere.messages), /No running channel can create 'discord' conversations/);
+    assert.deepEqual(creates, ['ava:client-acme:true:U1,mia']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a message.read of a direct message is refused before any approval prompt, and a channel read still asks and runs', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: reader\ntools: [message.read]\n---\n\nYou are Ava.\n');

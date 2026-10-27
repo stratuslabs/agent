@@ -4482,6 +4482,21 @@ export interface ChannelAdapterLike {
     bookmarksUnavailable?: string;
     bookmarksOmitted?: number;
   }>;
+  /** See `ChannelAdapter.createConversation`. */
+  createConversation?(request: {
+    agentId: string;
+    name: string;
+    private?: boolean;
+    topic?: string;
+    purpose?: string;
+    invite?: string[];
+  }): Promise<{
+    conversation: string;
+    name: string;
+    invited: string[];
+    notInvited: Array<{ who: string; reason: string }>;
+    notSet: Array<{ field: 'topic' | 'purpose'; reason: string }>;
+  }>;
   /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
@@ -8357,6 +8372,8 @@ export {
   type ChannelCredentialRequest,
   type ChannelSessionKeyParts,
   type ConversationBookmark,
+  type ConversationCreateRequest,
+  type ConversationCreateResult,
   type ConversationMessage,
   type ConversationReadRequest,
   type ConversationReadResult,
