@@ -6249,6 +6249,33 @@ test('doctor reports the fallback and flags one with no sign-in', async () => {
   assert.doesNotMatch(output.stdout, /fallback {2}openai/);
 });
 
+test('doctor names a config key that loading ignores, without its value', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The provider block is the shape a plugin's settings take, so it is an
+  // easy mistake, and the loader drops it: before this, doctor only said no
+  // provider was configured. `modle` is a typo the loader never reads.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: { name: 'anthropic' }, modle: 'claude-opus-5', systemPrompt: '' }),
+    { mode: 0o600 },
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /sets "provider" to an object, which Stratus doesn't accept there, so it is ignored/);
+  assert.match(output.stdout, /sets "systemPrompt" to an empty string, which Stratus doesn't accept there/);
+  assert.match(output.stdout, /has a key Stratus doesn't read: "modle"\. It does nothing, so check its spelling or remove it\./);
+  // Named by key and type only: a value can be a secret pasted in the wrong place.
+  assert.doesNotMatch(output.stdout, /claude-opus-5/);
+});
+
 test('doctor treats a malformed config as fatal instead of showing defaults', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

@@ -17,6 +17,7 @@ import {
   readProcessEnv,
   readWorkingDirectory,
   DEFAULT_CONFIG_FILENAME,
+  ignoredConfigKeys,
   loadConfigFile,
   resolveAgentPrincipals,
   gatewayInfoPath,
@@ -223,6 +224,51 @@ interface DaemonHealth {
   startup?: { warnings?: unknown; configs?: unknown };
   intake?: { paused?: unknown; unreadable?: unknown };
 }
+
+const VALUE_TYPE_PHRASE = {
+  object: 'an object',
+  array: 'an array',
+  number: 'a number',
+  string: 'a string',
+  'empty string': 'an empty string',
+  boolean: 'true or false',
+  null: 'null',
+} as const;
+
+/**
+ * Keys the config carries that loading leaves unused (#843): one the loader
+ * drops for its type, and one it never reads. Each is named by key and JSON
+ * type, never by value, since a value can be a secret pasted in the wrong
+ * place. The file is read again rather than threaded out of
+ * `loadConfigFile`, whose result is the resolved config; if it changed in
+ * between, this describes it as it is now.
+ */
+const ignoredConfigKeyProblems = async (configPath: string): Promise<string[]> => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(configPath, 'utf8'));
+  } catch {
+    return [];
+  }
+  const problems: string[] = [];
+  const unknown: string[] = [];
+  for (const entry of ignoredConfigKeys(parsed, configPath)) {
+    if (entry.reason === 'unknown') {
+      unknown.push(JSON.stringify(entry.key));
+    } else {
+      problems.push(
+        `${configPath} sets ${JSON.stringify(entry.key)} to ${VALUE_TYPE_PHRASE[entry.valueType]}, which Stratus doesn't accept there, `
+        + 'so it is ignored and runs go on as if it were not set.',
+      );
+    }
+  }
+  if (unknown.length === 1) {
+    problems.push(`${configPath} has a key Stratus doesn't read: ${unknown[0]}. It does nothing, so check its spelling or remove it.`);
+  } else if (unknown.length > 1) {
+    problems.push(`${configPath} has keys Stratus doesn't read: ${unknown.join(', ')}. They do nothing, so check their spelling or remove them.`);
+  }
+  return problems;
+};
 
 /**
  * How the gateway begins every intake warning it logs at start (an intake
@@ -443,6 +489,9 @@ export const collectDoctorReport = async (
       problems.push(`${winner.path} could not be parsed (${(error as Error).message}). Every run fails until it is fixed or removed.`);
       warn(`ignoring unreadable config ${winner.path}`);
     }
+  }
+  if (winner && !configFatal) {
+    problems.push(...await ignoredConfigKeyProblems(winner.path));
   }
 
   // Readable by other users: the file holds whatever plugin config carries,

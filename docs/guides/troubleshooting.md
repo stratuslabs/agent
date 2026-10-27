@@ -110,6 +110,14 @@ a problem.
   wrote it at your umask's mode, and it can hold secrets (tool-shell's `env`
   block is the usual one). Run `chmod 600 ~/.stratus/config.json`; every
   save from this build writes it `0600`, and tightens a loose one.
+- **Doctor says a key in `config.json` is ignored, or that Stratus doesn't
+  read it** — loading skips a key it doesn't know (usually a typo) and an
+  older key whose value has the wrong type, such as
+  `"provider": { "name": "anthropic" }` where a name belongs
+  (`"provider": "anthropic"`). Runs go on as if the key weren't there, so fix
+  the spelling or the value;
+  [every key the config file accepts](../reference/config.md#every-key-the-config-file-accepts)
+  shows each one's shape. Doctor names the key and its type, never the value.
 - **`stratus update` upgraded, then said `State migration failed: The
   requested module '@stratusagent/state' does not provide an export named
   …`** — the upgrade itself landed; the build doing the updating mixed its
