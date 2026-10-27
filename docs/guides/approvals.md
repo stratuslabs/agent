@@ -66,8 +66,16 @@ Anything riskier is refused, with a line in the log saying which agent
 wanted what:
 
 ```text
-09:14:36  —           warning: blair: shell.run is gated and nobody is available to approve it (session slack:blair:…)
+09:14:36  —           warning: blair: [grant] shell.run is gated and nobody is available to approve it (session slack:blair:…)
 ```
+
+The word in brackets is the check that refused, so you know which setting
+to change: `scope` (no command scope covered it), `parse` (the command
+couldn't be reduced to a scope), `grant` (no standing grant, site,
+destination or channel authorization covered it), `gate` (the conversation
+read external content; see below), `risk` (a `dangerous` tool, which nothing
+can grant), `approver` (a person said no) or `cancelled` (the turn stopped
+while it waited).
 
 That is the honest default (`headless`) behind a service manager. If
 somebody *is* reachable, `--approvals remote` asks them instead — see
@@ -719,7 +727,7 @@ what that label does to the agent's grants:
   `headless` is refused, with a log line naming what the conversation read:
 
   ```text
-  09:14:36  —  warning: scout: fs.write was called after this conversation read external content (from web.fetch); with approvals.externalContent set to "gate" no grant covers it, and nobody is available to approve it (session …)
+  09:14:36  —  warning: scout: [gate] fs.write was called after this conversation read external content (from web.fetch); with approvals.externalContent set to "gate" no grant covers it, and nobody is available to approve it (session …)
   ```
 
   An approval given in a gated conversation is **one-shot**: there is no
