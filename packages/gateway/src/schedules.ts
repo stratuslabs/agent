@@ -768,7 +768,11 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         events.store.retire([row.id], 'expired', 'Its trigger was cancelled.', nowIso);
         continue;
       }
-      if (now.getTime() - Date.parse(row.createdAt) > EVENT_HOLD_MAX_MS) {
+      // Holds expire; a claim does not. A batch claimed before a crash may
+      // already have reached the gateway, and its key either continues that
+      // turn or sends an event that never went out, however long the
+      // daemon was down.
+      if (row.status !== 'firing' && now.getTime() - Date.parse(row.createdAt) > EVENT_HOLD_MAX_MS) {
         events.store.retire([row.id], 'expired', 'Held for more than 24 hours.', nowIso);
         continue;
       }

@@ -417,6 +417,27 @@ test('recovery: a batch claimed before a crash goes out again as itself, and an 
   }
 });
 
+test('a batch claimed before a long outage still goes out: the 24-hour expiry is for holds, not claims', async () => {
+  const db = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-triggers-long-crash-')), 'fleet.db');
+  const first = await rig({}, db);
+  const id = await first.trigger();
+  const a = first.deliver(id, 'd-a');
+  first.events.claim([a], eventDispatchKey(id, 'github', 'd-a'), T0.toISOString());
+  first.runtime.stop();
+  first.events.close();
+  first.schedules.close();
+
+  const second = await rig({}, db);
+  try {
+    second.clock.now = new Date(T0.getTime() + 30 * 3_600_000);
+    await second.runtime.start();
+    assert.equal(second.dispatched.length, 1);
+    assert.equal(second.dispatched[0]!.idempotencyKey, eventDispatchKey(id, 'github', 'd-a'));
+  } finally {
+    await second.stop();
+  }
+});
+
 test('recovery inside quiet hours holds the recovered firing instead of sending it', async () => {
   const db = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-triggers-quiet-crash-')), 'fleet.db');
   const first = await rig({}, db);
