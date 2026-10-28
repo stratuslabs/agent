@@ -10656,6 +10656,68 @@ test('serve brings the control API up and publishes where to reach it', async ()
   await assert.rejects(readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8'));
 });
 
+test('serve opens the events listener on its own port when the trusted config names a source', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-serve-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    events: { listen: { port: 0 }, sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } },
+  }));
+  let announce: (url: string) => void = () => {};
+  const announced = new Promise<string>((resolve) => {
+    announce = resolve;
+  });
+  let stdout = '';
+  let stderr = '';
+  const controller = new AbortController();
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: {
+      stdout: {
+        write(chunk: string) {
+          stdout += chunk;
+          const found = /events listener on (http:\/\/\S+?)\/events\//.exec(chunk);
+          if (found?.[1]) {
+            announce(found[1]);
+          }
+          return true;
+        },
+      },
+      stderr: { write(chunk: string) { stderr += chunk; return true; } },
+    },
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+  const hung = Symbol('hung');
+  const gaveUp = new Promise<typeof hung>((resolve) => {
+    const timer = setTimeout(() => resolve(hung), 5_000);
+    timer.unref?.();
+  });
+  const url = await Promise.race([announced, gaveUp]);
+  try {
+    assert.notEqual(url, hung, `the events listener never announced itself; stdout: ${stdout} stderr: ${stderr}`);
+    const apiUrl = (/control API on (http:\/\/\S+?)\s/.exec(stdout) ?? [])[1];
+    assert.ok(apiUrl, 'the control API runs beside it');
+    assert.notEqual(new URL(url as string).port, new URL(apiUrl).port, 'events have their own port');
+    // The secret is not stored yet: the listener is up and says what to run.
+    const response = await fetch(`${url as string}/events/board`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(response.status, 503);
+    assert.match(((await response.json()) as { message: string }).message, /stratus credential set events\.board/);
+  } finally {
+    controller.abort();
+    assert.equal(await serving, 0);
+  }
+});
+
+test('serve opens no events port without a source, and says --events-host did nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-none-'));
+  const { stdout, stderr } = await withServedApi(home, async () => {}, ['--events-host', '0.0.0.0']);
+  assert.doesNotMatch(stdout, /events listener on/);
+  assert.match(`${stdout}${stderr}`, /--events-host has no effect/);
+});
+
 test('stratus agents --gateway renders the same roster a running daemon serves', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-remote-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });

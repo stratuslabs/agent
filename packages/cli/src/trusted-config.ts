@@ -4,6 +4,7 @@ import {
   resolveAgentApprovals,
   type ApiConfig,
   type ApprovalsConfig,
+  type EventsConfig,
   type PrincipalsConfig,
   type PluginsConfig,
   type SlackConfig,
@@ -241,6 +242,32 @@ export const loadServeApi = async (
   }
   if (block.status === 'unreadable') {
     warn(`ignoring the api config (${block.error instanceof Error ? block.error.message : String(block.error)}); using the defaults`);
+    return {};
+  }
+  return block.status === 'present' ? block.value : {};
+};
+
+/**
+ * The daemon's `events` block (card 590), only from a trusted location.
+ * It opens a port meant to face the internet and decides who may wake the
+ * daemon's agents, so a project-local config's block is ignored loudly,
+ * the same as `api`.
+ */
+export const loadServeEvents = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<EventsConfig> => {
+  const block = await readTrustedConfigBlock('events', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring the events config in ${block.path}: a project-local config cannot open the events port or decide `
+      + 'who may wake this daemon\'s agents. Move it to ~/.stratus/config.json, or pass it with --config.',
+    );
+    return {};
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring the events config (${block.error instanceof Error ? block.error.message : String(block.error)}); no events listener`);
     return {};
   }
   return block.status === 'present' ? block.value : {};

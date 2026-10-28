@@ -52,7 +52,7 @@ import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
 import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
-import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi } from '../loaders.ts';
+import { hostChannelClaimsFor, loadSlackAdapter, type GatewayFactory, loadControlApi, loadEventListener } from '../loaders.ts';
 import { companionsBehindMessage, readCompanions } from '../companions.ts';
 import { providerPackagesMissingMessage, missingProviderPackages } from '../provider-packages.ts';
 import { CLI_VERSION } from '../npm.ts';
@@ -74,6 +74,7 @@ import {
   loadServePrincipals,
   loadServeSlack,
   loadServeApi,
+  loadServeEvents,
   loadServePlugins,
   loadServeRuntimeSelection,
   loadServeAgentMaxTurns,
@@ -396,6 +397,34 @@ const serveHeldHome = async (
         + 'Run `npm install -g @stratusagent/control-api` to bring it online; starting without it.',
       );
     }
+  }
+
+  // The events listener (card 590): its own port, opened only when the
+  // trusted config names a source, from the same optional package as the
+  // control API. An adapter like the API, so it starts after the roster
+  // loads, stops before the stores drain, and waits out a held start.
+  const eventsConfig = await loadServeEvents(env, command.configPath, warn);
+  const eventSources = eventsConfig.sources ?? {};
+  if (Object.keys(eventSources).length > 0) {
+    const createEventListener = await loadEventListener();
+    if (createEventListener) {
+      const eventsHost = command.eventsHost ?? eventsConfig.listen?.host;
+      const eventsPort = eventsConfig.listen?.port;
+      controlApiChannels.push(createEventListener({
+        ...(eventsHost !== undefined ? { host: eventsHost } : {}),
+        ...(eventsPort !== undefined ? { port: eventsPort } : {}),
+        ...(eventsConfig.maxBodyBytes !== undefined ? { maxBodyBytes: eventsConfig.maxBodyBytes } : {}),
+        log,
+        warn,
+      }));
+    } else {
+      warn(
+        'the config names event sources, but @stratusagent/control-api is not installed, so nothing listens for them. '
+        + 'Run `npm install -g @stratusagent/control-api` to bring the events listener online.',
+      );
+    }
+  } else if (command.eventsHost !== undefined) {
+    warn('--events-host has no effect: the config\'s "events" block names no source, so no events listener runs.');
   }
 
   // `--held` holds every start; `--hold-new-version` only a start of a
@@ -777,6 +806,9 @@ const serveHeldHome = async (
     ...(approvalsConfig.timeoutMs !== undefined ? { approvalTimeoutMs: approvalsConfig.timeoutMs } : {}),
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
+    ...(Object.keys(eventSources).length > 0
+      ? { events: { sources: eventSources, ...(eventsConfig.maxBodyBytes !== undefined ? { maxBodyBytes: eventsConfig.maxBodyBytes } : {}) } }
+      : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
     ...(Object.keys(autoContinue).length > 0 ? { autoContinueFor: (agentId: string) => autoContinue[agentId] } : {}),

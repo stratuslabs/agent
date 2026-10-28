@@ -103,6 +103,14 @@ import {
 } from '@stratusagent/agents';
 import { createFleetReader } from './fleet.ts';
 import {
+  createEventIntake,
+  type EventIntakeCounters,
+  type EventIntakeRequest,
+  type EventIntakeResponse,
+  type EventSourceConfig,
+} from './event-intake.ts';
+import { SqliteEventStore } from './events.ts';
+import {
   createSchedulerRuntime,
   isScheduleSessionId,
   SqliteScheduleStore,
@@ -185,6 +193,7 @@ import {
   BUILTIN_PROVIDER_NAMES,
   createDemoTool,
   createFileCredentialResolver,
+  resolveDaemonCredential,
   createHomeMemoryStore,
   drainSharedMemory,
   hasBracketedLegacyStateIn,
@@ -848,6 +857,12 @@ export interface GatewayOptions {
    */
   idleTimeoutMs?: number;
   /**
+   * The events listener's sources and body limit (card 590), from the
+   * trusted config's `events` block. With no sources the event store is
+   * never opened, and every delivery is to an unknown source.
+   */
+  events?: { sources?: Record<string, EventSourceConfig>; maxBodyBytes?: number };
+  /**
    * Where the per-agent session stores (`agents/<id>/sessions.db`) and the
    * fleet database (`fleet.db`, holding the schedules and the session
    * index) live. Default `~/.stratus`.
@@ -1229,6 +1244,14 @@ export interface Gateway {
    */
   cancelSchedule(scheduleId: string): boolean;
   /**
+   * One request to the events port (card 590): verified, deduplicated,
+   * matched against event triggers and recorded, all before the answer.
+   * The listener in control-api calls this with the raw body.
+   */
+  receiveEvent(request: EventIntakeRequest): Promise<EventIntakeResponse>;
+  /** The events listener's counts of requests refused before they left a row. */
+  eventCounters(): EventIntakeCounters;
+  /**
    * Every registered tool, with the risk it will actually be judged at and
    * the package it came from.
    *
@@ -1602,6 +1625,28 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // The same database sessions live in — one file to back up — through the
   // schedule store's own connection (see its docs for why).
   const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir), { stateHome: stateDir });
+
+  // ---- events (card 590) ---------------------------------------------------
+
+  // Opened only for a daemon with sources, so one that never takes events
+  // never grows the tables. Its own connection to fleet.db, like schedules'.
+  const eventSources = options.events?.sources ?? {};
+  const eventStore = Object.keys(eventSources).length > 0
+    ? new SqliteEventStore(fleetDbIn(stateDir), { stateHome: stateDir })
+    : undefined;
+  const eventIntake = eventStore
+    ? createEventIntake({
+      store: eventStore,
+      sources: () => eventSources,
+      // The daemon's own credential, read per delivery: a stored or
+      // rotated secret works on the next one, with no restart.
+      secret: (name) => resolveDaemonCredential(env, name),
+      // Event triggers arrive with `schedule.on`; until then nothing matches.
+      triggers: () => [],
+      ...(options.events?.maxBodyBytes !== undefined ? { maxBodyBytes: options.events.maxBodyBytes } : {}),
+      warn,
+    })
+    : undefined;
 
   /**
    * The started adapter of one kind that speaks for an agent and has the
@@ -5411,6 +5456,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     storesClosed = true;
     scheduleStore.close();
+    eventStore?.close();
     store.close();
   };
 
@@ -5909,6 +5955,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     cancelSchedule(scheduleId) {
       return scheduler.cancel(scheduleId);
+    },
+
+    async receiveEvent(request) {
+      if (!eventIntake) {
+        return { status: 404, body: { error: 'unknown_source', message: 'No event source is configured at this path.' } };
+      }
+      return eventIntake.receive(request);
+    },
+
+    eventCounters() {
+      return eventIntake?.counters() ?? { unknownSource: 0, sources: {} };
     },
 
     tools() {
