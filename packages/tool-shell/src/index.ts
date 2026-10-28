@@ -2,7 +2,13 @@ import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { isValidAgentId } from '@stratusagent/agents';
+import {
+  COMMAND_OPTION_VARIABLES,
+  credentialVariableProblem,
+  GIT_REPOSITORY_VARIABLES,
+  isValidAgentId,
+  SHELL_STARTUP_VARIABLES,
+} from '@stratusagent/agents';
 
 import {
   DEFAULT_SUBPROCESS_PASS_ENV,
@@ -139,14 +145,12 @@ const truncate = (value: string, maxBytes: number, dropped: boolean): { text: st
 const maxOutputBytesFor = (config: JsonObject, session: Session): number =>
   asNumber(resolvePluginAgentConfig(config, session.agent.id).maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
 
-/**
- * Environment variables that carry options for a command the permission
- * engine judges by its arguments. Never passed to a child: see `settingsFor`.
- */
-// Not POSIXLY_CORRECT: macOS's /bin/sh exports it to every command it runs,
-// so the permission engine reads arguments both ways instead (see
-// `operandsToo` in @stratusagent/permissions).
-export const COMMAND_OPTION_VARIABLES = ['RIPGREP_CONFIG_PATH', 'GREP_OPTIONS', 'GZIP'] as const;
+// Environment variables that carry options for a command the permission
+// engine judges by its arguments, never passed to a child (see
+// `settingsFor`). The list moved to @stratusagent/agents, beside the rule for
+// which variables a credential may be put in, and is re-exported here so
+// this package's importers keep working.
+export { COMMAND_OPTION_VARIABLES };
 
 /**
  * Flags that stop a shell from running its user startup files before the
@@ -167,26 +171,6 @@ const startupOff = (shell: string): string[] => {
   }
   return [];
 };
-
-/**
- * Variables that make git use a repository other than the one the command
- * runs in, which the permission engine finds from the working directory.
- * Identity and config (`GIT_CONFIG_GLOBAL`, author names) are untouched.
- */
-const GIT_REPOSITORY_VARIABLES: readonly string[] = [
-  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
-];
-
-/**
- * Variables that make a shell run code before the command, or read it
- * differently from the permission engine. Never passed. `CDPATH` sends a
- * relative `cd` somewhere other than the working directory the engine
- * follows it from. `BASHOPTS`, `SHELLOPTS` and `POSIXLY_CORRECT` switch on
- * shell options at startup (`cdable_vars` makes `cd HOME` follow `$HOME`).
- */
-const SHELL_STARTUP_VARIABLES: readonly string[] = [
-  'BASH_ENV', 'ENV', 'ZDOTDIR', 'CDPATH', 'BASHOPTS', 'SHELLOPTS', 'POSIXLY_CORRECT',
-];
 
 const settingsFor = (
   config: JsonObject,
@@ -625,24 +609,50 @@ const canonicalPath = (target: string): string => {
 };
 
 /**
- * The variables `credentialsEnv` sets for this agent's commands, from the
- * credential store: `{ GH_TOKEN: "github.token" }` puts the agent's stored
- * `github.token` in `GH_TOKEN`. Per agent like the rest of the settings, and
- * only names the agent's soul grants it (its `credentials:` list); a name it
- * isn't granted is skipped, so a fleet-wide mapping gives each agent only
- * its own. A granted name with nothing stored leaves the variable unset.
+ * The stored credentials this agent's commands get as environment variables,
+ * from two places, read on every command so neither needs a restart:
+ *
+ * - **Bindings** an approver made by answering a form that said "readable by
+ *   <agent>'s shell as `VAR`", or an operator made with
+ *   `stratus credential env`. They live in the credentials file beside the
+ *   values, and reach this plugin only because its manifest opts in
+ *   (`envBindings: true`).
+ * - **`credentialsEnv`** in the trusted config: `{ GH_TOKEN: "github.token" }`
+ *   puts the agent's stored `github.token` in `GH_TOKEN`. Per agent like the
+ *   rest of the settings. It is the operator's pin: a variable it names is
+ *   never taken from a binding, whether or not its own name resolves.
+ *
+ * Either way only names the agent's soul grants it (its `credentials:` list)
+ * reach a command; a name it isn't granted is skipped, so a fleet-wide
+ * mapping gives each agent only its own. A granted name with nothing stored
+ * leaves the variable unset.
  *
  * The command can read the value (`echo $GH_TOKEN` prints it), which is
- * the point and the cost: map only narrowly scoped tokens.
+ * the point and the cost, and why a form says so before anyone answers it.
  */
 const credentialEnvFor = async (
   config: JsonObject,
   session: Session,
   credentials: CredentialResolver | undefined,
 ): Promise<Record<string, string>> => {
-  const mapping = resolvePluginAgentConfig(config, session.agent.id, { mergeKeys: ['credentialsEnv'] }).credentialsEnv;
-  if (typeof mapping !== 'object' || mapping === null || Array.isArray(mapping) || Object.keys(mapping).length === 0) {
-    return {};
+  const configured = resolvePluginAgentConfig(config, session.agent.id, { mergeKeys: ['credentialsEnv'] }).credentialsEnv;
+  const mapping = typeof configured === 'object' && configured !== null && !Array.isArray(configured) ? configured : {};
+  const env: Record<string, string> = {};
+  if (credentials?.envBindings !== undefined) {
+    for (const [variable, value] of Object.entries(await credentials.envBindings(session.agent))) {
+      // A hand-edited file is the only way here: every writer checks first.
+      const problem = credentialVariableProblem(variable);
+      if (problem !== undefined) {
+        throw new Error(`shell.run refused: a stored credential binding names ${variable}. ${problem} Remove it with \`stratus credential env --remove\`.`);
+      }
+      if (typeof mapping[variable] === 'string' && mapping[variable].length > 0) {
+        continue;
+      }
+      env[variable] = value;
+    }
+  }
+  if (Object.keys(mapping).length === 0) {
+    return env;
   }
   if (credentials === undefined) {
     throw new Error(
@@ -651,14 +661,11 @@ const credentialEnvFor = async (
     );
   }
   const granted = new Set(session.agent.credentials ?? []);
-  const env: Record<string, string> = {};
   for (const [variable, name] of Object.entries(mapping)) {
     if (typeof name !== 'string' || name.length === 0) {
       continue;
     }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable) || RESERVED_CREDENTIAL_VARIABLES.has(variable)
-      || (COMMAND_OPTION_VARIABLES as readonly string[]).includes(variable) || SHELL_STARTUP_VARIABLES.includes(variable)
-      || GIT_REPOSITORY_VARIABLES.includes(variable) || variable.startsWith('BASH_FUNC_')) {
+    if (credentialVariableProblem(variable) !== undefined) {
       throw new Error(
         `shell.run refused: credentialsEnv can't set ${variable}. Map a credential to a variable a CLI reads its token from, such as GH_TOKEN.`,
       );
@@ -673,9 +680,6 @@ const credentialEnvFor = async (
   }
   return env;
 };
-
-/** Variables a credential must not replace: what finds programs and where they keep their files. */
-const RESERVED_CREDENTIAL_VARIABLES = new Set(['PATH', 'HOME', 'SHELL', 'USER', 'LOGNAME', 'TMPDIR', 'PWD', 'IFS']);
 
 export interface ShellToolOptions {
   /**

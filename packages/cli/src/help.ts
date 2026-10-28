@@ -158,11 +158,20 @@ Commands:
                    history: printf %s "$KEY" | stratus credential set
                    search.apiKey. --agent <id> stores one agent's own key,
                    which outranks the shared entry for that agent. Storing
-                   grants nothing: the soul still needs credentials: [name]
-  credentials      List stored credential names and which agents have their
-                   own — names only, never values (also: credential list)
+                   grants nothing: the soul still needs credentials: [name].
+                   --env <VAR> (with --agent) also binds it, as below
+  credential env   Let one agent's shell commands read a stored key as an
+                   environment variable: stratus credential env
+                   twilio.authToken TWILIO_AUTH_TOKEN --agent <id>. Applies
+                   from the agent's next command, no restart; only while its
+                   soul lists the name. --remove drops the binding. The
+                   config's credentialsEnv still wins for a variable it maps
+  credentials      List stored credential names, which agents have their
+                   own, and what each agent's shell reads — names only,
+                   never values (also: credential list)
   credential remove
-                   Forget one (--agent <id> for that agent's own entry)
+                   Forget one (--agent <id> for that agent's own entry),
+                   with the bindings that read it
   signin set       Give one agent its own Claude subscription: stratus signin
                    set anthropic --agent <id> asks for a \`claude setup-token\`
                    token without echoing it, or reads it from stdin; never

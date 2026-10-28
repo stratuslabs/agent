@@ -124,6 +124,7 @@
       },
       "additionalProperties": false
     },
-    "credentialsFromConfig": "credentialsEnv"
+    "credentialsFromConfig": "credentialsEnv",
+    "envBindings": true
   }
 }

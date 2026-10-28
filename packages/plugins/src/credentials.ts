@@ -29,6 +29,10 @@ export const createManifestBoundCredentialResolver = (
   config?: JsonObject,
 ): CredentialResolver => {
   const declared = new Set([...manifest.credentials, ...configuredCredentialNames(manifest, config)]);
+  // Bindings are names an approver or operator chose after the plugin
+  // loaded, so no manifest can list them; one that says it reads them gets
+  // the method, and every other plugin never sees it.
+  const envBindings = manifest.envBindings === true ? resolver.envBindings?.bind(resolver) : undefined;
   return {
     async resolve(agent, name) {
       if (!declared.has(name)) {
@@ -39,6 +43,7 @@ export const createManifestBoundCredentialResolver = (
       }
       return resolver.resolve(agent, name);
     },
+    ...(envBindings !== undefined ? { envBindings } : {}),
   };
 };
 
