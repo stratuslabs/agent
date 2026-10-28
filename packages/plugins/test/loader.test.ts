@@ -922,8 +922,8 @@ test('only a plugin whose manifest says envBindings: true is handed the host\'s 
     credentials,
   });
   assert.deepEqual(handed, { shellish: { TWILIO_AUTH_TOKEN: 'tw-secret' }, other: 'none' });
-  assert.equal(result.failures.length, 1);
-  assert.match(String(result.failures[0]?.error ?? JSON.stringify(result.failures[0])), /envBindings must be true or false/);
+  assert.deepEqual(result.failures.map((failure) => failure.package), ['stratus-plugin-bad']);
+  assert.match(result.failures[0]?.reason ?? '', /envBindings must be true or false/);
 });
 
 const CHECK = { agentId: 'ava', sessionId: 's1', provider: 'anthropic' };

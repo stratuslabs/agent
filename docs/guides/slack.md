@@ -410,10 +410,17 @@ submission; anyone else in the thread is told they cannot. What the form does:
   beside the old file and renamed over it, so the old key stays until the
   new one is saved, and the next command or tool call uses the new one with
   no restart.
+- **A key for the agent's shell says so.** When the agent asks with `env`
+  (`credential.request` with `env: "GH_TOKEN"`, for a CLI or script that
+  reads its token from a variable), the message and the form both say
+  "Kai's shell commands will be able to read this as `GH_TOKEN`, so Kai can
+  see the value". Answering stores the value and that binding together, and
+  the agent's next command has `$GH_TOKEN`, with no config edit or restart.
+  See [tool-shell](../../packages/tool-shell/README.md#stored-credentials-in-the-environment).
 - **Every key added or replaced from a form or a link writes an audit
   line** to `~/.stratus/credential-audit.log`: when, which name, whose store,
-  added or replaced, the approver's Slack id, and form or link. It holds
-  names only, never a value.
+  added or replaced, the approver's Slack id, form or link, and the variable
+  when one was bound. It holds names only, never a value.
 
 An agent asks only in a conversation a channel started, and only in a
 channel that can show the form, which today is Slack; a scheduled or HTTP

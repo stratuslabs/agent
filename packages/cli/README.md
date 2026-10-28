@@ -53,6 +53,7 @@ stratus restart                        # announced restart: refuse, drain, come 
 stratus health                         # is the running daemon serving? exit 0/1, for container and probe health checks
 stratus sessions --status failed       # what the daemon's sessions are doing, newest first (--agent, --limit, --format json)
 stratus credentials                    # stored credential names (never values)
+stratus credential env gh.token GH_TOKEN --agent kai   # kai's shell reads it as $GH_TOKEN, no restart
 stratus signin set anthropic --agent remy  # one agent's own Claude subscription, token asked without echo (also `signins`, `signin remove`)
 stratus channel set imessage --agent blair apiKey  # a channel plugin's secrets for one agent, asked without echo (also `channels`, `channel remove`)
 stratus schedules                      # what the fleet has scheduled, and where it reports
@@ -95,7 +96,7 @@ Full reference with every subcommand:
 | `--limit <n>` | `memory search`: maximum hits; `sessions`: how many to list (default 20) |
 | `--status <status>` | `sessions`: only this state (`idle`, `running`, `pending_approval`, `completed`, `failed`) |
 | `--file <path>`, `--preserve-trust` | `memory export` / `memory import`: the JSONL, and keeping each recorded label instead of landing entries `external` |
-| `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one; `signin set`/`remove`: whose own sign-in it is; `channel set`/`remove`: whose binding it is |
+| `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one; `credential env`: whose shell the binding is for; `signin set`/`remove`: whose own sign-in it is; `channel set`/`remove`: whose binding it is |
 | `--port`, `--host`, `--no-open` | `dashboard`: where a daemon it starts should bind; skip opening the browser |
 | `--no-login` | `service install`: install without the start-at-login trigger |
 | `--version`, `-v` | Print this build's version and exit |

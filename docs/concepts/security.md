@@ -77,6 +77,23 @@ linked own the full story.
   replace from chat or a link appends a names-only line to
   `~/.stratus/credential-audit.log`.
   ([Slack](../guides/slack.md#adding-a-credential-from-slack))
+- **A form can make one key readable by one agent's shell, and says so
+  before anything is typed.** A request with `env` (`GH_TOKEN`) shows "Kai's
+  shell commands will be able to read this as `GH_TOKEN`, so Kai can see the
+  value", and answering it stores the value and that binding in one write; a
+  channel whose form can't say it is never handed the request. The same
+  approvers decide, and a binding gives nothing unless the agent's soul lists
+  the name. A variable the agent names must look like a secret's (uppercase,
+  ending in `_TOKEN`, `_KEY`, `_SECRET`, `_PASSWORD`, `_SID` or `_ID`),
+  because a variable can change what an allowed command does
+  (`GIT_SSH_COMMAND`, `NODE_OPTIONS`) while the permission engine judges the
+  command text; any other name is the operator's, at the machine
+  (`stratus credential env`), where only the refused list applies. A binding
+  is for one agent, even on a shared key: a delegated agent runs as itself
+  and gets only its own, while a sub-agent runs under its parent and gets
+  the parent's. The config's `credentialsEnv` pins a variable over any
+  binding, and the audit line names the variable.
+  ([tool-shell](../../packages/tool-shell/README.md#stored-credentials-in-the-environment))
 - **A credential link is a bearer capability, by choice.** Where no form
   can be shown, an agent whose soul lists `credential.request` (or has no
   `tools:` key) is handed a one-time link to a form the control

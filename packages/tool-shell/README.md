@@ -198,21 +198,40 @@ reasons of its own.
 | `home` | `hidden` | `hidden`: only the toolchain paths above and `readablePaths` are readable in your home. `visible`: all of it is, apart from the denied paths. |
 | `readablePaths` | none | More paths a command may read (`~/projects`), read-only. They win over the default denials around them, so a path inside the Stratus home (an agent's own `~/.stratus/integrations/<id>` git and gh config) can be named. Denied paths inside them stay hidden. |
 | `writablePaths` | none | More directories a command may write, such as a build tool's cache (`~/.gradle`). Like `readablePaths`, they win over the default denials around them, so an agent's own home inside the Stratus home (`~/.stratus/integrations/<id>/home`, where CLIs like vercel, gh and gcloud save their config) can be named. Denied paths inside them stay denied. A path that is or holds the Stratus home, another agent's workspace, or a file the host protects is refused, with the command, and so is one inside another agent's workspace or inside a directory the host protects other than the Stratus home (a gateway's own `stateDir`). Name the narrowest directory: `integrations/<id>/home`, not `integrations/<id>`, which can hold the agent's toolchain and git or gh config. On Linux, these and the default caches are created before the command if missing, since nothing under the read-only root can be. |
-| `credentialsEnv` | none | Environment variables filled from the credential store: `{ "GH_TOKEN": "github.token" }`. See below. |
+| `credentialsEnv` | none | Environment variables filled from the credential store: `{ "GH_TOKEN": "github.token" }`. It pins: a variable it maps is never taken from a binding. See below. |
 
 All of these can be set per agent under `agents`.
 
 A CLI that reads its login from a hidden path (`gh` from `~/.config/gh` or
 the keychain, `fly` from `~/.fly`) can't authenticate inside the sandbox.
-Give that agent a stored credential through `credentialsEnv`, or a token
-through `env`, where it's visible in config, or set `sandbox: "off"` for it.
+Give that agent a stored credential bound to the variable the CLI reads (below),
+or a token through `env`, where it's visible in config, or set `sandbox: "off"`
+for it.
 
 ### Stored credentials in the environment
+
+A stored credential reaches a command as an environment variable in two ways,
+both read when the command starts, so neither needs a restart:
+
+- **A binding**, kept beside the value in `~/.stratus/credentials.json`. An
+  agent asks for a key with `credential.request` and `env: "TWILIO_AUTH_TOKEN"`;
+  the Slack form or link page says the agent's shell will be able to read it as
+  that variable, and answering it stores the value and the binding together.
+  Or the operator binds one at the machine with
+  `stratus credential env twilio.authToken TWILIO_AUTH_TOKEN --agent kai`
+  (`--remove` undoes it). A variable an agent asks for must be uppercase and
+  end in `_TOKEN`, `_KEY`, `_SECRET`, `_PASSWORD`, `_SID` or `_ID`; the
+  operator may bind any other name the refused list below allows. The plugin
+  reads bindings because its manifest says `"envBindings": true`.
+- **`credentialsEnv`** in the trusted config, which a config edit (and so a
+  restart) changes.
 
 `credentialsEnv` maps a variable to a credential name, and each command gets
 the agent's stored value (`stratus credential set`, or `credential.request`
 from chat). Set it fleet-wide, per agent under `agents`, or both. The two are
-merged name by name, with the agent's own entry winning:
+merged name by name, with the agent's own entry winning. A variable it maps
+wins over a binding of the same variable, whether or not its own name
+resolves, so the operator's config can pin one:
 
 ```json
 "@stratusagent/tool-shell": {
@@ -221,9 +240,10 @@ merged name by name, with the agent's own entry winning:
 }
 ```
 
-- An agent gets a name only when its soul lists it under `credentials:`. A
-  fleet-wide mapping gives each agent its own value, and nothing for a name
-  it isn't granted. A granted name with nothing stored leaves the variable unset.
+- An agent gets a name, bound or mapped, only when its soul lists it under
+  `credentials:`. A fleet-wide mapping gives each agent its own value, and
+  nothing for a name it isn't granted. A granted name with nothing stored
+  leaves the variable unset. A binding is for one agent, even on a shared key.
 - The value is read when the command starts, so a replaced key reaches the next
   command without a restart. It wins over the same name in `env` or `passEnv`.
 - A command can read the value: `echo $GH_TOKEN` prints it, and so does the
@@ -231,7 +251,8 @@ merged name by name, with the agent's own entry winning:
   a project-scoped Vercel one).
 - Variables that find or run programs (`PATH`, `HOME`, `BASH_ENV`,
   `GIT_DIR` and the rest of the filtered list) are refused, along with names
-  that aren't valid variable names.
+  that aren't valid variable names. A binding naming one (a hand-edited file)
+  refuses the command and names the variable.
 
 `gh` prefers `GH_TOKEN` over its own `hosts.yml`, so the stored credential is
 the one source of truth. For `git push` over HTTPS to use it as well, point
