@@ -70,8 +70,12 @@ export interface EventIntakeOptions {
   store: Pick<SqliteEventStore, 'accept' | 'refuse'>;
   /** The configured sources, read per request. */
   sources(): Readonly<Record<string, EventSourceConfig>>;
-  /** A stored credential's value by name, or undefined when it is not set. */
-  secret(name: string): string | undefined;
+  /**
+   * A stored credential's value by name, or undefined when it is not set.
+   * Asked per request, so `stratus credential set` takes effect on the next
+   * delivery, with no restart.
+   */
+  secret(name: string): Promise<string | undefined>;
   /** The event triggers on a source, read per delivery. Empty until triggers exist. */
   triggers(sourceId: string): readonly EventTrigger[];
   maxBodyBytes?: number;
@@ -80,7 +84,7 @@ export interface EventIntakeOptions {
 }
 
 export interface EventIntake {
-  receive(request: EventIntakeRequest): EventIntakeResponse;
+  receive(request: EventIntakeRequest): Promise<EventIntakeResponse>;
   counters(): EventIntakeCounters;
 }
 
@@ -330,7 +334,7 @@ export const createEventIntake = (options: EventIntakeOptions): EventIntake => {
     return true;
   };
 
-  const receive = (request: EventIntakeRequest): EventIntakeResponse => {
+  const receive = async (request: EventIntakeRequest): Promise<EventIntakeResponse> => {
     const { sourceId, headers, body } = request;
     const sources = options.sources();
     const source = Object.hasOwn(sources, sourceId) ? sources[sourceId] : undefined;
@@ -346,8 +350,7 @@ export const createEventIntake = (options: EventIntakeOptions): EventIntake => {
       return answer(413, { error: 'too_large', message: `The body is over ${maxBodyBytes} bytes.` });
     }
 
-    const secrets = source.secrets
-      .map((name) => options.secret(name))
+    const secrets = (await Promise.all(source.secrets.map((name) => options.secret(name))))
       .filter((value): value is string => typeof value === 'string' && value.length > 0);
     if (secrets.length === 0) {
       count.notReady += 1;

@@ -119,7 +119,7 @@ const harness = async (overrides: Partial<EventIntakeOptions> = {}, triggers: Ev
       board: { verify: 'standard-webhooks', secrets: ['events.board'] },
       github: { verify: 'github', secrets: ['events.github'] },
     }),
-    secret: (name) => ({ 'events.board': SW_SECRET, 'events.github': GH_SECRET } as Record<string, string>)[name],
+    secret: async (name) => ({ 'events.board': SW_SECRET, 'events.github': GH_SECRET } as Record<string, string>)[name],
     triggers: (sourceId) => triggers.filter((trigger) => trigger.source === sourceId),
     now: () => clock.now,
     warn: (line) => warnings.push(line),
@@ -142,7 +142,7 @@ const cloudEvent = (id: string, extra: Record<string, unknown> = {}): string => 
 test('an unknown source is 404 with no row, and every unknown path shares one counter', async () => {
   const { intake, store } = await harness();
   for (const sourceId of ['nope', 'other', 'nope', 'constructor', '__proto__']) {
-    const response = intake.receive({ sourceId, headers: {}, body: Buffer.from('{}') });
+    const response = await intake.receive({ sourceId, headers: {}, body: Buffer.from('{}') });
     assert.equal(response.status, 404);
   }
   assert.equal(store.deliveries().length, 0);
@@ -152,7 +152,7 @@ test('an unknown source is 404 with no row, and every unknown path shares one co
 
 test('a body over the limit is 413 with no row', async () => {
   const { intake, store } = await harness({ maxBodyBytes: 64 });
-  const response = intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1'));
+  const response = await intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1'));
   assert.equal(response.status, 413);
   assert.equal(store.deliveries().length, 0);
   assert.equal(intake.counters().sources.board!.tooLarge, 1);
@@ -162,11 +162,11 @@ test('a missing or wrong signature is 401 with no row; the reason is kept as the
   const { intake, store, warnings } = await harness();
   const unsigned = swRequest(cloudEvent('ce-1'), 'ce-1');
   delete (unsigned.headers as Record<string, string>)['webhook-signature'];
-  assert.equal(intake.receive(unsigned).status, 401);
+  assert.equal((await intake.receive(unsigned)).status, 401);
   const forged = swRequest(cloudEvent('ce-1'), 'ce-1', { 'webhook-signature': swSign('ce-1', nowSeconds, cloudEvent('ce-1'), 'whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA') });
-  assert.equal(intake.receive(forged).status, 401);
+  assert.equal((await intake.receive(forged)).status, 401);
   const gh = ghRequest('ping', { zen: 'hi' }, 'd-1', { 'x-hub-signature-256': ghSign('{"zen":"hi"}', 'wrong') });
-  assert.equal(intake.receive(gh).status, 401);
+  assert.equal((await intake.receive(gh)).status, 401);
   assert.equal(store.deliveries().length, 0, 'unsigned traffic leaves no row');
   const counters = intake.counters();
   assert.equal(counters.sources.board!.badSignature, 2);
@@ -178,16 +178,16 @@ test('a missing or wrong signature is 401 with no row; the reason is kept as the
 test('a Standard Webhooks timestamp more than 5 minutes off is refused, even with a good signature', async () => {
   const { intake } = await harness();
   const stale = String(Math.floor(NOW.getTime() / 1_000) - 301);
-  const response = intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1', { 'webhook-timestamp': stale }));
+  const response = await intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1', { 'webhook-timestamp': stale }));
   assert.equal(response.status, 401);
   assert.match(intake.counters().sources.board!.lastRefusal!.reason, /5 minutes/);
   const ahead = String(Math.floor(NOW.getTime() / 1_000) + 299);
-  assert.equal(intake.receive(swRequest(cloudEvent('ce-2'), 'ce-2', { 'webhook-timestamp': ahead })).status, 200);
+  assert.equal((await intake.receive(swRequest(cloudEvent('ce-2'), 'ce-2', { 'webhook-timestamp': ahead }))).status, 200);
 });
 
 test('a source whose secret is not set answers 503 and says how to set it', async () => {
-  const { intake, store } = await harness({ secret: () => undefined });
-  const response = intake.receive(ghRequest('ping', { zen: 'hi' }, 'd-1'));
+  const { intake, store } = await harness({ secret: async () => undefined });
+  const response = await intake.receive(ghRequest('ping', { zen: 'hi' }, 'd-1'));
   assert.equal(response.status, 503);
   assert.match(String(response.body.message), /stratus credential set events\.github/);
   assert.equal(store.deliveries().length, 0);
@@ -197,59 +197,59 @@ test('only signed requests count toward the 120-a-minute quota, so unsigned floo
   const { intake, clock } = await harness();
   for (let i = 0; i < 500; i += 1) {
     const unsigned = swRequest(cloudEvent(`junk-${i}`), `junk-${i}`, { 'webhook-signature': 'v1,AAAA' });
-    assert.equal(intake.receive(unsigned).status, 401);
+    assert.equal((await intake.receive(unsigned)).status, 401);
   }
   for (let i = 0; i < 120; i += 1) {
-    assert.equal(intake.receive(swRequest(cloudEvent(`ce-${i}`), `ce-${i}`)).status, 200, `signed request ${i}`);
+    assert.equal((await intake.receive(swRequest(cloudEvent(`ce-${i}`), `ce-${i}`))).status, 200, `signed request ${i}`);
   }
-  assert.equal(intake.receive(swRequest(cloudEvent('ce-120'), 'ce-120')).status, 429);
+  assert.equal((await intake.receive(swRequest(cloudEvent('ce-120'), 'ce-120'))).status, 429);
   assert.equal(intake.counters().sources.board!.rateLimited, 1);
   // GitHub has its own quota.
-  assert.equal(intake.receive(ghRequest('ping', { zen: 'hi' }, 'd-1')).status, 200);
+  assert.equal((await intake.receive(ghRequest('ping', { zen: 'hi' }, 'd-1'))).status, 200);
   clock.now = new Date(NOW.getTime() + 61_000);
   const later = String(Math.floor(clock.now.getTime() / 1_000));
-  assert.equal(intake.receive(swRequest(cloudEvent('ce-121'), 'ce-121', { 'webhook-timestamp': later })).status, 200);
+  assert.equal((await intake.receive(swRequest(cloudEvent('ce-121'), 'ce-121', { 'webhook-timestamp': later }))).status, 200);
 });
 
 test("a GitHub delivery left on the form content type is refused 415 naming the setting, and the fixed redelivery gets through", async () => {
   const { intake, store } = await harness();
   const payload = 'payload=%7B%22zen%22%3A%22hi%22%7D';
   const form = ghRequest('ping', payload, 'd-1', { 'content-type': 'application/x-www-form-urlencoded' });
-  const refused = intake.receive(form);
+  const refused = await intake.receive(form);
   assert.equal(refused.status, 415);
   assert.match(String(refused.body.message), /application\/json/);
   const [row] = store.deliveries();
   assert.equal(row!.status, 'refused');
   assert.match(row!.reason ?? '', /Content type.*application\/json/);
-  assert.equal(intake.receive(ghRequest('ping', { zen: 'hi', hook: { type: 'Organization' }, organization: { login: 'stratuslabs' } }, 'd-1')).status, 200);
+  assert.equal((await intake.receive(ghRequest('ping', { zen: 'hi', hook: { type: 'Organization' }, organization: { login: 'stratuslabs' } }, 'd-1'))).status, 200);
   assert.equal(store.deliveries()[0]!.status, 'unmatched');
 });
 
 test('a signed body that is not a valid event is refused 400 with a row, and the corrected post with the same id is accepted', async () => {
   const { intake, store } = await harness();
-  assert.equal(intake.receive(swRequest('{not json', 'ce-1')).status, 400);
-  assert.equal(intake.receive(swRequest(JSON.stringify({ specversion: '1.0', id: 'ce-1', source: 's' }), 'ce-1')).status, 400, 'no type');
-  assert.equal(intake.receive(swRequest(JSON.stringify({ data: {} }), 'ce-1')).status, 400, 'a plain payload needs a type');
+  assert.equal((await intake.receive(swRequest('{not json', 'ce-1'))).status, 400);
+  assert.equal((await intake.receive(swRequest(JSON.stringify({ specversion: '1.0', id: 'ce-1', source: 's' }), 'ce-1'))).status, 400, 'no type');
+  assert.equal((await intake.receive(swRequest(JSON.stringify({ data: {} }), 'ce-1'))).status, 400, 'a plain payload needs a type');
   const [latest] = store.deliveries();
   assert.equal(latest!.status, 'refused');
   assert.equal(latest!.eventId, 'ce-1');
-  assert.equal(intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1')).status, 200);
+  assert.equal((await intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1'))).status, 200);
 });
 
 test("a CloudEvent's id must be the webhook-id it was signed under", async () => {
   const { intake } = await harness();
-  const response = intake.receive(swRequest(cloudEvent('ce-other'), 'ce-1'));
+  const response = await intake.receive(swRequest(cloudEvent('ce-other'), 'ce-1'));
   assert.equal(response.status, 400);
   assert.match(String(response.body.message), /webhook-id/);
 });
 
 test('the CloudEvents content type is accepted', async () => {
   const { intake } = await harness();
-  const response = intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1', {
+  const response = await intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1', {
     'content-type': 'application/cloudevents+json; charset=utf-8',
   }));
   assert.equal(response.status, 200);
-  assert.equal(intake.receive(swRequest(cloudEvent('ce-2'), 'ce-2', { 'content-type': 'text/plain' })).status, 415);
+  assert.equal((await intake.receive(swRequest(cloudEvent('ce-2'), 'ce-2', { 'content-type': 'text/plain' }))).status, 415);
 });
 
 test('a structured CloudEvent keeps its attributes, scalar extensions as strings, and its data', () => {
@@ -338,10 +338,10 @@ test('a GitHub delivery without its event or delivery header is refused 400', as
   const { intake } = await harness();
   const noEvent = ghRequest('ping', { zen: 'hi' }, 'd-1');
   delete (noEvent.headers as Record<string, string>)['x-github-event'];
-  assert.equal(intake.receive(noEvent).status, 400);
+  assert.equal((await intake.receive(noEvent)).status, 400);
   const noDelivery = ghRequest('ping', { zen: 'hi' }, 'd-1');
   delete (noDelivery.headers as Record<string, string>)['x-github-delivery'];
-  assert.equal(intake.receive(noDelivery).status, 400);
+  assert.equal((await intake.receive(noDelivery)).status, 400);
 });
 
 test('a matching trigger gets a pending firing with its keys and block, and a repeat delivery fires nothing', async () => {
@@ -356,7 +356,7 @@ test('a matching trigger gets a pending firing with its keys and block, and a re
   };
   const other: EventTrigger = { ...trigger, triggerId: 'sched-other', filter: parseEventFilter({ exact: { actor: 'dylan' } }) };
   const { intake, store } = await harness({}, [trigger, other]);
-  const first = intake.receive(ghRequest('pull_request_review', codexReviewPayload, 'd-review'));
+  const first = await intake.receive(ghRequest('pull_request_review', codexReviewPayload, 'd-review'));
   assert.equal(first.status, 200);
   assert.equal(first.body.status, 'matched');
   const open = store.open();
@@ -367,7 +367,7 @@ test('a matching trigger gets a pending firing with its keys and block, and a re
   assert.match(open[0]!.sessionId, /^schedule:sched-codex:event-/);
   assert.match(open[0]!.block ?? '', /^Event from source "github":/);
 
-  const repeat = intake.receive(ghRequest('pull_request_review', codexReviewPayload, 'd-review'));
+  const repeat = await intake.receive(ghRequest('pull_request_review', codexReviewPayload, 'd-review'));
   assert.equal(repeat.status, 200);
   assert.equal(repeat.body.status, 'duplicate');
   assert.equal(store.open().length, 1);
@@ -376,6 +376,6 @@ test('a matching trigger gets a pending firing with its keys and block, and a re
 test('a trigger on another source never matches', async () => {
   const trigger: EventTrigger = { triggerId: 't', agentId: 'atlas', source: 'board', filter: parseEventFilter({ prefix: { type: 'com.github.' } }) };
   const { intake, store } = await harness({}, [trigger]);
-  assert.equal(intake.receive(ghRequest('ping', { zen: 'hi' }, 'd-1')).body.status, 'unmatched');
+  assert.equal((await intake.receive(ghRequest('ping', { zen: 'hi' }, 'd-1'))).body.status, 'unmatched');
   assert.equal(store.open().length, 0);
 });
