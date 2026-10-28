@@ -163,9 +163,10 @@ schedule (`schedule.list`, `schedule.cancel`, `stratus schedules`,
   most its 5 newest held events, and a hold older than 24 hours expires.
   Cancelling a trigger expires what it was holding.
 - **Never twice:** each firing carries an idempotency key. A repeated
-  delivery is a `duplicate`, and a firing caught by a restart goes out again
-  under the same key, so a turn that already started continues instead of
-  running a second time.
+  delivery is a `duplicate`, and a firing caught by a restart, a crash or
+  a graceful stop that cut its turn short, goes out again under the same
+  key, so a turn that already started continues once instead of running a
+  second time.
 
 ## Seeing what happened
 

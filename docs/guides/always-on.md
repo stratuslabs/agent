@@ -5,12 +5,18 @@ roster live at once on its own provider and model, sessions in SQLite so
 they survive restarts, delegation between agents, a watchdog for stalled
 turns, and any installed channels connected. Ctrl+C or SIGTERM drains
 cleanly: new turns are refused, in-flight ones get up to 30 seconds to
-finish, and any still running after that are aborted and recorded as
-failed ("stratusd is stopping"), which also kills the shell commands they
-started. A tool call that ignores the abort is left behind after 2 seconds,
-so it can't hold the stop, and a message that was waiting behind its turn is
-refused with the same reason instead of disappearing with the process. A
-second signal during the drain is ignored rather than cutting it short
+finish, and any still running after that are aborted, which also kills
+the shell commands they started. A turn whose message carried an
+idempotency key (a Slack message, an event firing, an API request that sent
+one) is then left for the next start, which continues it once, as it would
+after a crash, and its sender is told it will be answered after the
+restart. Any other is recorded as failed ("stratusd is stopping"), and so
+is a keyed turn on a provider that runs its own tool loop (Codex, or Claude
+through a subscription sign-in), which can't be continued safely. A tool
+call that ignores the abort is left behind after 2 seconds, so it can't
+hold the stop, and a message that was waiting behind its turn is refused
+with the same reason instead of disappearing with the process. A second
+signal during the drain is ignored rather than cutting it short
 (SIGKILL ends the process at once).
 
 It stays a foreground process on purpose — debuggable, and composable with

@@ -726,8 +726,11 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         // left for the next start: the batch stays claimed, and the next
         // start sends it again under its key, which continues that turn
         // (or runs it, if it never started) rather than losing the events.
-        // Matched by name, as a channel matches it.
-        if (error instanceof Error && error.name === 'GatewayStoppingError') {
+        // Matched by name, as a channel matches it. Only once this
+        // scheduler has stopped, which the gateway does before it refuses
+        // or aborts anything: a batch left claimed while ticks still ran
+        // would go straight out again.
+        if (stopped && error instanceof Error && error.name === 'GatewayStoppingError') {
           log(`event trigger ${record.id}: ${reason} The batch stays claimed for the next start.`);
           return;
         }

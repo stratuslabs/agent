@@ -5666,6 +5666,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // The watchdog's own mechanism: the runner fails each session with
       // the reason on the signal, saves it, and emits session.failed —
       // so the next daemon finds a finished turn, not an abandoned one.
+      // Except a keyed turn, which the resumable abort leaves running for
+      // the next daemon to continue once, as a crash would have left it
+      // (`shutdownAbort`); its caller is refused (`leftForNext`).
       // Before the loop, so a turn queued behind one aborted here, which
       // starts as soon as that one settles, is aborted the same way.
       abortingWith = kind === 'stop' ? STOPPING_TURN_ERROR : RESTARTING_TURN_ERROR;
