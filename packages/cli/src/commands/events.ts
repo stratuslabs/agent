@@ -1,3 +1,4 @@
+import { escapeControlCharacters } from '@stratusagent/core';
 import { gatewayInfoPath } from '@stratusagent/state';
 import { callRunningGateway, gatewayErrorMessage, runningGatewayBase } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
@@ -31,11 +32,17 @@ const BEFORE_ROW_LABELS: Record<string, string> = {
   notReady: 'no secret set',
 };
 
+// Every string below is printed escaped. A delivery's type and subject, and
+// a refusal reason quoting them, are whatever a signed sender wrote, so a
+// raw newline, ANSI escape or bidi control could forge a line or recolor
+// the terminal. The same rule `stratus sessions` and `stratus memory` follow.
+const safe = escapeControlCharacters;
+
 /** Nonzero counts in a fixed order, then any status this CLI doesn't know, so a newer daemon's are still shown. */
 const counts = (byStatus: Record<string, number> | undefined, order: readonly string[], label = (key: string) => key): string[] => {
-  const entries = Object.entries(byStatus ?? {}).filter(([, count]) => count > 0);
+  const entries = Object.entries(byStatus ?? {}).filter(([, count]) => typeof count === 'number' && count > 0);
   const rank = (key: string) => (order.includes(key) ? order.indexOf(key) : order.length);
-  return entries.sort(([a], [b]) => rank(a) - rank(b)).map(([key, count]) => `${count} ${label(key)}`);
+  return entries.sort(([a], [b]) => rank(a) - rank(b)).map(([key, count]) => `${count} ${safe(label(key))}`);
 };
 
 /**
@@ -94,14 +101,14 @@ export const runEvents = async (
     return 0;
   }
   for (const [id, source] of sources) {
-    writeLine(streams.stdout, id);
+    writeLine(streams.stdout, safe(id));
     const last = source.lastDelivery;
     // A refused body may have no type to show (form-encoded, say).
     writeLine(streams.stdout, last
-      ? `  last delivery: ${[last.at, last.type, last.subject].filter((part) => part !== undefined && part !== '').join(' ')} (${last.status})`
+      ? `  last delivery: ${[last.at, last.type, last.subject].filter((part): part is string => part !== undefined && part !== '').map((part) => safe(part)).join(' ')} (${safe(last.status)})`
       : '  last delivery: none yet');
     if (source.lastRefusal) {
-      writeLine(streams.stdout, `  last refusal: ${source.lastRefusal.at} ${source.lastRefusal.reason}`);
+      writeLine(streams.stdout, `  last refusal: ${safe(source.lastRefusal.at)} ${safe(source.lastRefusal.reason)}`);
     }
     const deliveries = counts(source.deliveries, DELIVERY_ORDER);
     const firings = counts(source.firings, FIRING_ORDER);

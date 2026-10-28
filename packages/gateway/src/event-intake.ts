@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import type { JsonObject, JsonValue } from '@stratusagent/core';
+import { escapeControlCharacters, type JsonObject, type JsonValue } from '@stratusagent/core';
 import { matchesEventFilter, type EventFilter, type InboundEvent } from '@stratusagent/agents';
 import type { EventSourceConfig } from '@stratusagent/state';
 
@@ -361,7 +361,9 @@ export const createEventIntake = (options: EventIntakeOptions): EventIntake => {
     const last = lastWarned.get(sourceId);
     if (last === undefined || at.getTime() - last >= REFUSAL_WARN_INTERVAL_MS) {
       lastWarned.set(sourceId, at.getTime());
-      options.warn(`events: refused a request to source "${sourceId}": ${reason}`);
+      // Escaped: a reason can quote a sender's content type or field, and a
+      // raw control character there would forge or recolor a log line.
+      options.warn(`events: refused a request to source "${sourceId}": ${escapeControlCharacters(reason)}`);
     }
   };
 

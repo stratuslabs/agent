@@ -10787,6 +10787,40 @@ test('stratus events renders each source from the daemon: last delivery, last re
   assert.equal(down.output.stdout, '');
 });
 
+test('stratus events escapes control characters in what a sender wrote, so a payload cannot forge lines or colors', async () => {
+  const forged = {
+    since: '2026-10-27T03:00:00.000Z',
+    unknownSource: 0,
+    sources: {
+      board: {
+        lastDelivery: { at: '2026-10-28T03:00:00.000Z', type: 'card.moved\u001b[2K', subject: 'card/1\nboard\n  last refusal: none', status: 'matched' },
+        lastRefusal: { at: '2026-10-28T03:00:01.000Z', reason: 'Content type "x\u001b[31m\u202e" is not supported.' },
+        deliveries: { matched: 1 },
+        firings: {},
+        refusedBeforeRow: { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 0 },
+      },
+    },
+  };
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(forged));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-escape-'));
+  try {
+    const text = createStreams();
+    assert.equal(await runCli({ argv: ['events', '--gateway', `http://127.0.0.1:${port}`, '--token', 't'], streams: text.streams, env: { homeDir: home, cwd: home, processEnv: {} } }), 0);
+    const lines = text.output.stdout.split('\n');
+    assert.equal(lines[1], '  last delivery: 2026-10-28T03:00:00.000Z card.moved\\u001b[2K card/1\\nboard\\n  last refusal: none (matched)');
+    assert.equal(lines[2], '  last refusal: 2026-10-28T03:00:01.000Z Content type "x\\u001b[31m\\u202e" is not supported.');
+    assert.doesNotMatch(text.output.stdout, /\u001b|\u202e/);
+    assert.equal(lines.filter((line) => line.startsWith('  last refusal:')).length, 1, 'no forged line');
+  } finally {
+    server.close();
+  }
+});
+
 test('stratus events asks the real daemon, which lists a configured source before any delivery', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-real-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
