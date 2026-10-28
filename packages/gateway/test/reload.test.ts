@@ -555,7 +555,10 @@ test('a stop that has to shut down around a stuck firing and a stuck plugin stil
   const firingStarted = new Promise<void>((resolve) => { firing = resolve; });
   const fetchImpl = (() => new Promise<Response>(() => { firing(); })) as typeof fetch;
 
-  const window = 200;
+  // A full second, so the slack in the bound below is wider than a stalled
+  // event loop: a loaded CI runner has held this process for a quarter of a
+  // second in the middle of a stop.
+  const window = 1_000;
   const warnings: string[] = [];
   const gateway = createGateway({
     env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
@@ -589,8 +592,10 @@ test('a stop that has to shut down around a stuck firing and a stuck plugin stil
 
   assert.ok(warnings.some((line) => /did not stop after being aborted/.test(line)), warnings.join('\n'));
   assert.ok(warnings.some((line) => /a plugin did not release what it holds/.test(line)), warnings.join('\n'));
-  // Two windows plus scheduling slack; one window per phase would be four.
-  assert.ok(elapsed < 3 * window, `stop took ${elapsed}ms with a ${window}ms window`);
+  // Two windows plus half a window of slack. A timer never fires early, so
+  // any phase that took a window of its own would make it at least three,
+  // and one window per phase would be four.
+  assert.ok(elapsed < 2.5 * window, `stop took ${elapsed}ms with a ${window}ms window`);
 });
 
 test('a turn that outlives the drain window is aborted as restarting, and the restart still happens', async () => {
