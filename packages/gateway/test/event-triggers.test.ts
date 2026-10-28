@@ -218,6 +218,28 @@ test('a firing records when it went out on the trigger itself, like a timed sche
   }
 });
 
+test('the running scheduler prunes the event tables to their 7-day window, at start and then hourly', async () => {
+  const r = await rig();
+  try {
+    const old = new Date(T0.getTime() - 8 * 86_400_000).toISOString();
+    r.events.accept({ source: 'github', eventId: 'old-1', type: 'com.github.ping', receivedAt: old, firings: [] });
+    r.events.accept({ source: 'github', eventId: 'new-1', type: 'com.github.ping', receivedAt: T0.toISOString(), firings: [] });
+    await r.runtime.start();
+    assert.deepEqual(r.events.deliveries().map((row) => row.eventId), ['new-1'], 'the start-up pass pruned the 8-day-old row');
+
+    // A row that ages out later goes at the next hourly pass, not every tick.
+    r.clock.now = new Date(T0.getTime() + 30 * 60_000);
+    r.events.accept({ source: 'github', eventId: 'older-1', type: 'com.github.ping', receivedAt: old, firings: [] });
+    r.runtime.kickEvents();
+    assert.equal(r.events.deliveries().length, 2, 'within the hour: not pruned yet');
+    r.clock.now = new Date(T0.getTime() + 61 * 60_000);
+    r.runtime.kickEvents();
+    assert.deepEqual(r.events.deliveries().map((row) => row.eventId), ['new-1']);
+  } finally {
+    await r.stop();
+  }
+});
+
 test('a dispatch that throws marks the firing failed with the reason', async () => {
   const r = await rig();
   try {
