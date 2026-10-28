@@ -351,10 +351,9 @@ export const createEventIntake = (options: EventIntakeOptions): EventIntake => {
       .filter((value): value is string => typeof value === 'string' && value.length > 0);
     if (secrets.length === 0) {
       count.notReady += 1;
-      const names = source.secrets.join(', ') || '(none listed)';
-      const reason = `no secret is set for this source. Run \`stratus credential set ${source.secrets[0] ?? `events.${sourceId}`}\` on the daemon's host (names: ${names}).`;
+      const reason = `No secret is set for event source "${sourceId}". Run \`stratus credential set ${source.secrets[0] ?? `events.${sourceId}`}\` on the daemon's host.`;
       refusal(sourceId, reason);
-      return answer(503, { error: 'source_not_ready', message: `This event source has ${reason}` });
+      return answer(503, { error: 'source_not_ready', message: reason });
     }
 
     const receivedAt = now().toISOString();
