@@ -6,6 +6,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { SENDER_TRUST_METADATA_KEY, type JsonObject, type Session } from '@stratusagent/core';
 import {
   canonicalDestination,
+  DEFAULT_EVENT_MAX_PER_HOUR,
+  isWithinQuietHours,
   nextFireAfter,
   SCHEDULE_ID_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
@@ -16,6 +18,8 @@ import {
 } from '@stratusagent/agents';
 import { assertDerivedStatePathSync } from '@stratusagent/state';
 
+import type { EventTrigger } from './event-intake.ts';
+import type { EventFiringRow, SqliteEventStore } from './events.ts';
 import { tightenSqliteFile } from './sessions.ts';
 
 /**
@@ -226,7 +230,17 @@ export interface SchedulerRuntimeOptions {
     agentId: string;
     userMessage: string;
     metadata: JsonObject;
+    /** An event firing's batch key: a repeat continues its turn rather than starting a second. */
+    idempotencyKey?: string;
   }): Promise<unknown>;
+  /**
+   * Event triggers (card 590): the store their firings wait in, and the
+   * sources the operator configured. Without it, an `event` cadence is
+   * refused at creation: a trigger nothing can deliver to never fires.
+   */
+  events?: SchedulerEventOptions;
+  /** The clock, for tests. Default `new Date()`. */
+  now?(): Date;
   /**
    * Prove a destination can be served, rejecting with a message fit for
    * the person who named it. Called at creation — the whole point is
@@ -264,9 +278,35 @@ export interface SchedulerRuntimeOptions {
   warn(line: string): void;
 }
 
+export interface SchedulerEventOptions {
+  store: Pick<SqliteEventStore, 'open' | 'claim' | 'hold' | 'finish' | 'retire' | 'turnsFiredSince'>;
+  /** The configured source ids, read at each creation. */
+  sources(): readonly string[];
+  /**
+   * Event firings per agent at once, apart from timed schedules' cap: a
+   * Codex review must not wait behind a long work-loop firing, which is the
+   * polling this replaces. A firing over it waits, it is not dropped.
+   * Default 1.
+   */
+  maxConcurrentPerAgent?: number;
+}
+
+/** A held event firing older than this expires, so a long pause never ends in a burst. */
+const EVENT_HOLD_MAX_MS = 24 * 60 * 60 * 1_000;
+
+/** Held firings kept per coalescing key; older ones are superseded. */
+const EVENT_HELD_PER_KEY = 5;
+
 export interface SchedulerRuntime {
   /** The handle the `schedule.*` tools close over. */
   handle: SchedulerHandle;
+  /** The event triggers on a source, for the intake's rule filter. */
+  eventTriggers(sourceId: string): EventTrigger[];
+  /**
+   * Run the hold-or-fire step for waiting event firings now, rather than at
+   * the next tick: the intake calls it after a delivery matched.
+   */
+  kickEvents(): void;
   /**
    * The destination carve-out, shaped for the permission policy's
    * `destinations` option: true exactly when this session is a firing of a
@@ -316,7 +356,9 @@ export interface SchedulerRuntime {
 }
 
 export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): SchedulerRuntime => {
-  const { store, dispatch, validateDestination, sessionStatus, hasAgent, log, warn } = options;
+  const { store, dispatch, validateDestination, sessionStatus, hasAgent, log, warn, events } = options;
+  const clock = options.now ?? (() => new Date());
+  const maxEventsPerAgent = events?.maxConcurrentPerAgent ?? 1;
   const minIntervalMs = options.limits?.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
   const maxConcurrentPerAgent = options.limits?.maxConcurrentPerAgent ?? DEFAULT_MAX_CONCURRENT_PER_AGENT;
   const tickMs = options.limits?.tickMs ?? DEFAULT_TICK_MS;
@@ -375,10 +417,50 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     }
   };
 
+  /**
+   * An event trigger: no slot, so the due scan never sees it; it fires when
+   * a delivery matches. Refused for a source the operator hasn't configured,
+   * now, while the person approving it can hear why.
+   */
+  const createTrigger = async (input: ScheduleCreateInput): Promise<ScheduleRecord> => {
+    if (input.cadence.kind !== 'event') {
+      throw new Error('createTrigger takes an event cadence.');
+    }
+    if (!events) {
+      throw new Error('This daemon takes no events: its config has no "events" sources, so a trigger could never fire. The operator adds a source first.');
+    }
+    const configured = events.sources();
+    if (!configured.includes(input.cadence.source)) {
+      throw new Error(
+        `No event source "${input.cadence.source}" is configured on this daemon. `
+        + (configured.length > 0 ? `Configured: ${configured.join(', ')}.` : 'None is.'),
+      );
+    }
+    if (input.destination) {
+      await validateDestination(input.agentId, input.destination);
+    }
+    const record: ScheduleRecord = {
+      id: randomUUID(),
+      agentId: input.agentId,
+      cadence: input.cadence,
+      prompt: input.prompt,
+      ...(input.destination ? { destination: input.destination } : {}),
+      createdAt: clock().toISOString(),
+      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      ...(input.trust ? { trust: input.trust } : {}),
+    };
+    store.insert(record);
+    log(`event trigger ${record.id} created for ${record.agentId} on source ${input.cadence.source}${record.destination ? `, reports to ${canonicalDestination(record.destination)}` : ''}`);
+    return record;
+  };
+
   const handle: SchedulerHandle = {
     async create(input) {
       if (!hasAgent(input.agentId)) {
         throw new Error(`Agent not found: ${input.agentId}`);
+      }
+      if (input.cadence.kind === 'event') {
+        return createTrigger(input);
       }
       enforceFloor(input);
       const now = new Date();
@@ -419,6 +501,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       const deleted = store.delete(scheduleId);
       if (deleted) {
         log(`schedule ${scheduleId} cancelled by ${agentId}`);
+        expireTriggerFirings(scheduleId);
       }
       return deleted;
     },
@@ -584,6 +667,164 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     void firing.finally(() => inflight.delete(firing));
   };
 
+  // ---- event triggers (card 590) ------------------------------------------
+
+  /** Batches this process dispatched and has not seen settle. Empty after a restart, which is what makes a claimed batch recoverable. */
+  const inflightBatches = new Set<string>();
+  const runningEventsPerAgent = new Map<string, number>();
+  /** Groups whose deferral under the per-agent slot was already logged. */
+  const eventDeferralsWarned = new Set<string>();
+
+  /** A trigger's waiting firings never go out once it is cancelled. */
+  const expireTriggerFirings = (triggerId: string): void => {
+    if (!events) {
+      return;
+    }
+    const ids = events.store.open()
+      .filter((row) => row.triggerId === triggerId && !(row.batchKey !== undefined && inflightBatches.has(row.batchKey)))
+      .map((row) => row.id);
+    if (ids.length > 0) {
+      events.store.retire(ids, 'expired', 'Its trigger was cancelled.', clock().toISOString());
+    }
+  };
+
+  const fireEventBatch = (record: ScheduleRecord, rows: EventFiringRow[], batchKey: string): void => {
+    const sessionId = rows[0]!.sessionId;
+    const ids = rows.map((row) => row.id);
+    inflightBatches.add(batchKey);
+    runningEventsPerAgent.set(record.agentId, (runningEventsPerAgent.get(record.agentId) ?? 0) + 1);
+    activeFirings.add(sessionId);
+    const firing = dispatch({
+      sessionId,
+      agentId: record.agentId,
+      // The trigger's prompt, then each event in the order it arrived.
+      userMessage: [record.prompt, ...rows.map((row) => row.block ?? '')].join('\n\n'),
+      idempotencyKey: batchKey,
+      metadata: {
+        [SCHEDULED_TURN_METADATA_KEY]: true,
+        [SCHEDULE_ID_METADATA_KEY]: record.id,
+        // The event text came from outside: a valid signature proves who
+        // delivered it, not who wrote it (anyone can comment on a PR). So
+        // the turn runs at `external`, under the gate that applies after
+        // reading a web page, whatever the trigger's creator was trusted at.
+        [SENDER_TRUST_METADATA_KEY]: 'external',
+      },
+    }).then(
+      () => {
+        events?.store.finish(ids, { status: 'fired' }, clock().toISOString());
+        log(`event trigger ${record.id} fired — session ${sessionId} completed (${ids.length} event${ids.length === 1 ? '' : 's'})`);
+      },
+      (error: unknown) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        events?.store.finish(ids, { status: 'failed', reason }, clock().toISOString());
+        warn(`event trigger ${record.id} firing failed: ${reason}`);
+      },
+    ).finally(() => {
+      activeFirings.delete(sessionId);
+      inflightBatches.delete(batchKey);
+      const count = (runningEventsPerAgent.get(record.agentId) ?? 1) - 1;
+      if (count > 0) {
+        runningEventsPerAgent.set(record.agentId, count);
+      } else {
+        runningEventsPerAgent.delete(record.agentId);
+      }
+    });
+    inflight.add(firing);
+    void firing.finally(() => inflight.delete(firing));
+  };
+
+  /**
+   * The hold-or-fire step, for every waiting event firing: a fresh match, a
+   * hold whose window opened, and at startup whatever a crash left. One
+   * path, so a recovered firing still waits out quiet hours and counts
+   * against its trigger's hour like any other.
+   */
+  const processEvents = (now: Date): void => {
+    if (!events || stopped) {
+      return;
+    }
+    const nowIso = now.toISOString();
+    const triggers = new Map<string, ScheduleRecord | undefined>();
+    const triggerFor = (id: string): ScheduleRecord | undefined => {
+      if (!triggers.has(id)) {
+        const record = store.get(id);
+        triggers.set(id, record?.cadence.kind === 'event' ? record : undefined);
+      }
+      return triggers.get(id);
+    };
+
+    // A claimed batch stays itself; free firings group by trigger and key.
+    // Map order is first appearance in `open()`, oldest first.
+    const groups = new Map<string, EventFiringRow[]>();
+    for (const row of events.store.open()) {
+      if (row.batchKey !== undefined && inflightBatches.has(row.batchKey)) {
+        continue;
+      }
+      const trigger = triggerFor(row.triggerId);
+      if (!trigger || trigger.agentId !== row.agentId) {
+        events.store.retire([row.id], 'expired', 'Its trigger was cancelled.', nowIso);
+        continue;
+      }
+      if (now.getTime() - Date.parse(row.createdAt) > EVENT_HOLD_MAX_MS) {
+        events.store.retire([row.id], 'expired', 'Held for more than 24 hours.', nowIso);
+        continue;
+      }
+      const key = row.batchKey !== undefined ? `batch\n${row.batchKey}` : `key\n${row.triggerId}\n${row.coalescingKey}`;
+      const group = groups.get(key) ?? [];
+      group.push(row);
+      groups.set(key, group);
+    }
+
+    const holdAs = (rows: EventFiringRow[], status: 'held' | 'rate_limited'): void => {
+      const ids = rows.filter((row) => row.status !== status).map((row) => row.id);
+      if (ids.length > 0) {
+        events.store.hold(ids, status, nowIso);
+      }
+    };
+
+    for (const [groupKey, all] of groups) {
+      const trigger = triggerFor(all[0]!.triggerId)!;
+      if (trigger.cadence.kind !== 'event') {
+        continue;
+      }
+      let rows = all;
+      const batched = rows[0]!.batchKey !== undefined;
+      if (!batched && rows.length > EVENT_HELD_PER_KEY) {
+        const dropped = rows.slice(0, rows.length - EVENT_HELD_PER_KEY);
+        events.store.retire(dropped.map((row) => row.id), 'superseded', `Over ${EVENT_HELD_PER_KEY} waiting for one subject; newer ones were kept.`, nowIso);
+        rows = rows.slice(-EVENT_HELD_PER_KEY);
+      }
+      const { quietHours } = trigger.cadence;
+      if (options.paused?.() === true || (quietHours !== undefined && isWithinQuietHours(quietHours, now))) {
+        holdAs(rows, 'held');
+        continue;
+      }
+      const running = runningEventsPerAgent.get(trigger.agentId) ?? 0;
+      if (running >= maxEventsPerAgent) {
+        if (!eventDeferralsWarned.has(groupKey)) {
+          eventDeferralsWarned.add(groupKey);
+          log(`event trigger ${trigger.id}: ${trigger.agentId} already has ${running} event firing(s) running; this one waits`);
+        }
+        continue;
+      }
+      eventDeferralsWarned.delete(groupKey);
+      const maxPerHour = trigger.cadence.maxPerHour ?? DEFAULT_EVENT_MAX_PER_HOUR;
+      if (events.store.turnsFiredSince(trigger.id, new Date(now.getTime() - 3_600_000).toISOString()) >= maxPerHour) {
+        if (!batched && rows.length > 1) {
+          events.store.retire(rows.slice(0, -1).map((row) => row.id), 'superseded', 'A newer event for the same subject replaced it while over the hourly limit.', nowIso);
+          rows = rows.slice(-1);
+        }
+        holdAs(rows, 'rate_limited');
+        continue;
+      }
+      const batchKey = rows[0]!.batchKey ?? rows[rows.length - 1]!.dispatchKey;
+      if (!events.store.claim(rows.map((row) => row.id), batchKey, nowIso)) {
+        continue;
+      }
+      fireEventBatch(trigger, rows, batchKey);
+    }
+  };
+
   /**
    * `propagateReadiness` is the startup tick's: a readiness failure there
    * has a caller to reach — `start()`, whose rejection is the gateway's
@@ -606,13 +847,14 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       }
     }
     try {
-      const now = new Date();
+      const now = clock();
       for (const record of store.due(now.toISOString())) {
         if (stopped) {
           break;
         }
         fireOrSkip(record, now);
       }
+      processEvents(now);
     } catch (error) {
       warn(`scheduler tick failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -629,6 +871,23 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
 
   return {
     handle,
+    eventTriggers(sourceId) {
+      return store.list()
+        .filter((record) => record.cadence.kind === 'event' && record.cadence.source === sourceId)
+        .map((record) => ({
+          triggerId: record.id,
+          agentId: record.agentId,
+          source: sourceId,
+          filter: (record.cadence as Extract<ScheduleRecord['cadence'], { kind: 'event' }>).filter,
+        }));
+    },
+    kickEvents() {
+      try {
+        processEvents(clock());
+      } catch (error) {
+        warn(`event triggers: processing failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
     isPreauthorized(session, destination) {
       // A live firing of this scheduler's, first: session metadata is
       // written by whoever dispatches, so on its own it proves nothing —
@@ -686,6 +945,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       const deleted = store.delete(scheduleId);
       if (deleted) {
         log(`schedule ${scheduleId} cancelled`);
+        expireTriggerFirings(scheduleId);
       }
       return deleted;
     },

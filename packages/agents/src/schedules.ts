@@ -399,6 +399,16 @@ export const describeSchedule = (record: ScheduleRecord): JsonObject => ({
   trust: record.trust ?? 'unknown',
   ...(record.destination ? { destination: canonicalDestination(record.destination) } : {}),
   ...(record.destination?.thread ? { thread: record.destination.thread } : {}),
+  ...(record.cadence.kind === 'event'
+    ? {
+      event: {
+        source: record.cadence.source,
+        filter: record.cadence.filter as unknown as JsonObject,
+        ...(record.cadence.quietHours ? { quietHours: { ...record.cadence.quietHours } } : {}),
+        ...(record.cadence.maxPerHour !== undefined ? { maxPerHour: record.cadence.maxPerHour } : {}),
+      },
+    }
+    : {}),
   ...(record.nextFireAt ? { nextFireAt: record.nextFireAt } : {}),
   ...(record.lastFiredAt ? { lastFiredAt: record.lastFiredAt } : {}),
   createdAt: record.createdAt,

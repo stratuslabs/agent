@@ -59,6 +59,7 @@ export const KERNEL_TOOL_NAMES = [
   'skill.read',
   'schedule.every',
   'schedule.at',
+  'schedule.on',
   'schedule.list',
   'schedule.cancel',
   'message.send',

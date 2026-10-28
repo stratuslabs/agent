@@ -18,6 +18,7 @@ import {
   describeSchedule,
   sameConversation,
 } from '../schedules.ts';
+import { DEFAULT_EVENT_MAX_PER_HOUR, parseEventFilter, parseQuietHours } from '../events.ts';
 
 const TOP_LEVEL_PARAMETER = {
   type: 'boolean',
@@ -43,16 +44,22 @@ export const SCHEDULE_EVERY_TOOL_NAME = 'schedule.every';
 
 export const SCHEDULE_AT_TOOL_NAME = 'schedule.at';
 
+export const SCHEDULE_ON_TOOL_NAME = 'schedule.on';
+
+/** The most turns an hour an event trigger may ask for: one every 30 seconds. */
+const MAX_EVENT_TRIGGER_PER_HOUR = 120;
+
 export const SCHEDULE_LIST_TOOL_NAME = 'schedule.list';
 
 export const SCHEDULE_CANCEL_TOOL_NAME = 'schedule.cancel';
 
 /**
- * The four `schedule.*` tools over one handle.
+ * The five `schedule.*` tools over one handle.
  *
  * Risk is split per tool, not per toolset: creating a schedule spends
  * future money unattended and (with a destination) mints a standing
- * permission to speak, so `schedule.every` and `schedule.at` are `gated` —
+ * permission to speak, so `schedule.every`, `schedule.at` and `schedule.on`
+ * are `gated` —
  * the approval of THAT call is the human decision the whole step leans on.
  * `schedule.list` is a read, and `schedule.cancel` only ever narrows
  * authority — it is the reversal the risk note in the spec names — so both
@@ -152,6 +159,61 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
           throw new Error(`${at} is in the past — a one-shot schedule must name a future time.`);
         }
         return create(session, { kind: 'at', at: parsed.toISOString() }, input);
+      },
+    },
+    {
+      name: SCHEDULE_ON_TOOL_NAME,
+      description: 'Set an event trigger for yourself: when a delivery from an operator-configured event source (like "github") passes your filter, run your prompt with the event appended. '
+        + 'The filter uses the CloudEvents dialects exact, prefix, suffix, all, any and not over attributes such as type, subject, actor and author; a key like "data.review.body" matches a string inside the event\'s data. '
+        + 'The event text is from outside, so the turn runs labeled external. Needs human approval once; firings then run unattended.',
+      risk: 'gated',
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: 'The event source id the operator configured, e.g. "github".' },
+          filter: {
+            type: 'object',
+            description: 'One filter expression with exactly one dialect key, e.g. { "all": [ { "exact": { "actor": "chatgpt-codex-connector[bot]" } }, { "prefix": { "type": "com.github.pull_request_review" } } ] }.',
+          },
+          prompt: { type: 'string', description: 'The instruction each firing runs, phrased to stand alone. The event follows it.' },
+          quietHours: {
+            type: 'object',
+            description: 'Optional daily window in which firings are held and then sent together, e.g. { "from": "22:00", "to": "07:00", "timeZone": "America/New_York" }.',
+            properties: {
+              from: { type: 'string', description: 'Start, HH:MM on a 24-hour clock.' },
+              to: { type: 'string', description: 'End, HH:MM on a 24-hour clock.' },
+              timeZone: { type: 'string', description: 'IANA time zone, e.g. "America/New_York".' },
+            },
+            required: ['from', 'to', 'timeZone'],
+          },
+          maxPerHour: { type: 'number', description: `Most turns an hour this trigger may start (default ${DEFAULT_EVENT_MAX_PER_HOUR}, at most ${MAX_EVENT_TRIGGER_PER_HOUR}).` },
+          destination: SCHEDULE_DESTINATION_PARAMETER,
+          topLevel: TOP_LEVEL_PARAMETER,
+        },
+        required: ['source', 'filter', 'prompt'],
+      },
+      async execute(input: JsonObject, session: Session) {
+        const source = typeof input.source === 'string' ? input.source.trim() : '';
+        if (!source) {
+          throw new Error('schedule.on needs a "source": the id of an event source the operator configured, like "github".');
+        }
+        if (input.filter === undefined) {
+          throw new Error('schedule.on needs a "filter": one expression such as { "exact": { "type": "com.github.pull_request_review.submitted" } }.');
+        }
+        const filter = parseEventFilter(input.filter);
+        const quietHours = input.quietHours !== undefined ? parseQuietHours(input.quietHours) : undefined;
+        const maxPerHour = input.maxPerHour;
+        if (maxPerHour !== undefined
+          && (typeof maxPerHour !== 'number' || !Number.isInteger(maxPerHour) || maxPerHour < 1 || maxPerHour > MAX_EVENT_TRIGGER_PER_HOUR)) {
+          throw new Error(`"maxPerHour" must be a whole number from 1 to ${MAX_EVENT_TRIGGER_PER_HOUR}.`);
+        }
+        return create(session, {
+          kind: 'event',
+          source,
+          filter,
+          ...(quietHours !== undefined ? { quietHours } : {}),
+          ...(maxPerHour !== undefined ? { maxPerHour: maxPerHour as number } : {}),
+        }, input);
       },
     },
     {
