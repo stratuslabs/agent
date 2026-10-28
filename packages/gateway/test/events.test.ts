@@ -446,7 +446,7 @@ test('the gateway\'s events summary: refusals before a row are counted, accepted
   };
   await gateway.start();
   try {
-    const before = gateway.eventSummary()!;
+    const before = gateway.eventSummary();
     assert.ok(Math.abs(Date.parse(before.since) - (Date.now() - 86_400_000)) < 60_000, 'counts cover the last 24 hours');
     assert.deepEqual(before.sources, {
       board: { deliveries: {}, firings: {}, refusedBeforeRow: { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 0 } },
@@ -455,14 +455,14 @@ test('the gateway\'s events summary: refusals before a row are counted, accepted
 
     const body = JSON.stringify({ specversion: '1.0', id: 'ce-1', source: 'https://board.example', type: 'card.moved', subject: 'card/590' });
     assert.equal((await gateway.receiveEvent(signed('ce-1', body, 'whsec_' + Buffer.from('wrong key, same length!').toString('base64')))).status, 401);
-    let board = gateway.eventSummary()!.sources.board!;
+    let board = gateway.eventSummary().sources.board!;
     assert.equal(board.refusedBeforeRow.badSignature, 1);
     assert.match(board.lastRefusal?.reason ?? '', /webhook-signature/);
     assert.equal(board.lastDelivery, undefined, 'a bad signature leaves no row');
     assert.deepEqual(gateway.eventDeliveries(), []);
 
     assert.equal((await gateway.receiveEvent(signed('ce-1', body))).body.status, 'unmatched');
-    board = gateway.eventSummary()!.sources.board!;
+    board = gateway.eventSummary().sources.board!;
     assert.deepEqual(board.deliveries, { unmatched: 1 });
     assert.equal(board.lastDelivery?.status, 'unmatched');
     assert.equal(board.lastDelivery?.subject, 'card/590');
@@ -474,7 +474,7 @@ test('the gateway\'s events summary: refusals before a row are counted, accepted
     assert.deepEqual(gateway.eventDeliveries({ source: 'other' }), []);
 
     await gateway.receiveEvent({ sourceId: 'nope', headers: {}, body: Buffer.from('{}') });
-    assert.equal(gateway.eventSummary()!.unknownSource, 1);
+    assert.equal(gateway.eventSummary().unknownSource, 1);
   } finally {
     await gateway.stop();
   }
@@ -482,7 +482,8 @@ test('the gateway\'s events summary: refusals before a row are counted, accepted
   const off = createGateway({ env: { homeDir: await mkdtemp(path.join(os.tmpdir(), 'stratus-events-off-')), processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
   await off.start();
   try {
-    assert.equal(off.eventSummary(), undefined, 'no source configured: nothing to summarize');
+    assert.deepEqual(off.eventSummary().sources, {}, 'no source configured: nothing to summarize');
+    assert.equal(off.eventSummary().unknownSource, 0);
     assert.deepEqual(off.eventDeliveries(), []);
   } finally {
     await off.stop();

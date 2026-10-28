@@ -1256,10 +1256,10 @@ export interface Gateway {
   /**
    * Per configured event source: the last delivery, the last refusal and
    * why, and the last 24 hours by status, with the requests refused before
-   * they could leave a row (`stratus events`, `/health`). Undefined when no
-   * source is configured.
+   * they could leave a row (`stratus events`, `/health`). No sources when
+   * none is configured.
    */
-  eventSummary(): EventsSummary | undefined;
+  eventSummary(): EventsSummary;
   /** Delivery rows, newest first; a row never holds the body. Empty when no source is configured. */
   eventDeliveries(options?: { source?: string; limit?: number }): EventDeliveryRow[];
   /**
@@ -5999,10 +5999,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     eventSummary() {
-      if (!eventStore || !eventIntake) {
-        return undefined;
-      }
       const since = new Date(Date.now() - 86_400_000).toISOString();
+      if (!eventStore || !eventIntake) {
+        return { since, sources: {}, unknownSource: 0 };
+      }
       return summarizeEvents({ sourceIds: Object.keys(eventSources), since, activity: eventStore.activity(since), counters: eventIntake.counters() });
     },
 
