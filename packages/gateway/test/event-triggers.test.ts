@@ -200,6 +200,24 @@ test('a matched firing goes out through dispatch: prompt then event, its session
   }
 });
 
+test('a firing records when it went out on the trigger itself, like a timed schedule\'s slot', async () => {
+  const r = await rig();
+  try {
+    const id = await r.trigger();
+    await r.runtime.start();
+    assert.equal(r.schedules.get(id)!.lastFiredAt, undefined);
+    r.deliver(id, 'd-1');
+    r.runtime.kickEvents();
+    const row = r.schedules.get(id)!;
+    assert.equal(row.lastFiredAt, T0.toISOString());
+    assert.equal(row.lastSessionId, r.dispatched[0]!.sessionId);
+    assert.equal(row.nextFireAt, undefined, 'still never due by the clock');
+    assert.deepEqual(r.schedules.due(new Date(T0.getTime() + 365 * 86_400_000).toISOString()), []);
+  } finally {
+    await r.stop();
+  }
+});
+
 test('a dispatch that throws marks the firing failed with the reason', async () => {
   const r = await rig();
   try {

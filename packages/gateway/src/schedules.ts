@@ -829,6 +829,13 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       if (!events.store.claim(rows.map((row) => row.id), batchKey, nowIso, { triggerId: trigger.id })) {
         continue;
       }
+      // When it last went out, on the trigger's own row, so `schedule.list`,
+      // `stratus schedules` and the control API show it the way they show a
+      // timed schedule's. The same conditional write a slot claim makes; an
+      // event trigger's slot is always empty, so it only requires the row.
+      // A cancel landing after the claim above makes this a no-op, and the
+      // claimed batch still goes, as a claimed slot does.
+      store.claimSlot(withNextFire(trigger, undefined, { lastFiredAt: nowIso, lastSessionId: rows[0]!.sessionId }), '');
       fireEventBatch(trigger, rows, batchKey);
     }
   };
