@@ -89,9 +89,9 @@ A tool that declares no risk counts as `gated`, never `safe` — forgetting
 to classify something should cost a prompt, not an unattended command. Most
 built-in tools (`demo.echo`, `memory.remember`, `memory.recall`,
 `memory.forget`, `agent.delegate`, `schedule.list`, `schedule.cancel`) are
-`safe`; the built-in exceptions are `schedule.every`, `schedule.at`, and
-`message.send`, which are `gated` because they act past the end of the
-turn — see [Schedules](./schedules.md). Anything you install is where this
+`safe`; the built-in exceptions are `schedule.every`, `schedule.at`,
+`schedule.on` and `message.send`, which are `gated` because they act past
+the end of the turn — see [Schedules](./schedules.md). Anything you install is where this
 starts to bite, which is what [Tools](./tools.md) is about.
 
 Three tools are the exception to the whole paragraph, because their risk is
