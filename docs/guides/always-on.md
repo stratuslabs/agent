@@ -132,7 +132,9 @@ The question every operator asks on their second day:
 | A skill installed, edited, or removed | No | `stratus skill add` reloads the daemon it finds; `stratus skill reload` after a hand edit. See [Skills](./skills.md#installing-while-the-daemon-runs) |
 | Tools from an MCP server that reconnects | No | Discovered on reconnect |
 | A plugin enabled, disabled, upgraded, or reconfigured | **Yes** | `stratus restart` |
-| Credentials, or the `api`, `approvals`, and `maxTurns` settings | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve, what the daemon binds, and how much one message may spend, so they are not re-read live |
+| A stored credential: a provider sign-in or API key, or a named key from `stratus credential set` or a credential form in Slack | No | A sign-in is read on every turn and a named key every time a tool asks for it, so a stored or rotated key reaches the next command. Two things still need a restart: adding or changing a variable in tool-shell's `credentialsEnv` mapping, which is plugin config (row above), and a key in the daemon's own environment |
+| A Slack app's tokens, or another channel's secrets (`stratus setup` → **Channels**, `stratus channel set`, `PUT /credentials/channels/:channel`) | **Yes** | `stratus restart`. Each channel connects its apps when the daemon starts, so a new agent's bot stays offline until then |
+| The `api`, `approvals`, and `maxTurns` settings | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve, what the daemon binds, and how much one message may spend, so they are not re-read live |
 | The `stratus` package itself | **Yes** | `stratus update`, which stops and starts the service around the upgrade |
 
 ### `stratus restart`: announced, drained, and back
