@@ -316,6 +316,35 @@ test('turns started in the last hour count batches, not rows, per trigger: runni
   store.close();
 });
 
+test('the hour counts a turn from when it started, not when it finished', async () => {
+  const store = new SqliteEventStore(await newDb());
+  const [a] = accept(store, 'g-a', [firing('t1', 'g-a')]).firings;
+  store.claim([a!.id], a!.dispatchKey, at(0));
+  // A turn that ran two hours.
+  store.finish([a!.id], { status: 'fired' }, at(2 * 3_600_000));
+  assert.equal(store.turnsStartedSince('t1', at(90 * 60_000)), 0, 'it started before the window');
+  assert.equal(store.turnsStartedSince('t1', at(0)), 1);
+  assert.equal(store.firing(a!.id)!.startedAt, at(0));
+  store.close();
+});
+
+test('a store opened on an event_firings table from before started_at gains the column', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const file = await newDb();
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE event_firings (
+    id TEXT PRIMARY KEY, delivery_seq INTEGER NOT NULL, trigger_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+    source TEXT NOT NULL, event_id TEXT NOT NULL, coalescing_key TEXT NOT NULL, session_id TEXT NOT NULL,
+    dispatch_key TEXT NOT NULL, batch_key TEXT NOT NULL, status TEXT NOT NULL, block TEXT, reason TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+  old.close();
+  const store = new SqliteEventStore(file);
+  const [a] = accept(store, 'g-a', [firing('t1', 'g-a')]).firings;
+  assert.equal(store.claim([a!.id], a!.dispatchKey, at(1)), true);
+  assert.equal(store.turnsStartedSince('t1', at(0)), 1);
+  store.close();
+});
+
 test('the open set survives reopening the database, which is what the startup sweep reads', async () => {
   const file = await newDb();
   const first = new SqliteEventStore(file);
