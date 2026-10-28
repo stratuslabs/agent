@@ -183,6 +183,12 @@ test('a matched firing goes out through dispatch: prompt then event, its session
 
     r.runtime.kickEvents();
     assert.equal(r.dispatched.length, 1, 'an in-flight firing is not sent again');
+    // Nor held, expired or regrouped while it runs: a pause now must not
+    // turn a firing that is already out into one that goes out again.
+    r.paused.value = true;
+    r.runtime.kickEvents();
+    assert.equal(r.events.firing(firingId)!.status, 'firing');
+    r.paused.value = false;
     turn!.finish();
     await settle();
     assert.equal(r.events.firing(firingId)!.status, 'fired');
