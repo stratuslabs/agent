@@ -464,8 +464,13 @@ export class SqliteEventStore {
    * which is how recovery resends one. A batch is fixed once claimed: no
    * row joins it later, and it never changes key. False, with nothing
    * changed, for anything else, or if any row is finished.
+   *
+   * With `triggerId`, also false unless that schedule row still exists, in
+   * the same transaction: `stratus schedules cancel` deletes from another
+   * process, and a trigger cancelled after the scan read it must not fire,
+   * as a timed schedule's conditional slot claim already guarantees.
    */
-  claim(ids: readonly string[], batchKey: string, nowIso: string): boolean {
+  claim(ids: readonly string[], batchKey: string, nowIso: string, options: { triggerId?: string } = {}): boolean {
     const members = this.db.prepare('SELECT id FROM event_firings WHERE batch_key = ?');
     const update = this.db.prepare(`
       UPDATE event_firings
@@ -478,6 +483,10 @@ export class SqliteEventStore {
       ids,
       (id) => Number(update.run(batchKey, nowIso, nowIso, id, batchKey).changes),
       () => {
+        if (options.triggerId !== undefined
+          && this.db.prepare('SELECT 1 FROM schedules WHERE id = ?').get(options.triggerId) === undefined) {
+          return false;
+        }
         const existing = (members.all(batchKey) as Array<{ id: string }>).map((row) => row.id);
         return existing.length === 0 || (existing.length === wanted.size && existing.every((id) => wanted.has(id)));
       },

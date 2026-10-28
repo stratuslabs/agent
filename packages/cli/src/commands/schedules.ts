@@ -168,7 +168,12 @@ export const runSchedules = async (
       ? `  →  ${canonicalDestination(record.destination)}${record.destination.thread ? ` (thread ${record.destination.thread})` : ''}`
       : '';
     writeLine(streams.stdout, `${record.id}  [${record.agentId}]  ${describeCadence(record.cadence)}${destination}`);
-    writeLine(streams.stdout, `  next: ${record.nextFireAt ?? '(spent — awaiting cleanup)'}${record.lastFiredAt ? `   last: ${record.lastFiredAt}` : ''}`);
+    // An event trigger has no slot by design (card 590); only a one-shot
+    // without one is spent.
+    const next = record.cadence.kind === 'event'
+      ? `when a ${record.cadence.source} event matches`
+      : record.nextFireAt ?? '(spent — awaiting cleanup)';
+    writeLine(streams.stdout, `  next: ${next}${record.lastFiredAt ? `   last: ${record.lastFiredAt}` : ''}`);
     writeLine(streams.stdout, `  prompt: ${record.prompt}`);
   }
   return 0;

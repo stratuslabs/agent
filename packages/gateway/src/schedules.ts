@@ -826,7 +826,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         continue;
       }
       const batchKey = rows[0]!.batchKey ?? rows[rows.length - 1]!.dispatchKey;
-      if (!events.store.claim(rows.map((row) => row.id), batchKey, nowIso)) {
+      if (!events.store.claim(rows.map((row) => row.id), batchKey, nowIso, { triggerId: trigger.id })) {
         continue;
       }
       fireEventBatch(trigger, rows, batchKey);

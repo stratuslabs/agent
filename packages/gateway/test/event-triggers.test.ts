@@ -40,6 +40,7 @@ interface Dispatched {
 const T0 = new Date('2026-10-28T15:00:00.000Z'); // 11:00 in New York
 
 interface Rig {
+  dbFile: string;
   schedules: SqliteScheduleStore;
   events: SqliteEventStore;
   runtime: ReturnType<typeof createSchedulerRuntime>;
@@ -102,7 +103,7 @@ const rig = async (overrides: Partial<SchedulerRuntimeOptions> = {}, file?: stri
     return accepted.firings[0]!.id;
   };
   return {
-    schedules, events, runtime, dispatched, clock, paused, warnings, trigger, deliver,
+    dbFile: db, schedules, events, runtime, dispatched, clock, paused, warnings, trigger, deliver,
     async stop() {
       runtime.stop();
       for (const pending of dispatched) {
@@ -361,6 +362,34 @@ test('a key keeps at most its 5 newest held firings, and a hold older than 24 ho
     assert.deepEqual(r.events.open(), []);
     assert.equal(r.events.firing(ids[6]!)!.status, 'expired');
     assert.equal(r.dispatched.length, 0);
+  } finally {
+    await r.stop();
+  }
+});
+
+test('a trigger cancelled from another process between the scan and the claim does not fire', async () => {
+  const r = await rig();
+  try {
+    const id = await r.trigger();
+    await r.runtime.start();
+    const firingId = r.deliver(id, 'd-1');
+    // `stratus schedules cancel` deletes the row through its own connection;
+    // here the delete lands after this scan has read the trigger.
+    const realGet = r.schedules.get.bind(r.schedules);
+    let cancelled = false;
+    r.schedules.get = (scheduleId: string) => {
+      const row = realGet(scheduleId);
+      if (!cancelled && scheduleId === id) {
+        cancelled = true;
+        const other = new SqliteScheduleStore(r.dbFile);
+        other.delete(id);
+        other.close();
+      }
+      return row;
+    };
+    r.runtime.kickEvents();
+    assert.equal(r.dispatched.length, 0, 'the claim saw the trigger gone');
+    assert.notEqual(r.events.firing(firingId)!.status, 'firing');
   } finally {
     await r.stop();
   }
