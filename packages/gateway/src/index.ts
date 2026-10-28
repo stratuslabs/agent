@@ -1641,8 +1641,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // The daemon's own credential, read per delivery: a stored or
       // rotated secret works on the next one, with no restart.
       secret: (name) => resolveDaemonCredential(env, name),
-      // Event triggers arrive with `schedule.on`; until then nothing matches.
-      triggers: () => [],
+      // The triggers are schedules: `schedule.on` rows on this source.
+      // Late-bound, because the scheduler is built further down.
+      triggers: (sourceId) => scheduler.eventTriggers(sourceId),
       ...(options.events?.maxBodyBytes !== undefined ? { maxBodyBytes: options.events.maxBodyBytes } : {}),
       warn,
     })
@@ -1732,6 +1733,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // `SchedulerRuntimeOptions.ready`.
     ready: () => assertStateCompatible(env),
     paused: () => intakeState.paused,
+    ...(eventStore ? { events: { store: eventStore, sources: () => Object.keys(eventSources) } } : {}),
     log,
     warn,
   });
@@ -5961,7 +5963,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!eventIntake) {
         return { status: 404, body: { error: 'unknown_source', message: 'No event source is configured at this path.' } };
       }
-      return eventIntake.receive(request);
+      const answer = await eventIntake.receive(request);
+      // The delivery and its firings are committed; send them now rather
+      // than at the next tick. The scheduler decides hold or fire, and does
+      // nothing while it is stopped or not yet started.
+      if (answer.body.status === 'matched') {
+        scheduler.kickEvents();
+      }
+      return answer;
     },
 
     eventCounters() {

@@ -398,3 +398,94 @@ test('recovery inside quiet hours holds the recovered firing instead of sending 
     await second.stop();
   }
 });
+
+// ---- end to end through the gateway ---------------------------------------------
+
+test('a signed delivery wakes the trigger\'s agent through the gateway: one turn, the event in its prompt, the report sent', async () => {
+  const { createHmac } = await import('node:crypto');
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const { addNamedCredential, fleetDbIn } = await import('@stratusagent/state');
+  const { createGateway } = await import('../src/index.ts');
+
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-triggers-e2e-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), [
+    '---', 'name: Ava', 'provider: openai', 'model: model-a', 'tools:', '  - schedule.*', '  - message.send', '---', '', 'You are Ava.', '',
+  ].join('\n'));
+  const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' } as Record<string, string> };
+  await addNamedCredential(env, { name: 'events.board', value: secret });
+
+  // The trigger, as an approved `schedule.on` leaves it.
+  const schedules = new SqliteScheduleStore(fleetDbIn(path.join(home, '.stratus')));
+  schedules.insert({
+    id: 'trig-1',
+    agentId: 'ava',
+    cadence: { kind: 'event', source: 'board', filter: parseEventFilter({ exact: { type: 'card.moved' } }) },
+    prompt: 'A card moved. Tell the team.',
+    destination: { channel: 'slack', to: 'C-ENG' },
+    createdAt: new Date().toISOString(),
+    trust: 'user',
+  });
+  schedules.close();
+
+  const prompts: string[] = [];
+  let calls = 0;
+  const fetchFake = (async (_url: unknown, init?: { body?: unknown }) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }> };
+    const user = body.messages.filter((message) => message.role === 'user').map((message) => String(message.content));
+    prompts.push(user[user.length - 1] ?? '');
+    const first = { choices: [{ message: { role: 'assistant', content: '', tool_calls: [
+      { id: 'call-1', type: 'function', function: { name: 'message_send', arguments: JSON.stringify({ destination: { channel: 'slack', to: 'C-ENG' }, text: 'Card 590 moved.' }) } },
+    ] } }] };
+    const done = { choices: [{ message: { role: 'assistant', content: 'Reported.' } }] };
+    return new Response(JSON.stringify(calls % 2 === 1 ? first : done), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+
+  const posts: Array<{ to: string; text: string }> = [];
+  const gateway = createGateway({
+    env: { ...env, fetch: fetchFake },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    log: () => {},
+    warn: () => {},
+    channels: [{
+      name: 'slack',
+      async start() {},
+      async stop() {},
+      async resolveOutbound({ to }) {
+        return { post: async (text: string) => { posts.push({ to, text }); return { channel: to, ts: '1' }; } };
+      },
+    }],
+    events: { sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } },
+  });
+  await gateway.start();
+  try {
+    const body = JSON.stringify({ specversion: '1.0', id: 'ce-1', source: 'https://board.example', type: 'card.moved', subject: 'card/590', data: { to: 'Todo' } });
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = `v1,${createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`ce-1.${timestamp}.${body}`).digest('base64')}`;
+    const request = {
+      sourceId: 'board',
+      headers: { 'content-type': 'application/json', 'webhook-id': 'ce-1', 'webhook-timestamp': timestamp, 'webhook-signature': signature },
+      body: Buffer.from(body),
+    };
+    const answer = await gateway.receiveEvent(request);
+    assert.deepEqual(answer, { status: 200, body: { status: 'matched' } });
+
+    const deadline = Date.now() + 5_000;
+    while (posts.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(posts, [{ to: 'C-ENG', text: 'Card 590 moved.' }], 'the pre-authorized report went out, headless');
+    assert.match(prompts[0] ?? '', /^A card moved\. Tell the team\.\n\nEvent from source "board":\n\{"id":"ce-1"/);
+
+    const repeat = await gateway.receiveEvent(request);
+    assert.deepEqual(repeat.body, { status: 'duplicate' });
+  } finally {
+    // Gated on the drain, not on a delay: stop() waits out every firing
+    // the scheduler started, so a turn the repeat had caused would be done.
+    await gateway.stop();
+  }
+  assert.equal(calls, 2, 'the repeat started no turn');
+});

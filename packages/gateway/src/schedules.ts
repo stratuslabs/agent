@@ -669,6 +669,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
 
   // ---- event triggers (card 590) ------------------------------------------
 
+  let started = false;
   /** Batches this process dispatched and has not seen settle. Empty after a restart, which is what makes a claimed batch recoverable. */
   const inflightBatches = new Set<string>();
   const runningEventsPerAgent = new Map<string, number>();
@@ -740,7 +741,9 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
    * against its trigger's hour like any other.
    */
   const processEvents = (now: Date): void => {
-    if (!events || stopped) {
+    // Not before start(): a held daemon's scheduler never starts, and its
+    // waiting firings must not go out through a delivery's kick either.
+    if (!events || stopped || !started) {
       return;
     }
     const nowIso = now.toISOString();
@@ -980,6 +983,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       // The first tick's readiness check propagates too: the stamp can
       // advance between the check above and here, and a `start()` that
       // resolved after noticing would let the gateway's sweeps run.
+      started = true;
       await tick(true);
     },
     stop() {
