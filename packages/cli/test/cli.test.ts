@@ -10711,6 +10711,130 @@ test('serve opens the events listener on its own port when the trusted config na
   }
 });
 
+test('stratus events renders each source from the daemon: last delivery, last refusal, 24 hours, and refusals before a row', async () => {
+  const summary = {
+    since: '2026-10-27T03:00:00.000Z',
+    unknownSource: 2,
+    sources: {
+      github: {
+        lastDelivery: { at: '2026-10-28T02:59:00.000Z', type: 'com.github.pull_request_review.submitted', subject: 'stratuslabs/agent#474', status: 'matched' },
+        lastRefusal: { at: '2026-10-28T02:10:00.000Z', reason: 'missing or wrong X-Hub-Signature-256 signature' },
+        deliveries: { matched: 3, unmatched: 9, refused: 1 },
+        firings: { fired: 2, failed: 1 },
+        refusedBeforeRow: { tooLarge: 0, badSignature: 4, rateLimited: 0, notReady: 0 },
+      },
+      board: { deliveries: {}, firings: {}, refusedBeforeRow: { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 0 } },
+      form: {
+        lastDelivery: { at: '2026-10-28T03:20:23.210Z', type: '', status: 'refused' },
+        deliveries: { refused: 1 },
+        firings: { held: 1 },
+        refusedBeforeRow: { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 2 },
+      },
+    },
+  };
+  const seen: Array<{ url: string | undefined; auth: string | undefined }> = [];
+  const server = createServer((request, response) => {
+    seen.push({ url: request.url, auth: request.headers.authorization });
+    if (request.url === '/api/v1/events/sources') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(summary));
+      return;
+    }
+    response.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: 'not_found', message: 'No such route.' } }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  const gateway = `http://127.0.0.1:${port}`;
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-cli-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  try {
+    const text = createStreams();
+    assert.equal(await runCli({ argv: ['events', '--gateway', gateway, '--token', 't0k'], streams: text.streams, env }), 0, text.output.stderr);
+    assert.equal(seen[0]?.auth, 'Bearer t0k');
+    assert.equal(text.output.stdout, [
+      'github',
+      '  last delivery: 2026-10-28T02:59:00.000Z com.github.pull_request_review.submitted stratuslabs/agent#474 (matched)',
+      '  last refusal: 2026-10-28T02:10:00.000Z missing or wrong X-Hub-Signature-256 signature',
+      '  last 24h: 3 matched, 9 unmatched, 1 refused; firings: 2 fired, 1 failed',
+      '  refused before a row since the daemon started: 4 bad signature',
+      'board',
+      '  last delivery: none yet',
+      '  last 24h: no deliveries; no firings',
+      'form',
+      '  last delivery: 2026-10-28T03:20:23.210Z (refused)',
+      '  last 24h: 1 refused; firings: 1 held',
+      '  refused before a row since the daemon started: 2 no secret set',
+      'Requests to unknown sources since the daemon started: 2',
+      '',
+    ].join('\n'));
+
+    const json = createStreams();
+    assert.equal(await runCli({ argv: ['events', '--gateway', gateway, '--token', 't0k', '--format', 'json'], streams: json.streams, env }), 0);
+    assert.deepEqual(JSON.parse(json.output.stdout), { gateway, ...summary });
+
+    summary.sources = {} as typeof summary.sources;
+    summary.unknownSource = 0;
+    const none = createStreams();
+    assert.equal(await runCli({ argv: ['events', '--gateway', gateway, '--token', 't0k'], streams: none.streams, env }), 0);
+    assert.match(none.output.stdout, /^No event sources are configured\. .*"events" block/);
+  } finally {
+    server.close();
+  }
+
+  const down = createStreams();
+  assert.equal(await runCli({ argv: ['events'], streams: down.streams, env }), 1);
+  assert.match(down.output.stderr, /stratusd is not serving/);
+  assert.equal(down.output.stdout, '');
+});
+
+test('stratus events escapes control characters in what a sender wrote, so a payload cannot forge lines or colors', async () => {
+  const forged = {
+    since: '2026-10-27T03:00:00.000Z',
+    unknownSource: 0,
+    sources: {
+      board: {
+        lastDelivery: { at: '2026-10-28T03:00:00.000Z', type: 'card.moved\u001b[2K', subject: 'card/1\nboard\n  last refusal: none', status: 'matched' },
+        lastRefusal: { at: '2026-10-28T03:00:01.000Z', reason: 'Content type "x\u001b[31m\u202e" is not supported.' },
+        deliveries: { matched: 1 },
+        firings: {},
+        refusedBeforeRow: { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 0 },
+      },
+    },
+  };
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(forged));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-escape-'));
+  try {
+    const text = createStreams();
+    assert.equal(await runCli({ argv: ['events', '--gateway', `http://127.0.0.1:${port}`, '--token', 't'], streams: text.streams, env: { homeDir: home, cwd: home, processEnv: {} } }), 0);
+    const lines = text.output.stdout.split('\n');
+    assert.equal(lines[1], '  last delivery: 2026-10-28T03:00:00.000Z card.moved\\u001b[2K card/1\\nboard\\n  last refusal: none (matched)');
+    assert.equal(lines[2], '  last refusal: 2026-10-28T03:00:01.000Z Content type "x\\u001b[31m\\u202e" is not supported.');
+    assert.doesNotMatch(text.output.stdout, /\u001b|\u202e/);
+    assert.equal(lines.filter((line) => line.startsWith('  last refusal:')).length, 1, 'no forged line');
+  } finally {
+    server.close();
+  }
+});
+
+test('stratus events asks the real daemon, which lists a configured source before any delivery', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-real-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    events: { listen: { port: 0 }, sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } },
+  }));
+  await withServedApi(home, async () => {
+    const env = { homeDir: home, cwd: home, processEnv: {} };
+    const text = createStreams();
+    assert.equal(await runCli({ argv: ['events'], streams: text.streams, env }), 0, text.output.stderr);
+    assert.match(text.output.stdout, /^board\n {2}last delivery: none yet\n/);
+  });
+});
+
 test('a project-local config cannot open the events port', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-untrusted-'));
   // Auto-discovered from the working directory: what a cloned repository ships.

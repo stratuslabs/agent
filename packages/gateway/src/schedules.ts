@@ -279,7 +279,7 @@ export interface SchedulerRuntimeOptions {
 }
 
 export interface SchedulerEventOptions {
-  store: Pick<SqliteEventStore, 'open' | 'claim' | 'hold' | 'finish' | 'retire' | 'turnsStartedSince'>;
+  store: Pick<SqliteEventStore, 'open' | 'claim' | 'hold' | 'finish' | 'retire' | 'turnsStartedSince' | 'prune'>;
   /** The configured source ids, read at each creation. */
   sources(): readonly string[];
   /**
@@ -296,6 +296,9 @@ const EVENT_HOLD_MAX_MS = 24 * 60 * 60 * 1_000;
 
 /** Held firings kept per coalescing key; older ones are superseded. */
 const EVENT_HELD_PER_KEY = 5;
+
+/** How often the event tables are pruned to their 7-day window and row cap. */
+const EVENT_PRUNE_INTERVAL_MS = 60 * 60 * 1_000;
 
 export interface SchedulerRuntime {
   /** The handle the `schedule.*` tools close over. */
@@ -670,6 +673,8 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   // ---- event triggers (card 590) ------------------------------------------
 
   let started = false;
+  /** When the event tables were last pruned; unset until the first pass after start. */
+  let eventsPrunedAt: number | undefined;
   /** Batches this process dispatched and has not seen settle. Empty after a restart, which is what makes a claimed batch recoverable. */
   const inflightBatches = new Set<string>();
   const runningEventsPerAgent = new Map<string, number>();
@@ -747,6 +752,18 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       return;
     }
     const nowIso = now.toISOString();
+    // The 7-day window and the row cap hold only if something enforces
+    // them, and this is the loop that runs for the daemon's whole life: at
+    // the start-up pass, then hourly. Kept off the hold-or-fire path's
+    // failure: a prune that can't get the lock waits for the next hour.
+    if (eventsPrunedAt === undefined || now.getTime() - eventsPrunedAt >= EVENT_PRUNE_INTERVAL_MS) {
+      eventsPrunedAt = now.getTime();
+      try {
+        events.store.prune(nowIso);
+      } catch (error) {
+        warn(`events: could not prune old deliveries: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     const triggers = new Map<string, ScheduleRecord | undefined>();
     const triggerFor = (id: string): ScheduleRecord | undefined => {
       if (!triggers.has(id)) {
@@ -828,6 +845,18 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       const batchKey = rows[0]!.batchKey ?? rows[rows.length - 1]!.dispatchKey;
       if (!events.store.claim(rows.map((row) => row.id), batchKey, nowIso, { triggerId: trigger.id })) {
         continue;
+      }
+      // When it last went out, on the trigger's own row, so `schedule.list`,
+      // `stratus schedules` and the control API show it the way they show a
+      // timed schedule's. The same conditional write a slot claim makes; an
+      // event trigger's slot is always empty, so it only requires the row.
+      // A cancel landing after the claim above makes this a no-op, and the
+      // claimed batch still goes, as a claimed slot does. An audit field, so
+      // a write that fails is warned and never keeps a claimed batch back.
+      try {
+        store.claimSlot(withNextFire(trigger, undefined, { lastFiredAt: nowIso, lastSessionId: rows[0]!.sessionId }), '');
+      } catch (error) {
+        warn(`event trigger ${trigger.id}: could not record its last firing: ${error instanceof Error ? error.message : String(error)}`);
       }
       fireEventBatch(trigger, rows, batchKey);
     }

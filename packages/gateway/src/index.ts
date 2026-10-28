@@ -104,12 +104,13 @@ import {
 import { createFleetReader } from './fleet.ts';
 import {
   createEventIntake,
-  type EventIntakeCounters,
+  summarizeEvents,
   type EventIntakeRequest,
   type EventIntakeResponse,
   type EventSourceConfig,
+  type EventsSummary,
 } from './event-intake.ts';
-import { SqliteEventStore } from './events.ts';
+import { SqliteEventStore, type EventDeliveryRow } from './events.ts';
 import {
   createSchedulerRuntime,
   isScheduleSessionId,
@@ -160,6 +161,7 @@ export {
   type EventDeliveryStatus,
   type EventFiringRow,
   type EventFiringStatus,
+  type EventSourceActivity,
   type NewEventFiring,
   type RefusedEventDelivery,
 } from './events.ts';
@@ -178,6 +180,8 @@ export {
   type EventIntakeResponse,
   type EventSourceConfig,
   type EventSourceCounters,
+  type EventSourceSummary,
+  type EventsSummary,
   type EventTrigger,
 } from './event-intake.ts';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
@@ -1249,8 +1253,15 @@ export interface Gateway {
    * The listener in control-api calls this with the raw body.
    */
   receiveEvent(request: EventIntakeRequest): Promise<EventIntakeResponse>;
-  /** The events listener's counts of requests refused before they left a row. */
-  eventCounters(): EventIntakeCounters;
+  /**
+   * Per configured event source: the last delivery, the last refusal and
+   * why, and the last 24 hours by status, with the requests refused before
+   * they could leave a row (`stratus events`, `/health`). No sources when
+   * none is configured.
+   */
+  eventSummary(): EventsSummary;
+  /** Delivery rows, newest first; a row never holds the body. Empty when no source is configured. */
+  eventDeliveries(options?: { source?: string; limit?: number }): EventDeliveryRow[];
   /**
    * Every registered tool, with the risk it will actually be judged at and
    * the package it came from.
@@ -5987,8 +5998,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return answer;
     },
 
-    eventCounters() {
-      return eventIntake?.counters() ?? { unknownSource: 0, sources: {} };
+    eventSummary() {
+      const since = new Date(Date.now() - 86_400_000).toISOString();
+      if (!eventStore || !eventIntake) {
+        return { since, sources: {}, unknownSource: 0 };
+      }
+      return summarizeEvents({ sourceIds: Object.keys(eventSources), since, activity: eventStore.activity(since), counters: eventIntake.counters() });
+    },
+
+    eventDeliveries(options = {}) {
+      return eventStore?.deliveries(options) ?? [];
     },
 
     tools() {

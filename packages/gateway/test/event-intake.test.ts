@@ -150,6 +150,16 @@ test('an unknown source is 404 with no row, and every unknown path shares one co
   assert.deepEqual(Object.keys(intake.counters().sources).sort(), ['board', 'github'], 'no counter per unknown path');
 });
 
+test('a refusal quoting what the sender sent is warned with its control characters escaped, so it cannot forge a log line', async () => {
+  const { intake, warnings } = await harness();
+  // A header value may carry C1 controls (obs-text); \u009b is CSI on some terminals.
+  const sneaky = swRequest(cloudEvent('ce-9'), 'ce-9', { 'content-type': 'text/x\u009b31m' });
+  assert.equal((await intake.receive(sneaky)).status, 415);
+  assert.equal(warnings.length, 1);
+  assert.doesNotMatch(warnings[0]!, /\u009b/);
+  assert.match(warnings[0]!, /text\/x\\u009b31m/);
+});
+
 test('a body over the limit is 413 with no row', async () => {
   const { intake, store } = await harness({ maxBodyBytes: 64 });
   const response = await intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1'));

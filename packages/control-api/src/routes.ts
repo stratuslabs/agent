@@ -177,6 +177,9 @@ interface Route {
 
 // ---- helpers ---------------------------------------------------------------
 
+/** Most delivery rows one `GET /events/deliveries` returns; 100 when `limit` is absent. */
+const MAX_EVENT_DELIVERIES_LISTED = 1_000;
+
 /**
  * Every setting this endpoint will write, and what shape it has to be.
  *
@@ -625,6 +628,7 @@ export const routes: Route[] = [
         runtimes.set(`${entry.provider}:${model ?? ''}:${entry.credentials}`, entry);
       }
 
+      const events = context.gateway.eventSummary();
       return {
         ok: true,
         version: context.version,
@@ -652,6 +656,9 @@ export const routes: Route[] = [
         held: context.gateway.held(),
         runtimes: [...runtimes.values()],
         ...(context.startup !== undefined ? { startup: context.startup() } : {}),
+        // Only when a source is configured: a monitor sees refusals climb
+        // here, and an install without events keeps the payload it had.
+        ...(Object.keys(events.sources).length > 0 ? { events } : {}),
       };
     },
   },
@@ -1368,6 +1375,36 @@ export const routes: Route[] = [
       // Cancelling also revoked the destination grant riding on the row —
       // the next send from a still-running firing is gated normally.
       return { cancelled: true };
+    },
+  },
+
+  // ---- events (card 590) ---------------------------------------------------
+  // Read-only views of the events port's work, for `stratus events` and a
+  // dashboard. Under the operator's token like every route here: a delivery
+  // row names who sent what (never the body). The delivery path itself is
+  // the separate listener, which has no route here.
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/events/sources`,
+    async handler(context) {
+      return context.gateway.eventSummary();
+    },
+  },
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/events/deliveries`,
+    async handler(context) {
+      const source = context.url.searchParams.get('source') ?? undefined;
+      const raw = context.url.searchParams.get('limit');
+      if (raw !== null && (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > MAX_EVENT_DELIVERIES_LISTED)) {
+        throw new ApiError(400, 'invalid_limit', `limit must be a whole number from 1 to ${MAX_EVENT_DELIVERIES_LISTED}.`);
+      }
+      return {
+        deliveries: context.gateway.eventDeliveries({
+          ...(source !== undefined ? { source } : {}),
+          ...(raw !== null ? { limit: Number(raw) } : {}),
+        }),
+      };
     },
   },
 

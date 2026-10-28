@@ -167,6 +167,37 @@ schedule (`schedule.list`, `schedule.cancel`, `stratus schedules`,
   under the same key, so a turn that already started continues instead of
   running a second time.
 
+## Seeing what happened
+
+`stratus events` asks the running daemon what each source has been doing:
+
+```
+github
+  last delivery: 2026-10-28T02:59:00.000Z com.github.pull_request_review.submitted stratuslabs/agent#474 (matched)
+  last refusal: 2026-10-28T02:10:00.000Z missing or wrong X-Hub-Signature-256 signature
+  last 24h: 3 matched, 9 unmatched, 1 refused; firings: 2 fired, 1 failed
+  refused before a row since the daemon started: 4 bad signature
+```
+
+- **Last refusal** is the newest of either kind: a signed delivery refused
+  with a reason, or a request refused before it could leave a record (a
+  wrong secret, too large, over the rate, or no secret stored). The second
+  kind is counted only by the running daemon, so those counts start again at
+  a restart.
+- **Last 24 hours** counts deliveries by what became of them, and firings by
+  where they stand. A firing still waiting (`pending`, `held`,
+  `rate_limited`) counts however old it is.
+- A **failed** firing is handled like a failed timed firing: the daemon log
+  says why (`event trigger <id> firing failed: ...`), and a turn that failed
+  partway leaves its session marked failed. Nothing is posted to the
+  trigger's destination.
+- `stratus schedules` shows each trigger's last firing, and `--format json`
+  gives the whole summary.
+
+`GET /api/v1/health` carries the same summary under `events` when a source
+is configured, so a monitor sees refusals climb. `GET /api/v1/events/deliveries`
+lists the delivery records themselves, which never hold a body.
+
 ## Reaching a daemon behind NAT
 
 The listener binds loopback by default. To take deliveries from the

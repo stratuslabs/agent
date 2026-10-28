@@ -2173,6 +2173,63 @@ test('saving settings does not delete the plugins somebody is running', async ()
   }
 });
 
+test('event sources and deliveries are readable over the API, and health carries the summary only when a source is configured', async () => {
+  const { createHmac } = await import('node:crypto');
+  const { addNamedCredential } = await import('@stratusagent/state');
+  const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
+  const home = await newHome();
+  await addNamedCredential({ homeDir: home, processEnv: {} }, { name: 'events.board', value: secret });
+  const harness = await startApi({
+    home,
+    gateway: { events: { sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } } },
+  });
+  try {
+    const body = JSON.stringify({ specversion: '1.0', id: 'ce-1', source: 'https://board.example', type: 'card.moved', subject: 'card/590' });
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = `v1,${createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`ce-1.${timestamp}.${body}`).digest('base64')}`;
+    const answer = await harness.gateway.receiveEvent({
+      sourceId: 'board',
+      headers: { 'content-type': 'application/json', 'webhook-id': 'ce-1', 'webhook-timestamp': timestamp, 'webhook-signature': signature },
+      body: Buffer.from(body),
+    });
+    assert.equal(answer.body.status, 'unmatched');
+
+    const summary = await json<{ since: string; sources: Record<string, { deliveries: Record<string, number>; lastDelivery?: { status: string } }> }>(
+      await harness.call('/api/v1/events/sources'),
+    );
+    assert.deepEqual(Object.keys(summary.sources), ['board']);
+    assert.deepEqual(summary.sources.board!.deliveries, { unmatched: 1 });
+    assert.equal(summary.sources.board!.lastDelivery?.status, 'unmatched');
+
+    const listed = await json<{ deliveries: Array<Record<string, unknown>> }>(await harness.call('/api/v1/events/deliveries?source=board&limit=5'));
+    assert.equal(listed.deliveries.length, 1);
+    assert.equal(listed.deliveries[0]?.eventId, 'ce-1');
+    assert.equal(listed.deliveries[0]?.body, undefined, 'a row never holds the body');
+    assert.deepEqual((await json<{ deliveries: unknown[] }>(await harness.call('/api/v1/events/deliveries?source=other'))).deliveries, []);
+    for (const bad of ['0', '1001', 'ten', '-1']) {
+      const refused = await harness.call(`/api/v1/events/deliveries?limit=${bad}`);
+      assert.equal(refused.status, 400, `limit=${bad}`);
+    }
+    assert.equal((await harness.call('/api/v1/events/sources', { auth: 'none' })).status, 401, 'operator data: the token is required');
+
+    const health = await json<{ events?: { sources: Record<string, unknown> } }>(await harness.call('/api/v1/health'));
+    assert.deepEqual(Object.keys(health.events?.sources ?? {}), ['board']);
+  } finally {
+    await harness.stop();
+  }
+
+  const plain = await startApi();
+  try {
+    const health = await json<Record<string, unknown>>(await plain.call('/api/v1/health'));
+    assert.equal('events' in health, false, 'no source, no events block');
+    const summary = await json<{ sources: Record<string, unknown> }>(await plain.call('/api/v1/events/sources'));
+    assert.deepEqual(summary.sources, {});
+    assert.deepEqual((await json<{ deliveries: unknown[] }>(await plain.call('/api/v1/events/deliveries'))).deliveries, []);
+  } finally {
+    await plain.stop();
+  }
+});
+
 test('schedules are listable and cancellable over the API', async () => {
   const harness = await startApi();
   try {

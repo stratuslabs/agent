@@ -176,6 +176,36 @@ test('a refused delivery is listed with its reason and leaves no tombstone, so t
   store.close();
 });
 
+test('activity per source: the last delivery, the last refused one, and counts since a cutoff, with waiting firings always counted', async () => {
+  const store = new SqliteEventStore(await newDb());
+  // Older than the cutoff: listed, but not in the counts.
+  accept(store, 'old-1', [], at(-2 * 3_600_000));
+  const [fired] = accept(store, 'g-1', [firing('t1', 'g-1')], at(1_000)).firings;
+  store.claim([fired!.id], fired!.dispatchKey, at(1_001));
+  store.finish([fired!.id], { status: 'fired' }, at(1_002));
+  accept(store, 'g-1', [firing('t1', 'g-1')], at(2_000)); // duplicate
+  accept(store, 'g-2', [], at(3_000)); // unmatched
+  store.refuse({ source: 'github', eventId: 'g-3', reason: 'Not JSON.', receivedAt: at(4_000) });
+  // Held before the cutoff and still waiting: counted, it is waiting now.
+  const [waiting] = accept(store, 'old-2', [firing('t1', 'old-2', 'pull/9')], at(-3 * 3_600_000)).firings;
+  store.hold([waiting!.id], 'held', at(-3 * 3_600_000));
+  accept(store, 'g-5', [firing('t1', 'g-5', 'pull/10')], at(5_000));
+  store.refuse({ source: 'board', eventId: 'b-1', reason: 'Missing type.', receivedAt: at(6_000) });
+
+  const activity = store.activity(at(0));
+  assert.deepEqual(Object.keys(activity).sort(), ['board', 'github']);
+  const github = activity.github!;
+  assert.deepEqual(github.lastDelivery, { at: at(5_000), type: 'com.github.pull_request_review.submitted', subject: 'pull/470', status: 'matched' });
+  assert.deepEqual(github.lastRefused, { at: at(4_000), reason: 'Not JSON.' });
+  assert.deepEqual(github.deliveries, { matched: 2, duplicate: 1, unmatched: 1, refused: 1 });
+  assert.deepEqual(github.firings, { fired: 1, held: 1, pending: 1 });
+  assert.deepEqual(activity.board!.deliveries, { refused: 1 });
+  assert.deepEqual(activity.board!.firings, {});
+  assert.deepEqual(store.activity(at(10_000)).github!.deliveries, {}, 'nothing new since then');
+  assert.deepEqual(store.activity(at(10_000)).github!.firings, { held: 1, pending: 1 }, 'waiting ones still count');
+  store.close();
+});
+
 test('the same event id from two sources is two events', async () => {
   const store = new SqliteEventStore(await newDb());
   assert.equal(accept(store, 'same', []).status, 'unmatched');
@@ -391,6 +421,73 @@ test('the event store shares fleet.db with schedules, owner-only, and refuses a 
   await mkdir(path.dirname(linkedFile), { recursive: true });
   await symlink(path.join(elsewhere, 'fleet.db'), linkedFile);
   assert.throws(() => new SqliteEventStore(linkedFile, { stateHome: linkedHome }));
+});
+
+test('the gateway\'s events summary: refusals before a row are counted, accepted ones come from the rows, and deliveries list without a body', async () => {
+  const { createHmac } = await import('node:crypto');
+  const { addNamedCredential } = await import('@stratusagent/state');
+  const { createGateway } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-summary-'));
+  const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await addNamedCredential(env, { name: 'events.board', value: secret });
+  const gateway = createGateway({
+    env, idleTimeoutMs: 0, log: () => {}, warn: () => {},
+    events: { sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } },
+  });
+  const signed = (id: string, body: string, key = secret) => {
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = `v1,${createHmac('sha256', Buffer.from(key.slice(6), 'base64')).update(`${id}.${timestamp}.${body}`).digest('base64')}`;
+    return {
+      sourceId: 'board',
+      headers: { 'content-type': 'application/json', 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': signature },
+      body: Buffer.from(body),
+    };
+  };
+  await gateway.start();
+  try {
+    const before = gateway.eventSummary();
+    assert.ok(Math.abs(Date.parse(before.since) - (Date.now() - 86_400_000)) < 60_000, 'counts cover the last 24 hours');
+    assert.deepEqual(before.sources, {
+      board: { deliveries: {}, firings: {}, refusedBeforeRow: { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 0 } },
+    });
+    assert.equal(before.unknownSource, 0);
+
+    const body = JSON.stringify({ specversion: '1.0', id: 'ce-1', source: 'https://board.example', type: 'card.moved', subject: 'card/590' });
+    assert.equal((await gateway.receiveEvent(signed('ce-1', body, 'whsec_' + Buffer.from('wrong key, same length!').toString('base64')))).status, 401);
+    let board = gateway.eventSummary().sources.board!;
+    assert.equal(board.refusedBeforeRow.badSignature, 1);
+    assert.match(board.lastRefusal?.reason ?? '', /webhook-signature/);
+    assert.equal(board.lastDelivery, undefined, 'a bad signature leaves no row');
+    assert.deepEqual(gateway.eventDeliveries(), []);
+
+    assert.equal((await gateway.receiveEvent(signed('ce-1', body))).body.status, 'unmatched');
+    board = gateway.eventSummary().sources.board!;
+    assert.deepEqual(board.deliveries, { unmatched: 1 });
+    assert.equal(board.lastDelivery?.status, 'unmatched');
+    assert.equal(board.lastDelivery?.subject, 'card/590');
+    assert.match(board.lastRefusal?.reason ?? '', /webhook-signature/, 'the refusal is still the last one');
+
+    const listed = gateway.eventDeliveries({ source: 'board' });
+    assert.equal(listed.length, 1);
+    assert.deepEqual(Object.keys(listed[0]!).sort(), ['eventId', 'receivedAt', 'seq', 'source', 'status', 'subject', 'type']);
+    assert.deepEqual(gateway.eventDeliveries({ source: 'other' }), []);
+
+    await gateway.receiveEvent({ sourceId: 'nope', headers: {}, body: Buffer.from('{}') });
+    assert.equal(gateway.eventSummary().unknownSource, 1);
+  } finally {
+    await gateway.stop();
+  }
+
+  const off = createGateway({ env: { homeDir: await mkdtemp(path.join(os.tmpdir(), 'stratus-events-off-')), processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await off.start();
+  try {
+    assert.deepEqual(off.eventSummary().sources, {}, 'no source configured: nothing to summarize');
+    assert.equal(off.eventSummary().unknownSource, 0);
+    assert.deepEqual(off.eventDeliveries(), []);
+  } finally {
+    await off.stop();
+  }
 });
 
 test('a gateway with no event sources never creates the event tables, and answers any delivery 404', async () => {

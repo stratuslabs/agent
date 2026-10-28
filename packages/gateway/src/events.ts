@@ -78,6 +78,25 @@ export interface EventFiringRow {
   updatedAt: string;
 }
 
+/**
+ * What one source has been doing, from the rows (`SqliteEventStore.activity`).
+ * Requests refused before they could leave a row (bad signature, too large,
+ * over the rate) aren't here: only the running listener counts those.
+ */
+export interface EventSourceActivity {
+  /** The newest delivery row, whatever its status. */
+  lastDelivery?: { at: string; type: string; subject?: string; status: EventDeliveryStatus };
+  /** The newest signed delivery whose body was refused, and why. */
+  lastRefused?: { at: string; reason: string };
+  /** Delivery rows received since the cutoff, by status. Of the rows still kept (the newest 10,000). */
+  deliveries: Partial<Record<EventDeliveryStatus, number>>;
+  /**
+   * Firings by status: finished ones that reached it since the cutoff, and
+   * every open one however old, since it is waiting now.
+   */
+  firings: Partial<Record<EventFiringStatus, number>>;
+}
+
 /** One trigger's match on a delivery, as the listener hands it to `accept`. */
 export interface NewEventFiring {
   triggerId: string;
@@ -251,8 +270,9 @@ const minus = (iso: string, ms: number): string => new Date(Date.parse(iso) - ms
 
 /**
  * Deliveries, dedup tombstones and firings, durable in `fleet.db`. Its own
- * connection, like the schedule store's, because the CLI will read it
- * without a daemon (`stratus events`).
+ * connection, like the schedule store's. `stratus events` reads through the
+ * running daemon instead of this file, because the requests refused before
+ * a row are counted only in the listener.
  *
  * Every method that changes more than one row does it in one transaction,
  * and every one that moves a firing between statuses is all-or-nothing and
@@ -408,6 +428,49 @@ export class SqliteEventStore {
       ? this.db.prepare('SELECT * FROM event_deliveries WHERE source = ? ORDER BY seq DESC LIMIT ?').all(options.source, limit)
       : this.db.prepare('SELECT * FROM event_deliveries ORDER BY seq DESC LIMIT ?').all(limit)) as unknown as DeliveryRowRaw[];
     return rows.map(deliveryFrom);
+  }
+
+  /**
+   * Per source with any row: its last delivery, its last refused one, and
+   * counts since `sinceIso` (`stratus events`, `/health`). Grouped in the
+   * database, so the cost doesn't grow with the 7 days of rows kept.
+   */
+  activity(sinceIso: string): Record<string, EventSourceActivity> {
+    const result: Record<string, EventSourceActivity> = {};
+    const entry = (source: string): EventSourceActivity => (result[source] ??= { deliveries: {}, firings: {} });
+    const latest = this.db.prepare(`
+      SELECT d.* FROM event_deliveries d
+      JOIN (SELECT source, MAX(seq) AS seq FROM event_deliveries GROUP BY source) newest ON newest.seq = d.seq
+    `).all() as unknown as DeliveryRowRaw[];
+    for (const row of latest) {
+      entry(row.source).lastDelivery = {
+        at: row.received_at,
+        type: row.type,
+        ...(row.subject !== '' ? { subject: row.subject } : {}),
+        status: row.status,
+      };
+    }
+    const refused = this.db.prepare(`
+      SELECT d.* FROM event_deliveries d
+      JOIN (SELECT source, MAX(seq) AS seq FROM event_deliveries WHERE status = 'refused' GROUP BY source) newest ON newest.seq = d.seq
+    `).all() as unknown as DeliveryRowRaw[];
+    for (const row of refused) {
+      entry(row.source).lastRefused = { at: row.received_at, reason: row.reason };
+    }
+    const deliveries = this.db.prepare(`
+      SELECT source, status, COUNT(*) AS n FROM event_deliveries WHERE received_at >= ? GROUP BY source, status
+    `).all(sinceIso) as unknown as Array<{ source: string; status: EventDeliveryStatus; n: number }>;
+    for (const row of deliveries) {
+      entry(row.source).deliveries[row.status] = Number(row.n);
+    }
+    const firings = this.db.prepare(`
+      SELECT source, status, COUNT(*) AS n FROM event_firings
+      WHERE status IN (${OPEN_SQL}) OR updated_at >= ? GROUP BY source, status
+    `).all(sinceIso) as unknown as Array<{ source: string; status: EventFiringStatus; n: number }>;
+    for (const row of firings) {
+      entry(row.source).firings[row.status] = Number(row.n);
+    }
+    return result;
   }
 
   firing(id: string): EventFiringRow | undefined {

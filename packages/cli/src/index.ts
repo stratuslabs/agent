@@ -93,6 +93,7 @@ export {
   type ParsedSkillReloadCommand,
   type ParsedRestartCommand,
   type ParsedHealthCommand,
+  type ParsedEventsCommand,
   type ParsedAgentsCommand,
   type ParsedSchedulesCommand,
   type ParsedGrantsCommand,
@@ -173,6 +174,7 @@ export { runSessions } from './commands/sessions.ts';
 export { runRestart } from './commands/restart.ts';
 
 export { runHealth } from './commands/health.ts';
+export { runEvents } from './commands/events.ts';
 
 export { soulPinForNewAgent, defaultAgentConfig, runAgentNew } from './commands/agent-new.ts';
 
