@@ -96,8 +96,9 @@ export const runEvents = async (
   for (const [id, source] of sources) {
     writeLine(streams.stdout, id);
     const last = source.lastDelivery;
+    // A refused body may have no type to show (form-encoded, say).
     writeLine(streams.stdout, last
-      ? `  last delivery: ${last.at} ${last.type}${last.subject !== undefined ? ` ${last.subject}` : ''} (${last.status})`
+      ? `  last delivery: ${[last.at, last.type, last.subject].filter((part) => part !== undefined && part !== '').join(' ')} (${last.status})`
       : '  last delivery: none yet');
     if (source.lastRefusal) {
       writeLine(streams.stdout, `  last refusal: ${source.lastRefusal.at} ${source.lastRefusal.reason}`);
