@@ -203,4 +203,8 @@ lists the delivery records themselves, which never hold a body.
 The listener binds loopback by default. To take deliveries from the
 internet, front the events port with a tunnel (Tailscale Funnel, Cloudflare
 Tunnel) or a reverse proxy that terminates TLS. Expose only the events port.
-In a container, `--events-host 0.0.0.0` lets a published port reach it.
+In the container image, `--events-host 0.0.0.0` is already in its command,
+so publish the port on the host's loopback (`-p 127.0.0.1:4124:4124`, or
+uncomment that line in `deploy/docker/compose.yaml`) and put the tunnel or
+proxy in front. Under the system unit the listener stays on loopback, and the
+tunnel or proxy points at `127.0.0.1:4124`.

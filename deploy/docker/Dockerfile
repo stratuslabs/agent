@@ -70,7 +70,7 @@ WORKDIR /home/node
 # Everything stratusd keeps: config, credentials, souls, sessions, memory,
 # logs. docs/reference/state-layout.md is the map.
 VOLUME ["/home/node/.stratus"]
-EXPOSE 4123
+EXPOSE 4123 4124
 # No shell between Docker and the daemon. The node image's entrypoint is a
 # POSIX sh script, and sh drops every environment variable whose name is not
 # a shell identifier on its way to exec — which is every named credential an
@@ -88,11 +88,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD ["stratus", "health"]
 # --api-host 0.0.0.0 so a published port can reach it: inside the container
 # loopback is the container's own. Publish it on the host's loopback only
-# (`-p 127.0.0.1:4123:4123`) — see the hardening checklist. --log-format
-# json makes stdout the structured log for `docker logs` and log drivers.
-# Run with `--init` (compose: `init: true`) so the shell tool's orphaned
-# grandchildren are reaped.
-CMD ["stratus", "serve", "--api-host", "0.0.0.0", "--log-format", "json"]
+# (`-p 127.0.0.1:4123:4123`) — see the hardening checklist. --events-host
+# 0.0.0.0 likewise for the events listener on 4124, which opens only when the
+# config's "events" block names a source (docs/guides/events.md); publish it
+# only when one does. --log-format json makes stdout the structured log for
+# `docker logs` and log drivers. Run with `--init` (compose: `init: true`) so
+# the shell tool's orphaned grandchildren are reaped.
+CMD ["stratus", "serve", "--api-host", "0.0.0.0", "--events-host", "0.0.0.0", "--log-format", "json"]
 
 # --- browser: + Chromium and its system libraries, for tool-browser --------
 FROM runtime AS browser

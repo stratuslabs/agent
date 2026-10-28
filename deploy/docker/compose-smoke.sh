@@ -87,6 +87,7 @@ services:
       - ${WORK}/stratusd.env
     ports: !override
       - "127.0.0.1::4123"
+      - "127.0.0.1::4124"
 EOF
 
 echo "--- up (build, then wait for the healthcheck)"
@@ -171,5 +172,31 @@ PROBE_EOF
 shell_ok=0
 compose exec -T -w /opt/stratus stratusd node --input-type=module -e "$probe_js" || shell_ok=$?
 [ "$shell_ok" = 0 ] || fail "shell.run neither ran sandboxed nor refused with bwrap's reason"
+
+echo "--- a signed event reaches the listener and leaves its row"
+# A source in the trusted config and its secret in the store, as
+# docs/guides/events.md says, then a restart: the listener opens at start,
+# on the image's --events-host 0.0.0.0, behind the published loopback port.
+EVENT_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+in_container sh -c 'test ! -e /home/node/.stratus/config.json' || fail "the volume already has a config.json; this test writes its own"
+printf '{"events":{"sources":{"github":{"verify":"github","secrets":["events.github"]}}}}\n' \
+  | in_container sh -c 'cat > /home/node/.stratus/config.json'
+printf %s "$EVENT_SECRET" | in_container stratus credential set events.github >/dev/null || fail "could not store events.github"
+compose restart stratusd >/dev/null 2>&1 || fail "the restart for the events config failed"
+wait_healthy
+find_api
+published=$(compose port stratusd 4124 | head -n 1) || fail "the events port is not published"
+[ -n "$published" ] || fail "the events port is not published"
+delivery="compose-smoke-${RUN_ID}"
+body='{"zen":"Keep it logically awesome.","hook_id":1}'
+signature=$(printf %s "$body" | openssl dgst -sha256 -hmac "$EVENT_SECRET" | awk '{print $NF}')
+answer=$(curl -sS --max-time 30 -X POST "http://127.0.0.1:${published##*:}/events/github" \
+  -H 'content-type: application/json' -H 'x-github-event: ping' -H "x-github-delivery: ${delivery}" \
+  -H "x-hub-signature-256: sha256=${signature}" -d "$body") || fail "the signed delivery got no answer"
+[ "$answer" = '{"status":"unmatched"}' ] || fail "the signed delivery was answered $answer, not unmatched"
+call GET "/events/deliveries?source=github" | grep -q "\"eventId\":\"${delivery}\"" || fail "the delivery left no row"
+# Captured first: grep -q closing the pipe early would fail the CLI's write under pipefail.
+events_out=$(in_container stratus events) || fail "stratus events failed"
+grep -q '^github$' <<<"$events_out" || fail "stratus events does not list the github source: $events_out"
 
 echo "compose-smoke: ok"
