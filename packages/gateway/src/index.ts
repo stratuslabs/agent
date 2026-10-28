@@ -11,6 +11,7 @@ import {
   senderTrustOf,
   SENDER_TRUST_METADATA_KEY,
   workItemState,
+  leftForNextStart,
   lastResponseIsAnswer,
   MAX_IDEMPOTENCY_KEY_LENGTH,
   recordTurnFailure,
@@ -3500,7 +3501,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const idle = new AbortController();
       trackTurn(sessionId, idle);
       if (abortingWith !== undefined) {
-        idle.abort(new RunAbortedError(abortingWith));
+        idle.abort(shutdownAbort());
       }
       try {
         return await run(idle.signal);
@@ -3512,7 +3513,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const controller = new AbortController();
     trackTurn(sessionId, controller);
     if (abortingWith !== undefined) {
-      controller.abort(new RunAbortedError(abortingWith));
+      controller.abort(shutdownAbort());
     }
     // The external reason travels: a caller that aborted with its own
     // `RunAbortedError` gets it recorded on the session, like the watchdog's.
@@ -3766,6 +3767,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const refusal = (): Error => restartStatus
     ? new GatewayStoppingError('stratusd is restarting and will accept new work once it is back up.', true)
     : new GatewayStoppingError('The gateway is stopping and no longer accepts new work.', false);
+  /**
+   * What the caller of a keyed turn the shutdown cut short hears: the same
+   * refusal, since its message is no more answered than one refused at the
+   * door (a channel keeps it for the next start, as it keeps those), and
+   * worded for a turn that ran and will be continued.
+   */
+  const leftForNext = (): Error => restartStatus
+    ? new GatewayStoppingError('stratusd is restarting; this turn was cut short and continues once it is back up.', true)
+    : new GatewayStoppingError('stratusd is stopping; this turn was cut short and continues when it is started again.', false);
+  /**
+   * The abort a stop's or restart's window ends a turn with. Resumable: a
+   * keyed turn is left for the next start to continue once, as a crash
+   * leaves it, rather than failed (`RunAbortedError.resumable`); every
+   * other turn is failed with the reason, as before.
+   */
+  const shutdownAbort = (): RunAbortedError => new RunAbortedError(abortingWith, { resumable: true });
 
   /**
    * The turn id running on each session, for callers that named one.
@@ -3909,6 +3926,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
+   * A keyed turn the shutdown cut short and the runner left for the next
+   * start (`leftForNextStart`): its caller is told so, the way a message
+   * refused at the door is, and keeps it for the next daemon, which
+   * continues the turn. Read back on the chain, so it is this dispatch's
+   * own message the session is still running on.
+   */
+  const settleLeftForNextStart = async (input: DispatchInput, turn: Promise<Session>): Promise<Session> => {
+    try {
+      return await turn;
+    } catch (error) {
+      if (input.idempotencyKey !== undefined && error instanceof RunAbortedError && error.resumable) {
+        const left = await store.get(input.sessionId).catch(() => undefined);
+        if (left !== undefined && workItemState(left, input.idempotencyKey) === 'unfinished' && leftForNextStart(left, error)) {
+          throw leftForNext();
+        }
+      }
+      throw error;
+    }
+  };
+
+  /**
    * `subAgent` is the narrowed definition `subAgents.run` built: the turn
    * runs as that, on the parent's resolved provider, with no memory and no
    * soul. Only that path passes it.
@@ -3992,7 +4030,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the fallback counts.
     const hostedLoop = input.idempotencyKey !== undefined && reachesHarness(config, switchedToFallback);
 
-    return withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
+    return settleLeftForNextStart(input, withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
       // The preflight above (agent refresh, config resolution, session
       // load) awaited filesystem work; the entry check has long passed.
       // Recheck before the runner touches durable state, or a dispatch
@@ -4073,7 +4111,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata, subAgent !== undefined),
         signal,
       });
-    });
+    }));
   };
 
   /**
@@ -4249,7 +4287,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (record) {
         trackTurn(sessionId, controller);
         if (abortingWith !== undefined) {
-          controller.abort(new RunAbortedError(abortingWith));
+          controller.abort(shutdownAbort());
         }
       }
       try {
@@ -5633,7 +5671,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       abortingWith = kind === 'stop' ? STOPPING_TURN_ERROR : RESTARTING_TURN_ERROR;
       for (const running of turnControllers.values()) {
         for (const controller of running) {
-          controller.abort(new RunAbortedError(abortingWith));
+          controller.abort(shutdownAbort());
         }
       }
       drained = await settlesWithin(drain, remaining());

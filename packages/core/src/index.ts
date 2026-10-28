@@ -6686,6 +6686,8 @@ export const raiseContextFloor = (session: Session): boolean => {
  * Thrown when a run is stopped by its abort signal. The session ends up
  * `failed` with this error's message as `lastError`, so an aborted turn is
  * distinguishable from a genuine failure.
+ *
+ * Except a keyed turn aborted with `resumable`: see `RunAbortedError.resumable`.
  */
 export class RunAbortedError extends Error {
   /** Recognized across copies of core: a channel package aborts with its own. */
@@ -6693,12 +6695,38 @@ export class RunAbortedError extends Error {
     return isBrandedCoreError(this, RunAbortedError, RUN_ABORTED_BRAND, value);
   }
 
-  constructor(message = 'Run aborted') {
+  /**
+   * The aborter is going away and the turn can be picked up after it: a
+   * host's planned stop or restart. A turn whose message carries an
+   * idempotency key is then not failed but left `running`, as a crash
+   * leaves it, for the next start to continue once (`continueTurn`); the
+   * abort still ends everything it was running. Not for a turn already
+   * continued once (`Message.continuedAfterCrash`) or one that could have
+   * reached a harness (`Message.hostedLoop`), which are failed, and never
+   * for an unkeyed turn, whose caller was promised nothing and is told now.
+   */
+  readonly resumable: boolean;
+
+  constructor(message = 'Run aborted', options: { resumable?: boolean } = {}) {
     super(message);
     this.name = 'RunAbortedError';
+    this.resumable = options.resumable === true;
     brandCoreError(this, RUN_ABORTED_BRAND);
   }
 }
+
+/**
+ * Whether an abort leaves this session's turn for the next start rather
+ * than failing it; see `RunAbortedError.resumable`. Exported for the host,
+ * which tells the turn's caller the same thing the runner decided.
+ */
+export const leftForNextStart = (session: Pick<Session, 'messages'>, error: unknown): boolean => {
+  if (!(error instanceof RunAbortedError) || !error.resumable) {
+    return false;
+  }
+  const message = session.messages.findLast((candidate) => candidate.role === 'user');
+  return message?.idempotencyKey !== undefined && message.continuedAfterCrash !== true && message.hostedLoop !== true;
+};
 
 /**
  * The abort that stopped a run, as the runner records it.
@@ -7886,6 +7914,13 @@ export class AgentRunner {
             ? abortErrorFor(signal)
             : caught)
         : caught;
+      if (leftForNextStart(session, error)) {
+        // A planned stop of a keyed turn: saved as it stands and still
+        // `running`, which is how the next start finds a turn to continue.
+        // No failure is recorded or announced; its caller hears the throw.
+        await this.store.save(session);
+        throw error;
+      }
       const lastError = error instanceof Error ? error.message : String(error);
       // Read off what the provider threw, not the normalized error: an
       // abort replaces it with a fresh `RunAbortedError`, and a harness

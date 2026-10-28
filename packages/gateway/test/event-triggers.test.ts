@@ -12,6 +12,7 @@ import {
   type ScheduleCadence,
 } from '@stratusagent/agents';
 import {
+  GatewayStoppingError,
   SqliteEventStore,
   SqliteScheduleStore,
   createSchedulerRuntime,
@@ -254,6 +255,44 @@ test('a dispatch that throws marks the firing failed with the reason', async () 
     assert.match(row.reason ?? '', /Agent not found/);
   } finally {
     await r.stop();
+  }
+});
+
+test('a firing a stopping daemon refused or cut short stays claimed, and the next start sends it again under its key', async () => {
+  // Card 590, Fly live check 3: a graceful restart mid-turn marked the
+  // firing failed and the event was never handled. The gateway now leaves a
+  // keyed turn its stop cut short for the next start and refuses the
+  // dispatch (GatewayStoppingError), as it refuses one that reaches it on
+  // the way down; either way the batch is not done, so it stays claimed.
+  const db = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-triggers-stop-')), 'fleet.db');
+  const first = await rig({}, db);
+  let firingId: string;
+  let batchKey: string | undefined;
+  try {
+    const id = await first.trigger();
+    await first.runtime.start();
+    firingId = first.deliver(id, 'd-1');
+    first.runtime.kickEvents();
+    batchKey = first.dispatched[0]!.idempotencyKey;
+    first.dispatched[0]!.finish(new GatewayStoppingError('stratusd is stopping; this turn was cut short and continues when it is started again.', false));
+    await settle();
+    assert.equal(first.events.firing(firingId)!.status, 'firing');
+    assert.equal(first.events.firing(firingId)!.batchKey, batchKey);
+    assert.ok(!first.warnings.some((line) => /firing failed/.test(line)), first.warnings.join('\n'));
+  } finally {
+    await first.stop();
+  }
+
+  const second = await rig({}, db);
+  try {
+    await second.runtime.start();
+    assert.equal(second.dispatched.length, 1);
+    assert.equal(second.dispatched[0]!.idempotencyKey, batchKey, 'the same key, so the turn the stop left is continued, not run again');
+    second.dispatched[0]!.finish();
+    await settle();
+    assert.equal(second.events.firing(firingId)!.status, 'fired');
+  } finally {
+    await second.stop();
   }
 });
 

@@ -722,6 +722,15 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       },
       (error: unknown) => {
         const reason = error instanceof Error ? error.message : String(error);
+        // Refused by a daemon on its way down, or cut short by its stop and
+        // left for the next start: the batch stays claimed, and the next
+        // start sends it again under its key, which continues that turn
+        // (or runs it, if it never started) rather than losing the events.
+        // Matched by name, as a channel matches it.
+        if (error instanceof Error && error.name === 'GatewayStoppingError') {
+          log(`event trigger ${record.id}: ${reason} The batch stays claimed for the next start.`);
+          return;
+        }
         events?.store.finish(ids, { status: 'failed', reason }, clock().toISOString());
         warn(`event trigger ${record.id} firing failed: ${reason}`);
       },
