@@ -92,7 +92,7 @@ test('the events port serves POST /events/<source> and nothing else', async () =
     assert.equal((await fetch(`${running.url}/events/board/extra`, { method: 'POST', body: '{}' })).status, 404);
     const unknown = await fetch(`${running.url}/events/nope`, { method: 'POST', body: '{}' });
     assert.equal(unknown.status, 404);
-    assert.equal(running.gateway.eventCounters().unknownSource, 1);
+    assert.equal(running.gateway.eventSummary()!.unknownSource, 1);
   } finally {
     await running.stop();
   }
@@ -107,7 +107,7 @@ test('an unsigned delivery is refused 401 and counted, with no row', async () =>
       body: event('ce-1'),
     });
     assert.equal(response.status, 401);
-    assert.equal(running.gateway.eventCounters().sources.board!.badSignature, 1);
+    assert.equal(running.gateway.eventSummary()!.sources.board!.refusedBeforeRow.badSignature, 1);
   } finally {
     await running.stop();
   }
@@ -119,7 +119,7 @@ test('a body past the limit is answered 413 without reading the rest, and the co
     const response = await fetch(`${running.url}/events/board`, signedPost('ce-1', event('ce-1')));
     assert.equal(response.status, 413);
     assert.equal(response.headers.get('connection'), 'close');
-    assert.equal(running.gateway.eventCounters().sources.board!.tooLarge, 1);
+    assert.equal(running.gateway.eventSummary()!.sources.board!.refusedBeforeRow.tooLarge, 1);
   } finally {
     await running.stop();
   }

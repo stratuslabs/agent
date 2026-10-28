@@ -9,6 +9,7 @@ import {
   eventDispatchKey,
   eventSessionId,
   renderEventBlock,
+  type EventSourceActivity,
   type NewEventFiring,
   type SqliteEventStore,
 } from './events.ts';
@@ -61,6 +62,45 @@ export interface EventIntakeCounters {
   /** Per configured source: requests refused before they could leave a row. */
   sources: Record<string, EventSourceCounters>;
 }
+
+/** One configured source in the events summary (`stratus events`, `/health`). */
+export interface EventSourceSummary extends Omit<EventSourceActivity, 'lastRefused'> {
+  /** Requests refused before they could leave a row, since this daemon started. */
+  refusedBeforeRow: Omit<EventSourceCounters, 'lastRefusal'>;
+  /** The newest refusal of any kind: a refused row, or one this daemon refused before a row. */
+  lastRefusal?: { at: string; reason: string };
+}
+
+export interface EventsSummary {
+  /** Where the row counts start: 24 hours before the summary. */
+  since: string;
+  /** Every configured source, with or without activity. */
+  sources: Record<string, EventSourceSummary>;
+  /** Requests to a path no source is configured for, since this daemon started. */
+  unknownSource: number;
+}
+
+/**
+ * The rows' view (it survives restarts) and the listener's counters (they
+ * hold what never got a row) as one answer per configured source.
+ */
+export const summarizeEvents = (input: {
+  sourceIds: readonly string[];
+  since: string;
+  activity: Readonly<Record<string, EventSourceActivity>>;
+  counters: EventIntakeCounters;
+}): EventsSummary => ({
+  since: input.since,
+  unknownSource: input.counters.unknownSource,
+  sources: Object.fromEntries(input.sourceIds.map((sourceId) => {
+    const { lastRefused, ...rows } = input.activity[sourceId] ?? { deliveries: {}, firings: {} };
+    const { lastRefusal: counted, ...refusedBeforeRow } = input.counters.sources[sourceId]
+      ?? { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 0 };
+    // ISO instants compare as strings.
+    const lastRefusal = lastRefused !== undefined && (counted === undefined || lastRefused.at > counted.at) ? lastRefused : counted;
+    return [sourceId, { ...rows, refusedBeforeRow, ...(lastRefusal !== undefined ? { lastRefusal: { ...lastRefusal } } : {}) }];
+  })),
+});
 
 export interface EventIntakeOptions {
   store: Pick<SqliteEventStore, 'accept' | 'refuse'>;
