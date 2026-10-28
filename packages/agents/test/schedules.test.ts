@@ -210,7 +210,7 @@ test('schedule.on refuses what it could never match on, before anyone is asked t
   const base = { source: 'github', filter: { exact: { type: 't' } }, prompt: 'p' };
   await assert.rejects(() => on.execute({ ...base, source: '' }, session), /"source"/);
   await assert.rejects(() => on.execute({ ...base, filter: { regex: { type: '.*' } } }, session), /"regex" is not a supported filter dialect/);
-  await assert.rejects(() => on.execute({ ...base, filter: undefined }, session), /filter/);
+  await assert.rejects(() => on.execute({ source: 'github', prompt: 'p' }, session), /filter/);
   await assert.rejects(() => on.execute({ ...base, prompt: ' ' }, session), /non-empty "prompt"/);
   await assert.rejects(() => on.execute({ ...base, quietHours: { from: '22:00', to: '07:00' } }, session), /timeZone/);
   for (const maxPerHour of [0, 121, 1.5, '6']) {
