@@ -358,6 +358,8 @@ export interface ParsedServeCommand {
   apiPort?: number;
   /** Overrides `api.host` in the config file. */
   apiHost?: string;
+  /** Overrides `events.listen.host` in the config file. */
+  eventsHost?: string;
 }
 
 export interface ParsedHelpCommand {
@@ -544,6 +546,11 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--api-host') {
         parsed.apiHost = readOptionValue(rest, index, '--api-host');
+        index += 1;
+        continue;
+      }
+      if (token === '--events-host') {
+        parsed.eventsHost = readOptionValue(rest, index, '--events-host');
         index += 1;
         continue;
       }

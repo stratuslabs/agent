@@ -20,12 +20,21 @@ import { createCredentialLinkStore } from './credential-links.ts';
 import { createEventStream, type EventFilter } from './events.ts';
 import { API_PREFIX, ApiError, MAX_BODY_BYTES, isStateChanging, sendError, sendJson } from './http.ts';
 import { allowedMethodsFor, resolveRoute, type DaemonStartup, type RouteContext } from './routes.ts';
+import { authority } from './authority.ts';
 
 export { API_PREFIX } from './http.ts';
 export { tokenFingerprint } from './auth.ts';
 export type { DashboardSession } from './auth.ts';
 export type { EventEnvelope, EventFilter } from './events.ts';
 export type { DaemonStartup } from './routes.ts';
+export { authority } from './authority.ts';
+export {
+  createEventListener,
+  DEFAULT_EVENTS_HOST,
+  DEFAULT_EVENTS_PORT,
+  type EventListener,
+  type EventListenerOptions,
+} from './event-listener.ts';
 
 /** Kept in step with package.json, the way the CLI keeps its own version. */
 export const CONTROL_API_VERSION = '0.13.7';
@@ -138,16 +147,6 @@ export interface ControlApi extends GatewayChannelAdapter {
   sessionsAtStop(): DashboardSession[];
 }
 
-/**
- * A host and port as a URL authority.
- *
- * IPv6 literals have to be bracketed or the colons in the address run into
- * the port: `http://::1:4123` is not a URL, and an API that advertised it
- * would also fail every request, since that string is the base `new URL`
- * parses each incoming path against.
- */
-export const authority = (host: string, port: number): string =>
-  host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
 
 /** Refuse an upgrade without pretending it was ever a WebSocket. */
 const refuseUpgrade = (socket: Duplex, status: number, reason: string): void => {

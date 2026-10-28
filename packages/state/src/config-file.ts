@@ -15,6 +15,8 @@ import {
   type PrincipalsConfig,
   type SlackConfig,
   type ApiConfig,
+  type EventsConfig,
+  type EventSourceConfig,
   type PluginConfigBlock,
   type PluginsConfig,
   type StratusConfigFile,
@@ -22,6 +24,7 @@ import {
 import { normalizeTrustedDomain, trustedDomainProblem } from '@stratusagent/permissions';
 
 import { REGISTERED_PROVIDER_NAME_PATTERN, parseProviderName } from './provider-names.ts';
+import { CREDENTIAL_NAME_PATTERN } from './credentials.ts';
 
 /**
  * A config file that exists but cannot be read, parsed, or validated —
@@ -228,6 +231,10 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (api) {
     resolved.api = api;
   }
+  const events = parseEventsConfig(config.events, configPath);
+  if (events) {
+    resolved.events = events;
+  }
   const plugins = parsePluginsConfig(config.plugins, configPath);
   if (plugins) {
     resolved.plugins = plugins;
@@ -429,6 +436,113 @@ const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined
     }
   }
   return api;
+};
+
+/** A source id is a URL path segment, so it is kept to what needs no escaping. */
+const EVENT_SOURCE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/** The largest `events.maxBodyBytes` accepted: the body is held in memory while it is verified. */
+const MAX_EVENT_BODY_BYTES = 16 * 1_048_576;
+
+/**
+ * Prefixes of secret values, not names. A value pasted where a name goes is
+ * a valid credential name by shape (`whsec_…` is letters and underscores),
+ * so the shape check alone would store it in config.json in plain text.
+ */
+const SECRET_VALUE_PREFIXES = ['whsec_', 'whsk_', 'ghp_', 'gho_', 'github_pat_', 'sk-', 'xoxb-', 'xapp-'];
+
+const parseEventSource = (raw: unknown, configPath: string, id: string): EventSourceConfig => {
+  const where = `events.sources.${id}`;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected { "verify": "github", "secrets": ["events.${id}"] }.`);
+  }
+  const source = raw as Record<string, unknown>;
+  for (const key of Object.keys(source)) {
+    if (key !== 'verify' && key !== 'secrets') {
+      throw new Error(`Invalid ${where}: unknown key "${key}" in config ${configPath}. A source has "verify" and "secrets".`);
+    }
+  }
+  if (source.verify !== 'standard-webhooks' && source.verify !== 'github') {
+    throw new Error(`Invalid ${where}.verify in config ${configPath}: ${JSON.stringify(source.verify)}. Use "standard-webhooks" or "github".`);
+  }
+  const secrets = source.secrets;
+  if (!Array.isArray(secrets) || secrets.length === 0
+    || !secrets.every((name): name is string => typeof name === 'string' && CREDENTIAL_NAME_PATTERN.test(name))) {
+    throw new Error(
+      `Invalid ${where}.secrets in config ${configPath}: expected a list of one or more credential names, `
+      + `like ["events.${id}"], each stored with \`stratus credential set\`.`,
+    );
+  }
+  for (const name of secrets) {
+    if (SECRET_VALUE_PREFIXES.some((prefix) => name.startsWith(prefix))) {
+      // The value is not repeated: it may be a real secret.
+      throw new Error(
+        `Invalid ${where}.secrets in config ${configPath}: an entry looks like a secret value, not a name. `
+        + `Store the value with \`stratus credential set events.${id}\` and list "events.${id}" here.`,
+      );
+    }
+  }
+  return { verify: source.verify, secrets: [...secrets] };
+};
+
+const parseEventsConfig = (raw: unknown, configPath: string): EventsConfig | undefined => {
+  if (raw === undefined) {
+    return undefined;
+  }
+  // Refused, not skipped: a block that parsed as nothing would leave the
+  // operator expecting deliveries that never arrive.
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid events in config ${configPath}: expected an object with "listen", "maxBodyBytes" and "sources".`);
+  }
+  const source = raw as Record<string, unknown>;
+  const events: EventsConfig = {};
+  if (source.listen !== undefined) {
+    if (typeof source.listen !== 'object' || source.listen === null || Array.isArray(source.listen)) {
+      throw new Error(`Invalid events.listen in config ${configPath}: expected { "host": "127.0.0.1", "port": 4124 }.`);
+    }
+    const listen = source.listen as Record<string, unknown>;
+    const parsed: NonNullable<EventsConfig['listen']> = {};
+    if (listen.host !== undefined) {
+      if (typeof listen.host !== 'string' || listen.host.trim().length === 0) {
+        throw new Error(`Invalid events.listen.host in config ${configPath}: ${String(listen.host)}. Use a hostname or address.`);
+      }
+      parsed.host = listen.host.trim();
+    }
+    if (listen.port !== undefined) {
+      if (typeof listen.port !== 'number' || !Number.isInteger(listen.port) || listen.port < 0 || listen.port > 65_535) {
+        throw new Error(`Invalid events.listen.port in config ${configPath}: ${String(listen.port)}. Use a whole number between 0 and 65535.`);
+      }
+      parsed.port = listen.port;
+    }
+    events.listen = parsed;
+  }
+  if (source.maxBodyBytes !== undefined) {
+    const max = source.maxBodyBytes;
+    if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > MAX_EVENT_BODY_BYTES) {
+      throw new Error(
+        `Invalid events.maxBodyBytes in config ${configPath}: ${String(max)}. Use a whole number of bytes from 1 to ${MAX_EVENT_BODY_BYTES}.`,
+      );
+    }
+    events.maxBodyBytes = max;
+  }
+  if (source.sources !== undefined) {
+    if (typeof source.sources !== 'object' || source.sources === null || Array.isArray(source.sources)) {
+      throw new Error(`Invalid events.sources in config ${configPath}: expected sources by id, like { "github": { "verify": "github", "secrets": ["events.github"] } }.`);
+    }
+    // No prototype: ids come from the file, and `__proto__` must be a refused key, not a setter.
+    const sources = Object.create(null) as Record<string, EventSourceConfig>;
+    for (const [id, entry] of Object.entries(source.sources as Record<string, unknown>)) {
+      if (!EVENT_SOURCE_ID.test(id)) {
+        throw new Error(
+          `Invalid events.sources key "${id}" in config ${configPath}: a source id is its URL path, /events/<id>. `
+          + 'Use lowercase letters, digits, dashes and underscores, starting with a letter or digit.',
+        );
+      }
+      sources[id] = parseEventSource(entry, configPath, id);
+    }
+    events.sources = { ...sources };
+  }
+  return events;
 };
 
 const parseApprovalRoute = (raw: unknown, configPath: string, where: string): AgentApprovalConfig | undefined => {

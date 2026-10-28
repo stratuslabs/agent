@@ -360,3 +360,24 @@ test('the event store shares fleet.db with schedules, owner-only, and refuses a 
   await symlink(path.join(elsewhere, 'fleet.db'), linkedFile);
   assert.throws(() => new SqliteEventStore(linkedFile, { stateHome: linkedHome }));
 });
+
+test('a gateway with no event sources never creates the event tables, and answers any delivery 404', async () => {
+  const { createGateway } = await import('../src/index.ts');
+  const { DatabaseSync } = await import('node:sqlite');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-off-'));
+  const gateway = createGateway({ env: { homeDir: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await gateway.start();
+  try {
+    const answer = await gateway.receiveEvent({ sourceId: 'github', headers: {}, body: Buffer.from('{}') });
+    assert.equal(answer.status, 404);
+  } finally {
+    await gateway.stop();
+  }
+  const file = fleetDbIn(path.join(home, '.stratus'));
+  const { existsSync } = await import('node:fs');
+  assert.ok(existsSync(file), 'the schedules opened fleet.db, so this reads the real file');
+  const db = new DatabaseSync(file);
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'event_%'").all() as Array<{ name: string }>);
+  db.close();
+  assert.deepEqual(tables, []);
+});

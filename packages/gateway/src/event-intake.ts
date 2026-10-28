@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import type { JsonObject, JsonValue } from '@stratusagent/core';
 import { matchesEventFilter, type EventFilter, type InboundEvent } from '@stratusagent/agents';
+import type { EventSourceConfig } from '@stratusagent/state';
 
 import {
   eventCoalescingKey,
@@ -21,13 +22,8 @@ import {
 // calls, with the raw bytes, so signatures are checked over exactly what
 // arrived.
 
-/** A source the operator configured under `events.sources`. */
-export interface EventSourceConfig {
-  /** How deliveries prove who sent them. */
-  verify: 'standard-webhooks' | 'github';
-  /** Credential names, tried in turn, so a secret can rotate without downtime. */
-  secrets: string[];
-}
+// The config's shape lives with the config; re-exported for the intake's callers.
+export type { EventSourceConfig };
 
 /** A trigger as matching sees it: the schedule's id, its agent, and its event cadence's source and filter. */
 export interface EventTrigger {

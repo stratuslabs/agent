@@ -130,6 +130,9 @@ export {
   type SlackConfig,
   type SlackReplyMode,
   type ApiConfig,
+  type EventsConfig,
+  type EventSourceConfig,
+  type EventSourceVerify,
   type PluginConfigBlock,
   type PluginsConfig,
   type StratusConfigFile,
@@ -173,6 +176,7 @@ export {
   NamedCredentialMissingError,
   type NamedCredentialSource,
   namedCredentialSource,
+  resolveDaemonCredential,
   createFileCredentialResolver,
 } from './credentials.ts';
 

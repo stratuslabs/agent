@@ -74,3 +74,18 @@ export const loadControlApi = async (): Promise<ControlApiFactory | undefined> =
   }
   return (await import('@stratusagent/control-api')).createControlApi;
 };
+
+type EventListenerFactory = typeof import('@stratusagent/control-api').createEventListener;
+
+/**
+ * The events listener, from the same optional package as the control API.
+ * Undefined as well when an installed control-api predates it: a companion
+ * left behind by an upgrade must cost the listener, not the daemon.
+ */
+export const loadEventListener = async (): Promise<EventListenerFactory | undefined> => {
+  if (!packageInstalled('@stratusagent/control-api')) {
+    return undefined;
+  }
+  const module: { createEventListener?: EventListenerFactory } = await import('@stratusagent/control-api');
+  return typeof module.createEventListener === 'function' ? module.createEventListener : undefined;
+};

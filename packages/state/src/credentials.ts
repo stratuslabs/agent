@@ -783,6 +783,22 @@ export const namedCredentialSource = async (
 ): Promise<NamedCredentialSource | undefined> =>
   lookupNamedCredential(await loadNamedCredentials(env), readProcessEnv(env), agentId, name)?.source;
 
+/**
+ * A credential the daemon itself uses, not an agent: an event source's
+ * signing secret. From the shared store, then the process environment (how
+ * Docker and Fly supply keys), and never from any one agent's own keys,
+ * which are that agent's consent and not the daemon's. Read from disk on
+ * every call, so `stratus credential set` takes effect without a restart.
+ */
+export const resolveDaemonCredential = async (env: StateEnvironment, name: string): Promise<string | undefined> => {
+  const shared = (await loadNamedCredentials(env)).shared[name];
+  if (shared !== undefined) {
+    return shared;
+  }
+  const fromEnv = readProcessEnv(env)[name];
+  return typeof fromEnv === 'string' ? fromEnv : undefined;
+};
+
 export const createFileCredentialResolver = (
   env: StateEnvironment,
   processEnv: Record<string, string | undefined> = readProcessEnv(env),

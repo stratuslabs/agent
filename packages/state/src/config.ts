@@ -258,6 +258,39 @@ export interface ApiConfig {
   publicUrl?: string;
 }
 
+/** How one event source proves who sent a delivery (card 590). */
+export type EventSourceVerify = 'standard-webhooks' | 'github';
+
+/** One source the events listener takes deliveries for, at `/events/<id>`. */
+export interface EventSourceConfig {
+  /** `standard-webhooks` (CloudEvents or plain payloads) or `github` (`X-Hub-Signature-256`). */
+  verify: EventSourceVerify;
+  /**
+   * Credential names (`stratus credential set <name>`), tried in turn so a
+   * secret can rotate without downtime. Names, never values: a value here
+   * would sit in config.json in plain text.
+   */
+  secrets: string[];
+}
+
+/**
+ * The events listener: a second port, apart from the control API, that
+ * takes signed deliveries and wakes agents' event triggers. Nothing listens
+ * until at least one source is configured.
+ *
+ * Read only from a **trusted** config, like `api`: which interface a daemon
+ * opens to the internet, and who may wake its agents, are not a cloned
+ * repository's to decide.
+ */
+export interface EventsConfig {
+  /** Default 127.0.0.1:4124. `stratus serve --events-host` overrides the host. */
+  listen?: { host?: string; port?: number };
+  /** The largest body accepted, in bytes. Default 1 MiB. */
+  maxBodyBytes?: number;
+  /** Sources by id: the `<id>` in `/events/<id>`. Only the operator adds one. */
+  sources?: Record<string, EventSourceConfig>;
+}
+
 /**
  * One plugin's settings: whether it runs, its own configuration, and the
  * per-agent overrides beneath it.
@@ -362,6 +395,8 @@ export interface StratusConfigFile {
   slack?: SlackConfig;
   /** Control API binding for `stratus serve`. */
   api?: ApiConfig;
+  /** The events listener for `stratus serve`. Trusted configs only. */
+  events?: EventsConfig;
   /** Plugins to load, keyed by package name. Trusted configs only. */
   plugins?: PluginsConfig;
   /**
