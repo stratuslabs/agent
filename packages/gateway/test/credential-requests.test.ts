@@ -36,13 +36,14 @@ type DeliveredRequest = Parameters<NonNullable<GatewayChannelAdapter['requestCre
  * A `slack` channel that shows credential forms by recording them, or
  * refuses to the way a failed post does.
  */
-const createFormChannel = (options: { refuse?: string; replaceForms?: boolean } = {}) => {
+const createFormChannel = (options: { refuse?: string; replaceForms?: boolean; envForms?: boolean } = {}) => {
   const delivered: DeliveredRequest[] = [];
   const adapter: GatewayChannelAdapter = {
     name: 'slack',
     start: async () => {},
     stop: async () => {},
     ...(options.replaceForms === false ? {} : { credentialReplaceForms: true }),
+    ...(options.envForms === false ? {} : { credentialEnvForms: true }),
     requestCredential: async (request) => {
       if (options.refuse !== undefined) {
         throw new Error(options.refuse);
@@ -752,6 +753,120 @@ test('a shared key is replaced only when the request says shared, and then for t
     const named = await readNamed(home);
     assert.equal(named.shared['github.token'], 'ghp-fleet-new');
     assert.equal(named.agents.kai, undefined, 'no agent entry created');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+const readBindings = async (home: string) => (JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+  envBindings?: { agents?: Record<string, Record<string, string>> };
+}).envBindings?.agents;
+
+test('an agent asks for a key in a variable, the form says so, and the answer stores the value and the binding together', async () => {
+  const { home, gateway, events, delivered } = await startRequesting({
+    request: { name: 'twilio.authToken', env: 'TWILIO_AUTH_TOKEN', reason: 'For the CNAM lookup script.' },
+  });
+  try {
+    const session = await gateway.dispatch({ sessionId: 'kai-e1', agentId: 'kai', userMessage: 'set up cnam', metadata: SLACK });
+    const requested = requestedIn(events);
+    assert.ok(requested, toolError(session));
+    assert.equal(requested.env, 'TWILIO_AUTH_TOKEN');
+    assert.equal(delivered[0]?.env, 'TWILIO_AUTH_TOKEN', 'the channel is told the variable, to say so on the form');
+    const output = session.messages.find((message) => message.role === 'tool')?.toolResult?.output as { env?: string; note?: string };
+    assert.equal(output.env, 'TWILIO_AUTH_TOKEN');
+    assert.match(output.note ?? '', /read it as \$TWILIO_AUTH_TOKEN/);
+
+    const result = await gateway.provideCredential({ requestId: requested.requestId, value: 'tw-secret', actor: 'U-DYLAN' });
+    assert.deepEqual(result, { ok: true, name: 'twilio.authToken', scope: 'agent', agentId: 'kai', granted: true });
+    assert.equal((await readNamed(home)).agents.kai?.['twilio.authToken'], 'tw-secret');
+    assert.deepEqual(await readBindings(home), { kai: { TWILIO_AUTH_TOKEN: 'twilio.authToken' } });
+
+    const provided = events.find((event): event is Extract<StratusEvent, { type: 'credential.provided' }> => event.type === 'credential.provided');
+    assert.equal(provided?.env, 'TWILIO_AUTH_TOKEN');
+    const line = JSON.parse((await readFile(path.join(home, '.stratus', 'credential-audit.log'), 'utf8')).trim()) as Record<string, string>;
+    assert.equal(line.env, 'TWILIO_AUTH_TOKEN');
+    assert.equal(line.bindingFor, 'kai');
+    const auditText = await readFile(path.join(home, '.stratus', 'credential-audit.log'), 'utf8');
+    assert.doesNotMatch(JSON.stringify([await gateway.store.get('kai-e1'), events]) + auditText, /tw-secret/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a shared key asked for in a variable is bound for the agent that asked, and a replace can bind too', async () => {
+  const shared = await startRequesting({ request: { name: 'github.token', scope: 'shared', env: 'GH_TOKEN' } });
+  try {
+    await shared.gateway.dispatch({ sessionId: 'kai-e2', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(shared.events)?.requestId ?? '';
+    assert.equal((await shared.gateway.provideCredential({ requestId, value: 'ghp-shared', actor: 'U-DYLAN' })).ok, true);
+    assert.equal((await readNamed(shared.home)).shared['github.token'], 'ghp-shared');
+    assert.deepEqual(await readBindings(shared.home), { kai: { GH_TOKEN: 'github.token' } });
+  } finally {
+    await shared.gateway.stop();
+  }
+
+  const replace = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', replace: true, env: 'GH_TOKEN' } });
+  try {
+    await storeNamed(replace.home, { agents: { kai: { 'github.token': 'ghp-old' } } });
+    await replace.gateway.dispatch({ sessionId: 'kai-e3', agentId: 'kai', userMessage: 'rotate', metadata: SLACK });
+    assert.equal(replace.delivered[0]?.env, 'GH_TOKEN');
+    const requestId = requestedIn(replace.events)?.requestId ?? '';
+    assert.equal((await replace.gateway.provideCredential({ requestId, value: 'ghp-new', actor: 'U-DYLAN' })).ok, true);
+    assert.equal((await readNamed(replace.home)).agents.kai?.['github.token'], 'ghp-new');
+    assert.deepEqual(await readBindings(replace.home), { kai: { GH_TOKEN: 'github.token' } });
+  } finally {
+    await replace.gateway.stop();
+  }
+});
+
+test('a channel whose forms cannot name the variable is never handed the request: a link names it instead, or nothing is pending', async () => {
+  const links = createLinkIssuer();
+  const plain = createFormChannel({ envForms: false });
+  const withLink = await startRequesting({ channel: plain.adapter, also: [links.adapter], request: { name: 'twilio.authToken', env: 'TWILIO_AUTH_TOKEN' } });
+  try {
+    const session = await withLink.gateway.dispatch({ sessionId: 'kai-e4', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    assert.equal(plain.delivered.length, 0, 'no form went up');
+    assert.equal(links.issued[0]?.env, 'TWILIO_AUTH_TOKEN', 'the link page is told the variable');
+    const output = session.messages.find((message) => message.role === 'tool')?.toolResult?.output as { via?: string; note?: string };
+    assert.equal(output.via, 'link');
+    assert.match(output.note ?? '', /that says which variable your shell will read it from/);
+    assert.equal(requestedIn(withLink.events)?.env, 'TWILIO_AUTH_TOKEN');
+  } finally {
+    await withLink.gateway.stop();
+  }
+
+  const noLink = await startRequesting({ channel: createFormChannel({ envForms: false }).adapter, request: { name: 'twilio.authToken', env: 'TWILIO_AUTH_TOKEN' } });
+  try {
+    const session = await noLink.gateway.dispatch({ sessionId: 'kai-e5', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    assert.equal(requestedIn(noLink.events), undefined);
+    assert.match(toolError(session), /No control API is running to issue a link either\..*stratus credential set twilio\.authToken --agent kai --env TWILIO_AUTH_TOKEN/);
+  } finally {
+    await noLink.gateway.stop();
+  }
+});
+
+test('a variable that is not secret-shaped, or changes how commands run, is refused before anyone is asked', async () => {
+  for (const env of ['NODE_OPTIONS', 'DATABASE_URL', 'PATH', 'GIT_DIR', 'gh_token', 'BASH_FUNC_x_TOKEN']) {
+    const { gateway, events, delivered } = await startRequesting({ request: { name: 'some.key', env } });
+    try {
+      const session = await gateway.dispatch({ sessionId: 'kai-e6', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+      assert.equal(delivered.length, 0, env);
+      assert.equal(requestedIn(events), undefined, env);
+      assert.match(toolError(session), /Nothing is pending\./, env);
+    } finally {
+      await gateway.stop();
+    }
+  }
+});
+
+test('asking for a key already held, in a variable, is refused with the one command the operator runs', async () => {
+  const { home, gateway, events, delivered } = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', env: 'GH_TOKEN' } });
+  try {
+    await storeNamed(home, { agents: { kai: { 'github.token': 'ghp-held' } } });
+    const session = await gateway.dispatch({ sessionId: 'kai-e7', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    assert.equal(delivered.length, 0);
+    assert.equal(requestedIn(events), undefined);
+    assert.match(toolError(session), /You already hold github\.token.*`stratus credential env github\.token GH_TOKEN --agent kai`.*Nothing is pending\./);
   } finally {
     await gateway.stop();
   }

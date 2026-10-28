@@ -289,3 +289,114 @@ test('the credential audit log is one owner-only JSON line per change, names onl
   ]);
   assert.equal((await lstat(credentialAuditPath(env))).mode & 0o777, 0o600);
 });
+
+test('an add with a binding stores the value and the variable in one write, and the resolver reads both on every call', async () => {
+  const { createFileCredentialResolver, credentialsPath } = await import('../src/index.ts');
+  const env = await newEnv();
+  // Built before anything is stored, as a daemon's is.
+  const resolver = createFileCredentialResolver(env, {});
+  const atlas = { id: 'atlas', name: 'Atlas', credentials: ['twilio.authToken', 'twilio.accountSid'] };
+  assert.deepEqual({ ...await resolver.envBindings!(atlas) }, {});
+
+  await addNamedCredential(env, { name: 'twilio.authToken', value: 'tw-secret', agentId: 'atlas', bind: { agentId: 'atlas', variable: 'TWILIO_AUTH_TOKEN' } });
+  const file = JSON.parse(await readFile(credentialsPath(env), 'utf8')) as Record<string, unknown>;
+  assert.deepEqual(file.envBindings, { agents: { atlas: { TWILIO_AUTH_TOKEN: 'twilio.authToken' } } });
+  assert.deepEqual({ ...await resolver.envBindings!(atlas) }, { TWILIO_AUTH_TOKEN: 'tw-secret' });
+
+  // A soul that no longer lists the name gets nothing from its binding.
+  assert.deepEqual({ ...await resolver.envBindings!({ ...atlas, credentials: [] }) }, {});
+  // Another agent never gets atlas's bindings.
+  assert.deepEqual({ ...await resolver.envBindings!({ ...atlas, id: 'kai' }) }, {});
+});
+
+test('a binding on a shared key is for the one agent that was approved, and an env-supplied key can be bound on the machine', async () => {
+  const { bindCredentialEnv, createFileCredentialResolver } = await import('../src/index.ts');
+  const env = await newEnv();
+  await addNamedCredential(env, { name: 'github.token', value: 'ghp-shared', bind: { agentId: 'atlas', variable: 'GH_TOKEN' } });
+  const resolver = createFileCredentialResolver(env, { OPENAI_KEY_FROM_ENV: 'sk-env' });
+  const granted = ['github.token', 'OPENAI_KEY_FROM_ENV'];
+  assert.deepEqual({ ...await resolver.envBindings!({ id: 'atlas', name: 'Atlas', credentials: granted }) }, { GH_TOKEN: 'ghp-shared' });
+  // Kai is granted the shared key too, but nobody bound it for kai's shell.
+  assert.deepEqual({ ...await resolver.envBindings!({ id: 'kai', name: 'Kai', credentials: granted }) }, {});
+
+  // Docker -e / fly secrets: the value is in the environment, bound by name.
+  assert.equal(await bindCredentialEnv(env, { agentId: 'kai', variable: 'OPENAI_API_KEY', name: 'OPENAI_KEY_FROM_ENV' }), undefined);
+  assert.deepEqual({ ...await resolver.envBindings!({ id: 'kai', name: 'Kai', credentials: granted }) }, { OPENAI_API_KEY: 'sk-env' });
+});
+
+test('bind and unbind refuse a variable that changes how commands run, and report what a variable was bound to', async () => {
+  const { bindCredentialEnv, unbindCredentialEnv, loadCredentialEnvBindings } = await import('../src/index.ts');
+  const env = await newEnv();
+  for (const variable of ['PATH', 'BASH_ENV', 'GIT_DIR', 'GREP_OPTIONS', 'BASH_FUNC_x%%', '1BAD']) {
+    await assert.rejects(bindCredentialEnv(env, { agentId: 'atlas', variable, name: 'github.token' }), Error, variable);
+    await assert.rejects(
+      addNamedCredential(env, { name: 'github.token', value: 'x', bind: { agentId: 'atlas', variable } }),
+      Error,
+      variable,
+    );
+  }
+  // Refused before anything was written.
+  assert.deepEqual({ ...await loadNamedCredentials(env) }.shared, Object.create(null));
+  await assert.rejects(bindCredentialEnv(env, { agentId: '__proto__', variable: 'GH_TOKEN', name: 'github.token' }), /cannot be an agent id/);
+
+  // The operator's rule only: not secret-shaped is the operator's call.
+  assert.equal(await bindCredentialEnv(env, { agentId: 'atlas', variable: 'DATABASE_URL', name: 'db.url' }), undefined);
+  assert.equal(await bindCredentialEnv(env, { agentId: 'atlas', variable: 'DATABASE_URL', name: 'db.replica' }), 'db.url');
+  assert.equal(await unbindCredentialEnv(env, { agentId: 'atlas', variable: 'DATABASE_URL' }), 'db.replica');
+  assert.equal(await unbindCredentialEnv(env, { agentId: 'atlas', variable: 'DATABASE_URL' }), undefined);
+  assert.deepEqual({ ...await loadCredentialEnvBindings(env) }, {});
+});
+
+test('removing a credential takes the bindings that read it, and nothing else', async () => {
+  const { bindCredentialEnv, loadCredentialEnvBindings, removeNamedCredential } = await import('../src/index.ts');
+  const env = await newEnv();
+  // As `stratus credential set` leaves it: a shared key, and kai's own over it.
+  await saveNamedCredentials(env, { shared: { 'github.token': 'ghp-shared' }, agents: { kai: { 'github.token': 'ghp-kai' } } });
+  await bindCredentialEnv(env, { agentId: 'atlas', variable: 'GH_TOKEN', name: 'github.token' });
+  await bindCredentialEnv(env, { agentId: 'kai', variable: 'GH_TOKEN', name: 'github.token' });
+  await bindCredentialEnv(env, { agentId: 'atlas', variable: 'NPM_TOKEN', name: 'npm.token' });
+
+  // Kai's own key goes, and kai's binding of it with it; atlas's binding
+  // reads the shared key and stays.
+  assert.equal(await removeNamedCredential(env, { name: 'github.token', agentId: 'kai' }), true);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await loadCredentialEnvBindings(env))),
+    { atlas: { GH_TOKEN: 'github.token', NPM_TOKEN: 'npm.token' } },
+  );
+  // The shared one goes, and so does every binding that read it.
+  assert.equal(await removeNamedCredential(env, { name: 'github.token' }), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(await loadCredentialEnvBindings(env))), { atlas: { NPM_TOKEN: 'npm.token' } });
+  assert.equal(await removeNamedCredential(env, { name: 'github.token' }), false);
+});
+
+test('writers that predate bindings keep the block, and anything a newer daemon put beside it', async () => {
+  const { bindCredentialEnv, credentialsPath, saveCredentials, loadCredentialEnvBindings } = await import('../src/index.ts');
+  const env = await newEnv();
+  await bindCredentialEnv(env, { agentId: 'atlas', variable: 'GH_TOKEN', name: 'github.token' });
+  const file = JSON.parse(await readFile(credentialsPath(env), 'utf8')) as Record<string, Record<string, unknown>>;
+  file.envBindings!.fleet = { FUTURE_TOKEN: 'future.token' };
+  await writeFile(credentialsPath(env), JSON.stringify(file));
+
+  await saveNamedCredentials(env, { shared: { 'search.apiKey': 'sk' }, agents: {} });
+  await saveCredentials(env, { anthropic: { type: 'api_key', value: 'sk-ant' } });
+  await bindCredentialEnv(env, { agentId: 'kai', variable: 'NPM_TOKEN', name: 'npm.token' });
+
+  const after = JSON.parse(await readFile(credentialsPath(env), 'utf8')) as Record<string, Record<string, unknown>>;
+  assert.deepEqual(after.envBindings!.fleet, { FUTURE_TOKEN: 'future.token' });
+  assert.deepEqual(JSON.parse(JSON.stringify(await loadCredentialEnvBindings(env))), {
+    atlas: { GH_TOKEN: 'github.token' },
+    kai: { NPM_TOKEN: 'npm.token' },
+  });
+});
+
+test('the audit line for a binding names the variable and whose shell it is for', async () => {
+  const { appendCredentialAudit, credentialAuditPath } = await import('../src/index.ts');
+  const env = await newEnv();
+  await appendCredentialAudit(env, { action: 'add', name: 'github.token', via: 'form', requestedBy: 'atlas', env: 'GH_TOKEN', bindingFor: 'atlas' });
+  await appendCredentialAudit(env, { action: 'bind', name: 'npm.token', agentId: 'kai', via: 'cli', env: 'NPM_TOKEN', bindingFor: 'kai' });
+  const lines = (await readFile(credentialAuditPath(env), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+  assert.deepEqual(lines.map(({ at: _at, ...rest }) => rest), [
+    { action: 'add', name: 'github.token', store: 'shared', via: 'form', requestedBy: 'atlas', env: 'GH_TOKEN', bindingFor: 'atlas' },
+    { action: 'bind', name: 'npm.token', store: 'agent:kai', via: 'cli', env: 'NPM_TOKEN', bindingFor: 'kai' },
+  ]);
+});

@@ -12910,6 +12910,61 @@ test('stratus credential remove forgets one, and says so when there is nothing t
   assert.deepEqual(stored.named?.agents, {});
 });
 
+test('credential set --env and credential env bind a key to one agent\'s shell, list shows it, and remove takes it with the key', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cred-env-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const set = createStreams();
+  assert.equal(await runCli({
+    argv: ['credential', 'set', 'twilio.authToken', '--agent', 'ava', '--env', 'TWILIO_AUTH_TOKEN'],
+    streams: set.streams,
+    env: { ...env, stdin: 'tw-secret' },
+  }), 0);
+  assert.match(set.output.stdout, /ava's shell commands read it as TWILIO_AUTH_TOKEN from their next command\. No restart needed\./);
+
+  const bound = createStreams();
+  assert.equal(await runCli({ argv: ['credential', 'env', 'db.url', 'DATABASE_URL', '--agent', 'ava'], streams: bound.streams, env }), 0);
+  assert.match(bound.output.stdout, /ava's shell commands read db\.url as DATABASE_URL from their next command/);
+
+  const file = () => readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8').then((text) => JSON.parse(text) as {
+    envBindings?: { agents?: Record<string, Record<string, string>> };
+  });
+  assert.deepEqual((await file()).envBindings?.agents, { ava: { TWILIO_AUTH_TOKEN: 'twilio.authToken', DATABASE_URL: 'db.url' } });
+
+  const list = createStreams();
+  await runCli({ argv: ['credentials'], streams: list.streams, env });
+  assert.match(list.output.stdout, /ava's shell reads:\n {2}DATABASE_URL from db\.url\n {2}TWILIO_AUTH_TOKEN from twilio\.authToken/);
+  assert.ok(!list.output.stdout.includes('tw-secret'));
+
+  const audit = (await readFile(path.join(home, '.stratus', 'credential-audit.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as Record<string, string>);
+  assert.deepEqual(audit.map((line) => [line.action, line.name, line.env, line.bindingFor, line.via]), [
+    ['bind', 'twilio.authToken', 'TWILIO_AUTH_TOKEN', 'ava', 'cli'],
+    ['bind', 'db.url', 'DATABASE_URL', 'ava', 'cli'],
+  ]);
+
+  const unbound = createStreams();
+  assert.equal(await runCli({ argv: ['credential', 'env', 'db.url', 'DATABASE_URL', '--agent', 'ava', '--remove'], streams: unbound.streams, env }), 0);
+  const nothing = createStreams();
+  assert.equal(await runCli({ argv: ['credential', 'env', 'db.url', 'DATABASE_URL', '--agent', 'ava', '--remove'], streams: nothing.streams, env }), 1);
+  assert.match(nothing.output.stderr, /has no credential bound to DATABASE_URL/);
+
+  assert.equal(await runCli({ argv: ['credential', 'remove', 'twilio.authToken', '--agent', 'ava'], streams: createStreams().streams, env }), 0);
+  assert.deepEqual((await file()).envBindings?.agents, {});
+});
+
+test('a binding is refused at parse time without an agent, without a variable, or for a variable that changes how commands run', () => {
+  assert.throws(() => parseCommand(['credential', 'env', 'github.token', 'GH_TOKEN']), /needs --agent <id>/);
+  assert.throws(() => parseCommand(['credential', 'set', 'github.token', '--env', 'GH_TOKEN']), /set --env needs --agent <id>.*bind it per agent with credential env/);
+  assert.throws(() => parseCommand(['credential', 'env', 'github.token', '--agent', 'ava']), /needs the variable too/);
+  assert.throws(() => parseCommand(['credential', 'env', 'github.token', 'PATH', '--agent', 'ava']), /can't be put in PATH/);
+  assert.throws(() => parseCommand(['credential', 'env', 'github.token', 'GH_TOKEN', 'EXTRA', '--agent', 'ava']), /one more/);
+  // --env is set's, --remove is env's.
+  assert.throws(() => parseCommand(['credential', 'remove', 'github.token', '--env', 'GH_TOKEN']), /Unknown option: --env/);
+  assert.throws(() => parseCommand(['credential', 'set', 'github.token', '--remove']), /Unknown option: --remove/);
+  assert.deepEqual(parseCommand(['credential', 'env', 'github.token', 'GH_TOKEN', '--agent', 'ava', '--remove']), {
+    command: 'credential', action: 'env', name: 'github.token', agentId: 'ava', env: 'GH_TOKEN', remove: true,
+  });
+});
+
 test('a credential name that could never be stored or resolved is refused at parse time', () => {
   // `__proto__` is the one that actually breaks: on an ordinary object it
   // assigns through the inherited setter, so a store would report success,

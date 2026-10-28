@@ -15011,3 +15011,32 @@ test('a replace request says so on the post, the button and the form, and still 
   assert.equal(view?.title?.text, 'Replace a credential');
   assert.equal(view?.submit?.text, 'Replace');
 });
+
+test('a request for a key in a variable says on the post and the form that the agent\'s shell will read it, before anything is typed', async () => {
+  const { socket, web, gateway, adapter, pending, ask, formPosts } = credentialAdapter(['U-DYLAN']);
+  // It declares that its forms show the variable; the gateway hands such a request to no other.
+  assert.equal(adapter.credentialEnvForms, true);
+  await adapter.start(gateway);
+  pending.add('cred-env');
+  await ask({ requestId: 'cred-env', env: 'GH_TOKEN' });
+
+  const blocks = JSON.stringify(formPosts().at(-1)?.blocks);
+  assert.match(blocks, /Ava's shell commands will be able to read this as `GH_TOKEN`, so Ava can see the value\./);
+
+  await socket.deliver('interactive', credentialClick('cred-env', 'U-DYLAN'));
+  assert.match(JSON.stringify(web.views_opened.at(-1)?.view), /Ava's shell commands will be able to read this as `GH_TOKEN`, so Ava can see the value\./);
+
+  await socket.deliver('interactive', credentialSubmission('cred-env', 'U-DYLAN', 'ghp-secret-value'), async () => {});
+  assert.match(web.updates.at(-1)?.text ?? '', /Added `github.token` for Ava only, by <@U-DYLAN>\..* Its shell commands read it as `GH_TOKEN`\./);
+  assert.doesNotMatch(JSON.stringify([web.posts, web.updates, web.views_opened]), /ghp-secret-value/);
+  await adapter.stop();
+});
+
+test('a request without a variable says nothing about the shell', async () => {
+  const { gateway, adapter, pending, ask, formPosts } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-plain');
+  await ask({ requestId: 'cred-plain' });
+  assert.doesNotMatch(JSON.stringify(formPosts().at(-1)?.blocks), /shell/);
+  await adapter.stop();
+});
