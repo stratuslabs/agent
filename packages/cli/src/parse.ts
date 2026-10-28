@@ -173,6 +173,14 @@ export interface ParsedHealthCommand {
   format: 'text' | 'json';
 }
 
+/** `stratus events`: what the running daemon's events port has been doing (card 590). */
+export interface ParsedEventsCommand {
+  command: 'events';
+  gateway?: string;
+  token?: string;
+  format: 'text' | 'json';
+}
+
 export interface ParsedAgentsCommand {
   command: 'agents';
   format: 'text' | 'json';
@@ -388,6 +396,7 @@ export type ParsedCommand =
   | ParsedChannelCommand
   | ParsedRestartCommand
   | ParsedHealthCommand
+  | ParsedEventsCommand
   | ParsedSchedulesCommand
   | ParsedGrantsCommand
   | ParsedMemoryCommand
@@ -1595,8 +1604,9 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     return parsed;
   }
 
-  if (command === 'health') {
-    const parsed: ParsedHealthCommand = { command: 'health', format: 'text' };
+  if (command === 'health' || command === 'events') {
+    // The same three options: both only ask the running daemon.
+    const parsed: ParsedHealthCommand | ParsedEventsCommand = { command, format: 'text' };
     for (let index = 0; index < rest.length; index += 1) {
       const token = rest[index];
       if (!token) {

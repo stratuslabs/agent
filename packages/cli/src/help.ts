@@ -26,6 +26,7 @@ Usage:
   stratus skill reload
   stratus restart
   stratus health
+  stratus events
   stratus sessions --status failed
   stratus schedules
   stratus schedules cancel <id>
@@ -141,6 +142,11 @@ Commands:
                    approvals), or exit 1 and one sentence saying why not.
                    For a container HEALTHCHECK, a Kubernetes probe, or a
                    monitoring script (--gateway, --token, --format json)
+  events           What the running daemon's events port has been doing, per
+                   source: the last delivery, the last refusal and why, the
+                   last 24 hours by status, and requests refused before they
+                   left a row, such as a webhook with the wrong secret
+                   (--gateway, --token, --format json)
   sessions         What the running daemon's sessions are doing, newest
                    first: status, agent, last update, id. --agent <id>,
                    --status <idle|running|pending_approval|completed|failed>,
@@ -295,7 +301,7 @@ Options:
   --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
   --gateway        agents / skill reload / restart / session rollover /
-                   sessions / health: a running daemon's control API (all but
+                   sessions / health / events: a running daemon's control API (all but
                    agents default to the daemon ~/.stratus/gateway.json names)
   --trust          memory list: show only this label; memory reassert: the
                    label to record (user, agent, unknown, external)

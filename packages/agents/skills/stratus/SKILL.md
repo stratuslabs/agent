@@ -194,6 +194,7 @@ When a stored key "isn't found", check in this order:
 | `stratus restart` | Announced drain-and-restart of the running daemon |
 | `stratus logs` | Read the daemon's log |
 | `stratus health` | Whether the running daemon is serving: exit 0 if so, for a container healthcheck or a probe |
+| `stratus events` | What the events port has been doing, per source: the last delivery, the last refusal and why (a webhook with the wrong secret shows here, though it leaves no row), and the last 24 hours of deliveries and firings by status. `--format json` |
 | `stratus sessions` (also `stratus session list`) | The running daemon's sessions, newest first: status, agent, last update, id. `--agent <id>`, `--status <status>` (`running`, `pending_approval`, `failed`, `completed`, `idle`), `--limit <n>` (default 20), `--format json` |
 | `stratus doctor` | What a run would use, and why |
 | `stratus update` | Update Stratus and its companion packages (`--check` to look first) |

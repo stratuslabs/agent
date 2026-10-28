@@ -18,6 +18,7 @@ import { runDashboard } from './commands/dashboard.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runGrants } from './commands/grants.ts';
 import { runHealth } from './commands/health.ts';
+import { runEvents } from './commands/events.ts';
 import { runLogs } from './commands/logs.ts';
 import { runMemory } from './commands/memory.ts';
 import { runPlugins } from './commands/plugins.ts';
@@ -93,6 +94,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
     // advances it (or fails because it could not).
     if (command.command === 'health') {
       return await runHealth(command, streams, resolvedEnv);
+    }
+    // Likewise only a question over HTTP to the running daemon.
+    if (command.command === 'events') {
+      return await runEvents(command, streams, resolvedEnv);
     }
 
     // Migrations run on first use of a newer build — every command, every
