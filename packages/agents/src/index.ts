@@ -62,6 +62,17 @@ export {
 } from './schedules.ts';
 
 export {
+  type InboundEvent,
+  type EventFilter,
+  type QuietHours,
+  DEFAULT_EVENT_MAX_PER_HOUR,
+  parseEventFilter,
+  matchesEventFilter,
+  parseQuietHours,
+  isWithinQuietHours,
+} from './events.ts';
+
+export {
   type AgentRouteRule,
   type AgentRouter,
   createAgentRouter,
