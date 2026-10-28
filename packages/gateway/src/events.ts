@@ -270,8 +270,9 @@ const minus = (iso: string, ms: number): string => new Date(Date.parse(iso) - ms
 
 /**
  * Deliveries, dedup tombstones and firings, durable in `fleet.db`. Its own
- * connection, like the schedule store's, because the CLI will read it
- * without a daemon (`stratus events`).
+ * connection, like the schedule store's. `stratus events` reads through the
+ * running daemon instead of this file, because the requests refused before
+ * a row are counted only in the listener.
  *
  * Every method that changes more than one row does it in one transaction,
  * and every one that moves a firing between statuses is all-or-nothing and
