@@ -7149,11 +7149,13 @@ test('the launchd plist runs the daemon by absolute path and starts at login', a
   // Restart on crash, but not on a clean SIGTERM shutdown.
   assert.match(plist, /<key>SuccessfulExit<\/key>\s*<false\/>/);
 
-  // bootout before bootstrap, or replacing an existing job is refused with
-  // "service already loaded" and the new unit never takes effect.
-  // Then it asks whether the daemon is actually running before saying so.
-  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
-  assert.equal(calls[1]?.args[1], 'gui/501');
+  // It asks whose job is loaded before touching it (another home's is left
+  // alone). Then bootout before bootstrap, or replacing an existing job is
+  // refused with "service already loaded" and the new unit never takes
+  // effect. Then it asks whether the daemon is actually running before
+  // saying so.
+  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
+  assert.equal(calls[2]?.args[1], 'gui/501');
   // The login-vs-power-on distinction is stated, not left to be discovered
   // after a reboot leaves the roster silent.
   assert.ok(result.messages.some((message) => /starts at login, not at power-on/.test(message)));
@@ -7223,6 +7225,7 @@ test('the systemd unit restarts on failure and enables at login', async () => {
   // active unit, so a rerun would leave the old process — and its old
   // config path — running while reporting the new unit as installed.
   assert.deepEqual(calls, [
+    'systemctl --user show --property=FragmentPath stratusd.service',
     'systemctl --user daemon-reload',
     'systemctl --user enable --now stratusd.service',
     'systemctl --user restart stratusd.service',
@@ -7287,8 +7290,100 @@ test('uninstall tells the manager before removing the unit file', async () => {
     },
   });
 
-  assert.deepEqual(seen, ['launchctl bootout gui/501/com.stratusagent.stratusd']);
+  assert.deepEqual(seen, ['launchctl print gui/501/com.stratusagent.stratusd', 'launchctl bootout gui/501/com.stratusagent.stratusd']);
   assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+});
+
+// The label belongs to the OS user, but the unit file follows HOME, so a CLI
+// run with another HOME (a test, a scratch home, an agent's own shell) names
+// the user's real daemon. A scratch-home `stratus setup` once booted out a
+// live daemon this way and then could not load its own replacement.
+const LOADED_ELSEWHERE_PLIST = '/Users/someone/Library/LaunchAgents/com.stratusagent.stratusd.plist';
+const LOADED_ELSEWHERE_UNIT = '/home/someone/.config/systemd/user/stratusd.service';
+const managerWithAnotherHomesJob = (calls: string[]): ServiceRunner => async (command, args) => {
+  calls.push([command, ...args].join(' '));
+  if (command === 'launchctl' && args[0] === 'print') {
+    // The shape `launchctl print` gives on macOS 15: the job's own path one
+    // tab in, ahead of the nested sections.
+    return {
+      code: 0,
+      stdout: `gui/501/com.stratusagent.stratusd = {\n\tactive count = 1\n\tpath = ${LOADED_ELSEWHERE_PLIST}\n\ttype = LaunchAgent\n\tstate = running\n\n\tprogram = /opt/homebrew/bin/node\n\tstdout path = /Users/someone/.stratus/logs/stratusd.out.log\n}\n`,
+      stderr: '',
+    };
+  }
+  if (command === 'systemctl' && args.includes('show')) {
+    return { code: 0, stdout: `FragmentPath=${LOADED_ELSEWHERE_UNIT}\n`, stderr: '' };
+  }
+  return { code: 0, stdout: command === 'systemctl' && args.includes('is-active') ? 'active\n' : '', stderr: '' };
+};
+
+for (const platform of ['darwin', 'linux'] as const) {
+  test(`service commands from another home leave the user's loaded stratusd alone (${platform})`, async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const actions = {
+      install: installService,
+      start: startService,
+      stop: stopService,
+      uninstall: uninstallService,
+    };
+    for (const [name, action] of Object.entries(actions)) {
+      const calls: string[] = [];
+      const result = await action({ platform, homeDir: home, uid: 501, run: managerWithAnotherHomesJob(calls), sleep: async () => {} });
+      assert.equal(result.ok, false, `${name} refuses`);
+      assert.match(result.messages.join('\n'), new RegExp(platform === 'darwin' ? LOADED_ELSEWHERE_PLIST : LOADED_ELSEWHERE_UNIT), `${name} names the job it left alone`);
+      // Asking is all it did: no bootout, bootstrap, kickstart, reload,
+      // restart, stop or disable reached the manager.
+      assert.deepEqual(
+        calls.filter((call) => !call.startsWith('launchctl print') && !call.startsWith('systemctl --user show')),
+        [],
+        `${name} only asked the manager`,
+      );
+    }
+    // Nothing on disk for a later run to take for an install either.
+    assert.equal(await readFile(serviceUnitPath({ platform, homeDir: home }), 'utf8').catch(() => undefined), undefined);
+  });
+}
+
+test('a job loaded from this home, even through a symlink, or no job at all, is still replaced', async () => {
+  const real = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-home-')));
+  const link = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-link-')), 'home');
+  await symlink(real, link);
+  const ownPlist = path.join(real, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist');
+
+  const loadedHere: string[] = [];
+  const replaced = await installService({
+    platform: 'darwin',
+    homeDir: link,
+    uid: 501,
+    run: async (command, args) => {
+      loadedHere.push(`${command} ${args[0]}`);
+      return command === 'launchctl' && args[0] === 'print'
+        ? { code: 0, stdout: `\tpath = ${ownPlist}\n\tstate = running\n`, stderr: '' }
+        : { code: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(replaced.ok, true);
+  assert.deepEqual(loadedHere, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
+
+  const fresh = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const nothingLoaded: string[] = [];
+  let bootstrapped = false;
+  const installed = await installService({
+    platform: 'darwin',
+    homeDir: fresh,
+    uid: 501,
+    run: async (command, args) => {
+      nothingLoaded.push(`${command} ${args[0]}`);
+      if (command === 'launchctl' && args[0] === 'bootstrap') {
+        bootstrapped = true;
+      }
+      return command === 'launchctl' && args[0] === 'print' && !bootstrapped
+        ? { code: 113, stdout: '', stderr: 'Bad request.\nCould not find service "com.stratusagent.stratusd" in domain for user gui: 501\n' }
+        : { code: 0, stdout: command === 'launchctl' && args[0] === 'print' ? '\tstate = running\n' : '', stderr: '' };
+    },
+  });
+  assert.equal(installed.ok, true);
+  assert.deepEqual(nothingLoaded, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
 });
 
 test('setup enables a plugin and writes the setting it is useless without', async () => {
@@ -9254,6 +9349,7 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
   // `start` alone leaves the enablement symlink from the first install, so
   // the unit keeps starting at login despite the success message.
   assert.deepEqual(calls, [
+    'systemctl --user show --property=FragmentPath stratusd.service',
     'systemctl --user daemon-reload',
     'systemctl --user disable stratusd.service',
     'systemctl --user start stratusd.service',
@@ -9514,7 +9610,9 @@ test('starting a LaunchAgent works after it has been booted out', async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.equal(calls[0]?.includes('bootstrap'), true, `expected a bootstrap first, got ${calls.join(', ')}`);
+  // After asking whose job is loaded, which changes nothing.
+  const changes = calls.filter((call) => !call.startsWith('launchctl print'));
+  assert.equal(changes[0]?.includes('bootstrap'), true, `expected a bootstrap first, got ${calls.join(', ')}`);
   assert.ok(calls.some((call) => /kickstart/.test(call)));
 });
 
@@ -9544,7 +9642,9 @@ test('service install says stratusd is running only once launchd reports it runn
     homeDir: home,
     uid: 501,
     sleep: async (ms) => { slept.push(ms); },
-    run: managerAnswering([loadedNeverStarted, loadedNeverStarted, '\tstate = running\n\truns = 1\n\tpid = 4242\n']),
+    // The first answer is to install's own question, whose job is loaded,
+    // before it boots anything out; no path in it changes nothing.
+    run: managerAnswering(['', loadedNeverStarted, loadedNeverStarted, '\tstate = running\n\truns = 1\n\tpid = 4242\n']),
   });
 
   assert.equal(result.ok, true);

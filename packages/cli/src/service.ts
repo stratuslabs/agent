@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { CONFIG_INVALID_EXIT_CODE } from './supervisor.ts';
@@ -576,6 +576,71 @@ export const readServiceCommand = async (env: ServiceEnvironment = {}): Promise<
   };
 };
 
+/**
+ * Whose unit the manager has loaded under this user's one stratusd label.
+ *
+ * The label (`com.stratusagent.stratusd`, `stratusd.service`) belongs to
+ * the OS user, but the unit file follows HOME. A CLI run with another HOME
+ * — a test, a scratch home, an agent's own shell — names the same job as
+ * the user's real daemon, and its bootout or restart stops that daemon.
+ * A scratch-home `stratus setup` did exactly that on a live host, then
+ * could not load its own replacement. So every command that stops,
+ * replaces or restarts the job asks first. A manager that does not say
+ * (no path in its answer, a timeout) is acted on as before: only a
+ * positive "loaded from somewhere else" refuses.
+ */
+type LoadedUnit = { from: 'nowhere' | 'here' | 'unknown' } | { from: 'elsewhere'; path: string };
+
+/** The path with symlinks resolved, as far up as it exists: the unit file may not be written yet. */
+const canonicalPath = async (target: string): Promise<string> => {
+  const resolved = path.resolve(target);
+  try {
+    return await realpath(resolved);
+  } catch {
+    const parent = path.dirname(resolved);
+    return parent === resolved ? resolved : path.join(await canonicalPath(parent), path.basename(resolved));
+  }
+};
+
+const loadedUnit = async (env: ServiceEnvironment, platform: ServicePlatform): Promise<LoadedUnit> => {
+  const run = runnerFor(env);
+  let loaded: string | undefined;
+  if (platform === 'launchd') {
+    const printed = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
+    if (printed.code !== 0) {
+      return { from: /could not find|no such/i.test(`${printed.stderr} ${printed.stdout}`) ? 'nowhere' : 'unknown' };
+    }
+    // The job's own plist, one tab in; nested sections and `stdout path`
+    // lines are not it.
+    loaded = /^\tpath = (.+)$/m.exec(printed.stdout)?.[1]?.trim();
+  } else {
+    const shown = await run('systemctl', ['--user', 'show', '--property=FragmentPath', SYSTEMD_UNIT]);
+    const fragment = shown.code === 0 ? /^FragmentPath=(.*)$/m.exec(shown.stdout)?.[1] : undefined;
+    if (fragment !== undefined && fragment.trim() === '') {
+      // systemd answers for any name; a unit it has no file for is empty here.
+      return { from: 'nowhere' };
+    }
+    // A masked unit points at /dev/null, which is no one's home; systemd
+    // refuses to start it by itself.
+    loaded = fragment?.trim() === '/dev/null' ? undefined : fragment?.trim();
+  }
+  if (loaded === undefined || loaded === '') {
+    return { from: 'unknown' };
+  }
+  return await canonicalPath(loaded) === await canonicalPath(serviceUnitPath(env))
+    ? { from: 'here' }
+    : { from: 'elsewhere', path: loaded };
+};
+
+/** The refusal when the loaded job is another home's. */
+const loadedElsewhere = (env: ServiceEnvironment, loaded: string, action: string): ServiceActionResult => ({
+  ok: false,
+  messages: [
+    `Not ${action} stratusd: the service loaded for this user runs ${loaded}, not this home's ${serviceUnitPath(env)}.`,
+    'It belongs to another home. Run this with the HOME that installed it, or uninstall it from there first.',
+  ],
+});
+
 export const installService = async (
   env: ServiceEnvironment = {},
   options: ServiceInstallOptions = {},
@@ -586,6 +651,11 @@ export const installService = async (
       ok: false,
       messages: [`No service manager for ${env.platform ?? process.platform}. Run \`stratus serve\` yourself, or supervise it however you prefer.`],
     };
+  }
+  // Before anything is written, so a refusal leaves no unit behind either.
+  const loaded = await loadedUnit(env, platform);
+  if (loaded.from === 'elsewhere') {
+    return loadedElsewhere(env, loaded.path, 'replacing');
   }
   const runAtLogin = options.runAtLogin ?? true;
   const unitPath = serviceUnitPath(env);
@@ -684,6 +754,10 @@ export const uninstallService = async (env: ServiceEnvironment = {}): Promise<Se
   if (!platform) {
     return { ok: false, messages: [`No service manager for ${env.platform ?? process.platform}.`] };
   }
+  const loaded = await loadedUnit(env, platform);
+  if (loaded.from === 'elsewhere') {
+    return loadedElsewhere(env, loaded.path, 'uninstalling');
+  }
   const unitPath = serviceUnitPath(env);
   const run = runnerFor(env);
   const stopped = platform === 'launchd'
@@ -720,6 +794,10 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
   const platform = servicePlatform(env);
   if (!platform) {
     return { ok: false, messages: [`No service manager for ${env.platform ?? process.platform}.`] };
+  }
+  const loaded = await loadedUnit(env, platform);
+  if (loaded.from === 'elsewhere') {
+    return loadedElsewhere(env, loaded.path, 'restarting');
   }
   const run = runnerFor(env);
   if (platform === 'systemd') {
@@ -764,6 +842,10 @@ export const stopService = async (env: ServiceEnvironment = {}): Promise<Service
   const platform = servicePlatform(env);
   if (!platform) {
     return { ok: false, messages: [`No service manager for ${env.platform ?? process.platform}.`] };
+  }
+  const loaded = await loadedUnit(env, platform);
+  if (loaded.from === 'elsewhere') {
+    return loadedElsewhere(env, loaded.path, 'stopping');
   }
   const run = runnerFor(env);
   // Asked before stopping, while the job is still there to ask about: a
