@@ -155,6 +155,23 @@ export {
   type NewEventFiring,
   type RefusedEventDelivery,
 } from './events.ts';
+export {
+  createEventIntake,
+  mapGithubDelivery,
+  parseStandardWebhookEvent,
+  verifyGithubSignature,
+  verifyStandardWebhookSignature,
+  DEFAULT_EVENT_MAX_BODY_BYTES,
+  EVENT_SOURCE_REQUESTS_PER_MINUTE,
+  type EventIntake,
+  type EventIntakeCounters,
+  type EventIntakeOptions,
+  type EventIntakeRequest,
+  type EventIntakeResponse,
+  type EventSourceConfig,
+  type EventSourceCounters,
+  type EventTrigger,
+} from './event-intake.ts';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import {
   loadPlugins,
