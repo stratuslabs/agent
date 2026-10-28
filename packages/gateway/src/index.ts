@@ -4621,7 +4621,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (stopping) {
       throw refusal();
     }
-    return onSessionChain(input.sessionId, () => dispatchInternal(input));
+    return onSessionChain(input.sessionId, async () => {
+      // A keyed firing (an event trigger's batch) that the session already
+      // holds is that turn, not a new one: a daemon that died after the
+      // turn and before the firing was recorded re-sends it at the next
+      // start, and must answer with the finished turn (or settle the
+      // unfinished one, as the start-up sweep would) instead of running the
+      // event again. The same check the public door makes, on the chain.
+      if (input.idempotencyKey !== undefined) {
+        const repeated = await settleRepeat(input.sessionId, input.idempotencyKey, input.agentId, input.turnId, input.onRepeat);
+        if (repeated !== undefined) {
+          return repeated;
+        }
+      }
+      return dispatchInternal(input);
+    });
   };
 
   const dispatch = async (input: DispatchInput): Promise<Session> => {

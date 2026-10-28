@@ -515,13 +515,20 @@ export class SqliteEventStore {
   }
 
   /**
-   * Turns a trigger has fired since `sinceIso`, for its hourly limit. A
-   * batch is one turn, so this counts batch keys, not rows.
+   * Turns a trigger has started since `sinceIso`, for its hourly limit: a
+   * batch running now, one that finished, and one that failed all count,
+   * since each was a turn started unattended. A failing provider would
+   * otherwise let every new event start another. A batch is one turn, so
+   * this counts batch keys, not rows; `exceptBatchKey` leaves out a batch
+   * being re-sent after a restart, which must not count against itself.
    */
-  turnsFiredSince(triggerId: string, sinceIso: string): number {
+  turnsStartedSince(triggerId: string, sinceIso: string, exceptBatchKey = ''): number {
     const row = this.db
-      .prepare("SELECT COUNT(DISTINCT batch_key) AS turns FROM event_firings WHERE trigger_id = ? AND status = 'fired' AND updated_at >= ?")
-      .get(triggerId, sinceIso) as { turns: number };
+      .prepare(`
+        SELECT COUNT(DISTINCT batch_key) AS turns FROM event_firings
+        WHERE trigger_id = ? AND status IN ('firing', 'fired', 'failed') AND updated_at >= ? AND batch_key != ?
+      `)
+      .get(triggerId, sinceIso, exceptBatchKey) as { turns: number };
     return row.turns;
   }
 

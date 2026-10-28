@@ -279,7 +279,7 @@ export interface SchedulerRuntimeOptions {
 }
 
 export interface SchedulerEventOptions {
-  store: Pick<SqliteEventStore, 'open' | 'claim' | 'hold' | 'finish' | 'retire' | 'turnsFiredSince'>;
+  store: Pick<SqliteEventStore, 'open' | 'claim' | 'hold' | 'finish' | 'retire' | 'turnsStartedSince'>;
   /** The configured source ids, read at each creation. */
   sources(): readonly string[];
   /**
@@ -812,7 +812,8 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       }
       eventDeferralsWarned.delete(groupKey);
       const maxPerHour = trigger.cadence.maxPerHour ?? DEFAULT_EVENT_MAX_PER_HOUR;
-      if (events.store.turnsFiredSince(trigger.id, new Date(now.getTime() - 3_600_000).toISOString()) >= maxPerHour) {
+      const hourAgo = new Date(now.getTime() - 3_600_000).toISOString();
+      if (events.store.turnsStartedSince(trigger.id, hourAgo, rows[0]!.batchKey) >= maxPerHour) {
         if (!batched && rows.length > 1) {
           events.store.retire(rows.slice(0, -1).map((row) => row.id), 'superseded', 'A newer event for the same subject replaced it while over the hourly limit.', nowIso);
           rows = rows.slice(-1);

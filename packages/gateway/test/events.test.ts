@@ -298,18 +298,21 @@ test('superseded and expired firings drop their blocks and leave the open set; f
   store.close();
 });
 
-test('turns fired in the last hour count batches, not rows, per trigger', async () => {
+test('turns started in the last hour count batches, not rows, per trigger: running, fired and failed alike', async () => {
   const store = new SqliteEventStore(await newDb());
   const [a] = accept(store, 'g-a', [firing('t1', 'g-a')]).firings;
   const [b] = accept(store, 'g-b', [firing('t1', 'g-b')]).firings;
   const [c] = accept(store, 'g-c', [firing('t1', 'g-c'), firing('t2', 'g-c')]).firings;
+  const [d] = accept(store, 'g-d', [firing('t1', 'g-d')]).firings;
   store.claim([a!.id, b!.id], b!.dispatchKey, at(1));
   store.finish([a!.id, b!.id], { status: 'fired' }, at(2));
   store.claim([c!.id], c!.dispatchKey, at(3));
-  store.finish([c!.id], { status: 'fired' }, at(4));
-  assert.equal(store.turnsFiredSince('t1', at(0)), 2);
-  assert.equal(store.turnsFiredSince('t1', at(3)), 1);
-  assert.equal(store.turnsFiredSince('t2', at(0)), 0, 'pending is not fired');
+  store.finish([c!.id], { status: 'failed', reason: 'provider down' }, at(4));
+  store.claim([d!.id], d!.dispatchKey, at(5));
+  assert.equal(store.turnsStartedSince('t1', at(0)), 3, 'a fired batch, a failed one and one still running');
+  assert.equal(store.turnsStartedSince('t1', at(3)), 2);
+  assert.equal(store.turnsStartedSince('t1', at(0), d!.dispatchKey), 2, 'a batch being re-sent does not count against itself');
+  assert.equal(store.turnsStartedSince('t2', at(0)), 0, 'pending has not started');
   store.close();
 });
 

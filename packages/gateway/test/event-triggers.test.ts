@@ -52,7 +52,7 @@ interface Rig {
   stop(): Promise<void>;
 }
 
-const rig = async (overrides: Partial<SchedulerRuntimeOptions> = {}, file?: string): Promise<Rig> => {
+const rig = async (overrides: Partial<SchedulerRuntimeOptions> = {}, file?: string, slot = 1): Promise<Rig> => {
   const db = file ?? path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-triggers-')), 'fleet.db');
   const schedules = new SqliteScheduleStore(db);
   const events = new SqliteEventStore(db);
@@ -69,7 +69,7 @@ const rig = async (overrides: Partial<SchedulerRuntimeOptions> = {}, file?: stri
     sessionStatus: async () => undefined,
     hasAgent: () => true,
     limits: { minIntervalMs: 1, tickMs: 3_600_000, maxConcurrentPerAgent: 1 },
-    events: { store: events, sources: () => ['github', 'board'] },
+    events: { store: events, sources: () => ['github', 'board'], maxConcurrentPerAgent: slot },
     now: () => clock.now,
     paused: () => paused.value,
     log: () => {},
@@ -307,6 +307,41 @@ test('over maxPerHour a firing waits as rate_limited, the newest per key goes wh
   }
 });
 
+test('a start that failed still uses the hour, so a failing provider cannot run past maxPerHour', async () => {
+  const r = await rig();
+  try {
+    const id = await r.trigger({ maxPerHour: 1 });
+    await r.runtime.start();
+    r.deliver(id, 'd-1', 'pull/1');
+    r.runtime.kickEvents();
+    r.dispatched[0]!.finish(new Error('provider down'));
+    await settle();
+    const next = r.deliver(id, 'd-2', 'pull/2');
+    r.runtime.kickEvents();
+    assert.equal(r.dispatched.length, 1);
+    assert.equal(r.events.firing(next)!.status, 'rate_limited');
+  } finally {
+    await r.stop();
+  }
+});
+
+test('a turn still running uses the hour too', async () => {
+  const r = await rig({}, undefined, 2);
+  try {
+    const id = await r.trigger({ maxPerHour: 1 });
+    await r.runtime.start();
+    r.deliver(id, 'd-1', 'pull/1');
+    r.runtime.kickEvents();
+    assert.equal(r.dispatched.length, 1);
+    const next = r.deliver(id, 'd-2', 'pull/2');
+    r.runtime.kickEvents();
+    assert.equal(r.dispatched.length, 1, 'the slot has room, the hour does not');
+    assert.equal(r.events.firing(next)!.status, 'rate_limited');
+  } finally {
+    await r.stop();
+  }
+});
+
 test('a key keeps at most its 5 newest held firings, and a hold older than 24 hours expires', async () => {
   const r = await rig();
   try {
@@ -494,4 +529,38 @@ test('a signed delivery wakes the trigger\'s agent through the gateway: one turn
     await gateway.stop();
   }
   assert.equal(calls, 2, 'the repeat started no turn');
+
+  // The process dies after the turn finished and before its firing was
+  // marked fired: the row is still claimed. The next start re-sends the
+  // batch under its key, and the gateway answers with the finished turn
+  // instead of running the event again.
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  const changed = db.prepare("UPDATE event_firings SET status = 'firing', block = 'Event from source \"board\": replayed' WHERE trigger_id = 'trig-1'").run().changes;
+  db.close();
+  assert.equal(changed, 1);
+  const restarted = createGateway({
+    env: { ...env, fetch: fetchFake },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    log: () => {},
+    warn: () => {},
+    channels: [{
+      name: 'slack',
+      async start() {},
+      async stop() {},
+      async resolveOutbound({ to }) {
+        return { post: async (text: string) => { posts.push({ to, text }); return { channel: to, ts: '1' }; } };
+      },
+    }],
+    events: { sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } },
+  });
+  await restarted.start();
+  await restarted.stop();
+  assert.equal(calls, 2, 'the recovered batch did not run its event a second time');
+  assert.equal(posts.length, 1);
+  const check = new DatabaseSync(fleetDbIn(path.join(home, '.stratus')));
+  const status = (check.prepare("SELECT status FROM event_firings WHERE trigger_id = 'trig-1'").get() as { status: string }).status;
+  check.close();
+  assert.equal(status, 'fired');
 });
