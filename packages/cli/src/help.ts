@@ -316,6 +316,9 @@ Options:
   --api            serve: serve it even where the config says api.enabled: false
   --api-host       serve: control API interface (default: 127.0.0.1)
   --api-port       serve: control API port (default: 4123, 0 for any free port)
+  --events-host    serve: events listener interface (default: 127.0.0.1). The
+                   listener runs only when the config's "events" block names
+                   a source
   --log-format     serve: text (default) or json — every structured log record
                    as one JSON line on stdout, and no human lines
   --held           serve: start held — the control API answers health, but no

@@ -129,6 +129,7 @@ export const serveArgv = (command: ParsedServeCommand): string[] => [
   ...(command.api === false ? ['--no-api'] : command.api === true ? ['--api'] : []),
   ...(command.apiPort !== undefined ? ['--api-port', String(command.apiPort)] : []),
   ...(command.apiHost !== undefined ? ['--api-host', command.apiHost] : []),
+  ...(command.eventsHost !== undefined ? ['--events-host', command.eventsHost] : []),
   // Carried: it holds only a version not yet promoted, and the replacement
   // runs the version that was serving.
   ...(command.holdNewVersion === true ? ['--hold-new-version'] : []),

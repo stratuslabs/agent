@@ -132,6 +132,7 @@ stratus dashboard                      # local browser dashboard
 | `--api` | `stratus serve`: serve it even where the config says `api.enabled: false` (what `stratus dashboard` asks of the daemon it starts) |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
 | `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port). A port the daemon cannot bind stops it — it does not serve without the API |
+| `--events-host` | `stratus serve`: events listener interface (default `127.0.0.1`, or the config's `events.listen.host`). The listener runs only when the config's `events` block names a source; see [Events](../guides/events.md) |
 | `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `sessions`, `grants`, `health`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
 | `--tool`, `--scope`, `--origin` | `stratus grants revoke`: which grant goes — exactly one of them |
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |

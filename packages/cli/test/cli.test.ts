@@ -10540,6 +10540,12 @@ test('parseCommand accepts the control-API and remote-gateway flags', () => {
     apiHost: '0.0.0.0',
     apiPort: 4200,
   });
+  assert.deepEqual(parseCommand(['serve', '--events-host', '0.0.0.0']), {
+    command: 'serve',
+    events: true,
+    eventsHost: '0.0.0.0',
+  });
+  assert.throws(() => parseCommand(['serve', '--events-host']), /--events-host/);
   assert.throws(() => parseCommand(['serve', '--api-port', 'nope']), /Invalid value for --api-port/);
   assert.throws(() => parseCommand(['serve', '--api-port', '70000']), /Invalid value for --api-port/);
 
@@ -11289,6 +11295,7 @@ test('serveArgv round-trips every serve option, so the daemon a restart starts i
   const full = parseCommand([
     'serve', '--config', './x.json', '--idle-timeout', '30', '--approvals', 'remote',
     '--no-events', '--no-log-file', '--log-format', 'json', '--no-api', '--api-port', '0', '--api-host', '0.0.0.0',
+    '--events-host', '0.0.0.0',
   ]);
   assert.equal(full.command, 'serve');
   assert.deepEqual(parseCommand(serveArgv(full)), full);

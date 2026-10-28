@@ -87,6 +87,7 @@ Full reference with every subcommand:
 | `--log-format` | `serve`: `text` (default) or `json` — the log's records as JSON lines on stdout, for `docker logs` and journald |
 | `--no-api` | `serve`: do not serve the control API |
 | `--api-host`, `--api-port` | `serve`: control API bind (default `127.0.0.1:4123`) |
+| `--events-host` | `serve`: events listener interface (default `127.0.0.1`); see [Events](https://github.com/stratuslabs/agent/blob/main/docs/guides/events.md) |
 | `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`, `sessions`, `grants`, `health`: a running daemon's control API |
 | `--tool`, `--scope`, `--origin` | `grants revoke`: which grant goes — exactly one |
 | `--trust <level>` | `memory list`: show only that label; `memory reassert`: the label to record (`user`, `agent`, `unknown`, `external`) |
