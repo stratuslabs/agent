@@ -69,6 +69,8 @@ export interface EventFiringRow {
    */
   batchKey?: string;
   status: EventFiringStatus;
+  /** When its batch was first claimed to go out: what the hourly limit counts from. */
+  startedAt?: string;
   /** The rendered event block, kept only while the firing is open. */
   block?: string;
   reason?: string;
@@ -208,6 +210,7 @@ interface FiringRowRaw {
   dispatch_key: string;
   batch_key: string;
   status: EventFiringStatus;
+  started_at: string;
   block: string | null;
   reason: string;
   created_at: string;
@@ -237,6 +240,7 @@ const firingFrom = (row: FiringRowRaw): EventFiringRow => ({
   dispatchKey: row.dispatch_key,
   ...(row.batch_key !== '' ? { batchKey: row.batch_key } : {}),
   status: row.status,
+  ...(row.started_at !== '' ? { startedAt: row.started_at } : {}),
   ...(row.block !== null ? { block: row.block } : {}),
   ...(row.reason !== '' ? { reason: row.reason } : {}),
   createdAt: row.created_at,
@@ -290,6 +294,7 @@ export class SqliteEventStore {
         dispatch_key TEXT NOT NULL,
         batch_key TEXT NOT NULL,
         status TEXT NOT NULL,
+        started_at TEXT NOT NULL DEFAULT '',
         block TEXT,
         reason TEXT NOT NULL,
         created_at TEXT NOT NULL,
@@ -299,6 +304,12 @@ export class SqliteEventStore {
       CREATE INDEX IF NOT EXISTS event_firings_trigger ON event_firings (trigger_id, status, updated_at);
       CREATE INDEX IF NOT EXISTS event_firings_batch ON event_firings (batch_key);
     `);
+    // A table made before `started_at` existed (an unreleased build of
+    // this feature) gains it; rows claimed then count from their update.
+    const columns = this.db.prepare('PRAGMA table_info(event_firings)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'started_at')) {
+      this.db.exec("ALTER TABLE event_firings ADD COLUMN started_at TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   private transaction<T>(work: () => T): T {
@@ -453,18 +464,29 @@ export class SqliteEventStore {
    * which is how recovery resends one. A batch is fixed once claimed: no
    * row joins it later, and it never changes key. False, with nothing
    * changed, for anything else, or if any row is finished.
+   *
+   * With `triggerId`, also false unless that schedule row still exists, in
+   * the same transaction: `stratus schedules cancel` deletes from another
+   * process, and a trigger cancelled after the scan read it must not fire,
+   * as a timed schedule's conditional slot claim already guarantees.
    */
-  claim(ids: readonly string[], batchKey: string, nowIso: string): boolean {
+  claim(ids: readonly string[], batchKey: string, nowIso: string, options: { triggerId?: string } = {}): boolean {
     const members = this.db.prepare('SELECT id FROM event_firings WHERE batch_key = ?');
     const update = this.db.prepare(`
-      UPDATE event_firings SET status = 'firing', batch_key = ?, updated_at = ?
+      UPDATE event_firings
+      SET status = 'firing', batch_key = ?, updated_at = ?,
+        started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END
       WHERE id = ? AND status IN (${OPEN_SQL}) AND (batch_key = '' OR batch_key = ?)
     `);
     const wanted = new Set(ids);
     return this.allOrNothing(
       ids,
-      (id) => Number(update.run(batchKey, nowIso, id, batchKey).changes),
+      (id) => Number(update.run(batchKey, nowIso, nowIso, id, batchKey).changes),
       () => {
+        if (options.triggerId !== undefined
+          && this.db.prepare('SELECT 1 FROM schedules WHERE id = ?').get(options.triggerId) === undefined) {
+          return false;
+        }
         const existing = (members.all(batchKey) as Array<{ id: string }>).map((row) => row.id);
         return existing.length === 0 || (existing.length === wanted.size && existing.every((id) => wanted.has(id)));
       },
@@ -515,13 +537,23 @@ export class SqliteEventStore {
   }
 
   /**
-   * Turns a trigger has fired since `sinceIso`, for its hourly limit. A
-   * batch is one turn, so this counts batch keys, not rows.
+   * Turns a trigger has started since `sinceIso`, for its hourly limit,
+   * counted from when each batch was first claimed (a two-hour turn doesn't
+   * hold the hour for two more): a batch running now, one that finished,
+   * and one that failed all count,
+   * since each was a turn started unattended. A failing provider would
+   * otherwise let every new event start another. A batch is one turn, so
+   * this counts batch keys, not rows; `exceptBatchKey` leaves out a batch
+   * being re-sent after a restart, which must not count against itself.
    */
-  turnsFiredSince(triggerId: string, sinceIso: string): number {
+  turnsStartedSince(triggerId: string, sinceIso: string, exceptBatchKey = ''): number {
     const row = this.db
-      .prepare("SELECT COUNT(DISTINCT batch_key) AS turns FROM event_firings WHERE trigger_id = ? AND status = 'fired' AND updated_at >= ?")
-      .get(triggerId, sinceIso) as { turns: number };
+      .prepare(`
+        SELECT COUNT(DISTINCT batch_key) AS turns FROM event_firings
+        WHERE trigger_id = ? AND status IN ('firing', 'fired', 'failed')
+          AND (CASE WHEN started_at = '' THEN updated_at ELSE started_at END) >= ? AND batch_key != ?
+      `)
+      .get(triggerId, sinceIso, exceptBatchKey) as { turns: number };
     return row.turns;
   }
 

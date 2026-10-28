@@ -5,11 +5,10 @@ events listener lets a service tell the daemon that something happened (a
 review on a pull request, a card moving on a board), so an agent can be woken
 for it rather than polling.
 
-This page covers the listener and its sources: what the daemon accepts and how
-it checks who sent it. Each delivery is checked, deduplicated and logged
-before anything else runs. Triggers, which wake an agent when a delivery
-matches, are still being built. Until they land, a delivery is recorded as
-`unmatched`.
+The operator configures the listener and its sources: what the daemon accepts,
+and how it checks who sent it. An agent sets a **trigger** with
+`schedule.on`, which a person approves once. Each delivery is checked,
+deduplicated, matched against triggers and logged before any model runs.
 
 ## Turn it on
 
@@ -112,6 +111,61 @@ either a [CloudEvent](https://github.com/cloudevents/spec/blob/main/cloudevents/
 (`application/cloudevents+json`, with `id` equal to `webhook-id`), or a plain
 `{ "type": …, "timestamp": …, "data": … }` payload, whose id is `webhook-id`.
 Events are JSON: `data_base64` is refused.
+
+## Triggers
+
+An agent registers a trigger with `schedule.on`. It's a schedule whose cadence
+is an event, so it's approved, listed, reported and cancelled like any
+schedule (`schedule.list`, `schedule.cancel`, `stratus schedules`,
+`GET /api/v1/schedules`).
+
+```json
+{
+  "source": "github",
+  "filter": { "all": [
+    { "exact": { "actor": "chatgpt-codex-connector[bot]", "author": "atlasatstratuslabs[bot]" } },
+    { "prefix": { "type": "com.github.pull_request_review.submitted", "data.review.body": "<!-- codex-review-receipt:v1 -->" } }
+  ] },
+  "prompt": "Codex reviewed one of your PRs. Handle it.",
+  "destination": { "channel": "slack", "to": "C0123456789" },
+  "quietHours": { "from": "22:00", "to": "07:00", "timeZone": "America/New_York" },
+  "maxPerHour": 12
+}
+```
+
+- **The filter** uses the six [CloudEvents Subscriptions](https://github.com/cloudevents/spec/blob/main/subscriptions/spec.md#3241-filter-dialects)
+  dialects: `exact`, `prefix`, `suffix`, `all`, `any` and `not`, matched
+  case-sensitively against attributes such as `type`, `subject`, `actor` and
+  `author`. A key starting with `data.` is a path into the event's JSON data
+  and matches only a string there. Anything else is refused when the trigger
+  is set. No model runs to decide a match.
+- **The source** must be one the operator configured. `schedule.on` refuses
+  any other.
+- **What the agent sees:** the trigger's prompt, then the event (its
+  attributes and data as JSON, at most 16 KB, with a note when it's cut).
+  Every event on one subject (one pull request, say) continues one
+  conversation.
+- **Trust:** the event came from outside. A valid signature proves who
+  delivered it, not who wrote it (anyone can comment on a pull request). So
+  the turn runs labeled `external`, as after reading a web page.
+- **Unattended:** a firing runs under the agent's existing grants. Its
+  destination is pre-authorized like a schedule's, and anything else is
+  gated as usual.
+- **Limits:**
+  - An agent runs one event firing at a time, apart from its timed
+    schedules, so a review never waits behind a long work-loop firing. A
+    second waits its turn.
+  - A trigger starts at most `maxPerHour` turns an hour (default 12, at most
+    120). Past that, the newest event per subject waits for the hour to
+    allow it, and older ones are dropped as `superseded`.
+- **Quiet hours and paused intake** hold firings. When the window ends,
+  each subject goes out once with all its held events. A subject keeps at
+  most its 5 newest held events, and a hold older than 24 hours expires.
+  Cancelling a trigger expires what it was holding.
+- **Never twice:** each firing carries an idempotency key. A repeated
+  delivery is a `duplicate`, and a firing caught by a restart goes out again
+  under the same key, so a turn that already started continues instead of
+  running a second time.
 
 ## Reaching a daemon behind NAT
 

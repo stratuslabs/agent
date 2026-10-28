@@ -1641,8 +1641,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // The daemon's own credential, read per delivery: a stored or
       // rotated secret works on the next one, with no restart.
       secret: (name) => resolveDaemonCredential(env, name),
-      // Event triggers arrive with `schedule.on`; until then nothing matches.
-      triggers: () => [],
+      // The triggers are schedules: `schedule.on` rows on this source.
+      // Late-bound, because the scheduler is built further down.
+      triggers: (sourceId) => scheduler.eventTriggers(sourceId),
       ...(options.events?.maxBodyBytes !== undefined ? { maxBodyBytes: options.events.maxBodyBytes } : {}),
       warn,
     })
@@ -1732,6 +1733,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // `SchedulerRuntimeOptions.ready`.
     ready: () => assertStateCompatible(env),
     paused: () => intakeState.paused,
+    ...(eventStore ? { events: { store: eventStore, sources: () => Object.keys(eventSources) } } : {}),
     log,
     warn,
   });
@@ -4619,7 +4621,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (stopping) {
       throw refusal();
     }
-    return onSessionChain(input.sessionId, () => dispatchInternal(input));
+    return onSessionChain(input.sessionId, async () => {
+      // A keyed firing (an event trigger's batch) that the session already
+      // holds is that turn, not a new one: a daemon that died after the
+      // turn and before the firing was recorded re-sends it at the next
+      // start, and must answer with the finished turn (or settle the
+      // unfinished one, as the start-up sweep would) instead of running the
+      // event again. The same check the public door makes, on the chain.
+      if (input.idempotencyKey !== undefined) {
+        const repeated = await settleRepeat(input.sessionId, input.idempotencyKey, input.agentId, input.turnId, input.onRepeat);
+        if (repeated !== undefined) {
+          return repeated;
+        }
+      }
+      return dispatchInternal(input);
+    });
   };
 
   const dispatch = async (input: DispatchInput): Promise<Session> => {
@@ -5961,7 +5977,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!eventIntake) {
         return { status: 404, body: { error: 'unknown_source', message: 'No event source is configured at this path.' } };
       }
-      return eventIntake.receive(request);
+      const answer = await eventIntake.receive(request);
+      // The delivery and its firings are committed; send them now rather
+      // than at the next tick. The scheduler decides hold or fire, and does
+      // nothing while it is stopped or not yet started.
+      if (answer.body.status === 'matched') {
+        scheduler.kickEvents();
+      }
+      return answer;
     },
 
     eventCounters() {

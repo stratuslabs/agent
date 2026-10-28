@@ -10965,6 +10965,40 @@ test('a real plugin loads through the real loader, with the risks its manifest d
 
 // ---- stratus schedules -------------------------------------------------------
 
+test('stratus schedules shows an event trigger as waiting for events, not spent', async () => {
+  // An event trigger has no next slot by design; the missing value must not
+  // read as a spent one-shot.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-cli-'));
+  const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const store = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+  store.insert({
+    id: 'sched-ev',
+    agentId: 'ava',
+    cadence: { kind: 'event', source: 'github', filter: { exact: { type: 'pull_request_review' } } },
+    prompt: 'look at the review',
+    createdAt: '2026-08-29T00:00:00.000Z',
+  });
+  store.insert({
+    id: 'sched-at',
+    agentId: 'ava',
+    cadence: { kind: 'at', at: '2026-08-29T07:00:00.000Z' },
+    prompt: 'once',
+    createdAt: '2026-08-29T00:00:00.000Z',
+  });
+  store.close();
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['schedules'], streams: listing.streams, env }), 0);
+  const blocks = listing.output.stdout.split(/\n(?=sched-)/);
+  const event = blocks.find((block) => block.startsWith('sched-ev')) ?? '';
+  const spent = blocks.find((block) => block.startsWith('sched-at')) ?? '';
+  assert.match(event, /next: when a github event matches/);
+  assert.doesNotMatch(event, /spent/);
+  assert.match(spent, /next: \(spent — awaiting cleanup\)/);
+  await rm(home, { recursive: true, force: true });
+});
+
 test('parseCommand reads the schedules command and its cancel form', () => {
   assert.deepEqual(parseCommand(['schedules']), { command: 'schedules', action: 'list', format: 'text' });
   assert.deepEqual(parseCommand(['schedule', 'list']), { command: 'schedules', action: 'list', format: 'text' });

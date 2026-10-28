@@ -7,6 +7,9 @@ always-on daemon into agents that act on their own:
   `"30m"` or a five-field cron expression, local time) or one-shot
   (ISO-8601), with the prompt each firing runs and, optionally, the
   destination its reports are pre-authorized to post to.
+- **`schedule.on`** — an event trigger: when a signed delivery from an
+  operator-configured source passes the agent's filter, the prompt runs with
+  the event appended. See [Events](./events.md#triggers).
 - **`schedule.list` / `schedule.cancel`** — an agent's own audit and undo.
 - **`message.send`** — post to a channel or DM outside the current
   conversation:

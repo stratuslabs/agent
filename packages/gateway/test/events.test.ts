@@ -298,18 +298,50 @@ test('superseded and expired firings drop their blocks and leave the open set; f
   store.close();
 });
 
-test('turns fired in the last hour count batches, not rows, per trigger', async () => {
+test('turns started in the last hour count batches, not rows, per trigger: running, fired and failed alike', async () => {
   const store = new SqliteEventStore(await newDb());
   const [a] = accept(store, 'g-a', [firing('t1', 'g-a')]).firings;
   const [b] = accept(store, 'g-b', [firing('t1', 'g-b')]).firings;
   const [c] = accept(store, 'g-c', [firing('t1', 'g-c'), firing('t2', 'g-c')]).firings;
+  const [d] = accept(store, 'g-d', [firing('t1', 'g-d')]).firings;
   store.claim([a!.id, b!.id], b!.dispatchKey, at(1));
   store.finish([a!.id, b!.id], { status: 'fired' }, at(2));
   store.claim([c!.id], c!.dispatchKey, at(3));
-  store.finish([c!.id], { status: 'fired' }, at(4));
-  assert.equal(store.turnsFiredSince('t1', at(0)), 2);
-  assert.equal(store.turnsFiredSince('t1', at(3)), 1);
-  assert.equal(store.turnsFiredSince('t2', at(0)), 0, 'pending is not fired');
+  store.finish([c!.id], { status: 'failed', reason: 'provider down' }, at(4));
+  store.claim([d!.id], d!.dispatchKey, at(5));
+  assert.equal(store.turnsStartedSince('t1', at(0)), 3, 'a fired batch, a failed one and one still running');
+  assert.equal(store.turnsStartedSince('t1', at(3)), 2);
+  assert.equal(store.turnsStartedSince('t1', at(0), d!.dispatchKey), 2, 'a batch being re-sent does not count against itself');
+  assert.equal(store.turnsStartedSince('t2', at(0)), 0, 'pending has not started');
+  store.close();
+});
+
+test('the hour counts a turn from when it started, not when it finished', async () => {
+  const store = new SqliteEventStore(await newDb());
+  const [a] = accept(store, 'g-a', [firing('t1', 'g-a')]).firings;
+  store.claim([a!.id], a!.dispatchKey, at(0));
+  // A turn that ran two hours.
+  store.finish([a!.id], { status: 'fired' }, at(2 * 3_600_000));
+  assert.equal(store.turnsStartedSince('t1', at(90 * 60_000)), 0, 'it started before the window');
+  assert.equal(store.turnsStartedSince('t1', at(0)), 1);
+  assert.equal(store.firing(a!.id)!.startedAt, at(0));
+  store.close();
+});
+
+test('a store opened on an event_firings table from before started_at gains the column', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const file = await newDb();
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE event_firings (
+    id TEXT PRIMARY KEY, delivery_seq INTEGER NOT NULL, trigger_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+    source TEXT NOT NULL, event_id TEXT NOT NULL, coalescing_key TEXT NOT NULL, session_id TEXT NOT NULL,
+    dispatch_key TEXT NOT NULL, batch_key TEXT NOT NULL, status TEXT NOT NULL, block TEXT, reason TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+  old.close();
+  const store = new SqliteEventStore(file);
+  const [a] = accept(store, 'g-a', [firing('t1', 'g-a')]).firings;
+  assert.equal(store.claim([a!.id], a!.dispatchKey, at(1)), true);
+  assert.equal(store.turnsStartedSince('t1', at(0)), 1);
   store.close();
 });
 

@@ -11,11 +11,13 @@ import {
   MESSAGE_READ_BOOKMARK_BUDGET,
   MESSAGE_READ_TEXT_BUDGET,
   describeCadence,
+  describeSchedule,
   nextFireAfter,
   parseCronExpression,
   parseInterval,
   SCHEDULE_CANCEL_TOOL_NAME,
   SCHEDULE_EVERY_TOOL_NAME,
+  SCHEDULE_ON_TOOL_NAME,
   SCHEDULE_LIST_TOOL_NAME,
   type ScheduleCreateInput,
   type ScheduleRecord,
@@ -141,6 +143,7 @@ test('the schedule toolset splits risk: creation is gated, list and cancel are s
   const byName = new Map(tools.map((tool) => [tool.name, tool.risk]));
   assert.equal(byName.get('schedule.every'), 'gated');
   assert.equal(byName.get('schedule.at'), 'gated');
+  assert.equal(byName.get('schedule.on'), 'gated');
   assert.equal(byName.get('schedule.list'), 'safe');
   assert.equal(byName.get('schedule.cancel'), 'safe');
 });
@@ -168,6 +171,69 @@ test('schedule.every takes exactly one of an interval or a cron expression', asy
   );
   assert.deepEqual(handle.created[1]?.cadence, { kind: 'cron', expression: '0 7 * * *' });
   assert.deepEqual(handle.created[1]?.destination, { channel: 'slack', to: 'C0123' });
+});
+
+test('schedule.on sets an event trigger: a source, a parsed filter, and optional quiet hours and hourly cap', async () => {
+  const handle = fakeHandle();
+  const on = toolNamed(createScheduleTools(handle), SCHEDULE_ON_TOOL_NAME);
+  const session = sessionFor('atlas');
+  const filter = { all: [
+    { exact: { actor: 'chatgpt-codex-connector[bot]', author: 'atlasatstratuslabs[bot]' } },
+    { prefix: { type: 'com.github.pull_request_review.submitted', 'data.review.body': '<!-- codex-review-receipt:v1 -->' } },
+  ] };
+  await on.execute({
+    source: ' github ',
+    filter,
+    prompt: 'Codex reviewed your PR. Handle it.',
+    quietHours: { from: '22:00', to: '07:00', timeZone: 'America/New_York' },
+    maxPerHour: 6,
+    destination: { channel: 'slack', to: 'C0C1YV12SLC' },
+  }, session);
+  assert.deepEqual(handle.created[0]?.cadence, {
+    kind: 'event',
+    source: 'github',
+    filter,
+    quietHours: { from: '22:00', to: '07:00', timeZone: 'America/New_York' },
+    maxPerHour: 6,
+  });
+  assert.equal(handle.created[0]?.prompt, 'Codex reviewed your PR. Handle it.');
+  assert.deepEqual(handle.created[0]?.destination, { channel: 'slack', to: 'C0C1YV12SLC' });
+
+  await on.execute({ source: 'board', filter: { exact: { type: 'card.moved' } }, prompt: 'A card moved.' }, session);
+  assert.deepEqual(handle.created[1]?.cadence, { kind: 'event', source: 'board', filter: { exact: { type: 'card.moved' } } });
+});
+
+test('schedule.on refuses what it could never match on, before anyone is asked to approve it', async () => {
+  const handle = fakeHandle();
+  const on = toolNamed(createScheduleTools(handle), SCHEDULE_ON_TOOL_NAME);
+  const session = sessionFor('atlas');
+  const base = { source: 'github', filter: { exact: { type: 't' } }, prompt: 'p' };
+  await assert.rejects(() => on.execute({ ...base, source: '' }, session), /"source"/);
+  await assert.rejects(() => on.execute({ ...base, filter: { regex: { type: '.*' } } }, session), /"regex" is not a supported filter dialect/);
+  await assert.rejects(() => on.execute({ source: 'github', prompt: 'p' }, session), /filter/);
+  await assert.rejects(() => on.execute({ ...base, prompt: ' ' }, session), /non-empty "prompt"/);
+  await assert.rejects(() => on.execute({ ...base, quietHours: { from: '22:00', to: '07:00' } }, session), /timeZone/);
+  for (const maxPerHour of [0, 121, 1.5, '6']) {
+    await assert.rejects(() => on.execute({ ...base, maxPerHour }, session), /maxPerHour/, `accepted ${String(maxPerHour)}`);
+  }
+  assert.equal(handle.created.length, 0);
+});
+
+test('an event trigger lists with its source and filter, and no next firing', () => {
+  const described = describeSchedule({
+    id: 'sched-ev',
+    agentId: 'atlas',
+    cadence: { kind: 'event', source: 'github', filter: { exact: { type: 't' } }, maxPerHour: 6 },
+    prompt: 'p',
+    createdAt: '2026-10-28T00:00:00.000Z',
+  });
+  assert.equal(described.cadence, 'on github events');
+  assert.deepEqual(described.event, { source: 'github', filter: { exact: { type: 't' } }, maxPerHour: 6 });
+  assert.equal(described.nextFireAt, undefined);
+  const plain = describeSchedule({
+    id: 'sched-1', agentId: 'atlas', cadence: { kind: 'every', intervalMs: 60_000 }, prompt: 'p', createdAt: '2026-10-28T00:00:00.000Z',
+  });
+  assert.equal(plain.event, undefined);
 });
 
 test('a malformed destination is refused, never silently dropped', async () => {
