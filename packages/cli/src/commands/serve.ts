@@ -419,13 +419,14 @@ const serveHeldHome = async (
       }));
     } else {
       warn(
-        'the config names event sources, but @stratusagent/control-api is not installed, so nothing listens for them. '
-        + 'Run `npm install -g @stratusagent/control-api` to bring the events listener online.',
+        'the config names event sources, but @stratusagent/control-api is not installed (or predates the events '
+        + 'listener), so nothing listens for them. Run `npm install -g @stratusagent/control-api` to bring it online.',
       );
     }
-  } else if (command.eventsHost !== undefined) {
-    warn('--events-host has no effect: the config\'s "events" block names no source, so no events listener runs.');
   }
+  // `--events-host` without a source is not warned about: like `--api-host`
+  // beside `--no-api`, it is a bind address for a listener that isn't
+  // running, and a container image passes it on every start.
 
   // `--held` holds every start; `--hold-new-version` only a start of a
   // version this home has not promoted yet, so an upgrade proves itself and

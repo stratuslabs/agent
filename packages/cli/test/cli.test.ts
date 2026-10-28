@@ -10711,11 +10711,21 @@ test('serve opens the events listener on its own port when the trusted config na
   }
 });
 
-test('serve opens no events port without a source, and says --events-host did nothing', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-none-'));
-  const { stdout, stderr } = await withServedApi(home, async () => {}, ['--events-host', '0.0.0.0']);
+test('a project-local config cannot open the events port', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-untrusted-'));
+  // Auto-discovered from the working directory: what a cloned repository ships.
+  await writeFile(path.join(home, 'stratus.config.json'), JSON.stringify({
+    events: { listen: { port: 0 }, sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } },
+  }));
+  const { stdout, stderr } = await withServedApi(home, async () => {});
   assert.doesNotMatch(stdout, /events listener on/);
-  assert.match(`${stdout}${stderr}`, /--events-host has no effect/);
+  assert.match(`${stdout}${stderr}`, /ignoring the events config in .*stratus\.config\.json/);
+});
+
+test('serve opens no events port without a source, --events-host or not', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-events-none-'));
+  const { stdout, stderr } = await withServedApi(home, async () => {}, ['--events-host', '127.0.0.1']);
+  assert.doesNotMatch(`${stdout}${stderr}`, /events listener|events-host/);
 });
 
 test('stratus agents --gateway renders the same roster a running daemon serves', async () => {
