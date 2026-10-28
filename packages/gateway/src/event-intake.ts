@@ -182,11 +182,16 @@ const ATTRIBUTE_NAME = /^[a-z0-9]+$/;
  * event. A plain `{ type, timestamp?, data? }` payload takes its id from
  * `webhook-id` and its source from the configured source. Extension
  * attributes keep only valid names with scalar values, as strings; anything
- * else is dropped, not refused.
+ * else is dropped, not refused. An empty `webhook-id` and `data_base64` are
+ * refused: one would make every such delivery share a dedup key, the other
+ * would arrive with its payload gone.
  */
 export const parseStandardWebhookEvent = (
   input: { sourceId: string; webhookId: string; body: Buffer | string },
 ): InboundEvent => {
+  if (input.webhookId.length === 0) {
+    throw new MalformedEventError('The webhook-id header is empty; every delivery needs its own id.');
+  }
   const object = parseJsonObject(input.body);
   if (object.specversion === undefined) {
     if (typeof object.type !== 'string' || object.type.length === 0) {
@@ -215,9 +220,14 @@ export const parseStandardWebhookEvent = (
   if (object.id !== input.webhookId) {
     throw new MalformedEventError('The CloudEvent id must equal the webhook-id header it was signed under.');
   }
+  // Refused, not dropped: accepting it would hand triggers an event whose
+  // payload silently vanished. Events here are JSON.
+  if (object.data_base64 !== undefined) {
+    throw new MalformedEventError('data_base64 is not supported; send the payload as JSON in "data".');
+  }
   const attributes: Record<string, string> = {};
   for (const [name, value] of Object.entries(object)) {
-    if (name === 'data' || name === 'data_base64' || !ATTRIBUTE_NAME.test(name)) {
+    if (name === 'data' || !ATTRIBUTE_NAME.test(name)) {
       continue;
     }
     if (typeof value === 'string') {

@@ -236,6 +236,23 @@ test('a signed body that is not a valid event is refused 400 with a row, and the
   assert.equal((await intake.receive(swRequest(cloudEvent('ce-1'), 'ce-1'))).status, 200);
 });
 
+test('an empty webhook-id is refused 400, so it can never become a shared dedup key', async () => {
+  const { intake, store } = await harness();
+  const body = JSON.stringify({ type: 'invoice.paid', data: {} });
+  const response = await intake.receive(swRequest(body, ''));
+  assert.equal(response.status, 400);
+  assert.match(String(response.body.message), /webhook-id/);
+  assert.equal(store.deliveries()[0]!.status, 'refused');
+});
+
+test('a CloudEvent with base64 data is refused 400 rather than accepted with its payload dropped', async () => {
+  const { intake } = await harness();
+  const body = JSON.stringify({ specversion: '1.0', id: 'ce-1', source: 's', type: 't', data_base64: 'aGk=' });
+  const response = await intake.receive(swRequest(body, 'ce-1'));
+  assert.equal(response.status, 400);
+  assert.match(String(response.body.message), /data_base64/);
+});
+
 test("a CloudEvent's id must be the webhook-id it was signed under", async () => {
   const { intake } = await harness();
   const response = await intake.receive(swRequest(cloudEvent('ce-other'), 'ce-1'));
