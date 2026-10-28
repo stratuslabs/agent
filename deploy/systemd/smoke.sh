@@ -157,6 +157,29 @@ wait_healthy
 call GET /intake | grep -q '"paused":true' || fail "the pause did not survive a restart"
 call PUT /intake '{"paused":false}' | grep -q '"paused":false' || fail "resume was refused"
 
+echo "--- a signed event reaches the listener and leaves its row"
+# A source in the trusted config and its secret in the store, as
+# docs/guides/events.md says, then a restart: the listener opens at start on
+# 127.0.0.1:4124, under the unit as it ships.
+EVENT_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+sudo test ! -e "$STATE/.stratus/config.json" || fail "$STATE/.stratus/config.json exists already; this test writes its own"
+printf '{"events":{"sources":{"github":{"verify":"github","secrets":["events.github"]}}}}\n' \
+  | sudo -u stratus tee "$STATE/.stratus/config.json" >/dev/null
+printf %s "$EVENT_SECRET" | as_stratus credential set events.github >/dev/null || fail "could not store events.github"
+sudo systemctl restart "$UNIT"
+wait_healthy
+delivery="systemd-smoke-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+body='{"zen":"Keep it logically awesome.","hook_id":1}'
+signature=$(printf %s "$body" | openssl dgst -sha256 -hmac "$EVENT_SECRET" | awk '{print $NF}')
+answer=$(curl -sS --max-time 30 -X POST http://127.0.0.1:4124/events/github \
+  -H 'content-type: application/json' -H 'x-github-event: ping' -H "x-github-delivery: ${delivery}" \
+  -H "x-hub-signature-256: sha256=${signature}" -d "$body") || fail "the signed delivery got no answer"
+[ "$answer" = '{"status":"unmatched"}' ] || fail "the signed delivery was answered $answer, not unmatched"
+call GET "/events/deliveries?source=github" | grep -q "\"eventId\":\"${delivery}\"" || fail "the delivery left no row"
+# Captured first: grep -q closing the pipe early would fail the CLI's write under pipefail.
+events_out=$(as_stratus events) || fail "stratus events failed"
+grep -q '^github$' <<<"$events_out" || fail "stratus events does not list the github source: $events_out"
+
 echo "--- a clean stop inside TimeoutStopSec"
 started=$SECONDS
 sudo systemctl stop "$UNIT"

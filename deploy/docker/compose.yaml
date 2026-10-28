@@ -41,6 +41,10 @@ services:
     # through a tunnel (Tailscale, SSH), never by widening this.
     ports:
       - "127.0.0.1:4123:4123"
+      # The events listener, for webhooks (docs/guides/events.md). Off until
+      # the config's "events" block names a source; then uncomment, and
+      # front it with a tunnel or a TLS proxy rather than a public bind.
+      # - "127.0.0.1:4124:4124"
     # Reaps the processes the shell tool's commands leave behind; the daemon
     # itself handles SIGTERM.
     init: true
