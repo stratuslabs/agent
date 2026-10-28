@@ -46,6 +46,14 @@ What they get:
 - **Linux** — a systemd user unit at
   `~/.config/systemd/user/stratusd.service`
 
+There is one such service per OS user: its name is the same whatever
+`HOME` is. So `stratus service`, `stratus update` and setup's Always on
+first ask the manager which unit file the loaded service came from. When
+it is another home's (a CLI run with a different `HOME`, such as a test or
+a scratch home), they refuse and name it, instead of stopping, replacing or
+restarting that home's daemon. Run the command with the `HOME` that
+installed it, or uninstall it from there first.
+
 The unit runs the daemon by **absolute path** — the node binary and script
 of the process that installed it, never a bare `stratus`. A service manager
 starts with a minimal environment and never loads the shell profile that
