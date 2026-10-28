@@ -231,7 +231,9 @@ the agent's stored value (`stratus credential set`, or `credential.request`
 from chat). Set it fleet-wide, per agent under `agents`, or both. The two are
 merged name by name, with the agent's own entry winning. A variable it maps
 wins over a binding of the same variable, whether or not its own name
-resolves, so the operator's config can pin one:
+resolves, so the operator's config can pin one, and an empty name
+(`"GH_TOKEN": ""`, under an agent's entry) withholds it from that agent
+whatever is bound:
 
 ```json
 "@stratusagent/tool-shell": {

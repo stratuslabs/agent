@@ -620,7 +620,8 @@ const canonicalPath = (target: string): string => {
  * - **`credentialsEnv`** in the trusted config: `{ GH_TOKEN: "github.token" }`
  *   puts the agent's stored `github.token` in `GH_TOKEN`. Per agent like the
  *   rest of the settings. It is the operator's pin: a variable it names is
- *   never taken from a binding, whether or not its own name resolves.
+ *   never taken from a binding, whether or not its own name resolves, and
+ *   an empty name (`{ GH_TOKEN: "" }`) withholds the variable altogether.
  *
  * Either way only names the agent's soul grants it (its `credentials:` list)
  * reach a command; a name it isn't granted is skipped, so a fleet-wide
@@ -645,7 +646,10 @@ const credentialEnvFor = async (
       if (problem !== undefined) {
         throw new Error(`shell.run refused: a stored credential binding names ${variable}. ${problem} Remove it with \`stratus credential env --remove\`.`);
       }
-      if (typeof mapping[variable] === 'string' && mapping[variable].length > 0) {
+      // Any entry for the variable pins it, an empty name included: that is
+      // how an agent's own entry withholds a fleet mapping, and a binding
+      // must not hand back what the operator's config took away.
+      if (Object.prototype.hasOwnProperty.call(mapping, variable)) {
         continue;
       }
       env[variable] = value;

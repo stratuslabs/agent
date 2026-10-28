@@ -841,6 +841,15 @@ test('the config\'s credentialsEnv pins a variable over a binding, and a binding
   // GH_TOKEN comes from, and a binding doesn't fill it in.
   const ungranted = await runAs({ credentialsEnv: { GH_TOKEN: 'github.token' } }, { credentials: store.resolver }, 'echo "[$GH_TOKEN]"', { id: 'ava' });
   assert.equal(String((ungranted.output as JsonObject).stdout).trim(), '[]');
+  // An agent's own empty entry withholds a fleet mapping, and that holds
+  // against a binding too (Codex P2 4402851919).
+  const withheld = await runAs(
+    { credentialsEnv: { GH_TOKEN: 'github.token' }, agents: { ava: { credentialsEnv: { GH_TOKEN: '' } } } },
+    { credentials: store.resolver },
+    'echo "[$GH_TOKEN][$NPM_TOKEN]"',
+    agent,
+  );
+  assert.equal(String((withheld.output as JsonObject).stdout).trim(), '[][npm-bound]', JSON.stringify(withheld));
   // Only a hand-edited file gets here; the command is refused, by variable,
   // and no value is echoed into the error.
   for (const variable of ['PATH', 'NODE_OPTIONS_X', 'BASH_ENV', 'GIT_DIR']) {
