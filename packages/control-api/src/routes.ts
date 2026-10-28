@@ -180,7 +180,6 @@ interface Route {
 /** Most delivery rows one `GET /events/deliveries` returns; 100 when `limit` is absent. */
 const MAX_EVENT_DELIVERIES_LISTED = 1_000;
 
-
 /**
  * Every setting this endpoint will write, and what shape it has to be.
  *

@@ -851,8 +851,13 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       // timed schedule's. The same conditional write a slot claim makes; an
       // event trigger's slot is always empty, so it only requires the row.
       // A cancel landing after the claim above makes this a no-op, and the
-      // claimed batch still goes, as a claimed slot does.
-      store.claimSlot(withNextFire(trigger, undefined, { lastFiredAt: nowIso, lastSessionId: rows[0]!.sessionId }), '');
+      // claimed batch still goes, as a claimed slot does. An audit field, so
+      // a write that fails is warned and never keeps a claimed batch back.
+      try {
+        store.claimSlot(withNextFire(trigger, undefined, { lastFiredAt: nowIso, lastSessionId: rows[0]!.sessionId }), '');
+      } catch (error) {
+        warn(`event trigger ${trigger.id}: could not record its last firing: ${error instanceof Error ? error.message : String(error)}`);
+      }
       fireEventBatch(trigger, rows, batchKey);
     }
   };
