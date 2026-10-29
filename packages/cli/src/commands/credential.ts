@@ -1,10 +1,45 @@
-import { credentialsPath, loadNamedCredentials, saveNamedCredentials } from '@stratusagent/state';
+import {
+  appendCredentialAudit,
+  bindCredentialEnv,
+  credentialsPath,
+  loadCredentialEnvBindings,
+  loadNamedCredentials,
+  quoteShellArg,
+  removeNamedCredential,
+  saveNamedCredentials,
+  unbindCredentialEnv,
+  type StateEnvironment,
+} from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, readSecretFromStdin } from '../io.ts';
 import type { ParsedCredentialCommand } from '../parse.ts';
 
 /**
- * `stratus credential set|list|remove`: the place a named credential goes.
+ * The audit line for a binding made on the machine. Written after the
+ * change, like the gateway's, and warned about rather than undoing a
+ * binding that already landed.
+ */
+const auditBinding = async (
+  env: StateEnvironment,
+  streams: CliStreams,
+  entry: { action: 'bind' | 'unbind'; name: string; agentId: string; variable: string },
+): Promise<void> => {
+  try {
+    await appendCredentialAudit(env, {
+      action: entry.action,
+      name: entry.name,
+      agentId: entry.agentId,
+      via: 'cli',
+      env: entry.variable,
+      bindingFor: entry.agentId,
+    });
+  } catch (error) {
+    writeLine(streams.stderr, `The binding changed, but the audit line could not be written (${error instanceof Error ? error.message : String(error)}).`);
+  }
+};
+
+/**
+ * `stratus credential set|list|remove|env`: the place a named credential goes.
  *
  * A credential nobody can add is a credential nobody has, which is why this
  * exists at all — a search backend asks for `search.apiKey` and until now
@@ -31,7 +66,8 @@ export const runCredential = async (
   if (command.action === 'list') {
     const shared = Object.keys(named.shared).sort();
     const agents = Object.entries(named.agents).sort(([a], [b]) => a.localeCompare(b));
-    if (shared.length === 0 && agents.length === 0) {
+    const bindings = Object.entries(await loadCredentialEnvBindings(env)).sort(([a], [b]) => a.localeCompare(b));
+    if (shared.length === 0 && agents.length === 0 && bindings.length === 0) {
       writeLine(streams.stdout, `No named credentials stored in ${credentialsPath(env)}.`);
       writeLine(streams.stdout, 'A search backend wants `stratus credential set search.apiKey`.');
       return 0;
@@ -48,6 +84,14 @@ export const runCredential = async (
         writeLine(streams.stdout, `  ${name}`);
       }
     }
+    // Which keys each agent's shell commands can read, and as what: the
+    // part of a key's reach that a soul's credentials: list doesn't show.
+    for (const [agentId, variables] of bindings) {
+      writeLine(streams.stdout, `${agentId}'s shell reads:`);
+      for (const [variable, name] of Object.entries(variables).sort(([a], [b]) => a.localeCompare(b))) {
+        writeLine(streams.stdout, `  ${variable} from ${name}`);
+      }
+    }
     // Names, never values — and say so, so nobody goes looking for a flag
     // that prints one.
     writeLine(streams.stdout, '');
@@ -59,8 +103,8 @@ export const runCredential = async (
 
   if (command.action === 'remove') {
     const scope = command.agentId;
-    const store = scope === undefined ? named.shared : named.agents[scope];
-    if (!store || store[name] === undefined) {
+    // The bindings that read it go in the same write (removeNamedCredential).
+    if (!(await removeNamedCredential(env, { name, ...(scope !== undefined ? { agentId: scope } : {}) }))) {
       writeLine(
         streams.stderr,
         scope === undefined
@@ -69,12 +113,31 @@ export const runCredential = async (
       );
       return 1;
     }
-    delete store[name];
-    if (scope !== undefined && Object.keys(store).length === 0) {
-      delete named.agents[scope];
-    }
-    await saveNamedCredentials(env, named);
     writeLine(streams.stdout, scope === undefined ? `Removed ${name}.` : `Removed ${name} for ${scope}.`);
+    return 0;
+  }
+
+  if (command.action === 'env') {
+    // The parser requires both for `env`.
+    const agentId = command.agentId ?? '';
+    const variable = command.env ?? '';
+    if (command.remove === true) {
+      const was = await unbindCredentialEnv(env, { agentId, variable });
+      if (was === undefined) {
+        writeLine(streams.stderr, `${agentId}'s shell has no credential bound to ${variable}. \`stratus credentials\` lists the bindings.`);
+        return 1;
+      }
+      await auditBinding(env, streams, { action: 'unbind', name: was, agentId, variable });
+      writeLine(streams.stdout, `${agentId}'s shell no longer reads ${was} as ${variable}, from its next command.`);
+      return 0;
+    }
+    const was = await bindCredentialEnv(env, { agentId, variable, name });
+    await auditBinding(env, streams, { action: 'bind', name, agentId, variable });
+    writeLine(
+      streams.stdout,
+      `${agentId}'s shell commands read ${name} as ${variable} from their next command${was !== undefined && was !== name ? ` (it was ${was})` : ''}. No restart needed.`,
+    );
+    writeLine(streams.stdout, `Only while ${agentId}'s soul lists it under credentials: and a value is stored. Undo: stratus credential env ${name} ${variable} --agent ${quoteShellArg(agentId)} --remove`);
     return 0;
   }
 
@@ -105,6 +168,11 @@ export const runCredential = async (
       ? `Stored ${name} in ${credentialsPath(env)} (readable only by you).`
       : `Stored ${name} for ${command.agentId} in ${credentialsPath(env)} (readable only by you). It outranks the shared entry for that agent.`,
   );
+  if (command.env !== undefined && command.agentId !== undefined) {
+    await bindCredentialEnv(env, { agentId: command.agentId, variable: command.env, name });
+    await auditBinding(env, streams, { action: 'bind', name, agentId: command.agentId, variable: command.env });
+    writeLine(streams.stdout, `${command.agentId}'s shell commands read it as ${command.env} from their next command. No restart needed.`);
+  }
   // Storing grants nothing: the soul is the second gate, and an operator
   // who stops here gets "not allowed to access credential" on every call.
   writeLine(streams.stdout, `Each agent that may use it still needs \`credentials: [${name}]\` in its soul.`);

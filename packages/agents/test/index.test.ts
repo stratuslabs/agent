@@ -31,6 +31,7 @@ import {
   CREDENTIAL_REQUEST_TOOL_NAME,
   GATEWAY_ONLY_TOOL_NAMES,
   createCredentialRequestTool,
+  credentialVariableProblem,
 } from '../src/index.ts';
 
 test('generateAgentName is a human-ish first name, deterministic for a seed', () => {
@@ -896,6 +897,40 @@ test('credential.request passes a name, a scope defaulting to the agent, a reaso
   // A human decides everything after the question, so asking is safe.
   assert.equal(tool.risk, 'safe');
   assert.ok(GATEWAY_ONLY_TOOL_NAMES.includes(CREDENTIAL_REQUEST_TOOL_NAME));
+});
+
+test('credential.request passes env, the variable the agent\'s shell should read the key from, and says so', async () => {
+  const asked: Array<{ env?: string }> = [];
+  const tool = createCredentialRequestTool(async (request) => {
+    asked.push(request);
+    return { requestId: 'req-1', via: 'form' };
+  });
+  const session = { id: 's1', agent: { id: 'kai', name: 'Kai' }, status: 'running' as const, messages: [], createdAt: '', updatedAt: '' };
+  const output = await tool.execute({ name: 'twilio.authToken', env: ' TWILIO_AUTH_TOKEN ' }, session) as { env?: string; note?: string };
+  assert.equal(asked[0]?.env, 'TWILIO_AUTH_TOKEN');
+  assert.equal(output.env, 'TWILIO_AUTH_TOKEN');
+  assert.match(output.note ?? '', /Your shell commands will read it as \$TWILIO_AUTH_TOKEN from then on\./);
+  await assert.rejects(tool.execute({ name: 'x', env: '' }, session), /"env" is the environment variable/);
+  await assert.rejects(tool.execute({ name: 'x', env: 7 }, session), /"env" is the environment variable/);
+  assert.equal(asked.length, 1);
+});
+
+test('which variables a credential may go in: the refused list for an operator, and secret-shaped names for an agent', () => {
+  for (const variable of ['PATH', 'HOME', 'IFS', 'BASH_ENV', 'ZDOTDIR', 'POSIXLY_CORRECT', 'GIT_DIR', 'GREP_OPTIONS', 'BASH_FUNC_x%%', '1X', 'A-B']) {
+    assert.ok(credentialVariableProblem(variable) !== undefined, variable);
+    assert.ok(credentialVariableProblem(variable, { requested: true }) !== undefined, variable);
+  }
+  // An operator may bind anything else, secret-shaped or not.
+  for (const variable of ['DATABASE_URL', 'NODE_OPTIONS', 'gh_token', 'GH_TOKEN']) {
+    assert.equal(credentialVariableProblem(variable), undefined, variable);
+  }
+  // An agent may only ask for what looks like a secret's variable.
+  for (const variable of ['GH_TOKEN', 'TWILIO_AUTH_TOKEN', 'TWILIO_ACCOUNT_SID', 'OPENAI_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'AWS_ACCESS_KEY_ID', 'DB_PASSWORD', 'STRIPE_SECRET']) {
+    assert.equal(credentialVariableProblem(variable, { requested: true }), undefined, variable);
+  }
+  for (const variable of ['DATABASE_URL', 'NODE_OPTIONS', 'LD_PRELOAD', 'GIT_SSH_COMMAND', 'gh_token', 'TOKEN', 'UID', 'GIT_CONFIG_KEY_0']) {
+    assert.match(credentialVariableProblem(variable, { requested: true }) ?? '', /doesn't look like a secret's variable|not an environment variable name/, variable);
+  }
 });
 
 test('effort: in soul frontmatter is a level, round-trips, and anything else is refused', () => {

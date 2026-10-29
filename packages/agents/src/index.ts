@@ -142,5 +142,11 @@ export {
   type CredentialRequester,
   createCredentialRequestTool,
 } from './tools/credentials.ts';
+export {
+  COMMAND_OPTION_VARIABLES,
+  GIT_REPOSITORY_VARIABLES,
+  SHELL_STARTUP_VARIABLES,
+  credentialVariableProblem,
+} from './credential-env.ts';
 export { GATEWAY_ONLY_TOOL_NAMES } from './tools/gateway-only.ts';
 export { loadStratusSkill, STRATUS_SKILL_PATH } from './builtin-skills.ts';

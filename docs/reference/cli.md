@@ -49,8 +49,10 @@ stratus sessions                       # what the daemon's sessions are doing, n
 stratus sessions --agent blair --status failed   # filter by agent and status; --limit <n>, --format json
 printf %s "$KEY" | stratus credential set search.apiKey   # store a named credential (value from stdin, never a flag)
 stratus credential set search.apiKey --agent blair       # one agent's own key, over the shared one
-stratus credentials                    # stored names, never values (also: stratus credential list)
+stratus credentials                    # stored names and what each agent's shell reads, never values (also: stratus credential list)
 stratus credential remove search.apiKey
+stratus credential env twilio.authToken TWILIO_AUTH_TOKEN --agent blair   # blair's shell reads it as $TWILIO_AUTH_TOKEN, from the next command
+printf %s "$KEY" | stratus credential set gh.token --agent blair --env GH_TOKEN   # store and bind in one step
 stratus signin set anthropic --agent remy   # remy's own Claude subscription (token asked without echo, or from stdin)
 stratus signins                        # which agents have their own sign-in, never the token (also: stratus signin list)
 stratus signin remove anthropic --agent remy  # back to the shared sign-in from its next turn
@@ -91,7 +93,7 @@ stratus dashboard                      # local browser dashboard
 | `agent new`, `agents` | [Agents](../concepts/agents.md) |
 | `template add` | [Templates](../guides/templates.md) |
 | `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
-| `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
+| `credential set`, `credentials`, `credential remove`, `credential env` | [Tools](../guides/tools.md#searching-the-web), [tool-shell](../../packages/tool-shell/README.md#stored-credentials-in-the-environment), [Security](../concepts/security.md) |
 | `signin set`, `signins`, `signin remove` | [Setup](../start/setup.md#one-agent-on-its-own-claude-subscription), [Security](../concepts/security.md) |
 | `channel set`, `channels`, `channel remove` | [Extending](../guides/extending.md#channels), [Slack](../guides/slack.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
@@ -148,7 +150,7 @@ stratus dashboard                      # local browser dashboard
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
-| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `signin set` / `signin remove`: the agent whose own sign-in it is (required). `channel set` / `channel remove`: the agent whose binding it is (required) |
+| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `credential env` (and `credential set --env`): the agent whose shell the binding is for (required). `signin set` / `signin remove`: the agent whose own sign-in it is (required). `channel set` / `channel remove`: the agent whose binding it is (required) |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
 | `--force` | `stratus skill add`: replace an already-installed skill id. `stratus template add`: replace an agent or skill already installed under the same name |
@@ -156,6 +158,8 @@ stratus dashboard                      # local browser dashboard
 | `--yes`, `-y` | `stratus template add`: install without the review prompt |
 | `--reason` | `stratus restart`: why, for the daemon's log |
 | `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
+| `--env <VAR>` | `stratus credential set`: also bind the key to that variable for the `--agent` agent's shell, as `credential env` does |
+| `--remove` | `stratus credential env`: drop the binding instead of making it |
 | `--help`, `-h` | Show help |
 
 `stratus credential set` takes the value on **stdin and never in a flag** —

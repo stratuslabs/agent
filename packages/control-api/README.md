@@ -562,7 +562,9 @@ cannot show a form, and gives one whenever the agent asks with
 `tools:` (or have no `tools:` key); the daemon grants the form to every
 agent, but not the link. This API issues it (the adapter's `requestCredentialLink`):
 a 256-bit token, kept in memory, minted for one pending request, and built
-on `api.publicUrl`, or on the bound address when that is unset.
+on `api.publicUrl`, or on the bound address when that is unset. A request
+with `env` carries it to the page, which says the agent's shell will be able
+to read the key as that variable before anything is typed.
 
 - **The token is the whole credential.** The operator chose a link that
   works by itself over one that also asks for a dashboard session, so the

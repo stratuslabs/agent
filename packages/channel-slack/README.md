@@ -368,7 +368,10 @@ Mode connection.
 
 The same approvers answer an agent's `credential.request`. The gateway hands
 the request to the adapter's `requestCredential`, the channel contract's
-method for this, and waits for it: the adapter resolves once the form is
+method for this, and waits for it (the adapter sets `credentialReplaceForms`
+and `credentialEnvForms`, so it is also handed replacements and requests
+with `env`, whose post and form say which variable the agent's shell will
+read the key from): the adapter resolves once the form is
 posted, and rejects, posting nothing, when the agent has no approvers, the
 turn is a DM with someone who is not one of them or a private channel or
 group DM none of them is a member of (`conversations.info`, then

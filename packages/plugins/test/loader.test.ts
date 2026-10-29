@@ -878,6 +878,54 @@ test('credentialsFromConfig declares the names the operator mapped in that key, 
   assert.deepEqual(outcomes, { 'github.token': true, 'vercel.token': true, 'npm.token': false });
 });
 
+test('only a plugin whose manifest says envBindings: true is handed the host\'s credential bindings', async () => {
+  const handed: Record<string, unknown> = {};
+  const agent = { id: 'ava', name: 'Ava', credentials: ['twilio.authToken'] };
+  const bindingPlugin = (key: string, envBindings: unknown) => ({
+    manifest: {
+      stratus: {
+        pluginVersion: 1,
+        contributes: { tools: [{ name: `${key}.run`, risk: 'gated' }] },
+        ...(envBindings !== undefined ? { envBindings } : {}),
+      },
+    },
+    module: {
+      createPlugin: (): Plugin => ({
+        name: key,
+        async setup(context) {
+          handed[key] = context.credentials?.envBindings === undefined
+            ? 'none'
+            : { ...await context.credentials.envBindings(agent) };
+          context.tools.register(tool(`${key}.run`, 'gated'));
+        },
+      }),
+    },
+  });
+  const host = await fakeHost({
+    'stratus-plugin-shellish': bindingPlugin('shellish', true),
+    'stratus-plugin-other': bindingPlugin('other', undefined),
+    'stratus-plugin-bad': bindingPlugin('bad', 'yes'),
+  });
+  const credentials = {
+    async resolve() {
+      return undefined;
+    },
+    async envBindings() {
+      return { TWILIO_AUTH_TOKEN: 'tw-secret' };
+    },
+  };
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-shellish': {}, 'stratus-plugin-other': {}, 'stratus-plugin-bad': {} },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    credentials,
+  });
+  assert.deepEqual(handed, { shellish: { TWILIO_AUTH_TOKEN: 'tw-secret' }, other: 'none' });
+  assert.deepEqual(result.failures.map((failure) => failure.package), ['stratus-plugin-bad']);
+  assert.match(result.failures[0]?.reason ?? '', /envBindings must be true or false/);
+});
+
 const CHECK = { agentId: 'ava', sessionId: 's1', provider: 'anthropic' };
 
 test('a plugin\'s provider-call guards reach the host\'s list once it loads whole, naming the plugin when one breaks', async () => {

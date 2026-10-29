@@ -796,6 +796,77 @@ test('the plugin hands the host\'s credential store to the tool', async () => {
   assert.equal(String((result.output as JsonObject).stdout).trim(), '[ghs-ava]', JSON.stringify(result));
 });
 
+// A store whose bindings can change between commands, as a form answer
+// changes the credentials file under a running daemon.
+const bindingStore = (bound: Record<string, Record<string, string>>) => ({
+  bound,
+  resolver: {
+    async resolve(agent: { id: string; credentials?: string[] }, name: string) {
+      if (!agent.credentials?.includes(name)) {
+        throw new Error(`Agent ${agent.id} is not allowed to access credential: ${name}`);
+      }
+      return { 'github.token': 'ghs-config' }[name];
+    },
+    async envBindings(agent: { id: string }) {
+      return { ...(bound[agent.id] ?? {}) };
+    },
+  },
+});
+
+test('a credential binding reaches the next command through the same tool, with no config and no restart', async () => {
+  const store = bindingStore({});
+  const tool = createShellTool({ sandbox: 'off', passEnv: ['PATH'] }, { processEnv: { PATH: process.env.PATH }, credentials: store.resolver });
+  const run = () => createLocalCommandExecutor().execute(
+    { id: 'call-1', toolName: 'shell.run', input: { command: 'echo "[$TWILIO_AUTH_TOKEN]"' } },
+    tool,
+    { ...session('ava'), agent: { id: 'ava', name: 'ava', credentials: ['twilio.authToken'] } },
+  );
+  const before = await run();
+  assert.equal(String((before.output as JsonObject).stdout).trim(), '[]');
+  // The form was answered: the store now has a binding, and the very same
+  // tool object, built before it existed, hands it to the next command.
+  store.bound.ava = { TWILIO_AUTH_TOKEN: 'tw-secret' };
+  const after = await run();
+  assert.equal(String((after.output as JsonObject).stdout).trim(), '[tw-secret]', JSON.stringify(after));
+});
+
+test('the config\'s credentialsEnv pins a variable over a binding, and a binding the variable rule refuses refuses the command', async () => {
+  const store = bindingStore({ ava: { GH_TOKEN: 'ghs-bound', NPM_TOKEN: 'npm-bound' } });
+  const agent = { id: 'ava', credentials: ['github.token'] };
+  // The operator mapped GH_TOKEN, so the binding for it is ignored; the
+  // other binding still applies.
+  const pinned = await runAs({ credentialsEnv: { GH_TOKEN: 'github.token' } }, { credentials: store.resolver }, 'echo "[$GH_TOKEN][$NPM_TOKEN]"', agent);
+  assert.equal(String((pinned.output as JsonObject).stdout).trim(), '[ghs-config][npm-bound]', JSON.stringify(pinned));
+  // Pinned even when the mapped name isn't granted: the operator said where
+  // GH_TOKEN comes from, and a binding doesn't fill it in.
+  const ungranted = await runAs({ credentialsEnv: { GH_TOKEN: 'github.token' } }, { credentials: store.resolver }, 'echo "[$GH_TOKEN]"', { id: 'ava' });
+  assert.equal(String((ungranted.output as JsonObject).stdout).trim(), '[]');
+  // An agent's own empty entry withholds a fleet mapping, and that holds
+  // against a binding too (Codex P2 4402851919).
+  const withheld = await runAs(
+    { credentialsEnv: { GH_TOKEN: 'github.token' }, agents: { ava: { credentialsEnv: { GH_TOKEN: '' } } } },
+    { credentials: store.resolver },
+    'echo "[$GH_TOKEN][$NPM_TOKEN]"',
+    agent,
+  );
+  assert.equal(String((withheld.output as JsonObject).stdout).trim(), '[][npm-bound]', JSON.stringify(withheld));
+  // Only a hand-edited file gets here; the command is refused, by variable,
+  // and no value is echoed into the error.
+  for (const variable of ['PATH', 'NODE_OPTIONS_X', 'BASH_ENV', 'GIT_DIR']) {
+    const refusing = bindingStore({ ava: { [variable]: 'bound-value' } });
+    const result = await runAs({}, { credentials: refusing.resolver }, 'true', agent);
+    if (variable === 'NODE_OPTIONS_X') {
+      // The operator's rule, not the request rule: not secret-shaped is fine
+      // for a binding an operator made on the machine.
+      assert.equal(result.ok, true, JSON.stringify(result));
+      continue;
+    }
+    assert.equal(result.ok, false, variable);
+    assert.match(result.error ?? '', new RegExp(`stored credential binding names ${variable}`), variable);
+    assert.ok(!(result.error ?? '').includes('bound-value'), variable);
+  }
+});
+
 test('with the external-content gate on, a tainted ledger closes grants before the first shell call is judged', async () => {
   const { workspaces, workspace } = await ledgerHome();
   const notes = path.join(workspace, 'notes.txt');

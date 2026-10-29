@@ -1,5 +1,5 @@
 import { isTrustLevel, TRUST_LEVELS, type SessionStatus, type TrustLevel } from '@stratusagent/core';
-import { isValidAgentId } from '@stratusagent/agents';
+import { credentialVariableProblem, isValidAgentId } from '@stratusagent/agents';
 import { CHANNEL_KIND_PATTERN, CREDENTIAL_NAME_PATTERN, parseProviderName, type StratusProviderName } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
@@ -113,11 +113,21 @@ export { CREDENTIAL_NAME_PATTERN };
 
 export interface ParsedCredentialCommand {
   command: 'credential';
-  action: 'set' | 'list' | 'remove';
+  action: 'set' | 'list' | 'remove' | 'env';
   /** The credential name — `search.apiKey` and whatever the ecosystem asks for next. */
   name?: string;
-  /** Store or remove this agent's own entry rather than the fleet's shared one. */
+  /**
+   * Store or remove this agent's own entry rather than the fleet's shared
+   * one. For `env`, whose shell the binding is for.
+   */
   agentId?: string;
+  /**
+   * The environment variable the agent's shell commands read the key from:
+   * `set --env VAR`, or `env NAME VAR`.
+   */
+  env?: string;
+  /** `env --remove`: drop the binding instead of making it. */
+  remove?: boolean;
 }
 
 export interface ParsedSignInCommand {
@@ -872,11 +882,13 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
       return { command: 'help' };
     }
-    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
-      throw new Error(`No credential subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
+    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove' && subcommand !== 'env') {
+      throw new Error(`No credential subcommand named ${JSON.stringify(subcommand)}. It is set, list, remove, or env.`);
     }
     let name: string | undefined;
     let agentId: string | undefined;
+    let variable: string | undefined;
+    let remove = false;
     for (let index = 0; index < credentialRest.length; index += 1) {
       const token = credentialRest[index];
       if (!token) {
@@ -890,16 +902,49 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
+      if (token === '--env' && subcommand === 'set') {
+        variable = readOptionValue(credentialRest, index, '--env');
+        index += 1;
+        continue;
+      }
+      if (token === '--remove' && subcommand === 'env') {
+        remove = true;
+        continue;
+      }
       if (token.startsWith('--')) {
         throw new Error(`Unknown option: ${token}`);
       }
+      // `env` takes the name and then the variable.
+      if (subcommand === 'env' && name !== undefined && variable === undefined) {
+        variable = token;
+        continue;
+      }
       if (name !== undefined) {
-        throw new Error(`credential ${subcommand} takes one credential name; got both ${JSON.stringify(name)} and ${JSON.stringify(token)}.`);
+        throw new Error(subcommand === 'env'
+          ? `credential env takes a credential name and a variable; ${JSON.stringify(token)} is one more.`
+          : `credential ${subcommand} takes one credential name; got both ${JSON.stringify(name)} and ${JSON.stringify(token)}.`);
       }
       name = token;
     }
     if (subcommand !== 'list' && name === undefined) {
       throw new Error(`credential ${subcommand} needs a credential name — for a search backend that is search.apiKey.`);
+    }
+    if (subcommand === 'env' && variable === undefined) {
+      throw new Error('credential env needs the variable too: stratus credential env twilio.authToken TWILIO_AUTH_TOKEN --agent <id>.');
+    }
+    // A binding is one agent's consent, never the fleet's.
+    if (variable !== undefined && agentId === undefined) {
+      throw new Error(
+        subcommand === 'env'
+          ? 'credential env needs --agent <id>: a binding is for one agent\'s shell.'
+          : 'credential set --env needs --agent <id>: a binding is for one agent\'s shell. '
+            + 'For a shared key, store it with credential set, then bind it per agent with credential env.',
+      );
+    }
+    // The operator's rule; the stricter one is for names an agent picks.
+    const variableProblem = variable !== undefined && !remove ? credentialVariableProblem(variable) : undefined;
+    if (variableProblem !== undefined) {
+      throw new Error(variableProblem);
     }
     // A name keys a map that a soul's `credentials:` list also names, so the
     // two spellings have to be able to meet. The store itself is
@@ -926,6 +971,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       action: subcommand,
       ...(name !== undefined ? { name } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
+      ...(variable !== undefined ? { env: variable } : {}),
+      ...(remove ? { remove } : {}),
     };
   }
 

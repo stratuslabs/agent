@@ -413,6 +413,15 @@ instead: `"credentialsFromConfig": "credentialsEnv"`. The names under that key
 the operator's config before the plugin's code runs, so the plugin can't add
 to them. The agent's own `credentials:` allowlist still applies to each one.
 
+A plugin that puts stored keys into a command's environment says
+`"envBindings": true`, and only then gets `CredentialResolver.envBindings`:
+the variables an approver bound by answering a form ("readable by Kai's shell
+as `GH_TOKEN`") or the operator bound with `stratus credential env`, with
+their values, for names the agent's `credentials:` list grants. Those names
+were chosen after the plugin loaded, so no manifest could list them; the flag
+is the manifest's statement that it reads them. tool-shell is the one that
+does.
+
 The point of a manifest separate from the code is that **the daemon can see
 what a plugin contributes, and validate its configuration, without importing
 it**. A misconfigured or over-reaching plugin fails at config validation, not

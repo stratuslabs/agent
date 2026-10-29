@@ -3004,6 +3004,15 @@ const credentialWhose = (agentName: string, scope: CredentialScope): string =>
     : `stored for the whole fleet, granted to ${agentName} (other agents need it in their own soul)`;
 
 /**
+ * What answering means when the agent asked for the key in a variable,
+ * said before anything is typed: the approval covers the binding too.
+ * `agentName` arrives escaped; the variable passed the gateway's rule, so
+ * it is letters, digits and underscores.
+ */
+const credentialShellLine = (agentName: string, env: string): string =>
+  `${agentName}'s shell commands will be able to read this as \`${env}\`, so ${agentName} can see the value.`;
+
+/**
  * The request as it appears in the conversation. What it says about the
  * value is the promise the form keeps: straight to the credential store,
  * never into the thread, and never over a key already there.
@@ -3015,6 +3024,7 @@ const credentialRequestBlocks = (
   reason: string | undefined,
   requestId: string,
   replace = false,
+  env?: string,
 ): SlackBlock[] => {
   const shortReason = reason !== undefined && reason.length > CREDENTIAL_REASON_LIMIT
     ? `${reason.slice(0, CREDENTIAL_REASON_LIMIT)}…`
@@ -3031,6 +3041,9 @@ const credentialRequestBlocks = (
     },
     ...(shortReason !== undefined
       ? [{ type: 'section', text: { type: 'mrkdwn', text: `_${escapeSlackText(agentName)} says:_ ${escapeSlackText(shortReason)}` } }]
+      : []),
+    ...(env !== undefined
+      ? [{ type: 'section', text: { type: 'mrkdwn', text: `*${credentialShellLine(escapeSlackText(agentName), escapeSlackText(env))}*` } }]
       : []),
     {
       type: 'context',
@@ -3071,11 +3084,12 @@ const credentialModal = (post: PendingCredentialPost, requestId: string): SlackB
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: post.replace === true
+        text: (post.replace === true
           ? `\`${escapeSlackText(post.name)}\`, ${credentialWhose(escapeSlackText(post.agentName), post.scope)}. `
             + 'The new value replaces the stored one once it saves; it never appears in the conversation.'
           : `\`${escapeSlackText(post.name)}\`, ${credentialWhose(escapeSlackText(post.agentName), post.scope)}. `
-            + `It is stored add-only and granted to ${escapeSlackText(post.agentName)}; it never appears in the conversation.`,
+            + `It is stored add-only and granted to ${escapeSlackText(post.agentName)}; it never appears in the conversation.`)
+          + (post.env !== undefined ? ` ${credentialShellLine(escapeSlackText(post.agentName), escapeSlackText(post.env))}` : ''),
       },
     },
     {
@@ -3099,6 +3113,8 @@ interface PendingCredentialPost {
   scope: CredentialScope;
   /** A new value for a key the agent holds, rather than an add. */
   replace?: boolean;
+  /** The variable the agent's shell will read it from, which the form says. */
+  env?: string;
   /** Bound at render time, as an approval request's are. */
   approvers: Set<string>;
 }
@@ -5661,7 +5677,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         channel,
         text: escapeSlackText(`${agentName} is asking ${request.replace === true ? 'to replace' : 'for'} a credential: ${request.name}, ${credentialWhose(agentName, request.scope)}.`),
         ...(thread ? { thread_ts: thread } : {}),
-        blocks: credentialRequestBlocks(agentName, request.name, request.scope, request.reason, request.requestId, request.replace === true),
+        blocks: credentialRequestBlocks(agentName, request.name, request.scope, request.reason, request.requestId, request.replace === true, request.env),
       });
     } catch (error) {
       credentialsPosting.delete(request.requestId);
@@ -5682,6 +5698,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       name: request.name,
       scope: request.scope,
       ...(request.replace === true ? { replace: true } : {}),
+      ...(request.env !== undefined ? { env: request.env } : {}),
       approvers,
     });
   };
@@ -5696,14 +5713,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ? `for ${escapeSlackText(post.agentName)} only`
       : `as a shared credential, granted to ${escapeSlackText(post.agentName)}`;
     const by = event.actor !== undefined && post.approvers.has(event.actor) ? `, by <@${event.actor}>` : '';
-    const text = event.replace === true
+    const shell = post.env !== undefined && event.grantError === undefined
+      ? ` Its shell commands read it as \`${escapeSlackText(post.env)}\`.`
+      : '';
+    const text = (event.replace === true
       ? `Replaced \`${escapeSlackText(post.name)}\` ${event.scope === 'agent' ? `for ${escapeSlackText(post.agentName)}` : 'as a shared credential'}${by}. `
         + `${escapeSlackText(post.agentName)} uses the new value from its next reply; it is in the credential store, not here.`
       : event.grantError === undefined
       ? `Added \`${escapeSlackText(post.name)}\` ${whose}${by}. ${escapeSlackText(post.agentName)} can use it from its next reply; the value is in the credential store, not here.`
       : `Stored \`${escapeSlackText(post.name)}\` ${event.scope === 'agent' ? `for ${escapeSlackText(post.agentName)}` : 'as a shared credential'}${by}, `
         + `but it could not be added to ${escapeSlackText(post.agentName)}'s soul (${escapeSlackText(event.grantError)}), so ${escapeSlackText(post.agentName)} cannot use it yet. `
-        + 'Add the name to the credentials list in its soul on the machine.';
+        + 'Add the name to the credentials list in its soul on the machine.') + shell;
     try {
       await post.connection.web.chat.update({ channel: post.channel, ts: post.ts, text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] });
     } catch (error) {
@@ -7949,6 +7969,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     conversationKindFor,
     requestCredential,
     credentialReplaceForms: true,
+    credentialEnvForms: true,
 
     async start(gateway) {
       gatewayRef = gateway;

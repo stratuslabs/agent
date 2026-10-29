@@ -2516,6 +2516,21 @@ export type CredentialDelivery = 'form' | 'link';
 
 export interface CredentialResolver {
   resolve(agent: AgentDefinition, name: string): Promise<string | undefined>;
+  /**
+   * The environment variables this agent's stored keys were bound to, with
+   * their values, read now: an approver answered a form that said the key
+   * would be readable by this agent's shell as that variable, or an
+   * operator bound it with `stratus credential env`. Only names the agent's
+   * `credentials:` list grants, by `assertCredentialAllowed`'s rule
+   * (skipped rather than thrown), and a bound name with nothing stored is
+   * left out.
+   *
+   * Optional: a host that omits it has no bindings, and its shell commands
+   * see only what the operator's config maps. A plugin is handed it only
+   * when its manifest says `"envBindings": true`, since the values it
+   * returns are names the manifest never listed.
+   */
+  envBindings?(agent: AgentDefinition): Promise<Record<string, string>>;
 }
 
 export interface ScopedCredentials {
@@ -4193,6 +4208,8 @@ export type StratusEvent =
       via?: CredentialDelivery;
       /** A new value for a key the agent already holds, swapped in place. Always a form, never a link. */
       replace?: boolean;
+      /** The variable the agent's shell commands will read the key from once it is added. */
+      env?: string;
       metadata?: JsonObject;
     }
   /**
@@ -4216,6 +4233,8 @@ export type StratusEvent =
       actor?: string;
       /** The value replaced one already stored, rather than being added. */
       replace?: boolean;
+      /** The variable the agent's shell commands now read the key from. */
+      env?: string;
       /** Set when the key was stored but could not be added to the soul. */
       grantError?: string;
     }

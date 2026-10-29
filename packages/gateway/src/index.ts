@@ -100,6 +100,7 @@ import {
   type ScheduleRecord,
   loadStratusSkill,
   STRATUS_SKILL_PATH,
+  credentialVariableProblem,
 } from '@stratusagent/agents';
 import { createFleetReader } from './fleet.ts';
 import {
@@ -365,10 +366,13 @@ export interface GatewayChannelAdapter {
     scope: CredentialScope;
     reason?: string;
     replace?: boolean;
+    env?: string;
     metadata: JsonObject;
   }): Promise<void>;
   /** See `ChannelAdapter.credentialReplaceForms`. */
   credentialReplaceForms?: boolean;
+  /** See `ChannelAdapter.credentialEnvForms`. */
+  credentialEnvForms?: boolean;
   /**
    * Issues a one-time link to a form for a credential request, for the
    * agent to pass on: what a request falls back to when its conversation
@@ -388,6 +392,8 @@ export interface GatewayChannelAdapter {
     name: string;
     scope: CredentialScope;
     reason?: string;
+    /** The variable the agent's shell will read the key from; the page must say so. */
+    env?: string;
   }): Promise<{
     url: string;
     expiresAt: string;
@@ -2713,6 +2719,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     soulPath: string;
     /** A new value for a key already stored where `scope` says, swapped in place. */
     replace?: boolean;
+    /** The variable the agent's shell reads the key from once it is stored, which the form said. */
+    env?: string;
     /** How it was put to someone, for the audit line. */
     via?: CredentialDelivery;
   }>();
@@ -2732,11 +2740,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         + 'starting with a letter, the way the tool that needs it spells it: search.apiKey, github.token.',
       );
     }
+    // The stricter rule, for a name the model picked: checked before anyone
+    // is asked, so an approver never sees a form whose binding the store
+    // would refuse, and so a variable that changes what a judged command
+    // does (NODE_OPTIONS) is never offered at all.
+    if (request.env !== undefined) {
+      const problem = credentialVariableProblem(request.env, { requested: true });
+      if (problem !== undefined) {
+        throw new Error(`${problem} Nothing is pending.`);
+      }
+    }
     // A key already stored is not something to ask a person for again: the
     // form only adds, so it could only fail. Say what is actually missing.
     const source = await namedCredentialSource(env, agentId, request.name);
     const stored = source !== undefined;
     const granted = session.agent.credentials?.includes(request.name) === true;
+    // Binding a key the agent already holds asks for no value, and every
+    // form today has a value field, so phase 1 leaves it to the machine.
+    const bindOnMachine = request.env !== undefined
+      ? ` To have your shell read it as ${request.env}, ask your operator to run \`stratus credential env ${request.name} ${request.env} --agent ${quoteShellArg(agentId)}\` on the machine.`
+      : '';
     if (request.replace === true) {
       // Checked here, before anyone is asked, so an approver is never shown
       // a form whose answer could only be refused.
@@ -2762,14 +2785,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         throw new Error('A replacement is asked for in a form an approver answers, never a link. Nothing is pending.');
       }
     } else if (stored && granted) {
-      throw new Error(`You already hold ${request.name}; the tools that need it use it for you. To rotate it for a new value, ask again with replace: true.`);
+      throw new Error(
+        `You already hold ${request.name}; the tools that need it use it for you. To rotate it for a new value, ask again with replace: true.${bindOnMachine}`
+        + (request.env !== undefined ? ' Nothing is pending.' : ''),
+      );
     } else if (stored) {
       throw new Error(
         `${request.name} is already ${source === 'environment' ? "supplied by the daemon's environment" : 'stored'} but not granted to you. `
-        + 'Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.',
+        + `Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.${bindOnMachine}`,
       );
     }
-    const onMachine = `\`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\``;
+    const onMachine = request.env === undefined
+      ? `\`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\``
+      : request.scope === 'agent'
+        ? `\`stratus credential set ${request.name} --agent ${quoteShellArg(agentId)} --env ${request.env}\``
+        : `\`stratus credential set ${request.name}\`, then \`stratus credential env ${request.name} ${request.env} --agent ${quoteShellArg(agentId)}\``;
     const record = {
       agentId,
       sessionId: session.id,
@@ -2777,6 +2807,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       scope: request.scope,
       soulPath,
       ...(request.replace === true ? { replace: true } : {}),
+      ...(request.env !== undefined ? { env: request.env } : {}),
     };
     const announce = async (requestId: string, via: CredentialDelivery): Promise<void> => {
       await bus.emit({
@@ -2789,6 +2820,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(request.reason !== undefined ? { reason: request.reason } : {}),
         via,
         ...(request.replace === true ? { replace: true } : {}),
+        ...(request.env !== undefined ? { env: request.env } : {}),
         ...(session.metadata ? { metadata: session.metadata } : {}),
       });
     };
@@ -2809,11 +2841,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const kind = session.metadata?.channel;
       const { adapter } = typeof kind === 'string'
         ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined
-          && (request.replace !== true || candidate.credentialReplaceForms === true))
+          && (request.replace !== true || candidate.credentialReplaceForms === true)
+          // A form that can't say the key will be shell-readable must not
+          // be the approval for it: a link says it instead.
+          && (request.env === undefined || candidate.credentialEnvForms === true))
         : { adapter: undefined };
       if (!adapter?.requestCredential || !session.metadata) {
         formUnavailable = typeof kind === 'string'
-          ? `This conversation's channel (${kind}) cannot show your operator a ${request.replace === true ? 'replacement' : 'credential'} form here.`
+          ? `This conversation's channel (${kind}) cannot show your operator a ${request.replace === true ? 'replacement' : 'credential'} form here${request.env !== undefined ? ' that says which variable your shell will read it from' : ''}.`
           : 'This conversation is not in a channel that can show your operator a form.';
       } else {
         const requestId = randomUUID();
@@ -2831,6 +2866,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
             scope: request.scope,
             ...(request.reason !== undefined ? { reason: request.reason } : {}),
             ...(request.replace === true ? { replace: true } : {}),
+            ...(request.env !== undefined ? { env: request.env } : {}),
             metadata: session.metadata,
           });
           await announce(requestId, 'form');
@@ -2875,6 +2911,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         name: request.name,
         scope: request.scope,
         ...(request.reason !== undefined ? { reason: request.reason } : {}),
+        ...(request.env !== undefined ? { env: request.env } : {}),
       });
     } catch (error) {
       credentialRequests.delete(requestId);
@@ -2936,6 +2973,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(actor !== undefined ? { actor } : {}),
         via: request.via ?? 'form',
         requestedBy: request.agentId,
+        ...(request.env !== undefined ? { env: request.env, bindingFor: request.agentId } : {}),
       });
     } catch (error) {
       warn(`credentials: ${request.name} was ${action === 'add' ? 'added' : 'replaced'}, but the audit line could not be written (${error instanceof Error ? error.message : String(error)}).`);
@@ -2980,7 +3018,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         message: `${request.soulPath} now belongs to ${owner}, not ${request.agentId}, so nothing was stored. Ask ${request.agentId} to request it again.`,
       };
     }
-    const store = request.scope === 'agent' ? { agentId: request.agentId } : {};
+    const store = {
+      ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
+      // The binding the form promised, written with the value, always for
+      // the agent that asked: consent is per agent even for a shared key.
+      ...(request.env !== undefined ? { bind: { agentId: request.agentId, variable: request.env } } : {}),
+    };
     if (request.replace === true) {
       // Re-read under the soul lock, so a grant removed while the form
       // waited (a shared key most of all) is never rotated on its behalf.
@@ -3020,6 +3063,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         name: request.name,
         scope: request.scope,
         replace: true,
+        ...(request.env !== undefined ? { env: request.env } : {}),
         ...(input.actor !== undefined ? { actor: input.actor } : {}),
       });
       // The soul already lists it: a replace is only asked for a key held.
@@ -3076,6 +3120,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       requestId: input.requestId,
       name: request.name,
       scope: request.scope,
+      ...(request.env !== undefined ? { env: request.env } : {}),
       ...(input.actor !== undefined ? { actor: input.actor } : {}),
       ...(grantError !== undefined ? { grantError } : {}),
     });

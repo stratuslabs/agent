@@ -117,7 +117,8 @@ https://mac-mini.example.ts.net/api/v1/credential-links/<token>
 ```
 
 Opening it shows what is asked for, whose it would be, and the agent's
-reason, with one field. What a submission does is what the Slack form does:
+reason, with one field, and, when the agent asked with `env`, that its shell
+commands will be able to read the key as that variable. What a submission does is what the Slack form does:
 the value is stored **add-only** (a name already stored, or supplied by the
 daemon's environment, is refused), the name is granted in the requesting
 agent's soul and in no other agent's, and the value goes to

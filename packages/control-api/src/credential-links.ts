@@ -18,6 +18,8 @@ export interface CredentialLinkRecord {
   name: string;
   scope: CredentialScope;
   reason?: string;
+  /** The variable the agent's shell will read the key from, which the page says before anything is typed. */
+  env?: string;
   expiresAt: number;
 }
 
@@ -97,6 +99,10 @@ export const sendCredentialPage = (
     : `<h1>Add a credential</h1>`
       + `<p><strong>${escapeHtml(record.agentName)}</strong> is asking for <code>${escapeHtml(record.name)}</code>, ${whose(record)}.</p>`
       + (record.reason !== undefined ? `<p class="reason"><em>${escapeHtml(record.agentName)} says:</em> ${escapeHtml(record.reason)}</p>` : '')
+      + (record.env !== undefined
+        ? `<p><strong>${escapeHtml(record.agentName)}'s shell commands will be able to read this as <code>${escapeHtml(record.env)}</code>, `
+          + `so ${escapeHtml(record.agentName)} can see the value.</strong></p>`
+        : '')
       + (error !== undefined ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '')
       + '<form method="post">'
       + `<label for="value">Value for ${escapeHtml(record.name)}</label>`

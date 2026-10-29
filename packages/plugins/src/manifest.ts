@@ -104,6 +104,13 @@ export interface PluginManifest {
    * says which they are, so the list stays one an operator can audit.
    */
   credentialsFromConfig?: string;
+  /**
+   * The plugin reads the stored keys an approver or operator bound to
+   * environment variables for an agent (`CredentialResolver.envBindings`).
+   * Those are names the manifest can't list, so it says it reads them
+   * instead: tool-shell, which puts them in a command's environment.
+   */
+  envBindings?: boolean;
   /** JSON Schema for the plugin's own config block, if it declared one. */
   config?: JsonObject;
 }
@@ -355,6 +362,10 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
     throw new PluginManifestError(`Plugin ${packageName}: credentialsFromConfig must be the name of a config key.`);
   }
 
+  if (stratus.envBindings !== undefined && typeof stratus.envBindings !== 'boolean') {
+    throw new PluginManifestError(`Plugin ${packageName}: envBindings must be true or false.`);
+  }
+
   if (stratus.config !== undefined && !isObject(stratus.config)) {
     throw new PluginManifestError(`Plugin ${packageName}: config must be a JSON Schema object.`);
   }
@@ -365,6 +376,7 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
     contributes: { tools, toolsDiscovered, skills, ...named },
     credentials,
     ...(typeof stratus.credentialsFromConfig === 'string' ? { credentialsFromConfig: stratus.credentialsFromConfig } : {}),
+    ...(stratus.envBindings === true ? { envBindings: true } : {}),
     ...(isObject(stratus.config) ? { config: stratus.config as JsonObject } : {}),
   };
 };

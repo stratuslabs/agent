@@ -122,6 +122,30 @@ test('a request no channel can show a form for gets a one-time link that adds th
   }
 });
 
+test('a link for a key in a variable says the agent\'s shell will read it, and answering binds it', async () => {
+  const { home, gateway, api } = await startLinking({ name: 'twilio.authToken', env: 'TWILIO_AUTH_TOKEN' });
+  try {
+    const session = await gateway.dispatch({ sessionId: 'kai-link-env', agentId: 'kai', userMessage: 'set up cnam' });
+    const { local } = linkFrom(session, api.url ?? '');
+    const html = await (await fetch(local)).text();
+    assert.match(html, /Kai's shell commands will be able to read this as <code>TWILIO_AUTH_TOKEN<\/code>, so Kai can see the value\./);
+
+    const added = await fetch(local, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ value: 'tw-secret' }).toString(),
+    });
+    assert.equal(added.status, 200);
+    assert.match(await added.text(), /Kai can use it from its next reply, and its shell commands read it as TWILIO_AUTH_TOKEN\./);
+    const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+      envBindings?: { agents?: Record<string, Record<string, string>> };
+    };
+    assert.deepEqual(credentials.envBindings?.agents, { kai: { TWILIO_AUTH_TOKEN: 'twilio.authToken' } });
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a link whose request can no longer be answered is spent with the reason', async () => {
   const { soulFile, gateway, api } = await startLinking();
   try {

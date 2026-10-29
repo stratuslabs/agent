@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile, chmod, mkdir, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
-import { isValidAgentId } from '@stratusagent/agents';
+import { credentialVariableProblem, isValidAgentId } from '@stratusagent/agents';
 import {
   type ChannelTransportSecrets,
   type CredentialResolver,
@@ -479,8 +479,10 @@ const readNameMap = (value: unknown): Record<string, string> => {
   return entries;
 };
 
-export const loadNamedCredentials = async (env: StateEnvironment): Promise<NamedCredentials> => {
-  const raw = await loadRawCredentialsFile(env);
+export const loadNamedCredentials = async (env: StateEnvironment): Promise<NamedCredentials> =>
+  readNamedCredentials(await loadRawCredentialsFile(env));
+
+const readNamedCredentials = (raw: Record<string, unknown>): NamedCredentials => {
   const named = raw.named;
   if (typeof named !== 'object' || named === null || Array.isArray(named)) {
     return { shared: emptyNameMap<string>(), agents: emptyNameMap<Record<string, string>>() };
@@ -506,6 +508,180 @@ export const saveNamedCredentials = async (
   existing.named = { shared: named.shared, agents: named.agents };
   await writeRawCredentialsFile(env, existing);
 };
+
+/**
+ * Which environment variable an agent's shell commands read each of its
+ * stored keys from: agent id, then variable, then credential name
+ * (`{ atlas: { TWILIO_AUTH_TOKEN: "twilio.authToken" } }`).
+ *
+ * Kept in the credentials file as a top-level `envBindings` block, beside
+ * the values and not in the soul or the config, for three reasons. A form
+ * answer writes the value and its binding in one atomic write. A daemon
+ * reads the file on every command already, so a binding applies with no
+ * restart. And a daemon from before bindings ignores the block and keeps it
+ * through its own writes, which all merge into the raw file, where a soul
+ * key would stop it loading the agent at all (soul front matter is strict).
+ *
+ * Per agent even when the value is shared, because the consent is per
+ * agent: the form said "readable by Atlas's shell". The block's `agents`
+ * key leaves room for fleet-wide bindings beside it later.
+ */
+export type CredentialEnvBindings = Record<string, Record<string, string>>;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const readEnvBindings = (raw: Record<string, unknown>): CredentialEnvBindings => {
+  const bindings = emptyNameMap<Record<string, string>>();
+  const agents = isPlainObject(raw.envBindings) ? raw.envBindings.agents : undefined;
+  if (!isPlainObject(agents)) {
+    return bindings;
+  }
+  for (const [agentId, entry] of Object.entries(agents)) {
+    const variables = readNameMap(entry);
+    if (Object.keys(variables).length > 0) {
+      bindings[agentId] = variables;
+    }
+  }
+  return bindings;
+};
+
+/** Sets the block's `agents`, keeping anything else a newer daemon put beside it. */
+const writeEnvBindings = (raw: Record<string, unknown>, bindings: CredentialEnvBindings): void => {
+  const agents = emptyNameMap<Record<string, string>>();
+  for (const [agentId, variables] of Object.entries(bindings)) {
+    if (Object.keys(variables).length > 0) {
+      agents[agentId] = variables;
+    }
+  }
+  raw.envBindings = { ...(isPlainObject(raw.envBindings) ? raw.envBindings : {}), agents };
+};
+
+const setEnvBinding = (bindings: CredentialEnvBindings, agentId: string, variable: string, name: string): string | undefined => {
+  const own = bindings[agentId] ?? emptyNameMap<string>();
+  const previous = own[variable];
+  own[variable] = name;
+  bindings[agentId] = own;
+  return previous;
+};
+
+export const loadCredentialEnvBindings = async (env: StateEnvironment): Promise<CredentialEnvBindings> =>
+  readEnvBindings(await loadRawCredentialsFile(env));
+
+/** A binding to write with a value: this agent's shell reads it as `variable`. */
+export interface CredentialEnvBinding {
+  agentId: string;
+  variable: string;
+}
+
+/**
+ * What every binding writer checks before taking the lock: the operator's
+ * variable rule from @stratusagent/agents (the gateway applies the stricter
+ * one for a name an agent asked for, before anyone is asked) and an agent
+ * id something could resolve.
+ */
+const assertBindable = (bind: CredentialEnvBinding): void => {
+  if (!isValidAgentId(bind.agentId)) {
+    throw new Error(`${JSON.stringify(bind.agentId)} cannot be an agent id, so a binding for it could never apply.`);
+  }
+  const problem = credentialVariableProblem(bind.variable);
+  if (problem !== undefined) {
+    throw new Error(problem);
+  }
+};
+
+/**
+ * Bind a stored key to the variable an agent's shell commands read it
+ * from, replacing whatever that variable was bound to for that agent. The
+ * operator's command (`stratus credential env`), on the machine: it doesn't
+ * need the value to be stored yet, and the soul still decides whether the
+ * agent gets it. Returns the name the variable was bound to before, if any.
+ */
+export const bindCredentialEnv = async (
+  env: StateEnvironment,
+  entry: { agentId: string; variable: string; name: string },
+): Promise<string | undefined> => {
+  if (!CREDENTIAL_NAME_PATTERN.test(entry.name)) {
+    throw new Error(`${JSON.stringify(entry.name)} is not a credential name, so nothing could be bound to it.`);
+  }
+  assertBindable(entry);
+  return withCredentialsFileLock(async () => {
+    const raw = await loadRawCredentialsFile(env);
+    const bindings = readEnvBindings(raw);
+    const previous = setEnvBinding(bindings, entry.agentId, entry.variable, entry.name);
+    writeEnvBindings(raw, bindings);
+    await writeRawCredentialsFile(env, raw);
+    return previous;
+  });
+};
+
+/**
+ * Remove an agent's binding for `variable`. Returns the name it was bound
+ * to, or undefined when there was none (nothing is written then).
+ */
+export const unbindCredentialEnv = async (
+  env: StateEnvironment,
+  entry: { agentId: string; variable: string },
+): Promise<string | undefined> =>
+  withCredentialsFileLock(async () => {
+    const raw = await loadRawCredentialsFile(env);
+    const bindings = readEnvBindings(raw);
+    const own = bindings[entry.agentId];
+    const previous = own?.[entry.variable];
+    if (own === undefined || previous === undefined) {
+      return undefined;
+    }
+    delete own[entry.variable];
+    writeEnvBindings(raw, bindings);
+    await writeRawCredentialsFile(env, raw);
+    return previous;
+  });
+
+/**
+ * Forget a named credential, the fleet's shared one or one agent's own, and
+ * the bindings that read it, in one write. Returns false when nothing was
+ * stored there.
+ *
+ * A binding goes with the value it was made for: an agent's own entry takes
+ * that agent's bindings of the name with it, and a shared one takes every
+ * binding of the name for agents without their own. Otherwise a binding
+ * left behind would quietly put whatever is stored under that name next
+ * into a variable nobody approved it for.
+ */
+export const removeNamedCredential = async (
+  env: StateEnvironment,
+  entry: { name: string; agentId?: string },
+): Promise<boolean> =>
+  withCredentialsFileLock(async () => {
+    const raw = await loadRawCredentialsFile(env);
+    const named = readNamedCredentials(raw);
+    const { name, agentId } = entry;
+    const store = agentId === undefined ? named.shared : named.agents[agentId];
+    if (store?.[name] === undefined) {
+      return false;
+    }
+    delete store[name];
+    if (agentId !== undefined && Object.keys(store).length === 0) {
+      delete named.agents[agentId];
+    }
+    raw.named = { shared: named.shared, agents: named.agents };
+    const bindings = readEnvBindings(raw);
+    for (const [boundAgent, variables] of Object.entries(bindings)) {
+      if (agentId !== undefined ? boundAgent !== agentId : named.agents[boundAgent]?.[name] !== undefined) {
+        continue;
+      }
+      for (const [variable, boundName] of Object.entries(variables)) {
+        if (boundName === name) {
+          delete variables[variable];
+        }
+      }
+    }
+    if (isPlainObject(raw.envBindings)) {
+      writeEnvBindings(raw, bindings);
+    }
+    await writeRawCredentialsFile(env, raw);
+    return true;
+  });
 
 /**
  * What a credential name may be: the two conventions in use, and nothing
@@ -580,9 +756,9 @@ export class NamedCredentialExistsError extends Error {
  */
 export const addNamedCredential = async (
   env: StateEnvironment,
-  entry: { name: string; value: string; agentId?: string },
+  entry: { name: string; value: string; agentId?: string; bind?: CredentialEnvBinding },
 ): Promise<void> => {
-  const { name, value, agentId } = entry;
+  const { name, value, agentId, bind } = entry;
   if (!CREDENTIAL_NAME_PATTERN.test(name)) {
     throw new Error(
       `${JSON.stringify(name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
@@ -595,8 +771,12 @@ export const addNamedCredential = async (
   if (value.trim().length === 0) {
     throw new Error(`The value for ${name} is empty, so nothing was stored.`);
   }
+  if (bind !== undefined) {
+    assertBindable(bind);
+  }
   await withCredentialsFileLock(async () => {
-    const named = await loadNamedCredentials(env);
+    const raw = await loadRawCredentialsFile(env);
+    const named = readNamedCredentials(raw);
     const replace = agentId === undefined
       ? `printf %s "$KEY" | stratus credential set ${name}`
       : `printf %s "$KEY" | stratus credential set ${name} --agent ${quoteShellArg(agentId)}`;
@@ -637,8 +817,28 @@ export const addNamedCredential = async (
       own[name] = value;
       named.agents[agentId] = own;
     }
-    await saveNamedCredentials(env, named);
+    writeNamedAndBinding(raw, named, name, bind);
+    await writeRawCredentialsFile(env, raw);
   });
+};
+
+/**
+ * The value and its binding in one document, so the one rename that saves
+ * the key saves the variable it reaches too: a crash can't leave a form's
+ * answer stored and the binding it promised missing.
+ */
+const writeNamedAndBinding = (
+  raw: Record<string, unknown>,
+  named: NamedCredentials,
+  name: string,
+  bind: CredentialEnvBinding | undefined,
+): void => {
+  raw.named = { shared: named.shared, agents: named.agents };
+  if (bind !== undefined) {
+    const bindings = readEnvBindings(raw);
+    setEnvBinding(bindings, bind.agentId, bind.variable, name);
+    writeEnvBindings(raw, bindings);
+  }
 };
 
 /**
@@ -673,9 +873,9 @@ export class NamedCredentialMissingError extends Error {
  */
 export const replaceNamedCredential = async (
   env: StateEnvironment,
-  entry: { name: string; value: string; agentId?: string },
+  entry: { name: string; value: string; agentId?: string; bind?: CredentialEnvBinding },
 ): Promise<void> => {
-  const { name, value, agentId } = entry;
+  const { name, value, agentId, bind } = entry;
   if (!CREDENTIAL_NAME_PATTERN.test(name)) {
     throw new Error(`${JSON.stringify(name)} is not a credential name, so there is nothing stored under it to replace.`);
   }
@@ -685,8 +885,12 @@ export const replaceNamedCredential = async (
   if (value.trim().length === 0) {
     throw new Error(`The value for ${name} is empty, so the stored one was kept.`);
   }
+  if (bind !== undefined) {
+    assertBindable(bind);
+  }
   await withCredentialsFileLock(async () => {
-    const named = await loadNamedCredentials(env);
+    const raw = await loadRawCredentialsFile(env);
+    const named = readNamedCredentials(raw);
     if (agentId === undefined) {
       if (named.shared[name] === undefined) {
         throw new NamedCredentialMissingError(name, undefined, `No shared credential named ${name} is stored, so there is nothing to replace.`);
@@ -699,7 +903,8 @@ export const replaceNamedCredential = async (
       }
       own[name] = value;
     }
-    await saveNamedCredentials(env, named);
+    writeNamedAndBinding(raw, named, name, bind);
+    await writeRawCredentialsFile(env, raw);
   });
 };
 
@@ -710,7 +915,19 @@ export const replaceNamedCredential = async (
  */
 export const appendCredentialAudit = async (
   env: StateEnvironment,
-  entry: { action: 'add' | 'replace'; name: string; agentId?: string; actor?: string; via: string; requestedBy: string },
+  entry: {
+    action: 'add' | 'replace' | 'bind' | 'unbind';
+    name: string;
+    /** Whose store the value is in; for a bind or unbind, whose binding it is. */
+    agentId?: string;
+    actor?: string;
+    via: string;
+    /** The agent that asked, for a change made from a chat or a link. */
+    requestedBy?: string;
+    /** The variable the key was bound to (or unbound from), and for which agent. */
+    env?: string;
+    bindingFor?: string;
+  },
 ): Promise<void> => {
   const filePath = credentialAuditPath(env);
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
@@ -721,7 +938,9 @@ export const appendCredentialAudit = async (
     store: entry.agentId === undefined ? 'shared' : `agent:${entry.agentId}`,
     ...(entry.actor !== undefined ? { actor: entry.actor } : {}),
     via: entry.via,
-    requestedBy: entry.requestedBy,
+    ...(entry.requestedBy !== undefined ? { requestedBy: entry.requestedBy } : {}),
+    ...(entry.env !== undefined ? { env: entry.env } : {}),
+    ...(entry.bindingFor !== undefined ? { bindingFor: entry.bindingFor } : {}),
   };
   await appendFile(filePath, `${JSON.stringify(line)}\n`, { mode: 0o600 });
 };
@@ -806,5 +1025,26 @@ export const createFileCredentialResolver = (
   async resolve(agent, name) {
     assertCredentialAllowed(agent, name);
     return lookupNamedCredential(await loadNamedCredentials(env), processEnv, agent.id, name)?.value;
+  },
+  // One read of the file for the values and the bindings together, per
+  // command, which is what makes a binding a form just wrote apply on the
+  // agent's next command with nothing restarted.
+  async envBindings(agent) {
+    const raw = await loadRawCredentialsFile(env);
+    const named = readNamedCredentials(raw);
+    const granted = new Set(agent.credentials ?? []);
+    const variables = emptyNameMap<string>();
+    for (const [variable, name] of Object.entries(readEnvBindings(raw)[agent.id] ?? {})) {
+      // `assertCredentialAllowed`'s rule, skipped rather than thrown: a
+      // binding left for a name the soul no longer lists gives nothing.
+      if (!granted.has(name)) {
+        continue;
+      }
+      const value = lookupNamedCredential(named, processEnv, agent.id, name)?.value;
+      if (value !== undefined) {
+        variables[variable] = value;
+      }
+    }
+    return variables;
   },
 });

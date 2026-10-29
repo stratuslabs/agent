@@ -550,7 +550,8 @@ export const routes: Route[] = [
         context.credentialLinks.retire(token);
         sendCredentialPage(context.response, 200, {
           done: `Added ${record.name} for ${record.agentName}${record.scope === 'shared' ? ' as a shared credential' : ''}. `
-            + `${record.agentName} can use it from its next reply. You can close this page.`,
+            + `${record.agentName} can use it from its next reply`
+            + `${record.env !== undefined ? `, and its shell commands read it as ${record.env}` : ''}. You can close this page.`,
         });
         return null;
       }

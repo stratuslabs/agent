@@ -484,6 +484,13 @@ export interface ChannelCredentialRequest {
    * is being replaced.
    */
   replace?: boolean;
+  /**
+   * The environment variable the agent's shell commands will read the key
+   * from once it is stored. The form must say so before anything is typed
+   * ("Atlas's shell commands will be able to read this as `GH_TOKEN`"),
+   * because answering it is the approval for that too.
+   */
+  env?: string;
   /** The session's routing metadata: where the conversation is. */
   metadata: JsonObject;
 }
@@ -529,6 +536,14 @@ export interface ChannelAdapter {
    * since its ordinary add form would rotate a key without saying so.
    */
   credentialReplaceForms?: boolean;
+  /**
+   * True when this adapter's `requestCredential` form shows `env`: it tells
+   * the approver which variable the agent's shell will read the key from.
+   * Absent on an adapter written before bindings, which the gateway never
+   * hands a request with `env`, since its form would make a key readable by
+   * the agent without saying so.
+   */
+  credentialEnvForms?: boolean;
   /**
    * The read side of an addressable conversation — what `message.read`
    * resolves. Optional, like `resolveOutbound`: a transport with no

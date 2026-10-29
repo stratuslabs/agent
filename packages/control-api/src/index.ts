@@ -423,6 +423,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
         name: request.name,
         scope: request.scope,
         ...(request.reason !== undefined ? { reason: request.reason } : {}),
+        ...(request.env !== undefined ? { env: request.env } : {}),
       });
       const base = (publicUrl ?? url).replace(/\/+$/, '');
       return {

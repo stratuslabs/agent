@@ -178,6 +178,12 @@ export {
   namedCredentialSource,
   resolveDaemonCredential,
   createFileCredentialResolver,
+  type CredentialEnvBindings,
+  type CredentialEnvBinding,
+  loadCredentialEnvBindings,
+  bindCredentialEnv,
+  unbindCredentialEnv,
+  removeNamedCredential,
 } from './credentials.ts';
 
 export { quoteShellArg } from './shell.ts';
