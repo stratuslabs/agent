@@ -465,6 +465,48 @@ export interface ConversationCreateResult {
 }
 
 /**
+ * A request for the agent's own app to join an existing conversation —
+ * what `channel.join` resolves. Channel-native ids, like
+ * `ConversationReadRequest`'s.
+ */
+export interface ConversationJoinRequest {
+  /** Whose app joins. */
+  agentId: string;
+  /** The conversation to join (Slack: `C…`). */
+  conversation: string;
+}
+
+export interface ConversationJoinResult {
+  /** Channel-native id of the conversation the app is now in. */
+  conversation: string;
+  /** The app was already a member, so nothing changed. */
+  alreadyMember: boolean;
+}
+
+/**
+ * A request to invite people to a conversation that already exists,
+ * through the agent's own app — what `channel.invite` resolves.
+ */
+export interface ConversationInviteRequest {
+  /** Whose app sends the invitation; it has to be a member already. */
+  agentId: string;
+  /** The conversation to invite them to (Slack: `C…`). */
+  conversation: string;
+  /**
+   * Who to invite: channel-native user ids, or ids of agents on this host,
+   * which the adapter resolves to the user its app for that agent posts as.
+   */
+  invite: string[];
+}
+
+export interface ConversationInviteResult {
+  /** Each `invite` entry that is now a member, as the caller named it. */
+  invited: string[];
+  /** Each `invite` entry that was not invited, with a sentence for the agent. */
+  notInvited: Array<{ who: string; reason: string }>;
+}
+
+/**
  * A credential an agent asked for, handed to the channel its conversation
  * is in so a person there can be shown a form. Everything the answer needs
  * stays with the gateway under `requestId`; the channel only has to show
@@ -588,6 +630,33 @@ export interface ChannelAdapter {
    * agent would retry into a second one.
    */
   createConversation?(request: ConversationCreateRequest): Promise<ConversationCreateResult>;
+  /**
+   * Joins an existing conversation with the agent's own app — what
+   * `channel.join` resolves. Optional, like `createConversation`.
+   *
+   * MUST reject, with a sentence for the agent, anything it did not join:
+   * no app here, a missing permission, a conversation the platform will
+   * not let an app join on its own (a private one), an archived or unknown
+   * one. When the platform's answer leaves it unknown whether the app
+   * joined, it MUST reject saying so, and that a retry is safe. Joining a
+   * conversation the app is already in resolves with `alreadyMember`.
+   */
+  joinConversation?(request: ConversationJoinRequest): Promise<ConversationJoinResult>;
+  /**
+   * Invites people to an existing conversation through the agent's own
+   * app — what `channel.invite` resolves. Optional, like
+   * `createConversation`.
+   *
+   * MUST reject only when it knows nobody was invited: a request it
+   * refuses before asking the platform (no app here, nobody to invite, too
+   * many), or a whole call the platform refused without acting (the app
+   * not in the conversation, a missing permission, an archived or unknown
+   * conversation). A rejection means the members did not change. Every
+   * other outcome resolves, each entry it did not invite in `notInvited`
+   * with a reason, including a call that may have partly worked; an entry
+   * whose outcome cannot be checked is never claimed as invited.
+   */
+  inviteToConversation?(request: ConversationInviteRequest): Promise<ConversationInviteResult>;
   /**
    * The workspace this agent's app is connected to, for a transport whose
    * conversation ids are unique only within one: a Slack team id.

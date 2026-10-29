@@ -614,6 +614,42 @@ Both scopes are left out of the default manifest, because they let an app
 create and manage channels and most agents never need that. Add them to
 the apps that should, under **OAuth & Permissions**, and reinstall.
 
+## Joining a channel and inviting people
+
+The adapter also implements `joinConversation` and `inviteToConversation`,
+which the gateway's `channel.join` and `channel.invite` tools run on. Both
+use the agent's **own** app and take the channel's id (`C…`, from the
+channel's link or a message), never its name. Their results name the
+channel by id only, because a channel's name and topic are whatever its
+members typed.
+
+- **Join** calls `conversations.join`, which works on **public channels
+  only**. Slack never lets an app join a private channel on its own: a
+  member has to invite it (`/invite @app`). Joining a channel the app is
+  already in succeeds with `alreadyMember: true`. Each refusal is a
+  sentence: a missing `channels:join` scope with the reinstall step, a
+  private channel, an archived one, one at the member limit. Slack answers
+  `channel_not_found` both for a wrong id and for a private channel the app
+  can't see, so that sentence names both. When Slack's answer leaves it
+  unknown whether the app joined (`internal_error`, `fatal_error`, or no
+  answer), the call says so; trying again is safe.
+- **Invite** resolves each entry the way a create does (agent ids become
+  their app's Slack user in the same workspace; anything else must be a
+  `U…` or `W…` id; the inviting app itself can't be invited), then sends
+  one `conversations.invite` with `force`. It rejects only when nobody was
+  invited: an empty list or more than 1,000 people, or a whole call Slack
+  refused (`not_in_channel`, `missing_scope`, `is_archived`,
+  `channel_not_found`, `method_not_supported_for_channel_type`, `no_user`,
+  `ratelimited`, or a refused token). Every other outcome resolves with
+  `invited` and `notInvited`; a failure that may have partly worked is
+  settled by the channel's members, as for a new channel.
+
+Scopes, all left out of the default manifest: `channels:join` to join;
+`channels:write.invites` (public) or `groups:write.invites` (private) to
+invite, where `channels:manage` and `groups:write` also work. Add them to
+the apps that should have them, under **OAuth & Permissions**, and
+reinstall.
+
 ## Speaking first: the outbound seam
 
 The adapter also implements the channel contract's `resolveOutbound` — how a

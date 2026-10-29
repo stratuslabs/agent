@@ -133,8 +133,14 @@ export {
 
 export {
   CHANNEL_CREATE_TOOL_NAME,
+  CHANNEL_INVITE_TOOL_NAME,
+  CHANNEL_JOIN_TOOL_NAME,
   type ConversationCreator,
+  type ConversationInviter,
+  type ConversationJoiner,
   createChannelCreateTool,
+  createChannelInviteTool,
+  createChannelJoinTool,
 } from './tools/channel.ts';
 
 export {

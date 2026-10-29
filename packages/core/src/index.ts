@@ -4577,6 +4577,13 @@ export interface ChannelAdapterLike {
     notInvited: Array<{ who: string; reason: string }>;
     notSet: Array<{ field: 'topic' | 'purpose'; reason: string }>;
   }>;
+  /** See `ChannelAdapter.joinConversation`. */
+  joinConversation?(request: { agentId: string; conversation: string }): Promise<{ conversation: string; alreadyMember: boolean }>;
+  /** See `ChannelAdapter.inviteToConversation`. */
+  inviteToConversation?(request: { agentId: string; conversation: string; invite: string[] }): Promise<{
+    invited: string[];
+    notInvited: Array<{ who: string; reason: string }>;
+  }>;
   /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
@@ -8592,6 +8599,10 @@ export {
   type ConversationBookmark,
   type ConversationCreateRequest,
   type ConversationCreateResult,
+  type ConversationInviteRequest,
+  type ConversationInviteResult,
+  type ConversationJoinRequest,
+  type ConversationJoinResult,
   type ConversationMessage,
   type ConversationReadRequest,
   type ConversationReadResult,

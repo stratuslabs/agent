@@ -615,6 +615,14 @@ capability rather than an assumption:
   is invalid before creating anything, and once the conversation exists it
   must resolve, reporting an invitation, topic or purpose that failed
   rather than throwing, so an agent never retries into a second one.
+- `ChannelAdapter.joinConversation` and `inviteToConversation` are optional
+  too: they are what `channel.join` and `channel.invite` run on, again with
+  the asking agent's own app. A join rejects anything it didn't join, and
+  says so when the platform's answer leaves it unknown (a retry is safe,
+  since joining twice changes nothing). An invite rejects only when it
+  knows nobody was invited, before asking the platform or when the
+  platform refused the whole call, so a rejection means the members didn't
+  change; anything else resolves with `notInvited` and a reason per entry.
 - Who counts as the operator is one rule in core's channel contract, not
   one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
   `senderTrustFor` (the `user`/`unknown` label a turn carries). Which

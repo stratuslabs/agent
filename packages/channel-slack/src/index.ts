@@ -48,6 +48,10 @@ import {
   type ConversationBookmark,
   type ConversationCreateRequest,
   type ConversationCreateResult,
+  type ConversationInviteRequest,
+  type ConversationInviteResult,
+  type ConversationJoinRequest,
+  type ConversationJoinResult,
   type ConversationMessage,
   type ConversationReadRequest,
   type ConversationReadResult,
@@ -572,6 +576,16 @@ export interface SlackWebLike {
      */
     invite?(args: { channel: string; users: string; force?: boolean }): Promise<{
       errors?: Array<{ user?: string; error?: string }>;
+    }>;
+    /**
+     * Joins a public channel as the calling app — what `channel.join` runs
+     * on. Needs `channels:join`, which the default manifest leaves out.
+     * Joining twice succeeds with an `already_in_channel` warning.
+     */
+    join?(args: { channel: string }): Promise<{
+      channel?: { id?: string };
+      warning?: string;
+      response_metadata?: { warnings?: string[] };
     }>;
   };
   users: {
@@ -3256,6 +3270,38 @@ const slackErrorCode = (error: unknown): string | undefined => {
   return typeof code === 'string' && code.length > 0 ? code : undefined;
 };
 
+/** Slack's code for a failed call, or the SDK's message when Slack never answered. */
+const describeSlackError = (error: unknown): string => slackErrorCode(error) ?? (error instanceof Error ? error.message : String(error));
+
+/** Codes Slack answers when the token itself is refused. */
+const SLACK_AUTH_ERRORS = new Set(['not_authed', 'invalid_auth', 'account_inactive', 'token_revoked', 'token_expired']);
+
+/**
+ * Codes with which Slack refuses a whole `conversations.invite` without
+ * inviting anyone, so `inviteToConversation` can reject and the members
+ * are known unchanged. Everything else, per-person codes and failures that
+ * may have partly worked included, is settled per entry instead.
+ */
+const SLACK_INVITE_REFUSALS = new Set([
+  'not_in_channel',
+  'missing_scope',
+  'is_archived',
+  'channel_not_found',
+  'method_not_supported_for_channel_type',
+  'no_user',
+  'ratelimited',
+  ...SLACK_AUTH_ERRORS,
+]);
+
+/**
+ * What `channel_not_found` means to an app: Slack says the same for a
+ * wrong id and for a private channel it can't see, and so does
+ * `conversations.info`, so the sentence names both.
+ */
+const channelNotFoundSentence = (agentId: string, conversation: string): string =>
+  `Slack found no channel ${conversation} that ${agentId}'s app can see. Check the id (copy it from the channel's link; a name won't work). `
+  + 'If the id is right, the channel is private, and a member has to invite the app.';
+
 /**
  * Orders two Slack message timestamps ("seconds.micros"). Compared as
  * integers, not floats: a current ts has more digits than a double holds.
@@ -4944,29 +4990,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!create || !setTopic || !setPurpose || !inviteUsers) {
       throw new Error('slack: this Slack client cannot create channels.');
     }
-    // Who each entry is, before anything exists: agents on this host become
-    // the user their app posts as, in the same workspace only.
-    const invited: string[] = [];
-    const notInvited: Array<{ who: string; reason: string }> = [];
-    const toInvite = new Map<string, string>();
-    for (const who of invite) {
-      const identity = botIdentities.get(who);
-      if (who === request.agentId || identity?.botUserId === connection.botUserId) {
-        invited.push(who);
-      } else if (configuredAgents.has(who) && !identity?.botUserId) {
-        notInvited.push({ who, reason: `Agent ${who}'s Slack app is not connected, so its Slack user is unknown.` });
-      } else if (identity) {
-        if (identity.teamId !== connection.teamId) {
-          notInvited.push({ who, reason: `Agent ${who}'s Slack app is in another Slack workspace.` });
-        } else {
-          toInvite.set(who, identity.botUserId);
-        }
-      } else if (/^[UW][A-Z0-9]+$/.test(who)) {
-        toInvite.set(who, who);
-      } else {
-        notInvited.push({ who, reason: 'Not a Slack user id (U… or W…) or an agent with a Slack app on this host.' });
-      }
-    }
+    // Who each entry is, before anything exists. The creating app is a
+    // member already, so naming it counts as invited.
+    const { own, notInvited, toInvite } = resolveInvitees(connection, request.agentId, invite);
+    const invited = [...own];
 
     const kind = request.private === true ? 'private' : 'public';
     let created: Awaited<ReturnType<typeof create>>;
@@ -4988,70 +5015,259 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
 
     const notSet: Array<{ field: 'topic' | 'purpose'; reason: string }> = [];
-    const describe = (error: unknown): string => slackErrorCode(error) ?? (error instanceof Error ? error.message : String(error));
     if (request.topic) {
       await setTopic({ channel: conversation, topic: request.topic })
-        .catch((error: unknown) => notSet.push({ field: 'topic', reason: `Slack did not set the topic (${describe(error)}).` }));
+        .catch((error: unknown) => notSet.push({ field: 'topic', reason: `Slack did not set the topic (${describeSlackError(error)}).` }));
     }
     if (request.purpose) {
       await setPurpose({ channel: conversation, purpose: request.purpose })
-        .catch((error: unknown) => notSet.push({ field: 'purpose', reason: `Slack did not set the purpose (${describe(error)}).` }));
+        .catch((error: unknown) => notSet.push({ field: 'purpose', reason: `Slack did not set the purpose (${describeSlackError(error)}).` }));
     }
 
-    if (toInvite.size > 0) {
-      // Slack's per-id failures, by user id: on the answer, or on the error
-      // the SDK throws for an ok: false answer.
-      const refusedOf = (errors: unknown): Map<string, string> => new Map(
-        (Array.isArray(errors) ? errors : []).flatMap((entry: { user?: unknown; error?: unknown }) =>
-          typeof entry?.user === 'string' && typeof entry.error === 'string' ? [[entry.user, entry.error] as const] : []),
-      );
-      let refused: Map<string, string>;
-      let failure: string | undefined;
-      try {
-        refused = refusedOf((await inviteUsers({ channel: conversation, users: [...new Set(toInvite.values())].join(','), force: true })).errors);
-      } catch (error) {
-        refused = refusedOf((error as { data?: { errors?: unknown } } | undefined)?.data?.errors);
-        failure = describe(error);
-      }
-      // A failed call that does not name everyone leaves the rest unknown,
-      // so the channel's members decide; who cannot be checked is not claimed.
-      let members: Set<string> | undefined;
-      let membersFailure: string | undefined;
-      if (failure !== undefined && [...toInvite.values()].some((user) => !refused.has(user))) {
-        try {
-          members = new Set();
-          let cursor: string | undefined;
-          do {
-            const page = await connection.web.conversations.members({ channel: conversation, limit: 1000, ...(cursor ? { cursor } : {}) });
-            for (const member of page.members ?? []) {
-              members.add(member);
-            }
-            cursor = page.response_metadata?.next_cursor || undefined;
-          } while (cursor);
-        } catch (error) {
-          members = undefined;
-          membersFailure = describe(error);
-        }
-      }
-      for (const [who, user] of toInvite) {
-        const code = refused.get(user);
-        if (code === 'already_in_channel' || (code === undefined && (failure === undefined || members?.has(user)))) {
-          invited.push(who);
-        } else if (code !== undefined || members !== undefined) {
-          notInvited.push({ who, reason: `Slack did not invite them (${code ?? failure}).` });
+    // The channel exists now, so every code is settled per entry and none
+    // turns into a rejection the agent would retry into a second channel.
+    const settled = await inviteAtSlack(connection, inviteUsers, conversation, toInvite);
+    invited.push(...settled.invited);
+    notInvited.push(...settled.notInvited);
+    sortByRequest(invite, invited, notInvited);
+    return { conversation, name: created.channel?.name ?? name, invited, notInvited, notSet };
+  };
+
+  /**
+   * Who each invite entry is, before Slack is asked: agents on this host
+   * become the user their app posts as, in the same workspace only. `own`
+   * holds the entries that are the asking app itself (the agent, or one
+   * sharing its bot user), which no invitation can add.
+   */
+  const resolveInvitees = (connection: AgentConnection, agentId: string, invite: string[]): {
+    own: string[];
+    notInvited: Array<{ who: string; reason: string }>;
+    toInvite: Map<string, string>;
+  } => {
+    const own: string[] = [];
+    const notInvited: Array<{ who: string; reason: string }> = [];
+    const toInvite = new Map<string, string>();
+    for (const who of invite) {
+      const identity = botIdentities.get(who);
+      if (who === agentId || identity?.botUserId === connection.botUserId) {
+        own.push(who);
+      } else if (configuredAgents.has(who) && !identity?.botUserId) {
+        notInvited.push({ who, reason: `Agent ${who}'s Slack app is not connected, so its Slack user is unknown.` });
+      } else if (identity) {
+        if (identity.teamId !== connection.teamId) {
+          notInvited.push({ who, reason: `Agent ${who}'s Slack app is in another Slack workspace.` });
         } else {
-          notInvited.push({
-            who,
-            reason: `The invitation failed (${failure}) and the channel's members could not be checked (${membersFailure}), so they may or may not have been added.`,
-          });
+          toInvite.set(who, identity.botUserId);
         }
+      } else if (/^[UW][A-Z0-9]+$/.test(who)) {
+        toInvite.set(who, who);
+      } else {
+        notInvited.push({ who, reason: 'Not a Slack user id (U… or W…) or an agent with a Slack app on this host.' });
       }
     }
+    return { own, notInvited, toInvite };
+  };
+
+  /**
+   * Sends one `conversations.invite`, force on so a bad id cannot stop the
+   * good ones, and settles each entry of `toInvite` (entry -> Slack user).
+   * Slack's per-id failures name who was refused, and `already_in_channel`
+   * counts as invited. A failed call that does not name everyone leaves
+   * the rest to the channel's members, and who cannot be checked is never
+   * claimed. A call Slack refused with a code `refusesWhole` accepts stops
+   * there, before any members check, with nobody settled and the code in
+   * `refusedWith` for the caller to reject on. Without `refusesWhole`
+   * every code is settled per entry.
+   */
+  const inviteAtSlack = async (
+    connection: AgentConnection,
+    inviteUsers: NonNullable<SlackWebLike['conversations']['invite']>,
+    conversation: string,
+    toInvite: Map<string, string>,
+    refusesWhole: (code: string) => boolean = () => false,
+  ): Promise<{ invited: string[]; notInvited: Array<{ who: string; reason: string }>; refusedWith?: string }> => {
+    const invited: string[] = [];
+    const notInvited: Array<{ who: string; reason: string }> = [];
+    if (toInvite.size === 0) {
+      return { invited, notInvited };
+    }
+    // Slack's per-id failures, by user id: on the answer, or on the error
+    // the SDK throws for an ok: false answer.
+    const refusedOf = (errors: unknown): Map<string, string> => new Map(
+      (Array.isArray(errors) ? errors : []).flatMap((entry: { user?: unknown; error?: unknown }) =>
+        typeof entry?.user === 'string' && typeof entry.error === 'string' ? [[entry.user, entry.error] as const] : []),
+    );
+    let refused: Map<string, string>;
+    let failure: string | undefined;
+    try {
+      refused = refusedOf((await inviteUsers({ channel: conversation, users: [...new Set(toInvite.values())].join(','), force: true })).errors);
+    } catch (error) {
+      const code = slackErrorCode(error);
+      if (code !== undefined && refusesWhole(code)) {
+        return { invited, notInvited, refusedWith: code };
+      }
+      refused = refusedOf((error as { data?: { errors?: unknown } } | undefined)?.data?.errors);
+      failure = describeSlackError(error);
+    }
+    // A failed call that does not name everyone leaves the rest unknown,
+    // so the channel's members decide; who cannot be checked is not claimed.
+    let members: Set<string> | undefined;
+    let membersFailure: string | undefined;
+    if (failure !== undefined && [...toInvite.values()].some((user) => !refused.has(user))) {
+      try {
+        members = new Set();
+        let cursor: string | undefined;
+        do {
+          const page = await connection.web.conversations.members({ channel: conversation, limit: 1000, ...(cursor ? { cursor } : {}) });
+          for (const member of page.members ?? []) {
+            members.add(member);
+          }
+          cursor = page.response_metadata?.next_cursor || undefined;
+        } while (cursor);
+      } catch (error) {
+        members = undefined;
+        membersFailure = describeSlackError(error);
+      }
+    }
+    for (const [who, user] of toInvite) {
+      const code = refused.get(user);
+      if (code === 'already_in_channel' || (code === undefined && (failure === undefined || members?.has(user)))) {
+        invited.push(who);
+      } else if (code !== undefined || members !== undefined) {
+        notInvited.push({ who, reason: `Slack did not invite them (${code ?? failure}).` });
+      } else {
+        notInvited.push({
+          who,
+          reason: `The invitation failed (${failure}) and the channel's members could not be checked (${membersFailure}), so they may or may not have been added.`,
+        });
+      }
+    }
+    return { invited, notInvited };
+  };
+
+  /** Puts both lists back in the order the caller named the entries. */
+  const sortByRequest = (invite: string[], invited: string[], notInvited: Array<{ who: string; reason: string }>): void => {
     const order = new Map(invite.map((who, index) => [who, index]));
     const byRequest = (left: string, right: string): number => (order.get(left) ?? 0) - (order.get(right) ?? 0);
     invited.sort(byRequest);
     notInvited.sort((left, right) => byRequest(left.who, right.who));
-    return { conversation, name: created.channel?.name ?? name, invited, notInvited, notSet };
+  };
+
+  /**
+   * Joins an existing public channel with the asking agent's own app —
+   * `channel.join`. Anything it did not join rejects with a sentence; an
+   * answer that leaves it unknown says so, and that a retry is safe,
+   * since Slack treats a second join as a no-op.
+   */
+  const joinConversation = async (request: ConversationJoinRequest): Promise<ConversationJoinResult> => {
+    const conversation = request.conversation.trim();
+    if (!conversation) {
+      throw new Error('slack: joining needs a channel id (C…).');
+    }
+    const connection = connectionFor(request.agentId);
+    if (!connection) {
+      throw new Error(configuredAgents.has(request.agentId)
+        ? `slack: ${request.agentId}'s Slack app is not connected right now, so it cannot join ${conversation}.`
+        : `slack: agent ${request.agentId} has no Slack app, so it cannot join a Slack channel.`);
+    }
+    const { join } = connection.web.conversations;
+    if (!join) {
+      throw new Error('slack: this Slack client cannot join channels.');
+    }
+    const agent = request.agentId;
+    let joined: Awaited<ReturnType<typeof join>>;
+    try {
+      joined = await join({ channel: conversation });
+    } catch (error) {
+      const code = slackErrorCode(error);
+      if (code === undefined || code === 'internal_error' || code === 'fatal_error') {
+        throw new Error(`slack: Slack's answer left it unknown whether ${agent}'s app joined ${conversation} (${describeSlackError(error)}). Trying again is safe: joining a channel twice changes nothing.`);
+      }
+      if (code === 'missing_scope') {
+        throw new Error(`slack: ${agent}'s Slack app can't join channels on its own because it lacks the channels:join scope. Add it to the app's manifest and reinstall the app.`);
+      }
+      if (code === 'method_not_supported_for_channel_type') {
+        throw new Error(`slack: ${conversation} isn't a public channel. Slack never lets an app join a private channel on its own: a member has to invite the app.`);
+      }
+      if (code === 'channel_not_found') {
+        throw new Error(`slack: ${channelNotFoundSentence(agent, conversation)}`);
+      }
+      if (code === 'is_archived') {
+        throw new Error(`slack: ${conversation} is archived, so it can't be joined.`);
+      }
+      if (code === 'too_many_members') {
+        throw new Error(`slack: ${conversation} is at Slack's member limit, so ${agent}'s app can't join it.`);
+      }
+      if (code === 'ratelimited') {
+        throw new Error(`slack: Slack is rate-limiting ${agent}'s app; try joining ${conversation} again later.`);
+      }
+      if (SLACK_AUTH_ERRORS.has(code)) {
+        throw new Error(`slack: Slack refused ${agent}'s app token (${code}). Reinstall the app or replace its bot token.`);
+      }
+      throw new Error(`slack: Slack did not let ${agent}'s app join ${conversation} (${code}).`);
+    }
+    const warnings = [joined.warning, ...(joined.response_metadata?.warnings ?? [])];
+    return { conversation: joined.channel?.id ?? conversation, alreadyMember: warnings.includes('already_in_channel') };
+  };
+
+  /**
+   * Invites people and agents to an existing channel with the asking
+   * agent's own app — `channel.invite`. It rejects only when nobody was
+   * invited: a request refused before Slack is asked, or a whole call Slack
+   * refused without acting. Everything else is settled per entry by the
+   * same code `createConversation` uses.
+   */
+  const inviteToConversation = async (request: ConversationInviteRequest): Promise<ConversationInviteResult> => {
+    const conversation = request.conversation.trim();
+    if (!conversation) {
+      throw new Error('slack: an invitation needs a channel id (C…).');
+    }
+    const invite = request.invite;
+    if (invite.length === 0) {
+      throw new Error('slack: an invitation needs at least one person or agent to invite.');
+    }
+    if (invite.length > CHANNEL_INVITE_LIMIT) {
+      throw new Error(`slack: that invites ${invite.length.toLocaleString('en-US')} people; Slack invites at most ${CHANNEL_INVITE_LIMIT.toLocaleString('en-US')} at once. Nobody was invited.`);
+    }
+    const connection = connectionFor(request.agentId);
+    if (!connection) {
+      throw new Error(configuredAgents.has(request.agentId)
+        ? `slack: ${request.agentId}'s Slack app is not connected right now, so it cannot invite anyone to ${conversation}.`
+        : `slack: agent ${request.agentId} has no Slack app, so it cannot invite anyone to a Slack channel.`);
+    }
+    const inviteUsers = connection.web.conversations.invite;
+    if (!inviteUsers) {
+      throw new Error('slack: this Slack client cannot invite people to channels.');
+    }
+    const agent = request.agentId;
+    const { own, notInvited, toInvite } = resolveInvitees(connection, agent, invite);
+    for (const who of own) {
+      notInvited.push({ who, reason: 'That is your own app, which can\'t invite itself. To join a public channel, use channel.join.' });
+    }
+    const settled = await inviteAtSlack(connection, inviteUsers, conversation, toInvite, (code) => SLACK_INVITE_REFUSALS.has(code));
+    if (settled.refusedWith !== undefined) {
+      const code = settled.refusedWith;
+      const why = code === 'not_in_channel'
+        ? `${agent}'s app isn't in ${conversation}, so it can't invite anyone there. For a public channel, join it first with channel.join; for a private one, a member has to invite the app.`
+        : code === 'channel_not_found'
+          ? channelNotFoundSentence(agent, conversation)
+          : code === 'missing_scope'
+            ? `${agent}'s Slack app lacks the scope to invite people: channels:write.invites for a public channel or groups:write.invites for a private one (channels:manage or groups:write also work). Add it to the app's manifest and reinstall the app.`
+            : code === 'is_archived'
+              ? `${conversation} is archived, so nobody can be invited to it.`
+              : code === 'method_not_supported_for_channel_type'
+                ? `${conversation} is a direct message or another conversation Slack doesn't allow invitations to.`
+                : code === 'ratelimited'
+                  ? `Slack is rate-limiting ${agent}'s app; try the invitation again later.`
+                  : SLACK_AUTH_ERRORS.has(code)
+                    ? `Slack refused ${agent}'s app token (${code}). Reinstall the app or replace its bot token.`
+                    : `Slack did not invite anyone to ${conversation} (${code}).`;
+      throw new Error(`slack: ${why} Nobody was invited.`);
+    }
+    const invited = settled.invited;
+    notInvited.push(...settled.notInvited);
+    sortByRequest(invite, invited, notInvited);
+    return { invited, notInvited };
   };
 
   /**
@@ -7963,6 +8179,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     readConversation,
     sessionConversation,
     createConversation,
+    joinConversation,
+    inviteToConversation,
     // A channel id is unique only within its workspace, so a standing
     // grant on one is bound to the team the agent's app authenticated in.
     accountFor: (agentId: string) => botIdentities.get(agentId)?.teamId || undefined,
