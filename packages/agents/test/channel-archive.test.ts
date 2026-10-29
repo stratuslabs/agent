@@ -30,9 +30,9 @@ test('channel.archive is gated, gateway-only, asks for an id, and says it cannot
   assert.equal(tool.risk, 'gated');
   assert.ok(GATEWAY_ONLY_TOOL_NAMES.includes(tool.name));
   assert.deepEqual((tool.parameters as { required?: string[] }).required, ['channel', 'conversation']);
-  assert.match(tool.description, /your own app created/);
-  assert.match(tool.description, /can't undo/);
-  assert.match(tool.description, /a person can unarchive/i);
+  assert.match(tool.description ?? '', /your own app created/);
+  assert.match(tool.description ?? '', /can.t undo/);
+  assert.match(tool.description ?? '', /a person can unarchive/i);
 });
 
 test('channel.archive passes a trimmed request as the calling agent, with its session, and returns ids only', async () => {

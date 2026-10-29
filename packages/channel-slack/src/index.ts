@@ -45,6 +45,8 @@ import {
   type AdmitPolicy,
   type ChannelAdapter,
   type ChannelCredentialRequest,
+  type ConversationArchiveRequest,
+  type ConversationArchiveResult,
   type ConversationBookmark,
   type ConversationCreateRequest,
   type ConversationCreateResult,
@@ -538,6 +540,13 @@ export interface SlackWebLike {
         is_ext_shared?: boolean;
         /** Shared across workspaces of an Enterprise Grid organization. */
         is_org_shared?: boolean;
+        /** Shared with another workspace in any way. */
+        is_shared?: boolean;
+        /** A Slack Connect invitation is out and not yet accepted. */
+        is_pending_ext_shared?: boolean;
+        is_archived?: boolean;
+        /** The user who created it; for a channel an app made, the app's bot user. Never changes. */
+        creator?: string;
       };
     }>;
     /**
@@ -587,6 +596,12 @@ export interface SlackWebLike {
       warning?: string;
       response_metadata?: { warnings?: string[] };
     }>;
+    /**
+     * Archives a channel — what `channel.archive` runs on. Same scopes as
+     * `create` (`channels:manage` public, `groups:write` private). There
+     * is no way back for an app: bot tokens can't unarchive.
+     */
+    archive?(args: { channel: string }): Promise<unknown>;
   };
   users: {
     info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
@@ -5271,6 +5286,121 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * Other agents on this host whose Slack app is this agent's: the same
+   * bot token configured (connected or not), or the same bot user in the
+   * same workspace. Slack's `creator` names the app's bot user, so it
+   * can't tell those agents' channels apart. This sees only this process;
+   * one app per agent is the supported setup (see the README).
+   */
+  const agentsSharingAppWith = (connection: AgentConnection): string[] => {
+    const agentId = connection.config.agentId;
+    const sharing = new Set<string>();
+    for (const other of options.agents) {
+      if (other.agentId !== agentId && other.botToken === connection.config.botToken) {
+        sharing.add(other.agentId);
+      }
+    }
+    for (const [other, identity] of botIdentities) {
+      if (other !== agentId && identity.botUserId !== '' && identity.botUserId === connection.botUserId && identity.teamId === connection.teamId) {
+        sharing.add(other);
+      }
+    }
+    return [...sharing];
+  };
+
+  /**
+   * Archives a channel the asking agent's own app created — what
+   * `channel.archive` runs on. Everything it refuses is refused before
+   * Slack is asked to archive: an id Slack can't show this app, a direct
+   * message, a channel another user or app created, an app other agents
+   * here share, a channel shared outside the workspace. Slack keeps who
+   * created a channel and whether it is archived, so nothing is stored
+   * here and the rule holds across restarts and hosts. Refusals name the
+   * channel by id only: its name is whatever its members typed.
+   */
+  const archiveConversation = async (request: ConversationArchiveRequest): Promise<ConversationArchiveResult> => {
+    const conversation = request.conversation.trim();
+    if (!conversation) {
+      throw new Error('slack: archiving needs a channel id (C…).');
+    }
+    const connection = connectionFor(request.agentId);
+    if (!connection) {
+      throw new Error(configuredAgents.has(request.agentId)
+        ? `slack: ${request.agentId}'s Slack app is not connected right now, so it cannot archive ${conversation}.`
+        : `slack: agent ${request.agentId} has no Slack app, so it cannot archive a Slack channel.`);
+    }
+    const { archive } = connection.web.conversations;
+    if (!archive) {
+      throw new Error('slack: this Slack client cannot archive channels.');
+    }
+    const agent = request.agentId;
+    const nothing = 'Nothing was archived.';
+    const sharing = agentsSharingAppWith(connection);
+    if (sharing.length > 0) {
+      throw new Error(`slack: ${agent}'s Slack app is also ${sharing.map((other) => `${other}'s`).join(' and ')} here, so Stratus can't tell which agent created ${conversation}. `
+        + `Give each agent its own Slack app. A person can archive it in Slack. ${nothing}`);
+    }
+    let info: Awaited<ReturnType<typeof connection.web.conversations.info>>['channel'];
+    try {
+      info = (await connection.web.conversations.info({ channel: conversation })).channel;
+    } catch (error) {
+      const code = slackErrorCode(error);
+      if (code === 'channel_not_found') {
+        throw new Error(`slack: ${channelNotFoundSentence(agent, conversation)} Either way, ${agent} can only archive channels its own app created. ${nothing}`);
+      }
+      if (code === 'ratelimited') {
+        throw new Error(`slack: Slack is rate-limiting ${agent}'s app; try archiving ${conversation} again later. ${nothing}`);
+      }
+      if (code !== undefined && SLACK_AUTH_ERRORS.has(code)) {
+        throw new Error(`slack: Slack refused ${agent}'s app token (${code}). Reinstall the app or replace its bot token. ${nothing}`);
+      }
+      throw new Error(`slack: Slack could not tell ${agent}'s app who created ${conversation} (${describeSlackError(error)}). ${nothing}`);
+    }
+    if (info?.is_im === true || info?.is_mpim === true) {
+      throw new Error(`slack: ${conversation} is a direct message, and only channels can be archived. ${nothing}`);
+    }
+    const creator = info?.creator ?? '';
+    if (creator === '' || connection.botUserId === '' || creator !== connection.botUserId) {
+      throw new Error(`slack: ${agent}'s app didn't create ${conversation}: another user or app did, so ${agent} can't archive it. A person can archive it in Slack. ${nothing}`);
+    }
+    if (info?.is_shared === true || info?.is_ext_shared === true || info?.is_org_shared === true || info?.is_pending_ext_shared === true) {
+      throw new Error(`slack: ${conversation} is shared with another workspace or organization, so archiving it would reach people outside this one. A person can archive it in Slack. ${nothing}`);
+    }
+    if (info?.is_archived === true) {
+      return { conversation, alreadyArchived: true };
+    }
+    try {
+      await archive({ channel: conversation });
+    } catch (error) {
+      const code = slackErrorCode(error);
+      if (code === 'already_archived') {
+        return { conversation, alreadyArchived: true };
+      }
+      warn(`slack: ${agent} could not archive ${conversation} (${describeSlackError(error)})`);
+      if (code === undefined || code === 'internal_error' || code === 'fatal_error') {
+        throw new Error(`slack: Slack's answer left it unknown whether ${agent}'s app archived ${conversation} (${describeSlackError(error)}). It may be archived. Trying again is safe: archiving a channel twice changes nothing.`);
+      }
+      const isPrivate = info?.is_private === true || info?.is_group === true;
+      const why = code === 'missing_scope'
+        ? `${agent}'s Slack app can't archive ${isPrivate ? 'private' : 'public'} channels because it lacks the ${isPrivate ? 'groups:write' : 'channels:manage'} scope. Add it to the app's manifest and reinstall the app.`
+        : code === 'not_in_channel'
+          ? `${agent}'s app is no longer a member of ${conversation}, so it can't archive it. A member has to add the app back first.`
+          : code === 'restricted_action'
+            ? `This workspace limits who can archive channels, so ${agent}'s app can't archive ${conversation}. A person has to do it in Slack.`
+            : code === 'ratelimited'
+              ? `Slack is rate-limiting ${agent}'s app; try archiving ${conversation} again later.`
+              : code === 'channel_not_found'
+                ? channelNotFoundSentence(agent, conversation)
+                : SLACK_AUTH_ERRORS.has(code)
+                  ? `Slack refused ${agent}'s app token (${code}). Reinstall the app or replace its bot token.`
+                  : `Slack did not let ${agent}'s app archive ${conversation} (${code}).`;
+      throw new Error(`slack: ${why} ${nothing}`);
+    }
+    log(`slack: ${agent} archived ${conversation}`);
+    return { conversation, alreadyArchived: false };
+  };
+
+  /**
    * Renders one parked call as buttons and remembers where it went.
    *
    * A request this adapter cannot route is DENIED here rather than left to
@@ -8181,6 +8311,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     createConversation,
     joinConversation,
     inviteToConversation,
+    archiveConversation,
     // A channel id is unique only within its workspace, so a standing
     // grant on one is bound to the team the agent's app authenticated in.
     accountFor: (agentId: string) => botIdentities.get(agentId)?.teamId || undefined,
