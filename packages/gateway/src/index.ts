@@ -1228,6 +1228,13 @@ export interface Gateway {
    */
   reloadRoster(): Promise<AgentDefinition[]>;
   /**
+   * The started channels a roster reload reaches (those with
+   * `ChannelAdapter.reload`), by name, in start order: where a secret
+   * stored while the daemon runs is picked up without a restart. Any other
+   * channel reads its secrets at the next start.
+   */
+  reloadableChannels(): string[];
+  /**
    * Re-read `~/.stratus/skills/` and serve what is there now, without a
    * restart — the shape `reloadRoster()` established: idempotent,
    * serialized against itself and the roster reload, and a failure that
@@ -6268,6 +6275,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         await reloadChannels();
       });
       return roster;
+    },
+
+    reloadableChannels() {
+      return startedChannels.filter((adapter) => typeof adapter.reload === 'function').map((adapter) => adapter.name);
     },
 
     async reloadSkills() {

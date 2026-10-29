@@ -910,7 +910,12 @@ export const routes: Route[] = [
     pattern: `${API_PREFIX}/roster/reload`,
     async handler(context) {
       const agents = await context.gateway.reloadRoster();
-      return { agents: agents.map((agent) => ({ id: agent.id, name: agent.name })) };
+      return {
+        agents: agents.map((agent) => ({ id: agent.id, name: agent.name })),
+        // The channels that picked up the reload: a secret stored for one of
+        // them is live now, and any other kind waits for a restart.
+        channels: context.gateway.reloadableChannels(),
+      };
     },
   },
   {
@@ -1642,7 +1647,20 @@ export const routes: Route[] = [
       await withCredentialsFileLock(async () => {
         await saveChannelTransportSecrets(context.env, channel, agentId, secrets);
       });
-      return { channel, agentId, stored: true };
+      // A channel that can reload connects the app now (card 894); any
+      // other reads it at the next start, which `reloaded: false` says.
+      // Stored either way, so a roster that will not load is reported
+      // beside the save rather than as its failure.
+      const reloadable = context.gateway.reloadableChannels().includes(channel);
+      if (!reloadable) {
+        return { channel, agentId, stored: true, reloaded: false };
+      }
+      try {
+        await context.gateway.reloadRoster();
+      } catch (error) {
+        return { channel, agentId, stored: true, reloaded: false, reason: error instanceof Error ? error.message : String(error) };
+      }
+      return { channel, agentId, stored: true, reloaded: true };
     },
   },
 

@@ -240,3 +240,42 @@ export const describeHeldHome = async (env: CliEnvironment): Promise<string> => 
     + 'if it is the installed service, otherwise Ctrl+C where it runs — and let it finish; it holds the home until '
     + 'its last turn is written.';
 };
+
+/**
+ * After channel secrets were stored or removed: if a daemon says it is
+ * running, reload its roster, which reloads every channel that can (card
+ * 894), and say whether `kind` was one of them. Undefined when no daemon
+ * says so, so the caller keeps its own line about the next start. A daemon
+ * that answers with an error leaves a warning, never a failure: the secret
+ * is stored either way.
+ */
+export const reloadRunningDaemonChannels = async (
+  env: CliEnvironment,
+  kind: string,
+): Promise<{ line: string } | { warning: string } | undefined> => {
+  const info = await readGatewayInfo(env);
+  if (!info) {
+    return undefined;
+  }
+  const base = info.url.replace(/\/+$/, '');
+  try {
+    const response = await callRunningGateway(env, {}, base, '/api/v1/roster/reload');
+    if (!response.ok) {
+      throw new Error(await gatewayErrorMessage(response));
+    }
+    const { channels } = await response.json() as { channels?: unknown };
+    // A daemon from before reloadable channels answers with no list: it
+    // reloads nothing, so it reads the secret at its next start.
+    const reloaded = Array.isArray(channels) && channels.includes(kind);
+    return {
+      line: reloaded
+        ? `The running daemon (${base}) reloaded ${kind}, so this applies now, with no restart. \`stratus logs\` shows each app as it connects.`
+        : `The running daemon (${base}) doesn't reload ${kind}, so this applies at its next start: \`stratus restart\`.`,
+    };
+  } catch (error) {
+    return {
+      warning: `${gatewayInfoPath(env)} names a daemon at ${base}, but it did not reload: `
+        + `${error instanceof Error ? error.message : String(error)} If it is running, apply this with: stratus restart`,
+    };
+  }
+};

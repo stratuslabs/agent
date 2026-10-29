@@ -13104,6 +13104,49 @@ test('stratus channel set stores a plugin channel\'s secrets 0600 where the chan
   assert.match(again.output.stderr, /Nothing is stored for ava on imessage/);
 });
 
+test('stratus channel set and remove reload a running daemon, and say whether that channel picked it up', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-channel-reload-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const reloaded = () => Response.json({ agents: [{ id: 'ava', name: 'Ava' }], channels: ['control-api', 'slack'] });
+
+  // No daemon has said it is running: nothing to ask, and the restart line.
+  const quiet = fakeGateway(reloaded);
+  const first = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: first.streams, env: { ...env, stdin: 'xapp-1\nxoxb-1\n', fetch: quiet.fetchImpl } }), 0);
+  assert.deepEqual(quiet.calls, []);
+  assert.match(first.output.stdout, /at its next start: `stratus restart`/);
+
+  await publishGateway(home, 'http://127.0.0.1:4123/');
+  const daemon = fakeGateway(reloaded);
+  const second = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: second.streams, env: { ...env, stdin: 'xapp-2\nxoxb-2\n', fetch: daemon.fetchImpl } }), 0);
+  assert.deepEqual(daemon.calls.map((call) => [call.method, call.url]), [['POST', 'http://127.0.0.1:4123/api/v1/roster/reload']]);
+  assert.match(second.output.stdout, /The running daemon \(http:\/\/127\.0\.0\.1:4123\) reloaded slack, so this applies now, with no restart/);
+  assert.ok(!second.output.stdout.includes('stratus restart'), second.output.stdout);
+
+  // A kind the daemon does not reload waits for its next start.
+  const plugin = fakeGateway(reloaded);
+  const third = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey'], streams: third.streams, env: { ...env, stdin: 'k\n', fetch: plugin.fetchImpl } }), 0);
+  assert.match(third.output.stdout, /doesn't reload imessage, so this applies at its next start: `stratus restart`/);
+
+  // Removing reloads too, so the app is let go of now.
+  const removing = fakeGateway(reloaded);
+  const fourth = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'remove', 'slack', '--agent', 'ava'], streams: fourth.streams, env: { ...env, fetch: removing.fetchImpl } }), 0);
+  assert.equal(removing.calls.length, 1);
+  assert.match(fourth.output.stdout, /Removed ava's slack secrets\. The running daemon \(http:\/\/127\.0\.0\.1:4123\) reloaded slack/);
+
+  // A daemon that refuses: stored all the same, a warning with its reason, success.
+  const refusing = fakeGateway(() => Response.json({ error: { code: 'roster_invalid', message: 'Two souls use the id ava.' } }, { status: 500 }));
+  const fifth = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: fifth.streams, env: { ...env, stdin: 'xapp-3\nxoxb-3\n', fetch: refusing.fetchImpl } }), 0);
+  assert.deepEqual(await loadChannelCredentials(env), { slack: { ava: { appToken: 'xapp-3', botToken: 'xoxb-3' } } });
+  assert.match(fifth.output.stderr, /Warning: .*gateway\.json names a daemon at http:\/\/127\.0\.0\.1:4123, but it did not reload: Two souls use the id ava\. If it is running, apply this with: stratus restart/);
+});
+
 test('stratus channel set stores nothing when a line is missing, a value is empty, or the agent is not on the roster', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-channel-refuse-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });

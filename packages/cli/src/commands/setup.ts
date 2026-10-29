@@ -67,7 +67,7 @@ import {
   uninstallService,
 } from '../service.ts';
 import { type ApprovalReach, classifyApprovalReach, unattendedReachParts } from '../approvals.ts';
-import { serviceEnvFor } from '../daemon.ts';
+import { reloadRunningDaemonChannels, serviceEnvFor } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, CliConfigFile } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import { packageInstalled } from '../loaders.ts';
@@ -2970,9 +2970,20 @@ export const runSetup = async (
       // writers merge, so this never clobbers the provider sign-in above.
       await saveChannelCredentials(env, state.channels);
       const connected = Object.keys(state.channels.slack ?? {}).length;
-      writeLine(streams.stdout, connected > 0
-        ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`
-        : `Removed the stored Slack tokens from ${credentialsPath(env)}.`);
+      const saved = connected > 0
+        ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)}`
+        : `Removed the stored Slack tokens from ${credentialsPath(env)}`;
+      // A running daemon picks the change up now (card 894); with none, the
+      // next start does.
+      const reload = await reloadRunningDaemonChannels(env, 'slack');
+      if (reload === undefined) {
+        writeLine(streams.stdout, connected > 0 ? `${saved} — run \`${serveCommand()}\` to bring them online.` : `${saved}.`);
+      } else if ('line' in reload) {
+        writeLine(streams.stdout, `${saved}. ${reload.line}`);
+      } else {
+        writeLine(streams.stdout, `${saved}.`);
+        writeLine(streams.stderr, `Warning: ${reload.warning}`);
+      }
     }
     if (state.pluginChannelEdits.length > 0) {
       // In the order they were made, so a store then a remove of the same

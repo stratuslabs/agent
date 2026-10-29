@@ -511,33 +511,41 @@ const serveHeldHome = async (
     const adapter = await loadSlackAdapter();
     if (adapter) {
       slackAdapterUp = true;
+      // One agent's Slack settings, from the config this daemon started
+      // with: a reload (card 894) changes which apps are connected, never
+      // how an agent is configured.
+      const slackAgentConfig = ([agentId, tokens]: [string, { appToken: string; botToken: string }]) => {
+        const route = resolveAgentApprovals(approvalsConfig, agentId);
+        const principals = resolveAgentPrincipals(principalsConfig, agentId);
+        const presentation = resolveAgentSlack(slackConfig, agentId);
+        const { homeChannels } = presentation;
+        return {
+          agentId,
+          appToken: tokens.appToken,
+          botToken: tokens.botToken,
+          ...(route.slackApprovers ? { approvers: route.slackApprovers } : {}),
+          ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
+          ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
+          ...(principals.admit ? { admit: principals.admit } : {}),
+          replies: presentation.replies,
+          ...(presentation.linkPreviews ? {} : { linkPreviews: false }),
+          ...(homeChannels.length > 0 ? { homeChannels } : {}),
+          ...(presentation.agentMentions
+            ? {
+              agentMentions: {
+                ...(slackConfig?.team ? { team: slackConfig.team } : {}),
+                ...(presentation.agentMentionsFrom ? { only: presentation.agentMentionsFrom } : {}),
+              },
+            }
+            : {}),
+        };
+      };
       channels.push(adapter({
-        agents: slackAgents.map(([agentId, tokens]) => {
-          const route = resolveAgentApprovals(approvalsConfig, agentId);
-          const principals = resolveAgentPrincipals(principalsConfig, agentId);
-          const presentation = resolveAgentSlack(slackConfig, agentId);
-          const { homeChannels } = presentation;
-          return {
-            agentId,
-            appToken: tokens.appToken,
-            botToken: tokens.botToken,
-            ...(route.slackApprovers ? { approvers: route.slackApprovers } : {}),
-            ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
-            ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
-            ...(principals.admit ? { admit: principals.admit } : {}),
-            replies: presentation.replies,
-            ...(presentation.linkPreviews ? {} : { linkPreviews: false }),
-            ...(homeChannels.length > 0 ? { homeChannels } : {}),
-            ...(presentation.agentMentions
-              ? {
-                agentMentions: {
-                  ...(slackConfig?.team ? { team: slackConfig.team } : {}),
-                  ...(presentation.agentMentionsFrom ? { only: presentation.agentMentionsFrom } : {}),
-                },
-              }
-              : {}),
-          };
-        }),
+        agents: slackAgents.map(slackAgentConfig),
+        // Read again on every roster reload, so an app stored while the
+        // daemon runs (`stratus channel set`, setup, the dashboard) connects
+        // without a restart, and one removed disconnects.
+        loadAgents: async () => Object.entries((await loadChannelCredentials(env)).slack ?? {}).map(slackAgentConfig),
         attachmentStore: (() => {
           const workspaces = createAgentWorkspaces(env);
           return { workspaces, ledger: createFileLedger((id) => workspaces.forAgent(id), (id) => workspaces.prepare(id)) };

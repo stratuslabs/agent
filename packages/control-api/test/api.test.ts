@@ -891,6 +891,63 @@ test('reloading the roster picks up a soul written behind the daemon\'s back', a
   }
 });
 
+test('storing a channel\'s secrets reloads it when it can, and the answer says whether it applies now', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  let reloads = 0;
+  const slack = {
+    name: 'slack',
+    async start() {},
+    async stop() {},
+    async reload() {
+      reloads += 1;
+    },
+  };
+  const harness = await startApi({ home, gateway: { channels: [slack] } });
+  try {
+    const put = (kind: string, body: object) => harness.call(`/api/v1/credentials/channels/${kind}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const stored = await put('slack', { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' });
+    assert.equal(stored.status, 200);
+    assert.deepEqual(await stored.json(), { channel: 'slack', agentId: 'ava', stored: true, reloaded: true });
+    assert.equal(reloads, 1, 'the save reloaded the channel');
+
+    // A kind no started channel reloads is stored for the next start.
+    const plugin = await put('discord', { agentId: 'ava', secrets: { botToken: 'discord-1' } });
+    assert.deepEqual(await plugin.json(), { channel: 'discord', agentId: 'ava', stored: true, reloaded: false });
+    assert.equal(reloads, 1);
+
+    // A roster that will not load: stored all the same, and the reason beside it.
+    await writeSoul(home, 'copy.md', '---\nname: Copy\nid: ava\n---\n\nAgain.\n');
+    const refused = await put('slack', { agentId: 'ava', appToken: 'xapp-2', botToken: 'xoxb-2' });
+    assert.equal(refused.status, 200);
+    const refusedBody = await refused.json() as { stored: boolean; reloaded: boolean; reason?: string };
+    assert.equal(refusedBody.stored, true);
+    assert.equal(refusedBody.reloaded, false);
+    assert.ok(refusedBody.reason && refusedBody.reason.length > 0);
+    const raw = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as { channels: { slack: Record<string, { appToken: string }> } };
+    assert.equal(raw.channels.slack.ava?.appToken, 'xapp-2');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a roster reload names the channels it reloaded', async () => {
+  const slack = { name: 'slack', async start() {}, async stop() {}, async reload() {} };
+  const plain = { name: 'plain', async start() {}, async stop() {} };
+  const harness = await startApi({ gateway: { channels: [plain, slack] } });
+  try {
+    const reloaded = await harness.call('/api/v1/roster/reload', { method: 'POST' });
+    assert.equal(reloaded.status, 200);
+    assert.deepEqual((await json<{ channels: string[] }>(reloaded)).channels, ['slack']);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('the roster carries when each agent was last active, and how many turns are live', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
