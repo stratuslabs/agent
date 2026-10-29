@@ -307,11 +307,19 @@ test('channel.archive is refused when this channel\'s session gets no conversati
   }
 });
 
-test('an archive of the conversation the work was asked from is refused before anyone is asked, so no grant comes of it', async () => {
-  const { gateway, archived, asked } = await archiveGateway({ approvals: 'remote', answer: 'always' });
+test('an archive that can\'t run (the asking conversation, no channel that archives) is refused before anyone is asked, so no grant comes of it', async () => {
+  const { gateway, archived, asked, setKind } = await archiveGateway({ approvals: 'remote', answer: 'always' });
   try {
     const own = await gateway.dispatch({ sessionId: 'fixture:ava:C1', agentId: 'ava', userMessage: say({ do: 'archive', conversation: 'C1' }) });
     assert.match(transcript(own), ASKED_FROM);
+    assert.deepEqual(asked, [], 'nobody was asked');
+    // Nor is anyone asked about an archive no running channel can do.
+    setKind('discord');
+    const elsewhere = await gateway.dispatch({ sessionId: 'fixture:ava:C4', agentId: 'ava', userMessage: say({ do: 'archive', conversation: 'C2' }) });
+    assert.match(transcript(elsewhere), /No running channel can archive 'discord' conversations/);
+    setKind('fixture');
+    const kai = await gateway.dispatch({ sessionId: 'fixture:kai:C1', agentId: 'kai', userMessage: say({ do: 'archive', conversation: 'C2' }) });
+    assert.match(transcript(kai), /No running 'fixture' channel carries agent kai/);
     assert.deepEqual(asked, [], 'nobody was asked');
     // Had Always allow been asked and answered, this would run unasked.
     await gateway.dispatch({ sessionId: 'fixture:ava:C3', agentId: 'ava', userMessage: say({ do: 'archive', conversation: 'C2' }) });

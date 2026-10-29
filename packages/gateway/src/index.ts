@@ -2794,12 +2794,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
   const archivingAdapter = (kind: string, agentId: string) =>
     channelCarrying(kind, agentId, (candidate) => candidate.archiveConversation !== undefined);
+  const noArchivingAdapter = (kind: string, agentId: string, carriesOthers: boolean): string => carriesOthers
+    ? `No running '${kind}' channel carries agent ${agentId}, so it has no app to archive a channel with.`
+    : `No running channel can archive '${kind}' conversations.`;
   tools.register(createChannelArchiveTool(async ({ agentId, channel, conversation }, session) => {
     const { adapter, carriesOthers } = archivingAdapter(channel, agentId);
     if (!adapter?.archiveConversation) {
-      throw new Error(carriesOthers
-        ? `No running '${channel}' channel carries agent ${agentId}, so it has no app to archive a channel with.`
-        : `No running channel can archive '${channel}' conversations.`);
+      throw new Error(noArchivingAdapter(channel, agentId, carriesOthers));
     }
     const refusal = await archiveRefusal(channel, conversation, session, adapter);
     if (refusal !== undefined) {
@@ -2812,9 +2813,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // with no useful answer. Held as an approval wait, like message.read's,
     // since it runs before any tool event and may read the store.
     refusalFor: async ({ agentId, channel, conversation }, session) => {
-      const { adapter } = archivingAdapter(channel, agentId);
+      const { adapter, carriesOthers } = archivingAdapter(channel, agentId);
       if (!adapter?.archiveConversation) {
-        return undefined;
+        return noArchivingAdapter(channel, agentId, carriesOthers);
       }
       const release = holdApprovalWait(session.id);
       try {
