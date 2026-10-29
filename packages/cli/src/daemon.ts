@@ -289,7 +289,10 @@ export const reloadRunningDaemonChannels = async (
 
 /** Whether `kind` picked up a reload, as one line for the operator. */
 export const channelReloadLine = (reload: DaemonChannelReload, kind: string): string => {
-  const entry = reload.channels.find((channel) => channel.name === kind);
+  // Every adapter of the kind, since two can carry disjoint agents of one
+  // kind: it applies now only if each of them reloaded.
+  const entries = reload.channels.filter((channel) => channel.name === kind);
+  const entry = entries.find((channel) => channel.outcome !== 'reloaded') ?? entries[0];
   if (entry?.outcome === 'reloaded') {
     return `The running daemon (${reload.base}) reloaded ${kind}, so this applies now, with no restart. \`stratus logs\` shows each app as it connects.`;
   }

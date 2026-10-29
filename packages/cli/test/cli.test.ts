@@ -13185,6 +13185,12 @@ test('stratus channel set and remove reload a running daemon, and say whether th
   assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: failed.streams, env: { ...env, stdin: 'xapp-4\nxoxb-4\n', fetch: failing.fetchImpl } }), 0);
   assert.match(failed.output.stdout, /could not reload slack \(credentials\.json is not readable\), so this applies at its next start: `stratus restart`/);
 
+  // Two adapters of one kind: it applies now only if both reloaded.
+  const split = fakeGateway(() => Response.json({ agents: [], channels: [{ name: 'slack', outcome: 'reloaded' }, { name: 'slack', outcome: 'still-reloading' }] }));
+  const both = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: both.streams, env: { ...env, stdin: 'xapp-6\nxoxb-6\n', fetch: split.fetchImpl } }), 0);
+  assert.match(both.output.stdout, /is still reloading slack/);
+
   // A daemon from before reloadable channels answers with no list.
   const older = fakeGateway(() => Response.json({ agents: [] }));
   const old = createStreams();
