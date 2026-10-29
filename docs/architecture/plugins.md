@@ -623,6 +623,15 @@ capability rather than an assumption:
   knows nobody was invited, before asking the platform or when the
   platform refused the whole call, so a rejection means the members didn't
   change; anything else resolves with `notInvited` and a reason per entry.
+- `ChannelAdapter.archiveConversation` is optional as well: it is what
+  `channel.archive` runs on. It resolves only when the conversation is
+  archived (by this call, or already, with `alreadyArchived`), and must not
+  archive anything unless the platform says the asking agent's own app
+  created it and no other agent on the host uses that app; it refuses when
+  the creator can't be told. An unknown outcome rejects saying the
+  conversation may be archived and that a retry is safe. The gateway, not
+  the adapter, refuses the conversation the work was asked from: a turn's
+  own, or for a sub-agent or a delegated run, its root turn's.
 - Who counts as the operator is one rule in core's channel contract, not
   one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
   `senderTrustFor` (the `user`/`unknown` label a turn carries). Which
