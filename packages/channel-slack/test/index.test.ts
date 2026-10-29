@@ -11030,6 +11030,289 @@ test('once the channel exists it is kept: a topic or an invitation that fails is
   await adapter.stop();
 });
 
+// How @slack/web-api throws when the request never got an answer: no
+// `data`, so no Slack code.
+const slackRequestError = (): Error => Object.assign(new Error('A request error occurred: socket hang up'), {
+  code: 'slack_webapi_request_error',
+});
+
+/** Gives a fake the join and invite calls, each recorded, answering what `answer` says. */
+const withMembership = (
+  web: FakeWeb,
+  answer: Partial<Record<'join' | 'invite', (args: Record<string, unknown>) => unknown>> = {},
+): CreateCall[] => {
+  const calls: CreateCall[] = [];
+  const conversations = web.conversations as unknown as Record<string, unknown>;
+  conversations.join = async (args: Record<string, unknown>) => {
+    calls.push(['join', args]);
+    return (answer.join ?? ((joined) => ({ ok: true, channel: { id: joined.channel } })))(args);
+  };
+  conversations.invite = async (args: Record<string, unknown>) => {
+    calls.push(['invite', args]);
+    return (answer.invite ?? (() => ({ ok: true, channel: { id: args.channel } })))(args);
+  };
+  const members = web.conversations.members.bind(web.conversations);
+  web.conversations.members = async (args) => {
+    calls.push(['members', args]);
+    return members(args);
+  };
+  return calls;
+};
+
+test('joinConversation joins with the agent\'s own app and says when it was already a member', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  let join: (args: Record<string, unknown>) => unknown = (args) => ({ ok: true, channel: { id: args.channel } });
+  const avaCalls = withMembership(webAva, { join: (args) => join(args) });
+  const beaCalls = withMembership(webBea);
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    log: () => {},
+    warn: () => {},
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+
+  assert.deepEqual(await adapter.joinConversation!({ agentId: 'ava', conversation: ' C-OPS ' }), { conversation: 'C-OPS', alreadyMember: false });
+  assert.deepEqual(avaCalls, [['join', { channel: 'C-OPS' }]]);
+  assert.deepEqual(beaCalls, [], 'the asking agent\'s own app joins');
+
+  // Slack answers a second join ok, with a warning.
+  join = (args) => ({ ok: true, warning: 'already_in_channel', response_metadata: { warnings: ['already_in_channel'] }, channel: { id: args.channel } });
+  assert.deepEqual(await adapter.joinConversation!({ agentId: 'ava', conversation: 'C-OPS' }), { conversation: 'C-OPS', alreadyMember: true });
+  join = (args) => ({ ok: true, response_metadata: { warnings: ['already_in_channel'] }, channel: { id: args.channel } });
+  assert.deepEqual(await adapter.joinConversation!({ agentId: 'ava', conversation: 'C-OPS' }), { conversation: 'C-OPS', alreadyMember: true });
+  await adapter.stop();
+});
+
+test('joinConversation refuses what it did not join, with a sentence for each reason', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  let failWith: Error = slackPlatformError('missing_scope', { needed: 'channels:join', provided: 'chat:write' });
+  const calls = withMembership(web, {
+    join: () => {
+      throw failWith;
+    },
+  });
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.joinConversation!({ agentId: 'ava', conversation: '  ' }), /needs a channel id/);
+  await assert.rejects(() => adapter.joinConversation!({ agentId: 'nobody', conversation: 'C-OPS' }), /agent nobody has no Slack app, so it cannot join a Slack channel/);
+  assert.deepEqual(calls, [], 'refused before Slack was asked');
+
+  const refusals: Array<[Error, RegExp]> = [
+    [slackPlatformError('missing_scope'), /^Error: slack: ava's Slack app can't join channels on its own because it lacks the channels:join scope\. Add it to the app's manifest and reinstall the app\.$/],
+    [slackPlatformError('method_not_supported_for_channel_type'), /C-OPS isn't a public channel\. Slack never lets an app join a private channel on its own: a member has to invite the app\./],
+    [slackPlatformError('channel_not_found'), /Slack found no channel C-OPS that ava's app can see\. Check the id \(copy it from the channel's link; a name won't work\)\. If the id is right, the channel is private, and a member has to invite the app\./],
+    [slackPlatformError('is_archived'), /C-OPS is archived, so it can't be joined\./],
+    [slackPlatformError('too_many_members'), /C-OPS is at Slack's member limit, so ava's app can't join it\./],
+    [slackPlatformError('ratelimited'), /Slack is rate-limiting ava's app; try joining C-OPS again later\./],
+    [slackPlatformError('invalid_auth'), /Slack refused ava's app token \(invalid_auth\)\. Reinstall the app or replace its bot token\./],
+    [slackPlatformError('app_cannot_join_channel'), /Slack did not let ava's app join C-OPS \(app_cannot_join_channel\)\./],
+  ];
+  for (const [error, message] of refusals) {
+    failWith = error;
+    await assert.rejects(() => adapter.joinConversation!({ agentId: 'ava', conversation: 'C-OPS' }), message);
+  }
+  await adapter.stop();
+
+  // A client without the call says so rather than failing oddly.
+  const older = createFakeWeb('B-AVA', 'T1');
+  const olderAdapter = await startedAdapterWith(older);
+  await assert.rejects(() => olderAdapter.joinConversation!({ agentId: 'ava', conversation: 'C-OPS' }), /this Slack client cannot join channels/);
+  await olderAdapter.stop();
+});
+
+test('a join whose outcome Slack leaves unknown says the app may have joined and that trying again is safe', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  let failWith: Error = slackPlatformError('internal_error');
+  withMembership(web, {
+    join: () => {
+      throw failWith;
+    },
+  });
+  const adapter = await startedAdapterWith(web);
+  for (const [error, code] of [
+    [slackPlatformError('internal_error'), 'internal_error'],
+    [slackPlatformError('fatal_error'), 'fatal_error'],
+    [slackRequestError(), 'A request error occurred: socket hang up'],
+  ] as const) {
+    failWith = error;
+    await assert.rejects(
+      () => adapter.joinConversation!({ agentId: 'ava', conversation: 'C-OPS' }),
+      (thrown: Error) => thrown.message === `slack: Slack's answer left it unknown whether ava's app joined C-OPS (${code}). Trying again is safe: joining a channel twice changes nothing.`,
+    );
+  }
+  await adapter.stop();
+});
+
+test('inviteToConversation invites people and agents to an existing channel in one call with the asking agent\'s own app', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const socketDan = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const webDan = createFakeWeb('B-DAN', 'T2');
+  let invite: (args: Record<string, unknown>) => unknown = () => ({ ok: true, errors: [{ user: 'U0GONE', ok: false, error: 'user_not_found' }] });
+  const avaCalls = withMembership(webAva, { invite: (args) => invite(args) });
+  const beaCalls = withMembership(webBea);
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+      { agentId: 'dan', appToken: 'xapp-d', botToken: 'xoxb-d' },
+    ],
+    editIntervalMs: 0,
+    log: () => {},
+    warn: () => {},
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : appToken === 'xapp-b' ? socketBea : socketDan),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : botToken === 'xoxb-b' ? webBea : webDan),
+  });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  const roster = gateway.agents();
+  gateway.agents = () => [...roster, { id: 'bea', name: 'Bea' }, { id: 'dan', name: 'Dan' }];
+  await adapter.start(gateway);
+
+  const result = await adapter.inviteToConversation!({
+    agentId: 'ava',
+    conversation: ' C-OPS ',
+    invite: ['U0DYLAN', 'bea', 'U0GONE', 'ava', 'dan', 'dylan'],
+  });
+  assert.deepEqual(avaCalls, [['invite', { channel: 'C-OPS', users: 'U0DYLAN,B-BEA,U0GONE', force: true }]]);
+  assert.deepEqual(beaCalls, []);
+  assert.deepEqual(result, {
+    invited: ['U0DYLAN', 'bea'],
+    notInvited: [
+      { who: 'U0GONE', reason: 'Slack did not invite them (user_not_found).' },
+      { who: 'ava', reason: 'That is your own app, which can\'t invite itself. To join a public channel, use channel.join.' },
+      { who: 'dan', reason: 'Agent dan\'s Slack app is in another Slack workspace.' },
+      { who: 'dylan', reason: 'Not a Slack user id (U… or W…) or an agent with a Slack app on this host.' },
+    ],
+  });
+
+  // Everyone already there: Slack answers ok: false, and each counts as invited.
+  invite = () => {
+    throw slackPlatformError('already_in_channel', { errors: [{ user: 'U0DYLAN', ok: false, error: 'already_in_channel' }, { user: 'B-BEA', ok: false, error: 'already_in_channel' }] });
+  };
+  avaCalls.length = 0;
+  assert.deepEqual(await adapter.inviteToConversation!({ agentId: 'ava', conversation: 'C-OPS', invite: ['U0DYLAN', 'bea'] }), {
+    invited: ['U0DYLAN', 'bea'],
+    notInvited: [],
+  });
+  assert.deepEqual(avaCalls.map(([method]) => method), ['invite'], 'a failure that names everyone needs no members check');
+
+  // Nobody left to ask Slack about: no call, and nothing claimed.
+  avaCalls.length = 0;
+  assert.deepEqual(await adapter.inviteToConversation!({ agentId: 'ava', conversation: 'C-OPS', invite: ['ava', 'dylan'] }), {
+    invited: [],
+    notInvited: [
+      { who: 'ava', reason: 'That is your own app, which can\'t invite itself. To join a public channel, use channel.join.' },
+      { who: 'dylan', reason: 'Not a Slack user id (U… or W…) or an agent with a Slack app on this host.' },
+    ],
+  });
+  assert.deepEqual(avaCalls, []);
+  await adapter.stop();
+});
+
+test('inviteToConversation rejects only when nobody was invited: before Slack is asked, or a whole call Slack refused', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  let failWith: Error = slackPlatformError('not_in_channel');
+  const calls = withMembership(web, {
+    invite: () => {
+      throw failWith;
+    },
+  });
+  const adapter = await startedAdapterWith(web);
+
+  const before: Array<[Parameters<NonNullable<typeof adapter.inviteToConversation>>[0], RegExp]> = [
+    [{ agentId: 'ava', conversation: 'C-OPS', invite: [] }, /needs at least one person or agent to invite/],
+    [{ agentId: 'ava', conversation: 'C-OPS', invite: Array.from({ length: 1001 }, (_, index) => `U${index}`) }, /that invites 1,001 people; Slack invites at most 1,000 at once\. Nobody was invited\./],
+    [{ agentId: 'ava', conversation: ' ', invite: ['U1'] }, /needs a channel id/],
+    [{ agentId: 'nobody', conversation: 'C-OPS', invite: ['U1'] }, /agent nobody has no Slack app, so it cannot invite anyone to a Slack channel/],
+  ];
+  for (const [request, message] of before) {
+    await assert.rejects(() => adapter.inviteToConversation!(request), message);
+  }
+  assert.deepEqual(calls, [], 'refused before Slack was asked');
+
+  const whole: Array<[Error, RegExp]> = [
+    [slackPlatformError('not_in_channel'), /ava's app isn't in C-OPS, so it can't invite anyone there\. For a public channel, join it first with channel\.join; for a private one, a member has to invite the app\. Nobody was invited\./],
+    [slackPlatformError('channel_not_found'), /Slack found no channel C-OPS that ava's app can see\. Check the id \(copy it from the channel's link; a name won't work\)\. If the id is right, the channel is private, and a member has to invite the app\. Nobody was invited\./],
+    [slackPlatformError('missing_scope', { needed: 'channels:write.invites' }), /ava's Slack app lacks the scope to invite people: channels:write\.invites for a public channel or groups:write\.invites for a private one \(channels:manage or groups:write also work\)\. Add it to the app's manifest and reinstall the app\. Nobody was invited\./],
+    [slackPlatformError('is_archived'), /C-OPS is archived, so nobody can be invited to it\. Nobody was invited\./],
+    [slackPlatformError('method_not_supported_for_channel_type'), /C-OPS is a direct message or another conversation Slack doesn't allow invitations to\. Nobody was invited\./],
+    [slackPlatformError('no_user'), /Slack did not invite anyone to C-OPS \(no_user\)\. Nobody was invited\./],
+    [slackPlatformError('ratelimited'), /Slack is rate-limiting ava's app; try the invitation again later\. Nobody was invited\./],
+  ];
+  for (const code of ['not_authed', 'invalid_auth', 'account_inactive', 'token_revoked', 'token_expired']) {
+    whole.push([slackPlatformError(code), new RegExp(`Slack refused ava's app token \\(${code}\\)\\. Reinstall the app or replace its bot token\\. Nobody was invited\\.`)]);
+  }
+  for (const [error, message] of whole) {
+    failWith = error;
+    await assert.rejects(() => adapter.inviteToConversation!({ agentId: 'ava', conversation: 'C-OPS', invite: ['U0DYLAN', 'U0KAI'] }), message);
+  }
+  assert.deepEqual(new Set(calls.map(([method]) => method)), new Set(['invite']), 'a refused call is not followed by a members check');
+  await adapter.stop();
+
+  const older = createFakeWeb('B-AVA', 'T1');
+  const olderAdapter = await startedAdapterWith(older);
+  await assert.rejects(() => olderAdapter.inviteToConversation!({ agentId: 'ava', conversation: 'C-OPS', invite: ['U1'] }), /this Slack client cannot invite people to channels/);
+  await olderAdapter.stop();
+});
+
+test('an invitation Slack may have partly done is settled by the channel\'s members, and never rejected', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  let failWith: Error = slackPlatformError('fatal_error');
+  const calls = withMembership(web, {
+    invite: () => {
+      throw failWith;
+    },
+  });
+  const adapter = await startedAdapterWith(web);
+  web.conversationMembers.set('C-OPS', [['B-AVA', 'U0DYLAN']]);
+
+  for (const [error, code] of [
+    [slackPlatformError('fatal_error'), 'fatal_error'],
+    [slackPlatformError('internal_error'), 'internal_error'],
+    [slackRequestError(), 'A request error occurred: socket hang up'],
+  ] as const) {
+    failWith = error;
+    calls.length = 0;
+    assert.deepEqual(await adapter.inviteToConversation!({ agentId: 'ava', conversation: 'C-OPS', invite: ['U0DYLAN', 'U0KAI'] }), {
+      invited: ['U0DYLAN'],
+      notInvited: [{ who: 'U0KAI', reason: `Slack did not invite them (${code}).` }],
+    });
+    assert.deepEqual(calls.map(([method]) => method), ['invite', 'members']);
+  }
+
+  // A per-person code on the whole answer is not a refusal of the call.
+  failWith = slackPlatformError('cant_invite', { errors: [{ user: 'U0KAI', ok: false, error: 'cant_invite' }] });
+  assert.deepEqual(await adapter.inviteToConversation!({ agentId: 'ava', conversation: 'C-OPS', invite: ['U0DYLAN', 'U0KAI'] }), {
+    invited: ['U0DYLAN'],
+    notInvited: [{ who: 'U0KAI', reason: 'Slack did not invite them (cant_invite).' }],
+  });
+
+  // And when the members cannot be read either, nobody is claimed.
+  failWith = slackPlatformError('fatal_error');
+  web.conversations.members = async () => {
+    throw slackPlatformError('ratelimited');
+  };
+  assert.deepEqual(await adapter.inviteToConversation!({ agentId: 'ava', conversation: 'C-OPS', invite: ['U0DYLAN'] }), {
+    invited: [],
+    notInvited: [{
+      who: 'U0DYLAN',
+      reason: 'The invitation failed (fatal_error) and the channel\'s members could not be checked (ratelimited), so they may or may not have been added.',
+    }],
+  });
+  await adapter.stop();
+});
+
 test('under admit: principals a peer whose socket failed to start keeps its place in the backfill', async () => {
   const thread = [
     { ts: '520.1', user: 'U-DYLAN', text: 'what is prod?' },

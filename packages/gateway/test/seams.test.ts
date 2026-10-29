@@ -490,6 +490,116 @@ test('channel.create goes through the adapter that carries the calling agent, an
   }
 });
 
+test('channel.join and channel.invite go through the adapter that carries the calling agent, and are refused where none can', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: member\ntools: [channel.join, channel.invite]\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: member\ntools: [channel.join, channel.invite]\n---\n\nYou are Mia.\n');
+  const calls: string[] = [];
+  let kind = 'fixture';
+  let toolName = 'channel.join';
+  const host = await hostFor({
+    'stratus-plugin-chan-a': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('a', (context) => {
+        context.channels!.register({
+          agents: ['ava'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async joinConversation(request) {
+              calls.push(`join:${request.agentId}:${request.conversation}`);
+              return { conversation: request.conversation, alreadyMember: false };
+            },
+            async inviteToConversation(request) {
+              calls.push(`invite:${request.agentId}:${request.conversation}:${request.invite.join(',')}`);
+              return { invited: request.invite.slice(0, 1), notInvited: request.invite.slice(1).map((who) => ({ who, reason: 'Slack did not invite them (cant_invite).' })) };
+            },
+          },
+        });
+      }),
+    },
+    // Carries mia, and can create channels but not join or invite: the
+    // capability is per method, so this never serves either tool.
+    'stratus-plugin-chan-b': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('b', (context) => {
+        context.channels!.register({
+          agents: ['mia'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async createConversation(request) {
+              return { conversation: 'C0', name: request.name, invited: [], notInvited: [], notSet: [] };
+            },
+          },
+        });
+      }),
+    },
+    'stratus-plugin-member': {
+      manifest: manifest({ providers: [{ name: 'member' }] }),
+      module: plugin('member', (context) => {
+        context.providers!.register({
+          name: 'member',
+          create: () => ({
+            name: 'member',
+            async generate({ session }): Promise<ProviderResponse> {
+              if (session.messages.at(-1)?.role === 'tool') {
+                return { parts: [{ type: 'text', text: 'done' }] };
+              }
+              const input = toolName === 'channel.join'
+                ? { channel: kind, conversation: 'C42' }
+                : { channel: kind, conversation: 'C42', invite: ['U1', 'mia'] };
+              return { parts: [{ type: 'tool-call', call: { id: `${session.id}:call`, toolName, input } }] };
+            },
+          }),
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-chan-b': {}, 'stratus-plugin-member': {} },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  const toolResult = (session: { messages: Array<{ role: string }> }): string => JSON.stringify(session.messages.find((message) => message.role === 'tool'));
+  try {
+    const joined = await gateway.dispatch({ sessionId: 'join-ava', agentId: 'ava', userMessage: 'join ops' });
+    assert.match(toolResult(joined), /\\"joined\\":true/);
+    assert.match(toolResult(joined), /\\"alreadyMember\\":false/);
+    toolName = 'channel.invite';
+    const invited = await gateway.dispatch({ sessionId: 'invite-ava', agentId: 'ava', userMessage: 'add them' });
+    assert.match(toolResult(invited), /\\"invited\\":\[\\"U1\\"\]/);
+    assert.match(toolResult(invited), /cant_invite/);
+    assert.deepEqual(calls, ['join:ava:C42', 'invite:ava:C42:U1,mia']);
+
+    // mia's own adapter cannot join or invite, and ava's app never serves her.
+    for (const name of ['channel.join', 'channel.invite']) {
+      toolName = name;
+      const mia = await gateway.dispatch({ sessionId: `${name}-mia`, agentId: 'mia', userMessage: 'go' });
+      assert.match(JSON.stringify(mia.messages), name === 'channel.join'
+        ? /No running 'fixture' channel carries agent mia, so it has no app to join a channel with/
+        : /No running 'fixture' channel carries agent mia, so it has no app to invite anyone with/);
+    }
+    // A kind nothing running can join or invite in.
+    kind = 'discord';
+    toolName = 'channel.join';
+    const elsewhereJoin = await gateway.dispatch({ sessionId: 'join-elsewhere', agentId: 'ava', userMessage: 'go' });
+    assert.match(JSON.stringify(elsewhereJoin.messages), /No running channel can join 'discord' conversations/);
+    toolName = 'channel.invite';
+    const elsewhereInvite = await gateway.dispatch({ sessionId: 'invite-elsewhere', agentId: 'ava', userMessage: 'go' });
+    assert.match(JSON.stringify(elsewhereInvite.messages), /No running channel can invite people to 'discord' conversations/);
+    assert.deepEqual(calls, ['join:ava:C42', 'invite:ava:C42:U1,mia']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a message.read of a direct message is refused before any approval prompt, and a channel read still asks and runs', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: reader\ntools: [message.read]\n---\n\nYou are Ava.\n');

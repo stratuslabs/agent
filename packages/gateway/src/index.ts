@@ -80,9 +80,13 @@ import {
   createMessageSendTool,
   createMessageReadTool,
   createChannelCreateTool,
+  createChannelInviteTool,
+  createChannelJoinTool,
   directMessageReadRefusal,
   type ConversationReader,
   type ConversationCreator,
+  type ConversationInviter,
+  type ConversationJoiner,
   createRecallTool,
   createRememberTool,
   createScheduleTools,
@@ -347,6 +351,19 @@ export interface GatewayChannelAdapter {
    * the conversation exists, reporting what did not happen after it.
    */
   createConversation?(request: Omit<Parameters<ConversationCreator>[0], 'channel'>): ReturnType<ConversationCreator>;
+  /**
+   * Joins an existing conversation with the agent's own app, mirroring
+   * `ChannelAdapter.joinConversation`. Optional: an adapter without it
+   * cannot serve `channel.join`.
+   */
+  joinConversation?(request: Omit<Parameters<ConversationJoiner>[0], 'channel'>): ReturnType<ConversationJoiner>;
+  /**
+   * Invites people to an existing conversation through the agent's own
+   * app, mirroring `ChannelAdapter.inviteToConversation`. Optional: an
+   * adapter without it cannot serve `channel.invite`. Implementations
+   * MUST reject only when nobody was invited.
+   */
+  inviteToConversation?(request: Omit<Parameters<ConversationInviter>[0], 'channel'>): ReturnType<ConversationInviter>;
   /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
@@ -2670,6 +2687,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         : `No running channel can create '${channel}' conversations.`);
     }
     return adapter.createConversation({ agentId, ...request });
+  }));
+  // Joining and inviting follow the same rule: the asking agent's own app
+  // does it, so membership stays per app and its token stays in the adapter.
+  tools.register(createChannelJoinTool(async ({ agentId, channel, conversation }) => {
+    const { adapter, carriesOthers } = channelCarrying(channel, agentId, (candidate) => candidate.joinConversation !== undefined);
+    if (!adapter?.joinConversation) {
+      throw new Error(carriesOthers
+        ? `No running '${channel}' channel carries agent ${agentId}, so it has no app to join a channel with.`
+        : `No running channel can join '${channel}' conversations.`);
+    }
+    return adapter.joinConversation({ agentId, conversation });
+  }));
+  tools.register(createChannelInviteTool(async ({ agentId, channel, ...request }) => {
+    const { adapter, carriesOthers } = channelCarrying(channel, agentId, (candidate) => candidate.inviteToConversation !== undefined);
+    if (!adapter?.inviteToConversation) {
+      throw new Error(carriesOthers
+        ? `No running '${channel}' channel carries agent ${agentId}, so it has no app to invite anyone with.`
+        : `No running channel can invite people to '${channel}' conversations.`);
+    }
+    return adapter.inviteToConversation({ agentId, ...request });
   }));
   tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
     // The same carrying rule as outbound: a read goes through the app of

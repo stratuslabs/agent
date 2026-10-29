@@ -115,3 +115,122 @@ export const createChannelCreateTool = (create: ConversationCreator): Tool => ({
     } as JsonObject;
   },
 });
+
+export const CHANNEL_JOIN_TOOL_NAME = 'channel.join';
+export const CHANNEL_INVITE_TOOL_NAME = 'channel.invite';
+
+/**
+ * Joins one existing conversation with the agent's own channel app, over
+ * the channel contract's `joinConversation`, mirrored here like
+ * `ConversationCreator`.
+ */
+export type ConversationJoiner = (input: {
+  agentId: string;
+  /** The channel kind, e.g. `slack`. */
+  channel: string;
+  conversation: string;
+}) => Promise<{ conversation: string; alreadyMember: boolean }>;
+
+/**
+ * Invites people to one existing conversation through the agent's own
+ * channel app, over the channel contract's `inviteToConversation`.
+ * Rejecting means nobody was invited.
+ */
+export type ConversationInviter = (input: {
+  agentId: string;
+  /** The channel kind, e.g. `slack`. */
+  channel: string;
+  conversation: string;
+  /** Channel-native user ids, or agent ids the channel resolves to their app. */
+  invite: string[];
+}) => Promise<{ invited: string[]; notInvited: Array<{ who: string; reason: string }> }>;
+
+const requiredText = (tool: string, input: JsonObject, key: string, what: string): string => {
+  const value = typeof input[key] === 'string' ? (input[key] as string).trim() : '';
+  if (!value) {
+    throw new Error(`${tool} requires "${key}", ${what}.`);
+  }
+  return value;
+};
+
+/**
+ * Join an existing public channel with the agent's own app, so it can read
+ * the channel and be mentioned there without a person adding it.
+ *
+ * `gated`, like `channel.create`: Slack starts sending the agent the
+ * channel's messages. Who gets a turn does not change, since principals
+ * and admit still decide. The result names the channel by id only: its
+ * name and topic are whatever its members typed.
+ */
+export const createChannelJoinTool = (join: ConversationJoiner): Tool => ({
+  name: CHANNEL_JOIN_TOOL_NAME,
+  description: 'Join an existing public channel with your own app, by its id (for Slack, C…, from the channel\'s link or a message). '
+    + 'Joining a channel you are already in changes nothing and says alreadyMember. '
+    + 'An app can never join a private channel on its own: a member has to invite it.',
+  risk: 'gated',
+  parameters: {
+    type: 'object',
+    properties: {
+      channel: { type: 'string', description: 'The channel kind, e.g. "slack".' },
+      conversation: { type: 'string', description: 'The id of the channel to join (for Slack, C…), not its name.' },
+    },
+    required: ['channel', 'conversation'],
+  },
+  async execute(input: JsonObject, session: Session) {
+    const channel = requiredText(CHANNEL_JOIN_TOOL_NAME, input, 'channel', 'the channel kind (e.g. "slack")');
+    const conversation = requiredText(CHANNEL_JOIN_TOOL_NAME, input, 'conversation', 'the id of the channel to join');
+    const result = await join({ agentId: session.agent.id, channel, conversation });
+    return { joined: true, channel, conversation: result.conversation, alreadyMember: result.alreadyMember === true } as JsonObject;
+  },
+});
+
+/**
+ * Invite people and other agents to a channel that already exists, through
+ * the agent's own app, which has to be in it.
+ *
+ * `gated`, like `channel.create`: everyone invited to a private channel can
+ * read its history. The approval prompt shows the channel and each
+ * invitee. A rejection means nobody was invited; anything else comes back
+ * with who was and who was not.
+ */
+export const createChannelInviteTool = (invite: ConversationInviter): Tool => ({
+  name: CHANNEL_INVITE_TOOL_NAME,
+  description: 'Invite people and other agents to an existing channel your own app is in, by the channel\'s id (for Slack, C…). '
+    + 'invite takes the channel\'s user ids (for Slack, U…) and other agents\' ids on this host, which resolve to their apps. '
+    + 'notInvited says who was not added and why; report those rather than retrying everyone. '
+    + 'If your app is not in the channel, join it first with channel.join (public channels only).',
+  risk: 'gated',
+  parameters: {
+    type: 'object',
+    properties: {
+      channel: { type: 'string', description: 'The channel kind, e.g. "slack".' },
+      conversation: { type: 'string', description: 'The id of the channel to invite them to (for Slack, C…), not its name.' },
+      invite: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 1,
+        description: 'Who to invite: user ids, or agent ids on this host.',
+      },
+    },
+    required: ['channel', 'conversation', 'invite'],
+  },
+  async execute(input: JsonObject, session: Session) {
+    const channel = requiredText(CHANNEL_INVITE_TOOL_NAME, input, 'channel', 'the channel kind (e.g. "slack")');
+    const conversation = requiredText(CHANNEL_INVITE_TOOL_NAME, input, 'conversation', 'the id of the channel to invite them to');
+    const raw = input.invite;
+    if (raw === undefined || raw === null || (Array.isArray(raw) && raw.length === 0)) {
+      throw new Error(`${CHANNEL_INVITE_TOOL_NAME}: "invite" must list at least one user or agent id.`);
+    }
+    if (!Array.isArray(raw) || raw.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+      throw new Error(`${CHANNEL_INVITE_TOOL_NAME}: "invite" must be a list of non-empty ids.`);
+    }
+    const unique = [...new Set((raw as string[]).map((entry) => entry.trim()))];
+    const result = await invite({ agentId: session.agent.id, channel, conversation, invite: unique });
+    return {
+      channel,
+      conversation,
+      invited: [...result.invited],
+      notInvited: result.notInvited.map(({ who, reason }) => ({ who, reason })),
+    } as JsonObject;
+  },
+});
