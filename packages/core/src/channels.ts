@@ -691,7 +691,9 @@ export interface ChannelAdapter {
    * conversation may have been archived and that a retry is safe.
    *
    * The gateway refuses the conversation the asking work came from before
-   * an adapter is asked, so an adapter need not check that.
+   * an adapter is asked, so an adapter need not check that. It asks the
+   * adapter's `sessionConversation` which one that is, so an adapter with
+   * this method implements that too: without it, every archive is refused.
    */
   archiveConversation?(request: ConversationArchiveRequest): Promise<ConversationArchiveResult>;
   /**

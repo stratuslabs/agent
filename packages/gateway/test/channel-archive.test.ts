@@ -65,7 +65,12 @@ const say = (step: Step): string => JSON.stringify(step);
  * the way Slack's are `slack:<agent>:<team>:<C…>`. Ava can archive, spawn a
  * sub-agent that archives, and delegate to Mia, who can archive.
  */
-const archiveGateway = async (options: { approvals?: 'remote'; answer?: 'once' | 'always' } = {}) => {
+const archiveGateway = async (options: {
+  approvals?: 'remote';
+  answer?: 'once' | 'always';
+  /** The fixture channel can't say which conversation a session is in, or fails saying it. */
+  sessionConversation?: 'missing' | 'throws';
+} = {}) => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', [
     '---', 'name: Ava', 'id: ava', 'provider: member',
@@ -87,10 +92,17 @@ const archiveGateway = async (options: { approvals?: 'remote'; answer?: 'once' |
             name: 'fixture',
             async start() {},
             async stop() {},
-            sessionConversation(agentId: string, sessionId: string) {
-              const match = /^fx:([^:]+):(C[A-Z0-9]+)$/.exec(sessionId);
-              return match && match[1] === agentId ? match[2] : undefined;
-            },
+            ...(options.sessionConversation === 'missing'
+              ? {}
+              : {
+                  sessionConversation(agentId: string, sessionId: string) {
+                    if (options.sessionConversation === 'throws') {
+                      throw new Error('fixture: lookup failed');
+                    }
+                    const match = /^fx:([^:]+):(C[A-Z0-9]+)$/.exec(sessionId);
+                    return match && match[1] === agentId ? match[2] : undefined;
+                  },
+                }),
             async archiveConversation(request: { agentId: string; conversation: string }) {
               archived.push(`${request.agentId}:${request.conversation}`);
               return { conversation: request.conversation, alreadyArchived: false };
@@ -257,6 +269,21 @@ test('channel.archive from a session whose id says it was started by another, wh
     assert.deepEqual(archived, []);
   } finally {
     await gateway.stop();
+  }
+});
+
+test('channel.archive is refused when the channel can\'t say which conversation the work was asked from', async () => {
+  for (const sessionConversation of ['missing', 'throws'] as const) {
+    const { gateway, archived } = await archiveGateway({ sessionConversation });
+    try {
+      for (const step of [say({ do: 'archive', conversation: 'C2' }), say({ do: 'spawn', conversation: 'C2' })]) {
+        const refused = await gateway.dispatch({ sessionId: 'fx:ava:C1', agentId: 'ava', userMessage: step });
+        assert.match(transcript(refused), /can't tell which conversation this work was asked from/, `${sessionConversation}: ${step}`);
+      }
+      assert.deepEqual(archived, [], sessionConversation);
+    } finally {
+      await gateway.stop();
+    }
   }
 });
 
