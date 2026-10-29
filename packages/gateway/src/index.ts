@@ -114,6 +114,7 @@ import { createFleetReader } from './fleet.ts';
 import {
   createEventIntake,
   summarizeEvents,
+  type EventIntake,
   type EventIntakeRequest,
   type EventIntakeResponse,
   type EventSourceConfig,
@@ -1676,26 +1677,39 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   // ---- events (card 590) ---------------------------------------------------
 
-  // Opened only for a daemon with sources, so one that never takes events
-  // never grows the tables. Its own connection to fleet.db, like schedules'.
+  // Opened for the first source, so a daemon that never takes events never
+  // grows the tables: at construction for the config's sources, or when the
+  // first plugin feeding a source loads (phase 2), which is at start(),
+  // before the scheduler's start-up pass. Its own connection to fleet.db,
+  // like schedules'.
   const eventSources = options.events?.sources ?? {};
-  const eventStore = Object.keys(eventSources).length > 0
-    ? new SqliteEventStore(fleetDbIn(stateDir), { stateHome: stateDir })
-    : undefined;
-  const eventIntake = eventStore
-    ? createEventIntake({
-      store: eventStore,
-      sources: () => eventSources,
-      // The daemon's own credential, read per delivery: a stored or
-      // rotated secret works on the next one, with no restart.
-      secret: (name) => resolveDaemonCredential(env, name),
-      // The triggers are schedules: `schedule.on` rows on this source.
-      // Late-bound, because the scheduler is built further down.
-      triggers: (sourceId) => scheduler.eventTriggers(sourceId),
-      ...(options.events?.maxBodyBytes !== undefined ? { maxBodyBytes: options.events.maxBodyBytes } : {}),
-      warn,
-    })
-    : undefined;
+  /** Sources plugins feed: source id to the package that declared it, filled as each loads. */
+  const pluginEventSources = new Map<string, string>();
+  const eventSourceIds = (): string[] => [...Object.keys(eventSources), ...pluginEventSources.keys()];
+  let eventStore: SqliteEventStore | undefined;
+  let eventIntake: EventIntake | undefined;
+  const openEvents = (): { store: SqliteEventStore; intake: EventIntake } => {
+    if (!eventStore || !eventIntake) {
+      eventStore = new SqliteEventStore(fleetDbIn(stateDir), { stateHome: stateDir });
+      eventIntake = createEventIntake({
+        store: eventStore,
+        sources: () => eventSources,
+        pluginSources: () => [...pluginEventSources.keys()],
+        // The daemon's own credential, read per delivery: a stored or
+        // rotated secret works on the next one, with no restart.
+        secret: (name) => resolveDaemonCredential(env, name),
+        // The triggers are schedules: `schedule.on` rows on this source.
+        // Late-bound, because the scheduler is built further down.
+        triggers: (sourceId) => scheduler.eventTriggers(sourceId),
+        ...(options.events?.maxBodyBytes !== undefined ? { maxBodyBytes: options.events.maxBodyBytes } : {}),
+        warn,
+      });
+    }
+    return { store: eventStore, intake: eventIntake };
+  };
+  if (Object.keys(eventSources).length > 0) {
+    openEvents();
+  }
 
   /**
    * The started adapter of one kind that speaks for an agent and has the
@@ -1796,7 +1810,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // `SchedulerRuntimeOptions.ready`.
     ready: () => assertStateCompatible(env),
     paused: () => intakeState.paused,
-    ...(eventStore ? { events: { store: eventStore, sources: () => Object.keys(eventSources) } } : {}),
+    ...(eventStore ? { events: { store: eventStore, sources: eventSourceIds } } : {}),
     log,
     warn,
   });
@@ -5408,6 +5422,39 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         onRead: (method) => log(`fleet read: ${method} by plugin ${packageName}`),
       }),
       providerCallGuards,
+      eventSources: {
+        reserved: Object.keys(eventSources),
+        register: (packageName, sourceIds) => {
+          for (const sourceId of sourceIds) {
+            pluginEventSources.set(sourceId, packageName);
+          }
+          if (!eventStore) {
+            // The first source on a daemon whose config has none: the
+            // scheduler was built without events, so it takes them now,
+            // before its start-up pass reads what is waiting.
+            scheduler.attachEvents({ store: openEvents().store, sources: eventSourceIds });
+          }
+        },
+        ingest: async (packageName, sourceId, event) => {
+          if (pluginEventSources.get(sourceId) !== packageName) {
+            throw new Error(`Plugin ${packageName} does not feed event source "${sourceId}" on this daemon.`);
+          }
+          // The store closes last in a stop. Until then an event is kept
+          // and goes out from the next start; after, refused, so a poller
+          // keeps its cursor where it was.
+          if (storesClosed) {
+            throw new Error('stratusd has stopped, so this event was not stored. Feed it again once the daemon is back.');
+          }
+          const answer = openEvents().intake.ingest(sourceId, event);
+          // Sent now rather than at the next tick; the scheduler decides
+          // hold or fire, and does nothing while it is stopped or not yet
+          // started.
+          if (answer.status === 'matched') {
+            scheduler.kickEvents();
+          }
+          return answer;
+        },
+      },
     });
     loadedPlugins = result.loaded;
     pluginFailures = result.failures;
@@ -5421,6 +5468,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...plugin.contributions.memory.map((name) => `memory store ${name}`),
         ...plugin.contributions.executors.map((name) => `executor ${name}`),
         ...(plugin.providerCallGuards > 0 ? ['guards model calls'] : []),
+        ...plugin.eventSources.map((sourceId) => `event source ${sourceId}`),
       ];
       log(`plugin ${plugin.package} loaded — ${contributed.join(', ') || 'no tools'}`);
     }
@@ -6260,7 +6308,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!eventStore || !eventIntake) {
         return { since, sources: {}, unknownSource: 0 };
       }
-      return summarizeEvents({ sourceIds: Object.keys(eventSources), since, activity: eventStore.activity(since), counters: eventIntake.counters() });
+      return summarizeEvents({
+        sourceIds: eventSourceIds(),
+        plugins: Object.fromEntries(pluginEventSources),
+        since,
+        activity: eventStore.activity(since),
+        counters: eventIntake.counters(),
+      });
     },
 
     eventDeliveries(options = {}) {

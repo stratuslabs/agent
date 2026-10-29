@@ -10836,6 +10836,7 @@ test('stratus events renders each source from the daemon: last delivery, last re
         firings: { held: 1 },
         refusedBeforeRow: { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 2 },
       },
+      poll: { plugin: 'stratus-plugin-github-poll', deliveries: {}, firings: {}, refusedBeforeRow: { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 0 } },
     },
   };
   const seen: Array<{ url: string | undefined; auth: string | undefined }> = [];
@@ -10870,6 +10871,9 @@ test('stratus events renders each source from the daemon: last delivery, last re
       '  last delivery: 2026-10-28T03:20:23.210Z (refused)',
       '  last 24h: 1 refused; firings: 1 held',
       '  refused before a row since the daemon started: 2 no secret set',
+      'poll (fed by plugin stratus-plugin-github-poll)',
+      '  last delivery: none yet',
+      '  last 24h: no deliveries; no firings',
       'Requests to unknown sources since the daemon started: 2',
       '',
     ].join('\n'));

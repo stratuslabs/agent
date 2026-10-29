@@ -139,8 +139,9 @@ schedule (`schedule.list`, `schedule.cancel`, `stratus schedules`,
   `author`. A key starting with `data.` is a path into the event's JSON data
   and matches only a string there. Anything else is refused when the trigger
   is set. No model runs to decide a match.
-- **The source** must be one the operator configured. `schedule.on` refuses
-  any other.
+- **The source** must be one the operator configured, or one a loaded plugin
+  feeds (see [Sources a plugin feeds](#sources-a-plugin-feeds)).
+  `schedule.on` refuses any other.
 - **What the agent sees:** the trigger's prompt, then the event (its
   attributes and data as JSON, at most 16 KB, with a note when it's cut).
   Every event on one subject (one pull request, say) continues one
@@ -198,6 +199,27 @@ github
 `GET /api/v1/health` carries the same summary under `events` when a source
 is configured, so a monitor sees refusals climb. `GET /api/v1/events/deliveries`
 lists the delivery records themselves, which never hold a body.
+
+## Sources a plugin feeds
+
+A daemon that can't take deliveries from the internet, or a service with no
+webhooks, can still wake triggers: a plugin polls, or holds a stream open,
+and feeds what it finds as events. Its manifest declares the source ids it
+feeds (`"contributes": { "eventSources": [{ "name": "github" }] }`), and
+enabling the plugin in the `plugins` block is all the operator does: there is
+no `events.sources` entry and no secret, and nothing listens. Those events go
+through the same limits, dedup, filter and firings as a signed delivery, and
+`schedule.on` takes the plugin's source like a configured one. A trigger
+names only the source id, so a source that moves from a poller to a webhook
+keeps its triggers: disable the plugin, then configure the same id here.
+
+A plugin can't take a source id the `events` block already configures, and
+two plugins can't feed one id; the second is refused at load, naming the
+first. A plugin's source is never a path on the events port: a request to it
+is a 404, like any unknown source. `stratus events` lists it as
+`<id> (fed by plugin <package>)`. See
+[`docs/architecture/plugins.md`](../architecture/plugins.md) for what a
+plugin author writes.
 
 ## Reaching a daemon behind NAT
 

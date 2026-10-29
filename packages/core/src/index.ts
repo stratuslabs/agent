@@ -5146,10 +5146,58 @@ export interface PluginContext {
    * itself loaded.
    */
   providerCalls?: ProviderCallGuardHandle;
+  /**
+   * Feeds this plugin's events to the host's event triggers. See
+   * {@link EventIngestHandle}. A host that omits it takes no events from
+   * plugins (`stratus run` is one), and a plugin whose whole job is feeding
+   * them must fail its `setup` naming it, rather than load and poll for
+   * events nothing will ever act on.
+   */
+  events?: EventIngestHandle;
 }
 
 export interface ProviderCallGuardHandle {
   register(guard: ProviderCallGuard): void;
+}
+
+/**
+ * What the host did with one event a plugin fed it. `matched`: stored, with
+ * a firing waiting for each event trigger it matched. `unmatched`: stored,
+ * and no trigger wanted it. `duplicate`: the source took the same id within
+ * the dedup window, so nothing new was stored and nothing fires.
+ */
+export interface EventIngestResult {
+  status: 'matched' | 'unmatched' | 'duplicate';
+}
+
+/**
+ * How a plugin that is not a webhook (a poller, an MCP subscriptions bridge)
+ * wakes agents' event triggers. Its events take the same path a signed
+ * delivery to the events port takes: the size limit, the per-source rate,
+ * dedup on the source and the event's id, the rule filter, then a firing
+ * per matched trigger. What a plugin skips is the signature, because the
+ * plugin is code the operator installed. Its event text is still labeled
+ * `external` in the turn, the way a webhook's is: who fed an event says
+ * nothing about who wrote the comment inside it.
+ *
+ * Bound to the source ids the plugin's manifest declares
+ * (`contributes.eventSources`), the way its tools are bound to the names it
+ * declares. A source a plugin feeds is never a path on the events port.
+ */
+export interface EventIngestHandle {
+  /**
+   * Store one event for a declared source. The event is a structured
+   * CloudEvents 1.0 object: `specversion` "1.0" and non-empty string `id`,
+   * `source` and `type`, with `subject`, `time`, scalar extension
+   * attributes and JSON `data` as wanted. Resolves once it is stored, so a
+   * poller can move its cursor past it. Rejects, naming the reason, for a
+   * source the manifest does not declare, an event that is not a
+   * CloudEvent, one over the size limit, a source over its rate, a plugin
+   * that has not finished loading or did not load, and a host that has
+   * stopped. A rejected event fires nothing; feeding it again later is
+   * safe, because the id is what dedup keys on.
+   */
+  ingest(sourceId: string, event: JsonObject): Promise<EventIngestResult>;
 }
 
 export interface Plugin {

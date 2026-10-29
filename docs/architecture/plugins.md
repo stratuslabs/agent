@@ -40,6 +40,7 @@ plugin can *register* one through the entrypoint, and today most cannot:
 | memory | `AgentMemoryStore`, as a `MemoryStoreContribution` | **yes**, `context.memory` |
 | executors | `Executor`, as an `ExecutorContribution` | **yes**, `context.executors` |
 | provider-call guards | `ProviderCallGuard` | **yes**, `context.providerCalls` |
+| event sources | CloudEvents fed to event triggers | **fed, not registered**: `context.events`, for the sources `contributes.eventSources` declares |
 
 Skills are the one kind that never needed a registration handle: a skill is
 prose the manifest points at (`contributes.skills`, an id and a path inside
@@ -311,6 +312,36 @@ does not hands no slot, and a plugin that needs one fails its `setup`
 naming it rather than loading with a limit nothing enforces. The load log
 line says `guards model calls`.
 
+**A plugin can wake agents' event triggers.** A source that isn't a webhook
+(a poller for a service with no webhooks, a daemon that can't open a port,
+an MCP subscriptions bridge) feeds events with
+`context.events.ingest(sourceId, event)`, for a source id its manifest
+declares in `contributes.eventSources` (`[{ "name": "github" }]`, lowercase
+runs joined by hyphens, at most 64 characters). The event is a structured
+CloudEvents 1.0 object (`specversion` `"1.0"`, non-empty string `id`,
+`source` and `type`, then `subject`, `time`, scalar extension attributes and
+JSON `data` as wanted), and it takes the path a signed delivery to the events
+port takes: the body limit, 120 events a minute per source, dedup on the
+source and the event's `id` for 7 days, the rule filter, then a firing per
+matched trigger. Only the signature is skipped, because the plugin is code
+the operator installed; the event's text still reaches the agent labeled
+`external`. `ingest` resolves with `matched`, `unmatched` or `duplicate`
+once the event is stored, so a poller moves its cursor only after that, and
+rejects with the reason otherwise (an undeclared source, not a CloudEvent,
+too large, over the rate, the daemon stopped). A rejected event fires
+nothing, and feeding it again is safe because the id is what dedup keys on.
+The handle is closed during `setup` and opens once the plugin has loaded
+whole, so a poller starts its first poll after `setup` returns; a plugin
+refused at load never gets a source. A declared id that the config's
+`events.sources` already has, or another loaded plugin already feeds,
+refuses the plugin before its code runs. A plugin's source is never a path
+on the events port, `schedule.on` accepts it like a configured one, and
+`stratus events` lists it with the plugin that feeds it. The load log line
+says `event source <id>`. The daemon hands every loaded plugin the handle;
+`stratus run` takes no events and hands none, and a plugin that exists to
+feed events fails its `setup` naming it. See
+[the events guide](../guides/events.md#sources-a-plugin-feeds).
+
 **`ledgerRoot` is the host's key and is stripped**, the way `toolRisks` is,
 so a plugin's code never sees it. Two plugins write the filesystem
 provenance ledger (`tool-fs` and `plugin-mcp`), and an operator who
@@ -398,7 +429,9 @@ A `"stratus"` field in `package.json`:
       "providers": [{ "name": "ollama" }],
       "channels":  [{ "name": "discord" }],
       "memory":    [{ "name": "vectors" }],
-      "executors": [{ "name": "sandbox" }]
+      "executors": [{ "name": "sandbox" }],
+      "//": "and the event sources setup()'s context.events may feed:",
+      "eventSources": [{ "name": "github" }]
     },
     "credentials": ["GITHUB_TOKEN"],
     "config": { "type": "object", "properties": { "org": { "type": "string" } } }

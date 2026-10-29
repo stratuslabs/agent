@@ -232,7 +232,7 @@ Your operator can do more from anywhere they reach the dashboard or the control 
 Only at the machine can someone:
 
 - enable or configure a plugin (its `env` and `headers` included), or choose an executor or memory store;
-- add an event source for `schedule.on`: an `events` block in `~/.stratus/config.json` (`"sources": { "github": { "verify": "github", "secrets": ["events.github"] } }`), the secret stored with `stratus credential set events.github`, and a restart (docs/guides/events.md);
+- add an event source for `schedule.on`: an `events` block in `~/.stratus/config.json` (`"sources": { "github": { "verify": "github", "secrets": ["events.github"] } }`), the secret stored with `stratus credential set events.github`, and a restart (docs/guides/events.md); or a plugin that feeds a source (a poller where no webhook can reach the daemon): its manifest declares the source id, enabling it in `plugins` is the whole setup, and `stratus events` names the plugin;
 - install or update packages;
 - remove a named credential, or replace one without an approver's form;
 - raise a memory's trust (`stratus memory reassert`).

@@ -6,6 +6,8 @@ import type {
   AgentWorkspaces,
   CredentialResolver,
   EventBus,
+  EventIngestHandle,
+  EventIngestResult,
   FleetReader,
   JsonObject,
   Plugin,
@@ -224,6 +226,8 @@ export interface LoadedPlugin {
   contributions: PluginContributionRecords;
   /** How many provider-call guards it registered; see `LoadPluginsOptions.providerCallGuards`. */
   providerCallGuards: number;
+  /** The event sources it feeds, as its manifest declares them; see `LoadPluginsOptions.eventSources`. */
+  eventSources: string[];
   /**
    * The plugin itself, so the host can shut it down. A browser plugin holds
    * a Chromium and a listening socket; a daemon that stopped without
@@ -323,7 +327,59 @@ export interface LoadPluginsOptions {
    * limit nobody enforces.
    */
   providerCallGuards?: ProviderCallGuard[];
+  /**
+   * The host's event triggers, for plugins that feed events (card 590).
+   * Given, every plugin's `setup` receives `PluginContext.events`, bound to
+   * the sources its manifest declares. Omitted, no plugin is handed it.
+   */
+  eventSources?: PluginEventSourceHost;
 }
+
+/**
+ * The host's side of `PluginContext.events`. The loader holds each plugin to
+ * its manifest; the host stores and matches what arrives.
+ */
+export interface PluginEventSourceHost {
+  /**
+   * Source ids the host already takes deliveries for (the config's
+   * `events.sources`). A plugin declaring one is refused whole: two feeds
+   * into one id would make neither's events trustworthy as that source's.
+   */
+  reserved: readonly string[];
+  /** A plugin loaded whole, and these sources are its from now on. */
+  register(packageName: string, sourceIds: readonly string[]): void;
+  /** Store one event for a source `register` gave this package. */
+  ingest(packageName: string, sourceId: string, event: JsonObject): Promise<EventIngestResult>;
+}
+
+/**
+ * A plugin's `PluginContext.events`: refuses a source its manifest doesn't
+ * declare, and anything before the plugin has loaded whole or after it was
+ * refused, so an event never lands for a source that doesn't exist.
+ */
+const manifestBoundEvents = (
+  packageName: string,
+  declared: readonly string[],
+  host: PluginEventSourceHost,
+  phase: () => 'setup' | 'loaded' | 'refused',
+): EventIngestHandle => ({
+  async ingest(sourceId, event) {
+    if (!declared.includes(sourceId)) {
+      throw new Error(
+        `Plugin ${packageName} fed an event to source ${JSON.stringify(sourceId)}, which its manifest does not declare. `
+        + `contributes.eventSources declares: ${declared.length > 0 ? declared.join(', ') : 'none'}.`,
+      );
+    }
+    const now = phase();
+    if (now === 'setup') {
+      throw new Error(`Plugin ${packageName} fed an event before it finished loading. Feed events once setup has returned.`);
+    }
+    if (now === 'refused') {
+      throw new Error(`Plugin ${packageName} did not load, so its event source ${JSON.stringify(sourceId)} does not exist.`);
+    }
+    return host.ingest(packageName, sourceId, event);
+  },
+});
 
 /**
  * A plugin's guard as the host runs it. A refusal on purpose passes
@@ -519,6 +575,8 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
   // Which package owns each name so far, so a collision can name both.
   const owners = new Map<string, string>();
   const contributionOwners = createContributionOwners();
+  // Which package feeds each event source so far, so a second claim can name the first.
+  const eventSourceOwners = new Map<string, string>();
   const targets = createContributionTargets({
     ...(options.providers ? { providers: options.providers } : {}),
     ...(options.channels ? { channels: options.channels } : {}),
@@ -537,9 +595,33 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
     // a child process — and a load that fails after that point leaves them
     // held for the life of a daemon that goes on running without it.
     let instance: Plugin | undefined;
+    // Where the plugin's events handle stands: closed during setup, open
+    // once the plugin has loaded whole, and closed for good if it is
+    // refused. Outside the try for the same reason as `instance`: the
+    // plugin keeps the handle for as long as it runs.
+    let eventsPhase: 'setup' | 'loaded' | 'refused' = 'setup';
     try {
       const { manifest, directory } = await readPluginManifest(specifier, options.host);
       const isTrusted = trusted(manifest.packageName);
+      // Before any of the plugin's code runs: a source id is a claim on
+      // where agents' triggers listen, and the manifest is the whole claim.
+      const eventSourceIds = manifest.contributes.eventSources.map((declared) => declared.name);
+      if (options.eventSources !== undefined) {
+        for (const sourceId of eventSourceIds) {
+          if (options.eventSources.reserved.includes(sourceId)) {
+            throw new PluginManifestError(
+              `Plugin ${manifest.packageName} declares event source ${JSON.stringify(sourceId)}, which is already configured in the "events" block. `
+              + 'Remove one: a source is fed by a webhook or by one plugin, never both.',
+            );
+          }
+          const owner = eventSourceOwners.get(sourceId);
+          if (owner !== undefined) {
+            throw new PluginManifestError(
+              `Plugin ${manifest.packageName} declares event source ${JSON.stringify(sourceId)}, which is already fed by ${owner}. Enable one of them.`,
+            );
+          }
+        }
+      }
       // Validated on the object the plugin will actually be handed, not on
       // the raw block: the block still carries the keys the host strips, and
       // a schema that forbids extra properties would refuse it for them.
@@ -585,6 +667,9 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       // returns, because a guard registered later would land nowhere.
       const stagedGuards: ProviderCallGuard[] = [];
       let guardsOpen = true;
+      const events = options.eventSources !== undefined
+        ? manifestBoundEvents(manifest.packageName, eventSourceIds, options.eventSources, () => eventsPhase)
+        : undefined;
       const providerCalls = options.providerCallGuards !== undefined
         ? {
             register: (guard: ProviderCallGuard): void => {
@@ -621,6 +706,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
           ...(options.subAgents !== undefined ? { subAgents: options.subAgents } : {}),
           ...(options.fleet !== undefined ? { fleet: options.fleet(manifest.packageName) } : {}),
           ...(providerCalls !== undefined ? { providerCalls } : {}),
+          ...(events !== undefined ? { events } : {}),
         });
       } finally {
         guardsOpen = false;
@@ -664,11 +750,20 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         skills,
         contributions: contributed,
         providerCallGuards: stagedGuards.length,
+        eventSources: eventSourceIds,
         instance: plugin,
       });
       // Last, once nothing else can refuse the plugin.
       options.providerCallGuards?.push(...stagedGuards);
+      if (options.eventSources !== undefined && eventSourceIds.length > 0) {
+        options.eventSources.register(manifest.packageName, eventSourceIds);
+        for (const sourceId of eventSourceIds) {
+          eventSourceOwners.set(sourceId, manifest.packageName);
+        }
+      }
+      eventsPhase = 'loaded';
     } catch (error) {
+      eventsPhase = 'refused';
       // Refused, and then released. A plugin whose `dispose` also throws is
       // ignored: it is already being reported as failed, and the second
       // failure would replace the reason that says why.

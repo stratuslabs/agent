@@ -401,6 +401,13 @@ export interface SchedulerRuntime {
    */
   kickEvents(): void;
   /**
+   * Take event triggers on a host that had no source when it built this
+   * runtime: a plugin's source is known only once plugins load, after the
+   * gateway built its scheduler. Once, and with the same options
+   * `SchedulerRuntimeOptions.events` would have carried.
+   */
+  attachEvents(events: SchedulerEventOptions): void;
+  /**
    * The destination carve-out, shaped for the permission policy's
    * `destinations` option: true exactly when this session is a firing of a
    * schedule that still exists, belongs to this session's agent, and was
@@ -459,9 +466,11 @@ interface ResumePlan {
 }
 
 export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): SchedulerRuntime => {
-  const { store, dispatch, validateDestination, sessionStatus, hasAgent, log, warn, events } = options;
+  const { store, dispatch, validateDestination, sessionStatus, hasAgent, log, warn } = options;
+  // Late-bindable once: see `attachEvents`.
+  let events = options.events;
   const clock = options.now ?? (() => new Date());
-  const maxEventsPerAgent = events?.maxConcurrentPerAgent ?? 1;
+  let maxEventsPerAgent = events?.maxConcurrentPerAgent ?? 1;
   const minIntervalMs = options.limits?.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
   const maxConcurrentPerAgent = options.limits?.maxConcurrentPerAgent ?? DEFAULT_MAX_CONCURRENT_PER_AGENT;
   const tickMs = options.limits?.tickMs ?? DEFAULT_TICK_MS;
@@ -530,7 +539,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       throw new Error('createTrigger takes an event cadence.');
     }
     if (!events) {
-      throw new Error('This daemon takes no events: its config has no "events" sources, so a trigger could never fire. The operator adds a source first.');
+      throw new Error('This daemon takes no events: its config has no "events" sources and no plugin feeds one, so a trigger could never fire. The operator adds a source first.');
     }
     const configured = events.sources();
     if (!configured.includes(input.cadence.source)) {
@@ -1037,7 +1046,9 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   const processEvents = (now: Date): void => {
     // Not before start(): a held daemon's scheduler never starts, and its
     // waiting firings must not go out through a delivery's kick either.
-    if (!events || stopped || !started) {
+    // Read once: the closures below would not see a narrowed `let`.
+    const current = events;
+    if (!current || stopped || !started) {
       return;
     }
     const nowIso = now.toISOString();
@@ -1048,7 +1059,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     if (eventsPrunedAt === undefined || now.getTime() - eventsPrunedAt >= EVENT_PRUNE_INTERVAL_MS) {
       eventsPrunedAt = now.getTime();
       try {
-        events.store.prune(nowIso);
+        current.store.prune(nowIso);
       } catch (error) {
         warn(`events: could not prune old deliveries: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -1065,13 +1076,13 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     // A claimed batch stays itself; free firings group by trigger and key.
     // Map order is first appearance in `open()`, oldest first.
     const groups = new Map<string, EventFiringRow[]>();
-    for (const row of events.store.open()) {
+    for (const row of current.store.open()) {
       if (row.batchKey !== undefined && inflightBatches.has(row.batchKey)) {
         continue;
       }
       const trigger = triggerFor(row.triggerId);
       if (!trigger || trigger.agentId !== row.agentId) {
-        events.store.retire([row.id], 'expired', 'Its trigger was cancelled.', nowIso);
+        current.store.retire([row.id], 'expired', 'Its trigger was cancelled.', nowIso);
         continue;
       }
       // Holds expire; a claim does not. A batch claimed before a crash may
@@ -1079,7 +1090,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       // turn or sends an event that never went out, however long the
       // daemon was down.
       if (row.status !== 'firing' && now.getTime() - Date.parse(row.createdAt) > EVENT_HOLD_MAX_MS) {
-        events.store.retire([row.id], 'expired', 'Held for more than 24 hours.', nowIso);
+        current.store.retire([row.id], 'expired', 'Held for more than 24 hours.', nowIso);
         continue;
       }
       const key = row.batchKey !== undefined ? `batch\n${row.batchKey}` : `key\n${row.triggerId}\n${row.coalescingKey}`;
@@ -1091,7 +1102,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     const holdAs = (rows: EventFiringRow[], status: 'held' | 'rate_limited'): void => {
       const ids = rows.filter((row) => row.status !== status).map((row) => row.id);
       if (ids.length > 0) {
-        events.store.hold(ids, status, nowIso);
+        current.store.hold(ids, status, nowIso);
       }
     };
 
@@ -1104,7 +1115,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       const batched = rows[0]!.batchKey !== undefined;
       if (!batched && rows.length > EVENT_HELD_PER_KEY) {
         const dropped = rows.slice(0, rows.length - EVENT_HELD_PER_KEY);
-        events.store.retire(dropped.map((row) => row.id), 'superseded', `Over ${EVENT_HELD_PER_KEY} waiting for one subject; newer ones were kept.`, nowIso);
+        current.store.retire(dropped.map((row) => row.id), 'superseded', `Over ${EVENT_HELD_PER_KEY} waiting for one subject; newer ones were kept.`, nowIso);
         rows = rows.slice(-EVENT_HELD_PER_KEY);
       }
       const { quietHours } = trigger.cadence;
@@ -1123,16 +1134,16 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       eventDeferralsWarned.delete(groupKey);
       const maxPerHour = trigger.cadence.maxPerHour ?? DEFAULT_EVENT_MAX_PER_HOUR;
       const hourAgo = new Date(now.getTime() - 3_600_000).toISOString();
-      if (events.store.turnsStartedSince(trigger.id, hourAgo, rows[0]!.batchKey) >= maxPerHour) {
+      if (current.store.turnsStartedSince(trigger.id, hourAgo, rows[0]!.batchKey) >= maxPerHour) {
         if (!batched && rows.length > 1) {
-          events.store.retire(rows.slice(0, -1).map((row) => row.id), 'superseded', 'A newer event for the same subject replaced it while over the hourly limit.', nowIso);
+          current.store.retire(rows.slice(0, -1).map((row) => row.id), 'superseded', 'A newer event for the same subject replaced it while over the hourly limit.', nowIso);
           rows = rows.slice(-1);
         }
         holdAs(rows, 'rate_limited');
         continue;
       }
       const batchKey = rows[0]!.batchKey ?? rows[rows.length - 1]!.dispatchKey;
-      if (!events.store.claim(rows.map((row) => row.id), batchKey, nowIso, { triggerId: trigger.id })) {
+      if (!current.store.claim(rows.map((row) => row.id), batchKey, nowIso, { triggerId: trigger.id })) {
         continue;
       }
       // When it last went out, on the trigger's own row, so `schedule.list`,
@@ -1213,6 +1224,13 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
           source: sourceId,
           filter: (record.cadence as Extract<ScheduleRecord['cadence'], { kind: 'event' }>).filter,
         }));
+    },
+    attachEvents(attached) {
+      if (events) {
+        throw new Error('This scheduler already takes events; its sources are read live, so add a source there instead.');
+      }
+      events = attached;
+      maxEventsPerAgent = attached.maxConcurrentPerAgent ?? 1;
     },
     kickEvents() {
       try {
