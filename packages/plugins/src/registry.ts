@@ -206,17 +206,11 @@ export class ManifestBoundToolRegistry extends ToolRegistry {
   }
 
   /**
-   * Move this plugin's tools into the shared registry, or refuse the whole
-   * plugin. A name already registered is a load-time error naming both
-   * packages, never a silent overwrite — the same reason a duplicate agent
-   * id refuses the roster rather than picking whichever loaded last.
-   *
-   * Returns the plugin's tool records **live**: the same array later
-   * registrations append to and removals splice from, so a host holding it
-   * always reads the current contribution rather than a snapshot that went
-   * stale at the first reconnect.
+   * Refuse now what `commit` would refuse, without moving anything: so a
+   * load can finish every check, and the host steps that can fail, before
+   * the first irreversible commit.
    */
-  commit(owners: Map<string, string>): PluginToolRecord[] {
+  preflightCommit(owners: ReadonlyMap<string, string>): void {
     for (const name of this.staged.keys()) {
       const existing = owners.get(name);
       if (existing !== undefined) {
@@ -232,6 +226,21 @@ export class ManifestBoundToolRegistry extends ToolRegistry {
         );
       }
     }
+  }
+
+  /**
+   * Move this plugin's tools into the shared registry, or refuse the whole
+   * plugin. A name already registered is a load-time error naming both
+   * packages, never a silent overwrite — the same reason a duplicate agent
+   * id refuses the roster rather than picking whichever loaded last.
+   *
+   * Returns the plugin's tool records **live**: the same array later
+   * registrations append to and removals splice from, so a host holding it
+   * always reads the current contribution rather than a snapshot that went
+   * stale at the first reconnect.
+   */
+  commit(owners: Map<string, string>): PluginToolRecord[] {
+    this.preflightCommit(owners);
     for (const [name, tool] of this.staged) {
       this.target.register(tool);
       owners.set(name, this.manifest.packageName);

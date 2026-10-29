@@ -63,6 +63,7 @@ export {
   type LoadPluginsOptions,
   type LoadPluginsResult,
   type OptionalModuleHost,
+  type PluginEventSourceHost,
   type PluginLoadFailure,
   type PluginSkillRecord,
 } from './loader.ts';

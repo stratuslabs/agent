@@ -10,6 +10,8 @@ const EVENTS_TIMEOUT_MS = 5_000;
 
 /** The fields of `GET /api/v1/events/sources` the text view reads; JSON passes the rest through. */
 interface SourceSummary {
+  /** The plugin that feeds a source the config doesn't define. */
+  plugin?: string;
   lastDelivery?: { at: string; type: string; subject?: string; status: string };
   lastRefusal?: { at: string; reason: string };
   deliveries?: Record<string, number>;
@@ -96,12 +98,12 @@ export const runEvents = async (
   if (sources.length === 0) {
     writeLine(
       streams.stdout,
-      'No event sources are configured. A source is an entry in the "events" block of ~/.stratus/config.json; see docs/guides/events.md.',
+      'No event sources are configured. A source is an entry in the "events" block of ~/.stratus/config.json, or one a loaded plugin feeds; see docs/guides/events.md.',
     );
     return 0;
   }
   for (const [id, source] of sources) {
-    writeLine(streams.stdout, safe(id));
+    writeLine(streams.stdout, typeof source.plugin === 'string' ? `${safe(id)} (fed by plugin ${safe(source.plugin)})` : safe(id));
     const last = source.lastDelivery;
     // A refused body may have no type to show (form-encoded, say).
     writeLine(streams.stdout, last

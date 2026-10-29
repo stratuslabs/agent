@@ -71,6 +71,13 @@ export interface PluginContributions {
   memory: PluginNamedDeclaration[];
   /** Executor names `setup()` may register. */
   executors: PluginNamedDeclaration[];
+  /**
+   * Event sources the plugin feeds through `PluginContext.events` (card
+   * 590): the ids an agent's `schedule.on` names. Not a registration: the
+   * declaration is the whole claim, checked against the config's own
+   * sources and every other plugin's before the plugin's code runs.
+   */
+  eventSources: PluginNamedDeclaration[];
 }
 
 /** The contribution kinds a manifest declares by name alone. */
@@ -145,6 +152,9 @@ const RISKS: ToolRisk[] = ['safe', 'gated', 'dangerous'];
 // hyphens, like a skill id, so `plugin:` prefixed forms and package
 // names (`@scope/name`) can never be mistaken for one.
 const CONTRIBUTION_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** The config's own limit on an event source id (`events.sources`). */
+const EVENT_SOURCE_NAME_MAX = 64;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -349,6 +359,29 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
     }
   }
 
+  const eventSources: PluginNamedDeclaration[] = [];
+  if (contributes.eventSources !== undefined) {
+    if (!Array.isArray(contributes.eventSources)) {
+      throw new PluginManifestError(`Plugin ${packageName}: contributes.eventSources must be an array.`);
+    }
+    for (const entry of contributes.eventSources) {
+      if (!isObject(entry) || typeof entry.name !== 'string') {
+        throw new PluginManifestError(`Plugin ${packageName}: every contributes.eventSources entry needs a "name".`);
+      }
+      // A subset of what the config allows for its own source ids, so a
+      // plugin's source and a configured one share one namespace.
+      if (!CONTRIBUTION_NAME_PATTERN.test(entry.name) || entry.name.length > EVENT_SOURCE_NAME_MAX) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: ${JSON.stringify(entry.name)} is not an event source name. Use lowercase runs joined by hyphens, at most ${EVENT_SOURCE_NAME_MAX} characters (github, board-poll).`,
+        );
+      }
+      if (eventSources.some((declared) => declared.name === entry.name)) {
+        throw new PluginManifestError(`Plugin ${packageName}: contributes.eventSources declares ${JSON.stringify(entry.name)} twice.`);
+      }
+      eventSources.push({ name: entry.name });
+    }
+  }
+
   const credentials: string[] = [];
   if (stratus.credentials !== undefined) {
     if (!Array.isArray(stratus.credentials) || stratus.credentials.some((name) => typeof name !== 'string')) {
@@ -373,7 +406,7 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
   return {
     packageName,
     pluginVersion: PLUGIN_MANIFEST_VERSION,
-    contributes: { tools, toolsDiscovered, skills, ...named },
+    contributes: { tools, toolsDiscovered, skills, ...named, eventSources },
     credentials,
     ...(typeof stratus.credentialsFromConfig === 'string' ? { credentialsFromConfig: stratus.credentialsFromConfig } : {}),
     ...(stratus.envBindings === true ? { envBindings: true } : {}),

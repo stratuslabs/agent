@@ -44,6 +44,7 @@ import {
   trustedConfigError,
   grantReadSerializer,
   grantWriteSerializer,
+  type EventsConfig,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describePosture, describeRemoteMode, describeUnreachable } from '../approvals.ts';
@@ -88,6 +89,25 @@ import {
  * to change without decoding the wording. A decision from a policy that
  * names no layer logs as it always did.
  */
+/**
+ * What the gateway takes from the trusted `events` block: the webhook
+ * sources, and the body limit, which also holds plugin-fed events (card 590
+ * phase 2), so it goes through even when no webhook source is configured.
+ */
+export const gatewayEventOptions = (
+  events: EventsConfig,
+): { sources?: NonNullable<EventsConfig['sources']>; maxBodyBytes?: number } | undefined => {
+  const sources = events.sources ?? {};
+  const hasSources = Object.keys(sources).length > 0;
+  if (!hasSources && events.maxBodyBytes === undefined) {
+    return undefined;
+  }
+  return {
+    ...(hasSources ? { sources } : {}),
+    ...(events.maxBodyBytes !== undefined ? { maxBodyBytes: events.maxBodyBytes } : {}),
+  };
+};
+
 export const refusalLogLine = (decision: PermissionDecision): string =>
   `${decision.agentId}: ${decision.layer === undefined ? '' : `[${decision.layer}] `}${decision.reason} (session ${decision.sessionId})`;
 
@@ -405,6 +425,7 @@ const serveHeldHome = async (
   // loads, stops before the stores drain, and waits out a held start.
   const eventsConfig = await loadServeEvents(env, command.configPath, warn);
   const eventSources = eventsConfig.sources ?? {};
+  const gatewayEvents = gatewayEventOptions(eventsConfig);
   if (Object.keys(eventSources).length > 0) {
     const createEventListener = await loadEventListener();
     if (createEventListener) {
@@ -807,9 +828,7 @@ const serveHeldHome = async (
     ...(approvalsConfig.timeoutMs !== undefined ? { approvalTimeoutMs: approvalsConfig.timeoutMs } : {}),
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
-    ...(Object.keys(eventSources).length > 0
-      ? { events: { sources: eventSources, ...(eventsConfig.maxBodyBytes !== undefined ? { maxBodyBytes: eventsConfig.maxBodyBytes } : {}) } }
-      : {}),
+    ...(gatewayEvents !== undefined ? { events: gatewayEvents } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
     ...(Object.keys(autoContinue).length > 0 ? { autoContinueFor: (agentId: string) => autoContinue[agentId] } : {}),

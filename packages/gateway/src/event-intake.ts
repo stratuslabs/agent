@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import { escapeControlCharacters, type JsonObject, type JsonValue } from '@stratusagent/core';
+import { escapeControlCharacters, type EventIngestResult, type JsonObject, type JsonValue } from '@stratusagent/core';
 import { matchesEventFilter, type EventFilter, type InboundEvent } from '@stratusagent/agents';
 import type { EventSourceConfig } from '@stratusagent/state';
 
@@ -65,6 +65,8 @@ export interface EventIntakeCounters {
 
 /** One configured source in the events summary (`stratus events`, `/health`). */
 export interface EventSourceSummary extends Omit<EventSourceActivity, 'lastRefused'> {
+  /** The plugin that feeds this source, for one a plugin declared rather than the config. */
+  plugin?: string;
   /** Requests refused before they could leave a row, since this daemon started. */
   refusedBeforeRow: Omit<EventSourceCounters, 'lastRefusal'>;
   /** The newest refusal of any kind: a refused row, or one this daemon refused before a row. */
@@ -86,6 +88,8 @@ export interface EventsSummary {
  */
 export const summarizeEvents = (input: {
   sourceIds: readonly string[];
+  /** Plugin sources: source id to the package that feeds it. */
+  plugins?: Readonly<Record<string, string>>;
   since: string;
   activity: Readonly<Record<string, EventSourceActivity>>;
   counters: EventIntakeCounters;
@@ -98,7 +102,13 @@ export const summarizeEvents = (input: {
       ?? { tooLarge: 0, badSignature: 0, rateLimited: 0, notReady: 0 };
     // ISO instants compare as strings.
     const lastRefusal = lastRefused !== undefined && (counted === undefined || lastRefused.at > counted.at) ? lastRefused : counted;
-    return [sourceId, { ...rows, refusedBeforeRow, ...(lastRefusal !== undefined ? { lastRefusal: { ...lastRefusal } } : {}) }];
+    const plugin = input.plugins !== undefined && Object.hasOwn(input.plugins, sourceId) ? input.plugins[sourceId] : undefined;
+    return [sourceId, {
+      ...(plugin !== undefined ? { plugin } : {}),
+      ...rows,
+      refusedBeforeRow,
+      ...(lastRefusal !== undefined ? { lastRefusal: { ...lastRefusal } } : {}),
+    }];
   })),
 });
 
@@ -106,6 +116,12 @@ export interface EventIntakeOptions {
   store: Pick<SqliteEventStore, 'accept' | 'refuse'>;
   /** The configured sources, read per request. */
   sources(): Readonly<Record<string, EventSourceConfig>>;
+  /**
+   * The sources plugins feed through `ingest` (card 590 phase 2), read per
+   * event. Never served over HTTP: they have no secret to check a request
+   * against. Default none.
+   */
+  pluginSources?(): readonly string[];
   /**
    * A stored credential's value by name, or undefined when it is not set.
    * Asked per request, so `stratus credential set` takes effect on the next
@@ -121,6 +137,14 @@ export interface EventIntakeOptions {
 
 export interface EventIntake {
   receive(request: EventIntakeRequest): Promise<EventIntakeResponse>;
+  /**
+   * One event a plugin source fed (card 590 phase 2), under the same size
+   * limit, per-source rate, dedup, rule filter and firings as a signed
+   * delivery, with no signature to check: the plugin is code the operator
+   * installed, and the loader held it to the sources its manifest declares.
+   * Throws a sentence naming the reason for anything refused.
+   */
+  ingest(sourceId: string, event: JsonObject): EventIngestResult;
   counters(): EventIntakeCounters;
 }
 
@@ -244,6 +268,20 @@ export const parseStandardWebhookEvent = (
       ...(object.data !== undefined ? { data: object.data } : {}),
     };
   }
+  const event = parseCloudEvent(object);
+  if (event.attributes.id !== input.webhookId) {
+    throw new MalformedEventError('The CloudEvent id must equal the webhook-id header it was signed under.');
+  }
+  return event;
+};
+
+/**
+ * A structured CloudEvents 1.0 object as an event: what a Standard Webhooks
+ * body with `specversion` carries, and what a plugin source feeds. Extension
+ * attributes keep only valid names with scalar values, as strings; anything
+ * else is dropped, not refused.
+ */
+const parseCloudEvent = (object: Readonly<Record<string, JsonValue>>): InboundEvent => {
   if (object.specversion !== '1.0') {
     throw new MalformedEventError(`CloudEvents specversion "${String(object.specversion)}" is not supported; send "1.0".`);
   }
@@ -252,9 +290,6 @@ export const parseStandardWebhookEvent = (
     if (typeof value !== 'string' || value.length === 0) {
       throw new MalformedEventError(`A CloudEvent needs a non-empty string "${required}".`);
     }
-  }
-  if (object.id !== input.webhookId) {
-    throw new MalformedEventError('The CloudEvent id must equal the webhook-id header it was signed under.');
   }
   // Refused, not dropped: accepting it would hand triggers an event whose
   // payload silently vanished. Events here are JSON.
@@ -369,8 +404,11 @@ export const createEventIntake = (options: EventIntakeOptions): EventIntake => {
 
   const answer = (status: number, body: JsonObject): EventIntakeResponse => ({ status, body });
 
-  /** Count a signed request against its source's minute; false when the minute is full. */
-  const admitSigned = (sourceId: string): boolean => {
+  /**
+   * Count a signed request, or a plugin's event, against its source's
+   * minute; false when the minute is full.
+   */
+  const admit = (sourceId: string): boolean => {
     const at = now().getTime();
     const recent = (signedRequests.get(sourceId) ?? []).filter((time) => at - time < 60_000);
     if (recent.length >= EVENT_SOURCE_REQUESTS_PER_MINUTE) {
@@ -431,7 +469,7 @@ export const createEventIntake = (options: EventIntakeOptions): EventIntake => {
       return answer(401, { error: 'bad_signature', message: `Refused: ${signatureProblem}.` });
     }
 
-    if (!admitSigned(sourceId)) {
+    if (!admit(sourceId)) {
       count.rateLimited += 1;
       refusal(sourceId, `over ${EVENT_SOURCE_REQUESTS_PER_MINUTE} signed requests a minute`);
       return answer(429, { error: 'rate_limited', message: `Over ${EVENT_SOURCE_REQUESTS_PER_MINUTE} requests a minute for this source.` });
@@ -473,7 +511,15 @@ export const createEventIntake = (options: EventIntakeOptions): EventIntake => {
       throw error;
     }
 
-    // The rule filter, before anything that could cost a model call.
+    return answer(200, { status: storeEvent(sourceId, event, receivedAt) });
+  };
+
+  /**
+   * The rule filter, before anything that could cost a model call, then one
+   * write for the delivery and a pending firing per matched trigger. The
+   * same for a webhook's event and a plugin's.
+   */
+  const storeEvent = (sourceId: string, event: InboundEvent, receivedAt: string): EventIngestResult['status'] => {
     const matched = options.triggers(sourceId)
       .filter((trigger) => trigger.source === sourceId && matchesEventFilter(trigger.filter, event));
     const coalescingKey = eventCoalescingKey(sourceId, event);
@@ -486,22 +532,71 @@ export const createEventIntake = (options: EventIntakeOptions): EventIntake => {
       dispatchKey: eventDispatchKey(trigger.triggerId, sourceId, event.attributes.id ?? ''),
       block,
     }));
-    const accepted = options.store.accept({
+    return options.store.accept({
       source: sourceId,
       eventId: event.attributes.id ?? '',
       type: event.attributes.type ?? '',
       ...(event.attributes.subject !== undefined ? { subject: event.attributes.subject } : {}),
       receivedAt,
       firings,
-    });
-    return answer(200, { status: accepted.status });
+    }).status;
+  };
+
+  const ingest = (sourceId: string, raw: JsonObject): EventIngestResult => {
+    if (!(options.pluginSources?.() ?? []).includes(sourceId)) {
+      throw new Error(`No plugin feeds an event source "${sourceId}" on this daemon.`);
+    }
+    const count = countersFor(sourceId);
+    const receivedAt = now().toISOString();
+    // Serialized once: the size limit is the one a webhook's body is held
+    // to, and what is matched and stored is what the same JSON posted to
+    // the events port would give (no undefined, no Date, no prototype).
+    let serialized: string | undefined;
+    try {
+      serialized = JSON.stringify(raw);
+    } catch (error) {
+      throw new Error(`The event is not JSON: ${error instanceof Error ? error.message : String(error)}.`);
+    }
+    if (serialized !== undefined && Buffer.byteLength(serialized) > maxBodyBytes) {
+      count.tooLarge += 1;
+      refusal(sourceId, `event over ${maxBodyBytes} bytes`);
+      throw new Error(`The event is over ${maxBodyBytes} bytes as JSON.`);
+    }
+    if (!admit(sourceId)) {
+      count.rateLimited += 1;
+      refusal(sourceId, `over ${EVENT_SOURCE_REQUESTS_PER_MINUTE} events a minute`);
+      throw new Error(`Over ${EVENT_SOURCE_REQUESTS_PER_MINUTE} events a minute for source "${sourceId}". Feed this one again later; its id keeps it from counting twice.`);
+    }
+    let event: InboundEvent;
+    try {
+      event = parseCloudEvent(parseJsonObject(serialized ?? ''));
+    } catch (error) {
+      if (!(error instanceof MalformedEventError)) {
+        throw error;
+      }
+      // A row, like a signed body the listener refused, so `stratus events`
+      // shows it; no tombstone, so the corrected event under the same id
+      // gets through.
+      const object = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? raw : {};
+      options.store.refuse({
+        source: sourceId,
+        eventId: typeof object.id === 'string' ? object.id : '',
+        ...(typeof object.type === 'string' ? { type: object.type } : {}),
+        reason: error.message,
+        receivedAt,
+      });
+      refusal(sourceId, error.message);
+      throw new Error(error.message);
+    }
+    return { status: storeEvent(sourceId, event, receivedAt) };
   };
 
   return {
     receive,
+    ingest,
     counters: () => ({
       unknownSource,
-      sources: Object.fromEntries(Object.keys(options.sources()).map((sourceId) => {
+      sources: Object.fromEntries([...Object.keys(options.sources()), ...(options.pluginSources?.() ?? [])].map((sourceId) => {
         const entry = countersFor(sourceId);
         return [sourceId, {
           ...entry,
