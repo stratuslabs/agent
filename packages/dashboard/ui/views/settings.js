@@ -298,7 +298,7 @@ export const renderSettings = (section) => {
         if (stored.reloaded) {
           say("Stored. Slack reloaded, so that agent comes online without a restart. If it doesn't, the daemon log says why.");
         } else if (stored.reason) {
-          say(`Stored, but stratusd could not reload: ${stored.reason} Restart stratusd to bring that agent online in Slack.`, 'bad');
+          say(`Stored. ${stored.reason}`, 'bad');
         } else {
           say('Stored. Restart stratusd to bring that agent online in Slack.');
         }

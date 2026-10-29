@@ -8407,11 +8407,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
-  const disconnect = async (connection: AgentConnection, reason: string): Promise<void> => {
+  /** Closes an app's socket; false, with a warning, when the close was refused. */
+  const disconnect = async (connection: AgentConnection, reason: string): Promise<boolean> => {
     try {
       await connection.socket.disconnect();
+      return true;
     } catch (error) {
       warn(`slack: could not disconnect ${connection.config.agentId} (${reason}): ${error instanceof Error ? error.message : String(error)}`);
+      return false;
     }
   };
 
@@ -8443,31 +8446,40 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const config = wanted.get(connection.config.agentId);
       return config === undefined || !sameApp(config, connection.config);
     });
-    const arriving = [...wanted.values()].filter((config) => {
-      const connection = connected.get(config.agentId);
-      return connection === undefined || !sameApp(config, connection.config);
-    });
 
-    // An unchanged app keeps the configuration it is serving with.
-    carried = next.map((config) => {
-      const connection = connected.get(config.agentId);
-      return connection !== undefined && sameApp(config, connection.config) ? connection.config : config;
-    });
-    configuredAgents.clear();
-    for (const config of carried) {
-      configuredAgents.add(config.agentId);
-    }
-
+    // Closed first, and only a closed one is let go of. A socket whose close
+    // was refused may still deliver, so it stays this agent's connection,
+    // on the tokens it has, and nothing is started beside it: a second
+    // socket for the agent would answer every message twice, and a removed
+    // app would keep answering while reported gone. A restart clears it.
     for (const connection of leaving) {
+      const agentId = connection.config.agentId;
+      const reason = !known.has(agentId)
+        ? 'its soul is gone'
+        : wanted.has(agentId) ? 'its tokens changed' : 'its tokens were removed';
+      if (!await disconnect(connection, reason)) {
+        warn(`slack: ${agentId} stays connected with the app it had until a restart, since its socket would not close`);
+        continue;
+      }
       const index = connections.indexOf(connection);
       if (index >= 0) {
         connections.splice(index, 1);
       }
-      await disconnect(connection, 'reload');
-      const reason = !known.has(connection.config.agentId)
-        ? 'its soul is gone'
-        : wanted.has(connection.config.agentId) ? 'its tokens changed' : 'its tokens were removed';
-      log(`slack: ${connection.config.agentId} disconnected (${reason})`);
+      log(`slack: ${agentId} disconnected (${reason})`);
+    }
+    // What is still connected now, stuck sockets included, serves on.
+    const serving = (agentId: string): AgentConnection | undefined =>
+      connections.find((connection) => connection.config.agentId === agentId);
+    const arriving = [...wanted.values()].filter((config) => serving(config.agentId) === undefined);
+
+    // A connected app keeps the configuration it is serving with.
+    carried = [
+      ...next.map((config) => serving(config.agentId)?.config ?? config),
+      ...connections.filter((connection) => !next.some((config) => config.agentId === connection.config.agentId)).map((connection) => connection.config),
+    ];
+    configuredAgents.clear();
+    for (const config of carried) {
+      configuredAgents.add(config.agentId);
     }
     // Who each remaining bot is, in the carried order: an app no longer
     // carried is nobody's to recognize, and a new one is learned below.
@@ -8475,12 +8487,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     botIdentities.clear();
     for (const config of carried) {
       const identity = kept.get(config.agentId);
-      if (identity !== undefined && wanted.has(config.agentId) && !arriving.includes(config)) {
+      if (identity !== undefined && serving(config.agentId) !== undefined) {
         botIdentities.set(config.agentId, identity);
       }
     }
     for (const config of next) {
-      if (!known.has(config.agentId) && !connected.has(config.agentId)) {
+      if (!known.has(config.agentId) && serving(config.agentId) === undefined) {
         warn(`slack: no roster agent with id ${config.agentId}; skipping its Slack app`);
       }
     }

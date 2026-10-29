@@ -6,7 +6,7 @@ import {
   saveChannelTransportSecrets,
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
-import { reloadRunningDaemonChannels } from '../daemon.ts';
+import { channelReloadLine, reloadRunningDaemonChannels } from '../daemon.ts';
 import { writeLine, readSecretFromStdin } from '../io.ts';
 import type { ParsedChannelCommand } from '../parse.ts';
 import { createSetupPrompter } from '../prompter.ts';
@@ -149,11 +149,11 @@ export const runChannel = async (
  * up (card 894), or, with no daemon to ask, when one would.
  */
 const sayWhenItApplies = async (streams: CliStreams, env: CliEnvironment, kind: string, done: string, noDaemon: string): Promise<void> => {
-  const reload = await reloadRunningDaemonChannels(env, kind);
+  const reload = await reloadRunningDaemonChannels(env);
   if (reload === undefined) {
     writeLine(streams.stdout, `${done} ${noDaemon}`);
-  } else if ('line' in reload) {
-    writeLine(streams.stdout, `${done} ${reload.line}`);
+  } else if ('base' in reload) {
+    writeLine(streams.stdout, `${done} ${channelReloadLine(reload, kind)}`);
   } else {
     writeLine(streams.stdout, done);
     writeLine(streams.stderr, `Warning: ${reload.warning}`);

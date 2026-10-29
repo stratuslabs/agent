@@ -15740,6 +15740,37 @@ test('a stop while a reload is starting an app\'s socket leaves that socket disc
   assert.equal(beaSocket?.disconnected, true);
 });
 
+test('a socket that won\'t close keeps its agent on the old app, and nothing starts beside it', async () => {
+  const setup = reloadingAdapter([ava, bea]);
+  await setup.adapter.start(setup.gateway);
+  const [oldBea] = setup.socketsFor('xapp-bea');
+  oldBea!.disconnect = async () => {
+    throw new Error('socket is in a bad state');
+  };
+
+  // Rotated: the new app is not started, so the agent never answers twice.
+  setup.store([ava, { agentId: 'bea', appToken: 'xapp-bea-2', botToken: 'xoxb-bea-2' }]);
+  await setup.adapter.reload!();
+  assert.equal(setup.socketsFor('xapp-bea-2').length, 0);
+  assert.ok(setup.warnings.some((line) => line.includes('bea stays connected with the app it had until a restart')), setup.warnings.join('\n'));
+  assert.ok(!setup.logs.some((line) => line.startsWith('slack: bea disconnected')), setup.logs.join('\n'));
+  assert.equal(setup.adapter.accountFor?.('bea'), 'T1', 'still recognized, since it can still deliver');
+
+  // Removed: still reported connected, not gone.
+  setup.store([ava]);
+  await setup.adapter.reload!();
+  assert.equal(setup.adapter.accountFor?.('bea'), 'T1');
+
+  // Once it closes, the next reload lets it go.
+  oldBea!.disconnect = async () => {
+    oldBea!.disconnected = true;
+  };
+  await setup.adapter.reload!();
+  assert.equal(oldBea?.disconnected, true);
+  assert.equal(setup.adapter.accountFor?.('bea'), undefined);
+  await setup.adapter.stop();
+});
+
 test('a reload before start or after stop connects nothing', async () => {
   const setup = reloadingAdapter([ava]);
   setup.store([ava, bea]);

@@ -67,7 +67,7 @@ import {
   uninstallService,
 } from '../service.ts';
 import { type ApprovalReach, classifyApprovalReach, unattendedReachParts } from '../approvals.ts';
-import { reloadRunningDaemonChannels, serviceEnvFor } from '../daemon.ts';
+import { channelReloadLine, reloadRunningDaemonChannels, serviceEnvFor } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, CliConfigFile } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import { packageInstalled } from '../loaders.ts';
@@ -2969,21 +2969,6 @@ export const runSetup = async (
       // Channel tokens live in their own namespace of the same file; the
       // writers merge, so this never clobbers the provider sign-in above.
       await saveChannelCredentials(env, state.channels);
-      const connected = Object.keys(state.channels.slack ?? {}).length;
-      const saved = connected > 0
-        ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)}`
-        : `Removed the stored Slack tokens from ${credentialsPath(env)}`;
-      // A running daemon picks the change up now (card 894); with none, the
-      // next start does.
-      const reload = await reloadRunningDaemonChannels(env, 'slack');
-      if (reload === undefined) {
-        writeLine(streams.stdout, connected > 0 ? `${saved} — run \`${serveCommand()}\` to bring them online.` : `${saved}.`);
-      } else if ('line' in reload) {
-        writeLine(streams.stdout, `${saved}. ${reload.line}`);
-      } else {
-        writeLine(streams.stdout, `${saved}.`);
-        writeLine(streams.stderr, `Warning: ${reload.warning}`);
-      }
     }
     if (state.pluginChannelEdits.length > 0) {
       // In the order they were made, so a store then a remove of the same
@@ -2995,7 +2980,32 @@ export const runSetup = async (
           await removeChannelTransportSecrets(env, edit.kind, edit.agentId);
         }
       }
-      writeLine(streams.stdout, `Saved your channel secrets to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`);
+    }
+    if (state.channelsDirty || state.pluginChannelEdits.length > 0) {
+      // Once every channel's secrets are written: a running daemon reloads
+      // each channel that can (card 894), and the rest wait for its next
+      // start, as they do with no daemon.
+      const reload = await reloadRunningDaemonChannels(env);
+      const answered = reload !== undefined && 'base' in reload ? reload : undefined;
+      if (state.channelsDirty) {
+        const connected = Object.keys(state.channels.slack ?? {}).length;
+        const saved = connected > 0
+          ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)}`
+          : `Removed the stored Slack tokens from ${credentialsPath(env)}`;
+        writeLine(streams.stdout, answered !== undefined
+          ? `${saved}. ${channelReloadLine(answered, 'slack')}`
+          : connected > 0 ? `${saved} — run \`${serveCommand()}\` to bring them online.` : `${saved}.`);
+      }
+      if (state.pluginChannelEdits.length > 0) {
+        const saved = `Saved your channel secrets to ${credentialsPath(env)}`;
+        const kinds = [...new Set(state.pluginChannelEdits.map((edit) => edit.kind))];
+        writeLine(streams.stdout, answered !== undefined
+          ? `${saved}. ${kinds.map((kind) => channelReloadLine(answered, kind)).join(' ')}`
+          : `${saved} — run \`${serveCommand()}\` to bring them online.`);
+      }
+      if (reload !== undefined && 'warning' in reload) {
+        writeLine(streams.stderr, `Warning: ${reload.warning}`);
+      }
     }
 
     // Before the service block below, deliberately. A package installed

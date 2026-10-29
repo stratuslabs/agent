@@ -915,10 +915,12 @@ test('storing a channel\'s secrets reloads it when it can, and the answer says w
     assert.deepEqual(await stored.json(), { channel: 'slack', agentId: 'ava', stored: true, reloaded: true });
     assert.equal(reloads, 1, 'the save reloaded the channel');
 
-    // A kind no started channel reloads is stored for the next start.
+    // A kind no started channel reloads is stored for the next start. The
+    // save still reloads the roster, so the channels that can are brought
+    // in line with what is on disk too.
     const plugin = await put('discord', { agentId: 'ava', secrets: { botToken: 'discord-1' } });
     assert.deepEqual(await plugin.json(), { channel: 'discord', agentId: 'ava', stored: true, reloaded: false });
-    assert.equal(reloads, 1);
+    assert.equal(reloads, 2);
 
     // A roster that will not load: stored all the same, and the reason beside it.
     await writeSoul(home, 'copy.md', '---\nname: Copy\nid: ava\n---\n\nAgain.\n');
@@ -927,9 +929,40 @@ test('storing a channel\'s secrets reloads it when it can, and the answer says w
     const refusedBody = await refused.json() as { stored: boolean; reloaded: boolean; reason?: string };
     assert.equal(refusedBody.stored, true);
     assert.equal(refusedBody.reloaded, false);
-    assert.ok(refusedBody.reason && refusedBody.reason.length > 0);
+    assert.match(refusedBody.reason ?? '', /^The roster did not reload: .*Fix that, then save again or restart stratusd\.$/);
     const raw = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as { channels: { slack: Record<string, { appToken: string }> } };
     assert.equal(raw.channels.slack.ava?.appToken, 'xapp-2');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a channel that fails to reload answers reloaded: false with its reason, and the secret is stored', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const slack = {
+    name: 'slack',
+    async start() {},
+    async stop() {},
+    async reload() {
+      throw new Error('credentials.json is not readable');
+    },
+  };
+  const harness = await startApi({ home, gateway: { channels: [slack] } });
+  try {
+    const stored = await harness.call('/api/v1/credentials/channels/slack', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }),
+    });
+    assert.equal(stored.status, 200);
+    assert.deepEqual(await stored.json(), {
+      channel: 'slack',
+      agentId: 'ava',
+      stored: true,
+      reloaded: false,
+      reason: 'The slack channel could not reload: credentials.json is not readable. Restart stratusd to apply it.',
+    });
   } finally {
     await harness.stop();
   }
@@ -942,7 +975,7 @@ test('a roster reload names the channels it reloaded', async () => {
   try {
     const reloaded = await harness.call('/api/v1/roster/reload', { method: 'POST' });
     assert.equal(reloaded.status, 200);
-    assert.deepEqual((await json<{ channels: string[] }>(reloaded)).channels, ['slack']);
+    assert.deepEqual((await json<{ channels: unknown }>(reloaded)).channels, [{ name: 'slack', outcome: 'reloaded' }]);
   } finally {
     await harness.stop();
   }

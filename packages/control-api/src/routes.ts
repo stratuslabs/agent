@@ -25,6 +25,7 @@ import {
   PauseMessageError,
   ROLLED_OVER_TO_METADATA_KEY,
   SCHEDULE_SESSION_ID_PREFIX,
+  type ChannelReloadOutcome,
   type Gateway,
 } from '@stratusagent/gateway';
 import {
@@ -909,12 +910,12 @@ export const routes: Route[] = [
     method: 'POST',
     pattern: `${API_PREFIX}/roster/reload`,
     async handler(context) {
-      const agents = await context.gateway.reloadRoster();
+      const { agents, channels } = await context.gateway.reloadRosterAndChannels();
       return {
         agents: agents.map((agent) => ({ id: agent.id, name: agent.name })),
-        // The channels that picked up the reload: a secret stored for one of
-        // them is live now, and any other kind waits for a restart.
-        channels: context.gateway.reloadableChannels(),
+        // What each channel that can reload did: a secret stored for one
+        // that `reloaded` is live now, and any other kind waits for a restart.
+        channels,
       };
     },
   },
@@ -1647,18 +1648,33 @@ export const routes: Route[] = [
       await withCredentialsFileLock(async () => {
         await saveChannelTransportSecrets(context.env, channel, agentId, secrets);
       });
-      // A channel that can reload connects the app now (card 894); any
-      // other reads it at the next start, which `reloaded: false` says.
-      // Stored either way, so a roster that will not load is reported
-      // beside the save rather than as its failure.
-      const reloadable = context.gateway.reloadableChannels().includes(channel);
-      if (!reloadable) {
+      // A channel that reloads picks the secrets up now (card 894); any
+      // other reads them at the next start, and `reloaded: false` says so,
+      // with the reason when it tried and failed. Stored either way, so a
+      // roster that will not load is reported beside the save rather than
+      // as its failure.
+      // `reason` is a sentence, for a client to show as it is.
+      const sentence = (text: string): string => (/[.!?]$/.test(text) ? text : `${text}.`);
+      let outcome: ChannelReloadOutcome | undefined;
+      try {
+        outcome = (await context.gateway.reloadRosterAndChannels()).channels.find((entry) => entry.name === channel);
+      } catch (error) {
+        return {
+          channel,
+          agentId,
+          stored: true,
+          reloaded: false,
+          reason: `${sentence(`The roster did not reload: ${error instanceof Error ? error.message : String(error)}`)} Fix that, then save again or restart stratusd.`,
+        };
+      }
+      if (outcome === undefined) {
         return { channel, agentId, stored: true, reloaded: false };
       }
-      try {
-        await context.gateway.reloadRoster();
-      } catch (error) {
-        return { channel, agentId, stored: true, reloaded: false, reason: error instanceof Error ? error.message : String(error) };
+      if (outcome.outcome !== 'reloaded') {
+        const reason = outcome.outcome === 'failed'
+          ? `${sentence(`The ${channel} channel could not reload: ${outcome.reason ?? 'no reason given'}`)} Restart stratusd to apply it.`
+          : `The ${channel} channel was still reloading when this answered; the daemon log says when it's done.`;
+        return { channel, agentId, stored: true, reloaded: false, reason };
       }
       return { channel, agentId, stored: true, reloaded: true };
     },

@@ -72,8 +72,9 @@ test('a roster reload reloads every started channel that can, after the new rost
   assert.deepEqual(first.reloads, [], 'starting is not a reload');
 
   await writeSoul(home, 'bea');
-  await gateway.reloadRoster();
+  const { channels } = await gateway.reloadRosterAndChannels();
 
+  assert.deepEqual(channels.map((channel) => channel.name), ['first', 'second'], 'a channel without reload() is not listed');
   assert.deepEqual(first.reloads, [['ava', 'bea', 'stratus']]);
   assert.deepEqual(second.reloads, [['ava', 'bea', 'stratus']]);
 });
@@ -86,10 +87,14 @@ test('one channel that fails to reload is logged, and the roster and the other c
   const { gateway, home, warnings } = await gatewayWith(t, [broken.adapter, healthy.adapter]);
 
   await writeSoul(home, 'bea');
-  const roster = await gateway.reloadRoster();
+  const { agents: roster, channels } = await gateway.reloadRosterAndChannels();
 
   assert.deepEqual(roster.map((agent) => agent.id).sort(), ['ava', 'bea', 'stratus']);
   assert.equal(healthy.reloads.length, 1);
+  assert.deepEqual(channels, [
+    { name: 'broken', outcome: 'failed', reason: 'the token file is unreadable' },
+    { name: 'healthy', outcome: 'reloaded' },
+  ]);
   assert.ok(warnings.some((line) => line.includes('channel broken could not reload') && line.includes('the token file is unreadable')), warnings.join('\n'));
 });
 
@@ -104,8 +109,9 @@ test('a channel whose reload hangs holds the roster reload only for the bound, a
   const { gateway, warnings, logs } = await gatewayWith(t, [stuck.adapter, after.adapter], { channelReloadTimeoutMs: 50 });
 
   const started = Date.now();
-  await gateway.reloadRoster();
+  const { channels } = await gateway.reloadRosterAndChannels();
   assert.ok(Date.now() - started < 2_000);
+  assert.deepEqual(channels, [{ name: 'stuck', outcome: 'still-reloading' }, { name: 'after', outcome: 'reloaded' }]);
   assert.equal(after.reloads.length, 1, 'the channel after the stuck one is still reloaded');
   assert.ok(warnings.some((line) => line.includes('channel stuck is still reloading after 50 ms')), warnings.join('\n'));
 
