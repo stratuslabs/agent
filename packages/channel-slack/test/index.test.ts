@@ -40,6 +40,9 @@ import {
 const createSlackChannelAdapter = (options: SlackAdapterOptions) => createAdapterAsShipped({
   ...options,
   agents: options.agents.map((agent) => ({ replies: 'stream' as const, ...agent })),
+  ...(options.loadAgents !== undefined
+    ? { loadAgents: async () => (await options.loadAgents!()).map((agent) => ({ replies: 'stream' as const, ...agent })) }
+    : {}),
 });
 
 interface FakeSocket extends SlackSocketLike {
@@ -15493,3 +15496,260 @@ test('archiveConversation turns Slack\'s refusals into sentences, and says an un
   assert.ok(warnings.some((line) => line === 'slack: ava could not archive C-PUB (restricted_action)'), warnings.join('\n'));
   await adapter.stop();
 });
+
+// Card 894: a Slack app stored while the daemon runs connects on reload().
+
+const IDENTITIES: Record<string, [string, string]> = {
+  'xoxb-ava': ['B-AVA', 'T1'],
+  'xoxb-bea': ['B-BEA', 'T1'],
+  'xoxb-bea-2': ['B-BEA', 'T1'],
+  'xoxb-cal': ['B-CAL', 'T1'],
+};
+const ava = { agentId: 'ava', appToken: 'xapp-ava', botToken: 'xoxb-ava' };
+const bea = { agentId: 'bea', appToken: 'xapp-bea', botToken: 'xoxb-bea' };
+
+const reloadingAdapter = (initial: Array<{ agentId: string; appToken: string; botToken: string }>, roster = ['ava', 'bea']) => {
+  const sockets: Array<{ appToken: string; socket: FakeSocket }> = [];
+  const authCalls: string[] = [];
+  let stored = initial;
+  let authGate: Promise<void> | undefined;
+  let socketGate: Promise<void> | undefined;
+  const warnings: string[] = [];
+  const logs: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'hi'));
+  let agents = roster;
+  gateway.agents = () => agents.map((id) => ({ id, name: id }));
+  let loads = 0;
+  const adapter = createSlackChannelAdapter({
+    agents: initial,
+    loadAgents: async () => {
+      loads += 1;
+      return stored;
+    },
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => {
+      const socket = createFakeSocket();
+      const start = socket.start.bind(socket);
+      socket.start = async () => {
+        if (socketGate) {
+          await socketGate;
+        }
+        await start();
+      };
+      sockets.push({ appToken, socket });
+      return socket;
+    },
+    createWebClient: (botToken) => {
+      const identity = IDENTITIES[botToken];
+      const web = createFakeWeb(identity?.[0] ?? 'B-?', identity?.[1] ?? 'T1');
+      const test = web.auth.test.bind(web.auth);
+      web.auth.test = async () => {
+        authCalls.push(botToken);
+        if (authGate) {
+          await authGate;
+        }
+        if (!identity) {
+          throw new Error('An API error occurred: invalid_auth');
+        }
+        return test();
+      };
+      return web;
+    },
+    log: (line) => logs.push(line),
+    warn: (line) => warnings.push(line),
+  });
+  return {
+    adapter,
+    gateway,
+    sockets,
+    authCalls,
+    warnings,
+    logs,
+    loads: () => loads,
+    store(next: typeof initial) {
+      stored = next;
+    },
+    roster(next: string[]) {
+      agents = next;
+    },
+    holdAuth(gate: Promise<void> | undefined) {
+      authGate = gate;
+    },
+    holdSocketStart(gate: Promise<void> | undefined) {
+      socketGate = gate;
+    },
+    socketsFor: (appToken: string) => sockets.filter((entry) => entry.appToken === appToken).map((entry) => entry.socket),
+  };
+};
+
+test('without loadAgents the adapter has no reload, so a roster reload leaves it as it started', () => {
+  const adapter = createSlackChannelAdapter({ agents: [ava], createSocketClient: createFakeSocket, createWebClient: () => createFakeWeb('B-AVA', 'T1') });
+  assert.equal(adapter.reload, undefined);
+});
+
+test('a reload connects a new agent\'s app, which answers a mention, and leaves the other apps alone', async () => {
+  const setup = reloadingAdapter([ava]);
+  await setup.adapter.start(setup.gateway);
+  const [avaSocket] = setup.socketsFor('xapp-ava');
+
+  setup.store([ava, bea]);
+  await setup.adapter.reload!();
+
+  const [beaSocket] = setup.socketsFor('xapp-bea');
+  assert.equal(beaSocket?.started, true);
+  assert.equal(setup.socketsFor('xapp-ava').length, 1, 'no second socket for an unchanged app');
+  assert.equal(avaSocket?.disconnected, false);
+  assert.deepEqual(setup.authCalls, ['xoxb-ava', 'xoxb-bea']);
+  assert.ok(setup.logs.some((line) => line.startsWith('slack: bea connected (bot B-BEA in team T1)')), setup.logs.join('\n'));
+
+  await beaSocket!.deliver('app_mention', mention('<@B-BEA> are you there?'));
+  assert.deepEqual(setup.gateway.dispatches.map((dispatch) => dispatch.agentId), ['bea']);
+  assert.equal(setup.adapter.accountFor?.('bea'), 'T1');
+
+  await setup.adapter.stop();
+  assert.equal(beaSocket?.disconnected, true);
+});
+
+test('changed tokens reconnect only that agent\'s app', async () => {
+  const setup = reloadingAdapter([ava, bea]);
+  await setup.adapter.start(setup.gateway);
+  const [avaSocket] = setup.socketsFor('xapp-ava');
+  const [oldBea] = setup.socketsFor('xapp-bea');
+
+  setup.store([ava, { agentId: 'bea', appToken: 'xapp-bea-2', botToken: 'xoxb-bea-2' }]);
+  await setup.adapter.reload!();
+
+  assert.equal(oldBea?.disconnected, true);
+  const [newBea] = setup.socketsFor('xapp-bea-2');
+  assert.equal(newBea?.started, true);
+  assert.equal(avaSocket?.disconnected, false);
+  assert.ok(setup.logs.some((line) => line === 'slack: bea disconnected (its tokens changed)'), setup.logs.join('\n'));
+  await setup.adapter.stop();
+});
+
+test('removed tokens disconnect the app, and the agent can no longer be sent to', async () => {
+  const setup = reloadingAdapter([ava, bea]);
+  await setup.adapter.start(setup.gateway);
+  const [beaSocket] = setup.socketsFor('xapp-bea');
+
+  setup.store([ava]);
+  await setup.adapter.reload!();
+
+  assert.equal(beaSocket?.disconnected, true);
+  assert.ok(setup.logs.some((line) => line === 'slack: bea disconnected (its tokens were removed)'), setup.logs.join('\n'));
+  await assert.rejects(setup.adapter.resolveOutbound!({ agentId: 'bea', to: 'C1' }));
+  assert.equal(setup.adapter.accountFor?.('bea'), undefined);
+  assert.equal(setup.socketsFor('xapp-ava')[0]?.disconnected, false);
+  await setup.adapter.stop();
+});
+
+test('a soul that appears gets its stored app connected, and one that goes away loses it', async () => {
+  const setup = reloadingAdapter([ava, bea], ['ava']);
+  await setup.adapter.start(setup.gateway);
+  assert.equal(setup.socketsFor('xapp-bea').length, 0, 'no roster agent, so no app at start');
+
+  setup.roster(['ava', 'bea']);
+  await setup.adapter.reload!();
+  const [beaSocket] = setup.socketsFor('xapp-bea');
+  assert.equal(beaSocket?.started, true);
+
+  setup.roster(['ava']);
+  await setup.adapter.reload!();
+  assert.equal(beaSocket?.disconnected, true);
+  assert.ok(setup.logs.some((line) => line === 'slack: bea disconnected (its soul is gone)'), setup.logs.join('\n'));
+  assert.equal(setup.adapter.accountFor?.('bea'), undefined, 'a bot whose soul is gone is nobody here');
+  await setup.adapter.stop();
+});
+
+test('one app that will not authenticate is warned about, and the others still connect', async () => {
+  const setup = reloadingAdapter([ava], ['ava', 'bea', 'cal']);
+  await setup.adapter.start(setup.gateway);
+
+  setup.store([ava, { agentId: 'cal', appToken: 'xapp-bad', botToken: 'xoxb-bad' }, bea]);
+  await setup.adapter.reload!();
+
+  assert.ok(setup.warnings.some((line) => line.includes('could not connect cal') && line.includes('invalid_auth')), setup.warnings.join('\n'));
+  assert.equal(setup.socketsFor('xapp-bea')[0]?.started, true);
+  assert.equal(setup.socketsFor('xapp-bad').length, 0);
+
+  // Fixed tokens connect on the next reload.
+  setup.store([ava, { agentId: 'cal', appToken: 'xapp-cal', botToken: 'xoxb-cal' }, bea]);
+  await setup.adapter.reload!();
+  assert.equal(setup.socketsFor('xapp-cal')[0]?.started, true);
+  await setup.adapter.stop();
+});
+
+test('a reload with nothing changed touches no app', async () => {
+  const setup = reloadingAdapter([ava, bea]);
+  await setup.adapter.start(setup.gateway);
+  const before = setup.sockets.length;
+
+  await setup.adapter.reload!();
+
+  assert.equal(setup.sockets.length, before);
+  assert.deepEqual(setup.authCalls, ['xoxb-ava', 'xoxb-bea']);
+  assert.ok(setup.sockets.every(({ socket }) => !socket.disconnected));
+  await setup.adapter.stop();
+});
+
+test('reloads run one at a time, so two at once connect a new app once', async () => {
+  const setup = reloadingAdapter([ava]);
+  await setup.adapter.start(setup.gateway);
+  setup.store([ava, bea]);
+
+  await Promise.all([setup.adapter.reload!(), setup.adapter.reload!()]);
+
+  assert.equal(setup.socketsFor('xapp-bea').length, 1);
+  assert.equal(setup.loads(), 2);
+  await setup.adapter.stop();
+});
+
+test('a stop during a reload leaves the app it was connecting down', async () => {
+  const setup = reloadingAdapter([ava]);
+  await setup.adapter.start(setup.gateway);
+  setup.store([ava, bea]);
+  let release: () => void = () => {};
+  setup.holdAuth(new Promise<void>((resolve) => { release = resolve; }));
+
+  const reloading = setup.adapter.reload!();
+  await new Promise((resolve) => setImmediate(resolve));
+  const stopping = setup.adapter.stop();
+  release();
+  await Promise.all([reloading, stopping]);
+
+  assert.ok(setup.socketsFor('xapp-bea').every((socket) => !socket.started || socket.disconnected));
+  assert.equal(setup.socketsFor('xapp-ava')[0]?.disconnected, true);
+});
+
+test('a stop while a reload is starting an app\'s socket leaves that socket disconnected', async () => {
+  const setup = reloadingAdapter([ava]);
+  await setup.adapter.start(setup.gateway);
+  setup.store([ava, bea]);
+  let release: () => void = () => {};
+  setup.holdSocketStart(new Promise<void>((resolve) => { release = resolve; }));
+
+  const reloading = setup.adapter.reload!();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(setup.socketsFor('xapp-bea').length, 1, 'the socket is starting');
+  const stopping = setup.adapter.stop();
+  release();
+  await Promise.all([reloading, stopping]);
+
+  const [beaSocket] = setup.socketsFor('xapp-bea');
+  assert.equal(beaSocket?.started, true);
+  assert.equal(beaSocket?.disconnected, true);
+});
+
+test('a reload before start or after stop connects nothing', async () => {
+  const setup = reloadingAdapter([ava]);
+  setup.store([ava, bea]);
+  await setup.adapter.reload!();
+  assert.equal(setup.sockets.length, 0);
+
+  await setup.adapter.start(setup.gateway);
+  await setup.adapter.stop();
+  const after = setup.sockets.length;
+  await setup.adapter.reload!();
+  assert.equal(setup.sockets.length, after);
+});
+
