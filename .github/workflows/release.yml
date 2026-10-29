@@ -8,9 +8,12 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # The release environment holds the publish credentials and needs a
+    # required reviewer's approval before this job starts.
+    environment: release
     permissions:
       contents: read
-      id-token: write # npm provenance
+      id-token: write # npm provenance and trusted publishing
     steps:
       - uses: actions/checkout@v4
 
@@ -21,6 +24,13 @@ jobs:
           node-version: 22
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      # Node 22 ships npm 10. Trusted publishing needs npm 11.5.1 or later.
+      # With it, a package whose npm settings trust this workflow and
+      # environment publishes over OIDC; any other package falls back to
+      # NODE_AUTH_TOKEN below.
+      - name: Install npm 11
+        run: npm install -g npm@11.21.1 && npm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
