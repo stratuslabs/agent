@@ -24,6 +24,10 @@ stratus logs --format json       # the raw records, for jq
 09:40:12  —           warning: mcp server linear disconnected — its tools are unavailable until it comes back
 ```
 
+A follow ends when its reader does: `stratus logs -f | grep -m1
+session.failed` exits once grep has its line, at the next record the
+follower would have printed, with exit code 0.
+
 A plugin's lifecycle lines land here too — an MCP server that dropped or
 came back, a reconnect that failed — not only on the stderr the service
 manager owns.

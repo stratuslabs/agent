@@ -197,5 +197,13 @@ Tool plugins have no flags: what is installed is a config decision
 decision (`tools:`). Neither is something a single run should be able to
 widen from the command line.
 
+Any command can be piped into a reader that stops early (`stratus events |
+grep -q github`, `stratus agents | head -1`). What it writes after the
+reader is gone is dropped; the command carries on with its work and exits
+with its own code, so a script under `set -o pipefail` gets the command's
+real result instead of a broken-pipe crash. `stratus serve` keeps serving,
+and everything it prints is also in its log file. `stratus logs -f` stops,
+since it would otherwise follow forever ([Logs](../guides/logs.md)).
+
 Precedence: flags → `STRATUS_*` env vars → soul file hints → config file —
 spelled out in [Configuration](./config.md).

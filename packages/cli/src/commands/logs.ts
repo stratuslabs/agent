@@ -52,9 +52,14 @@ export const runLogs = async (
   const stop = (): void => controller.abort();
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
-  env.shutdownSignal?.addEventListener('abort', stop, { once: true });
-  if (env.shutdownSignal?.aborted) {
-    stop();
+  // A follow only ends when interrupted, so a reader that stopped early
+  // (`stratus logs -f | grep -m1 x`) has to end it too, or the pipeline
+  // waits forever on a follower writing to nobody.
+  for (const signal of [env.shutdownSignal, env.outputClosed]) {
+    signal?.addEventListener('abort', stop, { once: true });
+    if (signal?.aborted) {
+      stop();
+    }
   }
   try {
     await tailLog({
