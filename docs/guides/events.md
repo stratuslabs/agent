@@ -35,7 +35,7 @@ repository's decision.
 | --- | --- |
 | `listen.host` | Interface to bind. Default `127.0.0.1`. `stratus serve --events-host <host>` overrides it |
 | `listen.port` | Port to bind. Default `4124` |
-| `maxBodyBytes` | The largest body accepted. Default 1 MiB, at most 16 MiB |
+| `maxBodyBytes` | The largest body accepted, and the largest event a plugin may feed (as JSON). Default 1 MiB, at most 16 MiB |
 | `sources` | Sources by id. A source's URL is `/events/<id>`. Ids are lowercase letters, digits, `-` and `_` |
 | `sources.<id>.verify` | `github` for GitHub webhooks, or `standard-webhooks` for anything that signs the [Standard Webhooks](https://www.standardwebhooks.com/) way |
 | `sources.<id>.secrets` | Names of stored credentials holding the signing secret. Several names let a secret rotate with no downtime |
