@@ -96,6 +96,22 @@ export interface ScheduleRecord {
    * — it is the approval's scope) from one whose turn is over (delete it).
    */
   lastSessionId?: string;
+  /**
+   * How many runs of this schedule in a row ended stopped early
+   * (`Session.stoppedEarly`), counted when the next firing is claimed and
+   * written with that claim. Absent is 0. At 2 or more the firing is told
+   * it's a repeat (card 858).
+   */
+  stoppedEarlyStreak?: number;
+  /**
+   * The checkpoint the firing in `lastSessionId` resumed from, kept until
+   * that firing's session exists: `firing` is that firing's session id and
+   * `from` the stopped run whose summary it carried. If the daemon dies
+   * between the claim and the session's creation, the next claim finds no
+   * session at `lastSessionId` and resumes from `from` instead of starting
+   * over. Only used while `firing` still equals `lastSessionId`.
+   */
+  resumeFrom?: { firing: string; from: string };
 }
 
 /** `every` strings: a positive integer and one unit — `90s`, `10m`, `2h`, `1d`. */

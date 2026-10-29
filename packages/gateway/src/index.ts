@@ -145,6 +145,7 @@ export {
   createSchedulerRuntime,
   isScheduleSessionId,
   SCHEDULE_SESSION_ID_PREFIX,
+  type PreviousRun,
   type ScheduleStoreLike,
   type SchedulerLimits,
   type SchedulerRuntime,
@@ -1746,6 +1747,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await outboundFor(agentId, destination);
     },
     sessionStatus: async (sessionId) => (await store.get(sessionId))?.status,
+    // Card 858: the previous firing, for the next one's checkpoint. The
+    // reply and its label, never the transcript.
+    previousRun: async (sessionId) => {
+      const session = await store.get(sessionId);
+      if (!session) {
+        return undefined;
+      }
+      const reply = latestTurnReply(session);
+      return {
+        status: session.status,
+        ...(session.stoppedEarly !== undefined ? { stoppedEarly: session.stoppedEarly } : {}),
+        ...(reply !== undefined ? { reply } : {}),
+        trust: sessionWriteTrust(session),
+      };
+    },
     hasAgent: (agentId) => registry.get(agentId) !== undefined,
     ...(options.schedules ? { limits: options.schedules } : {}),
     // The same stamp check every turn runs, before a slot is claimed — see

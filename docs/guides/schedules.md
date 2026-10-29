@@ -71,11 +71,30 @@ destination, because that is what is being approved. See
 - **Each firing is its own session** (`schedule:<id>:<slot>`), dispatched
   through the same path a channel message takes, marked `scheduled: true`
   in metadata. Continuity across firings is what
-  [agent memory](../concepts/memory.md) is for. That prefix is **reserved**:
+  [agent memory](../concepts/memory.md) is for, with one exception below.
+  That prefix is **reserved**:
   a firing's session carries the destination grant approved with the
   schedule, so nothing outside the scheduler may dispatch into one. The
   daemon refuses it, and the control API answers `400 session_id_reserved`
   rather than accepting a turn that could never run.
+- **A run that stopped early is the next firing's starting point.** When a
+  firing of an `every` or cron schedule runs out of steps (or keeps hitting
+  one failure) and answers with its wrap-up, the next firing's message is
+  the schedule's prompt followed by that wrap-up: when the last run stopped,
+  why, what it said was done and left (up to 4 KB), and to carry on from
+  there. Nothing is posted anywhere. From the second stop in a row the
+  message also says it's a repeat and, when the schedule has a destination,
+  that one line there is fine if it blocks someone; the agent decides, the
+  daemon never posts it. The checkpoint is the stopped session itself, read
+  when the next firing is claimed, so a daemon killed in between still
+  resumes. A resumed firing is labeled no higher than the run it carries
+  on from, so a run that read a web page can't pass that page's text on at
+  the schedule's own label. A one-shot has no next firing and isn't
+  resumed.
+- **A schedule never overlaps itself.** Its next slot waits while its
+  previous firing is still running or waiting on a person, so each firing
+  reads a finished predecessor. With the default per-agent cap of one this
+  is what already happens; it matters when the cap is raised.
 - **Schedules are immutable.** Editing is cancel-plus-create, so the
   approval's scope is exactly the row's lifetime.
 - **A one-shot's row lives exactly as long as its firing.** The slot is

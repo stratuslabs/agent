@@ -3,7 +3,15 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { SENDER_TRUST_METADATA_KEY, type JsonObject, type Session } from '@stratusagent/core';
+import {
+  leastTrusted,
+  SENDER_TRUST_METADATA_KEY,
+  type JsonObject,
+  type Session,
+  type SessionStatus,
+  type SessionStoppedEarly,
+  type TrustLevel,
+} from '@stratusagent/core';
 import {
   canonicalDestination,
   DEFAULT_EVENT_MAX_PER_HOUR,
@@ -181,6 +189,80 @@ export const SCHEDULE_SESSION_ID_PREFIX = 'schedule:';
 export const isScheduleSessionId = (sessionId: string): boolean =>
   sessionId.startsWith(SCHEDULE_SESSION_ID_PREFIX);
 
+/** The longest prefix of `text` that fits in `bytes` of UTF-8, never splitting a character. */
+export const utf8Prefix = (text: string, bytes: number): string => {
+  const { read } = new TextEncoder().encodeInto(text, new Uint8Array(Math.max(0, bytes)));
+  return text.slice(0, read);
+};
+
+/**
+ * What the next firing of a schedule reads from the one before it (card
+ * 858), from the gateway's session store: the status, the stopped-early
+ * marker, the latest reply and the label that reply carries. Never the
+ * transcript.
+ */
+export interface PreviousRun {
+  status: SessionStatus;
+  stoppedEarly?: SessionStoppedEarly;
+  /** The latest turn's text (`latestTurnReply`): for a stopped run, its wrap-up. */
+  reply?: string;
+  /** The label the run's own words carry (`sessionWriteTrust`). */
+  trust: TrustLevel;
+}
+
+/** A resumed firing carries at most this much of the stopped run's summary. */
+export const RESUME_SUMMARY_MAX_BYTES = 4_096;
+
+const STOPPED_EARLY_WHY: Record<string, string> = {
+  'turn-limit': 'it used all its steps',
+  'repeated-failure': 'it kept hitting the same failure',
+};
+
+const ordinal = (n: number): string => {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? 'th' : (['th', 'st', 'nd', 'rd'][n % 10] ?? 'th');
+  return `${n}${suffix}`;
+};
+
+/**
+ * What a firing that resumes sees after its schedule's prompt: when the
+ * stopped run ended and why, its own summary of what was done and left
+ * (capped), and, from the second stop in a row, that it's a repeat. The
+ * runtime posts nothing about a repeat: only the agent knows whether a
+ * person is waiting, so it's told it may post one line to the destination
+ * its schedule was approved with, when there is one.
+ */
+export const renderResumeBlock = (
+  stoppedEarly: SessionStoppedEarly,
+  reply: string | undefined,
+  streak: number,
+  reportsSomewhere: boolean,
+): string => {
+  const text = reply?.trim() ?? '';
+  const summary = text === ''
+    ? 'It left no summary.'
+    : Buffer.byteLength(text) <= RESUME_SUMMARY_MAX_BYTES
+      ? text
+      : `${utf8Prefix(text, RESUME_SUMMARY_MAX_BYTES)}\n[summary cut at ${Math.round(RESUME_SUMMARY_MAX_BYTES / 1_024)} KB]`;
+  const when = typeof stoppedEarly.at === 'string' ? `, at ${stoppedEarly.at},` : '';
+  const why = STOPPED_EARLY_WHY[stoppedEarly.reason] ?? 'it stopped before finishing';
+  const lines = [
+    `Your last run of this schedule${when} stopped early: ${why}. What it said was done and what was left:`,
+    '',
+    summary,
+    '',
+    "Carry on from there, and don't redo finished work.",
+  ];
+  if (streak >= 2) {
+    lines.push(
+      '',
+      `That was the ${ordinal(streak)} run in a row to stop early.`
+        + (reportsSomewhere ? " If that blocks someone, post one line to this schedule's report destination saying what's stuck." : ''),
+    );
+  }
+  return lines.join('\n');
+};
+
 export interface SchedulerLimits {
   /**
    * The floor under a recurring cadence, milliseconds. Applied to intervals
@@ -249,6 +331,14 @@ export interface SchedulerRuntimeOptions {
   validateDestination(agentId: string, destination: ScheduleDestination): Promise<void>;
   /** Status of a firing's session, for the spent-one-shot sweep. */
   sessionStatus(sessionId: string): Promise<string | undefined>;
+  /**
+   * The session a schedule's previous firing ran in, or undefined when it
+   * doesn't exist (card 858). Read when the next firing of an `every` or
+   * `cron` schedule is claimed: a run that stopped early is that firing's
+   * checkpoint, and a run still going holds the slot back. Without it,
+   * every firing starts from its prompt alone, as before.
+   */
+  previousRun?(sessionId: string): Promise<PreviousRun | undefined>;
   /** The roster check: a schedule for an agent that does not exist is a refusal. */
   hasAgent(agentId: string): boolean;
   limits?: SchedulerLimits;
@@ -356,6 +446,16 @@ export interface SchedulerRuntime {
    * could carry from a caller, and a firing may retire only its own row.
    */
   retireSpentOneShot(scheduleId: string, sessionId: string): void;
+}
+
+type StoppedRun = PreviousRun & { stoppedEarly: SessionStoppedEarly };
+
+/** What one firing carries from the run before it (card 858). */
+interface ResumePlan {
+  /** Runs in a row that stopped early, as of this claim. */
+  streak: number;
+  /** The stopped run this firing resumes from. */
+  from?: { sessionId: string; run: StoppedRun };
 }
 
 export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): SchedulerRuntime => {
@@ -542,6 +642,134 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   };
 
   /**
+   * Card 858: a readiness check that failed after an await inside a scan.
+   * Carries the reason out to `tick`, which treats it like the check at the
+   * top of the tick: the scheduler stops, and at start the failure is
+   * `start()`'s rejection.
+   */
+  class NotReady extends Error {
+    readonly scheduleId: string;
+    readonly reason: unknown;
+
+    constructor(scheduleId: string, reason: unknown) {
+      super(reason instanceof Error ? reason.message : String(reason));
+      this.scheduleId = scheduleId;
+      this.reason = reason;
+    }
+  }
+
+  const stillReady = async (scheduleId: string): Promise<void> => {
+    if (!options.ready) {
+      return;
+    }
+    try {
+      await options.ready();
+    } catch (error) {
+      stopped = true;
+      throw new NotReady(scheduleId, error);
+    }
+  };
+
+  /**
+   * What the firing about to be claimed carries from the one in
+   * `lastSessionId` (card 858): `'defer'` while that run is still going (a
+   * schedule never claims past a run whose outcome it hasn't read, or that
+   * run's summary is lost and the streak breaks), otherwise the new streak
+   * and the stopped run to resume from, if any. Undefined when the daemon
+   * gave no `previousRun`: the claim then leaves both fields as they are.
+   */
+  const planResume = async (
+    record: ScheduleRecord,
+    last: string,
+    slot: string,
+  ): Promise<ResumePlan | 'defer' | undefined> => {
+    const deferKey = `${record.id}:${slot}:previous`;
+    const holdBack = (): 'defer' => {
+      if (!deferralsWarned.has(deferKey)) {
+        deferralsWarned.add(deferKey);
+        warn(`schedule ${record.id}: its previous run ${last} is still going; deferring this firing (slot ${slot})`);
+      }
+      return 'defer';
+    };
+    // Started by this daemon and not settled: its session may not exist yet.
+    if (activeFirings.has(last)) {
+      return holdBack();
+    }
+    const read = options.previousRun;
+    if (!read) {
+      return undefined;
+    }
+    const streak = record.stoppedEarlyStreak ?? 0;
+    const readRun = async (sessionId: string): Promise<PreviousRun | undefined | 'unreadable'> => {
+      try {
+        return await read(sessionId);
+      } catch (error) {
+        warn(`schedule ${record.id}: could not read its previous run ${sessionId} (${error instanceof Error ? error.message : String(error)}); firing without it`);
+        return 'unreadable';
+      }
+    };
+    const previous = await readRun(last);
+    if (previous === 'unreadable') {
+      // No outcome to count: the streak stays, and there's no block.
+      return { streak };
+    }
+    if (previous !== undefined) {
+      if (previous.status === 'running' || previous.status === 'pending_approval') {
+        return holdBack();
+      }
+      deferralsWarned.delete(deferKey);
+      return previous.stoppedEarly !== undefined
+        ? { streak: streak + 1, from: { sessionId: last, run: previous as StoppedRun } }
+        : { streak: 0 };
+    }
+    deferralsWarned.delete(deferKey);
+    const fallback = record.resumeFrom;
+    if (fallback !== undefined && fallback.firing === last) {
+      // That firing was claimed and never started: the daemon died before
+      // its session existed, or refused it on the way down. It has no
+      // outcome, so the streak stays, and it carried a checkpoint, which
+      // this firing carries instead.
+      const from = await readRun(fallback.from);
+      if (from === 'unreadable') {
+        return { streak };
+      }
+      if (from?.stoppedEarly !== undefined) {
+        return { streak, from: { sessionId: fallback.from, run: from as StoppedRun } };
+      }
+      log(`schedule ${record.id}: previous run ${last} never started, and the run it resumed from (${fallback.from}) is gone; starting fresh`);
+      return { streak: 0 };
+    }
+    // Removed after it ran, a home restored without it, or a fallback left
+    // for another firing (an older build moved `lastSessionId` without it).
+    // Replaying an older checkpoint here could redo finished work.
+    log(`schedule ${record.id}: previous run ${last} not found; starting fresh`);
+    return { streak: 0 };
+  };
+
+  /**
+   * A resumed firing whose session exists no longer needs its fallback: the
+   * next claim reads that session. Only while the row still names this
+   * firing, through the slot claim's own conditional write, so a later
+   * claim's fallback is never the one removed. Best effort: one left
+   * behind is used only while `lastSessionId` names no session.
+   */
+  const dropFallback = async (scheduleId: string, sessionId: string): Promise<void> => {
+    try {
+      if ((await sessionStatus(sessionId)) === undefined) {
+        return;
+      }
+      const current = store.get(scheduleId);
+      if (current?.resumeFrom?.firing !== sessionId) {
+        return;
+      }
+      const { resumeFrom: _done, ...rest } = current;
+      store.claimSlot(rest, current.nextFireAt ?? '');
+    } catch (error) {
+      warn(`schedule ${scheduleId}: could not clear the resume fallback for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  /**
    * Fire one due schedule: consume the slot durably, then dispatch.
    *
    * The catch-up rule is inline rather than a separate restart path,
@@ -550,7 +778,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
    * advance past it with a log line, never replay. Anything else fires,
    * which on time is the normal case and late is the single catch-up.
    */
-  const fireOrSkip = (record: ScheduleRecord, now: Date): void => {
+  const fireOrSkip = async (record: ScheduleRecord, now: Date): Promise<void> => {
     const slot = record.nextFireAt;
     if (!slot) {
       return;
@@ -572,11 +800,15 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       // and the line that blamed downtime for it sent an operator to look
       // for a restart that never happened.
       const deferralKey = `${record.id}:${slot}`;
-      log(deferralsWarned.has(deferralKey)
-        ? `schedule ${record.id}: the firing deferred by the per-agent cap (slot ${slot}) outlasted its window; skipping to ${next ? next.toISOString() : 'never'}`
-        : `schedule ${record.id}: missed firing(s) while the daemon was down; skipping to ${next ? next.toISOString() : 'never'}`);
+      const skippingTo = next ? next.toISOString() : 'never';
+      log(deferralsWarned.has(`${deferralKey}:previous`)
+        ? `schedule ${record.id}: the firing deferred while its previous run was still going (slot ${slot}) outlasted its window; skipping to ${skippingTo}`
+        : deferralsWarned.has(deferralKey)
+          ? `schedule ${record.id}: the firing deferred by the per-agent cap (slot ${slot}) outlasted its window; skipping to ${skippingTo}`
+          : `schedule ${record.id}: missed firing(s) while the daemon was down; skipping to ${skippingTo}`);
       store.claimSlot(withNextFire(record, next), slot);
       deferralsWarned.delete(deferralKey);
+      deferralsWarned.delete(`${deferralKey}:previous`);
       return;
     }
 
@@ -612,6 +844,26 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     }
     deferralsWarned.delete(`${record.id}:${slot}`);
 
+    // Card 858: what this firing carries from the one before it. Read here,
+    // at the claim, so a daemon killed after a wrap-up still leaves the
+    // stopped session for this read; it's the one copy of the checkpoint.
+    let plan: ResumePlan | undefined;
+    if (record.cadence.kind !== 'at' && record.lastSessionId !== undefined) {
+      const planned = await planResume(record, record.lastSessionId, slot);
+      if (planned === 'defer') {
+        return;
+      }
+      if (planned !== undefined) {
+        // An await sat between the readiness check and the claim below,
+        // which writes into the schedules table: check both again.
+        if (stopped) {
+          return;
+        }
+        await stillReady(record.id);
+        plan = planned;
+      }
+    }
+
     const firedAt = now.toISOString();
     const sessionId = `${SCHEDULE_SESSION_ID_PREFIX}${record.id}:${slot}`;
     // Advance from the scheduled slot, not from now: `following` is the
@@ -625,24 +877,45 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     // and spent ATOMICALLY against the slot this tick read: a schedule
     // cancelled between the due scan and here is gone, and its prompt
     // must not run on a grant that was just revoked.
-    if (!store.claimSlot(withNextFire(record, next, { lastFiredAt: firedAt, lastSessionId: sessionId }), slot)) {
+    let claimed = withNextFire(record, next, { lastFiredAt: firedAt, lastSessionId: sessionId });
+    if (plan !== undefined) {
+      // The streak and the fallback are written in the same claim as the
+      // slot, so a crash can't leave one without the other.
+      const { stoppedEarlyStreak: _streak, resumeFrom: _resumeFrom, ...rest } = claimed;
+      claimed = {
+        ...rest,
+        ...(plan.streak > 0 ? { stoppedEarlyStreak: plan.streak } : {}),
+        ...(plan.from !== undefined ? { resumeFrom: { firing: sessionId, from: plan.from.sessionId } } : {}),
+      };
+    }
+    if (!store.claimSlot(claimed, slot)) {
       log(`schedule ${record.id}: slot ${slot} was cancelled or already claimed; not firing`);
       return;
     }
 
-    runningPerAgent.set(record.agentId, running + 1);
+    const resumeFrom = plan?.from;
+    // Re-read: a firing of this agent's may have settled during the await above.
+    runningPerAgent.set(record.agentId, (runningPerAgent.get(record.agentId) ?? 0) + 1);
     activeFirings.add(sessionId);
     const firing = dispatch({
       sessionId,
       agentId: record.agentId,
-      userMessage: record.prompt,
+      userMessage: resumeFrom === undefined
+        ? record.prompt
+        : [record.prompt, renderResumeBlock(resumeFrom.run.stoppedEarly, resumeFrom.run.reply, plan!.streak, record.destination !== undefined)].join('\n\n'),
       metadata: {
         [SCHEDULED_TURN_METADATA_KEY]: true,
         [SCHEDULE_ID_METADATA_KEY]: record.id,
         // The firing's "sender" is the session that wrote the prompt, at
         // the label it had then; a schedule set before labels existed is
-        // `unknown`, like every other record from before.
-        [SENDER_TRUST_METADATA_KEY]: record.trust ?? 'unknown',
+        // `unknown`, like every other record from before. A resumed firing
+        // also carries the stopped run's own words, so it's sent at the
+        // lower of the two, the rule `agent.delegate` uses for a child: a
+        // run that read a web page can't launder that page's text into a
+        // turn at the schedule's label.
+        [SENDER_TRUST_METADATA_KEY]: resumeFrom === undefined
+          ? record.trust ?? 'unknown'
+          : leastTrusted(record.trust ?? 'unknown', resumeFrom.run.trust),
       },
     }).then(
       () => {
@@ -651,7 +924,11 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       (error) => {
         warn(`schedule ${record.id} firing failed: ${error instanceof Error ? error.message : String(error)}`);
       },
-    ).finally(() => {
+    ).then(async () => {
+      if (resumeFrom !== undefined) {
+        await dropFallback(record.id, sessionId);
+      }
+    }).finally(() => {
       activeFirings.delete(sessionId);
       const count = (runningPerAgent.get(record.agentId) ?? 1) - 1;
       if (count > 0) {
@@ -901,10 +1178,17 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         if (stopped) {
           break;
         }
-        fireOrSkip(record, now);
+        await fireOrSkip(record, now);
       }
       processEvents(now);
     } catch (error) {
+      if (error instanceof NotReady) {
+        if (propagateReadiness) {
+          throw error.reason;
+        }
+        warn(`scheduler stopped before claiming schedule ${error.scheduleId}'s firing: ${error.message}`);
+        return;
+      }
       warn(`scheduler tick failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (!stopped) {

@@ -201,7 +201,11 @@ a problem.
   same way. A run that stopped this way, with nobody there to read the
   wrap-up (a schedule, say), shows in `stratus sessions` as
   `completed (stopped early: turn limit)`, and `stratus logs` has a
-  `session.stopped-early` line for it.
+  `session.stopped-early` line for it. On a recurring schedule the next
+  firing starts from that wrap-up instead of from scratch (see
+  [Schedules](./schedules.md#the-rest-of-the-shape-briefly)), so a
+  schedule that stops early every time is a budget to raise, not work
+  being lost.
   See [how many turns one message may
   spend](./always-on.md#how-many-turns-one-message-may-spend).
 - **"ran out of context part-way through its answer"** — different from
