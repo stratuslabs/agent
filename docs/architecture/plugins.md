@@ -631,9 +631,11 @@ capability rather than an assumption:
   the creator can't be told. An unknown outcome rejects saying the
   conversation may be archived and that a retry is safe. The gateway, not
   the adapter, refuses the conversation the work was asked from: a turn's
-  own, or for a sub-agent or a delegated run, its root turn's. It asks the
-  adapter's `sessionConversation` which one that is, so an adapter that
-  archives implements that too; without it, every archive is refused.
+  own, or for a sub-agent or a delegated run, its root turn's, before any
+  approval prompt. It asks the adapter's `sessionConversation` which one
+  that is, so an adapter that archives implements that too: without it,
+  every archive is refused, and so is one from a session whose id is that
+  channel's (`channelSessionKey`) when it gets no answer.
 - Who counts as the operator is one rule in core's channel contract, not
   one per adapter: `isPrincipal`, `admitsSender` (the `admit` policy), and
   `senderTrustFor` (the `user`/`unknown` label a turn carries). Which

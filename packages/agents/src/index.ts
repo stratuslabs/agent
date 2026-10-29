@@ -136,6 +136,7 @@ export {
   CHANNEL_CREATE_TOOL_NAME,
   CHANNEL_INVITE_TOOL_NAME,
   CHANNEL_JOIN_TOOL_NAME,
+  type ConversationArchiveRefusal,
   type ConversationArchiver,
   type ConversationCreator,
   type ConversationInviter,

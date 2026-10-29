@@ -69,3 +69,23 @@ test('channel.archive refuses a malformed request before the channel is asked', 
   }
   assert.deepEqual(calls, []);
 });
+
+test('channel.archive has a refusal hook only when the host gives one, and hands it the trimmed request and the session', async () => {
+  assert.equal(archiving().tool.refusalFor, undefined);
+  const seen: Array<{ input: { agentId: string; channel: string; conversation: string }; session: Session }> = [];
+  const tool = createChannelArchiveTool(async () => ({ conversation: 'C1', alreadyArchived: false }), {
+    refusalFor: async (input, session) => {
+      seen.push({ input, session });
+      return input.conversation === 'C1' ? 'not that one' : undefined;
+    },
+  });
+  const session = sessionFor('blair');
+  assert.equal(await tool.refusalFor!({ channel: ' slack ', conversation: ' C1 ' }, session), 'not that one');
+  assert.equal(await tool.refusalFor!({ channel: 'slack', conversation: 'C2' }, session), undefined);
+  assert.equal(await tool.refusalFor!({ channel: 'slack', conversation: '  ' }, session), undefined, 'a malformed call is left to execute');
+  assert.deepEqual(seen.map(({ input }) => input), [
+    { agentId: 'blair', channel: 'slack', conversation: 'C1' },
+    { agentId: 'blair', channel: 'slack', conversation: 'C2' },
+  ]);
+  assert.equal(seen[0]!.session, session);
+});

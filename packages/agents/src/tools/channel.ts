@@ -264,7 +264,21 @@ export type ConversationArchiver = (
  * Nothing is deleted: a person can unarchive it. The result names the
  * channel by id only, since members can rename a channel after it is made.
  */
-export const createChannelArchiveTool = (archive: ConversationArchiver): Tool => ({
+/**
+ * A refusal the host can tell before anyone is asked about a
+ * `channel.archive` call (the conversation the work was asked from), so
+ * nobody approves an archive that is bound to fail. Undefined when it has
+ * nothing to say; the archiver still refuses the same call itself.
+ */
+export type ConversationArchiveRefusal = (
+  input: { agentId: string; channel: string; conversation: string },
+  session: Session,
+) => Promise<string | undefined>;
+
+export const createChannelArchiveTool = (
+  archive: ConversationArchiver,
+  options: { refusalFor?: ConversationArchiveRefusal } = {},
+): Tool => ({
   name: CHANNEL_ARCHIVE_TOOL_NAME,
   description: 'Archive a channel your own app created (for example with channel.create), by its id (for Slack, C…). '
     + 'Channels another user or app created are refused, and so is the conversation you were asked from. '
@@ -279,6 +293,15 @@ export const createChannelArchiveTool = (archive: ConversationArchiver): Tool =>
     },
     required: ['channel', 'conversation'],
   },
+  ...(options.refusalFor !== undefined
+    ? {
+        async refusalFor(input: JsonObject, session: Session) {
+          const channel = typeof input.channel === 'string' ? input.channel.trim() : '';
+          const conversation = typeof input.conversation === 'string' ? input.conversation.trim() : '';
+          return channel && conversation ? options.refusalFor?.({ agentId: session.agent.id, channel, conversation }, session) : undefined;
+        },
+      }
+    : {}),
   async execute(input: JsonObject, session: Session) {
     const channel = requiredText(CHANNEL_ARCHIVE_TOOL_NAME, input, 'channel', 'the channel kind (e.g. "slack")');
     const conversation = requiredText(CHANNEL_ARCHIVE_TOOL_NAME, input, 'conversation', 'the id of the channel to archive');
