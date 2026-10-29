@@ -118,7 +118,7 @@ interface FakeWeb extends SlackWebLike {
   /** Held by chat.postMessage, so a test can act while a post is in flight. */
   postGate?: Promise<void>;
   /** What conversations.info answers for; anything else rejects channel_not_found. */
-  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean; is_channel?: boolean; is_group?: boolean; name?: string; num_members?: number; is_ext_shared?: boolean; is_org_shared?: boolean }>;
+  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean; is_private?: boolean; is_mpim?: boolean; is_channel?: boolean; is_group?: boolean; name?: string; num_members?: number; is_ext_shared?: boolean; is_org_shared?: boolean; is_shared?: boolean; is_pending_ext_shared?: boolean; is_archived?: boolean; creator?: string }>;
   /** What conversations.members answers, one page per entry; unknown channels have no members. */
   conversationMembers: Map<string, string[][]>;
   /**
@@ -15321,5 +15321,175 @@ test('a request without a variable says nothing about the shell', async () => {
   pending.add('cred-plain');
   await ask({ requestId: 'cred-plain' });
   assert.doesNotMatch(JSON.stringify(formPosts().at(-1)?.blocks), /shell/);
+  await adapter.stop();
+});
+
+/** Gives a fake the archive call, recorded, answering what `answer` says. */
+const withArchive = (web: FakeWeb, answer: (args: Record<string, unknown>) => unknown = () => ({ ok: true })): CreateCall[] => {
+  const calls: CreateCall[] = [];
+  (web.conversations as unknown as Record<string, unknown>).archive = async (args: Record<string, unknown>) => {
+    calls.push(['archive', args]);
+    return answer(args);
+  };
+  return calls;
+};
+
+test('archiveConversation archives a channel the agent\'s own app created, with that app, and says when it was archived already', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  let archive: (args: Record<string, unknown>) => unknown = () => ({ ok: true });
+  const avaCalls = withArchive(webAva, (args) => archive(args));
+  const beaCalls = withArchive(webBea);
+  webAva.knownConversations.set('C-MINE', { is_channel: true, creator: 'B-AVA', name: 'renamed-by-someone' });
+  webAva.knownConversations.set('G-MINE', { is_channel: true, is_private: true, creator: 'B-AVA' });
+  webAva.knownConversations.set('C-DONE', { is_channel: true, creator: 'B-AVA', is_archived: true });
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    log: () => {},
+    warn: () => {},
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+
+  assert.deepEqual(await adapter.archiveConversation!({ agentId: 'ava', conversation: ' C-MINE ' }), { conversation: 'C-MINE', alreadyArchived: false });
+  assert.deepEqual(await adapter.archiveConversation!({ agentId: 'ava', conversation: 'G-MINE' }), { conversation: 'G-MINE', alreadyArchived: false });
+  assert.deepEqual(avaCalls, [['archive', { channel: 'C-MINE' }], ['archive', { channel: 'G-MINE' }]]);
+  assert.deepEqual(beaCalls, [], 'the asking agent\'s own app archives');
+
+  // Archived already, as Slack's info says it: nothing to call.
+  assert.deepEqual(await adapter.archiveConversation!({ agentId: 'ava', conversation: 'C-DONE' }), { conversation: 'C-DONE', alreadyArchived: true });
+  assert.equal(avaCalls.length, 2);
+  // Archived between the look and the call: Slack's code says so.
+  archive = () => {
+    throw slackPlatformError('already_archived');
+  };
+  assert.deepEqual(await adapter.archiveConversation!({ agentId: 'ava', conversation: 'C-MINE' }), { conversation: 'C-MINE', alreadyArchived: true });
+  await adapter.stop();
+});
+
+test('archiveConversation refuses, before Slack is asked to archive, anything its own app did not create or a person must decide', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  const calls = withArchive(web);
+  web.knownConversations.set('C-THEIRS', { is_channel: true, creator: 'U-DYLAN' });
+  web.knownConversations.set('C-NOBODY', { is_channel: true });
+  web.knownConversations.set('D-DM', { is_im: true });
+  web.knownConversations.set('G-MPIM', { is_mpim: true, creator: 'B-AVA' });
+  for (const flag of ['is_shared', 'is_ext_shared', 'is_org_shared', 'is_pending_ext_shared'] as const) {
+    web.knownConversations.set(`C-${flag}`, { is_channel: true, creator: 'B-AVA', [flag]: true });
+  }
+  const info = web.conversations.info.bind(web.conversations);
+  web.conversations.info = async (args) => {
+    if (!web.knownConversations.has(args.channel)) {
+      throw slackPlatformError('channel_not_found');
+    }
+    return info(args);
+  };
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(() => adapter.archiveConversation!({ agentId: 'ava', conversation: '  ' }), /archiving needs a channel id/);
+  await assert.rejects(() => adapter.archiveConversation!({ agentId: 'nobody', conversation: 'C-THEIRS' }), /agent nobody has no Slack app, so it cannot archive a Slack channel/);
+  const refusals: Array<[string, RegExp]> = [
+    ['C-THEIRS', /^Error: slack: ava's app didn't create C-THEIRS: another user or app did, so ava can't archive it\. A person can archive it in Slack\. Nothing was archived\.$/],
+    ['C-NOBODY', /ava's app didn't create C-NOBODY/],
+    ['D-DM', /^Error: slack: D-DM is a direct message, and only channels can be archived\. Nothing was archived\.$/],
+    ['G-MPIM', /G-MPIM is a direct message, and only channels can be archived/],
+    ['C-UNKNOWN', /^Error: slack: Slack found no channel C-UNKNOWN that ava's app can see\. Check the id \(copy it from the channel's link; a name won't work\)\. If the id is right, the channel is private, and a member has to invite the app\. Either way, ava can only archive channels its own app created\. Nothing was archived\.$/],
+  ];
+  for (const flag of ['is_shared', 'is_ext_shared', 'is_org_shared', 'is_pending_ext_shared']) {
+    refusals.push([`C-${flag}`, new RegExp(`^Error: slack: C-${flag} is shared with another workspace or organization, so archiving it would reach people outside this one\\. A person can archive it in Slack\\. Nothing was archived\\.$`)]);
+  }
+  for (const [conversation, message] of refusals) {
+    await assert.rejects(() => adapter.archiveConversation!({ agentId: 'ava', conversation }), message, conversation);
+  }
+  assert.deepEqual(calls, [], 'Slack was never asked to archive');
+  await adapter.stop();
+
+  // A client without the call says so rather than failing oddly.
+  const older = createFakeWeb('B-AVA', 'T1');
+  const olderAdapter = await startedAdapterWith(older);
+  await assert.rejects(() => olderAdapter.archiveConversation!({ agentId: 'ava', conversation: 'C-THEIRS' }), /this Slack client cannot archive channels/);
+  await olderAdapter.stop();
+});
+
+test('archiveConversation refuses every channel when another agent here uses the same Slack app', async () => {
+  // The same bot token configured for two agents, and two tokens of one
+  // app's bot user in one workspace: Slack's creator can't tell the agents'
+  // channels apart either way.
+  for (const sameToken of [true, false]) {
+    const webAva = createFakeWeb('B-AVA', 'T1');
+    const webBea = createFakeWeb('B-AVA', 'T1');
+    const calls = withArchive(webAva);
+    withArchive(webBea);
+    webAva.knownConversations.set('C-MINE', { is_channel: true, creator: 'B-AVA' });
+    const adapter = createSlackChannelAdapter({
+      agents: [
+        { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+        { agentId: 'bea', appToken: 'xapp-b', botToken: sameToken ? 'xoxb-a' : 'xoxb-b' },
+      ],
+      editIntervalMs: 0,
+      log: () => {},
+      warn: () => {},
+      createSocketClient: () => createFakeSocket(),
+      createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    });
+    await adapter.start(createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused')));
+    await assert.rejects(
+      () => adapter.archiveConversation!({ agentId: 'ava', conversation: 'C-MINE' }),
+      /^Error: slack: ava's Slack app is also bea's here, so Stratus can't tell which agent created C-MINE\. Give each agent its own Slack app\. A person can archive it in Slack\. Nothing was archived\.$/,
+      `same token: ${sameToken}`,
+    );
+    assert.deepEqual(calls, []);
+    await adapter.stop();
+  }
+});
+
+test('archiveConversation turns Slack\'s refusals into sentences, and says an unknown outcome may have archived and is safe to retry', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  let failWith: Error = slackPlatformError('missing_scope');
+  withArchive(web, () => {
+    throw failWith;
+  });
+  web.knownConversations.set('C-PUB', { is_channel: true, creator: 'B-AVA' });
+  web.knownConversations.set('G-PRIV', { is_channel: true, is_private: true, creator: 'B-AVA' });
+  const warnings: string[] = [];
+  const adapter = await startedAdapterWith(web, { warn: (line) => warnings.push(line) });
+
+  failWith = slackPlatformError('missing_scope');
+  await assert.rejects(() => adapter.archiveConversation!({ agentId: 'ava', conversation: 'C-PUB' }),
+    /^Error: slack: ava's Slack app can't archive public channels because it lacks the channels:manage scope\. Add it to the app's manifest and reinstall the app\. Nothing was archived\.$/);
+  await assert.rejects(() => adapter.archiveConversation!({ agentId: 'ava', conversation: 'G-PRIV' }),
+    /^Error: slack: ava's Slack app can't archive private channels because it lacks the groups:write scope\. Add it to the app's manifest and reinstall the app\. Nothing was archived\.$/);
+  const refusals: Array<[Error, RegExp]> = [
+    [slackPlatformError('not_in_channel'), /ava's app is no longer a member of C-PUB, so it can't archive it\. A member has to add the app back first\. Nothing was archived\.$/],
+    [slackPlatformError('restricted_action'), /This workspace limits who can archive channels, so ava's app can't archive C-PUB\. A person has to do it in Slack\. Nothing was archived\.$/],
+    [slackPlatformError('ratelimited'), /Slack is rate-limiting ava's app; try archiving C-PUB again later\. Nothing was archived\.$/],
+    [slackPlatformError('invalid_auth'), /Slack refused ava's app token \(invalid_auth\)\. Reinstall the app or replace its bot token\. Nothing was archived\.$/],
+    [slackPlatformError('channel_not_found'), /Slack found no channel C-PUB that ava's app can see/],
+    [slackPlatformError('cant_archive_general'), /^Error: slack: Slack did not let ava's app archive C-PUB \(cant_archive_general\)\. Nothing was archived\.$/],
+  ];
+  for (const [error, message] of refusals) {
+    failWith = error;
+    await assert.rejects(() => adapter.archiveConversation!({ agentId: 'ava', conversation: 'C-PUB' }), message);
+  }
+  for (const [error, code] of [
+    [slackPlatformError('internal_error'), 'internal_error'],
+    [slackPlatformError('fatal_error'), 'fatal_error'],
+    [slackRequestError(), 'A request error occurred: socket hang up'],
+  ] as const) {
+    failWith = error;
+    await assert.rejects(
+      () => adapter.archiveConversation!({ agentId: 'ava', conversation: 'C-PUB' }),
+      (thrown: Error) => thrown.message === `slack: Slack's answer left it unknown whether ava's app archived C-PUB (${code}). It may be archived. Trying again is safe: archiving a channel twice changes nothing.`,
+    );
+  }
+  // The log names the agent, the channel id and Slack's code, never a name or text.
+  assert.ok(warnings.some((line) => line === 'slack: ava could not archive C-PUB (restricted_action)'), warnings.join('\n'));
   await adapter.stop();
 });

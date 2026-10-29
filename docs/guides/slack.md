@@ -506,6 +506,18 @@ already turns on for approval buttons; no scope is added.
   **OAuth & Permissions** for the agents that should have them, and
   reinstall. Both are gated tools. Details in
   [Joining a channel and inviting people](../../packages/channel-slack/README.md#joining-a-channel-and-inviting-people).
+- **Archiving a channel** — `channel.archive` archives a channel the
+  agent's **own** app created (with `channel.create`, say), by its id. It
+  refuses a channel another user or app created, a direct message, a channel
+  shared with another workspace or organization, and the conversation the
+  agent was asked from. Slack records the app's bot user as a channel's
+  creator, so ownership is per Slack app: it relies on one app per agent,
+  and it refuses every channel when another agent on the host uses the same
+  app. An agent can't undo an archive (Slack doesn't let bot tokens
+  unarchive); messages are kept, and a person can unarchive the channel in
+  Slack. It uses the `channel.create` scopes, `channels:manage` (public) and
+  `groups:write` (private), so no new scope. It is a gated tool. Details in
+  [Archiving a channel](../../packages/channel-slack/README.md#archiving-a-channel).
 - **Approval buttons** — with [`--approvals remote`](./approvals.md), a gated
   tool call parks the turn and asks in its thread with **Allow once** /
   **Always allow** / **Deny**. Clicks are authorized by *who clicked*, never

@@ -234,3 +234,78 @@ export const createChannelInviteTool = (invite: ConversationInviter): Tool => ({
     } as JsonObject;
   },
 });
+
+export const CHANNEL_ARCHIVE_TOOL_NAME = 'channel.archive';
+
+/**
+ * Archives one conversation the agent's own channel app created, over the
+ * channel contract's `archiveConversation`. It takes the asking session
+ * too, because the gateway refuses to archive the conversation the work
+ * was asked from, and only the session says which one that is. Rejecting
+ * means the conversation was not archived, or that it is unknown.
+ */
+export type ConversationArchiver = (
+  input: {
+    agentId: string;
+    /** The channel kind, e.g. `slack`. */
+    channel: string;
+    conversation: string;
+  },
+  session: Session,
+) => Promise<{ conversation: string; alreadyArchived: boolean }>;
+
+/**
+ * A refusal the host can tell before anyone is asked about a
+ * `channel.archive` call (the conversation the work was asked from), so
+ * nobody approves an archive that is bound to fail. Undefined when it has
+ * nothing to say; the archiver still refuses the same call itself.
+ */
+export type ConversationArchiveRefusal = (
+  input: { agentId: string; channel: string; conversation: string },
+  session: Session,
+) => Promise<string | undefined>;
+
+/**
+ * Archive a channel the agent's own app created, so test and one-off
+ * channels don't stay open until a person cleans them up.
+ *
+ * `gated`, like `channel.create`: archiving takes the channel out of its
+ * members' sidebars, and the agent can't undo it. The channel decides what
+ * its app may archive, and Slack's adapter refuses anything the app didn't create.
+ * Nothing is deleted: a person can unarchive it. The result names the
+ * channel by id only, since members can rename a channel after it is made.
+ */
+export const createChannelArchiveTool = (
+  archive: ConversationArchiver,
+  options: { refusalFor?: ConversationArchiveRefusal } = {},
+): Tool => ({
+  name: CHANNEL_ARCHIVE_TOOL_NAME,
+  description: 'Archive a channel your own app created (for example with channel.create), by its id (for Slack, C…). '
+    + 'Channels another user or app created are refused, and so is the conversation you were asked from. '
+    + 'You can\'t undo an archive: messages are kept, and a person can unarchive the channel in Slack. '
+    + 'Archiving a channel that is already archived changes nothing and says alreadyArchived.',
+  risk: 'gated',
+  parameters: {
+    type: 'object',
+    properties: {
+      channel: { type: 'string', description: 'The channel kind, e.g. "slack".' },
+      conversation: { type: 'string', description: 'The id of the channel to archive (for Slack, C…), not its name.' },
+    },
+    required: ['channel', 'conversation'],
+  },
+  ...(options.refusalFor !== undefined
+    ? {
+        async refusalFor(input: JsonObject, session: Session) {
+          const channel = typeof input.channel === 'string' ? input.channel.trim() : '';
+          const conversation = typeof input.conversation === 'string' ? input.conversation.trim() : '';
+          return channel && conversation ? options.refusalFor?.({ agentId: session.agent.id, channel, conversation }, session) : undefined;
+        },
+      }
+    : {}),
+  async execute(input: JsonObject, session: Session) {
+    const channel = requiredText(CHANNEL_ARCHIVE_TOOL_NAME, input, 'channel', 'the channel kind (e.g. "slack")');
+    const conversation = requiredText(CHANNEL_ARCHIVE_TOOL_NAME, input, 'conversation', 'the id of the channel to archive');
+    const result = await archive({ agentId: session.agent.id, channel, conversation }, session);
+    return { archived: true, channel, conversation: result.conversation, alreadyArchived: result.alreadyArchived === true } as JsonObject;
+  },
+});

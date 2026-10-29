@@ -650,6 +650,43 @@ invite, where `channels:manage` and `groups:write` also work. Add them to
 the apps that should have them, under **OAuth & Permissions**, and
 reinstall.
 
+## Archiving a channel
+
+The adapter implements `archiveConversation`, which the gateway's
+`channel.archive` tool runs on, with the agent's **own** app and the
+channel's id (`C…`). It archives only a channel that app created. It first
+asks `conversations.info` and refuses, before Slack is asked to archive:
+
+- a channel whose `creator` isn't the app's bot user, or that has none;
+- a direct message or group DM;
+- a channel shared with another workspace or organization (`is_shared`,
+  `is_ext_shared`, `is_org_shared`, `is_pending_ext_shared`), since a person
+  outside this workspace would be affected;
+- any channel at all when another agent on this host uses the same app (the
+  same bot token, or the same bot user in the same workspace).
+
+That last rule is why ownership needs **one app per agent**, as the rest of
+this adapter does: `creator` names the app's bot user, so two agents on one
+app can't tell their channels apart. The check sees only this process, and
+two daemons on one app's tokens are not a supported setup.
+
+A channel already archived resolves with `alreadyArchived: true`, so a retry
+changes nothing. Slack's refusals become sentences: a missing
+`channels:manage` (public) or `groups:write` (private) scope with the
+reinstall step, an app that is no longer a member (`not_in_channel`), a
+workspace rule limiting who can archive (`restricted_action`), rate limits
+and refused tokens. When Slack's answer leaves the outcome unknown
+(`internal_error`, `fatal_error`, or no answer), the call says the channel
+may be archived and that trying again is safe. Results and refusals name the
+channel by id only.
+
+Archiving can't be undone by the agent: Slack doesn't let bot tokens call
+`conversations.unarchive`. Messages are kept, and a person can unarchive the
+channel in Slack. The gateway also refuses the conversation the agent was
+asked from, so a reply always has somewhere to go.
+
+No new scope: an app with the `channel.create` scopes can archive.
+
 ## Speaking first: the outbound seam
 
 The adapter also implements the channel contract's `resolveOutbound` — how a

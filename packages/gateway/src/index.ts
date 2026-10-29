@@ -79,11 +79,13 @@ import {
   createPinTool,
   createMessageSendTool,
   createMessageReadTool,
+  createChannelArchiveTool,
   createChannelCreateTool,
   createChannelInviteTool,
   createChannelJoinTool,
   directMessageReadRefusal,
   type ConversationReader,
+  type ConversationArchiver,
   type ConversationCreator,
   type ConversationInviter,
   type ConversationJoiner,
@@ -91,6 +93,7 @@ import {
   createRememberTool,
   createScheduleTools,
   DELEGATED_BY_METADATA_KEY,
+  DELEGATED_SESSION_ID_MARKER,
   DEFAULT_MAX_DELEGATION_DEPTH,
   DELEGATION_DEPTH_METADATA_KEY,
   delegatingSessionIdOf,
@@ -364,6 +367,14 @@ export interface GatewayChannelAdapter {
    * MUST reject only when nobody was invited.
    */
   inviteToConversation?(request: Omit<Parameters<ConversationInviter>[0], 'channel'>): ReturnType<ConversationInviter>;
+  /**
+   * Archives a conversation the agent's own app created, mirroring
+   * `ChannelAdapter.archiveConversation`. Optional: an adapter without it
+   * cannot serve `channel.archive`. The gateway has already refused the
+   * conversation the work was asked from, which it asks the same adapter's
+   * `sessionConversation`; without that, every archive is refused.
+   */
+  archiveConversation?(request: Omit<Parameters<ConversationArchiver>[0], 'channel'>): ReturnType<ConversationArchiver>;
   /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
@@ -2707,6 +2718,112 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         : `No running channel can invite people to '${channel}' conversations.`);
     }
     return adapter.inviteToConversation({ agentId, ...request });
+  }));
+  /**
+   * Why a `channel.archive` call would archive the conversation its work was
+   * asked from, or can't tell, as a sentence; undefined when it may go on.
+   * That conversation is never archived: the answer to it would have
+   * nowhere to go, and the agent can't unarchive.
+   *
+   * An ordinary session is its own origin. A sub-agent's or a delegated
+   * run's is the root turn that started the chain, read off the id the
+   * host minted for it (each child id is its parent's plus a marker, so the
+   * root is the text before the first one), never off metadata a tool in
+   * the slice could rewrite. The id is the one the session had at its first
+   * tool call, for the same reason. The origin's conversation is asked of
+   * the adapter of this kind that carries the origin's agent. When it can't
+   * be told (the root is gone; no adapter, no `sessionConversation`, a
+   * lookup that fails, or no answer for a session whose id is this
+   * channel's), the call is refused: an archive the agent can't undo
+   * doesn't run on a guess. A session that isn't this channel's at all (an
+   * API call, a schedule, a turn on another transport) has no conversation
+   * here to protect.
+   */
+  const archiveRefusal = async (
+    kind: string,
+    conversation: string,
+    session: Session,
+    archiving: GatewayChannelAdapter,
+  ): Promise<string | undefined> => {
+    const unknown = (why: string): string =>
+      `${kind} ${conversation} was not archived: ${why}, so Stratus can't tell which conversation this work was asked from, `
+      + 'and that one is never archived. Ask for the archive from a conversation.';
+    const id = hostIdOf(session);
+    const marks = [SUB_AGENT_SESSION_ID_MARKER, DELEGATED_SESSION_ID_MARKER]
+      .map((marker) => id.indexOf(marker))
+      .filter((at) => at >= 0);
+    let origin = { agentId: session.agent.id, sessionId: id };
+    let adapter: GatewayChannelAdapter | undefined = archiving;
+    if (marks.length > 0) {
+      const rootId = id.slice(0, Math.min(...marks));
+      let root: Session | undefined;
+      try {
+        root = rootId ? await store.get(rootId) : undefined;
+      } catch (error) {
+        warn(`${id}: could not read the root session ${rootId} to check a channel.archive (${error instanceof Error ? error.message : String(error)})`);
+        root = undefined;
+      }
+      if (!root) {
+        return unknown('this run was started by another session that no longer exists');
+      }
+      origin = { agentId: root.agent.id, sessionId: root.id };
+      adapter = channelCarrying(kind, origin.agentId, () => true).adapter;
+    }
+    // Channel session ids lead with their kind (`channelSessionKey`).
+    const onThisChannel = origin.sessionId.startsWith(`${kind}:`);
+    if (!adapter) {
+      return onThisChannel ? unknown(`no running '${kind}' channel carries the agent this work was asked of`) : undefined;
+    }
+    if (!adapter.sessionConversation) {
+      return unknown(`the running '${kind}' channel can't say which conversation a session is in`);
+    }
+    let origins: string | undefined;
+    try {
+      origins = adapter.sessionConversation(origin.agentId, origin.sessionId);
+    } catch (error) {
+      warn(`${id}: could not tell which conversation ${origin.sessionId} is in to check a channel.archive (${error instanceof Error ? error.message : String(error)})`);
+      return unknown(`the running '${kind}' channel couldn't say which conversation this work was asked from`);
+    }
+    if (origins === undefined) {
+      return onThisChannel ? unknown(`the running '${kind}' channel can't say which of its conversations this work was asked from`) : undefined;
+    }
+    return origins === conversation
+      ? `${kind} ${conversation} is the conversation this work was asked from, so it was not archived: `
+        + 'the reply would have nowhere to go. Ask for the archive from another conversation.'
+      : undefined;
+  };
+  const archivingAdapter = (kind: string, agentId: string) =>
+    channelCarrying(kind, agentId, (candidate) => candidate.archiveConversation !== undefined);
+  const noArchivingAdapter = (kind: string, agentId: string, carriesOthers: boolean): string => carriesOthers
+    ? `No running '${kind}' channel carries agent ${agentId}, so it has no app to archive a channel with.`
+    : `No running channel can archive '${kind}' conversations.`;
+  tools.register(createChannelArchiveTool(async ({ agentId, channel, conversation }, session) => {
+    const { adapter, carriesOthers } = archivingAdapter(channel, agentId);
+    if (!adapter?.archiveConversation) {
+      throw new Error(noArchivingAdapter(channel, agentId, carriesOthers));
+    }
+    const refusal = await archiveRefusal(channel, conversation, session, adapter);
+    if (refusal !== undefined) {
+      throw new Error(refusal);
+    }
+    return adapter.archiveConversation({ agentId, conversation });
+  }, {
+    // The same check before anyone is asked: an approval, Always allow
+    // above all, for an archive that is bound to be refused is a question
+    // with no useful answer. Held as an approval wait, like message.read's,
+    // since it runs before any tool event and may read the store.
+    refusalFor: async ({ agentId, channel, conversation }, session) => {
+      const { adapter, carriesOthers } = archivingAdapter(channel, agentId);
+      if (!adapter?.archiveConversation) {
+        return noArchivingAdapter(channel, agentId, carriesOthers);
+      }
+      const release = holdApprovalWait(session.id);
+      try {
+        return await archiveRefusal(channel, conversation, session, adapter);
+      } finally {
+        release();
+      }
+    },
   }));
   tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
     // The same carrying rule as outbound: a read goes through the app of

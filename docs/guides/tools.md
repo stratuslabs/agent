@@ -125,7 +125,7 @@ instructions call for are still not there.
 
 **A daemon tool named in a local run is a right name in the wrong
 process.** `schedule.*`, `message.send`, `message.read`, `channel.create`, `channel.join`, `channel.invite`,
-`agent.delegate`, and `credential.request` need the
+`channel.archive`, `agent.delegate`, and `credential.request` need the
 dispatcher, the store, and the channels, so only `stratus serve` registers
 them. A soul that uses them is correct; `stratus run` just cannot call it,
 and says which it is rather than sending you after a plugin:
