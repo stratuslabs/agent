@@ -496,3 +496,81 @@ test('a symlinked state home is still usable: the fleet index is not an agent di
   assert.equal((await store.get('a-1'))?.agent.id, 'ava');
   store.close();
 });
+
+test('a session that stopped early is listed with its marker, and a later save without one clears it', async () => {
+  const stateDir = await newStateDir();
+  const store = new ShardedSessionStore({ stateDir });
+  const created = await store.create(session('stopped-1', 'ava', 'running'));
+  const stoppedEarly = { reason: 'turn-limit' as const, continuations: 1, at: '2026-10-29T19:00:00.000Z' };
+  await store.save({ ...created, status: 'completed', stoppedEarly });
+
+  // The listing answers from the fleet index, which never reads a body,
+  // so the marker has to be on the index row itself.
+  assert.deepEqual(store.list().find((row) => row.id === 'stopped-1')?.stoppedEarly, stoppedEarly);
+
+  // The next message clears the marker on the session, and the row follows.
+  const stored = await store.get('stopped-1');
+  const { stoppedEarly: _cleared, ...next } = stored!;
+  await store.save({ ...next, status: 'running' });
+  assert.equal(Object.hasOwn(store.list().find((row) => row.id === 'stopped-1')!, 'stoppedEarly'), false);
+  store.close();
+});
+
+test('a fleet index made before the stopped-early column gains it, and its old rows list as before', async () => {
+  const stateDir = await newStateDir();
+  const { DatabaseSync } = await import('node:sqlite');
+  const old = new DatabaseSync(fleetDbIn(stateDir));
+  old.exec(`
+    CREATE TABLE session_index (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  old.prepare('INSERT INTO session_index (id, agent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .run('old-1', 'ava', 'completed', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z');
+  old.close();
+
+  const store = new ShardedSessionStore({ stateDir });
+  const created = await store.create(session('new-1', 'ava', 'running'));
+  const stoppedEarly = { reason: 'repeated-failure' as const, continuations: 0, at: '2026-10-29T19:00:00.000Z' };
+  await store.save({ ...created, status: 'completed', stoppedEarly });
+
+  const rows = new Map(store.list().map((row) => [row.id, row]));
+  assert.deepEqual(rows.get('new-1')?.stoppedEarly, stoppedEarly);
+  assert.deepEqual(rows.get('old-1'), {
+    id: 'old-1',
+    agentId: 'ava',
+    status: 'completed',
+    createdAt: '2026-10-01T00:00:00.000Z',
+    updatedAt: '2026-10-01T00:00:00.000Z',
+  });
+  store.close();
+  // Opening it again finds the column already there.
+  new ShardedSessionStore({ stateDir }).close();
+});
+
+test('a stopped-early session the index fell behind on is re-indexed with its marker', async () => {
+  const stateDir = await newStateDir();
+  const store = new ShardedSessionStore({ stateDir });
+  await store.create(session('behind-1', 'ava', 'running'));
+  store.close();
+  // The kill between the shard write and the index write, on the save
+  // that completed a stopped-early turn: the store has the marker, the
+  // index row is one save behind.
+  const shard = new SqliteSessionStore(agentSessionDbIn(stateDir, 'ava'));
+  const stored = await shard.get('behind-1');
+  const stoppedEarly = { reason: 'turn-limit' as const, continuations: 0, at: '2026-10-29T19:00:00.000Z' };
+  await shard.save({ ...stored!, status: 'completed', stoppedEarly });
+  shard.close();
+
+  const reopened = new ShardedSessionStore({ stateDir });
+  const report = await reopened.reconcile();
+  assert.deepEqual(report.reindexed, ['behind-1']);
+  const row = reopened.list().find((candidate) => candidate.id === 'behind-1');
+  assert.equal(row?.status, 'completed');
+  assert.deepEqual(row?.stoppedEarly, stoppedEarly);
+  reopened.close();
+});

@@ -137,6 +137,7 @@ export {
   type SqliteSessionStoreOptions,
   type ShardedSessionStoreOptions,
   type SessionIndexRow,
+  type SessionListRow,
   type SessionReconcileReport,
 } from './sessions.ts';
 export {

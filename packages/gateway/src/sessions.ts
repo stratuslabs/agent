@@ -3,7 +3,13 @@ import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import type { Session, SessionStatus, SessionStore } from '@stratusagent/core';
+import {
+  isStoppedEarlyReason,
+  type Session,
+  type SessionStatus,
+  type SessionStoppedEarly,
+  type SessionStore,
+} from '@stratusagent/core';
 import {
   agentSessionDbIn,
   agentStateDirIn,
@@ -50,6 +56,10 @@ const SESSIONS_TABLE = `
  * The same columns minus the conversation body: the index is a routing
  * table and a set of claimed ids, never a second copy of the transcript.
  * Nothing about a conversation can be read out of the fleet database.
+ *
+ * `stopped_early` is `Session.stoppedEarly` as JSON — a reason and counts,
+ * no content — so `stratus sessions` can say a run stopped early without
+ * reading bodies. NULL for every other session.
  */
 const SESSION_INDEX_TABLE = `
   CREATE TABLE IF NOT EXISTS session_index (
@@ -57,9 +67,37 @@ const SESSION_INDEX_TABLE = `
     agent_id TEXT NOT NULL,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    stopped_early TEXT
   )
 `;
+
+/**
+ * A stored `stoppedEarly`, or nothing. Read defensively: the column is a
+ * display aid, and a value a hand edit or a future build wrote must not
+ * fail a listing.
+ */
+const parseStoppedEarly = (stored: unknown): SessionStoppedEarly | undefined => {
+  if (typeof stored !== 'string') {
+    return undefined;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(stored);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const { reason, continuations, at } = value as Record<string, unknown>;
+  return isStoppedEarlyReason(reason) && typeof continuations === 'number' && typeof at === 'string'
+    ? { reason, continuations, at }
+    : undefined;
+};
+
+/** One listing row, as `GET /api/v1/sessions` returns it. */
+export type SessionListRow = Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'stoppedEarly'> & { agentId: string };
 
 /**
  * Sessions hold complete conversations (prompts, replies, tool output,
@@ -266,6 +304,18 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   /**
+   * One session's `stoppedEarly`, read out of its body by SQLite. For the
+   * reconcile re-indexing a row, which is rare: `rows()` stays body-free,
+   * because it runs over every session at every start.
+   */
+  stoppedEarlyOf(id: string): SessionStoppedEarly | undefined {
+    const row = this.db.prepare("SELECT json_extract(body, '$.stoppedEarly') AS stopped FROM sessions WHERE id = ?").get(id) as
+      | { stopped: unknown }
+      | undefined;
+    return parseStoppedEarly(row?.stopped);
+  }
+
+  /**
    * Every row's routing and lifecycle columns, no bodies — what the
    * startup reconcile compares this shard against the fleet index with.
    */
@@ -294,6 +344,8 @@ export interface SessionIndexRow {
   status: SessionStatus;
   createdAt: string;
   updatedAt: string;
+  /** See `Session.stoppedEarly`. Written by `record`, never by `claim`. */
+  stoppedEarly?: SessionStoppedEarly;
 }
 
 /**
@@ -327,6 +379,21 @@ export class FleetSessionIndex {
   constructor(filePath: string, options: SqliteSessionStoreOptions = {}) {
     this.db = openStratusDatabase(filePath, options);
     this.db.exec(SESSION_INDEX_TABLE);
+    // An index made before the column existed gains it. Older builds name
+    // their columns in every statement, so they read past it, and their
+    // `record` writes it back NULL: after a rollback a listing just stops
+    // showing the marker, which the session body still holds.
+    const columns = this.db.prepare('PRAGMA table_info(session_index)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'stopped_early')) {
+      try {
+        this.db.exec('ALTER TABLE session_index ADD COLUMN stopped_early TEXT');
+      } catch (error) {
+        // Another connection added it between the check and the change.
+        if (!/duplicate column/i.test(error instanceof Error ? error.message : String(error))) {
+          throw error;
+        }
+      }
+    }
     tightenSqliteFile(filePath);
   }
 
@@ -369,8 +436,15 @@ export class FleetSessionIndex {
   /** Write the row as it now stands. Called after every shard write. */
   record(row: SessionIndexRow): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO session_index (id, agent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-      .run(row.id, row.agentId, row.status, row.createdAt, row.updatedAt);
+      .prepare('INSERT OR REPLACE INTO session_index (id, agent_id, status, created_at, updated_at, stopped_early) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(
+        row.id,
+        row.agentId,
+        row.status,
+        row.createdAt,
+        row.updatedAt,
+        row.stoppedEarly !== undefined ? JSON.stringify(row.stoppedEarly) : null,
+      );
   }
 
   /** Drop a claim — a reconcile releasing an id whose conversation never landed. */
@@ -444,26 +518,31 @@ export class FleetSessionIndex {
     return activity;
   }
 
-  list(agentId?: string, limit?: number): Array<Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt'> & { agentId: string }> {
+  list(agentId?: string, limit?: number): SessionListRow[] {
     // -1 is SQLite's "no limit", so one prepared statement serves both cases
     // rather than four.
     const bound = limit !== undefined && Number.isInteger(limit) && limit >= 0 ? limit : -1;
     const rows = (agentId
-      ? this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM session_index WHERE agent_id = ? ORDER BY updated_at DESC LIMIT ?').all(agentId, bound)
-      : this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM session_index ORDER BY updated_at DESC LIMIT ?').all(bound)) as Array<{
+      ? this.db.prepare('SELECT id, agent_id, status, created_at, updated_at, stopped_early FROM session_index WHERE agent_id = ? ORDER BY updated_at DESC LIMIT ?').all(agentId, bound)
+      : this.db.prepare('SELECT id, agent_id, status, created_at, updated_at, stopped_early FROM session_index ORDER BY updated_at DESC LIMIT ?').all(bound)) as Array<{
       id: string;
       agent_id: string;
       status: Session['status'];
       created_at: string;
       updated_at: string;
+      stopped_early: unknown;
     }>;
-    return rows.map((row) => ({
-      id: row.id,
-      agentId: row.agent_id,
-      status: row.status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    return rows.map((row) => {
+      const stoppedEarly = parseStoppedEarly(row.stopped_early);
+      return {
+        id: row.id,
+        agentId: row.agent_id,
+        status: row.status,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        ...(stoppedEarly !== undefined ? { stoppedEarly } : {}),
+      };
+    });
   }
 
   close(): void {
@@ -551,6 +630,7 @@ export class ShardedSessionStore implements SessionStore {
       status: session.status,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
+      ...(session.stoppedEarly !== undefined ? { stoppedEarly: session.stoppedEarly } : {}),
     });
     return session;
   }
@@ -600,6 +680,7 @@ export class ShardedSessionStore implements SessionStore {
       status: written.status,
       createdAt: written.createdAt,
       updatedAt: written.updatedAt,
+      ...(written.stoppedEarly !== undefined ? { stoppedEarly: written.stoppedEarly } : {}),
     });
   }
 
@@ -619,7 +700,7 @@ export class ShardedSessionStore implements SessionStore {
     return this.index.statusOf(id);
   }
 
-  list(agentId?: string, limit?: number): Array<Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt'> & { agentId: string }> {
+  list(agentId?: string, limit?: number): SessionListRow[] {
     return this.index.list(agentId, limit);
   }
 
@@ -639,6 +720,16 @@ export class ShardedSessionStore implements SessionStore {
   async reconcile(): Promise<SessionReconcileReport> {
     const report: SessionReconcileReport = { released: [], reindexed: [] };
     const owners = new Map<string, SessionIndexRow>();
+    // Read first, so a row about to be re-indexed can take its marker from
+    // the shard while that shard is open.
+    const indexed = new Map(this.index.rows().map((row) => [row.id, row]));
+    const behind = (row: SessionIndexRow): boolean => {
+      const claim = indexed.get(row.id);
+      return claim === undefined
+        || claim.agentId !== row.agentId
+        || claim.status !== row.status
+        || claim.updatedAt !== row.updatedAt;
+    };
     for (const agentId of await this.shardedAgentIds()) {
       // Read through a connection this reconcile owns, and let it go again
       // unless the store was already open: a roster's every agent has a
@@ -658,7 +749,11 @@ export class ShardedSessionStore implements SessionStore {
               + 'Two agents cannot share a session id; move or remove one of the two `agents/<id>/sessions.db` rows before starting.',
             );
           }
-          owners.set(row.id, row);
+          // Only for a row the index fell behind on: the marker lives in the
+          // body, and reading bodies for every row would make every start
+          // pay for a repair that is almost never needed.
+          const stoppedEarly = behind(row) ? shard.stoppedEarlyOf(row.id) : undefined;
+          owners.set(row.id, stoppedEarly !== undefined ? { ...row, stoppedEarly } : row);
         }
       } finally {
         if (cached === undefined) {
@@ -666,7 +761,6 @@ export class ShardedSessionStore implements SessionStore {
         }
       }
     }
-    const indexed = new Map(this.index.rows().map((row) => [row.id, row]));
     for (const [id] of indexed) {
       if (!owners.has(id)) {
         this.index.release(id);
@@ -674,11 +768,7 @@ export class ShardedSessionStore implements SessionStore {
       }
     }
     for (const [id, row] of owners) {
-      const claim = indexed.get(id);
-      if (claim === undefined
-        || claim.agentId !== row.agentId
-        || claim.status !== row.status
-        || claim.updatedAt !== row.updatedAt) {
+      if (behind(row)) {
         this.index.record(row);
         report.reindexed.push(id);
       }
