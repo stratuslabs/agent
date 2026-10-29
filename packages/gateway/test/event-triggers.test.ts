@@ -12,6 +12,7 @@ import {
   type ScheduleCadence,
 } from '@stratusagent/agents';
 import {
+  GatewayStoppingError,
   SqliteEventStore,
   SqliteScheduleStore,
   createSchedulerRuntime,
@@ -254,6 +255,46 @@ test('a dispatch that throws marks the firing failed with the reason', async () 
     assert.match(row.reason ?? '', /Agent not found/);
   } finally {
     await r.stop();
+  }
+});
+
+test('a firing a stopping daemon refused or cut short stays claimed, and the next start sends it again under its key', async () => {
+  // Card 590, Fly live check 3: a graceful restart mid-turn marked the
+  // firing failed and the event was never handled. The gateway now leaves a
+  // keyed turn its stop cut short for the next start and refuses the
+  // dispatch (GatewayStoppingError), as it refuses one that reaches it on
+  // the way down; either way the batch is not done, so it stays claimed.
+  const db = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-triggers-stop-')), 'fleet.db');
+  const first = await rig({}, db);
+  let firingId: string;
+  let batchKey: string | undefined;
+  try {
+    const id = await first.trigger();
+    await first.runtime.start();
+    firingId = first.deliver(id, 'd-1');
+    first.runtime.kickEvents();
+    batchKey = first.dispatched[0]!.idempotencyKey;
+    // The gateway stops the scheduler before it refuses or aborts anything.
+    first.runtime.stop();
+    first.dispatched[0]!.finish(new GatewayStoppingError('stratusd is stopping; this turn was cut short and continues when it is started again.', false));
+    await settle();
+    assert.equal(first.events.firing(firingId)!.status, 'firing');
+    assert.equal(first.events.firing(firingId)!.batchKey, batchKey);
+    assert.ok(!first.warnings.some((line) => /firing failed/.test(line)), first.warnings.join('\n'));
+  } finally {
+    await first.stop();
+  }
+
+  const second = await rig({}, db);
+  try {
+    await second.runtime.start();
+    assert.equal(second.dispatched.length, 1);
+    assert.equal(second.dispatched[0]!.idempotencyKey, batchKey, 'the same key, so the turn the stop left is continued, not run again');
+    second.dispatched[0]!.finish();
+    await settle();
+    assert.equal(second.events.firing(firingId)!.status, 'fired');
+  } finally {
+    await second.stop();
   }
 });
 
@@ -653,4 +694,95 @@ test('a signed delivery wakes the trigger\'s agent through the gateway: one turn
   const status = (check.prepare("SELECT status FROM event_firings WHERE trigger_id = 'trig-1'").get() as { status: string }).status;
   check.close();
   assert.equal(status, 'fired');
+});
+
+test('a graceful stop mid-turn leaves the event\'s turn for the next start, which continues it once and marks the firing fired', async () => {
+  // Card 590, Fly live check 3: a restart that drained for its window and
+  // then aborted the event's turn failed the firing, and the event was never
+  // handled. Stop, start, and the event is answered once.
+  const { createHmac } = await import('node:crypto');
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const { DatabaseSync } = await import('node:sqlite');
+  const { addNamedCredential, fleetDbIn } = await import('@stratusagent/state');
+  const { createGateway } = await import('../src/index.ts');
+
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-triggers-stop-e2e-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' } as Record<string, string> };
+  await addNamedCredential(env, { name: 'events.board', value: secret });
+  const fleetDb = fleetDbIn(path.join(home, '.stratus'));
+  const schedules = new SqliteScheduleStore(fleetDb);
+  schedules.insert({
+    id: 'trig-1',
+    agentId: 'ava',
+    cadence: { kind: 'event', source: 'board', filter: parseEventFilter({ exact: { type: 'card.moved' } }) },
+    prompt: 'A card moved. Note it.',
+    createdAt: new Date().toISOString(),
+    trust: 'user',
+  });
+  schedules.close();
+  const firingStatus = (): string => {
+    const db = new DatabaseSync(fleetDb);
+    try {
+      return (db.prepare("SELECT status FROM event_firings WHERE trigger_id = 'trig-1'").get() as { status: string }).status;
+    } finally {
+      db.close();
+    }
+  };
+  const options = (fetchImpl: typeof fetch) => ({
+    env: { ...env, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: 50,
+    schedules: { tickMs: 25 },
+    log: () => {},
+    warn: () => {},
+    events: { sources: { board: { verify: 'standard-webhooks' as const, secrets: ['events.board'] } } },
+  });
+
+  let reached!: () => void;
+  const inTurn = new Promise<void>((resolve) => { reached = resolve; });
+  const hanging = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      reached();
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+  const first = createGateway(options(hanging));
+  await first.start();
+  const body = JSON.stringify({ specversion: '1.0', id: 'ce-1', source: 'https://board.example', type: 'card.moved', subject: 'card/590', data: {} });
+  const timestamp = String(Math.floor(Date.now() / 1_000));
+  const signature = `v1,${createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`ce-1.${timestamp}.${body}`).digest('base64')}`;
+  const answer = await first.receiveEvent({
+    sourceId: 'board',
+    headers: { 'content-type': 'application/json', 'webhook-id': 'ce-1', 'webhook-timestamp': timestamp, 'webhook-signature': signature },
+    body: Buffer.from(body),
+  });
+  assert.deepEqual(answer, { status: 200, body: { status: 'matched' } });
+  await inTurn;
+  await first.stop();
+  assert.equal(firingStatus(), 'firing', 'the batch is still claimed, not failed');
+
+  const prompts: string[] = [];
+  const answering = (async (_url: unknown, init?: { body?: unknown }) => {
+    const sent = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }> };
+    prompts.push(sent.messages.filter((message) => message.role === 'user').map((message) => String(message.content)).join('\n'));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Noted.' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const second = createGateway(options(answering));
+  await second.start();
+  try {
+    const deadline = Date.now() + 5_000;
+    while (firingStatus() !== 'fired' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(firingStatus(), 'fired');
+    assert.equal(prompts.length, 1, 'continued once, not run again');
+    assert.equal(prompts[0]!.match(/"id":"ce-1"/g)?.length, 1, 'the event is in the transcript once');
+    const sessions = await second.store.list();
+    const turn = sessions.find((session) => session.id.startsWith('schedule:trig-1:'));
+    assert.equal(turn?.status, 'completed');
+  } finally {
+    await second.stop();
+  }
 });

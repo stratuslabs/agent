@@ -187,8 +187,11 @@ A plugin is code, and code gets a restart — `POST /restart`, which answers
 `202` at once and then refuses new turns (a `POST /sessions/:id/messages`
 during the drain fails with "stratusd is restarting and will accept new work
 once it is back up"), lets in-flight turns finish for `drainTimeoutMs`
-(default 30 000), aborts what is still running at the end of it (the session
-is saved as failed with `Run aborted: stratusd is restarting`), stops, and
+(default 30 000), aborts what is still running at the end of it (a turn
+sent with an idempotency key is left for the new process to continue once,
+and its request fails with "stratusd is restarting; this turn was cut short
+and continues once it is back up"; any other session is saved as failed
+with `Run aborted: stratusd is restarting`), stops, and
 comes back — this API's connections and event streams included, so a client
 reconnects, and a dashboard session still authenticates: the stopping daemon
 hands its live sessions to the replacement in memory, over the channel

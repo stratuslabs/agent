@@ -427,6 +427,132 @@ test('a stop drains for a bounded window, then aborts what is still running and 
   }
 });
 
+test('a stop that aborts a keyed turn leaves it for the next start, which continues it once', async () => {
+  // Card 590, Fly live check 3: an event firing's turn (keyed by its batch)
+  // still running when a graceful restart's window closed was failed with
+  // the stop's reason, and the event was lost; a SIGKILL at the same moment
+  // would have left it running for the next start to continue. A keyed
+  // turn is a work item its caller was promised would finish, so a planned
+  // stop keeps that promise the way a crash does: the turn is cut short
+  // (no command outlives the daemon), left unfinished, and the dispatch is
+  // refused like one that reached a daemon on its way down, which a channel
+  // keeps for the next start.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  let firstCall!: () => void;
+  const started = new Promise<void>((resolve) => { firstCall = resolve; });
+  const hanging = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      firstCall();
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+
+  const failures: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: hanging },
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: 50,
+    log: () => {},
+    warn: () => {},
+  });
+  gateway.bus.subscribe((event) => {
+    if (event.type === 'session.failed') {
+      failures.push(event.sessionId);
+    }
+  });
+  await gateway.start();
+
+  const keyed = gateway.dispatch({ sessionId: 'keyed', agentId: 'ava', userMessage: 'hang', idempotencyKey: 'item-1' });
+  await started;
+  await gateway.stop();
+
+  await assert.rejects(keyed, (error: Error) => error instanceof GatewayStoppingError && error.restarting === false);
+  assert.deepEqual(failures, []);
+
+  let calls = 0;
+  const answering = (() => {
+    calls += 1;
+    return Promise.resolve(openAiText('continued'));
+  }) as typeof fetch;
+  const next = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: answering },
+    idleTimeoutMs: 0,
+    log: () => {},
+    warn: () => {},
+  });
+  await next.start();
+  try {
+    let stored = await next.store.get('keyed');
+    for (let i = 0; i < 200 && stored?.status !== 'completed'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      stored = await next.store.get('keyed');
+    }
+    assert.equal(stored?.status, 'completed', stored?.lastError);
+    assert.equal(stored?.messages.at(-1)?.content, 'continued');
+    const said = stored?.messages.filter((message) => message.role === 'user');
+    assert.deepEqual(said?.map((message) => message.content), ['hang']);
+    assert.equal(said?.[0]?.continuedAfterCrash, true);
+    assert.equal(calls, 1);
+  } finally {
+    await next.stop();
+  }
+});
+
+test('a keyed turn a stop already continued once is failed by the next stop, not left again', async () => {
+  // The once in "continues it once": a turn that a stop cut short, that
+  // the next start continued, and that is still running when that daemon
+  // stops too is failed with the stop's reason, as a crash during a
+  // continuation fails it, so no turn is carried from start to start.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const hangingFetch = (onCall: () => void) => ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      onCall();
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+
+  let firstCall!: () => void;
+  const started = new Promise<void>((resolve) => { firstCall = resolve; });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: hangingFetch(() => firstCall()) },
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: 50,
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  const keyed = gateway.dispatch({ sessionId: 'keyed', agentId: 'ava', userMessage: 'hang', idempotencyKey: 'item-1' });
+  await started;
+  await gateway.stop();
+  await assert.rejects(keyed, (error: Error) => error instanceof GatewayStoppingError);
+
+  let continued!: () => void;
+  const continuing = new Promise<void>((resolve) => { continued = resolve; });
+  const second = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: hangingFetch(() => continued()) },
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: 50,
+    log: () => {},
+    warn: () => {},
+  });
+  const failed = nextEvent(second.bus, 'session.failed');
+  await second.start();
+  await continuing;
+  await second.stop();
+  assert.equal((await failed).error, STOPPING_TURN_ERROR);
+
+  const third = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await third.start();
+  try {
+    const stored = await third.store.get('keyed');
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.lastError, STOPPING_TURN_ERROR);
+  } finally {
+    await third.stop();
+  }
+});
+
 test('a stop ends a turn whose tool ignores its abort, and the message queued behind it is refused with the stop\'s reason', async () => {
   // Card 826, from the Infra runbook check: a plugin tool that never
   // settles and never looks at its signal held the turn past the abort, the

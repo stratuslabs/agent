@@ -483,8 +483,9 @@ What the recipe sets, and what it leaves to you.
 - [ ] **Stopped gracefully.** `stop_grace_period: 75s` / `TimeoutStopSec=75`
   / `kill_timeout = 75` on Fly (whose default is 5 seconds), longer than
   the 30-second drain plus the 30 seconds an aborted turn gets to record
-  its failure, so a turn still running after the drain is aborted and
-  recorded by the daemon rather than killed with it. Fly treats
+  its failure, so a turn still running after the drain is aborted by the
+  daemon rather than killed with it: a keyed turn is left for the next
+  start to continue once, and any other is recorded as failed. Fly treats
   `kill_timeout` as best effort and can stop a machine sooner. The next
   start then settles a turn cut off that way as it would after a crash: a
   turn parked on an approval asks again, a turn whose message carried an
