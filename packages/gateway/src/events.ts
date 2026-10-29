@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { MAX_IDEMPOTENCY_KEY_LENGTH } from '@stratusagent/core';
 import type { InboundEvent } from '@stratusagent/agents';
 
-import { openFleetDatabase, SCHEDULE_SESSION_ID_PREFIX, type SqliteScheduleStoreOptions } from './schedules.ts';
+import { openFleetDatabase, SCHEDULE_SESSION_ID_PREFIX, utf8Prefix, type SqliteScheduleStoreOptions } from './schedules.ts';
 
 // Event triggers' durable half (card 590, agent-plans
 // roadmap/590-event-triggers.md): deliveries, dedup tombstones and firings,
@@ -164,12 +164,6 @@ export const eventDispatchKey = (triggerId: string, sourceId: string, eventId: s
 };
 
 const ATTRIBUTE_ORDER = ['id', 'source', 'type', 'subject', 'time'];
-
-/** The longest prefix of `text` that fits in `bytes` of UTF-8, never splitting a character. */
-const utf8Prefix = (text: string, bytes: number): string => {
-  const { read } = new TextEncoder().encodeInto(text, new Uint8Array(Math.max(0, bytes)));
-  return text.slice(0, read);
-};
 
 /**
  * What a firing's turn sees after the trigger's prompt. Rendered when the
