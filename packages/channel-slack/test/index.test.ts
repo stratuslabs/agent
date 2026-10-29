@@ -11239,7 +11239,7 @@ test('inviteToConversation rejects only when nobody was invited: before Slack is
   for (const [request, message] of before) {
     await assert.rejects(() => adapter.inviteToConversation!(request), message);
   }
-  assert.deepEqual(calls, [], 'refused before Slack was asked');
+  assert.equal(calls.length, 0, 'refused before Slack was asked');
 
   const whole: Array<[Error, RegExp]> = [
     [slackPlatformError('not_in_channel'), /ava's app isn't in C-OPS, so it can't invite anyone there\. For a public channel, join it first with channel\.join; for a private one, a member has to invite the app\. Nobody was invited\./],

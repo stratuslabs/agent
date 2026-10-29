@@ -494,6 +494,18 @@ already turns on for approval buttons; no scope is added.
   them the call says which scope is missing. It is a gated tool, so it goes
   through approvals like `message.send`. Details in
   [Creating a channel](../../packages/channel-slack/README.md#creating-a-channel).
+- **Joining channels and inviting people** — `channel.join` joins an
+  existing public channel with the agent's own app, by its id (`C…`, from
+  the channel's link). An app can never join a private channel on its own:
+  a member has to invite it. `channel.invite` invites people (Slack user
+  ids) and other agents on this host to a channel the app is already in.
+  Join needs the `channels:join` scope; invite needs `channels:write.invites`
+  for public channels and `groups:write.invites` for private ones
+  (`channels:manage` and `groups:write`, the `channel.create` scopes, also
+  cover inviting). The default manifest leaves them all out; add them under
+  **OAuth & Permissions** for the agents that should have them, and
+  reinstall. Both are gated tools. Details in
+  [Joining a channel and inviting people](../../packages/channel-slack/README.md#joining-a-channel-and-inviting-people).
 - **Approval buttons** — with [`--approvals remote`](./approvals.md), a gated
   tool call parks the turn and asks in its thread with **Allow once** /
   **Always allow** / **Deny**. Clicks are authorized by *who clicked*, never
