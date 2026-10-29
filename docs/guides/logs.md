@@ -102,6 +102,11 @@ back — counts only, for the same reason. It is worth watching for: the
 answers stay plausible while the agent quietly stops being able to remember
 the start of the conversation. See
 [a conversation that outgrows the model](./troubleshooting.md#a-conversation-that-outgrows-the-model).
+A message that ran out of steps, or kept repeating one failure, and
+answered with its wrap-up is `session.stopped-early`, just before its
+`session.completed`: the reason (`turn-limit` or `repeated-failure`) and
+how many auto-continue budgets it had used. The wrap-up's words are the
+reply, and stay out of the log.
 See [Memory](../concepts/memory.md#where-a-fact-came-from). For
 what it records about a shell command — the scope, never the command — see
 [Shell commands](./shell.md#what-the-log-records-about-a-command). A call

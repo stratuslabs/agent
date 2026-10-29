@@ -273,9 +273,13 @@ bounds.
 - What each conversation is doing: `stratus sessions` lists the running
   daemon's sessions newest first, with each one's status (`running`,
   `pending_approval` while it waits on a person, `failed`, `completed`, or
-  `idle`), agent, last update, and id. `--agent <id>` and `--status
-  <status>` narrow it, `--limit <n>` shows more than the default 20, and
-  `--format json` gives the same as data. It asks the daemon the way
+  `idle`), agent, last update, and id. A message that ran out of steps and
+  answered with a wrap-up shows as `completed (stopped early: turn limit)`,
+  or `repeated failure` when it kept failing the same way, so a run that
+  stopped early isn't mistaken for one that finished. `--agent <id>` and
+  `--status <status>` narrow it (`--status stopped-early` lists only those),
+  `--limit <n>` shows more than the default 20, and `--format json` gives
+  the same as data, with `stoppedEarly` on those rows. It asks the daemon the way
   `stratus health` does; `--gateway` and `--token` point it at another one.
 - `--idle-timeout <seconds>` — how long the watchdog lets a streaming
   provider stay silent before aborting the turn (default 120). An aborted
