@@ -255,6 +255,7 @@ export const renderResumeBlock = (
   ];
   if (streak >= 2) {
     lines.push(
+      '',
       `That was the ${ordinal(streak)} run in a row to stop early.`
         + (reportsSomewhere ? " If that blocks someone, post one line to this schedule's report destination saying what's stuck." : ''),
     );
