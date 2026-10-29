@@ -17,11 +17,13 @@ export interface OutputErrorSource {
  * under `set -o pipefail` that got exactly the answer it asked for (#909).
  *
  * The output nobody reads is dropped and the command carries on to its own
- * exit code. Exiting at the first failed write, the usual EPIPE idiom, would
- * report success for a command it cut short: `stratus update | head -1`
- * would leave the install half done and exit 0. The returned signal aborts
- * when the reader is gone, for a command that never finishes on its own
- * (`logs --follow`) to stop on.
+ * exit code. Exiting 0 at the first failed write, the usual EPIPE idiom,
+ * would report success for a command it cut short: `stratus update | head
+ * -1` would stop partway through the update it was reporting on. A
+ * foreground `stratus serve` keeps serving the same way; everything it
+ * prints is in its log file too. The returned signal aborts when the reader
+ * is gone, for a command that never finishes on its own (`logs --follow`)
+ * to stop on.
  *
  * Every other write error still throws, as an uncaught exception the way it
  * did before: a full disk is not a reader that stopped reading, and the
