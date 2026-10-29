@@ -10394,6 +10394,12 @@ test('a serve that cannot start reports the failure instead of escaping', async 
   assert.match(streams.output.stderr, /Error: .*database file/);
 });
 
+test('a message that stopped early is a line in the console and counts in the log', () => {
+  const event = { type: 'session.stopped-early', sessionId: 's1', reason: 'turn-limit', continuations: 2 } as const;
+  assert.equal(formatEvent(event), '• session.stopped-early turn-limit after 2 continuations');
+  assert.deepEqual(eventDetail(event), { reason: 'turn-limit', continuations: 2 });
+});
+
 test('approval events are visible in the console and in the audit log', async () => {
   // A granted approval produces no `onDecision` warning — only refusals do
   // — so without these two records an "Always allow" that widened what an
@@ -16694,8 +16700,9 @@ test('parseCommand reads stratus sessions and its filters', () => {
   );
   assert.throws(
     () => parseCommand(['sessions', '--status', 'done']),
-    /Unknown status: done\. One of: idle, running, pending_approval, completed, failed/,
+    /Unknown status: done\. One of: idle, running, pending_approval, completed, failed, stopped-early/,
   );
+  assert.deepEqual(parseCommand(['sessions', '--status', 'stopped-early']), { command: 'sessions', status: 'stopped-early', format: 'text' });
   assert.throws(() => parseCommand(['sessions', '--limit', '0']), /--limit takes a whole number of 1 or more/);
   assert.throws(() => parseCommand(['sessions', '--limit', 'ten']), /--limit takes a whole number of 1 or more/);
   assert.throws(() => parseCommand(['sessions', '--format', 'yaml']), /Unsupported format: yaml/);
@@ -16752,6 +16759,34 @@ test('stratus sessions filters by status before it limits, and says when there a
 
   const none = await run(['--status', 'pending_approval']);
   assert.equal(none.stdout, 'No pending_approval sessions.\n');
+});
+
+test('stratus sessions says which runs stopped early, and --status stopped-early lists only those', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sessions-stopped-'));
+  const rows = [
+    { id: 's3', agentId: 'ava', status: 'completed', updatedAt: '2026-10-29T10:03:00.000Z', stoppedEarly: { reason: 'turn-limit', continuations: 2, at: '2026-10-29T10:03:00.000Z' } },
+    { id: 's2', agentId: 'ava', status: 'completed', updatedAt: '2026-10-29T10:02:00.000Z' },
+    { id: 's1', agentId: 'bea', status: 'completed', updatedAt: '2026-10-29T10:01:00.000Z', stoppedEarly: { reason: 'repeated-failure', continuations: 0, at: '2026-10-29T10:01:00.000Z' } },
+  ];
+  const fetchStub = (async () => new Response(JSON.stringify({ sessions: rows }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: {}, fetch: fetchStub };
+  const run = async (argv: string[]) => {
+    const streams = createStreams();
+    const code = await runCli({ argv: ['sessions', '--gateway', 'http://127.0.0.1:9', '--token', 't', ...argv], streams: streams.streams, env });
+    return { code, ...streams.output };
+  };
+
+  // Still `completed`, because the wrap-up answered; the marker is what
+  // tells it apart from a run that finished its work.
+  const all = await run([]);
+  assert.equal(all.code, 0, all.stderr);
+  assert.match(all.stdout, /^completed \(stopped early: turn limit\) +ava +\S+ +s3\ncompleted +ava +\S+ +s2\ncompleted \(stopped early: repeated failure\) +bea +\S+ +s1\n$/);
+
+  const stopped = await run(['--status', 'stopped-early']);
+  assert.match(stopped.stdout, /^completed \(stopped early: turn limit\) +ava +\S+ +s3\ncompleted \(stopped early: repeated failure\) +bea +\S+ +s1\n$/);
+
+  const json = await run(['--status', 'stopped-early', '--format', 'json']);
+  assert.deepEqual(JSON.parse(json.stdout), { sessions: [rows[0], rows[2]], more: false });
 });
 
 test('stratus sessions lists the sessions of the running daemon', async () => {

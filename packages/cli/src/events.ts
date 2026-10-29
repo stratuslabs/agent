@@ -36,6 +36,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• session.context-trimmed dropped=${event.droppedMessages} floor=${event.floor}`;
     case 'session.continued':
       return `• session.continued #${event.continuation} (+${event.turns} turns)`;
+    case 'session.stopped-early':
+      return `• session.stopped-early ${event.reason} after ${event.continuations} continuation${event.continuations === 1 ? '' : 's'}`;
     default:
       return null;
   }
@@ -125,6 +127,9 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
       return { droppedMessages: event.droppedMessages, floor: event.floor };
     case 'session.continued':
       return { continuation: event.continuation, turns: event.turns };
+    case 'session.stopped-early':
+      // Why and how far, never the wrap-up's words: that is the reply.
+      return { reason: event.reason, continuations: event.continuations };
     default:
       return undefined;
   }

@@ -342,6 +342,7 @@ test('kernel tools are served over a loopback MCP endpoint the codex process can
   });
 
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Saved!' }]);
+  assert.equal(Object.hasOwn(response, 'stoppedEarly'), false, 'a call inside the budget is no early stop');
   // The kernel sees the original dotted name, not the MCP-flattened one —
   // in the executed call and in the streamed delta alike.
   assert.equal(executed[0]?.toolName, 'memory.remember');
@@ -391,6 +392,9 @@ test('maxTurns bounds the inner loop: calls past the budget are refused, not exe
 
   assert.deepEqual(executed, ['demo.echo'], 'only the budgeted call may execute');
   assert.deepEqual(response.parts, [{ type: 'text', text: 'stopping here' }]);
+  // An answer given because the budget ran out, so the runner marks the
+  // session stopped early.
+  assert.equal(response.stoppedEarly, 'turn-limit');
 });
 
 test('without an executor the runtime stays text-only', async () => {

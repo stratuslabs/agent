@@ -597,6 +597,9 @@ export const createCodexProvider = ({
     };
 
     let hostedToolRuns = 0;
+    // A call was refused for the budget, so the answer that follows is
+    // codex finishing with what it has: the runner marks it stopped early.
+    let budgetRefused = false;
     const toolBudget = maxTurns ?? DEFAULT_MAX_TURNS;
     const countedExecute: CodexToolExecutor | undefined = executeTool
       ? async (session, call, context) => {
@@ -605,6 +608,7 @@ export const createCodexProvider = ({
           // (a tool error, with nothing executed and no side effects), so
           // the inner loop is bounded the same way the outer runner's is.
           if (hostedToolRuns >= toolBudget) {
+            budgetRefused = true;
             return {
               callId: call.id,
               toolName: call.toolName,
@@ -910,11 +914,11 @@ export const createCodexProvider = ({
       // `RunInput.addressed` in core — when Codex said the turn finished
       // with nothing to say.
       if (isUnaddressedTurn(request.session)) {
-        return { parts: [] };
+        return { parts: [], ...(budgetRefused ? { stoppedEarly: 'turn-limit' as const } : {}) };
       }
       throw markIfDelivered(markIfSideEffects(new Error('Codex returned an empty response.')));
     }
 
-    return { parts: [{ type: 'text' as const, text: resultText }] };
+    return { parts: [{ type: 'text' as const, text: resultText }], ...(budgetRefused ? { stoppedEarly: 'turn-limit' as const } : {}) };
   },
 });

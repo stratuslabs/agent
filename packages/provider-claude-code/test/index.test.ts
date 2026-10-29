@@ -411,6 +411,18 @@ test('a run that uses every turn resumes once to say where it got to', async () 
   assert.equal(calls[1]!.prompt, TURN_LIMIT_NOTE);
   assert.equal(calls[1]!.options?.resume, 'sdk-1');
   assert.equal(calls[1]!.options?.maxTurns, 1);
+  // Said so, so the runner marks the session the way it marks its own
+  // wrap-up: from outside one generate this answer looks like any other.
+  assert.equal(response.stoppedEarly, 'turn-limit');
+});
+
+test('a run that answers inside its turns is not reported as stopped early', async () => {
+  const provider = createClaudeCodeProvider({
+    queryFn: createFakeQuery([{ type: 'result', subtype: 'success', is_error: false, result: 'Done.', session_id: 'sdk-2' }]).queryFn,
+  });
+  const response = await provider.generate({ session: createSession() });
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Done.' }]);
+  assert.equal(Object.hasOwn(response, 'stoppedEarly'), false);
 });
 
 // What the real CLI (agent SDK 0.3.233) yields when a Claude subscription's
