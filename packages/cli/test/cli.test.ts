@@ -4212,7 +4212,7 @@ test('runCli serve starts the gateway, prints a ready line, and drains on shutdo
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: {
       homeDir: serveHome,
@@ -4259,7 +4259,7 @@ test('serve in remote mode says who can actually approve', async () => {
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -4285,7 +4285,7 @@ test('serve names the agents no channel can ask for', async () => {
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -4308,7 +4308,7 @@ test('serve warns at startup when a first-party package is older than the CLI', 
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: {
       homeDir: serveHome,
@@ -4341,7 +4341,7 @@ test('serve refuses to start on a trusted config that does not parse', async () 
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -4366,7 +4366,7 @@ test('serve still starts when only an untrusted project config is broken', async
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: { homeDir: serveHome, cwd: project, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -6386,7 +6386,7 @@ test('serve warns at startup when an env key demotes the subscription', async ()
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 150);
   await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: {
       homeDir: home,
@@ -6610,7 +6610,7 @@ test('serve writes what it says to the log file, and --no-log-file opts out', as
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 150);
   await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams: createStreams().streams,
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -6625,7 +6625,7 @@ test('serve writes what it says to the log file, and --no-log-file opts out', as
   const quiet = new AbortController();
   setTimeout(() => quiet.abort(), 150);
   await runCli({
-    argv: ['serve', '--no-events', '--no-log-file'],
+    argv: ['serve', '--no-events', '--api-port', '0', '--no-log-file'],
     streams: createStreams().streams,
     env: { homeDir: quietHome, cwd: quietHome, processEnv: {}, shutdownSignal: quiet.signal },
   });
@@ -6752,7 +6752,7 @@ test('serve warns for a roster agent whose soul pins the demoted provider', asyn
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 200);
   await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: {
       homeDir: home,
@@ -6894,7 +6894,7 @@ test('serve applies the gateway soul-pin demotion before checking an agent', asy
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 250);
   await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: {
       homeDir: home,
@@ -7011,7 +7011,7 @@ test('serve writes its credential warning to the log, not just to stderr', async
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 200);
   await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams: createStreams().streams,
     env: {
       homeDir: home,
@@ -10348,7 +10348,7 @@ test('redirect logs are truncated even when serve cannot start', async () => {
   const controller = new AbortController();
   controller.abort();
   await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams: createStreams().streams,
     env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -10381,7 +10381,7 @@ test('a serve that cannot start reports the failure instead of escaping', async 
 
   const streams = createStreams();
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams: streams.streams,
     env: { homeDir: home, cwd: home, processEnv: {} },
   });
@@ -10462,7 +10462,7 @@ test('a project-local config cannot appoint the daemon\'s approvers', async () =
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: { homeDir: serveHome, cwd: projectDir, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -10488,7 +10488,7 @@ test('a config the daemon was pointed at may set approvals', async () => {
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events', '--config', configPath],
+    argv: ['serve', '--no-events', '--api-port', '0', '--config', configPath],
     streams,
     env: { homeDir: serveHome, cwd: projectDir, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -15529,7 +15529,7 @@ test('serve says once what an auto-discovered project config asked for and did n
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: { homeDir: serveHome, cwd: project, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -15565,7 +15565,7 @@ test('serve says what a project config asked for even when its runtime cannot re
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: { homeDir: serveHome, cwd: project, processEnv: {}, shutdownSignal: controller.signal },
   });
@@ -15828,7 +15828,7 @@ test('serve with an invalid principals block refuses to start rather than admitt
   setTimeout(() => controller.abort(), 150);
 
   const code = await runCli({
-    argv: ['serve', '--no-events'],
+    argv: ['serve', '--no-events', '--api-port', '0'],
     streams,
     env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
   });
