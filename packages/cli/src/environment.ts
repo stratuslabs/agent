@@ -31,6 +31,13 @@ export interface CliEnvironment {
   /** Shuts down `stratus serve` the way SIGTERM would (tests). */
   shutdownSignal?: AbortSignal;
   /**
+   * Aborts once stdout's reader is gone (`| grep -q` matched, `| head` has
+   * its lines); see `watchOutputReader`. A command that only ends when
+   * interrupted (`logs --follow`) stops on it. Everything else just finishes:
+   * its output is dropped, and its work and exit code are its own.
+   */
+  outputClosed?: AbortSignal;
+  /**
    * Starts the fresh daemon an announced restart asks for and resolves
    * with its exit code. Injected so tests never spawn a process; the
    * default runs this CLI's own entrypoint with the serve arguments given.
