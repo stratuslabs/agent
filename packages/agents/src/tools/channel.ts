@@ -255,16 +255,6 @@ export type ConversationArchiver = (
 ) => Promise<{ conversation: string; alreadyArchived: boolean }>;
 
 /**
- * Archive a channel the agent's own app created, so test and one-off
- * channels don't stay open until a person cleans them up.
- *
- * `gated`, like `channel.create`: archiving takes the channel out of its
- * members' sidebars, and the agent can't undo it. The channel decides what
- * its app may archive, and Slack's refuses anything the app didn't create.
- * Nothing is deleted: a person can unarchive it. The result names the
- * channel by id only, since members can rename a channel after it is made.
- */
-/**
  * A refusal the host can tell before anyone is asked about a
  * `channel.archive` call (the conversation the work was asked from), so
  * nobody approves an archive that is bound to fail. Undefined when it has
@@ -275,6 +265,16 @@ export type ConversationArchiveRefusal = (
   session: Session,
 ) => Promise<string | undefined>;
 
+/**
+ * Archive a channel the agent's own app created, so test and one-off
+ * channels don't stay open until a person cleans them up.
+ *
+ * `gated`, like `channel.create`: archiving takes the channel out of its
+ * members' sidebars, and the agent can't undo it. The channel decides what
+ * its app may archive, and Slack's adapter refuses anything the app didn't create.
+ * Nothing is deleted: a person can unarchive it. The result names the
+ * channel by id only, since members can rename a channel after it is made.
+ */
 export const createChannelArchiveTool = (
   archive: ConversationArchiver,
   options: { refusalFor?: ConversationArchiveRefusal } = {},
