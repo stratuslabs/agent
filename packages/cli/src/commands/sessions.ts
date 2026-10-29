@@ -8,7 +8,7 @@ import {
 } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
-import type { ParsedSessionsCommand } from '../parse.ts';
+import { STOPPED_EARLY_FILTER, type ParsedSessionsCommand } from '../parse.ts';
 
 /** How many sessions a listing shows when no --limit is given. */
 export const DEFAULT_SESSIONS_LIMIT = 20;
@@ -20,7 +20,17 @@ interface SessionRow {
   status: string;
   createdAt?: string;
   updatedAt?: string;
+  /** See `Session.stoppedEarly` in core. */
+  stoppedEarly?: { reason?: string };
 }
+
+/**
+ * The status column: the status, and when the message ended in a wrap-up
+ * instead of finishing, why. `turn-limit` reads "turn limit".
+ */
+const statusCell = (row: SessionRow): string => (row.stoppedEarly === undefined
+  ? row.status
+  : `${row.status} (stopped early: ${String(row.stoppedEarly.reason ?? 'unknown').replaceAll('-', ' ')})`);
 
 /**
  * `stratus sessions` — what the running daemon's sessions are doing, newest
@@ -67,7 +77,9 @@ export const runSessions = async (
     return 1;
   }
 
-  const matching = command.status === undefined ? rows : rows.filter((row) => row.status === command.status);
+  const matching = command.status === undefined
+    ? rows
+    : rows.filter((row) => (command.status === STOPPED_EARLY_FILTER ? row.stoppedEarly !== undefined : row.status === command.status));
   const shown = matching.slice(0, limit);
   const more = matching.length > limit;
 
@@ -81,7 +93,7 @@ export const runSessions = async (
   }
   // Escaped like `stratus memory list`: an id is whatever a channel or an
   // API caller named the session, and this goes to a terminal.
-  const lines = shown.map((row) => [row.status, row.agentId, row.updatedAt ?? '-', row.id].map(escapeControlCharacters));
+  const lines = shown.map((row) => [statusCell(row), row.agentId, row.updatedAt ?? '-', row.id].map(escapeControlCharacters));
   const widths = [0, 1, 2].map((column) => Math.max(...lines.map((cells) => cells[column]?.length ?? 0)));
   for (const cells of lines) {
     writeLine(streams.stdout, cells.map((cell, column) => (column < 3 ? cell.padEnd(widths[column] ?? 0) : cell)).join('  '));

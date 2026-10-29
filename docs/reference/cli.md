@@ -47,6 +47,7 @@ stratus health                         # is the running daemon serving? one line
 stratus health --format json           # the daemon's /health answer as data
 stratus sessions                       # what the daemon's sessions are doing, newest first (also: stratus session list)
 stratus sessions --agent blair --status failed   # filter by agent and status; --limit <n>, --format json
+stratus sessions --status stopped-early           # runs whose message ran out of steps and wrapped up
 printf %s "$KEY" | stratus credential set search.apiKey   # store a named credential (value from stdin, never a flag)
 stratus credential set search.apiKey --agent blair       # one agent's own key, over the shared one
 stratus credentials                    # stored names and what each agent's shell reads, never values (also: stratus credential list)
@@ -140,7 +141,7 @@ stratus dashboard                      # local browser dashboard
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
 | `--limit <n>` | `stratus memory search`: maximum hits. The store bounds the read either way. `stratus sessions`: how many to list, newest first (default 20) |
-| `--status <status>` | `stratus sessions`: only sessions in this state — `idle`, `running`, `pending_approval`, `completed`, or `failed` |
+| `--status <status>` | `stratus sessions`: only sessions in this state — `idle`, `running`, `pending_approval`, `completed`, or `failed` — or `stopped-early`, the completed ones whose message ran out of steps (or repeated one failure) and wrapped up |
 | `--file <path>` | `stratus memory export` (omit for stdout) / `stratus memory import`: the JSONL |
 | `--preserve-trust` | `stratus memory import`: keep each entry's recorded trust label instead of landing it `external`. For a file you own and vouch for |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |

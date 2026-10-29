@@ -292,7 +292,12 @@ export interface ParsedSessionCommand {
 export interface ParsedSessionsCommand {
   command: 'sessions';
   agentId?: string;
-  status?: SessionStatus;
+  /**
+   * A session status, or `stopped-early`: completed sessions whose message
+   * ended in a wrap-up (`Session.stoppedEarly`). Not a status, because
+   * `completed` is still true of them.
+   */
+  status?: SessionStatus | typeof STOPPED_EARLY_FILTER;
   /** How many to show, newest first; the command's default when unset. */
   limit?: number;
   format: 'text' | 'json';
@@ -312,6 +317,9 @@ const SESSION_STATUS_NAMES: Record<SessionStatus, true> = {
 export const SESSION_STATUSES = Object.keys(SESSION_STATUS_NAMES) as SessionStatus[];
 
 const isSessionStatus = (value: string): value is SessionStatus => Object.hasOwn(SESSION_STATUS_NAMES, value);
+
+/** `stratus sessions --status stopped-early`; see `ParsedSessionsCommand.status`. */
+export const STOPPED_EARLY_FILTER = 'stopped-early';
 
 export interface ParsedDoctorCommand {
   command: 'doctor';
@@ -1528,8 +1536,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--status') {
         const value = readOptionValue(sessionsRest, index, '--status');
-        if (!isSessionStatus(value)) {
-          throw new Error(`Unknown status: ${value}. One of: ${SESSION_STATUSES.join(', ')}`);
+        if (!isSessionStatus(value) && value !== STOPPED_EARLY_FILTER) {
+          throw new Error(`Unknown status: ${value}. One of: ${[...SESSION_STATUSES, STOPPED_EARLY_FILTER].join(', ')}`);
         }
         parsed.status = value;
         index += 1;

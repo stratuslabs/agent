@@ -522,7 +522,39 @@ export interface Session {
    * (`totalTokenUsage`), never written here.
    */
   usage?: UsageRecord[];
+  /**
+   * Set when the latest message ended early: it used its step budget (and
+   * any auto-continue grants) or kept repeating one failure, and the turn
+   * that answered was the wrap-up (`TURN_LIMIT_NOTE`). The session still
+   * ends `completed`, because the wrap-up did answer; this is what tells
+   * that run apart from one that finished its work.
+   *
+   * Cleared when the next message in the session starts. A reason and
+   * counts only, never content: the summary is the turn's reply.
+   */
+  stoppedEarly?: SessionStoppedEarly;
 }
+
+/** Why a message ended in a wrap-up instead of finishing. */
+export type StoppedEarlyReason = 'turn-limit' | 'repeated-failure';
+
+/** See `Session.stoppedEarly`. */
+export interface SessionStoppedEarly {
+  reason: StoppedEarlyReason;
+  /** Auto-continue grants the message had used when it stopped. */
+  continuations: number;
+  /** When the wrap-up answered. */
+  at: string;
+}
+
+const STOPPED_EARLY_REASONS: readonly StoppedEarlyReason[] = ['turn-limit', 'repeated-failure'];
+
+/**
+ * Whether a value is a reason core knows. A provider is a plugin, and its
+ * `ProviderResponse.stoppedEarly` reaches the runner untyped at runtime.
+ */
+export const isStoppedEarlyReason = (value: unknown): value is StoppedEarlyReason =>
+  typeof value === 'string' && (STOPPED_EARLY_REASONS as readonly string[]).includes(value);
 
 export interface ToolCall {
   id: string;
@@ -3014,6 +3046,14 @@ export interface ProviderResponse {
    * other, and an adapter that reported through the sink leaves this alone.
    */
   usage?: ProviderCallUsage;
+  /**
+   * For a provider that runs its own tool loop (the harness runtimes): set
+   * when this answer is that loop's wrap-up, given because its inner budget
+   * ran out, so the runner marks the session `stoppedEarly` as it does for
+   * its own wrap-up. A value the runner does not know is ignored. Absent
+   * for every ordinary answer.
+   */
+  stoppedEarly?: 'turn-limit';
 }
 
 export interface ModelProvider {
@@ -3479,6 +3519,17 @@ export const completeAnsweredTurn = async (finished: Session, store: SessionStor
   const stored = await store.get(session.id);
   session = stored ?? session;
   await bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
+  // Here rather than where the wrap-up answered, so a turn finished by a
+  // restart (its wrap-up saved, the completing save lost) is announced the
+  // same way. The marker was saved with the answer.
+  if (session.stoppedEarly !== undefined) {
+    await bus.emit({
+      type: 'session.stopped-early',
+      sessionId: session.id,
+      reason: session.stoppedEarly.reason,
+      continuations: session.stoppedEarly.continuations,
+    });
+  }
   await bus.emit({
     type: 'session.completed',
     sessionId: session.id,
@@ -4309,7 +4360,14 @@ export type StratusEvent =
    * `continuation` counts from 1 within the message; `turns` is the
    * allowance just granted.
    */
-  | { type: 'session.continued'; sessionId: string; continuation: number; turns: number };
+  | { type: 'session.continued'; sessionId: string; continuation: number; turns: number }
+  /**
+   * The message ended in a wrap-up instead of finishing (`Session.stoppedEarly`):
+   * emitted just before its `session.completed`. Counts only, like
+   * `session.continued`, because the daemon log records it; the summary is
+   * the turn's reply.
+   */
+  | { type: 'session.stopped-early'; sessionId: string; reason: StoppedEarlyReason; continuations: number };
 
 export type EventHandler = (event: StratusEvent) => void | Promise<void>;
 
@@ -7176,6 +7234,8 @@ export class AgentRunner {
 
     session.status = 'running';
     delete session.lastError;
+    // The marker describes the message before this one.
+    delete session.stoppedEarly;
     session.messages.push({
       id: `${session.id}:user:${session.messages.length + 1}`,
       role: 'user',
@@ -7908,6 +7968,19 @@ export class AgentRunner {
             content: '',
             createdAt: new Date().toISOString(),
           });
+        }
+        // Saved with the answer it describes, so a restart that finishes
+        // this turn (`continueTurn`) still announces it. A wrap-up never
+        // holds a call: that was refused above.
+        const stoppedEarly = stuck !== undefined
+          ? 'repeated-failure'
+          : wrappingUp
+            ? 'turn-limit'
+            // Only on an answer: a response still calling tools has not
+            // wrapped anything up, whatever it claims.
+            : calls.length === 0 && isStoppedEarlyReason(response.stoppedEarly) ? response.stoppedEarly : undefined;
+        if (stoppedEarly !== undefined) {
+          session.stoppedEarly = { reason: stoppedEarly, continuations: continued, at: new Date().toISOString() };
         }
         const sawToolCall = calls.length > 0;
         await this.store.save(session);

@@ -148,8 +148,10 @@ Commands:
                    left a row, such as a webhook with the wrong secret
                    (--gateway, --token, --format json)
   sessions         What the running daemon's sessions are doing, newest
-                   first: status, agent, last update, id. --agent <id>,
-                   --status <idle|running|pending_approval|completed|failed>,
+                   first: status, agent, last update, id. A message that ran
+                   out of steps shows as completed (stopped early: turn
+                   limit). --agent <id>, --status <idle|running|
+                   pending_approval|completed|failed|stopped-early>,
                    --limit <n> (default 20), --format json
                    (also: stratus session list)
   credential set   Store a named credential an agent can resolve — a search
@@ -317,7 +319,7 @@ Options:
   --all-unknown    memory reassert: every live entry with no recorded origin
   --limit          memory search: maximum hits (the store bounds it too);
                    sessions: how many to list (default 20)
-  --status         sessions: only this status
+  --status         sessions: only this status, or stopped-early
   --file           memory export / import: the JSONL path
   --preserve-trust memory import: keep each entry's recorded trust label
                    instead of landing it external

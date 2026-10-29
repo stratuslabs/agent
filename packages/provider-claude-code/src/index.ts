@@ -878,6 +878,8 @@ export const createClaudeCodeProvider = ({
       }
     };
 
+    // Set once the wrap-up has answered: see the return below.
+    let wrappedUp = false;
     const wrapUp = async (sdkSessionId: string): Promise<void> => {
       refuseTools = true;
       let attemptUsage: Record<string, ClaudeCodeModelUsage> | undefined;
@@ -998,6 +1000,7 @@ export const createClaudeCodeProvider = ({
       }
       if (outOfTurns !== undefined && resultText === undefined) {
         await wrapUp(outOfTurns);
+        wrappedUp = true;
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -1031,13 +1034,15 @@ export const createClaudeCodeProvider = ({
       // with nothing to say. A stream that ended without a result is a run
       // that did not complete, and on any turn is an error.
       if (completed && isUnaddressedTurn(request.session)) {
-        return { parts: [] };
+        return { parts: [], ...(wrappedUp ? { stoppedEarly: 'turn-limit' as const } : {}) };
       }
       throw markIfDelivered(markIfSideEffects(new Error(
         completed ? 'Claude Code returned an empty response.' : 'Claude Code ended without reporting a result.',
       )));
     }
 
-    return { parts: [{ type: 'text' as const, text: resultText }] };
+    // A wrap-up is told to the runner, which marks the session stopped
+    // early as it does for its own (`ProviderResponse.stoppedEarly`).
+    return { parts: [{ type: 'text' as const, text: resultText }], ...(wrappedUp ? { stoppedEarly: 'turn-limit' as const } : {}) };
   },
 });
