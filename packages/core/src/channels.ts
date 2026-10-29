@@ -507,6 +507,24 @@ export interface ConversationInviteResult {
 }
 
 /**
+ * A request for the agent's own app to archive a conversation it created —
+ * what `channel.archive` resolves.
+ */
+export interface ConversationArchiveRequest {
+  /** Whose app archives it; only a conversation that app created qualifies. */
+  agentId: string;
+  /** The conversation to archive (Slack: `C…`). */
+  conversation: string;
+}
+
+export interface ConversationArchiveResult {
+  /** Channel-native id of the archived conversation. */
+  conversation: string;
+  /** It was archived already, so nothing changed. */
+  alreadyArchived: boolean;
+}
+
+/**
  * A credential an agent asked for, handed to the channel its conversation
  * is in so a person there can be shown a form. Everything the answer needs
  * stays with the gateway under `requestId`; the channel only has to show
@@ -657,6 +675,25 @@ export interface ChannelAdapter {
    * whose outcome cannot be checked is never claimed as invited.
    */
   inviteToConversation?(request: ConversationInviteRequest): Promise<ConversationInviteResult>;
+  /**
+   * Archives a conversation the agent's own app created — what
+   * `channel.archive` resolves. Optional, like `createConversation`.
+   *
+   * Resolves only when the conversation is archived, by this call or
+   * already (`alreadyArchived`). MUST reject, with a sentence for the
+   * agent, anything it did not archive: no app here, an unknown id, a
+   * direct message, a conversation shared outside this workspace, a
+   * missing permission, an app that is no longer a member, a workspace
+   * rule against it. MUST NOT archive a conversation unless the platform
+   * says this agent's own app created it and no other agent here uses that
+   * app, and refuses when the creator can't be told. When the platform's
+   * answer leaves the outcome unknown, it MUST reject saying the
+   * conversation may have been archived and that a retry is safe.
+   *
+   * The gateway refuses the conversation the asking work came from before
+   * an adapter is asked, so an adapter need not check that.
+   */
+  archiveConversation?(request: ConversationArchiveRequest): Promise<ConversationArchiveResult>;
   /**
    * The workspace this agent's app is connected to, for a transport whose
    * conversation ids are unique only within one: a Slack team id.

@@ -132,12 +132,15 @@ export {
 } from './tools/message.ts';
 
 export {
+  CHANNEL_ARCHIVE_TOOL_NAME,
   CHANNEL_CREATE_TOOL_NAME,
   CHANNEL_INVITE_TOOL_NAME,
   CHANNEL_JOIN_TOOL_NAME,
+  type ConversationArchiver,
   type ConversationCreator,
   type ConversationInviter,
   type ConversationJoiner,
+  createChannelArchiveTool,
   createChannelCreateTool,
   createChannelInviteTool,
   createChannelJoinTool,

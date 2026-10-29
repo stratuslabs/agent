@@ -79,11 +79,13 @@ import {
   createPinTool,
   createMessageSendTool,
   createMessageReadTool,
+  createChannelArchiveTool,
   createChannelCreateTool,
   createChannelInviteTool,
   createChannelJoinTool,
   directMessageReadRefusal,
   type ConversationReader,
+  type ConversationArchiver,
   type ConversationCreator,
   type ConversationInviter,
   type ConversationJoiner,
@@ -91,6 +93,7 @@ import {
   createRememberTool,
   createScheduleTools,
   DELEGATED_BY_METADATA_KEY,
+  DELEGATED_SESSION_ID_MARKER,
   DEFAULT_MAX_DELEGATION_DEPTH,
   DELEGATION_DEPTH_METADATA_KEY,
   delegatingSessionIdOf,
@@ -364,6 +367,13 @@ export interface GatewayChannelAdapter {
    * MUST reject only when nobody was invited.
    */
   inviteToConversation?(request: Omit<Parameters<ConversationInviter>[0], 'channel'>): ReturnType<ConversationInviter>;
+  /**
+   * Archives a conversation the agent's own app created, mirroring
+   * `ChannelAdapter.archiveConversation`. Optional: an adapter without it
+   * cannot serve `channel.archive`. The gateway has already refused the
+   * conversation the work was asked from.
+   */
+  archiveConversation?(request: Omit<Parameters<ConversationArchiver>[0], 'channel'>): ReturnType<ConversationArchiver>;
   /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
@@ -2707,6 +2717,63 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         : `No running channel can invite people to '${channel}' conversations.`);
     }
     return adapter.inviteToConversation({ agentId, ...request });
+  }));
+  /**
+   * Where the work behind a `channel.archive` call was asked from, so that
+   * conversation is never the one archived: the answer to it would have
+   * nowhere to go, and the agent can't unarchive. An ordinary session is
+   * its own origin. A sub-agent's or a delegated run's is the root turn
+   * that started the chain, read off the id the host minted for it (each
+   * child id is its parent's plus a marker, so the root is the text before
+   * the first one), never off metadata a tool in the slice could rewrite.
+   * The id is the one the session had at its first tool call, for the same
+   * reason. `unknown` when that root no longer exists: an archive the agent
+   * can't undo doesn't run on a guess.
+   */
+  const archiveOriginOf = async (kind: string, session: Session): Promise<{ conversation: string | undefined } | 'unknown'> => {
+    const id = hostIdOf(session);
+    const marks = [SUB_AGENT_SESSION_ID_MARKER, DELEGATED_SESSION_ID_MARKER]
+      .map((marker) => id.indexOf(marker))
+      .filter((at) => at >= 0);
+    let origin = { agentId: session.agent.id, sessionId: id };
+    if (marks.length > 0) {
+      const rootId = id.slice(0, Math.min(...marks));
+      let root: Session | undefined;
+      try {
+        root = rootId ? await store.get(rootId) : undefined;
+      } catch (error) {
+        warn(`${id}: could not read the root session ${rootId} to check a channel.archive (${error instanceof Error ? error.message : String(error)})`);
+        root = undefined;
+      }
+      if (!root) {
+        return 'unknown';
+      }
+      origin = { agentId: root.agent.id, sessionId: root.id };
+    }
+    const { adapter } = channelCarrying(kind, origin.agentId, (candidate) => candidate.sessionConversation !== undefined);
+    try {
+      return { conversation: adapter?.sessionConversation?.(origin.agentId, origin.sessionId) };
+    } catch {
+      return { conversation: undefined };
+    }
+  };
+  tools.register(createChannelArchiveTool(async ({ agentId, channel, conversation }, session) => {
+    const { adapter, carriesOthers } = channelCarrying(channel, agentId, (candidate) => candidate.archiveConversation !== undefined);
+    if (!adapter?.archiveConversation) {
+      throw new Error(carriesOthers
+        ? `No running '${channel}' channel carries agent ${agentId}, so it has no app to archive a channel with.`
+        : `No running channel can archive '${channel}' conversations.`);
+    }
+    const origin = await archiveOriginOf(channel, session);
+    if (origin === 'unknown') {
+      throw new Error(`${channel} ${conversation} was not archived: this run was started by another session that no longer exists, `
+        + 'so Stratus can\'t tell which conversation this work was asked from. Ask for the archive from a conversation.');
+    }
+    if (origin.conversation !== undefined && origin.conversation === conversation) {
+      throw new Error(`${channel} ${conversation} is the conversation this work was asked from, so it was not archived: `
+        + 'the reply would have nowhere to go. Ask for the archive from another conversation.');
+    }
+    return adapter.archiveConversation({ agentId, conversation });
   }));
   tools.register(createMessageReadTool(async ({ agentId, source, ...window }) => {
     // The same carrying rule as outbound: a read goes through the app of

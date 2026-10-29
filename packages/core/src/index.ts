@@ -4584,6 +4584,8 @@ export interface ChannelAdapterLike {
     invited: string[];
     notInvited: Array<{ who: string; reason: string }>;
   }>;
+  /** See `ChannelAdapter.archiveConversation`. */
+  archiveConversation?(request: { agentId: string; conversation: string }): Promise<{ conversation: string; alreadyArchived: boolean }>;
   /** See `ChannelAdapter.accountFor`. */
   accountFor?(agentId: string): string | undefined;
   /** See `ChannelAdapter.conversationKindFor`. */
@@ -8596,6 +8598,8 @@ export {
   type ChannelAdapter,
   type ChannelCredentialRequest,
   type ChannelSessionKeyParts,
+  type ConversationArchiveRequest,
+  type ConversationArchiveResult,
   type ConversationBookmark,
   type ConversationCreateRequest,
   type ConversationCreateResult,
