@@ -240,3 +240,67 @@ export const describeHeldHome = async (env: CliEnvironment): Promise<string> => 
     + 'if it is the installed service, otherwise Ctrl+C where it runs — and let it finish; it holds the home until '
     + 'its last turn is written.';
 };
+
+/** What a running daemon said each channel did with a reload; see `reloadRunningDaemonChannels`. */
+export interface DaemonChannelReload {
+  base: string;
+  channels: Array<{ name: string; outcome: string; reason?: string }>;
+}
+
+/**
+ * After channel secrets were stored or removed: if a daemon says it is
+ * running, reload its roster, which reloads every channel that can (card
+ * 894), and return what each did. Undefined when no daemon says so, so the
+ * caller keeps its own line about the next start. A daemon that answers
+ * with an error gives a warning, never a failure: the secret is stored
+ * either way.
+ */
+export const reloadRunningDaemonChannels = async (
+  env: CliEnvironment,
+): Promise<DaemonChannelReload | { warning: string } | undefined> => {
+  const info = await readGatewayInfo(env);
+  if (!info) {
+    return undefined;
+  }
+  const base = info.url.replace(/\/+$/, '');
+  try {
+    const response = await callRunningGateway(env, {}, base, '/api/v1/roster/reload');
+    if (!response.ok) {
+      throw new Error(await gatewayErrorMessage(response));
+    }
+    const { channels } = await response.json() as { channels?: unknown };
+    // A daemon from before reloadable channels answers with no list: it
+    // reloads nothing, so it reads secrets at its next start.
+    return {
+      base,
+      channels: Array.isArray(channels)
+        ? channels.filter((entry): entry is { name: string; outcome: string; reason?: string } =>
+          typeof entry === 'object' && entry !== null && typeof (entry as { name?: unknown }).name === 'string'
+          && typeof (entry as { outcome?: unknown }).outcome === 'string')
+        : [],
+    };
+  } catch (error) {
+    return {
+      warning: `${gatewayInfoPath(env)} names a daemon at ${base}, but it did not reload: `
+        + `${error instanceof Error ? error.message : String(error)} If it is running, apply this with: stratus restart`,
+    };
+  }
+};
+
+/** Whether `kind` picked up a reload, as one line for the operator. */
+export const channelReloadLine = (reload: DaemonChannelReload, kind: string): string => {
+  // Every adapter of the kind, since two can carry disjoint agents of one
+  // kind: it applies now only if each of them reloaded.
+  const entries = reload.channels.filter((channel) => channel.name === kind);
+  const entry = entries.find((channel) => channel.outcome !== 'reloaded') ?? entries[0];
+  if (entry?.outcome === 'reloaded') {
+    return `The running daemon (${reload.base}) reloaded ${kind}, so this applies now, with no restart. \`stratus logs\` shows each app as it connects.`;
+  }
+  if (entry?.outcome === 'still-reloading') {
+    return `The running daemon (${reload.base}) is still reloading ${kind}; \`stratus logs\` shows when it's done, and \`stratus restart\` applies it if it doesn't finish.`;
+  }
+  if (entry?.outcome === 'failed') {
+    return `The running daemon (${reload.base}) could not reload ${kind}${entry.reason ? ` (${entry.reason})` : ''}, so this applies at its next start: \`stratus restart\`.`;
+  }
+  return `The running daemon (${reload.base}) doesn't reload ${kind}, so this applies at its next start: \`stratus restart\`.`;
+};

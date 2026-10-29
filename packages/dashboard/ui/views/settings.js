@@ -285,7 +285,7 @@ export const renderSettings = (section) => {
     const save = async () => {
       state.busy = true; update();
       try {
-        await api.storeChannel('slack', {
+        const stored = await api.storeChannel('slack', {
           agentId: agentPicker.value,
           appToken: appToken.value,
           botToken: botToken.value,
@@ -293,7 +293,15 @@ export const renderSettings = (section) => {
         appToken.value = '';
         botToken.value = '';
         state.credentials = await api.credentials();
-        say('Stored. Restart stratusd to bring that agent online in Slack.');
+        // A daemon that reloads Slack connects the app now; one that
+        // started without Slack, or could not reload, needs the restart.
+        if (stored.reloaded) {
+          say("Stored. Slack reloaded, so that agent comes online without a restart. If it doesn't, the daemon log says why.");
+        } else if (stored.reason) {
+          say(`Stored. ${stored.reason}`, 'bad');
+        } else {
+          say('Stored. Restart stratusd to bring that agent online in Slack.');
+        }
       } catch (error) {
         say(error.message, 'bad');
       }

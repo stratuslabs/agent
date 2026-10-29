@@ -134,7 +134,8 @@ Remotely, the control API's `PUT /credentials/channels/discord` takes
 that agent had on that kind and never disturbs another kind's; `stratus
 channel remove discord --agent blair` forgets one. `GET /credentials` lists
 which agents are bound on each kind, ids only. A running daemon reads them
-at its next start: `stratus restart`.
+at its next start (`stratus restart`), unless the channel implements
+`reload()` (Slack does), in which case it picks them up when they're saved.
 
 Who may approve a channel's gated calls is in the plugin's own config
 block, not the trusted `approvals` block, whose approver lists are Slack's —

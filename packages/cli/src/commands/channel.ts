@@ -6,6 +6,7 @@ import {
   saveChannelTransportSecrets,
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
+import { channelReloadLine, reloadRunningDaemonChannels } from '../daemon.ts';
 import { writeLine, readSecretFromStdin } from '../io.ts';
 import type { ParsedChannelCommand } from '../parse.ts';
 import { createSetupPrompter } from '../prompter.ts';
@@ -29,7 +30,8 @@ const SLACK_KEYS = ['appToken', 'botToken'];
  * history; nothing ever prints one back. These are gateway infrastructure
  * secrets, never resolved through an agent's credentials — an agent must
  * not read the tokens of the transport carrying it — so there is no soul
- * gate to mention, only the restart that makes a daemon read them.
+ * gate to mention. A running daemon is asked to reload, which a channel
+ * that can (Slack) picks up at once; any other reads them at its next start.
  */
 export const runChannel = async (
   command: ParsedChannelCommand,
@@ -71,7 +73,7 @@ export const runChannel = async (
       writeLine(streams.stderr, `Nothing is stored for ${agentId} on ${kind}. \`stratus channel list\` shows what is.`);
       return 1;
     }
-    writeLine(streams.stdout, `Removed ${agentId}'s ${kind} secrets. A running stratusd lets go of them at its next start: \`stratus restart\`.`);
+    await sayWhenItApplies(streams, env, kind, `Removed ${agentId}'s ${kind} secrets.`, 'A running stratusd lets go of them at its next start: `stratus restart`.');
     return 0;
   }
 
@@ -138,6 +140,22 @@ export const runChannel = async (
 
   await saveChannelTransportSecrets(env, kind, agentId, secrets);
   writeLine(streams.stdout, `Stored ${keys.join(', ')} for ${agentId} on ${kind} in ${credentialsPath(env)} (readable only by you).`);
-  writeLine(streams.stdout, 'This replaces whatever was stored for that agent on that channel. A running stratusd reads it at its next start: `stratus restart`.');
+  await sayWhenItApplies(streams, env, kind, 'This replaces whatever was stored for that agent on that channel.', 'A running stratusd reads it at its next start: `stratus restart`.');
   return 0;
+};
+
+/**
+ * The line after a store or a remove: whether the running daemon picked it
+ * up (card 894), or, with no daemon to ask, when one would.
+ */
+const sayWhenItApplies = async (streams: CliStreams, env: CliEnvironment, kind: string, done: string, noDaemon: string): Promise<void> => {
+  const reload = await reloadRunningDaemonChannels(env);
+  if (reload === undefined) {
+    writeLine(streams.stdout, `${done} ${noDaemon}`);
+  } else if ('base' in reload) {
+    writeLine(streams.stdout, `${done} ${channelReloadLine(reload, kind)}`);
+  } else {
+    writeLine(streams.stdout, done);
+    writeLine(streams.stderr, `Warning: ${reload.warning}`);
+  }
 };

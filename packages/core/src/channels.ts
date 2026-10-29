@@ -715,6 +715,29 @@ export interface ChannelAdapter {
    * without it, that authorization never applies on this transport.
    */
   conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
+  /**
+   * Picks up a change in which agents this channel carries, without a
+   * restart: an agent whose secrets were stored or removed since `start`,
+   * a soul that appeared, one that is gone. The gateway calls it after
+   * every roster reload, on each channel that started, one channel at a
+   * time, once the new roster is what `GatewayLike.agents()` answers.
+   *
+   * Connects, reconnects or drops only what changed and leaves every other
+   * connection alone, so a conversation on an unchanged app never notices.
+   * Settings other than the secrets come from wherever `start` read them,
+   * which for the daemon is the config it started with: a reload changes
+   * which apps are connected, never how an agent is configured.
+   *
+   * Resolves once done. Rejects, with a reason for the log, only when the
+   * reload could not run at all; one app that would not connect is the
+   * adapter's to log, the way `start` does, and not a reason to reject.
+   * The gateway stops waiting after a bound and goes on, so a second
+   * reload can arrive before the first settled, and `stop()` can arrive
+   * during one: an implementation serializes its own reloads, and leaves
+   * nothing connected that a stop has already taken down. Optional: a
+   * channel without it changes only at a restart.
+   */
+  reload?(): Promise<void>;
 }
 
 export interface ChannelSessionKeyParts {

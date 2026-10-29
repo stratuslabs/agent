@@ -383,6 +383,14 @@ export interface GatewayChannelAdapter {
   /** See `ChannelAdapter.sessionConversation`. */
   sessionConversation?(agentId: string, sessionId: string): string | undefined;
   /**
+   * Picks up which agents this channel carries without a restart, mirroring
+   * `ChannelAdapter.reload`. The gateway calls it on every started channel
+   * after a roster reload, one channel at a time, and stops waiting after
+   * `channelReloadTimeoutMs`. Optional: a channel without it changes only
+   * at a restart.
+   */
+  reload?(): Promise<void>;
+  /**
    * Shows a person a form for a credential an agent asked for, mirroring
    * `ChannelAdapter.requestCredential`. Optional:
    * a channel without it cannot take credentials, and a request made in
@@ -634,6 +642,19 @@ export const STOPPING_TURN_ERROR = 'Run aborted: stratusd is stopping';
  * two windows an operator can hit agree.
  */
 export const DEFAULT_RESTART_DRAIN_TIMEOUT_MS = 30_000;
+/** How long a roster reload waits on one channel's `reload()`. */
+export const DEFAULT_CHANNEL_RELOAD_TIMEOUT_MS = 30_000;
+
+/**
+ * What one channel did with a roster reload. `reloaded`: its `reload()`
+ * resolved. `failed`: it rejected, with the reason. `still-reloading`: it
+ * had not settled within `channelReloadTimeoutMs`, and finishes on its own.
+ */
+export interface ChannelReloadOutcome {
+  name: string;
+  outcome: 'reloaded' | 'failed' | 'still-reloading';
+  reason?: string;
+}
 
 /**
  * How long a stop lets in-flight turns finish before aborting them. The
@@ -1001,6 +1022,12 @@ export interface GatewayOptions {
   onPromoted?: () => Promise<void>;
   /** The drain window a `restart()` uses when the request names none. Default 30s. */
   restartDrainTimeoutMs?: number;
+  /**
+   * How long a roster reload waits on one channel's `reload()` before it
+   * goes on without it. Default 30s. The reload is not cancelled: the
+   * channel finishes on its own, and its outcome is logged when it does.
+   */
+  channelReloadTimeoutMs?: number;
   /** The drain window a `stop()` uses. Default 30s; see `DEFAULT_STOP_DRAIN_TIMEOUT_MS`. */
   stopDrainTimeoutMs?: number;
   log?: (line: string) => void;
@@ -1211,6 +1238,14 @@ export interface Gateway {
    * created by another surface, or one whose soul was deleted.
    */
   reloadRoster(): Promise<AgentDefinition[]>;
+  /**
+   * `reloadRoster()`, then what each started channel that can reload
+   * (`ChannelAdapter.reload`) did with it, in start order: where a secret
+   * stored while the daemon runs is picked up without a restart. A channel
+   * missing from the list can't reload, and reads its secrets at the next
+   * start. Rejects as `reloadRoster()` does, when the roster won't load.
+   */
+  reloadRosterAndChannels(): Promise<{ agents: AgentDefinition[]; channels: ChannelReloadOutcome[] }>;
   /**
    * Re-read `~/.stratus/skills/` and serve what is there now, without a
    * restart — the shape `reloadRoster()` established: idempotent,
@@ -2552,6 +2587,63 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // a roster that failed to load must not block every reload after it.
     reloads = next.catch(() => undefined);
     await next;
+  };
+
+  const channelReloadTimeoutMs = options.channelReloadTimeoutMs ?? DEFAULT_CHANNEL_RELOAD_TIMEOUT_MS;
+
+  /**
+   * After a roster reload, each started channel that can picks up the
+   * agents it carries now (a new agent's stored app, one whose soul or
+   * secrets are gone). One at a time, in start order, so the log reads in
+   * the order an operator configured them. A channel that fails is
+   * logged and the rest still reload: one bad app must not hold back the
+   * others, the rule `startChannels` follows. A channel still reloading
+   * after the bound is left to finish on its own, and what it ends with is
+   * logged then, so a hung Slack call cannot hold every later reload.
+   */
+  const reloadChannels = async (): Promise<ChannelReloadOutcome[]> => {
+    const outcomes: ChannelReloadOutcome[] = [];
+    for (const adapter of [...startedChannels]) {
+      if (stopping || channelsClosed) {
+        return outcomes;
+      }
+      if (typeof adapter.reload !== 'function') {
+        continue;
+      }
+      const reload = adapter.reload.bind(adapter);
+      // Settles with the failure, never rejects: one that comes after the
+      // bound has nobody awaiting it, and would take the daemon down.
+      const settled = (async () => reload())().then(
+        () => undefined,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const bound = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), channelReloadTimeoutMs);
+        timer.unref?.();
+      });
+      const outcome = await Promise.race([settled.then((failure) => ({ failure })), bound]);
+      clearTimeout(timer);
+      if (outcome === 'timeout') {
+        warn(`channel ${adapter.name} is still reloading after ${channelReloadTimeoutMs} ms; the roster reload goes on without it`);
+        void settled.then((failure) => {
+          if (failure !== undefined) {
+            warn(`channel ${adapter.name} could not reload: ${failure}`);
+          } else {
+            log(`channel ${adapter.name} finished reloading`);
+          }
+        });
+        outcomes.push({ name: adapter.name, outcome: 'still-reloading' });
+        continue;
+      }
+      if (outcome.failure !== undefined) {
+        warn(`channel ${adapter.name} could not reload: ${outcome.failure}`);
+        outcomes.push({ name: adapter.name, outcome: 'failed', reason: outcome.failure });
+        continue;
+      }
+      outcomes.push({ name: adapter.name, outcome: 'reloaded' });
+    }
+    return outcomes;
   };
 
   /**
@@ -6188,12 +6280,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     async reloadRoster() {
-      // Under the soul lock, so a repoint cannot land between a credential
-      // grant's check of the served path and its write (`grantSoulCredential`).
-      await reloadsInOrder(() => withSoulFileLock(loadRoster));
-      const roster = registry.list();
-      log(`roster reloaded — ${roster.length} agent(s): ${roster.map((agent) => agent.name).join(', ')}`);
-      return roster;
+      return (await gateway.reloadRosterAndChannels()).agents;
+    },
+
+    async reloadRosterAndChannels() {
+      let roster: AgentDefinition[] = [];
+      let channels: ChannelReloadOutcome[] = [];
+      await reloadsInOrder(async () => {
+        // Under the soul lock, so a repoint cannot land between a credential
+        // grant's check of the served path and its write (`grantSoulCredential`).
+        await withSoulFileLock(loadRoster);
+        roster = registry.list();
+        log(`roster reloaded — ${roster.length} agent(s): ${roster.map((agent) => agent.name).join(', ')}`);
+        // Outside the soul lock, which guards files and must not wait on a
+        // network; inside the reload chain, so two reloads never interleave
+        // their channel work (the bound keeps one from holding it).
+        channels = await reloadChannels();
+      });
+      return { agents: roster, channels };
     },
 
     async reloadSkills() {

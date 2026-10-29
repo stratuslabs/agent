@@ -629,6 +629,13 @@ export interface SlackWebLike {
 
 export interface SlackAdapterOptions {
   agents: SlackAgentConfig[];
+  /**
+   * The agents to carry now, read again on every `reload()`: what the
+   * daemon passes so a Slack app stored while it runs connects without a
+   * restart. Without it, the adapter has no `reload` and carries `agents`
+   * until it stops.
+   */
+  loadAgents?: () => Promise<SlackAgentConfig[]>;
   log?: (line: string) => void;
   warn?: (line: string) => void;
   /** Minimum gap between streaming edits per message (chat.update rate limits). */
@@ -3352,9 +3359,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const now = options.now ?? Date.now;
 
   const connections: AgentConnection[] = [];
+  // The agents this adapter carries: `options.agents` until a reload reads
+  // another list (`options.loadAgents`).
+  let carried: SlackAgentConfig[] = options.agents;
   // Every agent this adapter was asked to carry, connected or not — the
   // difference between "mine and broken" and "not mine".
-  const configuredAgents = new Set(options.agents.map((agent) => agent.agentId));
+  const configuredAgents = new Set(carried.map((agent) => agent.agentId));
   // Renderers queue per session: two messages in one thread share a
   // session id, and the gateway serializes their turns — so events route
   // to the FIRST registered renderer (the running turn), never a later
@@ -3554,8 +3564,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * is the correct outcome there, and it is also the visible one — the same
    * thing a mention has always done when an app is down.
    *
-   * Insertion order is `options.agents` order, which is what makes
-   * `agentNamedIn` deterministic across every connection.
+   * Insertion order is the carried agents' order (`options.agents`, or the
+   * list a reload read), which is what makes `agentNamedIn` deterministic
+   * across every connection.
    */
   const botIdentities = new Map<string, { botUserId: string; teamId: string }>();
   // Rendered approval requests, keyed by the gateway's request id — the
@@ -3584,6 +3595,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const resolvedWhileRendering = new Map<string, Extract<StratusEvent, { type: 'tool.approval-resolved' }>>();
   let unsubscribe: (() => void) | undefined;
   let gatewayRef: GatewayLike | undefined;
+  // Set as `stop()` begins, so a reload still connecting an app leaves
+  // nothing up behind the stop.
+  let stopRequested = false;
 
   // Everything the adapter owes Slack goes through here, so stop() drains
   // it: an approval question or its retraction must reach the workspace
@@ -4359,7 +4373,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   /** An agent's configuration, whether or not its socket came up. */
   const agentConfigFor = (agentId: string): SlackAgentConfig | undefined =>
-    options.agents.find((candidate) => candidate.agentId === agentId);
+    carried.find((candidate) => candidate.agentId === agentId);
 
   /**
    * Which agent each home channel belongs to, keyed `team:channel` because
@@ -4376,7 +4390,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const settleHomeOwners = (): void => {
     homeOwners.clear();
     const claims = new Map<string, string[]>();
-    for (const agent of options.agents) {
+    for (const agent of carried) {
       const teamId = botIdentities.get(agent.agentId)?.teamId;
       if (teamId === undefined) {
         continue;
@@ -5295,7 +5309,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const agentsSharingAppWith = (connection: AgentConnection): string[] => {
     const agentId = connection.config.agentId;
     const sharing = new Set<string>();
-    for (const other of options.agents) {
+    for (const other of carried) {
       if (other.agentId !== agentId && other.botToken === connection.config.botToken) {
         sharing.add(other.agentId);
       }
@@ -8303,8 +8317,229 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /**
+   * One agent's app, authenticated, with who its bot is recorded, and its
+   * socket built but not started: undefined, with a warning, when it would
+   * not authenticate. Recorded before the socket is even built: an app
+   * that never comes up must still be recognizable when somebody names it.
+   */
+  const authenticate = async (config: SlackAgentConfig): Promise<AgentConnection | undefined> => {
+    try {
+      const created = createWeb(config.botToken);
+      const web = config.linkPreviews === false ? withoutLinkPreviews(created) : created;
+      const auth = await web.auth.test();
+      const botUserId = auth.user_id ?? '';
+      const teamId = auth.team_id ?? '';
+      checkBotScopes(config.agentId, auth.response_metadata?.scopes ?? [], warn);
+      botIdentities.set(config.agentId, { botUserId, teamId });
+      return {
+        config,
+        web,
+        socket: createSocket(config.appToken),
+        botUserId,
+        teamId,
+        statusWarned: { value: false },
+      };
+    } catch (error) {
+      // One broken app must not take the rest of the fleet down.
+      warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  };
+
+  /**
+   * Starts an authenticated app's socket and serves it. Resolves with the
+   * listener a replay of kept messages delivers through, or undefined when
+   * the socket would not start: authenticated but not serving, it answers
+   * nothing, and stays recognizable so nobody answers in its place.
+   */
+  const connect = async (connection: AgentConnection): Promise<((args: SlackSocketEventArgs) => Promise<void>) | undefined> => {
+    const { config, socket } = connection;
+    try {
+      // Returns the work it started: the SDK ignores it, and a test's fake
+      // socket waits on it rather than guessing how long it takes.
+      const handle = (inbound: Promise<void>): Promise<void> => {
+        const handled = inbound.catch((error) => {
+          warn(`slack event handling failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        inflight.add(handled);
+        void handled.finally(() => inflight.delete(handled));
+        return handled;
+      };
+      // The replay's own deliveries never wait on the hold they release.
+      const onReplay = (args: SlackSocketEventArgs): Promise<void> => handle(handleInbound(connection, args));
+      const onEvent = (args: SlackSocketEventArgs): Promise<void> => {
+        const channel = (args.event as { channel?: unknown } | undefined)?.channel;
+        const hold = typeof channel === 'string' ? replayHolds.get(holdKey(config.agentId, channel))?.held : undefined;
+        if (hold === undefined) {
+          return onReplay(args);
+        }
+        // Acked now, as any delivery is, so Slack does not redeliver a
+        // message that is only waiting its turn; admitted after the hold.
+        void Promise.resolve(args.ack()).catch((error) => {
+          warn(`slack: could not ack an envelope: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        return handle(hold.then(() => handleInbound(connection, { ...args, ack: async () => {} })));
+      };
+      socket.on('app_mention', onEvent);
+      socket.on('message', onEvent);
+      socket.on('interactive', (args: SlackSocketEventArgs): Promise<void> => {
+        const handled = handleInteractive(connection, args).catch((error) => {
+          warn(`slack interaction handling failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        track(handled);
+        return handled;
+      });
+      await socket.start();
+      // A stop that began while this socket was starting has already
+      // disconnected what it could see; one left up here would answer
+      // beside the next daemon.
+      if (stopRequested) {
+        await disconnect(connection, 'the adapter is stopping');
+        return undefined;
+      }
+      connections.push(connection);
+      log(`slack: ${config.agentId} connected (bot ${connection.botUserId} in team ${connection.teamId})`);
+      return onReplay;
+    } catch (error) {
+      warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  };
+
+  /** Closes an app's socket; false, with a warning, when the close was refused. */
+  const disconnect = async (connection: AgentConnection, reason: string): Promise<boolean> => {
+    try {
+      await connection.socket.disconnect();
+      return true;
+    } catch (error) {
+      warn(`slack: could not disconnect ${connection.config.agentId} (${reason}): ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  };
+
+  const sameApp = (a: SlackAgentConfig, b: SlackAgentConfig): boolean =>
+    a.appToken === b.appToken && a.botToken === b.botToken;
+
+  /**
+   * Brings the connected apps in line with the agents to carry now (card
+   * 894): connects an agent whose app is new, or that the roster has only
+   * now, or that did not come up before; reconnects one whose tokens
+   * changed; disconnects one whose tokens were removed or whose soul is
+   * gone. Every other socket is left alone, so a conversation on it never
+   * notices. Settings come with the list `options.loadAgents` reads, which
+   * for the daemon is the config it started with.
+   */
+  const reconcile = async (): Promise<void> => {
+    const gateway = gatewayRef;
+    if (gateway === undefined || stopRequested || options.loadAgents === undefined) {
+      return;
+    }
+    const next = await options.loadAgents();
+    if (gatewayRef !== gateway || stopRequested) {
+      return;
+    }
+    const known = new Set(gateway.agents().map((agent) => agent.id));
+    const wanted = new Map(next.filter((config) => known.has(config.agentId)).map((config) => [config.agentId, config]));
+    const connected = new Map(connections.map((connection) => [connection.config.agentId, connection]));
+    const leaving = [...connected.values()].filter((connection) => {
+      const config = wanted.get(connection.config.agentId);
+      return config === undefined || !sameApp(config, connection.config);
+    });
+
+    // Closed first, and only a closed one is let go of. A socket whose close
+    // was refused may still deliver, so it stays this agent's connection,
+    // on the tokens it has, and nothing is started beside it: a second
+    // socket for the agent would answer every message twice, and a removed
+    // app would keep answering while reported gone. A restart clears it.
+    for (const connection of leaving) {
+      const agentId = connection.config.agentId;
+      const reason = !known.has(agentId)
+        ? 'its soul is gone'
+        : wanted.has(agentId) ? 'its tokens changed' : 'its tokens were removed';
+      if (!await disconnect(connection, reason)) {
+        warn(`slack: ${agentId} stays connected with the app it had until a restart, since its socket would not close`);
+        continue;
+      }
+      const index = connections.indexOf(connection);
+      if (index >= 0) {
+        connections.splice(index, 1);
+      }
+      log(`slack: ${agentId} disconnected (${reason})`);
+    }
+    // What is still connected now, stuck sockets included, serves on.
+    const serving = (agentId: string): AgentConnection | undefined =>
+      connections.find((connection) => connection.config.agentId === agentId);
+    const arriving = [...wanted.values()].filter((config) => serving(config.agentId) === undefined);
+
+    // A connected app keeps the configuration it is serving with.
+    carried = [
+      ...next.map((config) => serving(config.agentId)?.config ?? config),
+      ...connections.filter((connection) => !next.some((config) => config.agentId === connection.config.agentId)).map((connection) => connection.config),
+    ];
+    configuredAgents.clear();
+    for (const config of carried) {
+      configuredAgents.add(config.agentId);
+    }
+    // Who each remaining bot is, in the carried order: an app no longer
+    // carried is nobody's to recognize, and a new one is learned below.
+    const kept = new Map(botIdentities);
+    botIdentities.clear();
+    for (const config of carried) {
+      const identity = kept.get(config.agentId);
+      if (identity !== undefined && serving(config.agentId) !== undefined) {
+        botIdentities.set(config.agentId, identity);
+      }
+    }
+    for (const config of next) {
+      if (!known.has(config.agentId) && serving(config.agentId) === undefined) {
+        warn(`slack: no roster agent with id ${config.agentId}; skipping its Slack app`);
+      }
+    }
+
+    // Every new identity first, then the sockets, as `start` does: a
+    // mention of an agent not yet known would read as an untagged reply.
+    const authenticated: AgentConnection[] = [];
+    for (const config of arriving) {
+      if (stopRequested) {
+        return;
+      }
+      const connection = await authenticate(config);
+      if (connection) {
+        authenticated.push(connection);
+      }
+    }
+    if (authenticated.length > 0) {
+      const learned = new Map(botIdentities);
+      botIdentities.clear();
+      for (const config of carried) {
+        const identity = learned.get(config.agentId);
+        if (identity !== undefined) {
+          botIdentities.set(config.agentId, identity);
+        }
+      }
+    }
+    settleHomeOwners();
+    for (const connection of authenticated) {
+      if (stopRequested) {
+        return;
+      }
+      await connect(connection);
+    }
+  };
+
+  // One reload at a time: the gateway can call again before an earlier one
+  // settled, since it stops waiting after a bound.
+  let reloading: Promise<void> = Promise.resolve();
+  const reload = (): Promise<void> => {
+    const run = reloading.then(reconcile, reconcile);
+    reloading = run.catch(() => undefined);
+    return run;
+  };
+
   return {
     name: 'slack',
+    ...(options.loadAgents !== undefined ? { reload } : {}),
     resolveOutbound,
     readConversation,
     sessionConversation,
@@ -8322,6 +8557,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     async start(gateway) {
       gatewayRef = gateway;
+      stopRequested = false;
       // Nothing counts as seen live until every socket is up (Codex
       // 4321128637): a message sent while the sockets are still coming up
       // reaches none of them, so a read stopping before it stops short.
@@ -8448,32 +8684,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // agent not yet known reads as an untagged reply — which the agent
       // holding that thread would then answer.
       const authenticated: AgentConnection[] = [];
-      for (const config of options.agents) {
+      for (const config of carried) {
         if (!known.has(config.agentId)) {
           warn(`slack: no roster agent with id ${config.agentId}; skipping its Slack app`);
           continue;
         }
-        try {
-          const created = createWeb(config.botToken);
-          const web = config.linkPreviews === false ? withoutLinkPreviews(created) : created;
-          const auth = await web.auth.test();
-          const botUserId = auth.user_id ?? '';
-          const teamId = auth.team_id ?? '';
-          checkBotScopes(config.agentId, auth.response_metadata?.scopes ?? [], warn);
-          // Recorded before the socket is even built: an app that never
-          // comes up must still be recognizable when somebody names it.
-          botIdentities.set(config.agentId, { botUserId, teamId });
-          authenticated.push({
-            config,
-            web,
-            socket: createSocket(config.appToken),
-            botUserId,
-            teamId,
-            statusWarned: { value: false },
-          });
-        } catch (error) {
-          // One broken app must not take the rest of the fleet down.
-          warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
+        const connection = await authenticate(config);
+        if (connection) {
+          authenticated.push(connection);
         }
       }
 
@@ -8497,50 +8715,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
       }
       for (const connection of authenticated) {
-        const { config, socket } = connection;
-        try {
-          // Returns the work it started: the SDK ignores it, and a test's fake
-          // socket waits on it rather than guessing how long it takes.
-          const handle = (inbound: Promise<void>): Promise<void> => {
-            const handled = inbound.catch((error) => {
-              warn(`slack event handling failed: ${error instanceof Error ? error.message : String(error)}`);
-            });
-            inflight.add(handled);
-            void handled.finally(() => inflight.delete(handled));
-            return handled;
-          };
-          // The replay's own deliveries never wait on the hold they release.
-          const onReplay = (args: SlackSocketEventArgs): Promise<void> => handle(handleInbound(connection, args));
-          const onEvent = (args: SlackSocketEventArgs): Promise<void> => {
-            const channel = (args.event as { channel?: unknown } | undefined)?.channel;
-            const hold = typeof channel === 'string' ? replayHolds.get(holdKey(config.agentId, channel))?.held : undefined;
-            if (hold === undefined) {
-              return onReplay(args);
-            }
-            // Acked now, as any delivery is, so Slack does not redeliver a
-            // message that is only waiting its turn; admitted after the hold.
-            void Promise.resolve(args.ack()).catch((error) => {
-              warn(`slack: could not ack an envelope: ${error instanceof Error ? error.message : String(error)}`);
-            });
-            return handle(hold.then(() => handleInbound(connection, { ...args, ack: async () => {} })));
-          };
-          socket.on('app_mention', onEvent);
-          socket.on('message', onEvent);
-          listeners.set(config.agentId, onReplay);
-          socket.on('interactive', (args: SlackSocketEventArgs): Promise<void> => {
-            const handled = handleInteractive(connection, args).catch((error) => {
-              warn(`slack interaction handling failed: ${error instanceof Error ? error.message : String(error)}`);
-            });
-            track(handled);
-            return handled;
-          });
-          await socket.start();
-          connections.push(connection);
-          log(`slack: ${config.agentId} connected (bot ${connection.botUserId} in team ${connection.teamId})`);
-        } catch (error) {
-          // Authenticated but not serving: it answers nothing, and stays
-          // recognizable so nobody answers in its place.
-          warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
+        const onReplay = await connect(connection);
+        if (onReplay) {
+          listeners.set(connection.config.agentId, onReplay);
         }
       }
       const liveMs = now() + LIVE_FROM_MARGIN_MS;
@@ -8555,6 +8732,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     },
 
     async stop() {
+      stopRequested = true;
       replayStopping?.abort();
       releaseAllConversations();
       // Stop intake first, so no new INBOUND event can slip into

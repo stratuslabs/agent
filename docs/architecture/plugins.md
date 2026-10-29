@@ -600,6 +600,18 @@ while the daemon runs is there at the next start. Read what this does and
 does not buy, the same way the credential resolver's section does: it is
 the honest path, not an isolation boundary.
 
+**A channel can pick up new secrets without a restart.** An adapter with
+the optional `reload()` is called after every roster reload, which saving a
+channel's secrets triggers (`stratus channel set`, `PUT
+/credentials/channels/:channel`, setup). It reads `transportSecrets(kind)`
+again and connects, reconnects or drops only the agents whose secrets or
+souls changed, leaving every other connection alone. The gateway calls one
+channel at a time and stops waiting after 30 seconds, so `reload()` must
+serialize itself and leave nothing connected once `stop()` has run. A
+failure is logged and the other channels still reload. Without it, a
+channel reads its secrets at the next start. Slack implements it; see
+`ChannelAdapter.reload` for the contract.
+
 **A channel may be bound by trusted config, not only by stored secrets.**
 `ChannelContribution.agents` is the plugin's to compute, and the secrets
 are one input to it, not the definition. A channel that needs no secret —

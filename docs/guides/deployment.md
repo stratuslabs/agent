@@ -163,7 +163,7 @@ cannot:
 | A provider API key | **Yes** | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `CODEX_API_KEY`. A key alone does not select a provider — with nothing naming one and no stored sign-in, every turn is refused with a pointer to `stratus setup` — so set `STRATUS_PROVIDER` too, or `provider` in the config, or `provider:` in a soul. `STRATUS_API_KEY` outranks every provider's own variable at once, so it belongs only on a single-provider fleet. See [Configuration](../reference/config.md). |
 | A named credential (`search.apiKey`) | **Yes**, in the image | By its exact name, read after any stored entry of that name — and only by an agent whose soul lists it under `credentials:`. The image starts the daemon with no shell in between because a POSIX shell drops a variable named `search.apiKey` on its way to exec; a system unit's `EnvironmentFile=` may refuse such a name too. Storing it works everywhere: `printf %s "$KEY" \| docker exec -i stratusd stratus credential set search.apiKey`. |
 | The control API's token | **Yes**, as a file | Set `STRATUS_GATEWAY_TOKEN_FILE` to a file holding the token (a mounted secret), and the daemon uses it instead of generating one, copying it into `~/.stratus/gateway-token` so `stratus health` and the other local commands keep working. One line, at least 32 printable characters, no spaces. Replace the file and restart to rotate it; a file that is missing or malformed stops the daemon from starting rather than falling back to a token nothing else knows. Unset, the daemon generates its own the first time, as before. |
-| Slack tokens | **No** | Read only from `credentials.json` in the home, because they are the daemon's own and an agent must never resolve them. Store them with `docker exec -it stratusd stratus setup` → **Channels**, or through the API (below), then `stratus restart`. |
+| Slack tokens | **No** | Read only from `credentials.json` in the home, because they are the daemon's own and an agent must never resolve them. Store them with `docker exec -it stratusd stratus setup` → **Channels**, or through the API (below). Once the daemon serves Slack for one agent, another agent's tokens connect when saved, with no restart; the first app on a daemon that started without Slack needs `stratus restart`. |
 | A Claude subscription or a codex sign-in | **No** | Stored by `stratus setup`. The `claude-code` and `codex` runtimes also run their vendor's CLI, which keeps its own state under the home directory — outside the volume, and read-only in the image — so they need that directory made writable (a second volume at `/home/node/.claude` or `/home/node/.codex`) and are not covered by the backup below. An API key is the path this recipe is built around. |
 
 Slack through the API, for a script rather than a menu (the app setup
@@ -173,8 +173,11 @@ itself is in the [channel's README](../../packages/channel-slack/README.md#setti
 curl -fsS -X PUT http://127.0.0.1:4123/api/v1/credentials/channels/slack \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d @slack-ops.json        # {"agentId":"ops","appToken":"xapp-…","botToken":"xoxb-…"}, 0600
-docker exec stratusd stratus restart
 ```
+
+The answer's `reloaded` says whether the running daemon connected it now.
+When it's `false` (the daemon started with no Slack app), run
+`docker exec stratusd stratus restart`.
 
 Keep `stratusd.env` and `/etc/stratus/stratusd.env` owner-readable only.
 A key in the daemon's environment does not reach the commands its agents

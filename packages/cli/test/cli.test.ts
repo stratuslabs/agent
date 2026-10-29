@@ -5147,6 +5147,46 @@ test('setup suggests serve with the same --config it was run with', async () => 
   assert.match(output.stdout, /run `stratus serve --config \.\/custom\.json` to bring them online/);
 });
 
+test('setup reloads a running daemon once the channel secrets are written, and says whether Slack picked them up', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await publishGateway(home, 'http://127.0.0.1:4123/');
+  const reloads: Array<{ tokensStored: boolean }> = [];
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      fetch: (async (url: any) => {
+        if (String(url).endsWith('/api/v1/roster/reload')) {
+          // Asked only once the tokens are on disk, so the reload can read them.
+          const stored = await loadChannelCredentials({ homeDir: home, cwd: home, processEnv: {} });
+          reloads.push({ tokensStored: Object.keys(stored.slack ?? {}).length > 0 });
+          return Response.json({ agents: [], channels: [{ name: 'slack', outcome: 'reloaded' }] });
+        }
+        return new Response(JSON.stringify(
+          String(url).endsWith('/auth.test')
+            ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+            : { ok: true, url: 'wss://x' },
+        ), { status: 200 });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.deepEqual(reloads, [{ tokensStored: true }]);
+  assert.match(output.stdout, /Saved Slack tokens for 1 agent to .*credentials\.json\. The running daemon \(http:\/\/127\.0\.0\.1:4123\) reloaded slack, so this applies now, with no restart/);
+});
+
 test('the Channels menu refuses a roster with a duplicate id instead of picking a winner', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
@@ -13102,6 +13142,67 @@ test('stratus channel set stores a plugin channel\'s secrets 0600 where the chan
   const again = createStreams();
   assert.equal(await runCli({ argv: ['channel', 'remove', 'imessage', '--agent', 'ava'], streams: again.streams, env }), 1);
   assert.match(again.output.stderr, /Nothing is stored for ava on imessage/);
+});
+
+test('stratus channel set and remove reload a running daemon, and say whether that channel picked it up', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-channel-reload-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const reloaded = () => Response.json({ agents: [{ id: 'ava', name: 'Ava' }], channels: [{ name: 'slack', outcome: 'reloaded' }] });
+
+  // No daemon has said it is running: nothing to ask, and the restart line.
+  const quiet = fakeGateway(reloaded);
+  const first = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: first.streams, env: { ...env, stdin: 'xapp-1\nxoxb-1\n', fetch: quiet.fetchImpl } }), 0);
+  assert.deepEqual(quiet.calls, []);
+  assert.match(first.output.stdout, /at its next start: `stratus restart`/);
+
+  await publishGateway(home, 'http://127.0.0.1:4123/');
+  const daemon = fakeGateway(reloaded);
+  const second = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: second.streams, env: { ...env, stdin: 'xapp-2\nxoxb-2\n', fetch: daemon.fetchImpl } }), 0);
+  assert.deepEqual(daemon.calls.map((call) => [call.method, call.url]), [['POST', 'http://127.0.0.1:4123/api/v1/roster/reload']]);
+  assert.match(second.output.stdout, /The running daemon \(http:\/\/127\.0\.0\.1:4123\) reloaded slack, so this applies now, with no restart/);
+  assert.ok(!second.output.stdout.includes('stratus restart'), second.output.stdout);
+
+  // A kind the daemon does not reload waits for its next start.
+  const plugin = fakeGateway(reloaded);
+  const third = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'imessage', '--agent', 'ava', 'apiKey'], streams: third.streams, env: { ...env, stdin: 'k\n', fetch: plugin.fetchImpl } }), 0);
+  assert.match(third.output.stdout, /doesn't reload imessage, so this applies at its next start: `stratus restart`/);
+
+  // Removing reloads too, so the app is let go of now.
+  const removing = fakeGateway(reloaded);
+  const fourth = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'remove', 'slack', '--agent', 'ava'], streams: fourth.streams, env: { ...env, fetch: removing.fetchImpl } }), 0);
+  assert.equal(removing.calls.length, 1);
+  assert.match(fourth.output.stdout, /Removed ava's slack secrets\. The running daemon \(http:\/\/127\.0\.0\.1:4123\) reloaded slack/);
+
+  // A channel that tried and failed waits for the next start, and says why.
+  const failing = fakeGateway(() => Response.json({ agents: [], channels: [{ name: 'slack', outcome: 'failed', reason: 'credentials.json is not readable' }] }));
+  const failed = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: failed.streams, env: { ...env, stdin: 'xapp-4\nxoxb-4\n', fetch: failing.fetchImpl } }), 0);
+  assert.match(failed.output.stdout, /could not reload slack \(credentials\.json is not readable\), so this applies at its next start: `stratus restart`/);
+
+  // Two adapters of one kind: it applies now only if both reloaded.
+  const split = fakeGateway(() => Response.json({ agents: [], channels: [{ name: 'slack', outcome: 'reloaded' }, { name: 'slack', outcome: 'still-reloading' }] }));
+  const both = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: both.streams, env: { ...env, stdin: 'xapp-6\nxoxb-6\n', fetch: split.fetchImpl } }), 0);
+  assert.match(both.output.stdout, /is still reloading slack/);
+
+  // A daemon from before reloadable channels answers with no list.
+  const older = fakeGateway(() => Response.json({ agents: [] }));
+  const old = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: old.streams, env: { ...env, stdin: 'xapp-5\nxoxb-5\n', fetch: older.fetchImpl } }), 0);
+  assert.match(old.output.stdout, /doesn't reload slack, so this applies at its next start/);
+
+  // A daemon that refuses: stored all the same, a warning with its reason, success.
+  const refusing = fakeGateway(() => Response.json({ error: { code: 'roster_invalid', message: 'Two souls use the id ava.' } }, { status: 500 }));
+  const fifth = createStreams();
+  assert.equal(await runCli({ argv: ['channel', 'set', 'slack', '--agent', 'ava'], streams: fifth.streams, env: { ...env, stdin: 'xapp-3\nxoxb-3\n', fetch: refusing.fetchImpl } }), 0);
+  assert.deepEqual(await loadChannelCredentials(env), { slack: { ava: { appToken: 'xapp-3', botToken: 'xoxb-3' } } });
+  assert.match(fifth.output.stderr, /Warning: .*gateway\.json names a daemon at http:\/\/127\.0\.0\.1:4123, but it did not reload: Two souls use the id ava\. If it is running, apply this with: stratus restart/);
 });
 
 test('stratus channel set stores nothing when a line is missing, a value is empty, or the agent is not on the roster', async () => {

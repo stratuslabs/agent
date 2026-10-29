@@ -4592,6 +4592,8 @@ export interface ChannelAdapterLike {
   conversationKindFor?(agentId: string, conversation: string): Promise<'channel' | 'direct' | undefined>;
   /** See `ChannelAdapter.sessionConversation`. */
   sessionConversation?(agentId: string, sessionId: string): string | undefined;
+  /** See `ChannelAdapter.reload`. */
+  reload?(): Promise<void>;
 }
 
 /**
