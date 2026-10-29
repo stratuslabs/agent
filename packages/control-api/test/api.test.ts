@@ -968,6 +968,34 @@ test('a channel that fails to reload answers reloaded: false with its reason, an
   }
 });
 
+test('with two adapters of one kind, the secret reads as live only if both reloaded', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const reloading = (fail: boolean) => ({
+    name: 'slack',
+    async start() {},
+    async stop() {},
+    async reload() {
+      if (fail) {
+        throw new Error('could not read its tokens');
+      }
+    },
+  });
+  const harness = await startApi({ home, gateway: { channels: [reloading(false), reloading(true)] } });
+  try {
+    const stored = await harness.call('/api/v1/credentials/channels/slack', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }),
+    });
+    const body = await stored.json() as { reloaded: boolean; reason?: string };
+    assert.equal(body.reloaded, false);
+    assert.match(body.reason ?? '', /could not read its tokens/);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a roster reload names the channels it reloaded', async () => {
   const slack = { name: 'slack', async start() {}, async stop() {}, async reload() {} };
   const plain = { name: 'plain', async start() {}, async stop() {} };

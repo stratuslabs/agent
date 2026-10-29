@@ -1655,9 +1655,11 @@ export const routes: Route[] = [
       // as its failure.
       // `reason` is a sentence, for a client to show as it is.
       const sentence = (text: string): string => (/[.!?]$/.test(text) ? text : `${text}.`);
-      let outcome: ChannelReloadOutcome | undefined;
+      // Every adapter of this kind, since two can carry disjoint agents of
+      // one kind: the secret is live only if each of them reloaded.
+      let outcomes: ChannelReloadOutcome[];
       try {
-        outcome = (await context.gateway.reloadRosterAndChannels()).channels.find((entry) => entry.name === channel);
+        outcomes = (await context.gateway.reloadRosterAndChannels()).channels.filter((entry) => entry.name === channel);
       } catch (error) {
         return {
           channel,
@@ -1667,10 +1669,11 @@ export const routes: Route[] = [
           reason: `${sentence(`The roster did not reload: ${error instanceof Error ? error.message : String(error)}`)} Fix that, then save again or restart stratusd.`,
         };
       }
-      if (outcome === undefined) {
+      if (outcomes.length === 0) {
         return { channel, agentId, stored: true, reloaded: false };
       }
-      if (outcome.outcome !== 'reloaded') {
+      const outcome = outcomes.find((entry) => entry.outcome !== 'reloaded');
+      if (outcome !== undefined) {
         const reason = outcome.outcome === 'failed'
           ? `${sentence(`The ${channel} channel could not reload: ${outcome.reason ?? 'no reason given'}`)} Restart stratusd to apply it.`
           : `The ${channel} channel was still reloading when this answered; the daemon log says when it's done.`;
