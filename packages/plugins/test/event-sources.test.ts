@@ -216,3 +216,29 @@ test('a host that takes no plugin events hands no handle', async () => {
   assert.equal(handles.length, 1);
   assert.equal(handles[0], undefined);
 });
+
+test('a host that cannot take a plugin\'s sources refuses the plugin whole, with nothing of it committed', async () => {
+  const handles: Array<EventIngestHandle | undefined> = [];
+  const module = {
+    createPlugin: (): Plugin => ({
+      name: 'poll',
+      setup(context) {
+        handles.push(context.events);
+        context.tools.register({ name: 'poll.status', risk: 'safe', async execute() { return 'ok'; } });
+      },
+    }),
+  };
+  const host = await fakeHost({ 'stratus-plugin-poll': { manifest: manifest([{ name: 'github' }], [{ name: 'poll.status', risk: 'safe' }]), module } });
+  const events = fakeEventHost();
+  events.host.register = () => {
+    throw new Error('fleet.db could not be opened');
+  };
+  const tools = new ToolRegistry();
+
+  const result = await loadPlugins({ config: { 'stratus-plugin-poll': {} }, host, tools, bus: new EventBus(), eventSources: events.host });
+
+  assert.deepEqual(result.loaded, []);
+  assert.match(result.failures[0]?.reason ?? '', /fleet\.db could not be opened/);
+  assert.equal(tools.get('poll.status'), undefined, 'the refused plugin\'s tool was never committed');
+  await assert.rejects(() => handles[0]!.ingest('github', EVENT), /did not load/);
+});

@@ -5425,14 +5425,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       eventSources: {
         reserved: Object.keys(eventSources),
         register: (packageName, sourceIds) => {
-          for (const sourceId of sourceIds) {
-            pluginEventSources.set(sourceId, packageName);
-          }
           if (!eventStore) {
             // The first source on a daemon whose config has none: the
             // scheduler was built without events, so it takes them now,
-            // before its start-up pass reads what is waiting.
+            // before its start-up pass reads what is waiting. First, so a
+            // store that won't open refuses the plugin with no source left
+            // behind.
             scheduler.attachEvents({ store: openEvents().store, sources: eventSourceIds });
+          }
+          for (const sourceId of sourceIds) {
+            pluginEventSources.set(sourceId, packageName);
           }
         },
         ingest: async (packageName, sourceId, event) => {

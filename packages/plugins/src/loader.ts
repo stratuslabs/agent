@@ -346,7 +346,11 @@ export interface PluginEventSourceHost {
    * into one id would make neither's events trustworthy as that source's.
    */
   reserved: readonly string[];
-  /** A plugin loaded whole, and these sources are its from now on. */
+  /**
+   * These sources are the plugin's from now on. Called once every check has
+   * passed and before anything of the plugin commits; a throw refuses the
+   * plugin whole, so leave nothing behind before throwing.
+   */
   register(packageName: string, sourceIds: readonly string[]): void;
   /** Store one event for a source `register` gave this package. */
   ingest(packageName: string, sourceId: string, event: JsonObject): Promise<EventIngestResult>;
@@ -728,6 +732,17 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       // The non-tool kinds are checked before the tools commit and landed
       // after it, so neither half can be live while the other is refused.
       contributions.preflightCommit();
+      view.preflightCommit(owners);
+      // The host's event sources, after every check and before anything
+      // commits: taking them can fail (the daemon opens its event store for
+      // the first one), and a plugin refused there must leave nothing live.
+      // The commits below only repeat checks that have already passed.
+      if (options.eventSources !== undefined && eventSourceIds.length > 0) {
+        options.eventSources.register(manifest.packageName, eventSourceIds);
+        for (const sourceId of eventSourceIds) {
+          eventSourceOwners.set(sourceId, manifest.packageName);
+        }
+      }
       const tools = view.commit(owners);
       const contributed = contributions.commit();
       const skills: PluginSkillRecord[] = [];
@@ -755,12 +770,6 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       });
       // Last, once nothing else can refuse the plugin.
       options.providerCallGuards?.push(...stagedGuards);
-      if (options.eventSources !== undefined && eventSourceIds.length > 0) {
-        options.eventSources.register(manifest.packageName, eventSourceIds);
-        for (const sourceId of eventSourceIds) {
-          eventSourceOwners.set(sourceId, manifest.packageName);
-        }
-      }
       eventsPhase = 'loaded';
     } catch (error) {
       eventsPhase = 'refused';
