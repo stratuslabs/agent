@@ -19,6 +19,8 @@ Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no w
 }
 ```
 
+- **A new agent's app connects without a restart.** Saving an agent's tokens (`stratus channel set slack`, `stratus setup` → Channels, or the dashboard) reloads the running daemon, which connects that app, reconnects one whose tokens changed, and drops one whose tokens were removed or whose soul is gone. Every other app stays connected. An agent's Slack settings (`slack`, `approvals`, `principals` in the config) still come from the config the daemon started with, and a daemon that started with no Slack app at all needs a restart for its first one.
+
 ## Who a message is for
 
 A mention is how a conversation starts. After that, the thread is the

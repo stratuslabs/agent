@@ -157,7 +157,7 @@ When a stored key "isn't found", check in this order:
   3. The app is missing the history scopes (`channels:history`, `groups:history`, `mpim:history`) and their `message.*` events, which means adding them and reinstalling the app.
 
   Not answering at all also happens when the daemon is down, the app was removed from the channel, or the person is not in `principals.slackUsers` and `admit` is `principals`, the default.
-- **Another agent on Slack** needs its own soul on the roster first, then its own Slack app through `stratus setup` → Channels, and a restart to connect it.
+- **Another agent on Slack** needs its own soul on the roster first, then its own Slack app through `stratus setup` → Channels or `stratus channel set slack --agent <id>`. Saving the tokens connects it on a daemon that already serves Slack, with no restart; a daemon that started with no Slack app at all needs a restart.
 - **Who counts as your operator** is `principals.slackUsers` in the trusted config. By default (`admit: "principals"`) everyone else is turned away before a turn starts, so an agent that says nothing to someone may simply not admit them. Under `admit: "anyone"` their messages reach you labelled as from someone unknown.
 - **Images** need the `files:read` scope. Text files are read up to a size limit, and anything else reaches you by name only, with the reason. The message says which.
 
@@ -168,7 +168,7 @@ When a stored key "isn't found", check in this order:
   - On Linux it is a systemd user unit, which needs `loginctl enable-linger` to run while nobody is logged in.
   - It will not start while the trusted config (`~/.stratus/config.json`, or the file `--config` names) fails to parse or validate. The error goes to stderr, not `stratus logs`: on Linux the unit then shows as failed until the file is fixed and `stratus service start` is run; on macOS launchd keeps retrying until the file is fixed. A daemon already running keeps its last good config, and `stratus service start`, `stratus update`, and `stratus restart` refuse up front with the same error rather than restart into it.
 - **`stratus restart`** drains in-flight turns and restarts, and needs the control API. Slack stays connected during the drain: a message addressed to you then gets an "I'm restarting" reply and is answered by the next daemon (kept in `slack-pending-intake.json`, no text). Overheard messages during a drain are not kept. Without the API, use `stratus service stop` then `stratus service start`.
-  - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after new channel secrets (Slack's tokens or a channel plugin's).
+  - A restart is needed after a change to `plugins` (a plugin's `env` included), `approvals`, `api`, `principals`, `slack`, `maxTurns`, `executor`, or `memoryStore`, and after a channel plugin's new secrets. New Slack tokens connect without one, once the daemon serves Slack.
   - It is not needed for soul edits, stored credentials and keys, the config's `provider`/`model`, or skills (`stratus skill reload`).
   - `stratus update` stops and starts the service itself. Only a daemon someone started with `stratus serve` needs restarting by hand.
 - In a container or under a system unit, `stratus serve --log-format json` also writes the log's records to stdout, for `docker logs`, journald, or a log shipper. `stratus health` is the probe.

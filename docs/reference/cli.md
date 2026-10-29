@@ -192,9 +192,12 @@ in the order named, keeping each exactly as typed:
 printf '%s\n%s\n' "$API_KEY" "$API_SECRET" | stratus channel set imessage --agent blair apiKey apiSecret
 ```
 
-It replaces whatever that agent had stored on that channel, refuses an
-agent the roster does not have (the channel would skip it), and is read by
-a running daemon at its next start. Slack's names are `appToken` and
+It replaces whatever that agent had stored on that channel and refuses an
+agent the roster does not have (the channel would skip it). Then it asks
+the running daemon, if there is one, to reload, and says what happened:
+Slack connects, reconnects or drops that agent's app at once, and a channel
+that can't reload (a plugin's) reads the secrets at the daemon's next start.
+`stratus channel remove` does the same. Slack's names are `appToken` and
 `botToken`, the default when none are given.
 
 Tool plugins have no flags: what is installed is a config decision
