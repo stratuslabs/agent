@@ -3703,6 +3703,16 @@ export const turnMessageOf = (session: Pick<Session, 'messages'>): Message | und
   session.messages.findLast(startsTurn);
 
 /**
+ * A key the turn a message started is known by: its own, or else the first
+ * of a dispatch it took in (`absorbedKeys`). A turn whose own message came
+ * unkeyed and then took a keyed message in at a tool step (card 948) is a
+ * keyed work item all the same — a restart continues it rather than
+ * failing it, and the key reads back its state (`workItemState`).
+ */
+export const turnKeyOf = (message: Pick<Message, 'idempotencyKey' | 'absorbedKeys'> | undefined): string | undefined =>
+  message?.idempotencyKey ?? message?.absorbedKeys?.[0];
+
+/**
  * Fail a session's in-flight turn: `status` and `lastError`, and the error
  * on the turn's own user message (`Message.turnError`), where the next
  * turn cannot overwrite it. The one write every path that fails a turn
@@ -6927,7 +6937,7 @@ export const leftForNextStart = (session: Pick<Session, 'messages'>, error: unkn
     return false;
   }
   const message = turnMessageOf(session);
-  return message?.idempotencyKey !== undefined && message.continuedAfterCrash !== true && message.hostedLoop !== true;
+  return turnKeyOf(message) !== undefined && message?.continuedAfterCrash !== true && message?.hostedLoop !== true;
 };
 
 /**

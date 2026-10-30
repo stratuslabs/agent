@@ -12,6 +12,7 @@ import {
   SENDER_TRUST_METADATA_KEY,
   workItemState,
   turnMessageOf,
+  turnKeyOf,
   leftForNextStart,
   lastResponseIsAnswer,
   MAX_IDEMPOTENCY_KEY_LENGTH,
@@ -4742,7 +4743,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // otherwise stay parked for every later start and redelivery to try
       // again. An unkeyed one keeps waiting for a sweep that can, as before.
       const after = await store.get(sessionId).catch(() => undefined);
-      const key = after === undefined ? undefined : turnMessageOf(after)?.idempotencyKey;
+      const key = after === undefined ? undefined : turnKeyOf(turnMessageOf(after));
       if (after !== undefined && key !== undefined && after.status === 'pending_approval' && workItemState(after, key) === 'unfinished') {
         await failParked(after, ABANDONED_TURN_ERROR).catch(() => {});
       }
@@ -4860,7 +4861,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const settleAbandonedTurn = async (session: Session): Promise<Session> => {
     const message = turnMessageOf(session);
-    if (message?.idempotencyKey === undefined) {
+    if (message === undefined || turnKeyOf(message) === undefined) {
       return failAbandoned(session);
     }
     // An answer already in the transcript is completed whatever came before
@@ -5125,7 +5126,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const settleOrphanedItem = async (sessionId: string): Promise<void> => {
     const session = await store.get(sessionId);
-    const key = session === undefined ? undefined : turnMessageOf(session)?.idempotencyKey;
+    const key = session === undefined ? undefined : turnKeyOf(turnMessageOf(session));
     if (session !== undefined && key !== undefined && workItemState(session, key) === 'unfinished') {
       // A continuation that fails has failed its session, which is settled
       // too; the message waiting behind it runs either way.

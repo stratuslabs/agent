@@ -12,6 +12,7 @@ import {
   sessionTrustOf,
   turnFailureFor,
   turnFilesFor,
+  turnKeyOf,
   turnMessageOf,
   turnReplyFor,
   workItemState,
@@ -218,4 +219,16 @@ test('a turn that crashed after a steered message continues from it, marked on t
   assert.equal(continued?.messages[2]?.continuedAfterCrash, true);
   assert.equal(continued?.messages[5]?.continuedAfterCrash, undefined);
   assert.equal(turnReplyFor(continued!, 'k2'), 'Skipped them.');
+});
+
+test('a turn whose own message was unkeyed is keyed by a message it took in, so a planned stop leaves it for the next start', () => {
+  const session = steeredTranscript();
+  const opening = session.messages[2]!;
+  delete opening.idempotencyKey;
+
+  assert.equal(turnKeyOf(opening), 'k2');
+  assert.equal(workItemState(session, 'k2'), 'unfinished');
+  assert.equal(leftForNextStart(session, new RunAbortedError('stopping', { resumable: true })), true);
+  delete opening.absorbedKeys;
+  assert.equal(leftForNextStart(session, new RunAbortedError('stopping', { resumable: true })), false);
 });
