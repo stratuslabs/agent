@@ -1,0 +1,104 @@
+name: Fresh dependencies
+
+# CI installs from pnpm-lock.yaml, so it tests one resolved version of every
+# dependency. A fresh install of a published package resolves each range to
+# the newest version allowed that day, so a dependency release can break a
+# version that is already on npm while CI stays green. That is how 0.14.0 lost
+# seven tools on the Claude Code harness (#495): the lockfile held Agent SDK
+# 0.3.233, and npm installed 0.3.314.
+#
+# This check drops the lockfile, resolves every range fresh, lists what moved,
+# then builds, typechecks and tests everything. A scheduled run that fails
+# opens an issue here, or comments on the one already open; the next
+# scheduled run that passes closes it.
+
+on:
+  schedule:
+    - cron: '41 7 * * *'
+  workflow_dispatch:
+  # Pull requests that change a dependency range, the lockfile or this check
+  # run it too. Release PRs change every package.json, so a release is checked
+  # against fresh resolution before it is published. Only a scheduled run
+  # reports.
+  pull_request:
+    paths:
+      - '**/package.json'
+      - pnpm-lock.yaml
+      - .github/workflows/fresh-deps.yml
+      - .github/scripts/lockfile-changes.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fresh-deps-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Build and test with fresh dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Resolve without installing first, so the summary of what moved is
+      # written even when an install with the new versions fails.
+      - name: Resolve every dependency fresh
+        run: |
+          mv pnpm-lock.yaml "$RUNNER_TEMP/pnpm-lock.committed.yaml"
+          pnpm install --lockfile-only --no-frozen-lockfile
+
+      - name: List what moved from the lockfile
+        run: |
+          node .github/scripts/lockfile-changes.mjs "$RUNNER_TEMP/pnpm-lock.committed.yaml" pnpm-lock.yaml \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the fresh resolution
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+  report:
+    name: Report
+    needs: test
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TITLE: Fresh dependency check is failing
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SHA: ${{ github.sha }}
+      RESULT: ${{ needs.test.result }}
+    steps:
+      - name: Open, update or close the issue
+        run: |
+          open=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            --jq "map(select(.title == env.TITLE)) | .[0].number // empty")
+          if [ "$RESULT" = success ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" --comment "Passing again with fresh dependencies on $SHA: $RUN"
+            fi
+            exit 0
+          fi
+          body="With every dependency resolved to the newest version its range allows, which is what a fresh install gets, main $SHA fails to install, build, typecheck or test ($RESULT). A published version may be broken for new installs. The run's summary lists which dependencies moved from pnpm-lock.yaml: $RUN"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi
