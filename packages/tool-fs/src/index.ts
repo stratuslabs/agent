@@ -410,6 +410,8 @@ const createReadTool = (
   name: 'fs.read',
   description: 'Read a UTF-8 text file inside one of this agent’s roots. A PNG, JPEG, GIF, or WebP image (a screenshot, say) is shown to you as an image, up to 5 MB.',
   risk: 'safe',
+  // Changes nothing, so a response's reads run together (`Tool.readOnly`).
+  readOnly: true,
   parameters: {
     type: 'object',
     properties: {
@@ -629,6 +631,7 @@ const createListTool = (
   name: 'fs.list',
   description: 'List a directory inside one of this agent’s roots.',
   risk: 'safe',
+  readOnly: true,
   parameters: {
     type: 'object',
     properties: {
@@ -963,6 +966,7 @@ const createSearchTool = (
   name: 'fs.search',
   description: 'Search file contents for literal text under one of this agent’s roots.',
   risk: 'safe',
+  readOnly: true,
   parameters: {
     type: 'object',
     properties: {

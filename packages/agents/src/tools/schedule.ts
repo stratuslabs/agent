@@ -221,6 +221,7 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
       description: 'List your own schedules: cadence, prompt, destination, and when each fires next.',
       // A read of state this agent itself created.
       risk: 'safe',
+      readOnly: true,
       parameters: { type: 'object', properties: {} },
       async execute(_input: JsonObject, session: Session, context) {
         const records = await scheduler.list(session.agent.id);

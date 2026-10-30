@@ -154,6 +154,10 @@ export const createWebSearchTool = (options: WebSearchToolOptions): Tool => {
     // read a result carries the label forward and the envelope's note is
     // for the model rather than the only record.
     outputTrust: 'external',
+    // Changes nothing it is shown. The daily count it keeps is the
+    // allowance's, taken and checked in one synchronous step, so two
+    // searches running together cannot both slip under the cap.
+    readOnly: true,
     parameters: {
       type: 'object',
       properties: {

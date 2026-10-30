@@ -115,6 +115,20 @@ returned. The rule is a rule, not a list the kernel keeps — a newly registered
 third-party tool that declares itself a producer is labelled with no change
 to kernel code, which is what makes the ecosystem's tools first-class here.
 
+A tool also says **whether it changes anything**. `readOnly: true` on the
+`Tool` declares that no call does: no file, memory, schedule, message, or
+anything past Stratus is different afterwards (`fs.read`, `fs.list`,
+`fs.search`, `memory.recall`, `schedule.list`, `skill.read`, `web.search`).
+The runner runs a response's tool calls one at a time, in order, because a
+call may depend on what the one before it did. A run of consecutive calls
+that are all `readOnly` and `safe` is the exception: those go out together,
+and their results are still saved in the order the model asked for them,
+each once it and every call ahead of it have landed, so a crash leaves the
+same in-order prefix one-at-a-time running would. Only `safe` calls, because
+any other may be held for a human, and those questions are asked one at a
+time. Omitted means the tool may write, for the reason an omitted `risk`
+means `gated`; declare it only when it is true of every call.
+
 A tool also **stops when its turn does**. The `ExecutionContext` carries the
 turn's `signal`, which fires when someone stops the turn (Slack's `stop`, the
 watchdog, a daemon stop or restart). A tool that can run for more than a

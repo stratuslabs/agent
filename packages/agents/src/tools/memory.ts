@@ -175,6 +175,8 @@ export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOpt
     name: RECALL_TOOL_NAME,
     description: 'Search your long-term memory for facts you have remembered. Your prompt carries only the pinned facts and a short recent tail — use this to find everything else, including facts that have expired.',
     risk: 'safe',
+    // A search: what it counts toward ranking is derived, never the record.
+    readOnly: true,
     parameters: {
       type: 'object',
       properties: {

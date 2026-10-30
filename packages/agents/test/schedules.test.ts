@@ -148,6 +148,8 @@ test('the schedule toolset splits risk: creation is gated, list and cancel are s
   assert.equal(byName.get('schedule.on'), 'gated');
   assert.equal(byName.get('schedule.list'), 'safe');
   assert.equal(byName.get('schedule.cancel'), 'safe');
+  // Only the listing changes nothing, so only it may run alongside other calls.
+  assert.deepEqual(tools.filter((tool) => tool.readOnly === true).map((tool) => tool.name), ['schedule.list']);
 });
 
 test('schedule.every takes exactly one of an interval or a cron expression', async () => {

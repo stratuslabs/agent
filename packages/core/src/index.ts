@@ -3258,6 +3258,27 @@ export interface Tool {
    */
   outputTrust?: TrustLevel;
   /**
+   * Whether a call changes nothing: no file, memory, schedule, message, or
+   * anything past Stratus is different after it runs. `fs.read` and
+   * `memory.recall` are; `memory.remember` is not, though it is `safe`.
+   * Omitted means it may write, for the reason an omitted `risk` means
+   * `gated`.
+   *
+   * What it buys is time. The runner runs a response's calls one at a
+   * time, in order, because a call may depend on what the one before it
+   * did — and calls that each change nothing cannot. So a run of
+   * consecutive calls that are all read-only *and* `safe` goes out
+   * together (card 956): only `safe`, because any other call may be held
+   * for a human, and those questions are asked one at a time, in order,
+   * with one durable checkpoint per session. A tool that also lowers trust
+   * before it runs (`trustBeforeCall`) is judged against the label as
+   * the call before it left it, so it stays in line too.
+   *
+   * Declare it only when it is true of every call. A tool that is wrong
+   * about it can have a write overlap whatever ran beside it.
+   */
+  readOnly?: boolean;
+  /**
    * The shell command this invocation would run, for a tool whose danger
    * lives in its arguments rather than in its identity.
    *
@@ -5603,6 +5624,7 @@ export const createSkillReadTool = (
   description:
     'Load the full instructions of one of your skills by id. Call this before relying on a skill — the one-line list in your instructions is only a pointer, not the procedure.',
   risk: 'safe',
+  readOnly: true,
   parameters: {
     type: 'object',
     properties: {
@@ -8373,8 +8395,10 @@ export class AgentRunner {
 
   /**
    * Runs a response's tool calls in order, recording each result as it
-   * lands. Shared by the normal path and by recovery, so a resumed turn
-   * writes exactly what an uninterrupted one would.
+   * lands — except that consecutive read-only calls run together
+   * (`Tool.readOnly`, `runTogether`). Shared by the normal path and by
+   * recovery, so a resumed turn writes exactly what an uninterrupted one
+   * would.
    */
   private async runToolCalls(
     session: Session,
@@ -8389,9 +8413,19 @@ export class AgentRunner {
     turn = 1,
   ): Promise<ToolResult[]> {
     const results: ToolResult[] = [];
-    for (let index = 0; index < calls.length; index += 1) {
-      const call = calls[index]!;
+    let index = 0;
+    while (index < calls.length) {
       throwIfAborted(signal);
+      let end = index;
+      while (end < calls.length && this.runsAlongside(calls[end]!)) {
+        end += 1;
+      }
+      if (end - index > 1) {
+        results.push(...await this.runTogether(session, calls.slice(index, end), signal, turn));
+        index = end;
+        continue;
+      }
+      const call = calls[index]!;
       const result = await this.executeToolCall(session, call, {
         ...(signal ? { signal } : {}),
         remaining: calls.slice(index + 1),
@@ -8403,6 +8437,66 @@ export class AgentRunner {
       // are never durable without their record.
       await this.recordToolResult(session, result);
       results.push(result);
+      index += 1;
+    }
+    return results;
+  }
+
+  /** See `Tool.readOnly`: what may run alongside its neighbours. */
+  private runsAlongside(call: ToolCall): boolean {
+    const tool = this.tools.get(call.toolName);
+    return tool !== undefined
+      && tool.readOnly === true
+      && resolveToolRisk(tool) === 'safe'
+      && tool.trustBeforeCall === undefined;
+  }
+
+  /**
+   * Runs consecutive read-only calls at once and records their results in
+   * the order they were asked for, each as soon as it and every call ahead
+   * of it have landed. So the saved transcript only ever holds a prefix of
+   * the batch, the same shape one-at-a-time running leaves: a crash closes
+   * the rest as interrupted, in order (`reconcileInterruptedToolCalls`),
+   * and nothing reruns — read-only, so nothing was half done.
+   *
+   * Every call settles before this returns or throws, a stopped one
+   * included (`untilStoppedFor` bounds it), so no tool of a finished turn
+   * is still running. A call that throws rather than answering (an
+   * approval policy that failed) fails the turn, as it would have alone;
+   * the results ahead of it stay recorded, and those behind it are
+   * dropped and closed as interrupted, which keeps the prefix.
+   */
+  private async runTogether(
+    session: Session,
+    calls: ToolCall[],
+    signal: AbortSignal | undefined,
+    turn: number,
+  ): Promise<ToolResult[]> {
+    // Settled into values up front: a call that throws while an earlier
+    // one is still being awaited must not be an unhandled rejection.
+    const running = calls.map((call) => this.executeToolCall(session, call, {
+      ...(signal ? { signal } : {}),
+      turn,
+    }).then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    ));
+    const results: ToolResult[] = [];
+    let failure: { error: unknown } | undefined;
+    for (const pending of running) {
+      const settled = await pending;
+      if (failure !== undefined) {
+        continue;
+      }
+      if ('error' in settled) {
+        failure = settled;
+        continue;
+      }
+      await this.recordToolResult(session, settled.result);
+      results.push(settled.result);
+    }
+    if (failure !== undefined) {
+      throw failure.error;
     }
     return results;
   }

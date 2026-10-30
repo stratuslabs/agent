@@ -54,6 +54,17 @@ test('web.search declares itself safe — a query acts on nothing', async () => 
   const tool = createWebSearchTool({ provider: createRecordingBackend() });
   assert.equal(tool.name, 'web.search');
   assert.equal(tool.risk, 'safe');
+  // Changes nothing, so a response's searches may run together (card 956).
+  assert.equal(tool.readOnly, true);
+});
+
+test('searches running together cannot slip past the daily cap between them', async () => {
+  const backend = createRecordingBackend();
+  const tool = createWebSearchTool({ provider: backend, config: { maxSearchesPerDay: 2 }, now: () => NOW });
+
+  const settled = await Promise.allSettled(['one', 'two', 'three', 'four'].map((query) => tool.execute({ query }, session())));
+  assert.deepEqual(settled.map((outcome) => outcome.status), ['fulfilled', 'fulfilled', 'rejected', 'rejected']);
+  assert.equal(backend.calls.length, 2);
 });
 
 test('a backend that cannot honor an option fails the call naming it, before it spends a request', async () => {
