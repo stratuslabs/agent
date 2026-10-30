@@ -219,7 +219,8 @@ posting each step. Its first line comes from the tools the agent actually
 called, not from what it says about them: "⚙ Working · step 3: `shell.run`",
 "⏸ Waiting for approval to run `shell.run`", and at the end "✓ Done ·
 7 steps", "■ Stopped after 3 steps" or "✗ Failed after 3 steps". Anything
-else the agent writes between tools goes under that line, newest last.
+else the agent writes between tools goes under that line, newest last;
+a passage too long to fit there is posted whole as a message of its own.
 The progress message opens once a task has worked for ten seconds, or as
 soon as the agent writes something more between tools, so a quick answer
 is just the answer. The finished reply follows as its own message; when

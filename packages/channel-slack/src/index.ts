@@ -204,13 +204,22 @@ const DEFAULT_PROGRESS_AFTER_MS = 10_000;
 /** Room kept for a progress message's first line and its `…` when its notes are trimmed. */
 const PROGRESS_HEADER_ROOM = 200;
 
+/**
+ * The most a progress message holds under its first line. Words longer than
+ * this are content, not a step — an analysis written before a tool call —
+ * and are posted whole as messages of their own, as before card 949, rather
+ * than cut to fit and lost.
+ */
+const PROGRESS_NOTE_ROOM = SLACK_MAX_MESSAGE_CHARS - PROGRESS_HEADER_ROOM;
+
 /** How a turn with a progress message ended, for that message's last edit. */
 type ProgressEnd = 'done' | 'stopped' | 'failed';
 
 /** What a progress message's first line is made of: the turn's own tool events, never its words. */
 interface ProgressState {
   steps: number;
-  running: string | undefined;
+  /** Calls started and not yet settled, by call id: more than one when tools run side by side. */
+  running: Map<string, string>;
   waitingOn: string | undefined;
   end: ProgressEnd | undefined;
 }
@@ -239,8 +248,9 @@ const progressHeader = (state: ProgressState): string => {
   if (state.waitingOn !== undefined) {
     return `⏸ Waiting for approval to run ${toolCode(state.waitingOn)}`;
   }
-  if (state.running !== undefined) {
-    return `⚙ Working · step ${state.steps}: ${toolCode(state.running)}`;
+  const latest = [...state.running.values()].at(-1);
+  if (latest !== undefined) {
+    return `⚙ Working · step ${state.steps}: ${toolCode(latest)}`;
   }
   return `⚙ Working · ${stepCount(state.steps)} done`;
 };
@@ -1210,7 +1220,7 @@ class ReplyRenderer {
   /** The progress message, once Slack took it. */
   private progressRef: OutboundMessageRef | undefined;
   /** What the first line says, from this turn's own tool events only. */
-  private readonly progress: ProgressState = { steps: 0, running: undefined, waitingOn: undefined, end: undefined };
+  private readonly progress: ProgressState = { steps: 0, running: new Map(), waitingOn: undefined, end: undefined };
   /** The notes under that line, as sent: converted, oldest dropped past one message's room. */
   private progressNotes: Array<{ text: string }> = [];
   /** Whether older notes were dropped for room, so the message says so. */
@@ -1558,7 +1568,7 @@ class ReplyRenderer {
       this.flushInterim(ofThisTurn);
       if (ofThisTurn && this.mayShowProgress()) {
         this.progress.steps += 1;
-        this.progress.running = event.call.toolName;
+        this.progress.running.set(event.call.id, event.call.toolName);
         this.progress.waitingOn = undefined;
         this.openProgressInTime();
         this.scheduleProgress();
@@ -1578,7 +1588,7 @@ class ReplyRenderer {
       // before a tool, and must not run into the next response's.
       this.flushInterim(ofThisTurn);
       if (ofThisTurn) {
-        this.settleProgressStep();
+        this.settleProgressStep(event.call.id);
       }
       this.scheduleEdit();
       return;
@@ -1590,7 +1600,7 @@ class ReplyRenderer {
       // reached `tool.called`; after one that did, this is empty.
       this.flushInterim(ofThisTurn);
       if (ofThisTurn) {
-        this.settleProgressStep();
+        this.settleProgressStep(event.result.callId);
       }
       // Also a boundary, and not only for symmetry: a call rejected before
       // execution settles as tool.completed without ever having emitted
@@ -1688,7 +1698,10 @@ class ReplyRenderer {
       return undefined;
     }
     if (this.firstWordsSaid || this.progressOpen) {
-      return this.noteProgress(text);
+      const note = toSlackMrkdwn(text);
+      if (note.length <= PROGRESS_NOTE_ROOM) {
+        return this.noteProgress(text, note);
+      }
     }
     this.firstWordsSaid = true;
     const handover = this.handover;
@@ -1727,6 +1740,7 @@ class ReplyRenderer {
         }
         this.lastInterim = text;
         this.interimSaid.push(text);
+        this.lastSaidWasNote = false;
         // A post of the app's in this thread takes the status down while
         // the turn is still working; put it back.
         this.refreshLoading();
@@ -1756,10 +1770,10 @@ class ReplyRenderer {
    * repeats them, as a message of their own would be. A note Slack refused
    * is taken out again, so a later edit never shows words nobody heard.
    */
-  private noteProgress(text: string): Promise<boolean> {
+  private noteProgress(text: string, converted: string): Promise<boolean> {
     this.progressOpen = true;
     this.clearProgressOpenTimer();
-    const note = { text: toSlackMrkdwn(text) };
+    const note = { text: converted };
     this.progressNotes.push(note);
     this.trimProgressNotes();
     let heard = '';
@@ -1789,9 +1803,8 @@ class ReplyRenderer {
    * long the task runs.
    */
   private trimProgressNotes(): void {
-    const room = SLACK_MAX_MESSAGE_CHARS - PROGRESS_HEADER_ROOM;
     let size = this.progressNotes.reduce((total, note) => total + note.text.length + 2, 0);
-    while (size > room && this.progressNotes.length > 1) {
+    while (size > PROGRESS_NOTE_ROOM && this.progressNotes.length > 1) {
       size -= (this.progressNotes.shift()?.text.length ?? 0) + 2;
       this.progressNotesCut = true;
     }
@@ -1888,12 +1901,12 @@ class ReplyRenderer {
     this.progressOpenTimer.unref?.();
   }
 
-  /** A step of this turn's finished or was refused: nothing is running until the next one starts. */
-  private settleProgressStep(): void {
+  /** A step of this turn's finished or was refused. */
+  private settleProgressStep(callId: string): void {
     if (!this.mayShowProgress()) {
       return;
     }
-    this.progress.running = undefined;
+    this.progress.running.delete(callId);
     this.progress.waitingOn = undefined;
     this.scheduleProgress();
   }
@@ -1938,8 +1951,6 @@ class ReplyRenderer {
       return;
     }
     this.progress.end = this.ending;
-    this.progress.running = undefined;
-    this.progress.waitingOn = undefined;
     try {
       await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text: this.progressText(omitLast) });
     } catch (error) {

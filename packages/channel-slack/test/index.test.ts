@@ -11924,6 +11924,54 @@ test('a progress message keeps its newest notes when they outgrow one message', 
   assert.equal(web.posts.at(-1)?.text, 'Done with all twelve.');
 });
 
+test('words too long for the progress message are posted whole as messages of their own, and not again as the reply', async () => {
+  const analysis = `Findings:\n\n${Array.from({ length: 90 }, (_, index) => `- item ${index}: ${'y'.repeat(40)}`).join('\n')}`;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Looking.');
+    await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'Two files to read.');
+    await runTool(gateway, sessionId, 'c2');
+    await say(gateway, sessionId, analysis);
+    await runTool(gateway, sessionId, 'c3', 'memory.remember');
+    // A Claude Code turn's reply is its last text, written before that call.
+    return sessionWithReply(sessionId, analysis);
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> audit it'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts[0], 'Looking.');
+  assert.match(texts[1] ?? '', /^⚙ Working/);
+  // Split only where Slack's limit makes it, every item said once.
+  const rest = texts.slice(2);
+  assert.ok(rest.length >= 2, JSON.stringify(rest.map((text) => text.length)));
+  assert.ok(rest.every((text) => !text.includes('Working')));
+  assert.equal(rest.join('\n').match(/item 89:/g)?.length, 1);
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 3 steps\n\nTwo files to read.');
+});
+
+test('the progress message names a tool still running when another finishes beside it', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Reading both.');
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'a', toolName: 'fs.read', input: {} } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'b', toolName: 'web.fetch', input: {} } });
+    await until(() => web.posts.length === 2);
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'b', toolName: 'web.fetch', ok: true, output: null } });
+    await until(() => editsOf(web, 'bot-ts-2').length > 0);
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'a', toolName: 'fs.read', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Both read.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> read both'));
+  await adapter.stop();
+
+  assert.equal(editsOf(web, 'bot-ts-2')[0], '⚙ Working · step 2: `fs.read`');
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps');
+});
+
 test('a tool name cannot ping anyone through the progress message', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await say(gateway, sessionId, 'Calling it.');
