@@ -47,15 +47,20 @@ jobs:
         with:
           node-version: 22
 
+      # Resolve without installing first, so the summary of what moved is
+      # written even when an install with the new versions fails.
       - name: Resolve every dependency fresh
         run: |
           mv pnpm-lock.yaml "$RUNNER_TEMP/pnpm-lock.committed.yaml"
-          pnpm install --no-frozen-lockfile
+          pnpm install --lockfile-only --no-frozen-lockfile
 
       - name: List what moved from the lockfile
         run: |
           node .github/scripts/lockfile-changes.mjs "$RUNNER_TEMP/pnpm-lock.committed.yaml" pnpm-lock.yaml \
             | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the fresh resolution
+        run: pnpm install --frozen-lockfile
 
       - name: Build
         run: pnpm build
