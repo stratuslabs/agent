@@ -11,6 +11,7 @@ import {
   senderTrustOf,
   SENDER_TRUST_METADATA_KEY,
   workItemState,
+  turnMessageOf,
   leftForNextStart,
   lastResponseIsAnswer,
   MAX_IDEMPOTENCY_KEY_LENGTH,
@@ -66,6 +67,7 @@ import {
   type ProviderCallGuard,
   type ProviderContribution,
   type Session,
+  type SteeredMessage,
   type StratusEvent,
   type ToolRisk,
   type TrustLevel,
@@ -1135,6 +1137,16 @@ export interface DispatchInput {
    *
    * The merged turn runs at the least trusted sender in it. A turn nobody
    * asked for (`addressed: false`) is never merged.
+   *
+   * Steering (card 948): while the running turn is itself an opted-in,
+   * addressed dispatch for the same agent, the batch waiting behind it is
+   * handed to that turn at its next tool step instead (`RunInput.steer`),
+   * so the agent reads it before its next call rather than after its whole
+   * turn. Every dispatch in the batch, its leader included, is then
+   * absorbed into the running turn — called here and settled with that
+   * turn's outcome — and the running turn's caller renders the answer. A
+   * turn that answers without another tool step leaves the batch to run
+   * next, merged, as above.
    */
   onAbsorbed?: () => void;
 }
@@ -1148,7 +1160,14 @@ interface MergeJoiner {
 
 interface MergeBatch {
   agentId: string | undefined;
+  /** The dispatch that opened the batch and runs it, unless it is steered. */
+  leader: MergeJoiner;
   absorbed: MergeJoiner[];
+  /**
+   * Taken by the turn running ahead of it (card 948), which settles every
+   * caller in it: the leader's place on the chain then runs nothing.
+   */
+  steered: boolean;
   /** Every image in the batch so far, leader's first. */
   images: ImageAttachment[];
   /** Characters of the merged user message so far, separators included. */
@@ -4317,6 +4336,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     input: DispatchInput,
     absorbedKeys: readonly string[] = [],
     subAgent?: AgentDefinition,
+    /** See `RunInput.steer`; passed by `dispatch` for an opted-in caller. */
+    steer?: () => Promise<SteeredMessage | undefined>,
   ): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
@@ -4455,6 +4476,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(hostedLoop ? { hostedLoop } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
+          ...(steer !== undefined ? { steer } : {}),
           signal,
         });
       }
@@ -4471,6 +4493,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.earlier !== undefined && input.earlier.length > 0 ? { earlier: input.earlier } : {}),
         metadata,
         runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata, subAgent !== undefined),
+        ...(steer !== undefined ? { steer } : {}),
         signal,
       });
     }));
@@ -4677,7 +4700,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // otherwise stay parked for every later start and redelivery to try
       // again. An unkeyed one keeps waiting for a sweep that can, as before.
       const after = await store.get(sessionId).catch(() => undefined);
-      const key = after?.messages.findLast((candidate) => candidate.role === 'user')?.idempotencyKey;
+      const key = after === undefined ? undefined : turnMessageOf(after)?.idempotencyKey;
       if (after !== undefined && key !== undefined && after.status === 'pending_approval' && workItemState(after, key) === 'unfinished') {
         await failParked(after, ABANDONED_TURN_ERROR).catch(() => {});
       }
@@ -4794,7 +4817,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * whose caller was never promised anything and is told to send again.
    */
   const settleAbandonedTurn = async (session: Session): Promise<Session> => {
-    const message = session.messages.findLast((candidate) => candidate.role === 'user');
+    const message = turnMessageOf(session);
     if (message?.idempotencyKey === undefined) {
       return failAbandoned(session);
     }
@@ -4959,6 +4982,93 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
+   * What a running turn takes in at its next tool step (card 948): the
+   * merged-turn batch waiting behind it, whole — leader and absorbed alike
+   * — when it is for the same agent. The dispatches it takes join `into`,
+   * which the running turn settles with its own outcome (`runSteerable`).
+   *
+   * A part cancelled while it waited is refused, as `runMerged` refuses it.
+   * A part whose key this session (or the archive it rolled over from)
+   * already holds is a repeat, and judging a repeat can mean settling a
+   * turn — never something to do from inside one — so such a batch is not
+   * taken: it waits and runs next, merged, where that is judged. Nor while
+   * the gateway is stopping, when the batch is what the drain refuses.
+   */
+  const takeSteered = async (
+    sessionId: string,
+    agentId: string | undefined,
+    into: MergeJoiner[],
+  ): Promise<SteeredMessage | undefined> => {
+    const batch = openBatches.get(sessionId);
+    if (stopping || batch === undefined || batch.agentId !== agentId) {
+      return undefined;
+    }
+    // Until every key in it is checked with nothing awaited since: a message
+    // can join while the store is read, and is checked on the next pass; a
+    // batch closed meanwhile is no longer this turn's to take.
+    const checked = new Set<string>();
+    let session: Session | undefined;
+    for (;;) {
+      if (stopping || openBatches.get(sessionId) !== batch) {
+        return undefined;
+      }
+      const unchecked = [batch.leader, ...batch.absorbed].flatMap((part) => (
+        part.input.idempotencyKey !== undefined && !checked.has(part.input.idempotencyKey) ? [part.input.idempotencyKey] : []
+      ));
+      if (unchecked.length === 0) {
+        break;
+      }
+      session ??= await store.get(sessionId);
+      for (const key of unchecked) {
+        checked.add(key);
+        if (session !== undefined && (workItemState(session, key) !== undefined || await archivedRepeat(session, key) !== undefined)) {
+          return undefined;
+        }
+      }
+    }
+    openBatches.delete(sessionId);
+    batch.steered = true;
+    const all = [batch.leader, ...batch.absorbed];
+    // Not waiting any more; the leader's place on the chain does not count it again.
+    const left = (waitingDispatches.get(sessionId) ?? all.length) - all.length;
+    if (left > 0) {
+      waitingDispatches.set(sessionId, left);
+    } else {
+      waitingDispatches.delete(sessionId);
+    }
+    const runnable: MergeJoiner[] = [];
+    for (const part of all) {
+      if (part.input.signal?.aborted) {
+        part.reject(abortErrorFor(part.input.signal));
+        continue;
+      }
+      runnable.push(part);
+    }
+    if (runnable.length === 0) {
+      return undefined;
+    }
+    const keys = runnable.flatMap((part) => (part.input.idempotencyKey !== undefined ? [part.input.idempotencyKey] : []));
+    const items = liveWorkItems.get(sessionId);
+    for (const key of keys) {
+      const item = items?.get(key);
+      if (item !== undefined) {
+        item.confirmed = true;
+      }
+    }
+    into.push(...runnable);
+    const labelled = runnable.some((part) => part.input.metadata !== undefined && SENDER_TRUST_METADATA_KEY in part.input.metadata);
+    const lowest = leastTrusted(...runnable.map((part) => senderTrustOf(part.input.metadata)));
+    const images = runnable.flatMap((part) => part.input.images ?? []);
+    log(`${sessionId}: ${runnable.length} message(s) sent during the running turn reached it at its next step`);
+    return {
+      userMessage: runnable.map((part) => part.input.userMessage).join(MERGED_SEPARATOR),
+      ...(images.length > 0 ? { images } : {}),
+      ...(labelled ? { metadata: { [SENDER_TRUST_METADATA_KEY]: lowest } } : {}),
+      ...(keys.length > 0 ? { keys } : {}),
+    };
+  };
+
+  /**
    * Settles a keyed item the last process left unfinished before any other
    * message joins its session. Channels are up before the sweeps reach it,
    * and a different message resumed onto it would become the session's
@@ -4970,7 +5080,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const settleOrphanedItem = async (sessionId: string): Promise<void> => {
     const session = await store.get(sessionId);
-    const key = session?.messages.findLast((candidate) => candidate.role === 'user')?.idempotencyKey;
+    const key = session === undefined ? undefined : turnMessageOf(session)?.idempotencyKey;
     if (session !== undefined && key !== undefined && workItemState(session, key) === 'unfinished') {
       // A continuation that fails has failed its session, which is settled
       // too; the message waiting behind it runs either way.
@@ -5229,7 +5339,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Otherwise it leads a new batch, if it is waiting behind a turn at all:
     // a message to an idle session runs at once, alone.
     const batch: MergeBatch | undefined = mergeable && sessionChains.has(input.sessionId)
-      ? { agentId: input.agentId, absorbed: [], images: [...(input.images ?? [])], chars: input.userMessage.length }
+      ? {
+        agentId: input.agentId,
+        // Settled through `settleLeader`, read when called: it is assigned below.
+        leader: { input, resolve: (session) => settleLeader({ session }), reject: (error) => settleLeader({ error }) },
+        absorbed: [],
+        steered: false,
+        images: [...(input.images ?? [])],
+        chars: input.userMessage.length,
+      }
       : undefined;
     if (batch !== undefined) {
       openBatches.set(input.sessionId, batch);
@@ -5334,7 +5452,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         activeTurns.set(input.sessionId, merged.turnId);
       }
       try {
-        outcome = { session: await dispatchInternal(merged, absorbedKeys) };
+        outcome = { session: await runSteerable(merged, absorbedKeys) };
       } catch (error) {
         outcome = { error };
       } finally {
@@ -5366,7 +5484,41 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       settleLeader = (outcome) => ('error' in outcome ? reject(outcome.error) : resolve(outcome.session));
     });
     waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
+    /**
+     * Runs this dispatch's turn, handing it whatever queues behind it at
+     * each tool step (`takeSteered`), then settles every dispatch it took
+     * with the turn's outcome — the outcome they joined. Only for a caller
+     * that opted into merged turns: it is the one that renders an answer
+     * covering messages other than its own.
+     */
+    const runSteerable = async (turnInput: DispatchInput, absorbedKeys: readonly string[] = []): Promise<Session> => {
+      const steered: MergeJoiner[] = [];
+      const steer = mergeable ? () => takeSteered(input.sessionId, input.agentId, steered) : undefined;
+      let outcome: { session: Session } | { error: unknown };
+      try {
+        outcome = { session: await dispatchInternal(turnInput, absorbedKeys, undefined, steer) };
+      } catch (error) {
+        outcome = { error };
+      }
+      for (const part of steered) {
+        part.input.onAbsorbed?.();
+        if ('session' in outcome) {
+          part.resolve(outcome.session);
+        } else {
+          part.reject(outcome.error);
+        }
+      }
+      if ('error' in outcome) {
+        throw outcome.error;
+      }
+      return outcome.session;
+    };
     const chained: Promise<Session> = onSessionChain(input.sessionId, async () => {
+      // Steered into the turn that ran ahead of it, which has answered and
+      // settled everyone in the batch already — this caller included.
+      if (batch?.steered === true) {
+        return turn;
+      }
       // The batch closes here: anything arriving from now on waits behind
       // this turn and leads the next one.
       if (batch !== undefined && openBatches.get(input.sessionId) === batch) {
@@ -5400,11 +5552,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       await settleOrphanedItem(input.sessionId);
       if (turnId === undefined) {
-        return dispatchInternal(input);
+        return runSteerable(input);
       }
       activeTurns.set(input.sessionId, turnId);
       try {
-        return await dispatchInternal(input);
+        return await runSteerable(input);
       } finally {
         // Unconditional, and safe to be: the chain guarantees no other turn
         // for this session ran between the set above and here, so this can
