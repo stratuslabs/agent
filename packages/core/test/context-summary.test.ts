@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AgentRunner,
   CONTEXT_FLOOR_METADATA_KEY,
+  CONTEXT_SUMMARY_INSTRUCTION,
   CONTEXT_SUMMARY_METADATA_KEY,
   ContextOverflowError,
   EventBus,
@@ -30,7 +31,7 @@ import {
  */
 const isSummaryRequest = (request: ProviderRequest): boolean => {
   const transcript = transcriptOf(request);
-  return transcript.length === 1 && /write a summary of the part below/i.test(transcript[0]?.content ?? '');
+  return transcript.length === 1 && /below, between <conversation> tags, for you to summarize/.test(transcript[0]?.content ?? '');
 };
 
 interface Recorded {
@@ -121,6 +122,13 @@ test('a floor rise sends a summary of what it cut in place of the messages, and 
   const first = transcriptOf(recorded.summaries[0]!)[0]!.content;
   assert.match(first, /remember this: the code word is pelican/);
   assert.doesNotMatch(first, /what was the code word\?/);
+  // The messages first, between tags, and what to do with them last.
+  // With the request only above a long run of messages, a model carries on
+  // the conversation instead: claude-haiku-4-5 answered a run of sensor
+  // dumps it was asked to summarize with "Logged dump 83."
+  assert.ok(first.endsWith(CONTEXT_SUMMARY_INSTRUCTION), 'the request comes after the messages');
+  assert.ok(first.indexOf('</conversation>') < first.indexOf(CONTEXT_SUMMARY_INSTRUCTION));
+  assert.ok(first.indexOf('<conversation>') < first.indexOf('remember this: the code word is pelican'));
   // Asked in words only: nothing to call, nothing to remember.
   assert.equal(recorded.summaries[0]!.tools, undefined);
   assert.equal(recorded.summaries[0]!.memory, undefined);

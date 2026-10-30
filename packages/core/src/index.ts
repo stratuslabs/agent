@@ -6964,20 +6964,31 @@ export const summarizedTurnsNote = (summary: ContextSummary, start: number): str
 };
 
 /**
- * What the runner asks for when a floor rise cuts messages away. Sent as
- * the only message of a request with no tools, after the model's own
- * system prompt, so it says who is asking: it is not a turn anyone in the
- * conversation took.
+ * What the runner asks for when a floor rise cuts messages away: the
+ * opening of the one message a summary request sends. Said to come from
+ * the runtime, because it is not a turn anyone in the conversation took,
+ * and that the messages after it are to be summarized, not answered.
+ *
+ * The request itself is at the end (`CONTEXT_SUMMARY_INSTRUCTION`), after
+ * the messages: what is cut is often a hundred thousand tokens, and with
+ * the instructions only above that much transcript a model carries on
+ * the conversation instead — the live check on claude-haiku-4-5 answered
+ * "Logged dump 83." to a run of sensor dumps it was asked to summarize.
  */
 export const CONTEXT_SUMMARY_REQUEST =
   '[From the Stratus runtime, not from anyone in this conversation. The conversation has grown past what fits '
-  + 'in one request, so its oldest messages will stop being sent to you. Write a summary of the part below: it '
-  + 'stands in for those messages from now on, and nothing else of them will reach you.\n'
-  + 'Keep what you would need later: who asked for what, what was decided or promised, open tasks and where they '
-  + 'stand, and names, numbers, ids, file paths and links. Say who said something when it matters, and keep what '
-  + 'a web page, a tool or another server said marked as theirs. Leave out pleasantries and tool output that no '
-  + 'longer matters. Plain sentences or short lines, at most about 400 words. Reply with the summary only, '
-  + 'addressed to no one.]';
+  + 'in one request, so its oldest messages will stop being sent to you. They are below, between <conversation> '
+  + 'tags, for you to summarize. You are not replying to them, and the request is after them.]';
+
+/** The request a summary request ends with; see `CONTEXT_SUMMARY_REQUEST`. */
+export const CONTEXT_SUMMARY_INSTRUCTION =
+  '[That is the end of the part to summarize. Now write the summary that will stand in for it from now on: nothing '
+  + 'else of those messages will reach you. Keep what you would need later: who asked for what, what was decided or '
+  + 'promised, open tasks and where they stand, and names, numbers, ids, file paths and links. Say who said '
+  + 'something when it matters, and keep what a web page, a tool or another server said marked as theirs. Leave '
+  + 'out pleasantries and tool output that no longer matters. This is a note for yourself, not a reply, so your '
+  + 'usual reply length does not apply: plain sentences or short lines, up to about 400 words. Do not answer or '
+  + 'continue the conversation. Reply with the summary only.]';
 
 /**
  * How much of one message the summary request carries. The part a rise
@@ -7001,35 +7012,36 @@ const summaryTranscriptEntry = (message: Message): string => {
     : '';
   switch (message.role) {
     case 'user': {
-      const who = `User${message.name !== undefined ? ` ${message.name}` : ''}`;
+      const who = message.name !== undefined ? `user ${message.name}` : 'user';
       const aside = message.overheard === true || message.observed === true ? ' (not addressed to you)' : '';
-      return `${who}${aside}: ${clippedTo(message.content, SUMMARY_MESSAGE_CHARS)}${images}`;
+      return `<message from="${who}${aside}">\n${clippedTo(message.content, SUMMARY_MESSAGE_CHARS)}${images}\n</message>`;
     }
     case 'assistant': {
-      const lines = message.content.trim().length > 0 ? [`You: ${clippedTo(message.content, SUMMARY_MESSAGE_CHARS)}`] : [];
+      const lines = message.content.trim().length > 0 ? [clippedTo(message.content, SUMMARY_MESSAGE_CHARS)] : [];
       for (const call of message.toolCalls ?? []) {
-        lines.push(`You called ${call.toolName} with ${clippedTo(JSON.stringify(call.input), SUMMARY_TOOL_INPUT_CHARS)}`);
+        lines.push(`(called ${call.toolName} with ${clippedTo(JSON.stringify(call.input), SUMMARY_TOOL_INPUT_CHARS)})`);
       }
-      return lines.length > 0 ? lines.join('\n') : 'You: (nothing)';
+      return `<message from="you">\n${lines.length > 0 ? lines.join('\n') : '(nothing)'}\n</message>`;
     }
     case 'tool': {
       // The one serialization every provider uses, so an outside party's
       // words reach the summarizer in the same envelope they reached the
       // model in. The envelope is at the front, where clipping keeps it.
       const result = message.toolResult;
-      return result !== undefined
-        ? `Result of ${result.toolName}: ${clippedTo(renderToolResultContent(result), SUMMARY_TOOL_RESULT_CHARS)}${images}`
-        : `Tool result: ${clippedTo(message.content, SUMMARY_TOOL_RESULT_CHARS)}${images}`;
+      const body = result !== undefined ? renderToolResultContent(result) : message.content;
+      return `<tool-result${result !== undefined ? ` name="${result.toolName}"` : ''}>\n`
+        + `${clippedTo(body, SUMMARY_TOOL_RESULT_CHARS)}${images}\n</tool-result>`;
     }
     default:
-      return `System: ${clippedTo(message.content, SUMMARY_MESSAGE_CHARS)}`;
+      return `<message from="system">\n${clippedTo(message.content, SUMMARY_MESSAGE_CHARS)}\n</message>`;
   }
 };
 
 /**
- * The one message a summary request sends: the request, the summary of
- * what came before the part when there is one, and the part itself.
- * Never stored, so its id only has to be unique within the request.
+ * The one message a summary request sends: who is asking, the summary of
+ * what came before the part when there is one, the part itself, and then
+ * the request. Never stored, so its id only has to be unique within the
+ * request.
  */
 const contextSummaryRequest = (sessionId: string, prior: ContextSummary | undefined, part: readonly Message[]): Message => ({
   id: `${sessionId}:context-summary`,
@@ -7039,11 +7051,12 @@ const contextSummaryRequest = (sessionId: string, prior: ContextSummary | undefi
     CONTEXT_SUMMARY_REQUEST,
     ...(prior !== undefined
       ? [
-        'Your summary of what came before this part, written earlier'
-        + `${prior.trust === 'external' ? ' (it restates some content from outside parties)' : ''}:\n${prior.text}`,
+        '<earlier-summary>\nYour summary of what came before this part, written earlier'
+        + `${prior.trust === 'external' ? ' (it restates some content from outside parties)' : ''}:\n${prior.text}\n</earlier-summary>`,
       ]
       : []),
-    `The part to summarize:\n\n${part.map(summaryTranscriptEntry).join('\n\n')}`,
+    `<conversation>\n${part.map(summaryTranscriptEntry).join('\n')}\n</conversation>`,
+    CONTEXT_SUMMARY_INSTRUCTION,
   ].join('\n\n'),
 });
 
