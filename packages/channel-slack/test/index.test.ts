@@ -11720,6 +11720,266 @@ test('a final reply the model already said before its last tool call is not post
   assert.equal(statuses.at(-1)?.status, '');
 });
 
+// Card 949: a long task shows its first line, one progress message edited
+// in place from its real tool events, and its reply. What the model writes
+// between tools after the first line goes into that message, not posts of
+// its own.
+
+/** A final-mode adapter for the progress-message tests, opening it after `progressAfterMs`. */
+const progressAdapter = (gateway: StubGateway, progressAfterMs?: number, overrides: Partial<SlackAdapterOptions['agents'][number]> = {}) => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', ...overrides }],
+    editIntervalMs: 0,
+    ...(progressAfterMs === undefined ? {} : { progressAfterMs }),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  return { socket, web, adapter };
+};
+
+/** One tool call, start to finish, on the bus. */
+const runTool = async (gateway: StubGateway, sessionId: string, id: string, toolName = 'shell.run', ok = true): Promise<void> => {
+  await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id, toolName, input: {} } });
+  await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: id, toolName, ok, output: null } });
+};
+
+const say = (gateway: StubGateway, sessionId: string, text: string) =>
+  gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text } });
+
+/** The edits made to one message, in order. */
+const editsOf = (web: FakeWeb, ts: string | undefined): string[] =>
+  web.updates.filter((update) => update.ts === ts).map((update) => update.text ?? '');
+
+test('a long task posts its first line, one progress message edited in place, and its reply', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'On it, checking both PRs.');
+    await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'PR 1 is green.');
+    await runTool(gateway, sessionId, 'c2');
+    await say(gateway, sessionId, 'Merging both.');
+    await runTool(gateway, sessionId, 'c3');
+    return sessionWithReply(sessionId, 'Merged both PRs.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> merge both'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts.length, 3, JSON.stringify(texts));
+  assert.equal(texts[0], 'On it, checking both PRs.');
+  assert.match(texts[1] ?? '', /^⚙ Working/);
+  assert.equal(texts[2], 'Merged both PRs.');
+  // Every edit is of that one message, and the last says how it ended,
+  // with everything the turn wrote along the way under it.
+  const progressTs = 'bot-ts-2';
+  assert.ok(web.updates.length > 0);
+  assert.ok(web.updates.every((update) => update.ts === progressTs), JSON.stringify(web.updates));
+  assert.equal(editsOf(web, progressTs).at(-1), '✓ Done · 3 steps\n\nPR 1 is green.\n\nMerging both.');
+});
+
+test('a quick task posts no progress message', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Looking.');
+    await runTool(gateway, sessionId, 'c1');
+    await runTool(gateway, sessionId, 'c2');
+    return sessionWithReply(sessionId, 'Both are green.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> are they green?'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Looking.', 'Both are green.']);
+  assert.deepEqual(web.updates, []);
+});
+
+test('words written after the first line go into the progress message, not posts of their own', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Looking.');
+    await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'CI passed.');
+    await runTool(gateway, sessionId, 'c2');
+    await say(gateway, sessionId, 'Merged.');
+    await runTool(gateway, sessionId, 'c3');
+    return sessionWithReply(sessionId, 'Both PRs are merged.');
+  });
+  // The default wait: the progress message opens for the words, not the clock.
+  const { socket, web, adapter } = progressAdapter(gateway);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> merge them'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts.length, 3, JSON.stringify(texts));
+  assert.equal(texts[0], 'Looking.');
+  assert.match(texts[1] ?? '', /CI passed\./);
+  assert.equal(texts[2], 'Both PRs are merged.');
+  assert.ok(!texts.includes('Merged.'));
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 3 steps\n\nCI passed.\n\nMerged.');
+});
+
+test('a progress message opens once a task has worked for a while, saying what it is running', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Running the suite.');
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+    await until(() => web.posts.length === 2);
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'All 40 pass.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 30);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> run the tests'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Running the suite.', '⚙ Working · step 1: `shell.run`', 'All 40 pass.']);
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 1 step');
+});
+
+test('words the turn ends on, written before its last tool call, are its reply, not a line in the progress message', async () => {
+  // A Claude Code turn's reply is its last text, which may have come before
+  // a final tool call; a Codex turn's reply is every message joined.
+  for (const reply of ['Summary: both green.', 'Looking.\n\nSummary: both green.']) {
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      await say(gateway, sessionId, 'Looking.');
+      await runTool(gateway, sessionId, 'c1');
+      await say(gateway, sessionId, 'Summary: both green.');
+      await runTool(gateway, sessionId, 'c2', 'memory.remember');
+      return sessionWithReply(sessionId, reply);
+    });
+    const { socket, web, adapter } = progressAdapter(gateway, 0);
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> are they green?'));
+    await adapter.stop();
+
+    const texts = web.posts.map((post) => post.text ?? '');
+    assert.equal(texts.length, 3, JSON.stringify(texts));
+    assert.equal(texts[2], 'Summary: both green.', JSON.stringify(reply));
+    assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps', JSON.stringify(reply));
+  }
+});
+
+test('a task that fails marks its progress message failed, and the failure posts below it', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Deploying.');
+    await runTool(gateway, sessionId, 'c1');
+    await runTool(gateway, sessionId, 'c2');
+    throw new Error('provider exploded');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> deploy'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts.length, 3, JSON.stringify(texts));
+  assert.equal(texts[2], 'Something went wrong: provider exploded');
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✗ Failed after 2 steps');
+});
+
+test('a task an approver stops marks its progress message stopped', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let signal: AbortSignal | undefined;
+  let running = false;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Starting the migration.');
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+    running = true;
+    await new Promise<void>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal?.reason), { once: true });
+    });
+    return sessionWithReply(sessionId, 'unused');
+  });
+  const inner = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    signal = input.signal;
+    return inner(input);
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    progressAfterMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  void socket.deliver('app_mention', mention('<@B-AVA> migrate'));
+  await until(() => running && web.posts.length === 2);
+  await socket.deliver('message', channelMessage({ text: 'stop', ts: '100.3', thread: '100.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts.at(-1), 'Stopped by <@U-DYLAN>.', JSON.stringify(texts));
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '■ Stopped after 1 step');
+});
+
+test('while a task waits on an approval its progress message says so, and the prompt posts below it', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Cleaning up.');
+    await runTool(gateway, sessionId, 'c1', 'fs.read');
+    // A model call sits between one tool and the next: the first line and
+    // the progress message are in the thread by the time the next asks.
+    await until(() => web.posts.length === 2);
+    const call = { id: 'call-1', toolName: 'shell.run', input: { command: 'ls' } };
+    gateway.pendingApprovals.add('req-1');
+    await gateway.bus.emit(approvalRequest({ sessionId, call }));
+    await until(() => web.posts.length === 3);
+    await until(() => editsOf(web, 'bot-ts-2').some((text) => text.startsWith('⏸ Waiting for approval to run `shell.run`')));
+    await gateway.bus.emit({ type: 'tool.approval-resolved', sessionId, requestId: 'req-1', answer: 'once', reason: 'decided' });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'call-1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Cleaned up.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0, { approvers: ['U-DYLAN'] });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> clean up'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts[0], 'Cleaning up.');
+  assert.match(texts[1] ?? '', /^⚙ Working/);
+  assert.equal(texts.at(-1), 'Cleaned up.');
+  // The prompt sits below the progress message, above the reply.
+  assert.equal(texts.length, 4, JSON.stringify(texts));
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps');
+});
+
+test('a judged turn and a streaming turn post no progress message', async () => {
+  for (const replies of ['stream', undefined] as const) {
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      await say(gateway, sessionId, 'Looking.');
+      await runTool(gateway, sessionId, 'c1');
+      await say(gateway, sessionId, 'Still looking.');
+      await runTool(gateway, sessionId, 'c2');
+      return sessionWithReply(sessionId, 'Found it.');
+    });
+    const judged = replies === undefined;
+    if (judged) {
+      gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+      gateway.sessionRouting = async () => ({ agentId: 'ava', metadata: {}, lastSpokeAt: new Date(990 * 1000).toISOString() });
+    }
+    const { socket, web, adapter } = progressAdapter(gateway, 0, replies ? { replies } : {});
+    await adapter.start(gateway);
+    if (judged) {
+      await socket.deliver('message', channelMessage({ text: 'where is it?', ts: '990.1', thread: '990.0' }));
+    } else {
+      await socket.deliver('app_mention', mention('<@B-AVA> where is it?'));
+    }
+    await adapter.stop();
+
+    if (judged) {
+      assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false]);
+    }
+    // Stream: one placeholder, filled in. Judged: the reply alone.
+    assert.deepEqual(web.posts.map((post) => post.text), judged ? ['Found it.'] : ['…'], String(replies));
+    assert.ok(!web.updates.some((update) => /Working|Done ·/.test(update.text ?? '')), String(replies));
+  }
+});
+
 test('the stream reply mode posts no interim messages: its placeholder already shows them', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
@@ -12073,7 +12333,14 @@ test('words before a refused call are posted before the next response, never run
   await socket.deliver('app_mention', mention('<@B-AVA> go'));
   await adapter.stop();
 
-  assert.deepEqual(web.posts.map((post) => post.text), ['Trying the shell.', 'Reading the file instead.', 'Done.']);
+  // The first words are a message of their own; the next are a note in the
+  // progress message (card 949). Neither runs into the other.
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts.length, 3, JSON.stringify(texts));
+  assert.equal(texts[0], 'Trying the shell.');
+  assert.match(texts[1] ?? '', /\n\nReading the file instead\.$/);
+  assert.equal(texts[2], 'Done.');
+  assert.equal(web.updates.at(-1)?.text, '✓ Done · 1 step\n\nReading the file instead.');
 });
 
 test('a hosted-loop reply that joins the whole turn posts only what was not said along the way', async () => {
