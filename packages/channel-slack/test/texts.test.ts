@@ -42,6 +42,13 @@ test('a list whose items are separated by blank lines stays one message', () => 
   );
 });
 
+test('a list item after an indented continuation is still the same list', () => {
+  assert.deepEqual(
+    textingParts('- first\n\n  details of the first\n\n- second\n\nAfter.'),
+    ['- first\n\n  details of the first\n\n- second', 'After.'],
+  );
+});
+
 test('a line ending in a colon stays with what it introduces', () => {
   assert.deepEqual(
     textingParts('Here is what changed:\n\n- the cap\n- the docs\n\nShip it?'),

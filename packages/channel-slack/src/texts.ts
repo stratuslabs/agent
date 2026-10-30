@@ -39,20 +39,29 @@ const INDENTED = /^(?: {2,}|\t)/;
 
 const isList = (block: string): boolean => block.split('\n').some((line) => LIST_ITEM.test(line));
 
-/**
- * Whether `block` belongs in the same message as `previous`, the block
- * just before it. Each rule keeps together what reads wrong apart.
- */
-const continues = (previous: string, block: string): boolean =>
+/** The rules that read only the block just before. */
+const continuesAfter = (previous: string, block: string): boolean =>
   // A heading on its own line leads the paragraph under it.
   (HEADING.test(previous) && !previous.includes('\n'))
   // "Here is what changed:" leads what it introduces; a closing `:tada:`
   // introduces nothing.
   || (/:[ \t]*$/.test(previous) && !/:[\w+-]+:[ \t]*$/.test(previous))
-  // A loose list, its items apart by blank lines, is still one list.
-  || (LIST_ITEM.test(block) && isList(previous))
   // An indented block hangs off the one above it.
   || INDENTED.test(block);
+
+/**
+ * Whether `block` belongs in the same message as `group`, the blocks
+ * gathered so far for the current one. Each rule keeps together what reads
+ * wrong apart.
+ */
+const continues = (group: readonly string[], block: string): boolean => {
+  const previous = group.at(-1) ?? '';
+  return continuesAfter(previous, block)
+    // A loose list, its items apart by blank lines, is still one list,
+    // including past an item's indented continuation: the list is the
+    // message's, not only the block just before.
+    || (LIST_ITEM.test(block) && group.some(isList));
+};
 
 /**
  * `text` as the messages it is sent as in `texts` mode, in order: cut at
@@ -82,8 +91,7 @@ export const textingParts = (text: string): string[] => {
       continue;
     }
     const last = groups.at(-1);
-    const previous = last?.at(-1);
-    if (last !== undefined && previous !== undefined && continues(previous, block)) {
+    if (last !== undefined && continues(last, block)) {
       last.push(block);
     } else {
       groups.push([block]);
