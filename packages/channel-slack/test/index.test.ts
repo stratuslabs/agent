@@ -15831,7 +15831,7 @@ const IDENTITIES: Record<string, [string, string]> = {
 const ava = { agentId: 'ava', appToken: 'xapp-ava', botToken: 'xoxb-ava' };
 const bea = { agentId: 'bea', appToken: 'xapp-bea', botToken: 'xoxb-bea' };
 
-const reloadingAdapter = (initial: Array<{ agentId: string; appToken: string; botToken: string }>, roster = ['ava', 'bea']) => {
+const reloadingAdapter = (initial: Array<{ agentId: string; appToken: string; botToken: string }>, roster = ['ava', 'bea'], extra: { stopWaitMs?: number } = {}) => {
   const sockets: Array<{ appToken: string; socket: FakeSocket }> = [];
   const authCalls: string[] = [];
   let stored = initial;
@@ -15880,6 +15880,7 @@ const reloadingAdapter = (initial: Array<{ agentId: string; appToken: string; bo
     },
     log: (line) => logs.push(line),
     warn: (line) => warnings.push(line),
+    ...extra,
   });
   return {
     adapter,
@@ -16061,6 +16062,95 @@ test('a stop while a reload is starting an app\'s socket leaves that socket disc
   const [beaSocket] = setup.socketsFor('xapp-bea');
   assert.equal(beaSocket?.started, true);
   assert.equal(beaSocket?.disconnected, true);
+});
+
+// Card 935: a stop that leaves a socket up says so, since the gateway
+// counts a rejected stop as not drained and a restart then exits for the
+// service manager instead of starting a second daemon beside the socket.
+
+const BAD_STATE = async (): Promise<void> => {
+  throw new Error('socket is in a bad state');
+};
+
+test('a stop whose socket will not close rejects, naming that agent, and still closes the others', async () => {
+  const setup = reloadingAdapter([ava, bea]);
+  await setup.adapter.start(setup.gateway);
+  const [avaSocket] = setup.socketsFor('xapp-ava');
+  const [beaSocket] = setup.socketsFor('xapp-bea');
+  beaSocket!.disconnect = BAD_STATE;
+
+  await assert.rejects(setup.adapter.stop(), (error: Error) => {
+    assert.match(error.message, /\bbea\b/);
+    assert.doesNotMatch(error.message, /\bava\b/);
+    return true;
+  });
+  assert.equal(avaSocket?.disconnected, true);
+  assert.ok(setup.warnings.some((line) => line.includes('could not disconnect bea') && line.includes('socket is in a bad state')), setup.warnings.join('\n'));
+});
+
+test('a stop waits for a socket a reload is still starting, and resolves once that socket is down', async () => {
+  const setup = reloadingAdapter([ava]);
+  await setup.adapter.start(setup.gateway);
+  setup.store([ava, bea]);
+  let release: () => void = () => {};
+  setup.holdSocketStart(new Promise<void>((resolve) => { release = resolve; }));
+
+  const reloading = setup.adapter.reload!();
+  await new Promise((resolve) => setImmediate(resolve));
+  const [beaSocket] = setup.socketsFor('xapp-bea');
+  assert.equal(beaSocket?.started, false, 'the socket is starting');
+  const stopping = setup.adapter.stop();
+  setTimeout(release, 20);
+  await stopping;
+
+  // Down by the time stop() resolved, not at some point after it.
+  assert.equal(beaSocket?.started, true);
+  assert.equal(beaSocket?.disconnected, true);
+  await reloading;
+});
+
+test('a stop while a reload is starting a socket that then will not close rejects, naming that agent', async () => {
+  const setup = reloadingAdapter([ava]);
+  await setup.adapter.start(setup.gateway);
+  setup.store([ava, bea]);
+  let release: () => void = () => {};
+  setup.holdSocketStart(new Promise<void>((resolve) => { release = resolve; }));
+
+  const reloading = setup.adapter.reload!();
+  await new Promise((resolve) => setImmediate(resolve));
+  const [beaSocket] = setup.socketsFor('xapp-bea');
+  beaSocket!.disconnect = BAD_STATE;
+  const stopping = setup.adapter.stop();
+  setTimeout(release, 20);
+
+  await assert.rejects(stopping, (error: Error) => {
+    assert.match(error.message, /\bbea\b/);
+    assert.doesNotMatch(error.message, /\bava\b/);
+    return true;
+  });
+  await reloading;
+  assert.equal(setup.socketsFor('xapp-ava')[0]?.disconnected, true);
+});
+
+test('a stop waits a bounded time for a socket still starting, then rejects naming that agent', async () => {
+  const setup = reloadingAdapter([ava], ['ava', 'bea'], { stopWaitMs: 50 });
+  await setup.adapter.start(setup.gateway);
+  setup.store([ava, bea]);
+  // Never starts, as a socket stuck connecting would not.
+  setup.holdSocketStart(new Promise<void>(() => {}));
+
+  void setup.adapter.reload!();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(setup.socketsFor('xapp-bea').length, 1, 'the socket is starting');
+  const began = Date.now();
+  await assert.rejects(setup.adapter.stop(), (error: Error) => {
+    assert.match(error.message, /\bbea\b/);
+    assert.match(error.message, /still starting/);
+    assert.doesNotMatch(error.message, /\bava\b/);
+    return true;
+  });
+  assert.ok(Date.now() - began < 5_000, 'bounded by stopWaitMs');
+  assert.equal(setup.socketsFor('xapp-ava')[0]?.disconnected, true);
 });
 
 test('a socket that won\'t close keeps its agent on the old app, and nothing starts beside it', async () => {

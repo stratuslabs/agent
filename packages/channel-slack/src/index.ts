@@ -179,6 +179,13 @@ const STATUS_REFRESH_MS = 60_000;
  * long.
  */
 const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 30_000;
+
+/**
+ * How long `stop()` waits on a socket that is still starting (card 935).
+ * Well inside the gateway's shutdown window, so a socket stuck connecting
+ * is reported by name rather than as the whole window running out.
+ */
+const DEFAULT_STOP_WAIT_MS = 10_000;
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 const NO_REPLY_TEXT = '(no reply)';
 
@@ -660,6 +667,12 @@ export interface SlackAdapterOptions {
    * Defaults to `DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS`.
    */
   fileDownloadTimeoutMs?: number;
+  /**
+   * How long `stop()` waits on a socket a reload or start is still
+   * starting before it rejects, naming that agent. Defaults to
+   * `DEFAULT_STOP_WAIT_MS`.
+   */
+  stopWaitMs?: number;
   /**
    * Where a text attachment too large to read into the message is saved
    * instead, so the turn can be told a path rather than only a name.
@@ -3505,6 +3518,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const createWeb = options.createWebClient ?? defaultWebClient;
   const fetchFile = onlySlackFileHost(options.fetchFile ?? defaultFetchFile);
   const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
+  const stopWaitMs = options.stopWaitMs ?? DEFAULT_STOP_WAIT_MS;
   const now = options.now ?? Date.now;
 
   const connections: AgentConnection[] = [];
@@ -3747,6 +3761,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Set as `stop()` begins, so a reload still connecting an app leaves
   // nothing up behind the stop.
   let stopRequested = false;
+  // Sockets between `start()` and `connections`, by the agent they serve
+  // (card 935). A stop can't see them to close them: `connect` closes each
+  // once its start returns, and the stop waits for that, bounded.
+  const socketsStarting = new Map<Promise<boolean>, string>();
+  // Agents whose socket `connect` could not close for a stop: up still,
+  // which the stop has to report.
+  const leftUpAtStop = new Set<string>();
 
   // Everything the adapter owes Slack goes through here, so stop() drains
   // it: an approval question or its retraction must reach the workspace
@@ -8548,15 +8569,30 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         track(handled);
         return handled;
       });
-      await socket.start();
-      // A stop that began while this socket was starting has already
-      // disconnected what it could see; one left up here would answer
-      // beside the next daemon.
-      if (stopRequested) {
-        await disconnect(connection, 'the adapter is stopping');
-        return undefined;
+      const up = (async (): Promise<boolean> => {
+        await socket.start();
+        // A stop that began while this socket was starting has already
+        // disconnected what it could see; one left up here would answer
+        // beside the next daemon. Checked in the same step that adds it
+        // to `connections`, so a stop either sees it there or finds it
+        // here.
+        if (stopRequested) {
+          if (!await disconnect(connection, 'the adapter is stopping')) {
+            leftUpAtStop.add(config.agentId);
+          }
+          return false;
+        }
+        connections.push(connection);
+        return true;
+      })();
+      socketsStarting.set(up, config.agentId);
+      try {
+        if (!await up) {
+          return undefined;
+        }
+      } finally {
+        socketsStarting.delete(up);
       }
-      connections.push(connection);
       log(`slack: ${config.agentId} connected (bot ${connection.botUserId} in team ${connection.teamId})`);
       return onReplay;
     } catch (error) {
@@ -8716,6 +8752,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     async start(gateway) {
       gatewayRef = gateway;
       stopRequested = false;
+      leftUpAtStop.clear();
       // Nothing counts as seen live until every socket is up (Codex
       // 4321128637): a message sent while the sockets are still coming up
       // reaches none of them, so a read stopping before it stops short.
@@ -8894,8 +8931,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       replayStopping?.abort();
       releaseAllConversations();
       // Stop intake first, so no new INBOUND event can slip into
-      // `inflight` while the drain below runs.
-      await Promise.allSettled(connections.map((connection) => connection.socket.disconnect()));
+      // `inflight` while the drain below runs. A close that is refused
+      // leaves a socket that may still deliver (card 935), and so does one
+      // still starting that does not come down in time: the stop rejects
+      // naming them, after the drain, and the gateway counts that as not
+      // drained, so a restart exits for the service manager rather than
+      // start a second daemon answering beside them.
+      const closing = Promise.all(connections.map(async (connection) =>
+        await disconnect(connection, 'the adapter is stopping') ? undefined : connection.config.agentId));
+      // Whatever is still in here once the wait ends never came up or down.
+      const starting = new Map(socketsStarting);
+      let waited: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled([...starting.keys()].map((up) => up.finally(() => starting.delete(up)))),
+        new Promise<void>((resolve) => { waited = setTimeout(resolve, stopWaitMs); }),
+      ]);
+      clearTimeout(waited);
+      const refused = [...new Set([...(await closing).filter((agentId) => agentId !== undefined), ...leftUpAtStop])];
+      const stillStarting = [...new Set(starting.values())];
+      leftUpAtStop.clear();
       // Until it stays empty, not once. The bus subscription is still live
       // here — it comes down after the drain, because a turn finishing
       // inside the drain still has an outcome to render — so a turn the
@@ -8929,6 +8983,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       rendering.clear();
       resolvedWhileRendering.clear();
       credentialsPosting.clear();
+      const left = [
+        ...(refused.length > 0 ? [`the socket for ${refused.join(', ')} would not close`] : []),
+        ...(stillStarting.length > 0 ? [`the socket for ${stillStarting.join(', ')} was still starting after ${stopWaitMs}ms`] : []),
+      ];
+      if (left.length > 0) {
+        throw new Error(`${left.join('; ')}, so it may still deliver messages`);
+      }
     },
   };
 };
