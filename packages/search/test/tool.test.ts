@@ -54,11 +54,12 @@ test('web.search declares itself safe — a query acts on nothing', async () => 
   const tool = createWebSearchTool({ provider: createRecordingBackend() });
   assert.equal(tool.name, 'web.search');
   assert.equal(tool.risk, 'safe');
-  // Changes nothing, so a response's searches may run together (card 956).
-  assert.equal(tool.readOnly, true);
+  // Changes nothing, but a response's searches still run one at a time
+  // (card 956): a backend may allow only one request a second.
+  assert.equal(tool.readOnly, undefined);
 });
 
-test('searches running together cannot slip past the daily cap between them', async () => {
+test('searches running together, from different turns, cannot slip past the daily cap between them', async () => {
   const backend = createRecordingBackend();
   const tool = createWebSearchTool({ provider: backend, config: { maxSearchesPerDay: 2 }, now: () => NOW });
 

@@ -3275,7 +3275,11 @@ export interface Tool {
    * the call before it left it, so it stays in line too.
    *
    * Declare it only when it is true of every call. A tool that is wrong
-   * about it can have a write overlap whatever ran beside it.
+   * about it can have a write overlap whatever ran beside it. Leave it off
+   * a tool that changes nothing but calls a service that limits how fast
+   * it may be called: `web.search` does, because a backend may allow one
+   * request a second. A batch goes out at most eight calls at a time
+   * (`READ_ONLY_CALLS_AT_ONCE`).
    */
   readOnly?: boolean;
   /**
@@ -7010,6 +7014,15 @@ const throwIfAborted = (signal: AbortSignal | undefined): void => {
 const STOPPED_TOOL_GRACE_MS = 2_000;
 
 /**
+ * The most read-only calls one response runs at a time (`Tool.readOnly`).
+ * A response can ask for any number, and each may be a file walk or a
+ * plugin's request to someone else's service; a longer run goes out in
+ * groups this size, one group after another, so a big batch is never that
+ * many reads in the same moment.
+ */
+const READ_ONLY_CALLS_AT_ONCE = 8;
+
+/**
  * Waits for a tool call's result, but not past `STOPPED_TOOL_GRACE_MS`
  * after the turn's signal fires.
  *
@@ -8417,7 +8430,7 @@ export class AgentRunner {
     while (index < calls.length) {
       throwIfAborted(signal);
       let end = index;
-      while (end < calls.length && this.runsAlongside(calls[end]!)) {
+      while (end < calls.length && end - index < READ_ONLY_CALLS_AT_ONCE && this.runsAlongside(calls[end]!)) {
         end += 1;
       }
       if (end - index > 1) {

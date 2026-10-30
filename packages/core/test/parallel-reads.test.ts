@@ -367,6 +367,35 @@ test('a result that cannot be saved ends the turn only after the rest of its bat
   assert.ok(log.includes('look.slow:end'), `the turn ended with a call still running: ${log.join(', ')}`);
 });
 
+test('a long run of read-only calls goes out at most eight at a time, still recorded in call order', async () => {
+  let running = 0;
+  let peak = 0;
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'look.count',
+    risk: 'safe',
+    readOnly: true,
+    async execute() {
+      running += 1;
+      peak = Math.max(peak, running);
+      await turns(5);
+      running -= 1;
+      return 'seen';
+    },
+  });
+  // A response with more reads than run at once: one big batch must not
+  // turn into that many searches or file walks in the same moment.
+  const ids = Array.from({ length: 11 }, (_, index) => `c${index}`);
+  const runner = new AgentRunner({ provider: createScript(ids.map((id) => call(id, 'look.count'))), tools, store: new InMemorySessionStore() });
+  await runner.initialize();
+
+  const session = await runAs(runner, 'cap-1');
+
+  assert.equal(peak, 8, `peak calls running at once: ${peak}`);
+  assert.equal(running, 0);
+  assert.deepEqual(toolResultIds(session), ids);
+});
+
 test('skill.read declares itself read-only', () => {
   assert.equal(createSkillReadTool(new SkillRegistry()).readOnly, true);
 });

@@ -118,16 +118,20 @@ to kernel code, which is what makes the ecosystem's tools first-class here.
 A tool also says **whether it changes anything**. `readOnly: true` on the
 `Tool` declares that no call does: no file, memory, schedule, message, or
 anything past Stratus is different afterwards (`fs.read`, `fs.list`,
-`fs.search`, `memory.recall`, `schedule.list`, `skill.read`, `web.search`).
+`fs.search`, `memory.recall`, `schedule.list`, `skill.read`).
 The runner runs a response's tool calls one at a time, in order, because a
 call may depend on what the one before it did. A run of consecutive calls
 that are all `readOnly` and `safe` is the exception: those go out together,
-and their results are still saved in the order the model asked for them,
-each once it and every call ahead of it have landed, so a crash leaves the
-same in-order prefix one-at-a-time running would. Only `safe` calls, because
+up to eight at a time, and their results are still saved in the order the
+model asked for them, each once it and every call ahead of it have landed,
+so a crash leaves the same in-order prefix one-at-a-time running would. Only `safe` calls, because
 any other may be held for a human, and those questions are asked one at a
 time. Omitted means the tool may write, for the reason an omitted `risk`
-means `gated`; declare it only when it is true of every call.
+means `gated`; declare it only when it is true of every call. Leave it off
+a tool that changes nothing but calls a service that limits how fast it may
+be called: `web.search` does, because a search backend may allow one
+request a second, and several searches at once would fail where the same
+searches in turn would not.
 
 A tool also **stops when its turn does**. The `ExecutionContext` carries the
 turn's `signal`, which fires when someone stops the turn (Slack's `stop`, the

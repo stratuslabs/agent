@@ -220,12 +220,14 @@ risk levels. Four things are worth knowing here:
 - **Reads in one response run together.** When the model asks for several
   calls at once, they run one at a time, in order, except that consecutive
   calls to `safe` tools that change nothing (`fs.read`, `fs.list`,
-  `fs.search`, `memory.recall`, `schedule.list`, `skill.read`, and
-  `web.search` where its plugin registers it `safe`) run at the same time. Their results still reach the model, and the saved
-  session, in the order it asked. A gated read such as `web.fetch` or
-  `message.read` still waits its turn, because its approval question is
-  asked one at a time. A plugin's tool joins in by declaring `readOnly: true`
-  — see [`plugins.md`](../architecture/plugins.md).
+  `fs.search`, `memory.recall`, `schedule.list`, `skill.read`) run at the
+  same time, up to eight at once. Their results still reach the model, and
+  the saved session, in the order it asked. A gated read such as
+  `web.fetch` or `message.read` still waits its turn, because its approval
+  question is asked one at a time, and so does `web.search`, because a
+  search backend may allow only one request a second. A plugin's tool joins
+  in by declaring `readOnly: true` — see
+  [`plugins.md`](../architecture/plugins.md).
 - **`plugin-mcp` mounts somebody else's code.** Each configured MCP server's
   tools register as `mcp.<server>.<tool>`, so `tools: [mcp.linear.*]` grants
   one server, and every bridged tool is `gated` regardless of how the server
