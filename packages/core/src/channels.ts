@@ -382,6 +382,18 @@ export interface ConversationReadRequest {
    * decides with its own `sessionConversation`; absent, no DM is.
    */
   sessionId?: string;
+  /**
+   * Fetch the image files on the messages read, so the model can be shown
+   * them: at most `count` images and `bytes` decoded bytes for the whole
+   * read, taken in the order the messages are returned and the files
+   * within each, and stopping at the first that does not fit. Each image
+   * is held to the same limits as one a person sends with a message
+   * (`IMAGE_ATTACHMENT_MAX_BYTES`, `IMAGE_ATTACHMENT_MAX_DIMENSION`).
+   * Absent, files come back by name only. An adapter that cannot fetch
+   * files ignores it and returns names, which is what every adapter
+   * written before it does.
+   */
+  images?: { count: number; bytes: number };
 }
 
 /** One message as a read returns it: text and who wrote it, not markup. */
@@ -399,8 +411,21 @@ export interface ConversationMessage {
   thread?: string;
   /** How many replies a thread root has. */
   replies?: number;
-  /** Names of attached files; their contents are not read. */
+  /** Names of attached files, images included; other contents are not read. */
   files?: string[];
+  /**
+   * The message's images, fetched for a read that asked for them
+   * (`ConversationReadRequest.images`), in the order its files are listed.
+   * In flight only: `message.read` hands them to the model with its result
+   * and never puts them in the result's text.
+   */
+  images?: ImageAttachment[];
+  /**
+   * A sentence for each image file on the message that is not shown as
+   * itself — sent as the platform's smaller preview, or left out and why —
+   * so the agent never answers as if it had looked at one it was not shown.
+   */
+  imageNotes?: string[];
 }
 
 /** One of a conversation's bookmarks: plain text, no markup and no ids. */

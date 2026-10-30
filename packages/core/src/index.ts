@@ -4546,6 +4546,7 @@ export interface ChannelAdapterLike {
     before?: string;
     limit: number;
     sessionId?: string;
+    images?: { count: number; bytes: number };
   }): Promise<{
     messages: Array<{
       id: string;
@@ -4556,6 +4557,8 @@ export interface ChannelAdapterLike {
       thread?: string;
       replies?: number;
       files?: string[];
+      images?: ImageAttachment[];
+      imageNotes?: string[];
     }>;
     more: boolean;
     bookmarks?: Array<{ title: string; link: string }>;

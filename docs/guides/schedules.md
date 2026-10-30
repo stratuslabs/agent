@@ -35,6 +35,9 @@ always-on daemon into agents that act on their own:
   destination may read that one conversation unattended. On Slack it reads only channels the agent's own
   app is a member of, and never DMs — see the
   [Slack adapter](../../packages/channel-slack/README.md#reading-a-channel).
+  Images on the messages read are shown to the agent with the result, at
+  most 5 and 10 MB per read; each message's `shownImages` and `imageNotes`
+  say which were shown and why any other was not.
 
 Souls opt in like any other tool:
 

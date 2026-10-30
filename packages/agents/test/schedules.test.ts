@@ -9,6 +9,8 @@ import {
   createScheduleTools,
   MESSAGE_READ_MAX_LIMIT,
   MESSAGE_READ_BOOKMARK_BUDGET,
+  MESSAGE_READ_IMAGE_BYTES,
+  MESSAGE_READ_MAX_IMAGES,
   MESSAGE_READ_TEXT_BUDGET,
   describeCadence,
   describeSchedule,
@@ -638,6 +640,129 @@ test('message.read cuts a message the bookmarks crowded out only by what they to
   const trimmed = await tail.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
   const sent = JSON.stringify(trimmed.bookmarks).length + JSON.stringify((trimmed.messages as JsonObject[])[0]).length;
   assert.ok(sent <= MESSAGE_READ_TEXT_BUDGET && sent > MESSAGE_READ_TEXT_BUDGET - 3, `sent ${sent}`);
+});
+
+// ---- images on the messages read (card 884) ---------------------------------
+
+type ReadImage = { mediaType: 'image/png'; data: string; name?: string };
+const imageOf = (name: string | undefined, bytes = 8): ReadImage => ({
+  mediaType: 'image/png',
+  data: Buffer.alloc(bytes, name ?? 'x').toString('base64'),
+  ...(name !== undefined ? { name } : {}),
+});
+const collecting = () => {
+  const attached: ReadImage[] = [];
+  return { attached, context: { attachImage: (image: ReadImage) => { attached.push(image); } } };
+};
+
+test('message.read asks for images only when the host can show them, and hands them over in message order', async () => {
+  const reads: Array<Parameters<Parameters<typeof createMessageReadTool>[0]>[0]> = [];
+  const a = imageOf('a.png');
+  const b = imageOf('b.png');
+  const c = imageOf(undefined);
+  const tool = createMessageReadTool(async (input) => {
+    reads.push(input);
+    return {
+      messages: [
+        { id: '2.000001', author: 'U1', text: 'newest', files: ['a.png', 'spec.pdf', 'big.png'], images: [a], imageNotes: ['big.png is shown as Slack\'s 1024×700 preview.'] },
+        { id: '1.000001', author: 'U1', text: 'older', files: ['b.png', 'c'], images: [b, c] },
+        { id: '0.000001', author: 'U1', text: 'no files' },
+      ],
+      more: false,
+    };
+  });
+
+  // A host that cannot show an image is never handed one: the read asks
+  // for names only, as it always did.
+  const plain = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava')) as JsonObject;
+  assert.equal(reads[0]?.images, undefined);
+  // Even from an adapter that returns them unasked, nothing is shown.
+  assert.doesNotMatch(JSON.stringify(plain), /shownImages|"images"/);
+  assert.doesNotMatch(JSON.stringify(plain), new RegExp(a.data));
+
+  const { attached, context } = collecting();
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'), context as never) as JsonObject;
+  assert.deepEqual(reads[1]?.images, { count: MESSAGE_READ_MAX_IMAGES, bytes: MESSAGE_READ_IMAGE_BYTES });
+  assert.deepEqual(attached, [a, b, c], 'in the order the messages and their files are listed');
+  const messages = result.messages as Array<{ shownImages?: string[]; imageNotes?: string[]; images?: unknown }>;
+  assert.deepEqual(messages[0]?.shownImages, ['a.png']);
+  assert.deepEqual(messages[0]?.imageNotes, ['big.png is shown as Slack\'s 1024×700 preview.']);
+  assert.deepEqual(messages[1]?.shownImages, ['b.png', 'image 2']);
+  assert.equal(messages[2]?.shownImages, undefined);
+  // The pixels travel beside the result, never inside its text.
+  assert.ok(messages.every((message) => message.images === undefined));
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(a.data));
+  assert.match(tool.description ?? '', /shownImages/);
+});
+
+test('message.read holds an adapter that ignores the cap to the read\'s own, and says what it left out', async () => {
+  const many = Array.from({ length: MESSAGE_READ_MAX_IMAGES + 2 }, (_, index) => imageOf(`shot-${index}.png`));
+  const tool = createMessageReadTool(async () => ({
+    messages: many.map((image, index) => ({ id: `${10 - index}.000001`, author: 'U1', text: 'look', files: [image.name!], images: [image] })),
+    more: false,
+  }));
+  const { attached, context } = collecting();
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'), context as never) as JsonObject;
+  assert.deepEqual(attached, many.slice(0, MESSAGE_READ_MAX_IMAGES));
+  const messages = result.messages as Array<{ shownImages?: string[]; imageNotes?: string[] }>;
+  assert.equal(messages[MESSAGE_READ_MAX_IMAGES]?.shownImages, undefined);
+  assert.match(messages[MESSAGE_READ_MAX_IMAGES]?.imageNotes?.[0] ?? '', /^shot-5\.png is not shown: past this read's cap of 5 images\.$/);
+
+  // And by bytes: two images that each fit, but not together.
+  const heavy = [imageOf('one.png', MESSAGE_READ_IMAGE_BYTES - 10), imageOf('two.png', 20)];
+  const weighed = createMessageReadTool(async () => ({
+    messages: [{ id: '1.000001', author: 'U1', text: 'both', files: ['one.png', 'two.png'], images: heavy }],
+    more: false,
+  }));
+  const second = collecting();
+  const read = await weighed.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'), second.context as never) as JsonObject;
+  assert.deepEqual(second.attached.map((image) => image.name), ['one.png']);
+  const only = (read.messages as Array<{ shownImages?: string[]; imageNotes?: string[] }>)[0]!;
+  assert.deepEqual(only.shownImages, ['one.png']);
+  assert.match(only.imageNotes?.[0] ?? '', /^two\.png is not shown: past this read's cap of 10 MB of images\.$/);
+});
+
+test('message.read says why an image the host refused is not shown, and still shows the rest', async () => {
+  const bad = imageOf('bad.png');
+  const good = imageOf('good.png');
+  const tool = createMessageReadTool(async () => ({
+    messages: [{ id: '1.000001', author: 'U1', text: 'two', files: ['bad.png', 'good.png'], images: [bad, good] }],
+    more: false,
+  }));
+  const attached: ReadImage[] = [];
+  const context = {
+    attachImage: (image: ReadImage) => {
+      if (image === bad) {
+        throw new Error('The bytes are not a complete image/png image.');
+      }
+      attached.push(image);
+    },
+  };
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'), context as never) as JsonObject;
+  assert.deepEqual(attached, [good]);
+  const message = (result.messages as Array<{ shownImages?: string[]; imageNotes?: string[] }>)[0]!;
+  assert.deepEqual(message.shownImages, ['good.png']);
+  assert.deepEqual(message.imageNotes, ['bad.png is not shown: The bytes are not a complete image/png image.']);
+});
+
+test('message.read measures its text budget without image bytes, and shows no image of a message it left out', async () => {
+  const half = 'x'.repeat(MESSAGE_READ_TEXT_BUDGET / 2 - 60);
+  // A megabyte of image on a short message is not text: it fits.
+  const large = imageOf('large.png', 1024 * 1024);
+  const crowded = imageOf('crowded.png');
+  const tool = createMessageReadTool(async () => ({
+    messages: [
+      { id: '3.000001', author: 'U1', text: 'tiny', files: ['large.png'], images: [large] },
+      { id: '2.000001', author: 'U1', text: half },
+      { id: '1.000001', author: 'U1', text: half, files: ['crowded.png'], images: [crowded] },
+    ],
+    more: false,
+  }));
+  const { attached, context } = collecting();
+  const result = await tool.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'), context as never) as JsonObject;
+  assert.equal(result.count, 2);
+  assert.equal(result.more, true);
+  assert.deepEqual(attached, [large], 'the message past the budget is paged to, and its image with it');
 });
 
 test('message.send names its session as the speaker, at the label its words carry', async () => {

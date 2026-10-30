@@ -346,6 +346,7 @@ export interface GatewayChannelAdapter {
     before?: string;
     limit: number;
     sessionId?: string;
+    images?: { count: number; bytes: number };
   }): ReturnType<ConversationReader>;
   /**
    * Creates a conversation with the agent's own app, mirroring
