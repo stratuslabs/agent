@@ -11981,6 +11981,71 @@ test('a note trimmed before the progress message ever showed it is not taken out
   assert.ok(web.posts.at(-1)?.text?.endsWith('All done.'));
 });
 
+test('a note an earlier write already showed stays said when its own write is refused', async () => {
+  // The progress message's opening write waits behind the first line and
+  // lands holding the note; the note's own edit after it is refused. The
+  // reader saw it, so it stays in the message and is not posted again.
+  let release!: () => void;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Starting.');
+    await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'Note A: found it.');
+    await runTool(gateway, sessionId, 'c2');
+    release();
+    return sessionWithReply(sessionId, 'Starting.\n\nNote A: found it.\n\nAll done.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  web.postGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const update = web.chat.update.bind(web.chat);
+  let refused = false;
+  web.chat.update = async (args) => {
+    if (!refused) {
+      refused = true;
+      web.updates.push(args);
+      throw new Error('ratelimited');
+    }
+    return update(args);
+  };
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.ok(refused);
+  assert.match(texts[1] ?? '', /Note A: found it\./);
+  assert.equal(texts.at(-1), 'All done.', JSON.stringify(texts));
+  assert.match(editsOf(web, 'bot-ts-2').at(-1) ?? '', /^✓ Done · 2 steps\n\nNote A: found it\.$/);
+});
+
+test('a note Slack never showed leaves the progress message and stays in the reply', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Starting.');
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+    await until(() => web.posts.length === 2);
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    await say(gateway, sessionId, 'Note A: found it.');
+    await runTool(gateway, sessionId, 'c2');
+    return sessionWithReply(sessionId, 'Starting.\n\nNote A: found it.\n\nAll done.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  // Slack refuses every edit that holds the note, so no reader ever sees it.
+  const update = web.chat.update.bind(web.chat);
+  web.chat.update = async (args) => {
+    if ((args.text ?? '').includes('Note A')) {
+      throw new Error('msg_too_long');
+    }
+    return update(args);
+  };
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps');
+  assert.equal(web.posts.at(-1)?.text, 'Note A: found it.\n\nAll done.');
+});
+
 test('words too long for the progress message are posted whole as messages of their own, and not again as the reply', async () => {
   const analysis = `Findings:\n\n${Array.from({ length: 90 }, (_, index) => `- item ${index}: ${'y'.repeat(40)}`).join('\n')}`;
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {

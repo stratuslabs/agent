@@ -1803,11 +1803,14 @@ class ReplyRenderer {
       settleLanded = resolve;
     });
     this.onInterim?.(() => heard, landedNow);
-    this.queueProgressWrite(() => {
-      // Its own write landed, but a slow Slack can let later notes trim it
-      // out before any write held it. Unseen, it is not said: the others do
-      // not hear it, and a reply that repeats it keeps it.
+    // Said once a write that held it has landed, whichever write that was,
+    // and only then. Its own write can land after a slow Slack let later
+    // notes trim it out unseen, or be refused after an earlier write showed
+    // it. Unseen, it is not said: the others do not hear it, and a reply
+    // that repeats it keeps it.
+    const settle = () => {
       if (!note.shown) {
+        this.progressNotes = this.progressNotes.filter((kept) => kept !== note);
         settleLanded(false);
         return;
       }
@@ -1817,10 +1820,8 @@ class ReplyRenderer {
       this.interimSaid.push(text);
       this.lastSaidWasNote = true;
       settleLanded(true);
-    }, () => {
-      this.progressNotes = this.progressNotes.filter((kept) => kept !== note);
-      settleLanded(false);
-    });
+    };
+    this.queueProgressWrite(settle, settle);
     return landedNow;
   }
 
