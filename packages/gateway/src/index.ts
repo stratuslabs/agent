@@ -1203,10 +1203,20 @@ const fitsReplayBudget = (images: readonly ImageAttachment[]): boolean =>
   images.length === 0 || imagesWithinReplayBudget([{ id: '', createdAt: '', role: 'user', content: '', images: [...images] }]).size === images.length;
 
 /** A signal that aborts once every one of `signals` has. */
-const allAborted = (signals: readonly AbortSignal[]): AbortSignal => {
+const allAborted = (signals: readonly AbortSignal[]): AbortSignal => joinableSignal(signals).signal;
+
+/**
+ * `allAborted` for callers that keep joining: a turn that takes in messages
+ * at its tool steps (card 948) is cancelled only once every caller in it
+ * is, the ones who joined late included. A caller joining with no signal
+ * can never cancel, so from then on neither can the turn.
+ */
+const joinableSignal = (initial: readonly AbortSignal[]): { signal: AbortSignal; join: (signal: AbortSignal | undefined) => void } => {
   const controller = new AbortController();
+  const signals = [...initial];
+  let uncancellable = false;
   const check = (): void => {
-    if (!controller.signal.aborted && signals.every((signal) => signal.aborted)) {
+    if (!uncancellable && !controller.signal.aborted && signals.every((signal) => signal.aborted)) {
       controller.abort(signals[signals.length - 1]?.reason);
     }
   };
@@ -1214,7 +1224,17 @@ const allAborted = (signals: readonly AbortSignal[]): AbortSignal => {
     signal.addEventListener('abort', check, { once: true });
   }
   check();
-  return controller.signal;
+  return {
+    signal: controller.signal,
+    join: (signal) => {
+      if (signal === undefined) {
+        uncancellable = true;
+        return;
+      }
+      signals.push(signal);
+      signal.addEventListener('abort', check, { once: true });
+    },
+  };
 };
 
 export interface ObserveInput {
@@ -5531,10 +5551,28 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
      */
     const runSteerable = async (turnInput: DispatchInput, absorbedKeys: readonly string[] = []): Promise<Session> => {
       const steered: MergeJoiner[] = [];
-      const steer = mergeable ? () => takeSteered(input.sessionId, input.agentId, steered) : undefined;
+      // Cancelled only when every caller in it is, as a merged turn is, the
+      // ones steered in later included: one caller giving up must not take
+      // the others' answer with it. A turn with a caller who cannot cancel
+      // has no signal to join.
+      const joint = turnInput.signal !== undefined ? joinableSignal([turnInput.signal]) : undefined;
+      const steer = mergeable
+        ? async (): Promise<SteeredMessage | undefined> => {
+          if (joint?.signal.aborted === true) {
+            return undefined;
+          }
+          const before = steered.length;
+          const message = await takeSteered(input.sessionId, input.agentId, steered);
+          for (const part of steered.slice(before)) {
+            joint?.join(part.input.signal);
+          }
+          return message;
+        }
+        : undefined;
+      const running = joint !== undefined ? { ...turnInput, signal: joint.signal } : turnInput;
       let outcome: { session: Session } | { error: unknown };
       try {
-        outcome = { session: await dispatchInternal(turnInput, absorbedKeys, undefined, steer) };
+        outcome = { session: await dispatchInternal(running, absorbedKeys, undefined, steer) };
       } catch (error) {
         outcome = { error };
       }

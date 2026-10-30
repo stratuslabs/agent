@@ -232,6 +232,50 @@ test('a steered batch\'s place in the queue is not counted twice, so a later bat
   assert.equal(lastUser(provider.calls[7]), 'N');
 });
 
+test('the running turn\'s caller giving up does not cancel the turn a steered message joined', async (t) => {
+  const provider = scriptedProvider([openAiToolCall, () => openAiText('Answered both.')], [1, 2]);
+  const gateway = await startGateway(t, provider.fetchImpl);
+  const cancelFirst = new AbortController();
+  const cancelSecond = new AbortController();
+
+  const first = gateway.dispatch({ sessionId: 's-1f', agentId: 'ava', userMessage: 'first', signal: cancelFirst.signal, onAbsorbed: () => {} });
+  await provider.started(1);
+  const second = gateway.dispatch({ sessionId: 's-1f', agentId: 'ava', userMessage: 'second', signal: cancelSecond.signal, onAbsorbed: () => {} });
+  provider.release(1);
+  await provider.started(2);
+  // Steered in; now the first caller gives up. The second still wants its answer.
+  cancelFirst.abort();
+  provider.release(2);
+  const [one, two] = await Promise.allSettled([first, second]);
+
+  assert.equal(two.status, 'fulfilled');
+  assert.equal(one.status, 'fulfilled');
+  assert.equal(lastUser(provider.calls[1]), 'second');
+  const session = await gateway.store.get('s-1f');
+  assert.equal(session?.status, 'completed');
+});
+
+test('a turn every caller in it gave up on, steered ones included, is cancelled', async (t) => {
+  const provider = scriptedProvider([openAiToolCall, () => openAiText('never seen')], [1, 2]);
+  const gateway = await startGateway(t, provider.fetchImpl);
+  const cancelFirst = new AbortController();
+  const cancelSecond = new AbortController();
+
+  const first = gateway.dispatch({ sessionId: 's-1g', agentId: 'ava', userMessage: 'first', signal: cancelFirst.signal, onAbsorbed: () => {} });
+  await provider.started(1);
+  const second = gateway.dispatch({ sessionId: 's-1g', agentId: 'ava', userMessage: 'second', signal: cancelSecond.signal, onAbsorbed: () => {} });
+  provider.release(1);
+  await provider.started(2);
+  cancelFirst.abort();
+  cancelSecond.abort();
+  provider.release(2);
+  const [one, two] = await Promise.allSettled([first, second]);
+
+  assert.equal(one.status, 'rejected');
+  assert.equal(two.status, 'rejected');
+  assert.equal(lastUser(provider.calls[1]), 'second');
+});
+
 test('a message sent while the final answer is being written runs as the next turn', async (t) => {
   // Call 1 asks for a tool at once; call 2 (the answer) waits; call 3 is the next turn.
   const provider = scriptedProvider([openAiToolCall, () => openAiText('Built.'), () => openAiText('Second answer.')], 2);
