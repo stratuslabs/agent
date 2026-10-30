@@ -4393,8 +4393,7 @@ export type StratusEvent =
    * trace, not a second transcript. Worth an event at all because it is
    * otherwise invisible: the answers stay plausible while the agent
    * quietly stops being able to remember the start of the conversation.
-   */
-  /**
+   *
    * `summarized` is true when a summary (`CONTEXT_SUMMARY_METADATA_KEY`)
    * now stands in for everything below the window, and false when this cut
    * went without one — the summary call failed, and the model is told the
@@ -6724,6 +6723,11 @@ const HOST_REFUSAL_BRAND: unique symbol = Symbol.for('stratus.error.HostRefusalE
  * manages its own context (`provider-claude-code`, `provider-codex`) has
  * nothing to report, because the transcript it sends is not ours to
  * shorten. A provider that never throws this behaves exactly as it did.
+ *
+ * A provider that does throw it is answered with requests that carry their
+ * own transcript (`ProviderRequest.messages`), and must send that rather
+ * than the session's: the shorter retry, and before it the summary of what
+ * the retry cut (`CONTEXT_SUMMARY_REQUEST`), a single message and no tools.
  */
 export class ContextOverflowError extends Error {
   /** Recognized across copies of core: a provider package carries its own. */
