@@ -5041,6 +5041,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     sessionId: string,
     agentId: string | undefined,
     into: MergeJoiner[],
+    /**
+     * Asked last, with nothing awaited after it: whether the running turn
+     * still takes these callers, joining them to its cancellation if so. A
+     * turn cancelled while the store was read takes nothing, and the batch
+     * waits and runs next, as it would have.
+     */
+    admit: (parts: readonly MergeJoiner[]) => boolean,
   ): Promise<SteeredMessage | undefined> => {
     const batch = openBatches.get(sessionId);
     if (stopping || batch === undefined || !batch.firstInLine || batch.agentId !== agentId) {
@@ -5069,12 +5076,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         }
       }
     }
+    const all = [batch.leader, ...batch.absorbed];
+    if (!admit(all.filter((part) => part.input.signal?.aborted !== true))) {
+      return undefined;
+    }
     openBatches.delete(sessionId);
     batch.steered = true;
     // Its place on the chain runs nothing now, so it is not ahead of a batch
     // opening behind it, which can then be steered at a later step.
     releaseQueued(sessionId);
-    const all = [batch.leader, ...batch.absorbed];
     // Not waiting any more; the leader's place on the chain does not count it again.
     const left = (waitingDispatches.get(sessionId) ?? all.length) - all.length;
     if (left > 0) {
@@ -5558,17 +5568,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // has no signal to join.
       const joint = turnInput.signal !== undefined ? joinableSignal([turnInput.signal]) : undefined;
       const steer = mergeable
-        ? async (): Promise<SteeredMessage | undefined> => {
+        ? (): Promise<SteeredMessage | undefined> => takeSteered(input.sessionId, input.agentId, steered, (parts) => {
           if (joint?.signal.aborted === true) {
-            return undefined;
+            return false;
           }
-          const before = steered.length;
-          const message = await takeSteered(input.sessionId, input.agentId, steered);
-          for (const part of steered.slice(before)) {
+          for (const part of parts) {
             joint?.join(part.input.signal);
           }
-          return message;
-        }
+          return true;
+        })
         : undefined;
       const running = joint !== undefined ? { ...turnInput, signal: joint.signal } : turnInput;
       let outcome: { session: Session } | { error: unknown };
