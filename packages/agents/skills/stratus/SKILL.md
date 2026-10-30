@@ -94,13 +94,14 @@ When you need a named credential you do not hold, first make sure a tool you hav
    - **A form**, in Slack, goes up in this conversation when one of `approvals.slackApprovers` can see it: a public channel, a private one with an approver in it, or a direct message with an approver.
    - **A link** comes back otherwise, or when you pass `via: "link"`, but only if your soul's `tools:` lists `credential.request` (or you have no `tools:` key); without that, it is a form or nothing. It needs the control API, and without `api.publicUrl` it opens only on the daemon's machine. Anyone who has the link can set the key, once, within 30 minutes, with no approver involved, and opening it spends nothing. So give it only to your operator. In a shared channel, or a direct message with anyone else, do not post it: ask your operator to message you directly, and ask again there. Pass `via: "form"` to get a form or nothing.
    - Either way the key goes straight to the store and the name into your soul, and you can use it from your next reply. A restart cancels a request still waiting.
+   - **A key that spans lines**, such as a GitHub App's PEM private key, needs a link (`via: "link"`): the link's field keeps line breaks, and the Slack form's one-line field does not. A PEM key that arrives with its line breaks lost is refused, so nothing broken is stored.
 2. **Otherwise, ask your operator to run, on the machine:**
 
    ```
    read -rs KEY && printf %s "$KEY" | stratus credential set <name> --agent <your id>
    ```
 
-   (leave out `--agent` for a shared one), and to add `<name>` to `credentials:` in your soul.
+   (leave out `--agent` for a shared one; for a key file, `stratus credential set <name> --agent <your id> < key.pem`), and to add `<name>` to `credentials:` in your soul.
 
 Away from the machine, the control API and a link only **add**: they store a name nobody has stored, and refuse one already stored or supplied by the daemon's environment. The Slack form adds too, and it is the one way to **replace** a key from chat. When one you hold is expiring or was revoked, call `credential.request` with `replace: true`. That is always a form an approver answers in this conversation, never a link. It is refused before anyone is asked when you don't hold the key, when it comes from the daemon's environment, or when your `scope` doesn't match where it is stored: a shared key needs `scope: "shared"`, because replacing it changes the key for every agent granted it. The new value is used from the next tool call or command. At the machine, `stratus credential set` replaces as well, and `stratus credential remove` is the only way to remove one. Each add or replace from a form or a link appends a line to `~/.stratus/credential-audit.log`, names only, with the variable when one was bound, and so does each `stratus credential env`. `stratus credentials` lists the names stored, shared and per agent, and what each agent's shell reads, never the values.
 

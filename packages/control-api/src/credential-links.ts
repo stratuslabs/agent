@@ -106,7 +106,12 @@ export const sendCredentialPage = (
       + (error !== undefined ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '')
       + '<form method="post">'
       + `<label for="value">Value for ${escapeHtml(record.name)}</label>`
-      + '<input id="value" name="value" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required autofocus>'
+      + '<p class="hint" id="value-hint">Paste the whole value. A key file, such as a PEM private key, keeps its line breaks.</p>'
+      // A text area, not a password input: a password input strips the
+      // line breaks out of anything pasted into it, which breaks a key
+      // file. Masked with -webkit-text-security, which every current
+      // browser engine supports.
+      + '<textarea id="value" name="value" rows="4" aria-describedby="value-hint" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required autofocus></textarea>'
       + '<button type="submit">Add credential</button>'
       + '</form>'
       + `<p class="small">This link works once and expires at ${escapeHtml(new Date(record.expiresAt).toISOString())}. `
@@ -129,9 +134,10 @@ export const sendCredentialPage = (
     + '<title>Stratus: add a credential</title>'
     + '<style>body{font-family:system-ui,sans-serif;background:#05070f;color:#f3f7ff;margin:0;padding:2rem 1rem;line-height:1.5}'
     + 'main{max-width:32rem;margin:0 auto}code{font-size:.95em}label{display:block;margin:1.5rem 0 .4rem}'
-    + 'input{box-sizing:border-box;width:100%;padding:.7rem;font-size:1rem;border-radius:.4rem;border:1px solid #3a4560;background:#0d1222;color:inherit}'
+    + 'textarea{box-sizing:border-box;width:100%;padding:.7rem;font-size:1rem;border-radius:.4rem;border:1px solid #3a4560;background:#0d1222;color:inherit;'
+    + 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical;-webkit-text-security:disc}'
     + 'button{margin-top:1rem;padding:.7rem 1.2rem;font-size:1rem;border:0;border-radius:.4rem;background:#3d7dd9;color:#fff}'
-    + '.error{color:#ff9a8a}.reason,.small{color:#b7c0d8}.small{font-size:.875rem;margin-top:2rem}</style>'
+    + '.error{color:#ff9a8a}.reason,.small,.hint{color:#b7c0d8}.small{font-size:.875rem;margin-top:2rem}.hint{font-size:.875rem;margin:0 0 .4rem}</style>'
     + `<body><main>${body}</main></body></html>`,
   );
 };

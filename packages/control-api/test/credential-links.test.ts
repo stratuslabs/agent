@@ -146,6 +146,58 @@ test('a link for a key in a variable says the agent\'s shell will read it, and a
   }
 });
 
+/** A PEM-shaped value, assembled so nothing here looks like a committed key; the body is base64 of a sentence. */
+const PEM_LABEL = ['PRIVATE', 'KEY'].join(' ');
+const PEM = [
+  `-----BEGIN ${PEM_LABEL}-----`,
+  'bm90IGEga2V5LCBqdXN0IGEgdGVzdCBvZiBsaW5lIGJyZWFrcyBpbiBhIHN0b3Jl',
+  'ZCBjcmVkZW50aWFsIHZhbHVlLCB3cmFwcGVkIGF0IHNpeHR5LWZvdXI=',
+  `-----END ${PEM_LABEL}-----`,
+].join('\n');
+
+test('a link keeps a multi-line key whole: a masked text area, and the browser\'s line breaks stored as the file\'s', async () => {
+  const { home, gateway, api } = await startLinking({ name: 'github.appKey' });
+  try {
+    const session = await gateway.dispatch({ sessionId: 'kai-link-pem', agentId: 'kai', userMessage: 'set up the app' });
+    const { local } = linkFrom(session, api.url ?? '');
+    const html = await (await fetch(local)).text();
+    // A password input strips line breaks from whatever is pasted into it,
+    // so the field is a text area, masked the way a password field is.
+    const field = html.match(/<textarea id="value" name="value"[^>]*>/)?.[0];
+    assert.ok(field, 'the value is a text area');
+    assert.match(field, /autocomplete="off"/);
+    assert.match(field, /spellcheck="false"/);
+    assert.match(field, / required/);
+    assert.doesNotMatch(html, /<input id="value"/);
+    assert.match(html, /textarea\{[^}]*-webkit-text-security:disc/);
+
+    // A flattened key is refused beside the field, and the link stays good.
+    const flattened = await fetch(local, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ value: PEM.replace(/\n/g, ' ') }).toString(),
+    });
+    assert.equal(flattened.status, 400);
+    assert.match(await flattened.text(), /line breaks were lost/);
+    assert.equal((await fetch(local)).status, 200);
+
+    // A browser submits a text area's line breaks as CRLF, whatever was
+    // pasted; the key file had LF, and LF is what is stored.
+    const added = await fetch(local, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ value: `${PEM.replace(/\n/g, '\r\n')}\r\n` }).toString(),
+    });
+    assert.equal(added.status, 200);
+    const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+      named?: { agents?: Record<string, Record<string, string>> };
+    };
+    assert.equal(credentials.named?.agents?.kai?.['github.appKey'], PEM);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a link whose request can no longer be answered is spent with the reason', async () => {
   const { soulFile, gateway, api } = await startLinking();
   try {

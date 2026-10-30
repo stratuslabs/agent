@@ -384,7 +384,10 @@ submission; anyone else in the thread is told they cannot. What the form does:
   through a replace request (below). A request whose name
   was stored since it was made (another form for the same shared key, or
   the machine) can never be answered, so the refusal also takes its button
-  down; an empty value leaves the form open for another try.
+  down; an empty value, or a PEM key whose line breaks were lost, leaves the
+  form open for another try. The field is one line, so a key file such as a
+  PEM private key goes through a [link](./remote-access.md#adding-a-credential-from-a-link)
+  (`via: "link"`) or `stratus credential set <name> < key.pem` instead.
 - **For the agent alone, unless it asked otherwise.** The agent chooses the
   scope when it asks (`scope: "shared"` stores one key for the whole fleet,
   which other agents can use once their own souls list it),
