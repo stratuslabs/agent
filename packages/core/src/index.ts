@@ -7061,8 +7061,10 @@ const contextSummaryRequest = (sessionId: string, prior: ContextSummary | undefi
 });
 
 /**
- * Raise the floor so the next attempt sends less, and report whether there
- * was anything left to give up.
+ * The floor a rise would set so the next attempt sends less, or undefined
+ * when there is nothing left to give up. Reads the session and changes
+ * nothing: the runner applies the floor only once the summary of what it
+ * cuts has settled (see `summarizeCut`).
  *
  * Halves the remaining window each time rather than trimming a fixed
  * amount: nothing here knows how many tokens a message is, and an overflow
@@ -7070,15 +7072,15 @@ const contextSummaryRequest = (sessionId: string, prior: ContextSummary | undefi
  * to converge in a handful of attempts rather than to creep towards the
  * answer one turn at a time, paying a rejected request for each step.
  *
- * Returns false when the window is already down to the newest turn. That is
+ * Undefined when the window is already down to the newest turn. That is
  * the floor's floor: a single turn that does not fit is a message larger
  * than the model can read, and no amount of dropping history fixes it.
  */
-export const raiseContextFloor = (session: Session): boolean => {
+const nextContextFloor = (session: Pick<Session, 'messages' | 'metadata'>): number | undefined => {
   const floor = contextFloorOf(session);
   const remaining = session.messages.length - floor;
   if (remaining <= 1) {
-    return false;
+    return undefined;
   }
   const target = floor + Math.max(1, Math.floor(remaining / 2));
   // The midpoint first, then the newest boundary there is. They differ when
@@ -7091,6 +7093,18 @@ export const raiseContextFloor = (session: Session): boolean => {
   // Nothing above the floor: the tail is one turn and there is nothing
   // further to drop.
   if (start === undefined || start <= floor) {
+    return undefined;
+  }
+  return start;
+};
+
+/**
+ * Raise the floor to `nextContextFloor`, and report whether there was
+ * anything left to give up.
+ */
+export const raiseContextFloor = (session: Session): boolean => {
+  const start = nextContextFloor(session);
+  if (start === undefined) {
     return false;
   }
   session.metadata = { ...(session.metadata ?? {}), [CONTEXT_FLOOR_METADATA_KEY]: start };
@@ -7873,12 +7887,20 @@ export class AgentRunner {
     });
   }
 
-  /** Ask every guard about the call about to be made; the first refusal throws. */
   /**
-   * After a floor rise, ask the model for a summary of what the rise cut
-   * and store it beside the floor (`CONTEXT_SUMMARY_METADATA_KEY`), so the
-   * window carries that instead of only a note that messages are gone.
-   * Returns whether a summary now covers everything below the window.
+   * Before a floor rise to `start`, ask the model for a summary of what the
+   * rise cuts, so the window carries that instead of only a note that
+   * messages are gone. Returns the summary that covers everything below
+   * `start`, for the caller to store beside the floor
+   * (`CONTEXT_SUMMARY_METADATA_KEY`), or undefined when there is none.
+   *
+   * Writes nothing to the session. The floor and its summary land together
+   * once this settles: a provider may save the session it is handed during
+   * the call (the fallback wrapper does, before asking its fallback), and a
+   * floor saved there with no summary beside it would hide the cut behind
+   * the plain note for good, since nothing asks again until the next
+   * overflow. A refusal or abort here therefore leaves the floor where it
+   * was, and the next turn's overflow asks again.
    *
    * One more call to the same provider the turn is on, asked and billed
    * like any other: the host's guards judge it first and a refusal ends
@@ -7896,21 +7918,18 @@ export class AgentRunner {
   private async summarizeCut(
     session: Session,
     shownFrom: number,
+    start: number,
     turnId: string,
     signal: AbortSignal | undefined,
     onDelta: ((delta: ProviderDelta) => Promise<void>) | undefined,
-  ): Promise<boolean> {
-    const start = nextTurnBoundary(session.messages, contextFloorOf(session));
-    if (start === undefined) {
-      return false;
-    }
+  ): Promise<ContextSummary | undefined> {
     const held = contextSummaryOf(session);
     // A stored summary that reaches past where the window began is not
     // this transcript's, and is replaced rather than built on.
     const prior = held !== undefined && held.through <= shownFrom ? held : undefined;
     const part = session.messages.slice(prior?.through ?? shownFrom, start);
     if (part.length === 0) {
-      return prior !== undefined && prior.through === start;
+      return prior !== undefined && prior.through === start ? prior : undefined;
     }
 
     await this.guardProviderCall(session);
@@ -7948,7 +7967,7 @@ export class AgentRunner {
       if (error instanceof HostRefusalError) {
         throw error;
       }
-      return false;
+      return undefined;
     }
     if (!sinkReported && response.usage) {
       this.recordUsage(session, turnId, response.usage);
@@ -7962,18 +7981,17 @@ export class AgentRunner {
     // No tools were offered, so a call is a model that did not do what it
     // was asked; nothing it said alongside one is the summary.
     if (text.length === 0 || response.parts.some((part) => part.type === 'tool-call')) {
-      return false;
+      return undefined;
     }
-    const summary: ContextSummary = {
+    return {
       from: prior?.from ?? shownFrom,
       through: start,
       text: clippedTo(text, CONTEXT_SUMMARY_MAX_CHARS),
       trust: leastTrusted(sessionWriteTrust(session), prior?.trust ?? 'agent'),
     };
-    session.metadata = { ...(session.metadata ?? {}), [CONTEXT_SUMMARY_METADATA_KEY]: { ...summary } };
-    return true;
   }
 
+  /** Ask every guard about the call about to be made; the first refusal throws. */
   private async guardProviderCall(
     session: Session,
     provider = this.options.provider.nameFor?.(session) ?? this.options.provider.name,
@@ -8353,7 +8371,8 @@ export class AgentRunner {
             // Where the window began before this rise: the summary covers
             // from there, or from where the stored one ends.
             const shownFrom = before === 0 ? 0 : nextTurnBoundary(session.messages, before) ?? before;
-            if (!raiseContextFloor(session)) {
+            const floor = nextContextFloor(session);
+            if (floor === undefined) {
               throw new Error(
                 `${error.message} The newest turn on its own is already larger than this model can read, `
                 + 'so dropping earlier messages cannot help: shorten the message, cut the tool output it '
@@ -8367,21 +8386,28 @@ export class AgentRunner {
             if (this.streaming) {
               await onDelta({ type: 'reset', reason: 'retry' });
             }
-            const summarized = await this.summarizeCut(session, shownFrom, turnId, signal, this.streaming ? onDelta : undefined);
+            const summary = await this.summarizeCut(session, shownFrom, floor, turnId, signal, this.streaming ? onDelta : undefined);
+            // The floor and its summary land together, after the summary
+            // settles and never ahead of it (see `summarizeCut`): a daemon
+            // that dies during the summary, or a turn stopped or refused
+            // there, pays that rejected call again and gets a summary for
+            // it, rather than coming back to a cut nothing covers.
+            session.metadata = {
+              ...(session.metadata ?? {}),
+              [CONTEXT_FLOOR_METADATA_KEY]: floor,
+              ...(summary !== undefined ? { [CONTEXT_SUMMARY_METADATA_KEY]: { ...summary } } : {}),
+            };
             // Durable before the retry, not after it. A daemon that dies
             // mid-recovery must not come back and replay the request that
             // was just refused; the floor is the one thing learned here and
-            // it costs a rejected call to learn again. Saved with the
-            // summary rather than ahead of it: a daemon that dies during
-            // the summary pays that rejected call again, and gets a summary
-            // for it, rather than coming back to a cut nothing covers.
+            // it costs a rejected call to learn again.
             await this.store.save(session);
             await this.bus.emit({
               type: 'session.context-trimmed',
               sessionId: session.id,
-              droppedMessages: contextFloorOf(session) - before,
-              floor: contextFloorOf(session),
-              summarized,
+              droppedMessages: floor - before,
+              floor,
+              summarized: summary !== undefined,
             });
           }
         }

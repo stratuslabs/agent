@@ -258,7 +258,9 @@ What this costs is real and worth knowing:
   summarized is too big even with long tool output clipped), the window
   narrows anyway and the agent is told only that earlier messages are not
   shown; the next narrowing whose summary succeeds catches up. The
-  summary call is billed and checked against budgets like any other.
+  summary call is billed and checked against budgets like any other. A
+  budget refusal, or a stop, during the summary call ends the turn before
+  the window narrows, so the next turn asks for the summary again.
 - **What an outside party wrote stays labeled.** A summary of a
   conversation that read a web page or another server's reply carries
   that label, and the agent is told to treat that part as data.

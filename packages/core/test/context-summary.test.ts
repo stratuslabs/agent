@@ -315,7 +315,12 @@ test('an abort during the summary stops the turn rather than falling back', asyn
     throw request.signal?.reason ?? new Error('aborted');
   });
   const store = new InMemorySessionStore();
-  const runner = new AgentRunner({ provider, store });
+  const events: StratusEvent[] = [];
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    events.push(event);
+  });
+  const runner = new AgentRunner({ provider, store, bus });
   await seed(store, 'sum-7', 10);
 
   await assert.rejects(
@@ -326,6 +331,40 @@ test('an abort during the summary stops the turn rather than falling back', asyn
   assert.equal(recorded.turns.length, 1);
   const stored = (await store.get('sum-7'))!;
   assert.equal(contextSummaryOf(stored), undefined);
+  // Nor did the floor rise without the summary it waited on: a floor saved
+  // alone hides the cut behind the plain note, and nothing would ask for a
+  // summary of it again. The next turn overflows once more and gets one.
+  assert.equal(contextFloorOf(stored), 0);
+  assert.deepEqual(events.filter((event) => event.type === 'session.context-trimmed'), []);
+});
+
+test('a floor is never saved ahead of its summary, even by a provider that saves the session mid-call', async () => {
+  // The fallback wrapper's shape: a primary that fails the summary has the
+  // session marked switched and saved before the fallback is asked. A
+  // daemon that dies during that second call comes back to whatever was
+  // saved then, and a raised floor with no summary beside it would stand
+  // for good, since nothing asks for a summary again until another overflow.
+  const store = new InMemorySessionStore();
+  const durable: { floor: number; summarized: boolean }[] = [];
+  const { provider } = createProvider(6, async (request) => {
+    await store.save(request.session);
+    const saved = (await store.get(request.session.id))!;
+    durable.push({ floor: contextFloorOf(saved), summarized: contextSummaryOf(saved) !== undefined });
+    return { parts: [{ type: 'text', text: 'Early on the person said the code word is pelican.' }] };
+  });
+  const runner = new AgentRunner({ provider, store });
+  await seed(store, 'sum-7b', 10);
+
+  const session = await runner.resume({ sessionId: 'sum-7b', userMessage: 'what was the code word?' });
+  assert.equal(session.status, 'completed');
+  assert.ok(durable.length >= 1, 'summarized');
+  assert.equal(durable[0]!.floor, 0, 'the first summary was asked before its floor was saved');
+  for (const saved of durable) {
+    assert.ok(saved.floor === 0 || saved.summarized, `floor ${saved.floor} saved with no summary`);
+  }
+  const stored = (await store.get('sum-7b'))!;
+  assert.ok(contextFloorOf(stored) > 0);
+  assert.equal(contextSummaryOf(stored)?.through, contextFloorOf(stored));
 });
 
 test('a host refusal of the summary call ends the turn, as it would any call', async () => {
@@ -349,6 +388,9 @@ test('a host refusal of the summary call ends the turn, as it would any call', a
 
   await assert.rejects(() => runner.resume({ sessionId: 'sum-8', userMessage: 'and now?' }), /used its budget/);
   assert.equal(recorded.summaries.length, 0, 'the refused call was never made');
+  // The cut waits for its summary, so a refused summary leaves no floor
+  // behind that no trim event or summary accounts for.
+  assert.equal(contextFloorOf((await store.get('sum-8'))!), 0);
 });
 
 test('a refusal from inside the summary call ends the turn too, rather than reading as a failed summary', async () => {
@@ -377,6 +419,7 @@ test('a refusal from inside the summary call ends the turn too, rather than read
   await assert.rejects(() => runner.resume({ sessionId: 'sum-8b', userMessage: 'and now?' }), /used its budget/);
   assert.equal(recorded.summaries.length, 1);
   assert.equal(recorded.turns.length, 1, 'no retry after the refusal');
+  assert.equal(contextFloorOf((await store.get('sum-8b'))!), 0);
 });
 
 test('a summary call is billed to the turn, and its words never stream to the person', async () => {

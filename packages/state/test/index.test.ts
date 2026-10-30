@@ -258,12 +258,15 @@ test('a summary the primary fails is answered by the fallback, routed like any c
   // summary, and the turn carries on there. Nothing about the summary is
   // special-cased, so it never runs on a model the turn would not.
   const { createFallbackWrappedProvider } = await import('../src/index.ts');
-  const { CONTEXT_SUMMARY_REQUEST, contextSummaryOf, transcriptOf } = await import('@stratusagent/core');
+  const { CONTEXT_SUMMARY_REQUEST, contextFloorOf, contextSummaryOf, transcriptOf } = await import('@stratusagent/core');
   const isSummary = (request: { session: Session; messages?: readonly unknown[] }): boolean => {
     const transcript = transcriptOf(request as never);
     return transcript.length === 1 && transcript[0]!.content.startsWith(CONTEXT_SUMMARY_REQUEST);
   };
   const served: string[] = [];
+  // What the wrapper saved before asking the fallback: a daemon that died
+  // during the fallback's summary would come back to this.
+  const savedFloors: number[] = [];
   const primary = {
     name: 'primary',
     async generate(request: { session: Session; messages?: readonly unknown[] }) {
@@ -280,6 +283,7 @@ test('a summary the primary fails is answered by the fallback, routed like any c
     async generate(request: { session: Session; messages?: readonly unknown[] }) {
       if (isSummary(request)) {
         served.push('fallback summary');
+        savedFloors.push(contextFloorOf((await store.get('long-fb'))!));
         return { parts: [{ type: 'text' as const, text: 'Early on the code word was pelican.' }] };
       }
       served.push('fallback turn');
@@ -303,6 +307,10 @@ test('a summary the primary fails is answered by the fallback, routed like any c
   const stored = (await store.get('long-fb'))!;
   assert.equal(stored.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], true);
   assert.match(contextSummaryOf(stored)?.text ?? '', /pelican/);
+  // The floor waited for the summary: the save before the fallback held the
+  // old floor, not a raised one with nothing summarizing what it cut.
+  assert.deepEqual(savedFloors, [0]);
+  assert.equal(contextSummaryOf(stored)?.through, contextFloorOf(stored));
 });
 
 test('a refusal the host made on purpose is not a model failing, so the fallback never answers instead', async () => {
