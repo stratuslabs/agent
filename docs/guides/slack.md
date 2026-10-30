@@ -221,11 +221,17 @@ line with their own text ("Finding answers…"). A turn nobody asked for (an age
 [judges](#how-an-agent-listens)) shows no status, since it may decide to
 say nothing.
 
-Messages you send while it is still working wait their turn and are
-answered in order. In a DM each one shows the status as soon as you send
-it, so a second message never makes the agent look idle; in a channel
-thread the status keeps saying what the running turn is doing until its
-reply posts.
+Messages you send while it is still working reach it at its next step:
+once the tool it is running finishes, it reads them before it decides what
+to do next, so "skip the tests" lands mid-task, and the reply it posts
+answers them along with what you first asked. If it is already writing
+its final reply, they wait, and its next turn answers everything that
+queued in one reply. An agent on a provider that runs its own tool loop
+(Codex, or Claude through a subscription sign-in) doesn't take messages
+mid-task yet: they always wait for the next turn. In a DM each message
+shows the status as soon as you send it, so a second message never makes
+the agent look idle; in a channel thread the status keeps saying what the
+running turn is doing until its reply posts.
 
 If you would rather watch the reply being written, set `stream`: the agent
 posts a `…` placeholder at once, edits it as the reply arrives, shows

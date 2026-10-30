@@ -325,9 +325,21 @@ export interface Message {
    * in one user message (card 423). Every key reader matches these as it
    * matches `idempotencyKey` (`carriesKey`), so a repeat of an absorbed
    * dispatch is the merged turn, never a second one. Present only when
-   * something was absorbed.
+   * something was absorbed. A turn that took a message at a tool step
+   * (`steered`) adds that dispatch's keys here too, in the save that
+   * appends it.
    */
   absorbedKeys?: string[];
+  /**
+   * A user message that reached a turn already running, at its next tool
+   * step (card 948): somebody wrote while the agent worked, and it read
+   * that before its next call instead of after its whole turn. It starts
+   * no turn. Its dispatches' keys are on the message the turn started on
+   * (`absorbedKeys`), so every key reader finds the turn they joined, and
+   * every reader of "the turn's message" passes over it
+   * (`turnMessageOf`). Present only when true.
+   */
+  steered?: boolean;
   /**
    * Why the turn this user message started failed, written by
    * `recordTurnFailure` in the save that fails it. The session's
@@ -3584,7 +3596,7 @@ export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey:
   if (start < 0) {
     return undefined;
   }
-  const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
+  const next = session.messages.findIndex((message, index) => index > start && startsTurn(message));
   return latestTurnReply({ messages: session.messages.slice(0, next < 0 ? undefined : next) });
 };
 
@@ -3607,7 +3619,7 @@ export const turnFilesFor = (
   if (start < 0) {
     return [];
   }
-  const next = session.messages.findIndex((message, index) => index > start && message.role === 'user');
+  const next = session.messages.findIndex((message, index) => index > start && startsTurn(message));
   return session.messages
     .slice(start + 1, next < 0 ? undefined : next)
     .flatMap((message) => (message.role === 'tool' && message.toolResult !== undefined
@@ -3672,6 +3684,35 @@ export const redactedError = (error: unknown, secrets: Iterable<string | undefin
 };
 
 /**
+ * Whether a message begins a turn's span in the transcript: a user
+ * message, except one steered into a turn already running
+ * (`Message.steered`), which that turn goes on past.
+ */
+const startsTurn = (message: Message): boolean => message.role === 'user' && message.steered !== true;
+
+/**
+ * The user message the session's newest turn started on: its newest user
+ * message that was not steered into it (`Message.steered`). The one
+ * reading of "this turn's message" — its key, its failure, whether it was
+ * addressed, whether it was already continued after a crash — so a
+ * message somebody sent mid-turn never stands in for the one the turn is
+ * answering. While a turn is in flight this is its message (`observe`
+ * refuses to append during one).
+ */
+export const turnMessageOf = (session: Pick<Session, 'messages'>): Message | undefined =>
+  session.messages.findLast(startsTurn);
+
+/**
+ * A key the turn a message started is known by: its own, or else the first
+ * of a dispatch it took in (`absorbedKeys`). A turn whose own message came
+ * unkeyed and then took a keyed message in at a tool step (card 948) is a
+ * keyed work item all the same — a restart continues it rather than
+ * failing it, and the key reads back its state (`workItemState`).
+ */
+export const turnKeyOf = (message: Pick<Message, 'idempotencyKey' | 'absorbedKeys'> | undefined): string | undefined =>
+  message?.idempotencyKey ?? message?.absorbedKeys?.[0];
+
+/**
  * Fail a session's in-flight turn: `status` and `lastError`, and the error
  * on the turn's own user message (`Message.turnError`), where the next
  * turn cannot overwrite it. The one write every path that fails a turn
@@ -3682,7 +3723,7 @@ export const redactedError = (error: unknown, secrets: Iterable<string | undefin
 export const recordTurnFailure = (session: Session, error: string): void => {
   session.status = 'failed';
   session.lastError = error;
-  const turn = session.messages.findLast((message) => message.role === 'user');
+  const turn = turnMessageOf(session);
   if (turn !== undefined) {
     turn.turnError = error;
   }
@@ -3696,7 +3737,7 @@ export const recordTurnFailure = (session: Session, error: string): void => {
  */
 export const isLatestTurn = (session: Pick<Session, 'messages'>, idempotencyKey: string): boolean =>
   ((latest) => latest !== undefined && carriesKey(latest, idempotencyKey))(
-    session.messages.findLast((message) => message.role === 'user' && message.observed !== true),
+    session.messages.findLast((message) => startsTurn(message) && message.observed !== true),
   );
 
 /**
@@ -3783,7 +3824,7 @@ export const OVERHEARD_IMAGES_NOTE = '(attached to the overheard message above, 
  * as the answer rather than as a broken endpoint.
  */
 export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =>
-  session.messages.findLast((message) => message.role === 'user')?.overheard === true;
+  turnMessageOf(session)?.overheard === true;
 
 /**
  * Where the dispatch carrying `idempotencyKey` stands in this session:
@@ -3809,7 +3850,7 @@ export const workItemState = (
     return undefined;
   }
   const inFlight = session.status === 'running' || session.status === 'pending_approval';
-  return inFlight && session.messages.findLast((message) => message.role === 'user') === keyed ? 'unfinished' : 'finished';
+  return inFlight && turnMessageOf(session) === keyed ? 'unfinished' : 'finished';
 };
 
 /**
@@ -6530,8 +6571,38 @@ export interface RunInput {
    * file that another file is its soul.
    */
   runtime?: AgentRuntimeContext;
+  /**
+   * Asked for what somebody has said since the turn started, at each of
+   * its tool steps: after the step's every call has its result and before
+   * the next provider call (card 948). What it hands over goes into the
+   * transcript right there, as a user message marked `steered`, so the
+   * agent reads a correction at its next step instead of after its whole
+   * turn. The message gives the turn a fresh step budget and failure
+   * streak, as it would have had as its own turn; its sender lowers the
+   * session's trust like any sender; its keys join the turn's message.
+   *
+   * Never asked before the first provider call, after an answer, on a
+   * turn nobody asked for (`addressed: false`, whose answer may be
+   * silence), or by a provider that hosts its own tool loop, whose steps
+   * the runner never sees. A host that omits it gets turns that hear
+   * nothing until they end, as before; what is handed over is the host's
+   * to answer for, since the runner only records it.
+   */
+  steer?: () => Promise<SteeredMessage | undefined>;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
+}
+
+/** What a running turn takes in at a tool step; see `RunInput.steer`. */
+export interface SteeredMessage {
+  /** What was said, as a user message carries it (speaker included, if the channel writes one). */
+  userMessage: string;
+  /** Images sent with it; see `Message.images`. */
+  images?: ImageAttachment[];
+  /** Read for the sender's trust (`SENDER_TRUST_METADATA_KEY`) and merged into nothing, as `ResumeInput.metadata` is. */
+  metadata?: JsonObject;
+  /** Idempotency keys of the dispatches it carries, added to the turn's message (`Message.absorbedKeys`). */
+  keys?: string[];
 }
 
 export interface ResumeInput {
@@ -6557,6 +6628,8 @@ export interface ResumeInput {
   metadata?: JsonObject;
   /** See `RunInput.runtime`. */
   runtime?: AgentRuntimeContext;
+  /** See `RunInput.steer`. */
+  steer?: () => Promise<SteeredMessage | undefined>;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
 }
@@ -6863,8 +6936,8 @@ export const leftForNextStart = (session: Pick<Session, 'messages'>, error: unkn
   if (!(error instanceof RunAbortedError) || !error.resumable) {
     return false;
   }
-  const message = session.messages.findLast((candidate) => candidate.role === 'user');
-  return message?.idempotencyKey !== undefined && message.continuedAfterCrash !== true && message.hostedLoop !== true;
+  const message = turnMessageOf(session);
+  return turnKeyOf(message) !== undefined && message?.continuedAfterCrash !== true && message?.hostedLoop !== true;
 };
 
 /**
@@ -7234,7 +7307,7 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.tainted', sessionId: session.id, trust: senderTrust, source: 'sender' });
     }
 
-    return this.executeTurns(session, input.signal, undefined, input.runtime);
+    return this.executeTurns(session, input.signal, undefined, input.runtime, input.steer);
   }
 
   /**
@@ -7332,7 +7405,7 @@ export class AgentRunner {
 
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
-    return this.executeTurns(working, input.signal, undefined, input.runtime);
+    return this.executeTurns(working, input.signal, undefined, input.runtime, input.steer);
   }
 
   /**
@@ -7369,7 +7442,7 @@ export class AgentRunner {
     // Before reconciliation splices results into the response it judges.
     const answered = lastResponseIsAnswer(session);
     this.reconcileInterruptedToolCalls(session);
-    const message = session.messages.findLast((candidate) => candidate.role === 'user');
+    const message = turnMessageOf(session);
     if (message !== undefined) {
       message.continuedAfterCrash = true;
     }
@@ -7389,6 +7462,9 @@ export class AgentRunner {
     // as an answered call with nothing left to run, so the loop counts this
     // message's responses (`responsesThroughCall`) and goes straight to the
     // next provider turn — the wrap-up, if the ceiling has been reached.
+    // Any user message, a steered one included: a message that reached the
+    // turn mid-way renewed its budget (`RunInput.steer`), so the responses
+    // counted are the ones since.
     const userIndex = working.messages.findLastIndex((candidate) => candidate.role === 'user');
     const callIndex = working.messages.findLastIndex((candidate) => candidate.role === 'assistant' && (candidate.toolCalls?.length ?? 0) > 0);
     const lastCall = callIndex > userIndex ? working.messages[callIndex]?.toolCalls?.at(-1) : undefined;
@@ -7683,6 +7759,8 @@ export class AgentRunner {
     },
     /** See `RunInput.runtime`. */
     runtime?: AgentRuntimeContext,
+    /** See `RunInput.steer`. Not passed for a recovered turn. */
+    steer?: () => Promise<SteeredMessage | undefined>,
   ): Promise<Session> {
     let session = initialSession;
     let pendingEntry = resumeFrom;
@@ -7731,6 +7809,25 @@ export class AgentRunner {
       let continued = 0;
       for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
+        // Between a tool step and the next call, and only there: every call
+        // of the last response has its result, so a user message here
+        // splits no call from its answer. Before the budget below is read,
+        // because what arrives renews it.
+        if (steer !== undefined && pendingEntry === undefined && session.messages.at(-1)?.role === 'tool' && !isUnaddressedTurn(session)) {
+          const steered = await steer();
+          throwIfAborted(signal);
+          if (steered !== undefined) {
+            await this.takeSteered(session, steered);
+            // A person's message is new information, as it would have been
+            // as its own turn: the steps it gets are counted from here, and
+            // a call that kept failing may work now.
+            ceiling = turn - 1 + this.maxTurns;
+            continued = 0;
+            lastFailure = undefined;
+            failureRun = 0;
+            stuck = undefined;
+          }
+        }
         // Out of budget and still working — the last response called a
         // tool — so with auto-continue on it gets another allowance rather
         // than a wrap-up. A loop, because a recovered turn can start
@@ -8117,6 +8214,31 @@ export class AgentRunner {
       });
       throw error;
     }
+  }
+
+  /**
+   * Records a message that reached a running turn (`RunInput.steer`): its
+   * keys on the turn's message, its text as a `steered` user message, its
+   * sender's trust on the session — in one save, before the provider sees
+   * it, so a key is never durable without the message it brought.
+   */
+  private async takeSteered(session: Session, steered: SteeredMessage): Promise<void> {
+    const opening = turnMessageOf(session);
+    const keys = (steered.keys ?? []).filter((key) => opening !== undefined && !carriesKey(opening, key));
+    if (opening !== undefined && keys.length > 0) {
+      opening.absorbedKeys = [...(opening.absorbedKeys ?? []), ...keys];
+    }
+    session.messages.push({
+      id: `${session.id}:user:${session.messages.length + 1}`,
+      role: 'user',
+      content: steered.userMessage,
+      createdAt: new Date().toISOString(),
+      ...userImages(steered.images),
+      steered: true,
+    });
+    omitImagesOutsideReplayBudget(session.messages, this.imageReplayBudget);
+    await this.taint(session, senderTrustOf(steered.metadata), 'sender');
+    await this.store.save(session);
   }
 
   /** Whether a message out of budget gets another; see `AgentRunnerOptions.autoContinue`. */

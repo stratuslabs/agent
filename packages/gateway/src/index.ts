@@ -11,6 +11,8 @@ import {
   senderTrustOf,
   SENDER_TRUST_METADATA_KEY,
   workItemState,
+  turnMessageOf,
+  turnKeyOf,
   leftForNextStart,
   lastResponseIsAnswer,
   MAX_IDEMPOTENCY_KEY_LENGTH,
@@ -66,6 +68,7 @@ import {
   type ProviderCallGuard,
   type ProviderContribution,
   type Session,
+  type SteeredMessage,
   type StratusEvent,
   type ToolRisk,
   type TrustLevel,
@@ -1135,6 +1138,16 @@ export interface DispatchInput {
    *
    * The merged turn runs at the least trusted sender in it. A turn nobody
    * asked for (`addressed: false`) is never merged.
+   *
+   * Steering (card 948): while the running turn is itself an opted-in,
+   * addressed dispatch for the same agent, the batch waiting behind it is
+   * handed to that turn at its next tool step instead (`RunInput.steer`),
+   * so the agent reads it before its next call rather than after its whole
+   * turn. Every dispatch in the batch, its leader included, is then
+   * absorbed into the running turn — called here and settled with that
+   * turn's outcome — and the running turn's caller renders the answer. A
+   * turn that answers without another tool step leaves the batch to run
+   * next, merged, as above.
    */
   onAbsorbed?: () => void;
 }
@@ -1148,7 +1161,20 @@ interface MergeJoiner {
 
 interface MergeBatch {
   agentId: string | undefined;
+  /** The dispatch that opened the batch and runs it, unless it is steered. */
+  leader: MergeJoiner;
+  /**
+   * Nothing was queued on the session's chain when it opened, so nothing
+   * can be ahead of it: the chain is first in, first out. Only such a batch
+   * is steered (card 948); one behind other work waits its turn.
+   */
+  firstInLine: boolean;
   absorbed: MergeJoiner[];
+  /**
+   * Taken by the turn running ahead of it (card 948), which settles every
+   * caller in it: the leader's place on the chain then runs nothing.
+   */
+  steered: boolean;
   /** Every image in the batch so far, leader's first. */
   images: ImageAttachment[];
   /** Characters of the merged user message so far, separators included. */
@@ -1178,10 +1204,20 @@ const fitsReplayBudget = (images: readonly ImageAttachment[]): boolean =>
   images.length === 0 || imagesWithinReplayBudget([{ id: '', createdAt: '', role: 'user', content: '', images: [...images] }]).size === images.length;
 
 /** A signal that aborts once every one of `signals` has. */
-const allAborted = (signals: readonly AbortSignal[]): AbortSignal => {
+const allAborted = (signals: readonly AbortSignal[]): AbortSignal => joinableSignal(signals).signal;
+
+/**
+ * `allAborted` for callers that keep joining: a turn that takes in messages
+ * at its tool steps (card 948) is cancelled only once every caller in it
+ * is, the ones who joined late included. A caller joining with no signal
+ * can never cancel, so from then on neither can the turn.
+ */
+const joinableSignal = (initial: readonly AbortSignal[]): { signal: AbortSignal; join: (signal: AbortSignal | undefined) => void } => {
   const controller = new AbortController();
+  const signals = [...initial];
+  let uncancellable = false;
   const check = (): void => {
-    if (!controller.signal.aborted && signals.every((signal) => signal.aborted)) {
+    if (!uncancellable && !controller.signal.aborted && signals.every((signal) => signal.aborted)) {
       controller.abort(signals[signals.length - 1]?.reason);
     }
   };
@@ -1189,7 +1225,17 @@ const allAborted = (signals: readonly AbortSignal[]): AbortSignal => {
     signal.addEventListener('abort', check, { once: true });
   }
   check();
-  return controller.signal;
+  return {
+    signal: controller.signal,
+    join: (signal) => {
+      if (signal === undefined) {
+        uncancellable = true;
+        return;
+      }
+      signals.push(signal);
+      signal.addEventListener('abort', check, { once: true });
+    },
+  };
 };
 
 export interface ObserveInput {
@@ -4052,6 +4098,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // are independent — different conversations run concurrently.
   const sessionChains = new Map<string, Promise<unknown>>();
   /**
+   * Work queued on each session's chain that has not started, of every
+   * kind (a dispatch, an overheard message, a recovery). What says whether
+   * a merged-turn batch is first in line behind the running turn, which
+   * steering needs (card 948): a batch with anything ahead of it would be
+   * answered before what was said first.
+   */
+  const queuedWork = new Map<string, number>();
+  const releaseQueued = (sessionId: string): void => {
+    const left = (queuedWork.get(sessionId) ?? 1) - 1;
+    if (left > 0) {
+      queuedWork.set(sessionId, left);
+    } else {
+      queuedWork.delete(sessionId);
+    }
+  };
+  /**
    * Dispatches queued behind a session's running turn, per session: what
    * tells an auto-continuing turn that somebody wrote meanwhile, so it
    * wraps up and lets them in rather than keep the session to itself.
@@ -4298,9 +4360,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     try {
       return await turn;
     } catch (error) {
-      if (input.idempotencyKey !== undefined && error instanceof RunAbortedError && error.resumable) {
+      if (error instanceof RunAbortedError && error.resumable) {
         const left = await store.get(input.sessionId).catch(() => undefined);
-        if (left !== undefined && workItemState(left, input.idempotencyKey) === 'unfinished' && leftForNextStart(left, error)) {
+        // The dispatch's own key, or, for an unkeyed one whose turn took
+        // keyed messages in at a tool step (card 948), the key the turn has
+        // from them: its steered callers are told what a keyed caller is.
+        const key = input.idempotencyKey ?? (left === undefined ? undefined : turnKeyOf(turnMessageOf(left)));
+        if (left !== undefined && key !== undefined && workItemState(left, key) === 'unfinished' && leftForNextStart(left, error)) {
           throw leftForNext();
         }
       }
@@ -4317,6 +4383,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     input: DispatchInput,
     absorbedKeys: readonly string[] = [],
     subAgent?: AgentDefinition,
+    /** See `RunInput.steer`; passed by `dispatch` for an opted-in caller. */
+    steer?: () => Promise<SteeredMessage | undefined>,
   ): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
@@ -4455,6 +4523,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(hostedLoop ? { hostedLoop } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
+          ...(steer !== undefined ? { steer } : {}),
           signal,
         });
       }
@@ -4471,6 +4540,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.earlier !== undefined && input.earlier.length > 0 ? { earlier: input.earlier } : {}),
         metadata,
         runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata, subAgent !== undefined),
+        ...(steer !== undefined ? { steer } : {}),
         signal,
       });
     }));
@@ -4677,7 +4747,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // otherwise stay parked for every later start and redelivery to try
       // again. An unkeyed one keeps waiting for a sweep that can, as before.
       const after = await store.get(sessionId).catch(() => undefined);
-      const key = after?.messages.findLast((candidate) => candidate.role === 'user')?.idempotencyKey;
+      const key = after === undefined ? undefined : turnKeyOf(turnMessageOf(after));
       if (after !== undefined && key !== undefined && after.status === 'pending_approval' && workItemState(after, key) === 'unfinished') {
         await failParked(after, ABANDONED_TURN_ERROR).catch(() => {});
       }
@@ -4794,8 +4864,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * whose caller was never promised anything and is told to send again.
    */
   const settleAbandonedTurn = async (session: Session): Promise<Session> => {
-    const message = session.messages.findLast((candidate) => candidate.role === 'user');
-    if (message?.idempotencyKey === undefined) {
+    const message = turnMessageOf(session);
+    if (message === undefined || turnKeyOf(message) === undefined) {
       return failAbandoned(session);
     }
     // An answer already in the transcript is completed whatever came before
@@ -4959,6 +5029,106 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
+   * What a running turn takes in at its next tool step (card 948): the
+   * merged-turn batch waiting behind it, whole — leader and absorbed alike
+   * — when it is for the same agent. The dispatches it takes join `into`,
+   * which the running turn settles with its own outcome (`runSteerable`).
+   *
+   * A part cancelled while it waited is refused, as `runMerged` refuses it.
+   * A part whose key this session (or the archive it rolled over from)
+   * already holds is a repeat, and judging a repeat can mean settling a
+   * turn — never something to do from inside one — so such a batch is not
+   * taken: it waits and runs next, merged, where that is judged. Nor while
+   * the gateway is stopping, when the batch is what the drain refuses.
+   */
+  const takeSteered = async (
+    sessionId: string,
+    agentId: string | undefined,
+    into: MergeJoiner[],
+    /**
+     * Asked last, with nothing awaited after it: whether the running turn
+     * still takes these callers, joining them to its cancellation if so. A
+     * turn cancelled while the store was read takes nothing, and the batch
+     * waits and runs next, as it would have.
+     */
+    admit: (parts: readonly MergeJoiner[]) => boolean,
+  ): Promise<SteeredMessage | undefined> => {
+    const batch = openBatches.get(sessionId);
+    if (stopping || batch === undefined || !batch.firstInLine || batch.agentId !== agentId) {
+      return undefined;
+    }
+    // Until every key in it is checked with nothing awaited since: a message
+    // can join while the store is read, and is checked on the next pass; a
+    // batch closed meanwhile is no longer this turn's to take.
+    const checked = new Set<string>();
+    let session: Session | undefined;
+    for (;;) {
+      if (stopping || openBatches.get(sessionId) !== batch) {
+        return undefined;
+      }
+      const unchecked = [batch.leader, ...batch.absorbed].flatMap((part) => (
+        part.input.idempotencyKey !== undefined && !checked.has(part.input.idempotencyKey) ? [part.input.idempotencyKey] : []
+      ));
+      if (unchecked.length === 0) {
+        break;
+      }
+      session ??= await store.get(sessionId);
+      for (const key of unchecked) {
+        checked.add(key);
+        if (session !== undefined && (workItemState(session, key) !== undefined || await archivedRepeat(session, key) !== undefined)) {
+          return undefined;
+        }
+      }
+    }
+    const all = [batch.leader, ...batch.absorbed];
+    if (!admit(all.filter((part) => part.input.signal?.aborted !== true))) {
+      return undefined;
+    }
+    openBatches.delete(sessionId);
+    batch.steered = true;
+    // Its place on the chain runs nothing now, so it is not ahead of a batch
+    // opening behind it, which can then be steered at a later step.
+    releaseQueued(sessionId);
+    // Not waiting any more; the leader's place on the chain does not count it again.
+    const left = (waitingDispatches.get(sessionId) ?? all.length) - all.length;
+    if (left > 0) {
+      waitingDispatches.set(sessionId, left);
+    } else {
+      waitingDispatches.delete(sessionId);
+    }
+    const runnable: MergeJoiner[] = [];
+    for (const part of all) {
+      if (part.input.signal?.aborted) {
+        part.reject(abortErrorFor(part.input.signal));
+        continue;
+      }
+      runnable.push(part);
+    }
+    if (runnable.length === 0) {
+      return undefined;
+    }
+    const keys = runnable.flatMap((part) => (part.input.idempotencyKey !== undefined ? [part.input.idempotencyKey] : []));
+    const items = liveWorkItems.get(sessionId);
+    for (const key of keys) {
+      const item = items?.get(key);
+      if (item !== undefined) {
+        item.confirmed = true;
+      }
+    }
+    into.push(...runnable);
+    const labelled = runnable.some((part) => part.input.metadata !== undefined && SENDER_TRUST_METADATA_KEY in part.input.metadata);
+    const lowest = leastTrusted(...runnable.map((part) => senderTrustOf(part.input.metadata)));
+    const images = runnable.flatMap((part) => part.input.images ?? []);
+    log(`${sessionId}: ${runnable.length} message(s) sent during the running turn reached it at its next step`);
+    return {
+      userMessage: runnable.map((part) => part.input.userMessage).join(MERGED_SEPARATOR),
+      ...(images.length > 0 ? { images } : {}),
+      ...(labelled ? { metadata: { [SENDER_TRUST_METADATA_KEY]: lowest } } : {}),
+      ...(keys.length > 0 ? { keys } : {}),
+    };
+  };
+
+  /**
    * Settles a keyed item the last process left unfinished before any other
    * message joins its session. Channels are up before the sweeps reach it,
    * and a different message resumed onto it would become the session's
@@ -4970,7 +5140,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const settleOrphanedItem = async (sessionId: string): Promise<void> => {
     const session = await store.get(sessionId);
-    const key = session?.messages.findLast((candidate) => candidate.role === 'user')?.idempotencyKey;
+    const key = session === undefined ? undefined : turnKeyOf(turnMessageOf(session));
     if (session !== undefined && key !== undefined && workItemState(session, key) === 'unfinished') {
       // A continuation that fails has failed its session, which is settled
       // too; the message waiting behind it runs either way.
@@ -5002,9 +5172,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * stops that, and it only holds if everything that writes a session goes
    * through it.
    */
-  const onSessionChain = <T>(sessionId: string, work: () => Promise<T>): Promise<T> => {
+  const onSessionChain = <T>(
+    sessionId: string,
+    work: () => Promise<T>,
+    /** True once this work no longer counts as queued: a batch steered into the turn ahead (`takeSteered` released it). */
+    released?: () => boolean,
+  ): Promise<T> => {
     const previous = sessionChains.get(sessionId) ?? Promise.resolve();
-    const turn = previous.then(work, work);
+    queuedWork.set(sessionId, (queuedWork.get(sessionId) ?? 0) + 1);
+    const start = (): Promise<T> => {
+      if (released?.() !== true) {
+        releaseQueued(sessionId);
+      }
+      return work();
+    };
+    const turn = previous.then(start, start);
 
     const settled = turn.catch(() => {});
     sessionChains.set(sessionId, settled);
@@ -5229,7 +5411,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Otherwise it leads a new batch, if it is waiting behind a turn at all:
     // a message to an idle session runs at once, alone.
     const batch: MergeBatch | undefined = mergeable && sessionChains.has(input.sessionId)
-      ? { agentId: input.agentId, absorbed: [], images: [...(input.images ?? [])], chars: input.userMessage.length }
+      ? {
+        agentId: input.agentId,
+        // Settled through `settleLeader`, read when called: it is assigned below.
+        leader: { input, resolve: (session) => settleLeader({ session }), reject: (error) => settleLeader({ error }) },
+        firstInLine: (queuedWork.get(input.sessionId) ?? 0) === 0,
+        absorbed: [],
+        steered: false,
+        images: [...(input.images ?? [])],
+        chars: input.userMessage.length,
+      }
       : undefined;
     if (batch !== undefined) {
       openBatches.set(input.sessionId, batch);
@@ -5334,7 +5525,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         activeTurns.set(input.sessionId, merged.turnId);
       }
       try {
-        outcome = { session: await dispatchInternal(merged, absorbedKeys) };
+        outcome = { session: await runSteerable(merged, absorbedKeys) };
       } catch (error) {
         outcome = { error };
       } finally {
@@ -5366,7 +5557,57 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       settleLeader = (outcome) => ('error' in outcome ? reject(outcome.error) : resolve(outcome.session));
     });
     waitingDispatches.set(input.sessionId, (waitingDispatches.get(input.sessionId) ?? 0) + 1);
+    /**
+     * Runs this dispatch's turn, handing it whatever queues behind it at
+     * each tool step (`takeSteered`), then settles every dispatch it took
+     * with the turn's outcome — the outcome they joined. Only for a caller
+     * that opted into merged turns: it is the one that renders an answer
+     * covering messages other than its own.
+     */
+    const runSteerable = async (turnInput: DispatchInput, absorbedKeys: readonly string[] = []): Promise<Session> => {
+      const steered: MergeJoiner[] = [];
+      // Cancelled only when every caller in it is, as a merged turn is, the
+      // ones steered in later included: one caller giving up must not take
+      // the others' answer with it. A turn with a caller who cannot cancel
+      // has no signal to join.
+      const joint = turnInput.signal !== undefined ? joinableSignal([turnInput.signal]) : undefined;
+      const steer = mergeable
+        ? (): Promise<SteeredMessage | undefined> => takeSteered(input.sessionId, input.agentId, steered, (parts) => {
+          if (joint?.signal.aborted === true) {
+            return false;
+          }
+          for (const part of parts) {
+            joint?.join(part.input.signal);
+          }
+          return true;
+        })
+        : undefined;
+      const running = joint !== undefined ? { ...turnInput, signal: joint.signal } : turnInput;
+      let outcome: { session: Session } | { error: unknown };
+      try {
+        outcome = { session: await dispatchInternal(running, absorbedKeys, undefined, steer) };
+      } catch (error) {
+        outcome = { error };
+      }
+      for (const part of steered) {
+        part.input.onAbsorbed?.();
+        if ('session' in outcome) {
+          part.resolve(outcome.session);
+        } else {
+          part.reject(outcome.error);
+        }
+      }
+      if ('error' in outcome) {
+        throw outcome.error;
+      }
+      return outcome.session;
+    };
     const chained: Promise<Session> = onSessionChain(input.sessionId, async () => {
+      // Steered into the turn that ran ahead of it, which has answered and
+      // settled everyone in the batch already — this caller included.
+      if (batch?.steered === true) {
+        return turn;
+      }
       // The batch closes here: anything arriving from now on waits behind
       // this turn and leads the next one.
       if (batch !== undefined && openBatches.get(input.sessionId) === batch) {
@@ -5400,18 +5641,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       await settleOrphanedItem(input.sessionId);
       if (turnId === undefined) {
-        return dispatchInternal(input);
+        return runSteerable(input);
       }
       activeTurns.set(input.sessionId, turnId);
       try {
-        return await dispatchInternal(input);
+        return await runSteerable(input);
       } finally {
         // Unconditional, and safe to be: the chain guarantees no other turn
         // for this session ran between the set above and here, so this can
         // only ever be clearing its own entry.
         activeTurns.delete(input.sessionId);
       }
-    });
+    }, () => batch?.steered === true);
     // A second settle (a leader already settled early) is a no-op.
     chained.then((session) => settleLeader({ session }), (error: unknown) => settleLeader({ error }));
     if (idempotencyKey !== undefined) {
