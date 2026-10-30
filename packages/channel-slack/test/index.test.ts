@@ -9005,6 +9005,25 @@ test('a submitted credential goes to the gateway and nowhere else, and the reque
   await adapter.stop();
 });
 
+test('the form\'s field takes several lines, so a key file reaches the gateway with its line breaks', async () => {
+  const { socket, web, gateway, adapter, provided, pending, ask } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-1');
+  await ask();
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
+  // A one-line plain_text_input flattens a pasted PEM private key's line
+  // breaks; a multiline one keeps them.
+  const view = web.views_opened.at(-1)?.view as { blocks?: Array<{ type?: string; element?: { type?: string; multiline?: boolean } }> } | undefined;
+  const field = view?.blocks?.find((block) => block.type === 'input')?.element;
+  assert.deepEqual({ type: field?.type, multiline: field?.multiline }, { type: 'plain_text_input', multiline: true });
+
+  const pem = [`-----BEGIN ${['PRIVATE', 'KEY'].join(' ')}-----`, 'bm90IGEga2V5', `-----END ${['PRIVATE', 'KEY'].join(' ')}-----`].join('\n');
+  await socket.deliver('interactive', credentialSubmission('cred-1', 'U-DYLAN', pem), async () => {});
+  assert.deepEqual(provided, [{ requestId: 'cred-1', value: pem, actor: 'U-DYLAN' }]);
+
+  await adapter.stop();
+});
+
 test('a refused submission keeps the form open with the reason beside the field', async () => {
   const { socket, gateway, adapter, pending, refuse, provided, ask } = credentialAdapter(['U-DYLAN']);
   await adapter.start(gateway);

@@ -3281,7 +3281,10 @@ const credentialModal = (post: PendingCredentialPost, requestId: string): SlackB
       type: 'input',
       block_id: CREDENTIAL_BLOCK,
       label: { type: 'plain_text', text: `Value for ${post.name}` },
-      element: { type: 'plain_text_input', action_id: CREDENTIAL_INPUT },
+      // Several lines: a one-line field flattens the line breaks of a pasted
+      // key file, such as a PEM private key, and the key stops working.
+      element: { type: 'plain_text_input', action_id: CREDENTIAL_INPUT, multiline: true },
+      hint: { type: 'plain_text', text: 'Paste the whole value. A key file, such as a PEM private key, keeps its line breaks.' },
     },
   ],
 });
