@@ -125,7 +125,9 @@ carrying a file, or one the author also broadcast to the channel, is a
 follow-up too; what Slack marks as bookkeeping — an edit, a deletion, a
 join — is not, and nothing answers it. **Images are shown to the model.**
 A PNG, JPEG, GIF, or WebP attached to a message is downloaded with the
-bot token and sent with the message — a screenshot alone, with nothing
+bot token and sent with the message (the token is only ever sent to
+`https://files.slack.com`: a remote file, an app's link to a file it hosts
+elsewhere, is named and never fetched) — a screenshot alone, with nothing
 typed, is a question in its own right and gets an answer. That needs the
 `files:read` scope, which the shipped manifest asks for; an app installed
 without it should have the scope added under **OAuth & Permissions** and be

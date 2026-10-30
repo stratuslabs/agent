@@ -647,7 +647,9 @@ export interface SlackAdapterOptions {
   /**
    * Test injection: fetch a file's private URL with the bot token. The
    * Web API client has no call for this — file bytes are served from a
-   * plain authenticated URL — so it is its own seam.
+   * plain authenticated URL — so it is its own seam. Only ever handed
+   * URLs on `https://files.slack.com`: the adapter refuses any other
+   * before calling it (see `onlySlackFileHost`).
    */
   fetchFile?: SlackFileFetcher;
   /**
@@ -858,6 +860,41 @@ export const createSlackFileFetcher = (fetchImpl: typeof fetch): SlackFileFetche
 
 const defaultFetchFile: SlackFileFetcher = (url, botToken, signal, maxBytes) =>
   createSlackFileFetcher(fetch)(url, botToken, signal, maxBytes);
+
+/**
+ * The one origin a file URL may name for the bot token to go with it.
+ * `url_private` does not by itself mean Slack hosts the file: for a remote
+ * file (an app's pointer to a file it hosts), Slack returns the app's own
+ * URL there, on whatever host the app chose, so any app with
+ * `remote_files:write` could collect the token of every agent that opened
+ * its file. Slack's rule is never to send Slack credentials to such a URL,
+ * and to compare the parsed host exactly rather than a prefix
+ * (docs.slack.dev, Working with files: Downloading files). Previews and
+ * downloads both live here. A redirect elsewhere is not a leak either:
+ * fetch drops `authorization` on a cross-origin redirect.
+ */
+const SLACK_FILE_ORIGIN = 'https://files.slack.com';
+
+/**
+ * A fetcher that is only ever handed URLs on Slack's file host. Anything
+ * else is refused before a request is made, with a reason that names the
+ * origin, and the callers' own handling turns that into a name-only file
+ * and an operator warning, as for any download that failed.
+ */
+const onlySlackFileHost = (fetchFile: SlackFileFetcher): SlackFileFetcher => (url, botToken, signal, maxBytes) => {
+  let origin: string | undefined;
+  try {
+    const parsed = new URL(url);
+    // Credentials in the URL would be sent with the token: not Slack's.
+    origin = parsed.username === '' && parsed.password === '' ? parsed.origin : `${parsed.protocol}//(credentials)@${parsed.host}`;
+  } catch {
+    origin = undefined;
+  }
+  if (origin !== SLACK_FILE_ORIGIN) {
+    return Promise.reject(new Error(`${origin ?? 'its link'} is not Slack's file host (${SLACK_FILE_ORIGIN}), so the bot token is not sent there`));
+  }
+  return fetchFile(url, botToken, signal, maxBytes);
+};
 
 /**
  * A hold on a queued renderer's placeholder, taken the moment an earlier
@@ -3354,7 +3391,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const editIntervalMs = options.editIntervalMs ?? DEFAULT_EDIT_INTERVAL_MS;
   const createSocket = options.createSocketClient ?? defaultSocketClient;
   const createWeb = options.createWebClient ?? defaultWebClient;
-  const fetchFile = options.fetchFile ?? defaultFetchFile;
+  const fetchFile = onlySlackFileHost(options.fetchFile ?? defaultFetchFile);
   const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
   const now = options.now ?? Date.now;
 
