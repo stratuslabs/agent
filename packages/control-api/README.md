@@ -581,6 +581,13 @@ to read the key as that variable before anything is typed.
   was stored since, the agent's soul moved), spends it. An empty value does
   not.
 - **Dies on its own.** 30 minutes after it was minted, or at a restart.
+- **A key file keeps its line breaks.** The field is a text area masked with
+  `-webkit-text-security`, not a password input, which strips the line
+  breaks out of a pasted PEM private key. A browser submits a text area's
+  line breaks as CRLF, so the route stores LF. The gateway drops line breaks
+  at either end of any form value, and refuses (`400`, the link stays good) a
+  value that is a PEM block with no line breaks left, naming the
+  `stratus credential set <name> < key.pem` command instead.
 - **The page keeps its address to itself.** No script, nothing loaded from
   elsewhere, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, and a
   CSP of `default-src 'none'; style-src 'unsafe-inline'; form-action 'self';

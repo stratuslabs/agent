@@ -545,7 +545,10 @@ export const routes: Route[] = [
         });
         return null;
       }
-      const value = new URLSearchParams(await readBody(context.request)).get('value') ?? '';
+      // A browser submits a text area's line breaks as CRLF whatever was
+      // pasted (HTML's form encoding normalizes them), so a key file's LF
+      // is restored here rather than stored as CRLF.
+      const value = (new URLSearchParams(await readBody(context.request)).get('value') ?? '').replace(/\r\n/g, '\n');
       const result = await context.gateway.provideCredential({ requestId: record.requestId, value, actor: 'link' });
       if (result.ok) {
         context.credentialLinks.retire(token);

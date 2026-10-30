@@ -594,6 +594,81 @@ const readNamed = async (home: string) => (JSON.parse(await readFile(path.join(h
 const toolError = (session: { messages: Array<{ role: string; toolResult?: { ok: boolean; error?: string } }> }) =>
   session.messages.find((message) => message.role === 'tool')?.toolResult?.error ?? '';
 
+/**
+ * A PEM-shaped value. Assembled here rather than written out, so nothing in
+ * the repository looks like a committed private key to a secret scanner;
+ * the body is base64 of a sentence, not a key.
+ */
+const PEM_LABEL = ['PRIVATE', 'KEY'].join(' ');
+const PEM = [
+  `-----BEGIN ${PEM_LABEL}-----`,
+  'bm90IGEga2V5LCBqdXN0IGEgdGVzdCBvZiBsaW5lIGJyZWFrcyBpbiBhIHN0b3Jl',
+  'ZCBjcmVkZW50aWFsIHZhbHVlLCB3cmFwcGVkIGF0IHNpeHR5LWZvdXI=',
+  `-----END ${PEM_LABEL}-----`,
+].join('\n');
+
+test('a multi-line key is stored with its line breaks, and line breaks around a value are dropped', async () => {
+  const cases: Array<[string, string]> = [
+    // A key file pasted whole, its last line break included.
+    [`\n${PEM}\n`, PEM],
+    // A one-line key copied with the line break after it, which would
+    // otherwise end up inside an Authorization header.
+    ['ghp-secret-value\r\n', 'ghp-secret-value'],
+    // Only line breaks: a value's own spaces are its own, as on the CLI.
+    ['ghp-spaced \n', 'ghp-spaced '],
+  ];
+  for (const [index, [sent, stored]] of cases.entries()) {
+    const { home, gateway, events } = await startRequesting();
+    try {
+      await gateway.dispatch({ sessionId: `kai-ml-${index}`, agentId: 'kai', userMessage: 'go', metadata: SLACK });
+      const result = await gateway.provideCredential({ requestId: requestedIn(events)?.requestId ?? '', value: sent, actor: 'U-DYLAN' });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal((await readNamed(home)).agents.kai?.['github.token'], stored);
+    } finally {
+      await gateway.stop();
+    }
+  }
+});
+
+test('a PEM key whose line breaks were lost is refused with how to keep them, and the request stays open', async () => {
+  const { home, gateway, events } = await startRequesting();
+  try {
+    await gateway.dispatch({ sessionId: 'kai-pem', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    // What a one-line field makes of a pasted key file: spaces, or nothing.
+    for (const flattened of [PEM.replace(/\n/g, ' '), PEM.replace(/\n/g, '')]) {
+      const refused = await gateway.provideCredential({ requestId, value: flattened, actor: 'U-DYLAN' });
+      assert.equal(refused.ok, false);
+      assert.equal(refused.ok ? undefined : refused.retired, undefined, 'not retired: the same form can take the real key');
+      const message = refused.ok ? '' : refused.message;
+      assert.match(message, /line breaks/);
+      assert.match(message, /stratus credential set github\.token --agent kai < key\.pem/);
+      assert.doesNotMatch(message, /bm90IGEga2V5/, 'the refusal never repeats the value');
+    }
+    await assert.rejects(readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'), 'nothing was stored');
+
+    assert.equal((await gateway.provideCredential({ requestId, value: PEM, actor: 'U-DYLAN' })).ok, true);
+    assert.equal((await readNamed(home)).agents.kai?.['github.token'], PEM);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a one-line value that only contains a PEM block, such as a service account key in JSON, is stored as sent', async () => {
+  const { home, gateway, events } = await startRequesting({ request: { name: 'gcp.serviceAccount' } });
+  try {
+    await gateway.dispatch({ sessionId: 'kai-json', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    // JSON escapes the key's line breaks, so the value has none of its own.
+    const json = JSON.stringify({ type: 'service_account', private_key: `${PEM}\n` });
+    assert.ok(!json.includes('\n'));
+    const result = await gateway.provideCredential({ requestId: requestedIn(events)?.requestId ?? '', value: json });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal((await readNamed(home)).agents.kai?.['gcp.serviceAccount'], json);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('an agent asks to replace a key it holds, an approver enters the new value, and it is swapped in place with an audit line', async () => {
   const { home, gateway, events, delivered } = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', replace: true, reason: 'It expires tomorrow.' } });
   try {
@@ -622,6 +697,24 @@ test('an agent asks to replace a key it holds, an approver enters the new value,
     // Neither value is anywhere but the credential store.
     const auditText = await readFile(path.join(home, '.stratus', 'credential-audit.log'), 'utf8');
     assert.doesNotMatch(JSON.stringify([await gateway.store.get('kai-r1'), events]) + auditText, /ghp-old|ghp-new/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a replacement whose PEM key lost its line breaks is refused, and the stored key stays in use', async () => {
+  const { home, gateway, events } = await startRequesting({ soul: KAI_HOLDS, request: { name: 'github.token', replace: true } });
+  try {
+    await storeNamed(home, { agents: { kai: { 'github.token': PEM } } });
+    await gateway.dispatch({ sessionId: 'kai-r-pem', agentId: 'kai', userMessage: 'rotate', metadata: SLACK });
+    const requestId = requestedIn(events)?.requestId ?? '';
+    const refused = await gateway.provideCredential({ requestId, value: PEM.replace(/\n/g, ' '), actor: 'U-DYLAN' });
+    assert.equal(refused.ok, false);
+    assert.match(refused.ok ? '' : refused.message, /line breaks/);
+    assert.equal((await readNamed(home)).agents.kai?.['github.token'], PEM);
+    const next = `${PEM.replace('bm90', 'bmV3')}\n`;
+    assert.equal((await gateway.provideCredential({ requestId, value: next, actor: 'U-DYLAN' })).ok, true);
+    assert.equal((await readNamed(home)).agents.kai?.['github.token'], next.trimEnd());
   } finally {
     await gateway.stop();
   }

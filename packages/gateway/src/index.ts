@@ -1475,6 +1475,11 @@ export interface Gateway {
 
 export interface ProvideCredentialInput {
   requestId: string;
+  /**
+   * As entered, line breaks included: a key file such as a PEM private key
+   * is stored with the ones inside it. Line breaks at either end are
+   * dropped, the way `stratus credential set` drops a trailing one.
+   */
   value: string;
   /** Who provided it. Channel-native id (a Slack user). */
   actor?: string;
@@ -1482,7 +1487,8 @@ export interface ProvideCredentialInput {
 
 /**
  * `ok: false` carries a sentence for the person who entered the value: the
- * request is gone, the name is already stored, or the value is empty.
+ * request is gone, the name is already stored, or the value is empty or a
+ * PEM key whose line breaks were lost.
  * `granted: false` on success means the soul already listed the name.
  *
  * `retired: true` means the request is no longer pending and no answer
@@ -1494,6 +1500,27 @@ export interface ProvideCredentialInput {
 export type ProvideCredentialResult =
   | { ok: true; name: string; scope: CredentialScope; agentId: string; granted: boolean }
   | { ok: false; message: string; retired?: boolean };
+
+/**
+ * A value from a form, without the line breaks around it.
+ *
+ * Forms take multi-line values now, so a one-line key copied with the line
+ * break after it would otherwise be stored with it, and fail later inside
+ * whatever header or command it lands in. Only line breaks: a value's own
+ * spaces are its own, as on the CLI.
+ */
+const formCredentialValue = (value: string): string => value.replace(/^[\r\n]+|[\r\n]+$/g, '');
+
+/**
+ * A PEM block (a private key, a certificate) with no line breaks left, which
+ * is what a one-line field makes of a pasted key file. PEM readers need the
+ * line after the `-----BEGIN …-----` header, so storing it would only move
+ * the failure to the first call that reads the key. Only a value that *is*
+ * one: a PEM inside JSON (a service account file) escapes its line breaks,
+ * so it has none of its own and is fine as sent.
+ */
+const isFlattenedPem = (value: string): boolean =>
+  /^\s*-----BEGIN [A-Z0-9 ]+-----/.test(value) && !value.includes('\n');
 
 interface AgentSource {
   definition: AgentDefinition;
@@ -3297,6 +3324,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         message: `${request.soulPath} now belongs to ${owner}, not ${request.agentId}, so nothing was stored. Ask ${request.agentId} to request it again.`,
       };
     }
+    const value = formCredentialValue(input.value);
+    if (isFlattenedPem(value)) {
+      // Refused, not retired: the same form can still take the key whole.
+      const command = request.scope === 'agent'
+        ? `stratus credential set ${request.name} --agent ${quoteShellArg(request.agentId)} < key.pem`
+        : `stratus credential set ${request.name} < key.pem`;
+      return {
+        ok: false,
+        message: 'That looks like a PEM key whose line breaks were lost, so nothing was stored: whatever reads it would fail. '
+          + `Paste it again from the original file with its line breaks, or store it on the machine: ${command}.`,
+      };
+    }
     const store = {
       ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
       // The binding the form promised, written with the value, always for
@@ -3313,7 +3352,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           if (soul.agent.id !== request.agentId || soul.agent.credentials?.includes(request.name) !== true) {
             return false;
           }
-          await replaceNamedCredential(env, { name: request.name, value: input.value, ...store });
+          await replaceNamedCredential(env, { name: request.name, value, ...store });
           return true;
         });
       } catch (error) {
@@ -3351,7 +3390,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     try {
       await addNamedCredential(env, {
         name: request.name,
-        value: input.value,
+        value,
         ...store,
       });
     } catch (error) {
