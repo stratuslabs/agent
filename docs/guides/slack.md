@@ -238,13 +238,23 @@ posts a `…` placeholder at once, edits it as the reply arrives, shows
 `⚙ tool…` lines while tools run, and finalizes it — how every reply looked
 before `final` existed.
 
+To have an agent read more like someone texting, set `texts`: it works the
+way `final` does, but each paragraph of a reply is posted as a message of
+its own, in order, in the same thread. The words before a tool are split the
+same way. A code block, a list, a heading with the paragraph under it, and a
+line ending in a colon with what it introduces each stay in one message. A
+reply is at most five messages, and anything past the fifth paragraph stays
+together in the last one. Messages the agent sends with `message.send` and
+error notices are posted as written.
+
 ```jsonc
 // ~/.stratus/config.json — trusted configs only
 {
   "slack": {
-    "replies": "final",              // the default; or "stream"
+    "replies": "final",              // the default; or "stream" or "texts"
     "agents": {
-      "blair": { "replies": "stream" }  // per agent, over the default
+      "blair": { "replies": "stream" }, // per agent, over the default
+      "atlas": { "replies": "texts" }
     }
   }
 }

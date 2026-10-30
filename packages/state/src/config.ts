@@ -174,9 +174,12 @@ export type PrincipalsAdmit = 'anyone' | 'principals';
  * Slack's own loading status while the turn runs and posts the reply once,
  * finished — so the notification carries the answer, not a `…`. `stream`
  * posts a placeholder at once and edits it as the reply is written, which
- * is how every reply looked before `final` existed.
+ * is how every reply looked before `final` existed. `texts` is `final`
+ * with each paragraph posted as a message of its own, the way a person
+ * texts: code blocks, lists and a heading with its paragraph stay whole,
+ * and a reply is at most five messages (card 951).
  */
-export type SlackReplyMode = 'final' | 'stream';
+export type SlackReplyMode = 'final' | 'stream' | 'texts';
 
 /** One agent's Slack presentation settings. */
 export interface AgentSlackConfig {

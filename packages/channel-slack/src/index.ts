@@ -66,6 +66,7 @@ import {
 } from '@stratusagent/core';
 
 import { codeRunsOf, toSlackMrkdwn } from './mrkdwn.ts';
+import { textingParts } from './texts.ts';
 
 /**
  * The longest display name the model is shown. Slack caps profile names
@@ -207,6 +208,9 @@ const settledWithin = (work: Promise<unknown>, ms: number): Promise<void> => new
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 const NO_REPLY_TEXT = '(no reply)';
 
+/** How an agent's replies appear in Slack; see `SlackAgentConfig.replies`. */
+export type SlackReplyMode = 'final' | 'stream' | 'texts';
+
 /** One agent's Slack identity: its own app (avatar, presence) and tokens. */
 export interface SlackAgentConfig {
   agentId: string;
@@ -252,9 +256,11 @@ export interface SlackAgentConfig {
   /**
    * How replies appear. `final` (the default) shows Slack's loading status
    * while the turn runs and posts the reply once, finished; `stream` posts
-   * a `…` placeholder at once and edits it as the reply is written.
+   * a `…` placeholder at once and edits it as the reply is written;
+   * `texts` is `final` with each paragraph posted as a message of its own,
+   * like texting (card 951, see `textingParts`).
    */
-  replies?: 'final' | 'stream';
+  replies?: SlackReplyMode;
   /**
    * `false` posts this agent's messages without link and media previews
    * (Slack's `unfurl_links`/`unfurl_media`). Absent or `true` leaves
@@ -1204,6 +1210,12 @@ class ReplyRenderer {
    */
   readonly streaming: boolean;
   /**
+   * Whether the reply, and what the turn says before a tool, are posted a
+   * paragraph to a message (`texts` mode). Never with `streaming`: there
+   * is one placeholder to stream into.
+   */
+  private readonly texts: boolean;
+  /**
    * The thread the loading status belongs to: the reply's thread, or the
    * message itself in a DM, whose reply has no thread to key one on.
    */
@@ -1259,6 +1271,7 @@ class ReplyRenderer {
       lazy?: boolean;
       now?: () => number;
       streaming?: boolean;
+      texts?: boolean;
       statusThread?: string;
       statusWarned?: { value: boolean };
       after?: Promise<unknown>;
@@ -1274,6 +1287,7 @@ class ReplyRenderer {
     this.lazy = options.lazy ?? false;
     this.now = options.now ?? Date.now;
     this.streaming = options.streaming ?? true;
+    this.texts = !this.streaming && options.texts === true;
     this.statusThread = options.statusThread ?? threadTs;
     this.statusWarned = options.statusWarned ?? { value: false };
     this.after = options.after ?? Promise.resolve();
@@ -1596,7 +1610,7 @@ class ReplyRenderer {
       .then(async () => {
         const landed: string[] = [];
         try {
-          for (const chunk of messageChunks(text)) {
+          for (const chunk of this.chunksOf(text)) {
             const posted = await this.web.chat.postMessage({
               channel: this.channel,
               text: chunk,
@@ -1612,7 +1626,7 @@ class ReplyRenderer {
           // reply, where repeating a few lines beats losing the rest.
           if (landed.length > 0) {
             this.interimPosted = true;
-            heard = landed.length === messageChunks(text).length ? text : landed.join('\n\n');
+            heard = landed.length === this.chunksOf(text).length ? text : landed.join('\n\n');
           }
           settleLanded(landed.length > 0);
         }
@@ -1831,7 +1845,7 @@ class ReplyRenderer {
       return this.outcome(true, true);
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
-    const chunks = messageChunks(text);
+    const chunks = this.chunksOf(text);
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
@@ -1880,6 +1894,11 @@ class ReplyRenderer {
       await this.statusChain;
     }
     return this.outcome(published, landed || this.edited || this.uploaded || stranded, !published);
+  }
+
+  /** This turn's text as the messages it is posted as, in this agent's reply mode. */
+  private chunksOf(text: string): string[] {
+    return messageChunks(text, this.texts ? 'texts' : undefined);
   }
 
   private placeText(ts: string | undefined): void {
@@ -2247,8 +2266,13 @@ const messageText = (text: string): string => truncateForSlack(toSlackMrkdwn(tex
  * Agent text as however many Slack messages it takes. Converted before it
  * is split, so a chunk is measured at the length it will be sent at, and so
  * no rewrite is ever asked to span a boundary.
+ *
+ * In `texts` mode a reply is first cut into the few messages it is texted
+ * as, each then converted and sized on its own: the cuts never fall inside
+ * code, and nothing else in the conversion crosses a line.
  */
-const messageChunks = (text: string): string[] => splitForSlack(toSlackMrkdwn(text));
+const messageChunks = (text: string, replies?: SlackReplyMode): string[] =>
+  (replies === 'texts' ? textingParts(text) : [text]).flatMap((part) => splitForSlack(toSlackMrkdwn(part)));
 
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',
@@ -6147,7 +6171,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // last. `NO_REPLY_TEXT` is what a rendered turn with nothing to say
     // puts in its own message too. With nothing queued behind, there is no
     // order to keep and nothing to say, so the files go on their own.
-    const chunks = routing.reply ? messageChunks(routing.reply) : [];
+    const chunks = routing.reply ? messageChunks(routing.reply, connection.config.replies) : [];
     const posting = chunks.length > 0 ? chunks : (behind && files.length > 0 ? [NO_REPLY_TEXT] : []);
     let landed: string[] = [];
     const uploads = async (): Promise<void> => {
@@ -8225,6 +8249,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         lazy: judged,
         now,
         streaming,
+        texts: connection.config.replies === 'texts',
         statusThread: thread ?? event.ts,
         statusWarned: connection.statusWarned,
         ...(ahead ? { after: ahead } : {}),
