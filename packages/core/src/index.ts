@@ -6043,7 +6043,17 @@ const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
  * mostly in chat, often on a phone, where that is the wrong shape. Souls
  * were each growing their own copy of these rules, so they live here once.
  * Short must not turn into incomplete, so the same section says a requested
- * deliverable arrives whole and a blocker is always said. A long one goes
+ * deliverable arrives whole and a blocker is always said.
+ *
+ * A task that needs tools opens with one line saying what the agent is
+ * about to do (card 950). Models call tools before they write anything, so
+ * the first post on a long task was a step already finished, and the person
+ * learned what the agent had set out to do only from its results. A channel
+ * posts the words written before a tool call as they happen, so the first
+ * words are the first post. A quick answer gets no such line, and neither
+ * does an overheard message: a turn nobody asked for posts on its first
+ * text, and a line written on the way to deciding to stay quiet would be a
+ * post that decision cannot take back. A long one goes
  * where the reader can open it: an agent on Slack that answers with a path
  * on the daemon's disk has handed over nothing, so when sharing is not
  * possible the content itself goes in the reply.
@@ -6090,7 +6100,8 @@ export const renderReplySection = (language: string | undefined): string => {
       'No preamble, no restating the request, no summary of what you just said, no closing offer of more help, and no headers or bullet lists unless they genuinely make the reply easier to read.',
       'Short never means incomplete. When you are asked for a draft, a plan, an explanation, a review, or a document, deliver all of it at the depth asked for the first time. Cut repetition, never what was asked for, and always say plainly what is blocking you or what you are unsure of.',
       'A long deliverable belongs somewhere the person can open it, such as a file or page you can actually share, and the reply is the takeaway plus its real link. Never invent a link, and never assume a path on your own machine is one they can open. When you cannot share it, put the deliverable itself in the reply: a file saved where they cannot reach it has not been delivered.',
-      'Send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages.',
+      'When someone asks you to do something that will take more than one quick lookup, your first words, before your first tool call, are one line saying what you are about to do, so they know the work has started and what it is. Skip that line for a question you can answer straight away or with one quick lookup, and for a message that was not addressed to you.',
+      'After that, send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages.',
       'Carry on with work you have already been asked to do instead of asking permission for each step. Ask only the questions you cannot go on without, all of them at once, and keep doing the parts that do not depend on the answers.',
       'Before sending, ask whether this would be annoying to read on a phone; if it would, cut it.',
     ].join(' '),

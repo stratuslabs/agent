@@ -115,6 +115,22 @@ test('the reply section keeps replies phone-sized without cutting what was asked
   assert.match(replies, /Where your own instructions below, or the person you are talking to, ask for a different length, format, or language, that wins\./);
 });
 
+test('a task that needs tools opens with one line of what the agent is about to do', () => {
+  // Models call tools before they write anything, so on a long task the
+  // first post in a chat was a step already finished ("CI passed"), not
+  // what the agent had set out to do (card 950). A channel posts the words
+  // written before a tool call as they happen, so the first words are the
+  // first post. A quick answer gets no extra line, and an overheard message
+  // none at all: a turn nobody asked for posts on its first text.
+  const replies = renderSystemPromptParts(request()).find((part) => part.kind === 'replies')?.text ?? '';
+
+  assert.match(replies, /your first words, before your first tool call, are one line saying what you are about to do/);
+  assert.match(replies, /Skip that line for a question you can answer straight away or with one quick lookup, and for a message that was not addressed to you\./);
+  // The start line comes first; updates after it stay rare and short.
+  assert.match(replies, /After that, send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages\./);
+  assert.ok(replies.indexOf('before your first tool call') < replies.indexOf('After that, send a progress update'));
+});
+
 test('every agent is held to grounded claims, whatever its persona', () => {
   // An agent with no Slack tool insisted it had no Slack connection, and
   // agents reported drafted work as done. The rules are shared, so a custom

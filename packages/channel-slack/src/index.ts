@@ -186,6 +186,24 @@ const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 30_000;
  * is reported by name rather than as the whole window running out.
  */
 const DEFAULT_STOP_WAIT_MS = 10_000;
+/**
+ * How long an approval prompt waits for the words its turn wrote before the
+ * call to land first (card 950). Long enough for an ordinary post, short
+ * enough that a slow or refusing Slack never keeps the question from an
+ * approver: the turn is parked on that answer.
+ */
+const DEFAULT_APPROVAL_PROMPT_WAIT_MS = 5_000;
+
+/** Resolves when `work` settles or after `ms`, whichever is first; never rejects. */
+const settledWithin = (work: Promise<unknown>, ms: number): Promise<void> => new Promise<void>((resolve) => {
+  const timer = setTimeout(resolve, ms);
+  timer.unref?.();
+  const done = (): void => {
+    clearTimeout(timer);
+    resolve();
+  };
+  work.then(done, done);
+});
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 const NO_REPLY_TEXT = '(no reply)';
 
@@ -673,6 +691,12 @@ export interface SlackAdapterOptions {
    * `DEFAULT_STOP_WAIT_MS`.
    */
   stopWaitMs?: number;
+  /**
+   * How long an approval prompt waits for the words its turn wrote before
+   * the call to be posted first. Defaults to
+   * `DEFAULT_APPROVAL_PROMPT_WAIT_MS`.
+   */
+  approvalPromptWaitMs?: number;
   /**
    * Where a text attachment too large to read into the message is saved
    * instead, so the turn can be told a path rather than only a name.
@@ -1552,11 +1576,11 @@ class ReplyRenderer {
    * turn ahead and any handover, on the upload chain, so interim text,
    * files, and the reply land in the order they happened.
    */
-  private flushInterim(ofThisTurn: boolean): void {
+  private flushInterim(ofThisTurn: boolean): Promise<boolean> | undefined {
     const text = this.interim.trim();
     this.interim = '';
     if (this.streaming || this.lazy || !this.turnStarted || !ofThisTurn || text.length === 0) {
-      return;
+      return undefined;
     }
     const handover = this.handover;
     const after = this.after;
@@ -1602,6 +1626,25 @@ class ReplyRenderer {
       // Settled whatever happened above, or the other agents' intake would
       // wait on it for good. A second settle is a no-op.
       .finally(() => settleLanded(false));
+    return landedNow;
+  }
+
+  /**
+   * Post what the model said before a call that is about to ask for
+   * approval, and resolve once it has landed (or could not), or at once
+   * when there is nothing to post (card 950).
+   *
+   * The prompt is posted before the call starts, so waiting for
+   * `tool.called` put the question above the line saying what the agent
+   * set out to do, and the approver answered without it. The same flush
+   * `tool.called` would have done, only earlier: what it posts is stripped
+   * from the reply as before, and the flush at `tool.called` finds nothing.
+   */
+  sayBeforeAsking(ofThisTurn: boolean): Promise<boolean> | undefined {
+    if (this.finalized) {
+      return undefined;
+    }
+    return this.flushInterim(ofThisTurn);
   }
 
   /**
@@ -3519,6 +3562,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const fetchFile = onlySlackFileHost(options.fetchFile ?? defaultFetchFile);
   const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
   const stopWaitMs = options.stopWaitMs ?? DEFAULT_STOP_WAIT_MS;
+  const approvalPromptWaitMs = options.approvalPromptWaitMs ?? DEFAULT_APPROVAL_PROMPT_WAIT_MS;
   const now = options.now ?? Date.now;
 
   const connections: AgentConnection[] = [];
@@ -3756,6 +3800,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // outstanding.
   const rendering = new Set<string>();
   const resolvedWhileRendering = new Map<string, Extract<StratusEvent, { type: 'tool.approval-resolved' }>>();
+  // Requests whose prompt is waiting for its turn's line to land first
+  // (card 950), and those of them settled in that wait: a request answered
+  // or cancelled before anyone was asked has no prompt to post. Bounded the
+  // same way: an id is here only for one bounded wait.
+  const askingAfterLine = new Set<string>();
+  const settledBeforeAsked = new Set<string>();
   let unsubscribe: (() => void) | undefined;
   let gatewayRef: GatewayLike | undefined;
   // Set as `stop()` begins, so a reload still connecting an app leaves
@@ -8758,18 +8808,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // reaches none of them, so a read stopping before it stops short.
       liveFrom = NOT_LIVE_YET;
       unsubscribe = gateway.bus.subscribe((event) => {
-        // Approval traffic is not part of a reply: it gets its own message
-        // with its own lifetime, and routing it through the running turn's
-        // renderer would fold a question into the answer being streamed.
-        if (event.type === 'tool.approval-requested') {
-          track(renderApprovalRequest(event));
-          return;
-        }
         if (event.type === 'credential.provided') {
           track(settleCredentialPost(event));
           return;
         }
         if (event.type === 'tool.approval-resolved') {
+          if (askingAfterLine.has(event.requestId)) {
+            settledBeforeAsked.add(event.requestId);
+          }
           // The question was posted into the turn's thread, which took the
           // loading status down with it; the turn works on once answered.
           track(retractApprovalRequest(event).finally(() => renderers.get(event.sessionId)?.[0]?.refreshLoading()));
@@ -8822,6 +8868,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // turn from a renderer still waiting to start, and the renderer
         // keeps what it is handed, as it always has.
         const foreign = exact && !rendered;
+        // Approval traffic is not part of a reply: it gets its own message
+        // with its own lifetime, and routing it through the running turn's
+        // renderer would fold a question into the answer being streamed.
+        // What the turn wrote before the call goes out first, though, so
+        // the approver reads the line saying what the agent is doing above
+        // the question it leads to (card 950). The wait is bounded: a line
+        // Slack is slow to take must not keep the question from anyone.
+        if (event.type === 'tool.approval-requested') {
+          const said = head?.sayBeforeAsking(!foreign);
+          if (!said) {
+            track(renderApprovalRequest(event));
+            return;
+          }
+          askingAfterLine.add(event.requestId);
+          track(settledWithin(said, approvalPromptWaitMs).then(async () => {
+            askingAfterLine.delete(event.requestId);
+            if (settledBeforeAsked.delete(event.requestId)) {
+              return;
+            }
+            await renderApprovalRequest(event);
+          }));
+          return;
+        }
         if (event.type === 'tool.completed' && event.result.ok && (foreign || !head)) {
           const produced = collectFilePaths(event.result);
           if (produced.length > 0) {
