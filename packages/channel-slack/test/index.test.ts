@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   EventBus,
   HostRefusalError,
+  IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT,
   SENDER_TRUST_METADATA_KEY,
   type ApprovalAnswer,
   type ChannelCredentialRequest,
@@ -24,6 +25,7 @@ import {
   STOPPING_REPLY_TEXT,
   type SlackAdapterOptions,
   type SlackBlock,
+  type SlackFileFetcher,
   type SlackInboundFile,
   type SlackSocketEventArgs,
   type SlackSocketLike,
@@ -6759,7 +6761,10 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
 
 // ---- addressable outbound (schedules) -------------------------------------
 
-const startedAdapterWith = async (web: FakeWeb, overrides?: { warn?: (msg: string) => void }): Promise<import('@stratusagent/core').ChannelAdapter> => {
+const startedAdapterWith = async (
+  web: FakeWeb,
+  overrides?: { warn?: (msg: string) => void; fetchFile?: SlackFileFetcher; fileDownloadTimeoutMs?: number },
+): Promise<import('@stratusagent/core').ChannelAdapter> => {
   const socket = createFakeSocket();
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
   const adapter = createSlackChannelAdapter({
@@ -6769,6 +6774,8 @@ const startedAdapterWith = async (web: FakeWeb, overrides?: { warn?: (msg: strin
     createWebClient: () => web,
     log: () => {},
     warn: overrides?.warn ?? (() => {}),
+    ...(overrides?.fetchFile !== undefined ? { fetchFile: overrides.fetchFile } : {}),
+    ...(overrides?.fileDownloadTimeoutMs !== undefined ? { fileDownloadTimeoutMs: overrides.fileDownloadTimeoutMs } : {}),
   });
   await adapter.start(gateway);
   return adapter;
@@ -10916,6 +10923,199 @@ test('readConversation never lists bookmarks of a conversation it refuses to rea
   await assert.rejects(() => adapter.readConversation!({ agentId: 'ava', conversation: 'C-OTHER', limit: 10 }), /not a member of C-OTHER/);
   assert.equal(listed, false);
   await adapter.stop();
+});
+
+// ---- images on the messages read (card 884) ---------------------------------
+
+const READ_MIB = 1024 * 1024;
+const slackImage = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  name,
+  mimetype: 'image/png',
+  size: PNG_BYTES.length,
+  url_private: `https://files.slack.com/files-pri/T1-${id}/${name}`,
+  ...extra,
+});
+
+test('readConversation fetches the images on the messages it reads when asked, in order, and leaves other files as names', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [
+      { ts: '200.000001', user: 'U-X', text: 'newest', files: [slackImage('F1', 'a.png'), { id: 'F2', name: 'spec.pdf', mimetype: 'application/pdf', size: 10, url_private: 'https://files.slack.com/files-pri/T1-F2/spec.pdf' }] },
+      { ts: '199.000001', user: 'U-X', text: 'older', files: [slackImage('F3', 'b.png')] },
+    ],
+  });
+  const fetched: string[] = [];
+  const adapter = await startedAdapterWith(web, {
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+
+  const names = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10 });
+  assert.deepEqual(fetched, [], 'a read that does not ask downloads nothing');
+  assert.deepEqual(names.messages[0]?.files, ['a.png', 'spec.pdf']);
+  assert.equal(names.messages[0]?.images, undefined);
+  assert.equal(names.messages[0]?.imageNotes, undefined);
+
+  const shown = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 5, bytes: 10 * READ_MIB } });
+  assert.deepEqual(fetched, ['https://files.slack.com/files-pri/T1-F1/a.png', 'https://files.slack.com/files-pri/T1-F3/b.png']);
+  assert.deepEqual(shown.messages[0]?.images, [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'a.png' }]);
+  assert.deepEqual(shown.messages[0]?.files, ['a.png', 'spec.pdf']);
+  assert.equal(shown.messages[0]?.imageNotes, undefined);
+  assert.deepEqual(shown.messages[1]?.images?.map((image) => image.name), ['b.png']);
+  await adapter.stop();
+});
+
+test('readConversation holds a read\'s images to its count and bytes, and stops at the first that does not fit', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  let files: Array<Array<Record<string, unknown>>> = [];
+  web.conversations.history = async () => ({
+    messages: files.map((list, index) => ({ ts: `${300 - index}.000001`, user: 'U-X', text: `m${index}`, files: list })),
+  });
+  const fetched: string[] = [];
+  const bodies = new Map<string, Buffer>();
+  const adapter = await startedAdapterWith(web, {
+    fetchFile: async (url) => {
+      fetched.push(url.split('/').at(-1)!);
+      return { status: 200, contentType: 'image/png', body: bodies.get(url.split('/').at(-1)!) ?? PNG_BYTES };
+    },
+  });
+
+  // By count: the third is never fetched, and says why.
+  files = [[slackImage('F1', 'a.png')], [slackImage('F2', 'b.png')], [slackImage('F3', 'c.png')]];
+  const counted = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 2, bytes: 10 * READ_MIB } });
+  assert.deepEqual(fetched, ['a.png', 'b.png']);
+  assert.equal(counted.messages[2]?.images, undefined);
+  assert.deepEqual(counted.messages[2]?.imageNotes, ['c.png is not shown: past this read\'s cap of 2 images.']);
+
+  // By bytes: Slack's size keeps big.png from being fetched, and the
+  // smaller one after it is not taken either, so the window is unbroken.
+  fetched.length = 0;
+  bodies.set('big.png', pngOfLength(1000));
+  files = [[slackImage('F1', 'a.png')], [slackImage('F2', 'big.png', { size: 1000 })], [slackImage('F3', 'c.png')]];
+  const weighed = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 5, bytes: PNG_BYTES.length + 500 } });
+  assert.deepEqual(fetched, ['a.png']);
+  assert.match(weighed.messages[1]?.imageNotes?.[0] ?? '', /^big\.png is not shown: past this read's cap of \d+ bytes of images\.$/);
+  assert.match(weighed.messages[2]?.imageNotes?.[0] ?? '', /^c\.png is not shown: past this read's cap of \d+ bytes/);
+  assert.equal(weighed.messages[2]?.images, undefined);
+
+  // A size Slack did not report is learned from the bytes, with the same result.
+  fetched.length = 0;
+  files = [[slackImage('F1', 'a.png')], [slackImage('F2', 'big.png', { size: undefined })], [slackImage('F3', 'c.png')]];
+  const learned = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 5, bytes: PNG_BYTES.length + 500 } });
+  assert.deepEqual(fetched, ['a.png', 'big.png']);
+  assert.equal(learned.messages[1]?.images, undefined);
+  assert.match(learned.messages[1]?.imageNotes?.[0] ?? '', /^big\.png is not shown: past this read's cap/);
+  assert.match(learned.messages[2]?.imageNotes?.[0] ?? '', /^c\.png is not shown: past this read's cap/);
+
+  // A cap past what one request can carry is held to it.
+  fetched.length = 0;
+  files = Array.from({ length: 25 }, (_, index) => [slackImage(`F${index}`, `s${index}.png`)]);
+  await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 50, images: { count: 1000, bytes: 1000 * READ_MIB } });
+  assert.equal(fetched.length, IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT);
+
+  // A cap that is not one asks for nothing.
+  fetched.length = 0;
+  const none = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 50, images: { count: 0, bytes: 10 * READ_MIB } });
+  assert.deepEqual(fetched, []);
+  assert.equal(none.messages[0]?.imageNotes, undefined);
+  await adapter.stop();
+});
+
+test('readConversation shows Slack\'s preview of an image over the per-image limit, and says it is a preview', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [{
+      ts: '200.000001',
+      user: 'U-X',
+      text: 'the landing page',
+      files: [slackImage('F1', 'huge.png', { size: 12 * READ_MIB, thumb_1024: 'https://files.slack.com/files-tmb/T1-F1/huge_1024.png' })],
+    }],
+  });
+  const fetched: string[] = [];
+  const preview = pngHeader(1024, 700);
+  const adapter = await startedAdapterWith(web, {
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: preview };
+    },
+  });
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 5, bytes: 10 * READ_MIB } });
+  assert.deepEqual(fetched, ['https://files.slack.com/files-tmb/T1-F1/huge_1024.png'], 'the 12 MB original is never fetched');
+  assert.deepEqual(result.messages[0]?.images, [{ mediaType: 'image/png', data: preview.toString('base64'), name: 'huge.png' }]);
+  assert.match(result.messages[0]?.imageNotes?.[0] ?? '', /^huge\.png is shown as Slack's 1024×700 preview, because the original is 12\.0 MB/);
+  await adapter.stop();
+});
+
+test('readConversation says why an image was not shown: another host, a refused download, a kind no model takes, or the read\'s deadline', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.conversations.history = async () => ({
+    messages: [{
+      ts: '200.000001',
+      user: 'U-X',
+      text: 'four files',
+      files: [
+        slackImage('F1', 'remote.png', { url_private: 'https://attacker.example/remote.png' }),
+        slackImage('F2', 'signin.png'),
+        slackImage('F3', 'photo.heic', { mimetype: 'image/heic' }),
+        slackImage('F4', 'ok.png'),
+      ],
+    }],
+  });
+  const fetched: string[] = [];
+  const adapter = await startedAdapterWith(web, {
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return url.endsWith('signin.png')
+        ? { status: 200, contentType: 'text/html; charset=utf-8', body: Buffer.from('<html>sign in</html>') }
+        : { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+  const result = await adapter.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 5, bytes: 10 * READ_MIB } });
+  // The bot token never leaves for another host.
+  assert.ok(fetched.every((url) => url.startsWith('https://files.slack.com/')));
+  assert.deepEqual(result.messages[0]?.images?.map((image) => image.name), ['ok.png']);
+  assert.deepEqual(result.messages[0]?.imageNotes, [
+    'remote.png is not shown: it could not be downloaded.',
+    'signin.png is not shown: it could not be downloaded.',
+    'photo.heic is not shown: it is image/heic, a kind of image a model cannot be shown.',
+  ]);
+  await adapter.stop();
+
+  // One deadline covers the whole read: once it passes, nothing more is fetched.
+  const slowWeb = createFakeWeb('B-AVA', 'T1');
+  slowWeb.knownConversations.set('C-ENG', { is_member: true });
+  slowWeb.conversations.history = async () => ({
+    messages: [
+      { ts: '200.000001', user: 'U-X', text: 'slow', files: [slackImage('F1', 'slow.png')] },
+      { ts: '199.000001', user: 'U-X', text: 'later', files: [slackImage('F2', 'later.png')] },
+    ],
+  });
+  const tried: string[] = [];
+  const slow = await startedAdapterWith(slowWeb, {
+    fileDownloadTimeoutMs: 20,
+    fetchFile: (url, _token, signal) => new Promise((_resolve, reject) => {
+      tried.push(url);
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+  });
+  // AbortSignal.timeout's timer does not hold the process open, and here
+  // nothing else does (no socket delivery is in flight), so the test holds
+  // it while the read waits on its deadline.
+  const holdOpen = setInterval(() => {}, 1_000);
+  const late = await slow.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 5, bytes: 10 * READ_MIB } })
+    .finally(() => clearInterval(holdOpen));
+  assert.equal(tried.length, 1);
+  assert.match(late.messages[0]?.imageNotes?.[0] ?? '', /^slow\.png is not shown: it was not downloaded in time/);
+  assert.match(late.messages[1]?.imageNotes?.[0] ?? '', /^later\.png is not shown: it was not downloaded in time/);
+  assert.equal(late.messages[0]?.text, 'slow', 'the messages still come back');
+  await slow.stop();
 });
 
 // How @slack/web-api throws a platform error: the code is on `data.error`.

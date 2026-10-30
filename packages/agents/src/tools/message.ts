@@ -1,4 +1,4 @@
-import { sessionWriteTrust, type JsonObject, type Session, type Tool, type TrustLevel } from '@stratusagent/core';
+import { createImageCollector, sessionWriteTrust, type ImageAttachment, type JsonObject, type Session, type Tool, type TrustLevel } from '@stratusagent/core';
 import {
   type ScheduleDestination,
   canonicalDestination,
@@ -144,6 +144,15 @@ export const MESSAGE_READ_TEXT_BUDGET = 40_000;
  */
 export const MESSAGE_READ_BOOKMARK_BUDGET = 16_000;
 const TRUNCATED_MARK = ' [... the rest of this message is not shown]';
+/**
+ * The most images one read shows the model. They are kept in the session
+ * and replayed on later turns inside the replay window, so a read of a
+ * busy channel must not fill that window with screenshots it was not
+ * asked about; the agent reads a narrower window to see more.
+ */
+export const MESSAGE_READ_MAX_IMAGES = 5;
+/** The most decoded image bytes one read shows the model, together. */
+export const MESSAGE_READ_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /**
  * Reads one conversation, or one thread in it, through the agent's own
@@ -160,6 +169,11 @@ export type ConversationReader = (input: {
   after?: string;
   before?: string;
   limit: number;
+  /**
+   * Fetch the messages' images, up to this many and this many bytes for
+   * the whole read; absent, files come back by name only.
+   */
+  images?: { count: number; bytes: number };
 }) => Promise<{
   messages: Array<{
     id: string;
@@ -170,6 +184,8 @@ export type ConversationReader = (input: {
     thread?: string;
     replies?: number;
     files?: string[];
+    images?: ImageAttachment[];
+    imageNotes?: string[];
   }>;
   more: boolean;
   bookmarks?: Array<{ title: string; link: string }>;
@@ -217,6 +233,89 @@ export const directMessageReadRefusal = (destination: string): string =>
   + 'This is not a permission, so approval cannot unlock it; do not ask for one or try again. '
   + 'Read a channel instead, or ask the person to paste what you need.';
 
+/** One message as `message.read` returns it: text, and the names of the images it shows. */
+type ShownMessage = Omit<Awaited<ReturnType<ConversationReader>>['messages'][number], 'images'> & { shownImages?: string[] };
+
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/**
+ * The longest image name a read repeats. A name is whatever the channel
+ * says, and it is said again in `shownImages` and in every note, so it is
+ * bounded like any other text the read carries.
+ */
+const IMAGE_NAME_MAX = 200;
+
+const imageNameOf = (image: ImageAttachment, index: number): string => {
+  const name = image.name ?? `image ${index + 1}`;
+  return name.length <= IMAGE_NAME_MAX ? name : `${name.slice(0, IMAGE_NAME_MAX)}…`;
+};
+
+/**
+ * Decides, message by message in the order they are listed, which of their
+ * images a read shows, before any message is measured, so the text sent is
+ * the text measured: the names shown and every note about the rest are in
+ * it. Held to the read's own cap whatever the channel returned, since the
+ * images stay in the session and replay on later turns. Once one does not
+ * fit, none after it is shown either, so what the agent sees is one
+ * unbroken stretch of the read. Each image is put through core's own image
+ * check, the one the runner's `attachImage` applies, so an image that
+ * would be refused is said here rather than after the budget is spent.
+ */
+const createImagePlan = () => {
+  const check = createImageCollector();
+  let count = 0;
+  let bytes = 0;
+  let full: string | undefined;
+  return (images: readonly ImageAttachment[]): { shown: Array<{ image: ImageAttachment; name: string }>; notes: string[] } => {
+    const shown: Array<{ image: ImageAttachment; name: string }> = [];
+    const notes: string[] = [];
+    images.forEach((image, index) => {
+      const name = imageNameOf(image, index);
+      const size = Buffer.byteLength(image.data, 'base64');
+      if (full === undefined && count >= MESSAGE_READ_MAX_IMAGES) {
+        full = `past this read's cap of ${MESSAGE_READ_MAX_IMAGES} images`;
+      } else if (full === undefined && bytes + size > MESSAGE_READ_IMAGE_BYTES) {
+        full = `past this read's cap of ${MESSAGE_READ_IMAGE_BYTES / (1024 * 1024)} MB of images`;
+      }
+      if (full !== undefined) {
+        notes.push(`${name} is not shown: ${full}.`);
+        return;
+      }
+      try {
+        check.attach(image);
+      } catch (error) {
+        notes.push(`${name} is not shown: ${errorText(error)}`);
+        return;
+      }
+      count += 1;
+      bytes += size;
+      shown.push({ image, name });
+    });
+    return { shown, notes };
+  };
+};
+
+/**
+ * The most a cut message's image notes may take: a message too big for
+ * the whole budget keeps its notes only up to this, and counts the rest,
+ * as it does its file list.
+ */
+const CUT_IMAGE_NOTES_BUDGET = 4_000;
+
+const boundedNotes = (notes: readonly string[]): string[] => {
+  const kept: string[] = [];
+  let size = 2;
+  for (const note of notes) {
+    const length = JSON.stringify(note).length + 1;
+    if (size + length > CUT_IMAGE_NOTES_BUDGET) {
+      break;
+    }
+    kept.push(note);
+    size += length;
+  }
+  return kept.length === notes.length ? [...notes] : [...kept, `${notes.length - kept.length} more notes about images, not listed`];
+};
+
 export const createMessageReadTool = (
   read: ConversationReader,
   options: { refusalFor?: ConversationReadRefusal } = {},
@@ -230,7 +329,10 @@ export const createMessageReadTool = (
     + 'and a thread_ts in the link is the thread to read. '
     + 'When more is true, page on with before (top level) or after (thread) set to the last id returned. '
     + 'A top-level read without before or after also returns the channel\'s bookmarks, when it has any; '
-    + 'if bookmarksOmitted is set, say that many were left out rather than guess them.',
+    + 'if bookmarksOmitted is set, say that many were left out rather than guess them. '
+    + `Images on the messages read are shown to you after this result, at most ${MESSAGE_READ_MAX_IMAGES} per read, `
+    + 'in the order the messages list them in shownImages; imageNotes says why any other image on a message was not shown, '
+    + 'so never describe an image you were not shown. To see images past the cap, read fewer messages.',
   risk: 'gated',
   outputTrust: 'external',
   parameters: {
@@ -259,11 +361,14 @@ export const createMessageReadTool = (
         },
       }
     : {}),
-  async execute(input: JsonObject, session: Session) {
+  async execute(input: JsonObject, session: Session, context) {
     const source = parseDestinationInput(input.source);
     if (!source) {
       throw new Error('message.read requires "source" as { channel, to } with non-empty strings.');
     }
+    // Images are asked for only when this host can show the model one; a
+    // host that cannot gets names, as every read did before images.
+    const attachImage = context?.attachImage;
     const thread = optionalId(input, 'thread');
     const after = optionalId(input, 'after');
     const before = optionalId(input, 'before');
@@ -278,6 +383,7 @@ export const createMessageReadTool = (
       ...(thread !== undefined ? { thread } : {}),
       ...(after !== undefined ? { after } : {}),
       ...(before !== undefined ? { before } : {}),
+      ...(attachImage !== undefined ? { images: { count: MESSAGE_READ_MAX_IMAGES, bytes: MESSAGE_READ_IMAGE_BYTES } } : {}),
     });
     // Bookmarks first, from their own share, in the channel's order.
     const bookmarks: Array<{ title: string; link: string }> = [];
@@ -300,51 +406,118 @@ export const createMessageReadTool = (
       ? result.bookmarksOmitted
       : 0;
     const bookmarksOmitted = upstreamOmitted + (result.bookmarks?.length ?? 0) - bookmarks.length;
-    const messages: Array<Awaited<ReturnType<ConversationReader>>['messages'][number]> = [];
+    const messages: ShownMessage[] = [];
+    // Each kept message's images, held beside it rather than in it: the
+    // budget is text, and the pixels never join the result's text.
+    const pending: Array<{ message: ShownMessage; shown: Array<{ image: ImageAttachment; name: string }> }> = [];
+    const plan = attachImage !== undefined ? createImagePlan() : undefined;
     let more = result.more;
-    for (const message of result.messages) {
+    for (const read of result.messages) {
+      const { images, imageNotes, ...rest } = read;
+      const decided = plan !== undefined && images !== undefined && images.length > 0 ? plan(images) : undefined;
+      const notes = [...(imageNotes ?? []), ...(decided?.notes ?? [])];
+      // Measured as it is sent: the names of the images it shows, and the
+      // notes on the rest, are text; their bytes are not.
+      const message: ShownMessage = {
+        ...rest,
+        ...(decided !== undefined && decided.shown.length > 0 ? { shownImages: decided.shown.map(({ name }) => name) } : {}),
+        ...(notes.length > 0 ? { imageNotes: notes } : {}),
+      };
       const size = JSON.stringify(message).length;
       if (used + size <= MESSAGE_READ_TEXT_BUDGET) {
-        messages.push({ ...message });
+        messages.push(message);
+        if (decided !== undefined && decided.shown.length > 0) {
+          pending.push({ message, shown: decided.shown });
+        }
         used += size;
         continue;
       }
       // One message bigger than the whole budget is cut rather than
       // dropped, or the read could never get past it. Its file list goes
-      // too, said by count, since a list can be as long as any text.
-      // One that would fit on its own, crowded out only by the bookmarks
-      // ahead of it, loses about what they took rather than half.
+      // too, said by count, and its image notes are kept only up to their
+      // own share, since either can be as long as any text. One that
+      // would fit on its own, crowded out only by the bookmarks ahead of
+      // it, loses about what they took rather than half.
       if (messages.length === 0) {
-        const { files, ...rest } = message;
-        const cutTo = (keep: number) => ({
-          ...rest,
+        const { files, imageNotes: allNotes, ...unlisted } = message;
+        const kept = allNotes !== undefined ? boundedNotes(allNotes) : undefined;
+        const cutTo = (keep: number): ShownMessage => ({
+          ...unlisted,
           text: message.text.slice(0, Math.max(0, keep)) + TRUNCATED_MARK,
           ...(files && files.length > 0 ? { files: [`${files.length} files, not listed`] } : {}),
+          ...(kept !== undefined ? { imageNotes: kept } : {}),
         });
-        let cut = cutTo(MESSAGE_READ_TEXT_BUDGET / 2);
-        if (used > 0 && size <= MESSAGE_READ_TEXT_BUDGET) {
-          // The longest cut that fits, measured as serialized, since
-          // escapes make the text longer and may sit anywhere in it.
-          const room = MESSAGE_READ_TEXT_BUDGET - used;
-          const fits = (keep: number) => JSON.stringify(cutTo(keep)).length <= room;
-          if (fits(0)) {
-            let low = 0;
-            let high = message.text.length;
-            while (low < high) {
-              const middle = Math.ceil((low + high) / 2);
-              if (fits(middle)) {
-                low = middle;
-              } else {
-                high = middle - 1;
-              }
+        // The longest cut that fits, measured as serialized, since escapes
+        // make the text longer and may sit anywhere in it: up to the whole
+        // text for one only the bookmarks crowded out, otherwise half.
+        const room = MESSAGE_READ_TEXT_BUDGET - used;
+        const fits = (keep: number) => JSON.stringify(cutTo(keep)).length <= room;
+        const ceiling = used > 0 && size <= MESSAGE_READ_TEXT_BUDGET ? message.text.length : MESSAGE_READ_TEXT_BUDGET / 2;
+        let low = 0;
+        if (fits(ceiling)) {
+          low = ceiling;
+        } else if (fits(0)) {
+          let high = ceiling;
+          while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            if (fits(middle)) {
+              low = middle;
+            } else {
+              high = middle - 1;
             }
-            cut = cutTo(low);
           }
         }
+        const cut = cutTo(low);
         messages.push(cut);
+        if (decided !== undefined && decided.shown.length > 0) {
+          pending.push({ message: cut, shown: decided.shown });
+        }
+        used += JSON.stringify(cut).length;
       }
       more = true;
       break;
+    }
+    // Shown only now, once every message that carries one is kept. Core's
+    // own check already passed each of them; a host whose attachImage has
+    // rules of its own can still refuse one, and then the image leaves
+    // shownImages, and why is said only where it fits what is left of the
+    // budget.
+    if (attachImage !== undefined) {
+      for (const { message, shown } of pending) {
+        const names: string[] = [];
+        const refusals: string[] = [];
+        for (const { image, name } of shown) {
+          try {
+            attachImage(image);
+            names.push(name);
+          } catch (error) {
+            refusals.push(`${name} is not shown: ${errorText(error)}`);
+          }
+        }
+        if (refusals.length === 0) {
+          continue;
+        }
+        let before = JSON.stringify(message).length;
+        if (names.length > 0) {
+          message.shownImages = names;
+        } else {
+          delete message.shownImages;
+        }
+        used += JSON.stringify(message).length - before;
+        for (const refusal of refusals) {
+          before = JSON.stringify(message).length;
+          message.imageNotes = [...(message.imageNotes ?? []), refusal];
+          const grown = JSON.stringify(message).length - before;
+          if (used + grown > MESSAGE_READ_TEXT_BUDGET) {
+            message.imageNotes = message.imageNotes.slice(0, -1);
+            if (message.imageNotes.length === 0) {
+              delete message.imageNotes;
+            }
+            break;
+          }
+          used += grown;
+        }
+      }
     }
     return {
       source: canonicalDestination(source),

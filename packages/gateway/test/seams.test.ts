@@ -17,6 +17,7 @@ import {
   type ToolCall,
   type ToolResult,
 } from '@stratusagent/core';
+import { MESSAGE_READ_IMAGE_BYTES, MESSAGE_READ_MAX_IMAGES } from '@stratusagent/agents';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 import { createFileCredentialResolver, saveChannelTransportSecrets } from '@stratusagent/state';
@@ -417,6 +418,79 @@ test('message.read goes through the adapter that carries the calling agent, and 
     const mia = await gateway.dispatch({ sessionId: 'read-mia', agentId: 'mia', userMessage: 'catch up' });
     assert.match(JSON.stringify(mia.messages), /No running 'fixture' channel carries agent mia/);
     assert.deepEqual(reads, ['ava:C1:T1:50']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('message.read asks the channel for images and the model gets them with the result, not in its text', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: reader\ntools: [message.read]\n---\n\nYou are Ava.\n');
+  // A 1×1 PNG with its size chunk and trailer: what the runner's image
+  // check reads before it lets an image through.
+  const png = Buffer.alloc(24);
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  png.writeUInt32BE(13, 8);
+  png.write('IHDR', 12, 'ascii');
+  png.writeUInt32BE(1, 16);
+  png.writeUInt32BE(1, 20);
+  const shot = Buffer.concat([png, Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82])]).toString('base64');
+  const asked: unknown[] = [];
+  const host = await hostFor({
+    'stratus-plugin-chan-a': {
+      manifest: manifest({ channels: [{ name: 'fixture' }] }),
+      module: plugin('a', (context) => {
+        context.channels!.register({
+          agents: ['ava'],
+          adapter: {
+            name: 'fixture',
+            async start() {},
+            async stop() {},
+            async readConversation(request) {
+              asked.push(request.images);
+              return {
+                messages: [{ id: '1', author: 'U1', text: 'the landing page', files: ['shot.png'], images: [{ mediaType: 'image/png', data: shot, name: 'shot.png' }] }],
+                more: false,
+              };
+            },
+          },
+        });
+      }),
+    },
+    'stratus-plugin-reader': {
+      manifest: manifest({ providers: [{ name: 'reader' }] }),
+      module: plugin('reader', (context) => {
+        context.providers!.register({
+          name: 'reader',
+          create: () => ({
+            name: 'reader',
+            async generate({ session }): Promise<ProviderResponse> {
+              if (session.messages.at(-1)?.role === 'tool') {
+                return { parts: [{ type: 'text', text: 'seen' }] };
+              }
+              return { parts: [{ type: 'tool-call', call: { id: `${session.id}:read`, toolName: 'message.read', input: { source: { channel: 'fixture', to: 'C1' } } } }] };
+            },
+          }),
+        });
+      }),
+    },
+  });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-reader': {} },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+  await gateway.start();
+  try {
+    const session = await gateway.dispatch({ sessionId: 'read-images', agentId: 'ava', userMessage: 'what did Dylan post?' });
+    assert.deepEqual(asked, [{ count: MESSAGE_READ_MAX_IMAGES, bytes: MESSAGE_READ_IMAGE_BYTES }]);
+    const result = session.messages.find((message) => message.role === 'tool');
+    assert.deepEqual(result?.images, [{ mediaType: 'image/png', data: shot, name: 'shot.png' }]);
+    assert.match(result?.content ?? '', /"shownImages":\["shot\.png"\]/);
+    assert.doesNotMatch(result?.content ?? '', new RegExp(shot.replace(/[+/=]/g, '\\$&')));
   } finally {
     await gateway.stop();
   }

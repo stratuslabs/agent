@@ -653,7 +653,12 @@ capability rather than an assumption:
   `ChannelAdapter.sessionConversation(agentId, sessionId)` says which
   conversation a session lives in, from the id alone; the gateway's
   refusal and the adapter's read both ask it, so they agree. Without it no
-  DM is readable.
+  DM is readable. `ConversationReadRequest.images` (`{ count, bytes }`)
+  asks for the image files on the messages read, for the whole read; an
+  adapter that can fetch them sets `ConversationMessage.images` (in flight
+  only, never part of the result's text) and says in `imageNotes` why any
+  other image file was not shown. One that cannot ignores it and returns
+  names in `files`, as before.
 - `ChannelAdapter.createConversation` is optional as well: it is what
   `channel.create` runs on, with the asking agent's own app, and a channel
   without it cannot create conversations. It must refuse what it can tell

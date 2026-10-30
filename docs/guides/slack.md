@@ -487,6 +487,13 @@ already turns on for approval buttons; no scope is added.
   under **OAuth & Permissions** and be reinstalled; until then the read
   returns the messages and tells the agent the scope is missing. Details in
   [Reading a channel](../../packages/channel-slack/README.md#reading-a-channel).
+- **Images in a read** — `message.read` shows the agent the images on the
+  messages it reads, at most 5 and 10 MB per read, held to the same limits
+  as an image someone sends it (Slack's preview for one over 5 MB). Each
+  message says which images it showed and why any other was not, so the
+  agent can read fewer messages to see the rest. It uses the `files:read`
+  scope the manifest already asks for. Details in
+  [Reading a channel](../../packages/channel-slack/README.md#reading-a-channel).
 - **Reading your own DM** — in a DM, `message.read` can read that DM's
   earlier messages and threads, so an agent can look back past what its
   session holds. Every other DM stays unreadable, whatever is approved.

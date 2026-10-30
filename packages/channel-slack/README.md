@@ -565,9 +565,27 @@ The boundary is the outbound one plus a rule for DMs:
   who can read what the bot token reads anyway.
 
 Messages come back as plain text with author ids and, where Slack supplies
-one cheaply, a display name. File contents are not downloaded; their names
-are listed. The tool labels the result `external`, so what an agent
-remembers after reading carries that label.
+one cheaply, a display name. Every attached file is listed by name. The
+tool labels the result `external`, so what an agent remembers after reading
+carries that label.
+
+Images on the messages read are shown to the model too, when the read asks
+for them (`ConversationReadRequest.images`). `message.read` asks whenever
+the agent's runtime can show an image, for at most 5 images and 10 MB per
+read. They go through the same reader as a message's attachments at the
+start of a turn: Slack's metadata is checked first, then the bytes, and only
+the four types a model takes (PNG, JPEG, GIF, WebP) are fetched, only from
+`https://files.slack.com`. An image over 5 MB or 8,000 pixels a side is sent
+as Slack's largest preview of it, and the agent is told it is a preview.
+The cap is spent in the order the messages come back (newest first at the
+top level, root first in a thread) and the files within each. Once one image
+doesn't fit, none after it is fetched, and one 30-second deadline covers
+every download in the read. Each message names the images it showed in
+`shownImages`, and says in `imageNotes` why any other image file was not
+shown: a preview, too large, a download that failed or ran out of time, a
+type no model takes, or the read's cap. Reading fewer messages shows the
+rest. Other files are never downloaded by a read. This needs the
+`files:read` scope that turn-start images already use.
 
 A read of a channel's top level with no `before` or `after`, the first
 page, also lists the channel's bookmarks (`bookmarks.list`, asked beside

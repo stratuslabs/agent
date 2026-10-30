@@ -19,6 +19,7 @@ import {
   isImageAttachmentMediaType,
   IMAGE_ATTACHMENT_MAX_BYTES,
   IMAGE_ATTACHMENT_MAX_DIMENSION,
+  IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT,
   IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   escapeControlCharacters,
   HostRefusalError,
@@ -474,7 +475,8 @@ export interface SlackHistoryMessage {
   subtype?: string;
   thread_ts?: string;
   reply_count?: number;
-  files?: Array<{ name?: string; title?: string; id?: string }>;
+  /** The same file objects an event carries, so a read can fetch an image. */
+  files?: SlackInboundFile[];
 }
 
 export interface SlackHistoryPage {
@@ -2403,8 +2405,11 @@ const MIB = 1024 * 1024;
  * what the small text says when it could only guess at it.
  */
 const previewNote = (previews: readonly ImagePreview[]): string =>
-  previews.map(({ name, width, height, original }) =>
-    `\n[${name} is shown as Slack's ${width}×${height} preview, because the original ${original}. Small text in it may not be legible: ask for a crop rather than guessing at it.]`).join('');
+  previews.map((preview) => `\n[${previewSentence(preview)}]`).join('');
+
+/** One preview, said the same way to a turn and to a read of history. */
+const previewSentence = ({ name, width, height, original }: ImagePreview): string =>
+  `${name} is shown as Slack's ${width}×${height} preview, because the original ${original}. Small text in it may not be legible: ask for a crop rather than guessing at it.`;
 
 /** An image downloaded, checked, and measured. */
 interface DownloadedImage {
@@ -2621,6 +2626,113 @@ const readImageAttachments = async (
     }
   });
   return { images, unread, previews };
+};
+
+/** A read's byte cap, said in the unit it was most likely set in. */
+const readCapLabel = (bytes: number): string => (bytes % MIB === 0 ? `${bytes / MIB} MB` : `${bytes} bytes`);
+
+/**
+ * The image cap a read asked for, held to what one request can carry, or
+ * undefined when it asked for none: then files come back by name only.
+ */
+const historyImageCap = (images: ConversationReadRequest['images']): { count: number; bytes: number } | undefined => {
+  if (images === undefined || !Number.isInteger(images.count) || images.count <= 0 || !Number.isFinite(images.bytes) || images.bytes < 1) {
+    return undefined;
+  }
+  return {
+    count: Math.min(images.count, IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT),
+    bytes: Math.min(Math.floor(images.bytes), IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES),
+  };
+};
+
+/** What a read is told about an image it tried to fetch and could not show. */
+const unshownImageNote = (label: string, reason: UnreadReason | undefined): string => {
+  switch (reason) {
+    case 'too-large':
+      return `${label} is not shown: it is over the ${IMAGE_ATTACHMENT_MAX_BYTES / MIB} MB or ${IMAGE_ATTACHMENT_MAX_DIMENSION} pixels a side a model can be sent, and Slack had no smaller preview of it that could be.`;
+    case 'timed-out':
+      return `${label} is not shown: it was not downloaded in time.`;
+    case 'unreadable':
+      return `${label} is not shown: its bytes are not a complete image.`;
+    default:
+      return `${label} is not shown: it could not be downloaded.`;
+  }
+};
+
+/**
+ * The images on the messages a read returns, fetched for a read that asks
+ * (`ConversationReadRequest.images`) and set on each message with a note
+ * for every image file it does not show. Each image goes through the same
+ * reader a turn's attachments do — Slack's metadata first, the bytes
+ * checked, Slack's preview for one over the per-image limits, and only
+ * from Slack's own file host — one file at a time, in the order the
+ * messages are returned. The read's cap is spent in that order, and once
+ * an image does not fit, none after it is taken, so what is shown is one
+ * unbroken stretch of the read rather than whichever small ones squeezed
+ * in. One deadline covers every download in the read.
+ */
+const readHistoryImages = async (
+  sources: ReadonlyArray<{ message: ConversationMessage; files: readonly SlackInboundFile[] }>,
+  cap: { count: number; bytes: number },
+  botToken: string,
+  fetchFile: SlackFileFetcher,
+  timeoutMs: number,
+  warn: (line: string) => void,
+): Promise<void> => {
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const pastBytes = `past this read's cap of ${readCapLabel(cap.bytes)} of images`;
+  let count = 0;
+  let remaining = cap.bytes;
+  let full: string | undefined;
+  for (const { message, files } of sources) {
+    const images: ImageAttachment[] = [];
+    const notes: string[] = [];
+    for (const file of files) {
+      const label = fileLabel(file);
+      if (!isImageAttachmentMediaType(file.mimetype)) {
+        if (file.mimetype?.startsWith('image/') === true) {
+          notes.push(`${label} is not shown: it is ${file.mimetype}, a kind of image a model cannot be shown.`);
+        }
+        continue;
+      }
+      if (full === undefined && count >= cap.count) {
+        full = `past this read's cap of ${cap.count} images`;
+      }
+      // Slack's own size, trusted before any bytes move. An original over
+      // the per-image limit may still go as its preview, whose size only
+      // its bytes can say.
+      if (full === undefined && file.size !== undefined && file.size <= IMAGE_ATTACHMENT_MAX_BYTES && file.size > remaining) {
+        full = pastBytes;
+      }
+      if (full !== undefined) {
+        notes.push(`${label} is not shown: ${full}.`);
+        continue;
+      }
+      const reasons: UnreadReasons = new Map();
+      const read = await readImageAttachments([file], botToken, fetchFile, timeoutMs, warn, reasons, deadline);
+      const image = read.images[0];
+      if (image === undefined) {
+        notes.push(unshownImageNote(label, reasons.get(file)));
+        continue;
+      }
+      const size = Buffer.byteLength(image.data, 'base64');
+      if (size > remaining) {
+        full = pastBytes;
+        notes.push(`${label} is not shown: ${full}.`);
+        continue;
+      }
+      remaining -= size;
+      count += 1;
+      images.push(image);
+      notes.push(...read.previews.map(previewSentence));
+    }
+    if (images.length > 0) {
+      message.images = images;
+    }
+    if (notes.length > 0) {
+      message.imageNotes = notes;
+    }
+  }
 };
 
 /** The most one text attachment may weigh to be read into the message. */
@@ -4991,6 +5103,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       names.set(user, await name);
     }
     const messages: ConversationMessage[] = [];
+    const sources: Array<{ message: ConversationMessage; files: SlackInboundFile[] }> = [];
     for (const message of raw) {
       if (!message.ts) {
         continue;
@@ -5003,7 +5116,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         || (message.user ? names.get(message.user) : undefined);
       const at = Number.parseFloat(message.ts);
       const files = (message.files ?? []).map((file) => file.name ?? file.title ?? file.id ?? 'file');
-      messages.push({
+      const read: ConversationMessage = {
         id: message.ts,
         author,
         text: plainSlackText(connection, message.text ?? '', names),
@@ -5012,7 +5125,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ...(message.thread_ts && message.thread_ts !== message.ts ? { thread: message.thread_ts } : {}),
         ...(message.reply_count ? { replies: message.reply_count } : {}),
         ...(files.length > 0 ? { files } : {}),
-      });
+      };
+      messages.push(read);
+      if (message.files !== undefined && message.files.length > 0) {
+        sources.push({ message: read, files: message.files });
+      }
+    }
+    const imageCap = historyImageCap(request.images);
+    if (imageCap !== undefined) {
+      await readHistoryImages(sources, imageCap, connection.config.botToken, fetchFile, fileDownloadTimeoutMs, warn);
     }
     return { messages, more, ...(listing ? await listing : {}) };
   };
