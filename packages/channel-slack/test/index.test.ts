@@ -2580,12 +2580,15 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   // Bea answers first in this process, so it knows the thread is hers.
   clock.at('990.5');
   await socket.deliver('message', channelMessage({ text: '<@B-BEA> start', ts: '990.5', thread: '990.0' }));
+  await socket.settled();
   // Dylan names Ava once: she answers, and the thread stays Bea's, but
   // Dylan's untagged follow-ups are Ava's to judge (card 541).
   clock.at('991.5');
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> look at this', ts: '991.5', thread: '990.0' }));
+  await socket.settled();
   clock.at('992.1');
   await socket.deliver('message', channelMessage({ text: 'so what do we do', ts: '992.1', thread: '990.0' }));
+  await socket.settled();
   // The placeholder the abandoned line opened is gone, not edited into
   // `(no reply)`, and nothing of Ava's judged turn stands in the thread.
   assert.deepEqual(webAva.posts.map((post) => post.text), ['…', '…']);
@@ -2596,6 +2599,7 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   // nobody, is answered by Bea, and Ava only hears it.
   clock.at('992.2');
   await socket.deliver('message', channelMessage({ text: 'and then?', ts: '992.2', thread: '990.0', user: 'U-SAM' }));
+  await socket.settled();
   const followUps = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('and then?'));
   assert.deepEqual(followUps.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]), [['bea', true]]);
   assert.deepEqual(webBea.updates.map((update) => update.text), ['sure', 'sure']);
@@ -2609,10 +2613,12 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   };
   clock.at('992.3');
   await socket.deliver('message', channelMessage({ text: 'hm', ts: '992.3', thread: '990.0' }));
+  await socket.settled();
   assert.ok(webAva.updates.some((update) => update.text === '(no reply)'), webAva.updates.map((update) => update.text).join(' | '));
   assert.equal(warnings.filter((line) => /chat\.delete failed: cant_delete_message/.test(line)).length, 1, warnings.join('\n'));
   clock.at('992.4');
   await socket.deliver('message', channelMessage({ text: 'ok', ts: '992.4', thread: '990.0', user: 'U-SAM' }));
+  await socket.settled();
   await adapter.stop();
   const last = gateway.dispatches.filter((dispatch) => dispatch.userMessage.endsWith(': ok'));
   assert.deepEqual(last.map((dispatch) => [dispatch.agentId, dispatch.addressed]), [['ava', false]]);
@@ -2660,19 +2666,23 @@ test('a turn nobody asked for whose placeholder opened but took no edit takes it
   // judge (card 541) without moving the thread.
   clock.at('1121.5');
   await socket.deliver('message', channelMessage({ text: '<@B-BEA> start', ts: '1121.5', thread: '1120.0' }));
+  await socket.settled();
   clock.at('1121.7');
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> look', ts: '1121.7', thread: '1120.0' }));
+  await socket.settled();
   // From here the placeholder posts; nothing Ava says ever lands in it.
   webAva.chat.update = async () => {
     throw new Error('ratelimited');
   };
   clock.at('1122.1');
   await socket.deliver('message', channelMessage({ text: 'so?', ts: '1122.1', thread: '1120.0' }));
+  await socket.settled();
   // The stranded placeholder is gone, and Ava did not speak: the thread
   // is still Bea's, so Sam, who named nobody, is answered by Bea alone.
   assert.equal(webAva.deletes.length, 1, warnings.join('\n'));
   clock.at('1122.2');
   await socket.deliver('message', channelMessage({ text: 'next', ts: '1122.2', thread: '1120.0', user: 'U-SAM' }));
+  await socket.settled();
   const next = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('next'));
   assert.deepEqual(next.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]), [['bea', true]]);
 
@@ -2683,8 +2693,10 @@ test('a turn nobody asked for whose placeholder opened but took no edit takes it
   };
   clock.at('1122.3');
   await socket.deliver('message', channelMessage({ text: 'again', ts: '1122.3', thread: '1120.0' }));
+  await socket.settled();
   clock.at('1122.4');
   await socket.deliver('message', channelMessage({ text: 'more', ts: '1122.4', thread: '1120.0', user: 'U-SAM' }));
+  await socket.settled();
   await adapter.stop();
   const more = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('more'));
   assert.deepEqual(more.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]), [['ava', false]]);
@@ -3583,8 +3595,12 @@ test('a judged turn whose streamed line landed but whose final edit Slack refuse
   webBea.stamp = clock.stamp;
   await adapter.start(gateway);
 
-  const both = (message: ReturnType<typeof channelMessage>) =>
-    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Each message waits for the turns before it: the next one's routing
+  // depends on whether Ava spoke, and that outlives the delivery wait.
+  const both = async (message: ReturnType<typeof channelMessage>) => {
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+    await Promise.all([socketAva.settled(), socketBea.settled()]);
+  };
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
   // untagged follow-ups are Ava's to judge (card 541), and Sam's are
   // the owner's.
