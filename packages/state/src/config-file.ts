@@ -888,9 +888,9 @@ const parseSlackEntry = (
   if (source.replies !== undefined) {
     // Refused rather than defaulted: a misspelt "streem" that quietly meant
     // `final` would look like the setting did nothing.
-    if (source.replies !== 'final' && source.replies !== 'stream') {
+    if (source.replies !== 'final' && source.replies !== 'stream' && source.replies !== 'texts') {
       throw new Error(
-        `Invalid ${where}.replies in config ${configPath}: expected "final" or "stream", received ${JSON.stringify(source.replies)}.`,
+        `Invalid ${where}.replies in config ${configPath}: expected "final", "stream" or "texts", received ${JSON.stringify(source.replies)}.`,
       );
     }
     entry.replies = source.replies;

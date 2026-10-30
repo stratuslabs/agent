@@ -12494,6 +12494,117 @@ test('a hosted-loop reply that joins the whole turn posts only what was not said
   assert.deepEqual(web.posts.map((post) => post.text), ['Let me check', 'Done']);
 });
 
+test('an agent on texts posts its reply as one message per paragraph, in order, in the thread, a code block whole', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => sessionWithReply(
+    sessionId,
+    'Main is **green**.\n\nThe flake was a timeout.\n\n```\nretries: 3\n\ntimeout: 10s\n```',
+  ));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> status?'));
+  await adapter.stop();
+
+  // Each paragraph converted to mrkdwn on its own, and the code block
+  // with a blank line inside it left as one message.
+  assert.deepEqual(web.posts.map((post) => post.text), ['Main is *green*.', 'The flake was a timeout.', '```\nretries: 3\n\ntimeout: 10s\n```']);
+  const threads = new Set(web.posts.map((post) => post.thread_ts));
+  assert.equal(threads.size, 1);
+  assert.notEqual([...threads][0], undefined);
+});
+
+test('the default reply mode still posts a reply of several paragraphs as one message', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => sessionWithReply(sessionId, 'Main is green.\n\nThe flake was a timeout.'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> status?'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Main is green.\n\nThe flake was a timeout.']);
+});
+
+test('on texts, what was said before a tool is split too, and is not posted again in the reply', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'On it.\n\nRunning the tests first.' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    // As the codex provider returns it: every message of the turn, joined.
+    return sessionWithReply(sessionId, 'On it.\n\nRunning the tests first.\n\nAll 40 pass.\n\nMerging now.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['On it.', 'Running the tests first.', 'All 40 pass.', 'Merging now.']);
+});
+
+test('on texts, a reply that only repeats the words before the last tool is not posted again', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Merged.\n\nTagging is yours.' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Merged.\n\nTagging is yours.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['Merged.', 'Tagging is yours.']);
+});
+
+test('on texts, the reply of a turn finished after a restart is split the same way', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'D1', slackThread: '700.1', conversation: { kind: 'direct' }, sessionTrust: 'user' },
+    reply: 'Back up.\n\nThe approval went through.',
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:D1:700.1' });
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Back up.', '700.1'], ['The approval went through.', '700.1']]);
+});
+
 test('what an agent said before its turn failed is still heard by the thread\'s other agents, and the error note is not', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
