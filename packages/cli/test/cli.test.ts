@@ -16975,6 +16975,18 @@ test('a continuation shows in --events and keeps its counts in the log', () => {
   assert.deepEqual(eventDetail(event), { continuation: 2, turns: 40 });
 });
 
+test('a context trim says in --events and the log whether a summary stands in for what left', () => {
+  const summarized = { type: 'session.context-trimmed' as const, sessionId: 's1', droppedMessages: 10, floor: 10, summarized: true };
+  assert.equal(formatEvent(summarized), '• session.context-trimmed dropped=10 floor=10 summarized=true');
+  assert.deepEqual(eventDetail(summarized), { droppedMessages: 10, floor: 10, summarized: true });
+  const cut = { ...summarized, summarized: false };
+  assert.deepEqual(eventDetail(cut), { droppedMessages: 10, floor: 10, summarized: false });
+  // An event from a core older than summaries reads as it always did.
+  const older = { type: 'session.context-trimmed' as const, sessionId: 's1', droppedMessages: 10, floor: 10 };
+  assert.equal(formatEvent(older), '• session.context-trimmed dropped=10 floor=10');
+  assert.deepEqual(eventDetail(older), { droppedMessages: 10, floor: 10 });
+});
+
 test('template add --force that cannot write the new soul keeps the agent it was replacing', async (t) => {
   if (process.platform === 'win32' || process.getuid?.() === 0) {
     t.skip('mode 500 does not deny writes here');
