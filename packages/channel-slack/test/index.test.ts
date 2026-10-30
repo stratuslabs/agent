@@ -11859,6 +11859,136 @@ test('a provider that answers in one piece still gets its words before a tool po
   assert.deepEqual(web.posts.map((post) => post.text), ['On it.', 'Done.']);
 });
 
+test('the words before a gated tool are posted before its approval prompt, and only once', async () => {
+  // Card 950: a task opens with one line saying what the agent is about to
+  // do. When its first tool needs approval, the prompt is posted before the
+  // call starts, so holding the line for tool.called put the question above
+  // the plan it belongs to, and the approver decided without it.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'call-1', toolName: 'shell.run', input: { command: 'ls' } };
+    await gateway.bus.emit({ type: 'provider.response', sessionId, parts: [{ type: 'text', text: 'Checking the logs first.' }, { type: 'tool-call', call }] });
+    gateway.pendingApprovals.add('req-1');
+    await gateway.bus.emit(approvalRequest({ sessionId, call }));
+    // The approver answers the prompt once they can see it.
+    for (let tick = 0; tick < 200 && !web.posts.some((posted) => /shell\.run/.test(posted.text ?? '')); tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await gateway.bus.emit({ type: 'tool.approval-resolved', sessionId, requestId: 'req-1', answer: 'once', reason: 'decided' });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'call-1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  const said = texts.indexOf('Checking the logs first.');
+  const asked = texts.findIndex((text) => /shell\.run/.test(text));
+  assert.ok(said >= 0 && asked >= 0, `expected both posts, got ${JSON.stringify(texts)}`);
+  assert.ok(said < asked, `expected the line above the prompt, got ${JSON.stringify(texts)}`);
+  assert.equal(texts.filter((text) => text === 'Checking the logs first.').length, 1);
+  assert.equal(texts.at(-1), 'Done.');
+});
+
+test('an approval prompt is not held up for good by a line that cannot be posted', async () => {
+  // The line goes out first, but Slack may be slow or refusing: the
+  // question still has to reach an approver, or the turn waits out the
+  // whole approval window for nothing.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const post = web.chat.postMessage.bind(web.chat);
+  let releaseLine!: () => void;
+  const lineGate = new Promise<void>((resolve) => {
+    releaseLine = resolve;
+  });
+  web.chat.postMessage = async (args) => {
+    if (args.text === 'Checking the logs first.') {
+      await lineGate;
+    }
+    return post(args);
+  };
+  let asked = false;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'call-1', toolName: 'shell.run', input: { command: 'ls' } };
+    await gateway.bus.emit({ type: 'provider.response', sessionId, parts: [{ type: 'text', text: 'Checking the logs first.' }, { type: 'tool-call', call }] });
+    gateway.pendingApprovals.add('req-1');
+    await gateway.bus.emit(approvalRequest({ sessionId, call }));
+    for (let tick = 0; tick < 200 && !asked; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      asked = web.posts.some((posted) => /shell\.run/.test(posted.text ?? ''));
+    }
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    approvalPromptWaitMs: 20,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  const delivered = socket.deliver('app_mention', mention('<@B-AVA> go'));
+  for (let tick = 0; tick < 200 && !asked; tick += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  // Asked while the line was still stuck, not after it went through.
+  assert.equal(asked, true);
+  releaseLine();
+  await delivered;
+  await adapter.stop();
+});
+
+test('a request settled while its prompt waits on the line is never posted', async () => {
+  // A stop, or an answer from another surface, can settle the request in
+  // the moment its prompt waits for the line: posting it then would offer
+  // buttons for a question that is no longer open.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const post = web.chat.postMessage.bind(web.chat);
+  let releaseLine!: () => void;
+  const lineGate = new Promise<void>((resolve) => {
+    releaseLine = resolve;
+  });
+  web.chat.postMessage = async (args) => {
+    if (args.text === 'Checking the logs first.') {
+      await lineGate;
+    }
+    return post(args);
+  };
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'call-1', toolName: 'shell.run', input: { command: 'ls' } };
+    await gateway.bus.emit({ type: 'provider.response', sessionId, parts: [{ type: 'text', text: 'Checking the logs first.' }, { type: 'tool-call', call }] });
+    gateway.pendingApprovals.add('req-1');
+    await gateway.bus.emit(approvalRequest({ sessionId, call }));
+    gateway.pendingApprovals.delete('req-1');
+    await gateway.bus.emit({ type: 'tool.approval-resolved', sessionId, requestId: 'req-1', answer: 'deny', reason: 'cancelled' });
+    releaseLine();
+    await gateway.bus.emit({ type: 'tool.denied', sessionId, call });
+    return sessionWithReply(sessionId, 'Stopped.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  const texts = web.posts.map((posted) => posted.text ?? '');
+  assert.deepEqual(texts, ['Checking the logs first.', 'Stopped.']);
+});
+
 test('a streaming provider\'s words before a tool are posted once, not again from its response', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
