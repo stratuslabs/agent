@@ -2195,9 +2195,12 @@ class ReplyRenderer {
     }
     // Alongside the reply rather than ahead of it: an edit keeps its place,
     // and the answer should not wait on a round trip for a status line.
-    const closed = this.closeProgress(promoted);
+    // Words promoted to the reply are the exception: they leave the
+    // progress message only once the reply holding them has landed, so a
+    // reply Slack refuses does not take the answer out of the thread.
+    const closed = promoted ? undefined : this.closeProgress(false);
     if (!this.ref && this.interimPosted && reply.trim().length === 0) {
-      await closed;
+      await (closed ?? this.closeProgress(false));
       // Nothing posts after this to take the status down, so it is cleared.
       if (hadStatus) {
         this.setStatus('');
@@ -2235,7 +2238,7 @@ class ReplyRenderer {
     // avoid, so it is taken back like an abandoned attempt's. One Slack
     // will not let go stands, and a message the thread can see is the
     // last thing said whatever it says.
-    await closed;
+    await (closed ?? this.closeProgress(published));
     let stranded = false;
     if (this.lazy && this.ref !== undefined && !landed && !this.edited) {
       stranded = !(await this.retract());

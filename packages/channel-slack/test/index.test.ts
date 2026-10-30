@@ -11861,6 +11861,30 @@ test('words the turn ends on, written before its last tool call, are its reply, 
   }
 });
 
+test('words promoted to the reply stay in the progress message when Slack refuses the reply', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Looking.');
+    await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'Summary: both green.');
+    await runTool(gateway, sessionId, 'c2', 'memory.remember');
+    return sessionWithReply(sessionId, 'Summary: both green.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    if (args.text === 'Summary: both green.') {
+      throw new Error('ratelimited');
+    }
+    return post(args);
+  };
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> are they green?'));
+  await adapter.stop();
+
+  // The answer is still in the thread, where it already was.
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps\n\nSummary: both green.');
+});
+
 test('a task with no first line keeps its words in the progress message once it has opened', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await runTool(gateway, sessionId, 'c1');
