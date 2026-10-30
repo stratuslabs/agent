@@ -1162,6 +1162,12 @@ interface MergeBatch {
   agentId: string | undefined;
   /** The dispatch that opened the batch and runs it, unless it is steered. */
   leader: MergeJoiner;
+  /**
+   * Nothing was queued on the session's chain when it opened, so nothing
+   * can be ahead of it: the chain is first in, first out. Only such a batch
+   * is steered (card 948); one behind other work waits its turn.
+   */
+  firstInLine: boolean;
   absorbed: MergeJoiner[];
   /**
    * Taken by the turn running ahead of it (card 948), which settles every
@@ -4071,6 +4077,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // are independent — different conversations run concurrently.
   const sessionChains = new Map<string, Promise<unknown>>();
   /**
+   * Work queued on each session's chain that has not started, of every
+   * kind (a dispatch, an overheard message, a recovery). What says whether
+   * a merged-turn batch is first in line behind the running turn, which
+   * steering needs (card 948): a batch with anything ahead of it would be
+   * answered before what was said first.
+   */
+  const queuedWork = new Map<string, number>();
+  const releaseQueued = (sessionId: string): void => {
+    const left = (queuedWork.get(sessionId) ?? 1) - 1;
+    if (left > 0) {
+      queuedWork.set(sessionId, left);
+    } else {
+      queuedWork.delete(sessionId);
+    }
+  };
+  /**
    * Dispatches queued behind a session's running turn, per session: what
    * tells an auto-continuing turn that somebody wrote meanwhile, so it
    * wraps up and lets them in rather than keep the session to itself.
@@ -5000,7 +5022,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     into: MergeJoiner[],
   ): Promise<SteeredMessage | undefined> => {
     const batch = openBatches.get(sessionId);
-    if (stopping || batch === undefined || batch.agentId !== agentId) {
+    if (stopping || batch === undefined || !batch.firstInLine || batch.agentId !== agentId) {
       return undefined;
     }
     // Until every key in it is checked with nothing awaited since: a message
@@ -5028,6 +5050,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     openBatches.delete(sessionId);
     batch.steered = true;
+    // Its place on the chain runs nothing now, so it is not ahead of a batch
+    // opening behind it, which can then be steered at a later step.
+    releaseQueued(sessionId);
     const all = [batch.leader, ...batch.absorbed];
     // Not waiting any more; the leader's place on the chain does not count it again.
     const left = (waitingDispatches.get(sessionId) ?? all.length) - all.length;
@@ -5112,9 +5137,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * stops that, and it only holds if everything that writes a session goes
    * through it.
    */
-  const onSessionChain = <T>(sessionId: string, work: () => Promise<T>): Promise<T> => {
+  const onSessionChain = <T>(
+    sessionId: string,
+    work: () => Promise<T>,
+    /** True once this work no longer counts as queued: a batch steered into the turn ahead (`takeSteered` released it). */
+    released?: () => boolean,
+  ): Promise<T> => {
     const previous = sessionChains.get(sessionId) ?? Promise.resolve();
-    const turn = previous.then(work, work);
+    queuedWork.set(sessionId, (queuedWork.get(sessionId) ?? 0) + 1);
+    const start = (): Promise<T> => {
+      if (released?.() !== true) {
+        releaseQueued(sessionId);
+      }
+      return work();
+    };
+    const turn = previous.then(start, start);
 
     const settled = turn.catch(() => {});
     sessionChains.set(sessionId, settled);
@@ -5343,6 +5380,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         agentId: input.agentId,
         // Settled through `settleLeader`, read when called: it is assigned below.
         leader: { input, resolve: (session) => settleLeader({ session }), reject: (error) => settleLeader({ error }) },
+        firstInLine: (queuedWork.get(input.sessionId) ?? 0) === 0,
         absorbed: [],
         steered: false,
         images: [...(input.images ?? [])],
@@ -5563,7 +5601,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // only ever be clearing its own entry.
         activeTurns.delete(input.sessionId);
       }
-    });
+    }, () => batch?.steered === true);
     // A second settle (a leader already settled early) is a no-op.
     chained.then((session) => settleLeader({ session }), (error: unknown) => settleLeader({ error }));
     if (idempotencyKey !== undefined) {

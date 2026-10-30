@@ -31,33 +31,46 @@ const openAiToolCall = (n: number): Response =>
 
 type Wire = Array<{ role: string; content: string }>;
 
+/** Something to wait on, and the hand that releases it. */
+const latch = () => {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { open, opened };
+};
+
 /**
- * A provider run from a script: call n gets `script[n - 1]`, called with a
- * gate it may wait on. Records every request's messages as sent.
+ * A provider run from a script: call n gets `script[n - 1]`. Each call in
+ * `gated` waits until released (`release(n)`), and says when it started
+ * (`started(n)`). Records every request's messages as sent.
  */
-const scriptedProvider = (script: Array<(n: number) => Response>, gatedCall?: number) => {
+const scriptedProvider = (script: Array<(n: number) => Response>, gated: number | number[] = []) => {
   const calls: Wire[] = [];
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let started!: () => void;
-  const waiting = new Promise<void>((resolve) => {
-    started = resolve;
-  });
+  const gates = new Map((Array.isArray(gated) ? gated : [gated]).map((n) => [n, { started: latch(), released: latch() }]));
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }> };
     calls.push(body.messages.map((message) => ({ role: message.role, content: typeof message.content === 'string' ? message.content : JSON.stringify(message.content) })));
     const n = calls.length;
-    if (n === gatedCall) {
-      started();
-      await gate;
+    const gate = gates.get(n);
+    if (gate !== undefined) {
+      gate.started.open();
+      await gate.released.opened;
     }
     // A call the script has no answer for fails the turn at once (a 400 is
     // not retried), so a regression fails an assertion instead of hanging.
     return script[n - 1]?.(n) ?? json({ error: { message: `unexpected provider call ${n}` } }, 400);
   }) as typeof fetch;
-  return { calls, fetchImpl, release, waiting };
+  const first = [...gates.keys()][0];
+  return {
+    calls,
+    fetchImpl,
+    started: (n: number) => gates.get(n)!.started.opened,
+    release: (n?: number) => gates.get(n ?? first!)?.released.open(),
+    get waiting() {
+      return gates.get(first!)!.started.opened;
+    },
+  };
 };
 
 const startGateway = async (t: TestContext, fetchImpl: typeof fetch) => {
@@ -138,6 +151,85 @@ test('an unkeyed message steered in is not run again when its place in the queue
   assert.equal(absorbed, true);
   assert.equal(provider.calls.length, 2);
   assert.equal(lastUser(provider.calls[1]), 'second');
+});
+
+test('a second message is steered in at a later step of the same turn', async (t) => {
+  // Call 1 and call 2 wait, each then asks for a tool; call 3 answers.
+  const provider = scriptedProvider([openAiToolCall, openAiToolCall, () => openAiText('Both done.')], [1, 2]);
+  const gateway = await startGateway(t, provider.fetchImpl);
+  const absorbed: string[] = [];
+
+  const first = gateway.dispatch({ sessionId: 's-1c', agentId: 'ava', userMessage: 'first', idempotencyKey: 'k1', onAbsorbed: () => {} });
+  await provider.started(1);
+  const second = gateway.dispatch({ sessionId: 's-1c', agentId: 'ava', userMessage: 'second', idempotencyKey: 'k2', onAbsorbed: () => absorbed.push('k2') });
+  provider.release(1);
+  await provider.started(2);
+  const third = gateway.dispatch({ sessionId: 's-1c', agentId: 'ava', userMessage: 'third', idempotencyKey: 'k3', onAbsorbed: () => absorbed.push('k3') });
+  provider.release(2);
+  const session = await first;
+  await Promise.all([second, third]);
+
+  assert.equal(provider.calls.length, 3);
+  assert.equal(lastUser(provider.calls[1]), 'second');
+  assert.equal(lastUser(provider.calls[2]), 'third');
+  assert.deepEqual(absorbed, ['k2', 'k3']);
+  assert.deepEqual(session.messages.filter((message) => message.steered === true).map((message) => message.content), ['second', 'third']);
+  assert.deepEqual(session.messages.find((message) => message.idempotencyKey === 'k1')?.absorbedKeys, ['k2', 'k3']);
+});
+
+test('a batch that opened behind other queued work is not steered ahead of it', async (t) => {
+  // The tool step ends with two things waiting: "first-queued", whose batch
+  // a too-long message closed, and the batch that long message opened.
+  const provider = scriptedProvider([openAiToolCall, () => openAiText('answer'), () => openAiText('a'), () => openAiText('b')], 1);
+  const gateway = await startGateway(t, provider.fetchImpl);
+  const long = `long ${'x'.repeat(40_000)}`;
+
+  const first = gateway.dispatch({ sessionId: 's-1d', agentId: 'ava', userMessage: 'first', onAbsorbed: () => {} });
+  await provider.waiting;
+  const earlier = gateway.dispatch({ sessionId: 's-1d', agentId: 'ava', userMessage: 'first-queued', onAbsorbed: () => {} });
+  const later = gateway.dispatch({ sessionId: 's-1d', agentId: 'ava', userMessage: long, onAbsorbed: () => {} });
+  provider.release();
+  const session = await first;
+  await Promise.all([earlier, later]);
+
+  // Nothing was steered: answered in the order they were sent, one turn each.
+  assert.equal(session.messages.some((message) => message.steered === true), false);
+  assert.equal(provider.calls.length, 4);
+  assert.equal(lastUser(provider.calls[2]), 'first-queued');
+  assert.equal(lastUser(provider.calls[3]), long);
+});
+
+test('a steered batch\'s place in the queue is not counted twice, so a later batch still waits behind what is ahead of it', async (t) => {
+  const provider = scriptedProvider([
+    openAiToolCall, openAiToolCall, () => openAiText('T1 done'), // 1-3: the first turn, two steps
+    () => openAiText('x'), // 4: X, which cannot be merged
+    openAiToolCall, () => openAiText('M done'), // 5-6: M, one step
+    () => openAiText('y'), () => openAiText('n'), // 7: Y, 8: N
+  ], [1, 2, 5]);
+  const gateway = await startGateway(t, provider.fetchImpl);
+
+  const first = gateway.dispatch({ sessionId: 's-1e', agentId: 'ava', userMessage: 'T1', onAbsorbed: () => {} });
+  await provider.started(1);
+  const a = gateway.dispatch({ sessionId: 's-1e', agentId: 'ava', userMessage: 'A', onAbsorbed: () => {} });
+  provider.release(1);
+  await provider.started(2);
+  // Steered A at step 1. Now: X (cannot merge), M (opens a batch behind X), Y (cannot merge).
+  const x = gateway.dispatch({ sessionId: 's-1e', agentId: 'ava', userMessage: 'X' });
+  const m = gateway.dispatch({ sessionId: 's-1e', agentId: 'ava', userMessage: 'M', onAbsorbed: () => {} });
+  const y = gateway.dispatch({ sessionId: 's-1e', agentId: 'ava', userMessage: 'Y' });
+  provider.release(2);
+  await Promise.all([first, a, x]);
+  await provider.started(5);
+  // M's turn is running and Y waits behind it: N must not be answered ahead of Y.
+  const n = gateway.dispatch({ sessionId: 's-1e', agentId: 'ava', userMessage: 'N', onAbsorbed: () => {} });
+  provider.release(5);
+  await Promise.all([m, y, n]);
+
+  assert.equal(lastUser(provider.calls[1]), 'A');
+  assert.equal(provider.calls.length, 8);
+  assert.equal(lastUser(provider.calls[5]), 'M');
+  assert.equal(lastUser(provider.calls[6]), 'Y');
+  assert.equal(lastUser(provider.calls[7]), 'N');
 });
 
 test('a message sent while the final answer is being written runs as the next turn', async (t) => {
