@@ -239,6 +239,18 @@ type ShownMessage = Omit<Awaited<ReturnType<ConversationReader>>['messages'][num
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
+ * The longest image name a read repeats. A name is whatever the channel
+ * says, and it is said again in `shownImages` and in every note, so it is
+ * bounded like any other text the read carries.
+ */
+const IMAGE_NAME_MAX = 200;
+
+const imageNameOf = (image: ImageAttachment, index: number): string => {
+  const name = image.name ?? `image ${index + 1}`;
+  return name.length <= IMAGE_NAME_MAX ? name : `${name.slice(0, IMAGE_NAME_MAX)}…`;
+};
+
+/**
  * Decides, message by message in the order they are listed, which of their
  * images a read shows, before any message is measured, so the text sent is
  * the text measured: the names shown and every note about the rest are in
@@ -258,7 +270,7 @@ const createImagePlan = () => {
     const shown: Array<{ image: ImageAttachment; name: string }> = [];
     const notes: string[] = [];
     images.forEach((image, index) => {
-      const name = image.name ?? `image ${index + 1}`;
+      const name = imageNameOf(image, index);
       const size = Buffer.byteLength(image.data, 'base64');
       if (full === undefined && count >= MESSAGE_READ_MAX_IMAGES) {
         full = `past this read's cap of ${MESSAGE_READ_MAX_IMAGES} images`;

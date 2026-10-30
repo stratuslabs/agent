@@ -817,7 +817,21 @@ test('message.read keeps its text budget with the image notes in it, however man
   const cut = await huge.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'), second.context as never) as JsonObject;
   assert.ok(JSON.stringify(cut.messages).length <= MESSAGE_READ_TEXT_BUDGET, `sent ${JSON.stringify(cut.messages).length}`);
   const only = (cut.messages as Array<{ shownImages?: string[] }>)[0]!;
-  assert.deepEqual(second.attached.map((image) => image.name), only.shownImages ?? []);
+  assert.equal(only.shownImages?.length, MESSAGE_READ_MAX_IMAGES);
+  assert.deepEqual(second.attached.map((image) => image.name), only.shownImages);
+
+  // A name is the adapter's to choose, so the read bounds it too.
+  const named = imageOf('n'.repeat(50_000));
+  const long = createMessageReadTool(async () => ({
+    messages: [{ id: '1.000001', author: 'U1', text: 'x'.repeat(MESSAGE_READ_TEXT_BUDGET), files: ['a long name'], images: [named] }],
+    more: false,
+  }));
+  const third = collecting();
+  const bounded = await long.execute({ source: { channel: 'slack', to: 'C9' } }, sessionFor('ava'), third.context as never) as JsonObject;
+  assert.ok(JSON.stringify(bounded.messages).length <= MESSAGE_READ_TEXT_BUDGET, `sent ${JSON.stringify(bounded.messages).length}`);
+  const shownName = (bounded.messages as Array<{ shownImages?: string[] }>)[0]?.shownImages?.[0] ?? '';
+  assert.ok(shownName.length <= 201 && shownName.startsWith('nnnn'), `name of ${shownName.length}`);
+  assert.equal(third.attached.length, 1);
 });
 
 test('message.read decides which images it shows before it measures, so a refused image is said within the budget', async () => {
