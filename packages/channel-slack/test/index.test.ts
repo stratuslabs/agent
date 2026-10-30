@@ -11105,7 +11105,12 @@ test('readConversation says why an image was not shown: another host, a refused 
       signal.addEventListener('abort', () => reject(signal.reason), { once: true });
     }),
   });
-  const late = await slow.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 5, bytes: 10 * READ_MIB } });
+  // AbortSignal.timeout's timer does not hold the process open, and here
+  // nothing else does (no socket delivery is in flight), so the test holds
+  // it while the read waits on its deadline.
+  const holdOpen = setInterval(() => {}, 1_000);
+  const late = await slow.readConversation!({ agentId: 'ava', conversation: 'C-ENG', limit: 10, images: { count: 5, bytes: 10 * READ_MIB } })
+    .finally(() => clearInterval(holdOpen));
   assert.equal(tried.length, 1);
   assert.match(late.messages[0]?.imageNotes?.[0] ?? '', /^slow\.png is not shown: it was not downloaded in time/);
   assert.match(late.messages[1]?.imageNotes?.[0] ?? '', /^later\.png is not shown: it was not downloaded in time/);

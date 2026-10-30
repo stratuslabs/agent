@@ -1,4 +1,4 @@
-import { sessionWriteTrust, type ImageAttachment, type JsonObject, type Session, type Tool, type TrustLevel } from '@stratusagent/core';
+import { createImageCollector, sessionWriteTrust, type ImageAttachment, type JsonObject, type Session, type Tool, type TrustLevel } from '@stratusagent/core';
 import {
   type ScheduleDestination,
   canonicalDestination,
@@ -236,26 +236,29 @@ export const directMessageReadRefusal = (destination: string): string =>
 /** One message as `message.read` returns it: text, and the names of the images it shows. */
 type ShownMessage = Omit<Awaited<ReturnType<ConversationReader>>['messages'][number], 'images'> & { shownImages?: string[] };
 
-const imageName = (image: ImageAttachment, index: number): string => image.name ?? `image ${index + 1}`;
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
- * Hands the kept messages' images to the model, message by message in the
- * order they are listed, held to the read's own cap whatever the channel
- * returned: the images stay in the session and replay on later turns, so
- * an adapter that ignored the cap must not fill that window. Once one
- * does not fit, none after it is shown either, so what the agent sees is
- * one unbroken stretch of the read. Each message ends up naming what it
- * showed, and saying of every other image why not.
+ * Decides, message by message in the order they are listed, which of their
+ * images a read shows, before any message is measured, so the text sent is
+ * the text measured: the names shown and every note about the rest are in
+ * it. Held to the read's own cap whatever the channel returned, since the
+ * images stay in the session and replay on later turns. Once one does not
+ * fit, none after it is shown either, so what the agent sees is one
+ * unbroken stretch of the read. Each image is put through core's own image
+ * check, the one the runner's `attachImage` applies, so an image that
+ * would be refused is said here rather than after the budget is spent.
  */
-const showImages = (pending: ReadonlyMap<ShownMessage, ImageAttachment[]>, attachImage: (image: ImageAttachment) => void): void => {
+const createImagePlan = () => {
+  const check = createImageCollector();
   let count = 0;
   let bytes = 0;
   let full: string | undefined;
-  for (const [message, images] of pending) {
-    const shown: string[] = [];
-    const notes = [...(message.imageNotes ?? [])];
+  return (images: readonly ImageAttachment[]): { shown: Array<{ image: ImageAttachment; name: string }>; notes: string[] } => {
+    const shown: Array<{ image: ImageAttachment; name: string }> = [];
+    const notes: string[] = [];
     images.forEach((image, index) => {
-      const name = imageName(image, index);
+      const name = image.name ?? `image ${index + 1}`;
       const size = Buffer.byteLength(image.data, 'base64');
       if (full === undefined && count >= MESSAGE_READ_MAX_IMAGES) {
         full = `past this read's cap of ${MESSAGE_READ_MAX_IMAGES} images`;
@@ -267,24 +270,38 @@ const showImages = (pending: ReadonlyMap<ShownMessage, ImageAttachment[]>, attac
         return;
       }
       try {
-        attachImage(image);
+        check.attach(image);
       } catch (error) {
-        notes.push(`${name} is not shown: ${error instanceof Error ? error.message : String(error)}`);
+        notes.push(`${name} is not shown: ${errorText(error)}`);
         return;
       }
       count += 1;
       bytes += size;
-      shown.push(name);
+      shown.push({ image, name });
     });
-    if (shown.length > 0) {
-      message.shownImages = shown;
-    } else {
-      delete message.shownImages;
+    return { shown, notes };
+  };
+};
+
+/**
+ * The most a cut message's image notes may take: a message too big for
+ * the whole budget keeps its notes only up to this, and counts the rest,
+ * as it does its file list.
+ */
+const CUT_IMAGE_NOTES_BUDGET = 4_000;
+
+const boundedNotes = (notes: readonly string[]): string[] => {
+  const kept: string[] = [];
+  let size = 2;
+  for (const note of notes) {
+    const length = JSON.stringify(note).length + 1;
+    if (size + length > CUT_IMAGE_NOTES_BUDGET) {
+      break;
     }
-    if (notes.length > 0) {
-      message.imageNotes = notes;
-    }
+    kept.push(note);
+    size += length;
   }
+  return kept.length === notes.length ? [...notes] : [...kept, `${notes.length - kept.length} more notes about images, not listed`];
 };
 
 export const createMessageReadTool = (
@@ -380,65 +397,115 @@ export const createMessageReadTool = (
     const messages: ShownMessage[] = [];
     // Each kept message's images, held beside it rather than in it: the
     // budget is text, and the pixels never join the result's text.
-    const pending = new Map<ShownMessage, ImageAttachment[]>();
+    const pending: Array<{ message: ShownMessage; shown: Array<{ image: ImageAttachment; name: string }> }> = [];
+    const plan = attachImage !== undefined ? createImagePlan() : undefined;
     let more = result.more;
     for (const read of result.messages) {
-      const { images, ...rest } = read;
-      const offered = attachImage !== undefined && images !== undefined ? images : [];
-      // Measured as it is sent: the names of the images it shows are text,
-      // their bytes are not.
-      const message: ShownMessage = offered.length > 0 ? { ...rest, shownImages: offered.map(imageName) } : rest;
+      const { images, imageNotes, ...rest } = read;
+      const decided = plan !== undefined && images !== undefined && images.length > 0 ? plan(images) : undefined;
+      const notes = [...(imageNotes ?? []), ...(decided?.notes ?? [])];
+      // Measured as it is sent: the names of the images it shows, and the
+      // notes on the rest, are text; their bytes are not.
+      const message: ShownMessage = {
+        ...rest,
+        ...(decided !== undefined && decided.shown.length > 0 ? { shownImages: decided.shown.map(({ name }) => name) } : {}),
+        ...(notes.length > 0 ? { imageNotes: notes } : {}),
+      };
       const size = JSON.stringify(message).length;
       if (used + size <= MESSAGE_READ_TEXT_BUDGET) {
         messages.push(message);
-        if (offered.length > 0) {
-          pending.set(message, offered);
+        if (decided !== undefined && decided.shown.length > 0) {
+          pending.push({ message, shown: decided.shown });
         }
         used += size;
         continue;
       }
       // One message bigger than the whole budget is cut rather than
       // dropped, or the read could never get past it. Its file list goes
-      // too, said by count, since a list can be as long as any text.
-      // One that would fit on its own, crowded out only by the bookmarks
-      // ahead of it, loses about what they took rather than half.
+      // too, said by count, and its image notes are kept only up to their
+      // own share, since either can be as long as any text. One that
+      // would fit on its own, crowded out only by the bookmarks ahead of
+      // it, loses about what they took rather than half.
       if (messages.length === 0) {
-        const { files, ...unlisted } = message;
+        const { files, imageNotes: allNotes, ...unlisted } = message;
+        const kept = allNotes !== undefined ? boundedNotes(allNotes) : undefined;
         const cutTo = (keep: number): ShownMessage => ({
           ...unlisted,
           text: message.text.slice(0, Math.max(0, keep)) + TRUNCATED_MARK,
           ...(files && files.length > 0 ? { files: [`${files.length} files, not listed`] } : {}),
+          ...(kept !== undefined ? { imageNotes: kept } : {}),
         });
-        let cut = cutTo(MESSAGE_READ_TEXT_BUDGET / 2);
-        if (used > 0 && size <= MESSAGE_READ_TEXT_BUDGET) {
-          // The longest cut that fits, measured as serialized, since
-          // escapes make the text longer and may sit anywhere in it.
-          const room = MESSAGE_READ_TEXT_BUDGET - used;
-          const fits = (keep: number) => JSON.stringify(cutTo(keep)).length <= room;
-          if (fits(0)) {
-            let low = 0;
-            let high = message.text.length;
-            while (low < high) {
-              const middle = Math.ceil((low + high) / 2);
-              if (fits(middle)) {
-                low = middle;
-              } else {
-                high = middle - 1;
-              }
+        // The longest cut that fits, measured as serialized, since escapes
+        // make the text longer and may sit anywhere in it: up to the whole
+        // text for one only the bookmarks crowded out, otherwise half.
+        const room = MESSAGE_READ_TEXT_BUDGET - used;
+        const fits = (keep: number) => JSON.stringify(cutTo(keep)).length <= room;
+        const ceiling = used > 0 && size <= MESSAGE_READ_TEXT_BUDGET ? message.text.length : MESSAGE_READ_TEXT_BUDGET / 2;
+        let low = 0;
+        if (fits(ceiling)) {
+          low = ceiling;
+        } else if (fits(0)) {
+          let high = ceiling;
+          while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            if (fits(middle)) {
+              low = middle;
+            } else {
+              high = middle - 1;
             }
-            cut = cutTo(low);
           }
         }
+        const cut = cutTo(low);
         messages.push(cut);
-        if (offered.length > 0) {
-          pending.set(cut, offered);
+        if (decided !== undefined && decided.shown.length > 0) {
+          pending.push({ message: cut, shown: decided.shown });
         }
+        used += JSON.stringify(cut).length;
       }
       more = true;
       break;
     }
+    // Shown only now, once every message that carries one is kept. Core's
+    // own check already passed each of them; a host whose attachImage has
+    // rules of its own can still refuse one, and then the image leaves
+    // shownImages, and why is said only where it fits what is left of the
+    // budget.
     if (attachImage !== undefined) {
-      showImages(pending, attachImage);
+      for (const { message, shown } of pending) {
+        const names: string[] = [];
+        const refusals: string[] = [];
+        for (const { image, name } of shown) {
+          try {
+            attachImage(image);
+            names.push(name);
+          } catch (error) {
+            refusals.push(`${name} is not shown: ${errorText(error)}`);
+          }
+        }
+        if (refusals.length === 0) {
+          continue;
+        }
+        let before = JSON.stringify(message).length;
+        if (names.length > 0) {
+          message.shownImages = names;
+        } else {
+          delete message.shownImages;
+        }
+        used += JSON.stringify(message).length - before;
+        for (const refusal of refusals) {
+          before = JSON.stringify(message).length;
+          message.imageNotes = [...(message.imageNotes ?? []), refusal];
+          const grown = JSON.stringify(message).length - before;
+          if (used + grown > MESSAGE_READ_TEXT_BUDGET) {
+            message.imageNotes = message.imageNotes.slice(0, -1);
+            if (message.imageNotes.length === 0) {
+              delete message.imageNotes;
+            }
+            break;
+          }
+          used += grown;
+        }
+      }
     }
     return {
       source: canonicalDestination(source),
