@@ -11949,6 +11949,38 @@ test('a progress message keeps its newest notes when they outgrow one message', 
   assert.equal(web.posts.at(-1)?.text, 'Done with all twelve.');
 });
 
+test('a note trimmed before the progress message ever showed it is not taken out of the reply', async () => {
+  // Slack is slow, so the first note's write waits behind the first line
+  // while later notes push it out of the message. Nobody saw it, so a
+  // hosted-loop reply that repeats the task keeps it.
+  const early = ['Note A: found it.', 'Note B: checking it.'];
+  const late = Array.from({ length: 4 }, (_, index) => `Note ${index}: ${'x'.repeat(1200)}`);
+  let release!: () => void;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Starting.');
+    await runTool(gateway, sessionId, 'c0');
+    for (const [index, note] of [...early, ...late].entries()) {
+      await say(gateway, sessionId, note);
+      await runTool(gateway, sessionId, `c${index + 1}`);
+    }
+    release();
+    return sessionWithReply(sessionId, ['Starting.', ...early, ...late, 'All done.'].join('\n\n'));
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  web.postGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  const seen = [...web.posts, ...web.updates].map((message) => message.text ?? '').join('\n');
+  for (const note of early) {
+    assert.ok(seen.includes(note), `${note} never reached Slack: ${JSON.stringify(web.posts.map((post) => (post.text ?? '').slice(0, 60)))}`);
+  }
+  assert.ok(web.posts.at(-1)?.text?.endsWith('All done.'));
+});
+
 test('words too long for the progress message are posted whole as messages of their own, and not again as the reply', async () => {
   const analysis = `Findings:\n\n${Array.from({ length: 90 }, (_, index) => `- item ${index}: ${'y'.repeat(40)}`).join('\n')}`;
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {

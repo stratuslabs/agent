@@ -1227,8 +1227,12 @@ class ReplyRenderer {
   private progressRef: OutboundMessageRef | undefined;
   /** What the first line says, from this turn's own tool events only. */
   private readonly progress: ProgressState = { steps: 0, running: new Map(), waitingOn: undefined, end: undefined };
-  /** The notes under that line, as sent: converted, oldest dropped past one message's room. */
-  private progressNotes: Array<{ text: string }> = [];
+  /**
+   * The notes under that line, as sent: converted, oldest dropped past one
+   * message's room. `shown` once a write that held the note has landed: a
+   * note trimmed while its write was still queued never reached anyone.
+   */
+  private progressNotes: Array<{ text: string; shown?: boolean }> = [];
   /** Whether older notes were dropped for room, so the message says so. */
   private progressNotesCut = false;
   /** Whether the last thing this turn said is a note rather than a message of its own. */
@@ -1790,7 +1794,7 @@ class ReplyRenderer {
   private noteProgress(text: string, converted: string): Promise<boolean> {
     this.progressOpen = true;
     this.clearProgressOpenTimer();
-    const note = { text: converted };
+    const note: { text: string; shown?: boolean } = { text: converted };
     this.progressNotes.push(note);
     this.trimProgressNotes();
     let heard = '';
@@ -1800,6 +1804,13 @@ class ReplyRenderer {
     });
     this.onInterim?.(() => heard, landedNow);
     this.queueProgressWrite(() => {
+      // Its own write landed, but a slow Slack can let later notes trim it
+      // out before any write held it. Unseen, it is not said: the others do
+      // not hear it, and a reply that repeats it keeps it.
+      if (!note.shown) {
+        settleLanded(false);
+        return;
+      }
       this.interimPosted = true;
       heard = text;
       this.lastInterim = text;
@@ -1847,7 +1858,11 @@ class ReplyRenderer {
       .then(() => after)
       .then(async () => {
         this.lastProgressAt = Date.now();
+        const held = [...this.progressNotes];
         await this.writeProgress(this.progressText());
+        for (const note of held) {
+          note.shown = true;
+        }
         landed?.();
       })
       .catch((error) => {
