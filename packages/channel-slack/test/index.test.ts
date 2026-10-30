@@ -2404,7 +2404,7 @@ test('an agent that judges takes a turn nobody asked for on every untagged reply
   const withShot = channelMessage({ text: 'what about this', ts: '4600.1', thread: '980.0' });
   await socket.deliver('message', {
     ...withShot,
-    event: { ...withShot.event, files: [{ id: 'F1', name: 'shot.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.example/shot.png' }] },
+    event: { ...withShot.event, files: [{ id: 'F1', name: 'shot.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.slack.com/shot.png' }] },
   });
   await adapter.stop();
 
@@ -8079,6 +8079,113 @@ test('an image the token may not read falls back to the note and names the scope
     undefined,
   ]]);
   assert.equal(warnings.filter((line) => /error\.png/.test(line) && /files:read/.test(line)).length, 1);
+});
+
+test('the bot token goes only to Slack\'s own file host: remote files, look-alike hosts and plain http are never fetched', async () => {
+  // A remote file is an app's pointer to a file it hosts, and Slack puts
+  // that app's URL in url_private, whatever host it names. Slack's rule:
+  // never send Slack credentials there, and compare the parsed host
+  // exactly (docs.slack.dev, Working with files: Downloading files).
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-file-host' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> look',
+      ts: '963.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [
+        // A remote file: its url_private is the app's own link.
+        { id: 'F30', name: 'remote.png', mimetype: 'image/png', size: 100, url_private: 'https://attacker.example/remote.png' },
+        { id: 'F31', name: 'lookalike.png', mimetype: 'image/png', size: 100, url_private_download: 'https://files.slack.com.attacker.example/F31/download' },
+        { id: 'F32', name: 'notes.md', mimetype: 'text/markdown', size: 24, url_private_download: 'http://files.slack.com/F32/download' },
+        { id: 'F33', name: 'huge.png', mimetype: 'image/png', size: 9 * 1024 * 1024, url_private_download: 'https://files.slack.com/F33/download', thumb_1024: 'https://attacker.example/F33/thumb_1024.png' },
+        { id: 'F34', name: 'ok.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.slack.com/F34/download' },
+      ],
+    },
+  });
+  await adapter.stop();
+
+  // Only the file on files.slack.com, over https, was asked for.
+  assert.deepEqual(fetched, ['https://files.slack.com/F34/download']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images?.map((image) => image.name)]), [[
+    'Dylan: look\n[Attached, name only: remote.png, lookalike.png, notes.md (could not be downloaded); huge.png (too large to read here). You have only the names, so say so rather than guessing at what is in them.]',
+    ['ok.png'],
+  ]]);
+  // The operator is told why, by host, and the token stayed home.
+  for (const [name, host] of [['remote.png', 'attacker.example'], ['lookalike.png', 'files.slack.com.attacker.example'], ['notes.md', 'http://files.slack.com'], ['huge.png', 'attacker.example']] as const) {
+    assert.equal(warnings.filter((line) => line.includes(name) && line.includes(host) && /bot token is not sent/.test(line)).length, 1, `${name}: ${warnings.join(' | ')}`);
+  }
+});
+
+test('a file URL with credentials or another port on Slack\'s host is not Slack\'s file host either', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-file-host-2' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> and these',
+      ts: '963.5',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [
+        { id: 'F35', name: 'userinfo.png', mimetype: 'image/png', size: 100, url_private_download: 'https://someone:secret@files.slack.com/F35/download' },
+        { id: 'F36', name: 'port.png', mimetype: 'image/png', size: 100, url_private_download: 'https://files.slack.com:8443/F36/download' },
+        { id: 'F37', name: 'garbled.png', mimetype: 'image/png', size: 100, url_private_download: 'not a url' },
+        // Upper case and the default port are the same origin, and fetched.
+        { id: 'F38', name: 'fine.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://FILES.slack.com:443/F38/download' },
+      ],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(fetched, ['https://FILES.slack.com:443/F38/download']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images?.map((image) => image.name)]), [[
+    'Dylan: and these\n[Attached, name only: userinfo.png, port.png, garbled.png (could not be downloaded). You have only the names, so say so rather than guessing at what is in them.]',
+    ['fine.png'],
+  ]]);
+  assert.equal(warnings.filter((line) => /bot token is not sent/.test(line)).length, 3);
+  // The refusal names where, never the credentials in the link.
+  assert.equal(warnings.some((line) => line.includes('secret')), false);
 });
 
 test('an image over the model limit is never downloaded, while a smaller one beside it still is', async () => {
@@ -14325,8 +14432,8 @@ test('a judged thread reply brings its image and text file to the owner, and to 
   });
   await adapter.start(gateway);
   const files = [
-    { id: 'F1', name: 'shot.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.example/shot.png' },
-    { id: 'F2', name: 'notes.md', mimetype: 'text/markdown', size: 24, url_private_download: 'https://files.example/notes.md' },
+    { id: 'F1', name: 'shot.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.slack.com/shot.png' },
+    { id: 'F2', name: 'notes.md', mimetype: 'text/markdown', size: 24, url_private_download: 'https://files.slack.com/notes.md' },
   ];
   const both = async (input: { text: string; ts: string; thread?: string; user?: string }, withFiles = false) => {
     clock.at(input.ts);
@@ -14347,8 +14454,8 @@ test('a judged thread reply brings its image and text file to the owner, and to 
 
   // Only Ava's token fetched, and only for the reply she judged.
   assert.deepEqual(fetched, [
-    { url: 'https://files.example/shot.png', token: 'xoxb-a' },
-    { url: 'https://files.example/notes.md', token: 'xoxb-a' },
+    { url: 'https://files.slack.com/shot.png', token: 'xoxb-a' },
+    { url: 'https://files.slack.com/notes.md', token: 'xoxb-a' },
   ]);
   const judged = gateway.dispatches.filter((dispatch) => dispatch.agentId === 'ava' && dispatch.addressed === false);
   assert.equal(judged.length, 1);

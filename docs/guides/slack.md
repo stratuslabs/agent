@@ -328,6 +328,12 @@ text or an image. It answers honestly from that note rather than as if it
 had read the file, and without guessing at a cause the note does not give.
 A message the agent only overheard names its files as not opened.
 
+Files are downloaded only from Slack's own file host, `https://files.slack.com`.
+A remote file, which another app added as a link to a file it hosts somewhere
+else, is never fetched: Slack hands out that app's own link in place of a
+Slack one, and the bot token is not sent outside Slack. The agent gets it by
+name, as not downloaded, and the daemon log names the host.
+
 Which runtimes can actually look: agents on the **Anthropic API**, an
 **OpenAI-compatible** provider, or a **Claude subscription** (the Claude Code
 runtime) receive the image itself. On Claude Code that is the newest
