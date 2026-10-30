@@ -594,11 +594,12 @@ test('bridged tool handlers execute through the host and report failures', async
 });
 
 /**
- * What the Claude Code CLI is shown for a bridged tool: the in-process
+ * What the Claude Code CLI is shown for bridged tools: the in-process
  * server the provider hands it, asked for tools/list over a bare MCP
- * transport. The SDK converts the shape with its own bundled zod.
+ * transport. The SDK converts each shape with its own bundled zod, and
+ * leaves out (with only a process warning) any tool it cannot convert.
  */
-const listedInputSchema = async (tools: ReturnType<typeof bridgeKernelTools>): Promise<Record<string, unknown>> => {
+const listedTools = async (tools: ReturnType<typeof bridgeKernelTools>): Promise<Array<{ name: string; inputSchema: Record<string, unknown> }>> => {
   const server = createSdkMcpServer({ name: 'stratus', tools });
   let reply: ((message: unknown) => void) | undefined;
   const replied = new Promise<unknown>((resolve) => { reply = resolve; });
@@ -610,9 +611,15 @@ const listedInputSchema = async (tools: ReturnType<typeof bridgeKernelTools>): P
   };
   await server.instance.connect(transport as never);
   transport.onmessage?.({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
-  const message = await replied as { result: { tools: Array<{ inputSchema: Record<string, unknown> }> } };
+  const message = await replied as { result: { tools: Array<{ name: string; inputSchema: Record<string, unknown> }> } };
   await server.instance.close();
-  return message.result.tools[0]!.inputSchema;
+  return message.result.tools;
+};
+
+const listedInputSchema = async (tools: ReturnType<typeof bridgeKernelTools>): Promise<Record<string, unknown>> => {
+  const listed = await listedTools(tools);
+  assert.deepEqual(listed.map((tool) => tool.name), tools.map((tool) => tool.name), 'the SDK left a bridged tool out of tools/list');
+  return listed[0]!.inputSchema;
 };
 
 test('a nested object parameter reaches the model with its keys, descriptions and required list', async () => {
@@ -677,6 +684,53 @@ test('a nested object parameter reaches the model with its keys, descriptions an
   // them against the tool's own schema as before.
   const extra = input.safeParse({ source: { channel: 'slack', to: 'C1', extra: 'x' }, meta: { any: 1 } });
   assert.deepEqual(extra.data, { source: { channel: 'slack', to: 'C1', extra: 'x' }, meta: { any: 1 } });
+});
+
+test('every bridged tool is listed to Claude Code, whatever nesting its parameters use', async () => {
+  // 0.14.0 put each nested parameter's JSON Schema on zod's internal
+  // toJSONSchema hook. The Agent SDK npm installs (0.3.312 and later)
+  // could not convert that and left the whole tool out: message.read,
+  // message.send, the schedule tools, memory.remember and channel.create
+  // vanished for every Claude Code agent. These are their parameter shapes.
+  const descriptors = [
+    { name: 'message.read', parameters: { type: 'object', properties: {
+      source: { type: 'object', description: 'Where to read.', properties: { channel: { type: 'string' }, to: { type: 'string' } }, required: ['channel', 'to'] },
+      limit: { type: 'number' },
+    }, required: ['source'] } },
+    { name: 'schedule.at', parameters: { type: 'object', properties: {
+      at: { type: 'string' },
+      destination: { type: 'object', description: 'Where firings report.', properties: { channel: { type: 'string', description: 'Channel kind.' }, to: { type: 'string' } }, required: ['channel', 'to'] },
+    }, required: ['at'] } },
+    { name: 'memory.remember', parameters: { type: 'object', properties: {
+      fact: { type: 'string' },
+      about: { type: 'array', description: 'Who it concerns.', items: { type: 'string' } },
+    }, required: ['fact'] } },
+    { name: 'channel.create', parameters: { type: 'object', properties: {
+      name: { type: 'string' },
+      invite: { type: 'array', items: { type: 'object', properties: { id: { type: 'string', description: 'A member id.' } }, required: ['id'] } },
+      options: { type: 'object', properties: { topic: { type: 'object', properties: { text: { type: 'string', description: 'Topic text.' } } } } },
+      meta: { type: 'object' },
+    }, required: ['name'] } },
+    { name: 'memory.recall', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+  ];
+  const warnings: string[] = [];
+  const onWarning = (warning: Error) => { warnings.push(warning.message); };
+  process.on('warning', onWarning);
+  try {
+    const bridged = bridgeKernelTools(descriptors, createSession(), async (_session, call) => ({ callId: call.id, toolName: call.toolName, ok: true, output: null }));
+    const listed = await listedTools(bridged);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(listed.map((tool) => tool.name), ['message_read', 'schedule_at', 'memory_remember', 'channel_create', 'memory_recall']);
+    assert.deepEqual(warnings.filter((message) => /left out of the server's tool list/.test(message)), []);
+    const props = (name: string) => (listed.find((tool) => tool.name === name)!.inputSchema as { properties: Record<string, Record<string, unknown>> }).properties;
+    assert.deepEqual(props('schedule_at').destination?.required, ['channel', 'to']);
+    assert.deepEqual(props('schedule_at').destination?.properties, { channel: { type: 'string', description: 'Channel kind.' }, to: { type: 'string' } });
+    assert.equal(props('schedule_at').destination?.description, 'Where firings report.');
+    assert.deepEqual(props('memory_remember').about, { type: 'array', items: { type: 'string' }, description: 'Who it concerns.' });
+    assert.deepEqual((props('channel_create').options?.properties as Record<string, { properties?: unknown }>).topic?.properties, { text: { type: 'string', description: 'Topic text.' } });
+  } finally {
+    process.off('warning', onWarning);
+  }
 });
 
 test('a bridged external result reaches the loop marked untrusted, and every other label as before', async () => {

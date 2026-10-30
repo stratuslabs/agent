@@ -136,25 +136,13 @@ const zodTypeFor = (schema: unknown, depth = 0): z.ZodType => {
   return typeof spec.description === 'string' ? type.describe(spec.description) : type;
 };
 
-// The Agent SDK turns a tool's shape into JSON Schema with its own bundled
-// zod, and copies only the top-level keys' descriptions into that zod's
-// registry. A nested key's description would never reach the model, so a
-// property with keys inside carries its JSON Schema, made here with ours,
-// through zod's toJSONSchema hook. A converter that ignores the hook, or a
-// shape ours cannot convert, still shows the keys and the required list,
-// only without their descriptions.
-const withNestedDescriptions = (type: z.ZodType): z.ZodType => {
-  try {
-    const { $schema: _dialect, ...json } = z.toJSONSchema(type, { io: 'input', target: 'draft-7' }) as Record<string, unknown>;
-    type._zod.toJSONSchema = () => structuredClone(json);
-  } catch {
-    // Keep the type as it is: a tool with plainer docs beats no tools.
-  }
-  return type;
-};
-
 // Kernel tools describe inputs as JSON Schema; the Agent SDK wants a Zod
 // shape. Unknown constructs degrade to z.unknown() rather than failing.
+// Plain zod only: the SDK (0.3.312 and later) converts the shape with its
+// own bundled zod and keeps nested keys' descriptions, and it leaves out
+// any tool whose shape it cannot convert. 0.14.0 set zod's internal
+// toJSONSchema hook here, which that converter cannot read, and lost seven
+// tools; the provider tests list every bridged tool through the real SDK.
 const zodShapeFor = (parameters: Record<string, unknown> | undefined, depth = 0): Record<string, z.ZodType> => {
   const shape: Record<string, z.ZodType> = {};
   if (!parameters || typeof parameters.properties !== 'object' || parameters.properties === null || Array.isArray(parameters.properties)) {
@@ -166,9 +154,7 @@ const zodShapeFor = (parameters: Record<string, unknown> | undefined, depth = 0)
       : [],
   );
   for (const [key, propSchema] of Object.entries(parameters.properties as Record<string, unknown>)) {
-    const nested = depth === 0 && typeof propSchema === 'object' && propSchema !== null
-      && ['object', 'array'].includes((propSchema as Record<string, unknown>).type as string);
-    const type = nested ? withNestedDescriptions(zodTypeFor(propSchema, depth)) : zodTypeFor(propSchema, depth);
+    const type = zodTypeFor(propSchema, depth);
     shape[key] = required.has(key) ? type : type.optional();
   }
   return shape;
