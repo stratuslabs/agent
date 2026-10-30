@@ -11879,6 +11879,31 @@ test('a task with no first line keeps its words in the progress message once it 
   assert.equal(editsOf(web, 'bot-ts-1').at(-1), '✓ Done · 2 steps\n\nHalfway there.');
 });
 
+test('a task that starts with a tool keeps the words it writes after it in the progress message', async () => {
+  // Only words before the first tool are a message of their own. Written
+  // after a quick step, before the progress message has opened on the
+  // clock, they open it rather than becoming the task's first post.
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await runTool(gateway, sessionId, 'c1', 'fs.read');
+    await say(gateway, sessionId, 'Found the config, checking the log.');
+    await runTool(gateway, sessionId, 'c2');
+    await say(gateway, sessionId, 'The log is clean.');
+    await runTool(gateway, sessionId, 'c3');
+    return sessionWithReply(sessionId, 'Nothing is wrong.');
+  });
+  // The default wait: nothing opens it on the clock in a test this quick.
+  const { socket, web, adapter } = progressAdapter(gateway);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> is it broken?'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts.length, 2, JSON.stringify(texts));
+  assert.match(texts[0] ?? '', /^⚙ Working/);
+  assert.equal(texts[1], 'Nothing is wrong.');
+  assert.equal(editsOf(web, 'bot-ts-1').at(-1), '✓ Done · 3 steps\n\nFound the config, checking the log.\n\nThe log is clean.');
+});
+
 test('a hosted-loop reply that joins the whole task posts only its answer, not the notes again', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await say(gateway, sessionId, 'Looking.');

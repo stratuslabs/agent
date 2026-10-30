@@ -1711,7 +1711,10 @@ class ReplyRenderer {
     if (this.streaming || this.lazy || !this.turnStarted || !ofThisTurn || text.length === 0) {
       return undefined;
     }
-    if (this.firstWordsSaid || this.progressOpen) {
+    // Only words before the turn's first tool are a message of their own:
+    // after one, a step has run, and what follows is progress whether or
+    // not the turn opened with a line.
+    if (this.firstWordsSaid || this.progressOpen || this.progress.steps > 0) {
       const note = toSlackMrkdwn(text);
       if (note.length <= PROGRESS_NOTE_ROOM) {
         return this.noteProgress(text, note);
