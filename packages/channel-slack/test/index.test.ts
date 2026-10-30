@@ -4545,6 +4545,88 @@ test('the tool status line clears as soon as the tool completes', async () => {
   assert.equal(texts.at(-1), 'done');
 });
 
+test('read-only calls running together keep the status line on the one still running', async () => {
+  // Core runs a response's consecutive read-only calls together, so one
+  // can finish while its neighbor is still running. The status line names
+  // the call still running, and only says thinking once none is.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  const ticks = async (): Promise<void> => {
+    for (let tick = 0; tick < 50; tick += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  let whileFirstRuns: string | undefined;
+  let afterBoth: string | undefined;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'fs.read', input: {} } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c2', toolName: 'fs.search', input: {} } });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c2', toolName: 'fs.search', ok: true, output: null } });
+    await ticks();
+    whileFirstRuns = statuses.at(-1)?.status;
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'fs.read', ok: true, output: null } });
+    await ticks();
+    afterBoth = statuses.at(-1)?.status;
+    return sessionWithReply(sessionId, 'Found it.');
+  });
+
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> where is it?'));
+  await adapter.stop();
+
+  assert.equal(whileFirstRuns, 'is running fs.read…');
+  assert.equal(afterBoth, 'is thinking…');
+});
+
+test('read-only calls running together keep the streamed tool line on the one still running', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+  const settle = async (): Promise<void> => {
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  };
+  let whileFirstRuns: string | undefined;
+  let afterBoth: string | undefined;
+
+  const gateway: GatewayLike = {
+    bus,
+    resolveApproval: () => false,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      await bus.emit({ type: 'tool.called', sessionId: input.sessionId, call: { id: 'c1', toolName: 'fs.read', input: {} } });
+      await bus.emit({ type: 'tool.called', sessionId: input.sessionId, call: { id: 'c2', toolName: 'fs.search', input: {} } });
+      await settle();
+      await bus.emit({ type: 'tool.completed', sessionId: input.sessionId, result: { callId: 'c2', toolName: 'fs.search', ok: true, output: {} } });
+      await settle();
+      whileFirstRuns = web.updates.at(-1)?.text;
+      await bus.emit({ type: 'tool.completed', sessionId: input.sessionId, result: { callId: 'c1', toolName: 'fs.read', ok: true, output: {} } });
+      await settle();
+      afterBoth = web.updates.at(-1)?.text;
+      return sessionWithReply(input.sessionId, 'done');
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> where is it?'));
+  await adapter.stop();
+
+  assert.ok(whileFirstRuns?.includes('⚙ fs.read…'), `expected the running call's line, saw: ${String(whileFirstRuns)}`);
+  assert.ok(!afterBoth?.includes('⚙'), `expected the line cleared once both settled, saw: ${String(afterBoth)}`);
+});
+
 test('streamed text from consecutive provider turns stays separated', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
