@@ -302,7 +302,7 @@ test('what an outside party wrote stays labeled through the summary', async () =
 
 test('an abort during the summary stops the turn rather than falling back', async () => {
   const controller = new AbortController();
-  const { provider } = createProvider(6, (request) => {
+  const { provider, recorded } = createProvider(6, (request) => {
     controller.abort(new RunAbortedError('stopped by the person'));
     throw request.signal?.reason ?? new Error('aborted');
   });
@@ -314,6 +314,8 @@ test('an abort during the summary stops the turn rather than falling back', asyn
     () => runner.resume({ sessionId: 'sum-7', userMessage: 'and now?', signal: controller.signal }),
     /stopped by the person/,
   );
+  // Stopped where it was: no retry went out on a turn the person stopped.
+  assert.equal(recorded.turns.length, 1);
   const stored = (await store.get('sum-7'))!;
   assert.equal(contextSummaryOf(stored), undefined);
 });
@@ -339,6 +341,34 @@ test('a host refusal of the summary call ends the turn, as it would any call', a
 
   await assert.rejects(() => runner.resume({ sessionId: 'sum-8', userMessage: 'and now?' }), /used its budget/);
   assert.equal(recorded.summaries.length, 0, 'the refused call was never made');
+});
+
+test('a refusal from inside the summary call ends the turn too, rather than reading as a failed summary', async () => {
+  // The fallback wrapper's shape: the primary failed the summary, and the
+  // host is asked before the fallback makes a second call. A spent budget
+  // refusing that call is not a summary that failed; the retry after it
+  // would be refused as well.
+  const { provider, recorded } = createProvider(6, async (request) => {
+    await request.guardCall?.('fallback-model');
+    return { parts: [{ type: 'text', text: 'never reached' }] };
+  });
+  const store = new InMemorySessionStore();
+  const runner = new AgentRunner({
+    provider,
+    store,
+    providerCallGuards: [
+      ({ provider: name }) => {
+        if (name === 'fallback-model') {
+          throw new HostRefusalError('This agent has used its budget for today.');
+        }
+      },
+    ],
+  });
+  await seed(store, 'sum-8b', 10);
+
+  await assert.rejects(() => runner.resume({ sessionId: 'sum-8b', userMessage: 'and now?' }), /used its budget/);
+  assert.equal(recorded.summaries.length, 1);
+  assert.equal(recorded.turns.length, 1, 'no retry after the refusal');
 });
 
 test('a summary call is billed to the turn, and its words never stream to the person', async () => {

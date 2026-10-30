@@ -97,8 +97,9 @@ appended with no turn run — is `session.observed`, by session and agent
 alone; that it was heard is the trace, and what was heard stays in the
 session store like every other message. When a conversation grows past what
 the model can read in one request and its oldest messages stop being sent,
-`session.context-trimmed` records how many left and how many are now held
-back — counts only, for the same reason. It is worth watching for: the
+`session.context-trimmed` records how many left, how many are now held
+back, and whether a summary the agent wrote stands in for them — counts
+only, for the same reason: the summary stays in the session store. It is worth watching for: the
 answers stay plausible while the agent quietly stops being able to remember
 the start of the conversation. See
 [a conversation that outgrows the model](./troubleshooting.md#a-conversation-that-outgrows-the-model).

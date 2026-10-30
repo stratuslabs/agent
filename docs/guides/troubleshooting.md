@@ -241,19 +241,31 @@ replays the whole thing to the model, and eventually it no longer fits.
 When that happens the conversation **narrows rather than stopping**. The
 request is refused for length, the daemon halves how much history it sends
 and tries again until it fits, and it remembers the window it landed on so
-the next turn does not pay for the discovery again. The agent is told, in
-the request, that earlier messages are not being shown.
+the next turn does not pay for the discovery again.
+
+Each time the window narrows, the daemon asks the same model, in one extra
+call, for a summary of the messages that just left it, and sends that
+summary in their place from then on. The next narrowing folds the earlier
+summary into the new one, so what was said at the start keeps reaching the
+agent. The agent is told, in the request, that it is reading a summary and
+not the messages themselves.
 
 What this costs is real and worth knowing:
 
-- **The agent cannot see the messages that fell out of the window.** It
-  knows how many there were and nothing about them, so it will answer
-  questions about the start of the conversation as though it had just
-  joined. Summarizing what leaves is
-  planned, not shipped.
+- **A summary is not the messages.** Details it left out are gone from
+  what the agent sees, and it is told to say so rather than guess. If the
+  summary call fails (the provider is overloaded, or the part being
+  summarized is too big even with long tool output clipped), the window
+  narrows anyway and the agent is told only that earlier messages are not
+  shown; the next narrowing whose summary succeeds catches up. The
+  summary call is billed and checked against budgets like any other.
+- **What an outside party wrote stays labeled.** A summary of a
+  conversation that read a web page or another server's reply carries
+  that label, and the agent is told to treat that part as data.
 - **Nothing is deleted.** The window bounds what is *sent*; the transcript
   on disk is whole, and `stratus logs` shows every trim as
-  `session.context-trimmed`.
+  `session.context-trimmed`, with `summarized` saying whether a summary
+  stands in for what left.
 - **The window only ever narrows.** A conversation that trimmed once will
   trim again as it grows.
 

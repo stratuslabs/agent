@@ -35,6 +35,7 @@ import {
   describeToolAllowlistFinding,
   unmatchedToolAllowlist,
   CONTEXT_FLOOR_METADATA_KEY,
+  CONTEXT_SUMMARY_METADATA_KEY,
   PENDING_APPROVAL_METADATA_KEY,
   SESSION_TAINTED_BY_METADATA_KEY,
   SESSION_TRUST_METADATA_KEY,
@@ -1712,6 +1713,10 @@ export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   // no messages and, once it grows past that index, silently stops sending
   // its own earliest turns, with no overflow and no trim event to say so.
   CONTEXT_FLOOR_METADATA_KEY,
+  // The summary that stands in below that floor, for both of the same
+  // reasons, and one more: the model reads it as something it wrote itself,
+  // so a caller who could seed it could put words in the agent's mouth.
+  CONTEXT_SUMMARY_METADATA_KEY,
   SUB_AGENT_METADATA_KEY,
 ];
 

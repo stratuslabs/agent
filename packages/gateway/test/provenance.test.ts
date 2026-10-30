@@ -9,6 +9,7 @@ import {
   InMemoryAgentMemoryStore,
   SENDER_TRUST_METADATA_KEY,
   CONTEXT_FLOOR_METADATA_KEY,
+  CONTEXT_SUMMARY_METADATA_KEY,
   SESSION_TRUST_METADATA_KEY,
   ToolRegistry,
   contextFloorOf,
@@ -133,6 +134,8 @@ test('the gateway carries each turn’s sender to a resumed session, so a strang
 test('the session label is the daemon’s to write: a caller cannot seed it through dispatch metadata', async () => {
   assert.ok(RESERVED_SESSION_METADATA_KEYS.includes(SESSION_TRUST_METADATA_KEY));
   assert.ok(RESERVED_SESSION_METADATA_KEYS.includes(ROLLED_OVER_FROM_METADATA_KEY));
+  // Nor the summary the model reads as its own words.
+  assert.ok(RESERVED_SESSION_METADATA_KEYS.includes(CONTEXT_SUMMARY_METADATA_KEY));
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
   const gateway = createGateway({ env, idleTimeoutMs: 0 });
@@ -169,6 +172,7 @@ test('a rollover archives the transcript and starts the same id over — the rem
         anthropicRawTurns: { old: [] },
         // A conversation long enough to have been trimmed.
         [CONTEXT_FLOOR_METADATA_KEY]: 2,
+        [CONTEXT_SUMMARY_METADATA_KEY]: { from: 0, through: 2, text: 'hello was said', trust: 'unknown' },
       },
     });
     const legacy = await gateway.dispatch({ sessionId: 'dm-1', userMessage: 'still here' });
@@ -203,6 +207,8 @@ test('a rollover archives the transcript and starts the same id over — the rem
     // with no overflow and no trim event to say so.
     assert.equal(contextFloorOf(fresh), 0);
     assert.equal(fresh.metadata?.[CONTEXT_FLOOR_METADATA_KEY], undefined);
+    // And so does the summary that stood in below it.
+    assert.equal(fresh.metadata?.[CONTEXT_SUMMARY_METADATA_KEY], undefined);
     // The archived row keeps it, being the transcript it describes.
     assert.equal(contextFloorOf(archived), 2);
     assert.equal(fresh.metadata?.[ROLLED_OVER_FROM_METADATA_KEY], archivedAs);
