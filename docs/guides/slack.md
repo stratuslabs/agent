@@ -210,10 +210,24 @@ machines, turn on `agentMentions`:
 ## How replies appear
 
 By default an agent posts finished messages, never a `…` that is then
-rewritten in front of you. Whatever it writes before it starts a tool is
+rewritten in front of you. Whatever it writes before its first tool is
 posted as that tool starts — "On it, checking the three PRs" reaches the
-thread at once, not an hour later — and the finished reply follows as its
-own message. While it works, Slack shows its own loading status under the
+thread at once, not an hour later.
+
+After that, a task keeps one progress message up to date instead of
+posting each step. Its first line comes from the tools the agent actually
+called, not from what it says about them: "⚙ Working · step 3: `shell.run`",
+"⏸ Waiting for approval to run `shell.run`", and at the end "✓ Done ·
+7 steps", "■ Stopped after 3 steps" or "✗ Failed after 3 steps". Anything
+else the agent writes between tools goes under that line, newest last;
+a passage too long to fit there is posted whole as a message of its own.
+The progress message opens once a task has worked for ten seconds, or as
+soon as the agent writes something more between tools, so a quick answer
+is just the answer. The finished reply follows as its own message; when
+the agent's last words came before its last tool call, those words are
+the reply rather than a line in the progress message.
+
+While it works, Slack shows its own loading status under the
 agent's name: "is thinking…", or "is running shell.run…" while a tool runs.
 The same step also goes out as Slack's loading message ("Running
 shell.run…"), for Slack's newer agent sessions, which replace the status
@@ -221,24 +235,40 @@ line with their own text ("Finding answers…"). A turn nobody asked for (an age
 [judges](#how-an-agent-listens)) shows no status, since it may decide to
 say nothing.
 
-Messages you send while it is still working wait their turn and are
-answered in order. In a DM each one shows the status as soon as you send
-it, so a second message never makes the agent look idle; in a channel
-thread the status keeps saying what the running turn is doing until its
-reply posts.
+Messages you send while it is still working reach it at its next step:
+once the tool it is running finishes, it reads them before it decides what
+to do next, so "skip the tests" lands mid-task, and the reply it posts
+answers them along with what you first asked. If it is already writing
+its final reply, they wait, and its next turn answers everything that
+queued in one reply. An agent on a provider that runs its own tool loop
+(Codex, or Claude through a subscription sign-in) doesn't take messages
+mid-task yet: they always wait for the next turn. In a DM each message
+shows the status as soon as you send it, so a second message never makes
+the agent look idle; in a channel thread the status keeps saying what the
+running turn is doing until its reply posts.
 
 If you would rather watch the reply being written, set `stream`: the agent
 posts a `…` placeholder at once, edits it as the reply arrives, shows
 `⚙ tool…` lines while tools run, and finalizes it — how every reply looked
 before `final` existed.
 
+To have an agent read more like someone texting, set `texts`: it works the
+way `final` does, but each paragraph of a reply is posted as a message of
+its own, in order, in the same thread. The words before a tool are split the
+same way. A code block, a list, a heading with the paragraph under it, and a
+line ending in a colon with what it introduces each stay in one message. A
+reply is at most five messages, and anything past the fifth paragraph stays
+together in the last one. Messages the agent sends with `message.send` and
+error notices are posted as written.
+
 ```jsonc
 // ~/.stratus/config.json — trusted configs only
 {
   "slack": {
-    "replies": "final",              // the default; or "stream"
+    "replies": "final",              // the default; or "stream" or "texts"
     "agents": {
-      "blair": { "replies": "stream" }  // per agent, over the default
+      "blair": { "replies": "stream" }, // per agent, over the default
+      "atlas": { "replies": "texts" }
     }
   }
 }

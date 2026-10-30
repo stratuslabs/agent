@@ -142,7 +142,10 @@ In `remote` mode a gated call does not fail — the turn parks, the request
 is posted to Slack with **Allow once**, **Always allow**, and **Deny**, and
 the turn resumes on the answer. The question goes to the thread the turn is
 happening in, so whoever is talking to the agent sees it where they already
-are.
+are. What the agent wrote before the call, such as its line saying what it
+is about to do, is posted first, so the question sits under the reason for
+it. If Slack is slow to take that line, the question goes out after a few
+seconds anyway.
 
 Turn it on for the daemon with `--approvals remote`, or in
 `~/.stratus/config.json` so the installed service picks it up too:

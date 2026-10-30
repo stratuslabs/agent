@@ -1946,9 +1946,11 @@ test('a config that is simply not there leaves the id check with nothing to repo
 
 test('the slack block sets each agent\'s reply mode, per agent over the default, and final when unset', () => {
   const config = validateConfigFile({
-    slack: { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } },
+    slack: { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {}, dee: { replies: 'texts' } } },
   }, 'test-config');
-  assert.deepEqual(config.slack, { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {} } });
+  assert.deepEqual(config.slack, { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {}, dee: { replies: 'texts' } } });
+  // Texting style (card 951) is a third mode, opted into per agent.
+  assert.deepEqual(resolveAgentSlack(config.slack, 'dee'), { replies: 'texts', linkPreviews: true, homeChannels: [], agentMentions: false });
   assert.deepEqual(resolveAgentSlack(config.slack, 'ava'), { replies: 'stream', linkPreviews: true, homeChannels: [], agentMentions: false });
   assert.deepEqual(resolveAgentSlack(config.slack, 'bea'), { replies: 'final', linkPreviews: true, homeChannels: [], agentMentions: false });
   assert.deepEqual(resolveAgentSlack(config.slack, 'cy'), { replies: 'stream', linkPreviews: true, homeChannels: [], agentMentions: false });
@@ -1958,7 +1960,7 @@ test('the slack block sets each agent\'s reply mode, per agent over the default,
   // look like the setting silently did nothing.
   assert.throws(
     () => validateConfigFile({ slack: { replies: 'streaming' } }, 'test-config'),
-    /Invalid slack\.replies in config test-config: expected "final" or "stream", received "streaming"\./,
+    /Invalid slack\.replies in config test-config: expected "final", "stream" or "texts", received "streaming"\./,
   );
   assert.throws(
     () => validateConfigFile({ slack: { agents: { ava: { replies: 'live' } } } }, 'test-config'),
