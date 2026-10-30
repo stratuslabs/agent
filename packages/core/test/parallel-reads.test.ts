@@ -341,6 +341,32 @@ for (const [order, recorded] of [[['s', 'x'], ['s']], [['x', 's'], []]] as const
   });
 }
 
+test('a result that cannot be saved ends the turn only after the rest of its batch has settled', async () => {
+  const log: string[] = [];
+  const tools = new ToolRegistry();
+  tools.register(createLoggedTool('look.fast', log, { risk: 'safe', readOnly: true }, async () => undefined));
+  tools.register(createLoggedTool('look.slow', log, { risk: 'safe', readOnly: true }, () => turns(30)));
+  const store = new InMemorySessionStore();
+  let failed = false;
+  // The disk fails once, on the save that would hold the first result.
+  const flaky: InMemorySessionStore = Object.assign(Object.create(store) as InMemorySessionStore, {
+    async save(session: Session): Promise<void> {
+      if (!failed && toolResultIds(session).length > 0) {
+        failed = true;
+        throw new Error('disk I/O error');
+      }
+      await store.save(session);
+    },
+  });
+  const runner = new AgentRunner({ provider: createScript([call('f', 'look.fast'), call('s', 'look.slow')]), tools, store: flaky });
+  await runner.initialize();
+
+  await assert.rejects(runAs(runner, 'save-1'), /disk I\/O error/);
+  assert.ok(failed);
+  // Nothing of the turn is still running once it has ended.
+  assert.ok(log.includes('look.slow:end'), `the turn ended with a call still running: ${log.join(', ')}`);
+});
+
 test('skill.read declares itself read-only', () => {
   assert.equal(createSkillReadTool(new SkillRegistry()).readOnly, true);
 });

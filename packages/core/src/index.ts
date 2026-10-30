@@ -8462,9 +8462,10 @@ export class AgentRunner {
    * Every call settles before this returns or throws, a stopped one
    * included (`untilStoppedFor` bounds it), so no tool of a finished turn
    * is still running. A call that throws rather than answering (an
-   * approval policy that failed) fails the turn, as it would have alone;
-   * the results ahead of it stay recorded, and those behind it are
-   * dropped and closed as interrupted, which keeps the prefix.
+   * approval policy that failed), or a result the store cannot save,
+   * fails the turn, as it would have alone; the results ahead of it stay
+   * recorded, and those behind it are dropped and closed as interrupted,
+   * which keeps the prefix.
    */
   private async runTogether(
     session: Session,
@@ -8492,7 +8493,14 @@ export class AgentRunner {
         failure = settled;
         continue;
       }
-      await this.recordToolResult(session, settled.result);
+      // A save that fails ends the turn the same way, after the drain: the
+      // calls behind it are already running.
+      try {
+        await this.recordToolResult(session, settled.result);
+      } catch (error) {
+        failure = { error };
+        continue;
+      }
       results.push(settled.result);
     }
     if (failure !== undefined) {
