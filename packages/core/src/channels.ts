@@ -198,11 +198,12 @@ export interface GatewayLike {
     /**
      * Opts into merged turns: sent while the session's turn runs, this
      * message may be answered by one next turn together with others that
-     * queued. Called before the dispatch settles when it was absorbed into
-     * such a turn led by an earlier message, whose caller posts the answer,
-     * so this one takes down anything of its own and posts nothing. A host
-     * without it ignores the field. See `DispatchInput.onAbsorbed` in
-     * `@stratusagent/gateway`.
+     * queued — or, when the running turn was opted in too, by that turn,
+     * which reads it at its next tool step (steering, card 948). Called
+     * before the dispatch settles when it was absorbed into a turn another
+     * message's caller renders, which posts the answer, so this one takes
+     * down anything of its own and posts nothing. A host without it ignores
+     * the field. See `DispatchInput.onAbsorbed` in `@stratusagent/gateway`.
      */
     onAbsorbed?: () => void;
   }): Promise<Session>;
