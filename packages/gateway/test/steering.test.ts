@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { sessionTrustOf, turnFailureFor, workItemState } from '@stratusagent/core';
-import { createGateway } from '../src/index.ts';
+import { createGateway, GatewayStoppingError } from '../src/index.ts';
 
 // Card 948: a message sent while a turn works reaches it at its next tool
 // step, instead of waiting for the whole turn to end (card 423 then merged
@@ -274,6 +274,58 @@ test('a turn every caller in it gave up on, steered ones included, is cancelled'
   assert.equal(one.status, 'rejected');
   assert.equal(two.status, 'rejected');
   assert.equal(lastUser(provider.calls[1]), 'second');
+});
+
+test('a planned stop tells a keyed steered caller its turn continues, even when the turn it joined was unkeyed', async (t) => {
+  const home = await newHome();
+  const dir = path.join(home, '.stratus', 'agents');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'ava.md'), '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const calls: Wire[] = [];
+  const firstCall = latch();
+  const releaseFirst = latch();
+  const secondCall = latch();
+  // Call 1 waits, then asks for a tool; call 2 hangs until the stop aborts it.
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: unknown }> };
+    calls.push(body.messages.map((message) => ({ role: message.role, content: String(message.content) })));
+    if (calls.length === 1) {
+      firstCall.open();
+      await releaseFirst.opened;
+      return openAiToolCall(1);
+    }
+    secondCall.open();
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    });
+  }) as typeof fetch;
+  const failures: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+    stopDrainTimeoutMs: 50,
+    log: () => {},
+    warn: () => {},
+  });
+  gateway.bus.subscribe((event) => {
+    if (event.type === 'session.failed') {
+      failures.push(event.sessionId);
+    }
+  });
+  await gateway.start();
+  t.after(() => gateway.stop());
+
+  const first = gateway.dispatch({ sessionId: 's-1h', agentId: 'ava', userMessage: 'unkeyed', onAbsorbed: () => {} });
+  await firstCall.opened;
+  const steered = gateway.dispatch({ sessionId: 's-1h', agentId: 'ava', userMessage: 'keyed', idempotencyKey: 'k2', onAbsorbed: () => {} });
+  releaseFirst.open();
+  await secondCall.opened;
+  await gateway.stop();
+
+  assert.equal(lastUser(calls[1]), 'keyed');
+  await assert.rejects(steered, (error: Error) => error instanceof GatewayStoppingError && error.restarting === false);
+  await assert.rejects(first, (error: Error) => error instanceof GatewayStoppingError);
+  assert.deepEqual(failures, []);
 });
 
 test('a message sent while the final answer is being written runs as the next turn', async (t) => {

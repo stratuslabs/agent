@@ -4360,9 +4360,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     try {
       return await turn;
     } catch (error) {
-      if (input.idempotencyKey !== undefined && error instanceof RunAbortedError && error.resumable) {
+      if (error instanceof RunAbortedError && error.resumable) {
         const left = await store.get(input.sessionId).catch(() => undefined);
-        if (left !== undefined && workItemState(left, input.idempotencyKey) === 'unfinished' && leftForNextStart(left, error)) {
+        // The dispatch's own key, or, for an unkeyed one whose turn took
+        // keyed messages in at a tool step (card 948), the key the turn has
+        // from them: its steered callers are told what a keyed caller is.
+        const key = input.idempotencyKey ?? (left === undefined ? undefined : turnKeyOf(turnMessageOf(left)));
+        if (left !== undefined && key !== undefined && workItemState(left, key) === 'unfinished' && leftForNextStart(left, error)) {
           throw leftForNext();
         }
       }
