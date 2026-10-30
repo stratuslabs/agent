@@ -100,7 +100,9 @@ are one line saying what it is about to do, so the first message you see is
 what it set out to do rather than a step it already finished. A question it
 can answer straight away or with one quick lookup gets no such line, and
 neither does a message that was not addressed to it. After that it sends an update only when something
-has changed, in a line. It
+has changed, in a line. In Slack those updates go into one progress message
+that is edited in place, not new posts (see
+[How replies appear](../guides/slack.md#how-replies-appear)). It
 carries on with work it was already asked to do instead of asking
 permission for each step, and asks only the questions it cannot go on
 without, all at once, while it keeps doing what does not depend on them.

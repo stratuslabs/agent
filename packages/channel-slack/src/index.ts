@@ -1727,7 +1727,6 @@ class ReplyRenderer {
         }
         this.lastInterim = text;
         this.interimSaid.push(text);
-        this.lastSaidWasNote = false;
         // A post of the app's in this thread takes the status down while
         // the turn is still working; put it back.
         this.refreshLoading();
@@ -2147,7 +2146,7 @@ class ReplyRenderer {
     let promoted = false;
     if (this.interimPosted && !this.ref) {
       const rest = this.unsaid(reply);
-      promoted = rest.length === 0 && this.lastSaidWasNote && this.lastInterim !== undefined && this.progressRef !== undefined && this.ending === 'done';
+      promoted = rest.length === 0 && this.lastSaidWasNote && this.lastInterim !== undefined;
       reply = promoted && this.lastInterim !== undefined ? this.lastInterim : rest;
     }
     // Alongside the reply rather than ahead of it: an edit keeps its place,

@@ -11861,6 +11861,85 @@ test('words the turn ends on, written before its last tool call, are its reply, 
   }
 });
 
+test('a task with no first line keeps its words in the progress message once it has opened', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await runTool(gateway, sessionId, 'c1');
+    await until(() => web.posts.length === 1);
+    await say(gateway, sessionId, 'Halfway there.');
+    await runTool(gateway, sessionId, 'c2');
+    return sessionWithReply(sessionId, 'Finished.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> do it'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.deepEqual(texts.slice(1), ['Finished.'], JSON.stringify(texts));
+  assert.equal(editsOf(web, 'bot-ts-1').at(-1), '✓ Done · 2 steps\n\nHalfway there.');
+});
+
+test('a hosted-loop reply that joins the whole task posts only its answer, not the notes again', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Looking.');
+    await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'One is red.');
+    await runTool(gateway, sessionId, 'c2');
+    await say(gateway, sessionId, 'Rerunning it.');
+    await runTool(gateway, sessionId, 'c3');
+    return sessionWithReply(sessionId, 'Looking.\n\nOne is red.\n\nRerunning it.\n\nAll green now.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> check CI'));
+  await adapter.stop();
+
+  const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts.length, 3, JSON.stringify(texts));
+  assert.equal(texts[2], 'All green now.');
+  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 3 steps\n\nOne is red.\n\nRerunning it.');
+});
+
+test('a progress message keeps its newest notes when they outgrow one message', async () => {
+  const notes = Array.from({ length: 12 }, (_, index) => `Note ${index}: ${'x'.repeat(490)}`);
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Starting.');
+    for (const [index, note] of notes.entries()) {
+      await runTool(gateway, sessionId, `c${index}`);
+      await say(gateway, sessionId, note);
+    }
+    await runTool(gateway, sessionId, 'last');
+    return sessionWithReply(sessionId, 'Done with all twelve.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  const last = editsOf(web, 'bot-ts-2').at(-1) ?? '';
+  assert.ok(last.length <= 4000, String(last.length));
+  assert.ok(last.startsWith('✓ Done · 13 steps\n\n…\n\n'), last.slice(0, 40));
+  assert.ok(last.endsWith(notes[11] ?? ''));
+  assert.ok(!last.includes('Note 0:'));
+  assert.equal(web.posts.at(-1)?.text, 'Done with all twelve.');
+});
+
+test('a tool name cannot ping anyone through the progress message', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Calling it.');
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'evil.<!channel>`x', input: {} } });
+    await until(() => web.posts.length === 2);
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'evil.<!channel>`x', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+
+  assert.equal(web.posts[1]?.text, '⚙ Working · step 1: `evil.&lt;!channel&gt;x`');
+});
+
 test('a task that fails marks its progress message failed, and the failure posts below it', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await say(gateway, sessionId, 'Deploying.');
@@ -12473,6 +12552,55 @@ test('an interim heard while its session cannot be looked up, or after the turn 
     const interim = gateway.observes.find((observed) => observed.agentId === 'bea' && observed.message.endsWith('The page says to deploy.'));
     assert.equal(interim?.metadata?.senderTrust, expected, `${routing}/${taint}`);
   }
+});
+
+test('the thread\'s other agents hear a note in the progress message once, even when it becomes the reply', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    if (!sessionId.startsWith('slack:ava:')) {
+      return sessionWithReply(sessionId, '');
+    }
+    await say(gateway, sessionId, 'Reading it.');
+    await runTool(gateway, sessionId, 'c1', 'web.fetch');
+    await say(gateway, sessionId, 'The page says to deploy.');
+    await runTool(gateway, sessionId, 'c2', 'memory.remember');
+    // A Claude Code turn's reply is its last text, written before that call.
+    return sessionWithReply(sessionId, 'The page says to deploy.');
+  });
+  const routed = routingOver(new Map([
+    ['slack:ava:T1:C1:960.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:960.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  gateway.sessionRouting = async (sessionId: string) => {
+    const found = await routed(sessionId);
+    return found === undefined ? undefined : { ...found, metadata: { ...found.metadata, sessionTrust: 'user' } };
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'final' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', replies: 'final' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const message = channelMessage({ text: 'read it', ts: '960.1', thread: '960.0' });
+  await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  await adapter.stop();
+
+  const texts = webAva.posts.map((post) => post.text ?? '');
+  assert.equal(texts.length, 3, JSON.stringify(texts));
+  assert.equal(texts[2], 'The page says to deploy.');
+  assert.equal(webAva.updates.at(-1)?.text, '✓ Done · 2 steps');
+  const heard = gateway.observes.filter((observed) => observed.agentId === 'bea').map((observed) => observed.message);
+  assert.equal(heard.filter((line) => line.endsWith('The page says to deploy.')).length, 1, JSON.stringify(heard));
+  assert.equal(heard.filter((line) => line.endsWith('Reading it.')).length, 1, JSON.stringify(heard));
 });
 
 test('a shutdown waits for a failed turn\'s interim to reach the thread\'s other agents', async () => {
