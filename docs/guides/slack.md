@@ -385,9 +385,10 @@ submission; anyone else in the thread is told they cannot. What the form does:
   was stored since it was made (another form for the same shared key, or
   the machine) can never be answered, so the refusal also takes its button
   down; an empty value, or a PEM key whose line breaks were lost, leaves the
-  form open for another try. The field is one line, so a new key file such as
-  a PEM private key goes through a [link](./remote-access.md#adding-a-credential-from-a-link)
-  (`via: "link"`), and a replacement one, which only a form can take, through
+  form open for another try. The field takes several lines, so a key file
+  such as a PEM private key can be pasted whole, line breaks included; line
+  breaks at either end of a value are dropped. Slack caps the field at 3,000
+  characters, so a longer key (a 4096-bit RSA key, say) goes through
   `stratus credential set <name> < key.pem` on the machine.
 - **For the agent alone, unless it asked otherwise.** The agent chooses the
   scope when it asks (`scope: "shared"` stores one key for the whole fleet,
