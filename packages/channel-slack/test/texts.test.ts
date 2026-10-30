@@ -22,6 +22,10 @@ test('runs of blank lines and whitespace-only lines make no empty messages', () 
   assert.deepEqual(textingParts('\n\nOne.\n \n\t\n\nTwo.  \n\n'), ['One.', 'Two.']);
 });
 
+test('Windows line endings split at their blank lines too', () => {
+  assert.deepEqual(textingParts('One.\r\n\r\nTwo.\r\n \r\n\r\n- a\r\n\r\n- b'), ['One.', 'Two.', '- a\n\n- b']);
+});
+
 test('a code block with blank lines inside it stays whole', () => {
   const code = '```ts\nconst a = 1;\n\nconst b = 2;\n```';
   assert.deepEqual(textingParts(`Here is the fix.\n\n${code}\n\nThat is all.`), ['Here is the fix.', code, 'That is all.']);

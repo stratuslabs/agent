@@ -24,8 +24,12 @@ import { codeRunsOf } from './mrkdwn.ts';
  */
 export const TEXTS_MAX_MESSAGES = 5;
 
-/** One or more blank lines (whitespace-only counts), with the line break before them. */
-const BLANK_LINES = /\n[ \t]*\n(?:[ \t]*\n)*/g;
+/**
+ * One or more blank lines (whitespace-only counts), with the line break
+ * before them. A `\r` is whitespace here, so a reply with Windows line
+ * endings splits where its blank lines are rather than not at all.
+ */
+const BLANK_LINES = /\n[ \t\r]*\n(?:[ \t\r]*\n)*/g;
 /** A Markdown heading line. */
 const HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 /** A list item: a bullet or a number, then air. */
