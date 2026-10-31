@@ -13,9 +13,9 @@ recently. Each pinned and recent fact starts with the UTC minute it was
 recorded (`- (2026-10-21 13:33Z) …`), so a fact from last week doesn't
 read like one from this turn.
 Everything else is reachable through `memory.recall`, a
-full-text search over the agent's own store: plain words in, matching facts
-out, newest first; a query like `C++` or an unmatched quote is a search,
-never an error. `memory.forget` retires a fact by id: it stops reaching
+full-text search over the agent's own store: plain words in, best matches
+out first; a query like `C++` or an unmatched quote is a search, never an
+error. `memory.forget` retires a fact by id: it stops reaching
 prompts and recall, but stays in the file as a tombstone line, so you can
 still see what an agent chose to drop. A single fact is capped at 4 KiB —
 an oversized `memory.remember` is refused outright rather than stored
@@ -309,13 +309,29 @@ daemon in the way. If a trusted config selects a contributed store with
 memory` refuses rather than answering from a JSONL nothing reads — see
 [Extending](../guides/extending.md#memory-stores).
 
-`search` matches the way `memory.recall` does — every word has to appear in
-a fact, or in what the fact is about — and marks anything outside its
-validity window. `--format json` carries the content as stored, along with
-each entry's `kind`, `about`, validity, and recall count.
+`search` matches the way `memory.recall` does — a word can match a fact or
+what the fact is about — and marks anything outside its validity window.
+`--format json` carries the content as stored, along with each entry's
+`kind`, `about`, validity, and recall count.
 
-Every read reports the **ordering** it applied. Today that is always
-`recency`, which is the one ordering the contract requires of every store;
-a store backed by embeddings can serve `relevance` or `hybrid` instead, and
-one asked for an ordering it does not implement serves `recency` and says
-so rather than failing.
+Every read reports the **ordering** it applied. `memory.recall` and
+`stratus memory search` ask for `hybrid`, and the built-in store serves it:
+
+- **`hybrid`** — any of the words can match. Facts holding every word come
+  first, then the rest, so a fact matching some of the words never buries
+  one matching all of them, however short or recent it is. Within each
+  group, facts carrying more of the words, and the rarer ones, rank higher
+  (SQLite's BM25 score), and a newer fact gets a boost that fades with age:
+  1.5× today, 1.25× at 30 days, 1.125× at 90. So between two facts that
+  match about equally well the newer one comes first, but a newer fact has
+  to be at least two thirds as good a match to pass an older one. BM25 also
+  favors a short fact over a long one with the same words, which is why
+  the every-word group is kept apart.
+- **`relevance`** — the same matching and grouping, by BM25 alone.
+- **`recency`** — every word has to appear, newest first. This is the one
+  ordering the contract requires of every store, and what a read gets when
+  it names none.
+
+A store asked for an ordering it does not implement serves `recency` and
+says so rather than failing, so an agent on a store without ranking (the
+in-memory one, or a plugin's) still gets answers, matched on every word.

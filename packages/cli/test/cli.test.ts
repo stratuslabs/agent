@@ -13502,7 +13502,14 @@ test('stratus memory search, pin, forget, and audit work the record the way the 
   assert.equal(await runCli({ argv: ['memory', 'search', 'ava', 'deploy', 'pipeline', '--format', 'json'], streams: found.streams, env }), 0);
   const hits = JSON.parse(found.output.stdout) as { strategy: string; entries: Array<{ id: string; validity: string }> };
   assert.deepEqual(hits.entries.map((entry) => entry.id), ['ava:memory:2']);
-  assert.equal(hits.strategy, 'recency');
+  assert.equal(hits.strategy, 'hybrid');
+  // Ranked the way memory.recall asks, so any one of the words is enough.
+  const either = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'search', 'ava', 'heron', 'postgres', '--format', 'json'], streams: either.streams, env }), 0);
+  assert.deepEqual((JSON.parse(either.output.stdout) as { entries: Array<{ id: string }> }).entries.map((entry) => entry.id), ['ava:memory:2']);
+  const none = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'search', 'ava', 'heron'], streams: none.streams, env }), 0);
+  assert.equal(none.output.stdout, "Nothing of ava's matches heron.\n");
 
   // An expired fact is listed, and listed *as* expired: the operator's read
   // is the one place it has to stay visible.

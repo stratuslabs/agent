@@ -197,7 +197,11 @@ A read may name the **ordering** it wants. `recency` is mandatory and is
 what the parity tests assert; a store asked for `relevance` or `hybrid` and
 lacking it serves `recency` and reports that in the result rather than
 erroring — so an embeddings-backed store is an additive capability here
-instead of a contract break.
+instead of a contract break. `memory.recall` asks for `hybrid`, and the
+built-in file store serves all three (see
+[Memory](../concepts/memory.md#searching-it-yourself)), so a store that
+ranks only by date will be asked for `hybrid` on every recall and should
+answer with `recency`.
 
 `stratus memory` is the exception that proves the rule: it reads and writes
 the built-in store directly, with no plugin host, so against a fleet

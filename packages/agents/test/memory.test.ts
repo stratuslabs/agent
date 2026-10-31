@@ -219,6 +219,24 @@ test('memory.remember carries the wider shape, and refuses a supersession that i
   assert.deepEqual((await store.list('juno')).entries.map((entry) => entry.id), [victim.id]);
 });
 
+test('memory.recall asks for the best match first and reports the ordering the store served', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const asked: unknown[] = [];
+  const search = store.search.bind(store);
+  store.search = async (agentId, query, options) => {
+    asked.push(options?.strategy);
+    return search(agentId, query, options);
+  };
+  await store.append('ava', 'the deploy runs from the blue runner');
+  const recall = createRecallTool(store);
+  const found = await recall.execute({ query: 'deploy runner', limit: 3 }, sessionFor('ava')) as { strategy: string };
+  assert.deepEqual(asked, ['hybrid']);
+  // This store has no ranking, so it served recency, and the tool passes
+  // that on rather than repeating what it asked for.
+  assert.equal(found.strategy, 'recency');
+  assert.match(JSON.stringify(recall.parameters), /a newer fact comes ahead/);
+});
+
 test('a memory.recall hit that is out of window comes back marked as such', async () => {
   const at = new Date('2026-06-01T00:00:00.000Z');
   const store = new InMemoryAgentMemoryStore({ now: () => at });

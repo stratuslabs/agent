@@ -188,8 +188,11 @@ export const runMemory = async (
   }
 
   if (command.action === 'search') {
+    // Asked the way `memory.recall` asks, so the operator sees what the
+    // agent would get for the same words.
     const found = await store.search(command.agentId, command.query ?? '', {
       ...(command.limit !== undefined ? { limit: command.limit } : {}),
+      strategy: 'hybrid',
     });
     const pinned = await pinnedIds();
     if (command.format === 'json') {
@@ -203,7 +206,12 @@ export const runMemory = async (
       return 0;
     }
     if (found.entries.length === 0) {
-      writeLine(streams.stdout, `Nothing of ${command.agentId}'s matches ${command.query}. Every word has to appear in a fact, or in what the fact is about.`);
+      writeLine(
+        streams.stdout,
+        found.strategy === 'recency'
+          ? `Nothing of ${command.agentId}'s matches ${command.query}. Every word has to appear in a fact, or in what the fact is about.`
+          : `Nothing of ${command.agentId}'s matches ${command.query}.`,
+      );
       return 0;
     }
     for (const entry of found.entries) {
@@ -211,7 +219,12 @@ export const runMemory = async (
     }
     if (found.truncated) {
       writeLine(streams.stdout, '');
-      writeLine(streams.stdout, 'More matched than this read returns. Narrow the words, or raise --limit.');
+      writeLine(
+        streams.stdout,
+        found.strategy === 'recency'
+          ? 'More matched than this read returns. Narrow the words, or raise --limit.'
+          : 'More matched than this read returns, and the best matches came first. Raise --limit to see more.',
+      );
     }
     return 0;
   }

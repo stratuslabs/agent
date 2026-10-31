@@ -168,6 +168,10 @@ export const RECALL_TOOL_NAME = MEMORY_RECALL_TOOL_NAME;
  * query a model writes is ever a syntax error; matching nothing is a normal
  * result, because an agent that has learned nothing yet is the ordinary
  * starting state, not a broken tool.
+ *
+ * It asks for `hybrid`: the best match first, newer facts ahead of equally
+ * good older ones. A store without ranking serves `recency` instead, and
+ * the result's `strategy` says which one the agent got.
  */
 export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOptions = {}): Tool => {
   const now = clockOf(options);
@@ -180,7 +184,10 @@ export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOpt
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'What to look for, as plain words. Every word must appear in a fact — or in what the fact is about — for it to match.' },
+        query: {
+          type: 'string',
+          description: 'What to look for, as plain words. Facts holding every word come first, then those with more of the words and the rarer ones, and a newer fact comes ahead of an equally good older one. Words also match what a fact is about. If the result\'s strategy is recency, every word had to appear and the newest came first.',
+        },
         limit: { type: 'number', description: 'Maximum facts to return. Optional; the store bounds it either way.' },
       },
       required: ['query'],
@@ -190,7 +197,7 @@ export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOpt
         throw new Error('memory.recall requires a "query" string.');
       }
       const limit = typeof input.limit === 'number' ? input.limit : undefined;
-      const result = await store.search(session.agent.id, input.query, { ...(limit !== undefined ? { limit } : {}) });
+      const result = await store.search(session.agent.id, input.query, { ...(limit !== undefined ? { limit } : {}), strategy: 'hybrid' });
       // What enters the context taints the session, recalled as much as
       // injected: an `external` entry surfacing here is a stranger's text
       // in the prompt, and marking the call is what stops the store from

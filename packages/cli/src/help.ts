@@ -220,9 +220,10 @@ Commands:
                    from outside) — plus what is pinned and what is outside
                    its validity window. --trust <level> filters; --format json
   memory search    Search one agent's memory the way the agent does: plain
-                   words, every one of which must appear in a fact or in
-                   what the fact is about. Expired facts are found and
-                   marked. --limit <n>; --format json
+                   words, matched against a fact or what it is about, best
+                   matches first and newer ahead of equally good older
+                   ones. Expired facts are found and marked. --limit <n>;
+                   --format json
   memory forget    Retire entries by id. They leave the prompt and recall
                    and stay in the record, where audit still shows them
   memory audit     Every entry the agent ever wrote, forgotten ones
