@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AgentRunner,
   CONTEXT_FLOOR_METADATA_KEY,
+  CONTEXT_SUMMARY_REQUEST,
   ContextOverflowError,
   contextFloorOf,
   transcriptOf,
@@ -2487,9 +2488,22 @@ test('the first stored turn is held to the replay window too', async () => {
 
 
 /**
+ * Whether a request is the runner asking for a summary of what a floor rise
+ * cut (see `CONTEXT_SUMMARY_REQUEST`), rather than a turn.
+ */
+const isSummaryRequest = (request: ProviderRequest): boolean => {
+  const transcript = transcriptOf(request);
+  return transcript.length === 1 && transcript[0]!.content.startsWith(CONTEXT_SUMMARY_REQUEST);
+};
+
+/**
  * A provider that refuses any request carrying more than `fits` messages,
  * the way an API refuses a transcript past the context window, and
  * otherwise answers. Records what it was actually sent each time.
+ *
+ * It fails every summary request, so these tests see the floor on its own:
+ * the cut a failed summary falls back to, which is the cut before summaries
+ * existed. `context-summary.test.ts` covers the summaries.
  */
 const createOverflowingProvider = (fits: number) => {
   const sent: number[] = [];
@@ -2502,6 +2516,9 @@ const createOverflowingProvider = (fits: number) => {
   const provider: ModelProvider = {
     name: 'overflowing-provider',
     async generate(request) {
+      if (isSummaryRequest(request)) {
+        throw new Error('overloaded_error: summaries are not this test\'s subject');
+      }
       const transcript = transcriptOf(request);
       sent.push(transcript.length);
       sessionSizes.push(request.session.messages.length);
@@ -2771,10 +2788,11 @@ test('a retry after an overflow records the call that answered, not only the one
       }
       seen.push(`attempt ${attempt}`);
       // And a one-call provider that answers with usage on the response
-      // only — a documented, valid mode.
+      // only — a documented, valid mode. The first answer after the
+      // overflow is the summary of what the retry cut, billed like any call.
       return {
         parts: [{ type: 'text' as const, text: 'answered' }],
-        usage: { inputTokens: 400, outputTokens: 25 },
+        usage: { inputTokens: isSummaryRequest(request) ? 100 : 400, outputTokens: 25 },
       };
     },
   };
@@ -2785,13 +2803,14 @@ test('a retry after an overflow records the call that answered, not only the one
 
   const stored = await runner.store.get('session-ctx-8');
   const usage = stored?.usage ?? [];
-  assert.deepEqual(seen, ['attempt 2']);
-  // Both are real spend and both are recorded: the refused request was
-  // billed, and so was the one that answered.
-  assert.equal(usage.length, 2, `both calls recorded: ${JSON.stringify(usage)}`);
+  assert.deepEqual(seen, ['attempt 2', 'attempt 3']);
+  // All are real spend and all are recorded: the refused request was
+  // billed, so was the summary of what the retry cut, and so was the one
+  // that answered.
+  assert.equal(usage.length, 3, `every call recorded: ${JSON.stringify(usage)}`);
   assert.deepEqual(
     usage.map((record) => record.inputTokens),
-    [900, 400],
+    [900, 100, 400],
   );
   // Under one turn id — one Stratus turn, however many provider calls it
   // took to fit.

@@ -33,7 +33,7 @@ export const formatEvent = (event: StratusEvent): string | null => {
     case 'session.tainted':
       return `• session.tainted ${event.trust} (${event.source})`;
     case 'session.context-trimmed':
-      return `• session.context-trimmed dropped=${event.droppedMessages} floor=${event.floor}`;
+      return `• session.context-trimmed dropped=${event.droppedMessages} floor=${event.floor}${event.summarized === undefined ? '' : ` summarized=${event.summarized}`}`;
     case 'session.continued':
       return `• session.continued #${event.continuation} (+${event.turns} turns)`;
     case 'session.stopped-early':
@@ -124,7 +124,11 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
     case 'session.context-trimmed':
       // Counts, never the messages: the conversation that fell out of the
       // window is exactly the kind of thing the log does not carry.
-      return { droppedMessages: event.droppedMessages, floor: event.floor };
+      return {
+        droppedMessages: event.droppedMessages,
+        floor: event.floor,
+        ...(event.summarized === undefined ? {} : { summarized: event.summarized }),
+      };
     case 'session.continued':
       return { continuation: event.continuation, turns: event.turns };
     case 'session.stopped-early':

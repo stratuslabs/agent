@@ -123,7 +123,7 @@ test('a guard that throws anything else refuses the call too, as a failure', asy
   assert.deepEqual(failures, [{ type: 'session.failed', sessionId: 'guard-3', error: 'the budget file could not be read' }]);
 });
 
-test('the retry after a context overflow is a provider call, and is guarded like one', async () => {
+test('the summary and the retry after a context overflow are provider calls, and are guarded like one', async () => {
   const asked: string[] = [];
   let calls = 0;
   const provider: ModelProvider = {
@@ -148,7 +148,8 @@ test('the retry after a context overflow is a provider call, and is guarded like
   await runner.run({ sessionId: 'guard-4', agent: AGENT, userMessage: 'first' });
   await runner.resume({ sessionId: 'guard-4', userMessage: 'second' });
 
-  assert.deepEqual(asked, ['guard', 'call 1', 'guard', 'call 2', 'guard', 'call 3']);
+  // Call 3 is the summary of what the rise cut; call 4 is the retry.
+  assert.deepEqual(asked, ['guard', 'call 1', 'guard', 'call 2', 'guard', 'call 3', 'guard', 'call 4']);
 });
 
 /**

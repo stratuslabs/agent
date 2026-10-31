@@ -251,6 +251,68 @@ test('an overflowing transcript reaches the runner instead of spending the fallb
   assert.equal((served.parts[0] as { text: string }).text, 'fallback');
 });
 
+test('a summary the primary fails is answered by the fallback, routed like any call of the turn', async () => {
+  // When a floor rise asks for a summary of what it cut, that call goes
+  // through the same wrapper as every other: an ordinary failure of the
+  // primary switches the session to the fallback, which writes the
+  // summary, and the turn carries on there. Nothing about the summary is
+  // special-cased, so it never runs on a model the turn would not.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const { CONTEXT_SUMMARY_REQUEST, contextFloorOf, contextSummaryOf, transcriptOf } = await import('@stratusagent/core');
+  const isSummary = (request: { session: Session; messages?: readonly unknown[] }): boolean => {
+    const transcript = transcriptOf(request as never);
+    return transcript.length === 1 && transcript[0]!.content.startsWith(CONTEXT_SUMMARY_REQUEST);
+  };
+  const served: string[] = [];
+  // What the wrapper saved before asking the fallback: a daemon that died
+  // during the fallback's summary would come back to this.
+  const savedFloors: number[] = [];
+  const primary = {
+    name: 'primary',
+    async generate(request: { session: Session; messages?: readonly unknown[] }) {
+      if (isSummary(request)) {
+        served.push('primary summary (failed)');
+        throw new Error('overloaded_error: primary down');
+      }
+      served.push('primary turn (overflowed)');
+      throw new ContextOverflowError('prompt is too long: 900 tokens > 800 maximum');
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate(request: { session: Session; messages?: readonly unknown[] }) {
+      if (isSummary(request)) {
+        served.push('fallback summary');
+        savedFloors.push(contextFloorOf((await store.get('long-fb'))!));
+        return { parts: [{ type: 'text' as const, text: 'Early on the code word was pelican.' }] };
+      }
+      served.push('fallback turn');
+      return { parts: [{ type: 'text' as const, text: 'answered' }] };
+    },
+  };
+  const store = new InMemorySessionStore();
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {}, (session) => store.save(session));
+  const runner = new AgentRunner({ provider: wrapped, store });
+  const now = new Date().toISOString();
+  const messages = [];
+  for (let turn = 1; turn <= 5; turn += 1) {
+    messages.push({ id: `u${turn}`, role: 'user' as const, content: turn === 1 ? 'the code word is pelican' : `question ${turn}`, createdAt: now });
+    messages.push({ id: `a${turn}`, role: 'assistant' as const, content: `answer ${turn}`, createdAt: now });
+  }
+  await store.create({ id: 'long-fb', agent: { id: 'a', name: 'A' }, status: 'idle', messages });
+
+  const session = await runner.resume({ sessionId: 'long-fb', userMessage: 'and now?' });
+  assert.equal(session.status, 'completed');
+  assert.deepEqual(served, ['primary turn (overflowed)', 'primary summary (failed)', 'fallback summary', 'fallback turn']);
+  const stored = (await store.get('long-fb'))!;
+  assert.equal(stored.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], true);
+  assert.match(contextSummaryOf(stored)?.text ?? '', /pelican/);
+  // The floor waited for the summary: the save before the fallback held the
+  // old floor, not a raised one with nothing summarizing what it cut.
+  assert.deepEqual(savedFloors, [0]);
+  assert.equal(contextSummaryOf(stored)?.through, contextFloorOf(stored));
+});
+
 test('a refusal the host made on purpose is not a model failing, so the fallback never answers instead', async () => {
   // A spent budget is the agent's limit, not the primary model's: the
   // fallback answering would spend what the limit exists to stop, and hide
