@@ -14,6 +14,7 @@ like a real host. Then it checks:
 
 | Check | What it would have caught |
 | --- | --- |
+| Every package tarball contains `LICENSE` and `NOTICE` | A package whose `files` leaves out the NOTICE, so the Apache 2.0 attribution never reaches npm |
 | The daemon starts with no startup warnings, and `stratus doctor` passes | A default that leaves a host-shaped config warning or broken |
 | A sandboxed `shell.run` runs a tool from the agent's `~/.stratus/integrations/<id>/toolchain/bin`, reads its git config there, and runs `node` | 0.13.0's sandbox, which denied that directory even when `readablePaths` named it, so git and gh failed in every command |
 | A named credential stored with `stratus credential set` reaches the plugin tool that declares it | A break in the credential allowlist or the plugin seam |
