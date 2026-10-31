@@ -16,7 +16,7 @@ import {
   memoryEntryTokens,
   memoryQueryMatches,
   memoryValidityAt,
-  memoryWindowAt,
+  effectiveMemoryValidityAt,
   renderMemorySection,
   selectMemoryInjection,
   MEMORY_INDEX_MAX_BYTES,
@@ -69,32 +69,45 @@ const daysBefore = (days: number, at: Date = AT): string => new Date(at.getTime(
 test('an episodic fact with no validUntil of its own expires after the default window', () => {
   assert.equal(MEMORY_EPISODIC_DEFAULT_TTL_DAYS, 14);
   const note = (createdAt: string, extra: Partial<MemoryEntry> = {}) => entry('m1', 'PR 501 head is abc123', { kind: 'episodic', createdAt, ...extra });
-  assert.equal(memoryValidityAt(note(daysBefore(13)), AT), 'current');
+  assert.equal(effectiveMemoryValidityAt(note(daysBefore(13)), AT), 'current');
   // The window is half-open like an explicit one: the instant it closes is expired.
-  assert.equal(memoryValidityAt(note(daysBefore(14)), AT), 'expired');
-  assert.equal(memoryValidityAt(note(daysBefore(15)), AT), 'expired');
+  assert.equal(effectiveMemoryValidityAt(note(daysBefore(14)), AT), 'expired');
+  assert.equal(effectiveMemoryValidityAt(note(daysBefore(15)), AT), 'expired');
   // Only episodic facts: the other kinds, and a fact with no kind, have no default.
   for (const kind of ['semantic', 'procedural', 'preference'] as const) {
-    assert.equal(memoryValidityAt(entry('m1', 'x', { kind, createdAt: daysBefore(400) }), AT), 'current', kind);
+    assert.equal(effectiveMemoryValidityAt(entry('m1', 'x', { kind, createdAt: daysBefore(400) }), AT), 'current', kind);
   }
-  assert.equal(memoryValidityAt(entry('m1', 'x', { createdAt: daysBefore(400) }), AT), 'current');
+  assert.equal(effectiveMemoryValidityAt(entry('m1', 'x', { createdAt: daysBefore(400) }), AT), 'current');
   // An explicit validUntil wins in both directions.
-  assert.equal(memoryValidityAt(note(daysBefore(30), { validUntil: '2026-07-01T00:00:00.000Z' }), AT), 'current');
-  assert.equal(memoryValidityAt(note(daysBefore(2), { validUntil: daysBefore(1) }), AT), 'expired');
+  assert.equal(effectiveMemoryValidityAt(note(daysBefore(30), { validUntil: '2026-07-01T00:00:00.000Z' }), AT), 'current');
+  assert.equal(effectiveMemoryValidityAt(note(daysBefore(2), { validUntil: daysBefore(1) }), AT), 'expired');
   // A validUntil nobody can parse is no bound, so the default applies.
-  assert.equal(memoryValidityAt(note(daysBefore(15), { validUntil: 'soon' }), AT), 'expired');
+  assert.equal(effectiveMemoryValidityAt(note(daysBefore(15), { validUntil: 'soon' }), AT), 'expired');
   // The window opens at validFrom when that is later than createdAt, so a
   // note written ahead of time is not spent before it starts.
   const planned = note(daysBefore(20), { validFrom: daysBefore(5) });
-  assert.equal(memoryValidityAt(planned, AT), 'current');
-  assert.equal(memoryValidityAt(planned, new Date(AT.getTime() + 9 * DAY_MS)), 'expired');
+  assert.equal(effectiveMemoryValidityAt(planned, AT), 'current');
+  assert.equal(effectiveMemoryValidityAt(planned, new Date(AT.getTime() + 9 * DAY_MS)), 'expired');
   // A validFrom earlier than createdAt does not backdate the window.
-  assert.equal(memoryValidityAt(note(daysBefore(2), { validFrom: daysBefore(60) }), AT), 'current');
+  assert.equal(effectiveMemoryValidityAt(note(daysBefore(2), { validFrom: daysBefore(60) }), AT), 'current');
   // A createdAt nobody can parse gives no window to count from.
-  assert.equal(memoryValidityAt(note('last week'), AT), 'current');
+  assert.equal(effectiveMemoryValidityAt(note('last week'), AT), 'current');
   // The record's own window ignores the default.
-  assert.equal(memoryWindowAt(note(daysBefore(400)), AT), 'current');
-  assert.equal(memoryWindowAt(note(daysBefore(2), { validUntil: daysBefore(1) }), AT), 'expired');
+  assert.equal(memoryValidityAt(note(daysBefore(400)), AT), 'current');
+  assert.equal(memoryValidityAt(note(daysBefore(2), { validUntil: daysBefore(1) }), AT), 'expired');
+});
+
+test('memoryValidityAt and isMemoryEntryCurrent keep their window-only meaning, so a store plugin built on them keeps an old pin', () => {
+  // A published store (memory-sqlite) filters its pinned core with
+  // isMemoryEntryCurrent and runs on whichever core the host installs. If
+  // the episodic default reached these two, an upgrade would unpin every
+  // episodic note older than the default window.
+  const pin = entry('m1', 'standing note: Dylan merges releases', { kind: 'episodic', createdAt: daysBefore(30) });
+  assert.equal(effectiveMemoryValidityAt(pin, AT), 'expired');
+  assert.equal(memoryValidityAt(pin, AT), 'current');
+  assert.ok(isMemoryEntryCurrent(pin, AT));
+  const pluginPinned = [pin].filter((found) => isMemoryEntryCurrent(found, AT));
+  assert.deepEqual(pluginPinned.map((found) => found.id), ['m1']);
 });
 
 test('an episodic successor past the default window still retires what it replaced', () => {
@@ -102,7 +115,7 @@ test('an episodic successor past the default window still retires what it replac
   // is true again: only the successor's own window ends a retirement.
   const old = entry('m1', 'Atlas GitHub access is pending', { kind: 'semantic', createdAt: daysBefore(60) });
   const note = entry('m2', 'Atlas GitHub access verified', { kind: 'episodic', createdAt: daysBefore(30), supersedes: 'm1' });
-  assert.equal(memoryValidityAt(note, AT), 'expired');
+  assert.equal(effectiveMemoryValidityAt(note, AT), 'expired');
   assert.deepEqual([...supersededMemoryIdsAt([old, note], AT)], ['m1']);
 });
 
@@ -125,7 +138,7 @@ test('the in-memory store drops a stale episodic note from what is true now, kee
   assert.ok(!injection.recent.some((recent) => recent.id === stale.id));
   // Findable, and marked.
   const found = await store.search('ava', 'loop status');
-  assert.deepEqual(found.entries.map((hit) => [hit.id, memoryValidityAt(hit, AT)]), [[fresh.id, 'current'], [stale.id, 'expired']]);
+  assert.deepEqual(found.entries.map((hit) => [hit.id, effectiveMemoryValidityAt(hit, AT)]), [[fresh.id, 'current'], [stale.id, 'expired']]);
 });
 
 test('supersession retires a fact exactly while its successor is current', () => {

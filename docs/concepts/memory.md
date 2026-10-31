@@ -74,6 +74,12 @@ in the pinned core, because pinning is how an agent says a note is still
 current. And a note that **superseded** a fact keeps that fact retired: a
 stale note is not evidence that the belief it replaced is true again.
 
+The built-in stores apply the default. For a store plugin, core exports it
+as `effectiveMemoryValidityAt`. `memoryValidityAt` and
+`isMemoryEntryCurrent` keep reading only the record's own window, so a
+store plugin written before the default (`memory-sqlite` 0.14.0, for one)
+keeps its pins and keeps listing old notes until it adopts it.
+
 ### Facts the agent stopped believing
 
 `memory.remember` takes a `supersedes` id, and that field *is* the

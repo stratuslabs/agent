@@ -10,6 +10,7 @@ import {
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_READ_MAX_BYTES,
   memoryContentByteLength,
+  effectiveMemoryValidityAt,
   memoryValidityAt,
   renderMemorySection,
   type AgentMemoryStore,
@@ -135,7 +136,7 @@ test('an existing store’s old episodic notes leave the prompt by default, stay
   // Findable, and marked.
   const found = await store.search('ava', 'loop status');
   assert.deepEqual(
-    found.entries.map((entry) => [entry.id, memoryValidityAt(entry, AT)]),
+    found.entries.map((entry) => [entry.id, effectiveMemoryValidityAt(entry, AT)]),
     [['ava:memory:fresh', 'current'], ['ava:memory:kept', 'current'], ['ava:memory:stale', 'expired']],
   );
   assert.equal((await store.list('ava', { validity: 'all' })).entries.length, 7);
@@ -149,8 +150,8 @@ test('an existing store’s old episodic notes leave the prompt by default, stay
   assert.deepEqual((await memory.list('ava')).entries.map((entry) => entry.id), (await store.list('ava')).entries.map((entry) => entry.id));
   assert.deepEqual((await memory.pinned!('ava')).map((entry) => entry.id), ['ava:memory:pinned']);
   assert.deepEqual(
-    (await memory.search('ava', 'loop status')).entries.map((entry) => [entry.id, memoryValidityAt(entry, AT)]),
-    found.entries.map((entry) => [entry.id, memoryValidityAt(entry, AT)]),
+    (await memory.search('ava', 'loop status')).entries.map((entry) => [entry.id, effectiveMemoryValidityAt(entry, AT)]),
+    found.entries.map((entry) => [entry.id, effectiveMemoryValidityAt(entry, AT)]),
   );
 });
 

@@ -7,7 +7,7 @@ import {
   MEMORY_EPISODIC_DEFAULT_TTL_DAYS,
   MEMORY_RECALL_TOOL_NAME,
   memoryEntryTrust,
-  memoryValidityAt,
+  effectiveMemoryValidityAt,
   sessionTaintedBy,
   sessionWriteTrust,
   type AgentMemoryStore,
@@ -211,7 +211,7 @@ export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOpt
           // returning it *unmarked* is not: an expired fact that reads
           // exactly like a current one is the confusion `validFrom` and
           // `validUntil` exist to prevent, arriving through the other door.
-          validity: memoryValidityAt(entry, at),
+          validity: effectiveMemoryValidityAt(entry, at),
           ...(entry.about ? { about: entry.about } : {}),
           ...(entry.kind ? { kind: entry.kind } : {}),
           ...(entry.validFrom ? { validFrom: entry.validFrom } : {}),

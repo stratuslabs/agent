@@ -13,6 +13,7 @@ import {
   clampMemoryRecallLimit,
   collectMemoryTopics,
   compareMemoryChronology,
+  effectiveMemoryValidityAt,
   importableMemoryEntry,
   isMemoryEntryCurrent,
   isTrustLevel,
@@ -21,7 +22,6 @@ import {
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_READ_MAX_BYTES,
   memoryEntryTokens,
-  memoryWindowAt,
   pinnedCapRefusal,
   pinnedInertRefusal,
   supersededMemoryIdsAt,
@@ -1095,7 +1095,7 @@ export const createFileMemoryStore = (
       // expired rather than vanishing.
       const current = listOptions.validity === 'all'
         ? live
-        : live.filter((entry) => isMemoryEntryCurrent(entry, at));
+        : live.filter((entry) => effectiveMemoryValidityAt(entry, at) === 'current');
       if (listOptions.limit === undefined) {
         return { entries: current.sort(compareMemoryChronology), truncated: false };
       }
@@ -1299,14 +1299,14 @@ export const createFileMemoryStore = (
       // note is still current.
       const live = new Set(liveEntriesFor(records, agentId, at).map((entry) => entry.id));
       return pins
-        .filter((entry) => live.has(entry.id) && memoryWindowAt(entry, at) === 'current')
+        .filter((entry) => live.has(entry.id) && isMemoryEntryCurrent(entry, at))
         .sort(compareMemoryChronology);
     },
 
     async topics(agentId: string): Promise<MemoryTopic[]> {
       const at = now();
       const live = liveEntriesFor(await readRecords(), agentId, at);
-      return collectMemoryTopics(live.filter((entry) => isMemoryEntryCurrent(entry, at)));
+      return collectMemoryTopics(live.filter((entry) => effectiveMemoryValidityAt(entry, at) === 'current'));
     },
 
     async importEntries(agentId: string, entries: readonly MemoryEntry[]): Promise<MemoryImportResult> {
