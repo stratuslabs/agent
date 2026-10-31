@@ -7,7 +7,22 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # The two floors every manifest's engines field admits (22.16 and 24.0),
+    # and the newest 22.x. Floors are pinned exactly: a range would quietly
+    # test whatever is newest, which is how 22.13 failing memory search and
+    # the state upgrade went unnoticed. Plus macOS, where most people run
+    # Stratus: its default disk folds case and its shell sandbox is
+    # sandbox-exec, neither of which a Linux runner exercises.
+    name: test (Node ${{ matrix.node }}${{ matrix.os == 'macos-latest' && ', macOS' || '' }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: ['22.16.0', '24.0.0', '22']
+        include:
+          - os: macos-latest
+            node: '22'
     steps:
       - uses: actions/checkout@v4
 
@@ -15,7 +30,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - name: Install dependencies
@@ -28,4 +43,6 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
-        run: pnpm test
+        # --no-bail: a failing package doesn't hide the failures in the ones
+        # after it, so one run shows everything that broke.
+        run: pnpm -r --no-bail test

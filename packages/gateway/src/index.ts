@@ -1058,6 +1058,13 @@ export interface DispatchInput {
    */
   addressed?: boolean;
   /**
+   * Said to the agent, but possibly needing no answer — see
+   * `RunInput.replyOptional` in `@stratusagent/core` (card 601). Messages
+   * merged into one turn (card 423) keep it only if every one of them
+   * carries it: one that owes an answer makes the turn owe it.
+   */
+  replyOptional?: boolean;
+  /**
    * What was said before this message that the agent never heard — see
    * `RunInput.earlier` in `@stratusagent/core`. Used only when this
    * dispatch creates the session; a session that already exists ignores
@@ -4523,6 +4530,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           userMessage: input.userMessage,
           ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
+          ...(input.replyOptional === true ? { replyOptional: true } : {}),
           ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
           ...(absorbedKeys.length > 0 ? { absorbedKeys: [...absorbedKeys] } : {}),
           ...(hostedLoop ? { hostedLoop } : {}),
@@ -4539,6 +4547,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         userMessage: input.userMessage,
         ...(input.images !== undefined ? { images: input.images } : {}),
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
+        ...(input.replyOptional === true ? { replyOptional: true } : {}),
         ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
         ...(absorbedKeys.length > 0 ? { absorbedKeys: [...absorbedKeys] } : {}),
         ...(hostedLoop ? { hostedLoop } : {}),
@@ -5517,6 +5526,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(head.input.agentId !== undefined ? { agentId: head.input.agentId } : {}),
         userMessage: runnable.map((part) => part.input.userMessage).join(MERGED_SEPARATOR),
         ...(images.length > 0 ? { images } : {}),
+        ...(runnable.every((part) => part.input.replyOptional === true) ? { replyOptional: true } : {}),
         ...(head.input.earlier !== undefined ? { earlier: head.input.earlier } : {}),
         ...(metadata !== undefined ? { metadata } : {}),
         ...(signal !== undefined ? { signal } : {}),

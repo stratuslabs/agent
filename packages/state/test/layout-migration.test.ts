@@ -1045,13 +1045,16 @@ test('two stored ids that differ only in case are not merged into one directory'
 
   // Exactly one of the two spellings was given a store, and it holds only
   // its own row — which spelling wins does not matter, and is not asserted.
+  // The spellings come from the directory listing, the way the disk spells
+  // them: on a disk that folds case (macOS, Windows) a stat of `twin` finds
+  // `Twin`'s store, so asking by each spelling would count one store twice.
   const stores: string[] = [];
-  for (const agentId of ['Twin', 'twin']) {
+  for (const agentId of (await readdir(agentsDirPath(env))).filter((name) => name.toLowerCase() === 'twin')) {
     try {
       await stat(agentSessionDbPath(env, agentId));
       stores.push(agentId);
     } catch {
-      // no store for this spelling, which is the quarantined one
+      // a directory with no store, which only the quarantined spelling may have
     }
   }
   assert.deepEqual(stores.length, 1, `one store, got ${stores.join(', ')}`);

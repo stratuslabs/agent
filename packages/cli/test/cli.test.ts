@@ -19,6 +19,7 @@ import { DEFAULT_STOP_DRAIN_TIMEOUT_MS, claimHome } from '@stratusagent/gateway'
 import {
   createFileMemoryStore,
   unsupportedNodeMessage,
+  SUPPORTED_NODE_RANGE,
   filterSqliteExperimentalWarning,
   withoutSqliteExperimentalWarning,
   CLI_VERSION,
@@ -143,24 +144,50 @@ test('the CLI refuses Node versions below the floor its manifests declare', () =
   // The failure this replaces is an ERR_UNKNOWN_BUILTIN_MODULE for
   // node:sqlite, thrown from a lazy import well after install, naming
   // neither Node nor the version needed.
-  // 23.0 through 23.3 are the interesting ones: newer than the 22.x floor,
-  // and still shipping node:sqlite behind --experimental-sqlite, because it
-  // was unflagged separately on each line (22.13.0 and 23.4.0).
-  for (const version of ['20.11.0', 'v18.20.4', '22.12.0', '22.9.1', '23.0.0', '23.3.0', 'v23.3.9']) {
+  // The floor is where the bundled node:sqlite has FTS5 (memory search) and
+  // opens file: URIs (the state upgrade): 22.16.0, and 24.0.0 after it.
+  // 22.13 through 22.15 run node:sqlite but fail one or both; no 23.x release
+  // ships FTS5, so the whole line is below the floor despite the number.
+  for (const version of [
+    '20.11.0', 'v18.20.4', '22.12.0', '22.9.1', '22.13.0', 'v22.13.1', '22.14.2', '22.15.0', '22.15.1',
+    '23.0.0', '23.3.0', '23.4.0', '23.10.0', 'v23.11.1',
+  ]) {
     const message = unsupportedNodeMessage(version);
     assert.ok(message, `${version} is below the floor`);
-    assert.match(message, /needs Node 22\.13 or newer/);
-    assert.match(message, /23\.4 or newer on the 23\.x line/);
+    assert.match(message, /needs Node 22\.16 or newer on the 22\.x line, or Node 24 or newer/);
     assert.match(message, new RegExp(version.replace(/^v/, '').replace(/\./g, '\\.')));
   }
 
-  for (const version of ['22.13.0', '22.14.2', '23.4.0', '23.11.1', '24.1.0', 'v22.13.1']) {
+  for (const version of ['22.16.0', 'v22.16.1', '22.21.0', '24.0.0', '24.1.0', '26.10.0']) {
     assert.equal(unsupportedNodeMessage(version), undefined, `${version} is supported`);
   }
 
   // An unrecognized build string is a bad reason to refuse to run.
   for (const version of ['', 'nightly', 'v-broken']) {
     assert.equal(unsupportedNodeMessage(version), undefined);
+  }
+});
+
+test('every package declares the Node range the CLI enforces', async () => {
+  // The floor lives in each manifest's engines field and in the preflight
+  // check. A release that moves one and not the others either refuses a
+  // Node its manifests allow or admits one that fails the state upgrade.
+  const packagesDir = fileURLToPath(new URL('../../', import.meta.url));
+  const declared: Record<string, string | undefined> = {};
+  for (const entry of await readdir(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const manifest = JSON.parse(
+      await readFile(path.join(packagesDir, entry.name, 'package.json'), 'utf8').catch(() => '{}'),
+    ) as { name?: string; engines?: { node?: string } };
+    if (manifest.name !== undefined) {
+      declared[manifest.name] = manifest.engines?.node;
+    }
+  }
+  assert.ok(Object.keys(declared).length > 1, 'found the workspace packages');
+  for (const [name, range] of Object.entries(declared)) {
+    assert.equal(range, SUPPORTED_NODE_RANGE, `${name} declares engines.node ${range ?? '(none)'}`);
   }
 });
 
@@ -1405,7 +1432,13 @@ test('source bin script works with piped stdin', async () => {
   assert.equal(exitCode, 0);
   assert.match(stdout, /Starting Stratus Agent local loop with provider=demo/);
   assert.match(stdout, /please inspect this tool/);
-  assert.equal(stderr, '');
+  // Running the .ts source, Node itself prints a Type Stripping warning on
+  // releases where that is still experimental (the 22.16.0 and 24.0.0 floors
+  // among them), before any of our code runs to filter it. The published
+  // bin is dist/bin.js and never sees it. Anything else on stderr still
+  // fails.
+  const nodeTypeStrippingWarning = /^\(node:\d+\) ExperimentalWarning: Type Stripping is an experimental feature[^\n]*\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\n/;
+  assert.equal(stderr.replace(nodeTypeStrippingWarning, ''), '');
 });
 
 test('parseCommand accepts the anthropic provider and soul flag', () => {
@@ -9320,6 +9353,7 @@ test('the managed daemon is pinned to the config setup wrote', async () => {
       cwd: project,
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: stubServiceRunner,
       setupInput: Readable.from(['9\n']),
     },
@@ -9342,7 +9376,7 @@ test('service install can pin the daemon to a config of its own', async () => {
   await runCli({
     argv: ['service', 'install', '--config', './team.json'],
     streams: createStreams().streams,
-    env: { cwd: project, homeDir: home, processEnv: {}, serviceRunner: stubServiceRunner },
+    env: { cwd: project, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: stubServiceRunner },
   });
 
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
@@ -9467,7 +9501,7 @@ test('the unit runs where it was installed, so relative config paths still work'
   await runCli({
     argv: ['service', 'install'],
     streams: createStreams().streams,
-    env: { cwd: project, homeDir: home, processEnv: {}, serviceRunner: stubServiceRunner },
+    env: { cwd: project, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: stubServiceRunner },
   });
 
   // A config's `soul` resolves against the process working directory, so
@@ -9596,6 +9630,7 @@ test('a stored sign-in installs the service as usual', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
       setupInput: Readable.from(['9\n']),
     },
@@ -9619,6 +9654,7 @@ test('opting out in setup removes a service an earlier run installed', async () 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
       // Always on → "Do not run it for me" → Save & finish.
       setupInput: Readable.from(['7\n', '3\n', '9\n']),
@@ -9914,6 +9950,7 @@ test('rerunning setup keeps an existing --no-login install as it was', async () 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => {
         calls.push([command, ...args].join(' '));
         return args.includes('is-enabled')
@@ -9945,6 +9982,7 @@ test('service install pins the config STRATUS_CONFIG selected', async () => {
       // here has to be baked into the unit or the daemon rediscovers and
       // can come up on a different roster.
       processEnv: { STRATUS_CONFIG: './team.json' },
+      servicePlatform: 'linux',
       serviceRunner: stubServiceRunner,
     },
   });
@@ -9996,6 +10034,7 @@ test('a transient status failure does not disable a service on the next save', a
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => {
         calls.push([command, ...args].join(' '));
         return args.includes('is-enabled')
@@ -10073,7 +10112,7 @@ test('an unanswerable enablement is reported as unknown, not as no', async () =>
   await runCli({
     argv: ['service', 'status'],
     streams,
-    env: { cwd: home, homeDir: home, processEnv: {}, serviceRunner: brokenBus },
+    env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: brokenBus },
   });
   assert.match(output.stdout, /at login {2}unknown — the service manager did not answer/);
 
@@ -10137,6 +10176,7 @@ test('a demo setup still installs, since it needs no credential at all', async (
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
     },
   });
@@ -10234,6 +10274,7 @@ test('a service install that throws is reported, not crashed through, and setup 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: stubServiceRunner,
       setupInput: Readable.from(['9\n']),
     },
@@ -10289,6 +10330,7 @@ test('a failed removal is reported, not crashed through, and setup still saves',
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: stubServiceRunner,
       // Always on → "Do not run it for me" → Save & finish.
       setupInput: Readable.from(['7\n', '3\n', '9\n']),
@@ -10350,6 +10392,7 @@ test('an unreadable unit still asks the manager whether it is running', async ()
       cwd: home,
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async () => ({ code: 0, stdout: 'active\n', stderr: '' }),
     },
   });
