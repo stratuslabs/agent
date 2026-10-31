@@ -169,3 +169,35 @@ test('a soul link that points at nothing is named in the report, not passed over
   const applied = await runStateMigrations(env);
   assert.match(applied[0]?.detail ?? '', /left .*bob\.md as it was \(unreadable/);
 });
+
+test('a soul path that cannot be read (a directory named like a soul) is named in the report, and the rest still migrate', async () => {
+  const env = await home({ upgraded: true });
+  await mkdir(path.join(agentsDirPath(env), 'broken.md'));
+  const soulPath = await soulAt(path.join(agentsDirPath(env), 'ava.md'), AVA);
+
+  const applied = await runStateMigrations(env);
+  assert.deepEqual(applied.map((migration) => migration.id), [MIGRATION]);
+  assert.match(applied[0]?.detail ?? '', /left .*broken\.md as it was \(unreadable/);
+  assert.deepEqual(parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath }).agent.tools, ['*']);
+  assert.ok((await readStateStamp(env)).applied.includes(MIGRATION));
+});
+
+test('the soul of a config chosen with --config is covered when the run is told about it', async () => {
+  const env = await home({ upgraded: true });
+  const outside = await soulAt(path.join(env.homeDir, 'custom', 'ava.md'), AVA);
+  const custom = path.join(env.homeDir, 'custom', 'stratus.json');
+  await writeFile(custom, JSON.stringify({ soul: outside }));
+
+  await runStateMigrations(env, { configPath: custom });
+  assert.deepEqual(parseSoul(await readFile(outside, 'utf8'), { seed: outside }).agent.tools, ['*']);
+});
+
+test('the soul of a config chosen with STRATUS_CONFIG is covered, resolved from the working directory', async () => {
+  const base = await home({ upgraded: true });
+  const outside = await soulAt(path.join(base.homeDir, 'custom', 'ava.md'), AVA);
+  await writeFile(path.join(base.homeDir, 'custom', 'stratus.json'), JSON.stringify({ soul: outside }));
+  const env = { ...base, cwd: path.join(base.homeDir, 'custom'), processEnv: { STRATUS_CONFIG: 'stratus.json' } };
+
+  await runStateMigrations(env);
+  assert.deepEqual(parseSoul(await readFile(outside, 'utf8'), { seed: outside }).agent.tools, ['*']);
+});

@@ -140,7 +140,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
         writeLine(streams.stderr, `Warning: ${newerStateMessage(stamp.schemaVersion)}`);
       } else {
         try {
-          for (const migration of await runStateMigrations(resolvedEnv)) {
+          // The command's own --config, so 0005 can keep the soul it names
+          // on every tool; STRATUS_CONFIG is read from the environment.
+          const configPath = 'configPath' in command ? command.configPath : undefined;
+          for (const migration of await runStateMigrations(resolvedEnv, configPath !== undefined ? { configPath } : {})) {
             if (migration.detail !== undefined) {
               writeLine(streams.stderr, `state migration ${migration.id}: ${migration.detail}`);
             }

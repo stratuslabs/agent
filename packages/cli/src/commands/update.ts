@@ -7,6 +7,7 @@ import {
   pendingStateMigrations,
   planAgentsHome,
   readStateStamp,
+  readWorkingDirectory,
   repairWorkspacesIfPending,
   surfaceAgentsHome,
   runStateMigrations,
@@ -561,7 +562,16 @@ const runUpdateSteps = async (
         + 'everything else still applied. Stop that daemon and run `stratus update` again to finish it.',
       );
     }
-    applied = await runStateMigrations(env, claim.held ? { exclusive: true } : {});
+    // The config the service is pinned to, as the daemon reads it: 0005
+    // keeps the soul that file names on every tool, and this shell's own
+    // --config or STRATUS_CONFIG is not what the restarted daemon runs on.
+    const unitConfigPath = unit?.configPath !== undefined
+      ? path.resolve(unit.workingDirectory ?? readWorkingDirectory(env), unit.configPath)
+      : undefined;
+    applied = await runStateMigrations(env, {
+      ...(claim.held ? { exclusive: true } : {}),
+      ...(unitConfigPath !== undefined ? { configPath: unitConfigPath } : {}),
+    });
     // And the workspace pass again, for the same reason `serve` runs it:
     // the schema stamp is not what makes that move safe, so a workspace an
     // older build left at the legacy path is folded whenever something

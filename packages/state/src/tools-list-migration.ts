@@ -4,7 +4,7 @@ import path from 'node:path';
 import { parseSoul, type ParsedSoul } from '@stratusagent/agents';
 
 import { loadConfigFile } from './config-file.ts';
-import { type StateEnvironment } from './environment.ts';
+import { readNonEmptyString, readProcessEnv, readWorkingDirectory, type StateEnvironment } from './environment.ts';
 import { agentsDirPath, globalConfigPath } from './paths.ts';
 import { replaceSoulFile, withSoulFileLock } from './souls.ts';
 
@@ -72,16 +72,19 @@ export const withEveryToolLine = (raw: string, seed: string): string | undefined
 /**
  * The souls a daemon on this home serves from files: every `*.md` in the
  * agents directory, keyed by the path the loader seeds identity with, plus
- * the global config's `soul:` when it is an absolute path.
+ * the `soul:` of the global config and of the config the daemon is started
+ * on (`configPath`, else `STRATUS_CONFIG`, resolved from the working
+ * directory as the CLI resolves it) when that is an absolute path.
  *
  * Absolute only. The loader resolves a relative `soul:` against the
  * working directory of whatever process reads it, and the one running this
  * may stand somewhere else, where the same name is another file. Setup and
  * `agent new` write absolute paths, so this is only a hand-written config,
  * and for that one the daemon's startup line says what to add. Souls named
- * by `--soul` or `STRATUS_SOUL` are not knowable from here at all.
+ * by `--soul` or `STRATUS_SOUL` are not knowable from here at all, and nor
+ * is a `--config` the command that first runs this build was not given.
  */
-const servedSoulPaths = async (env: StateEnvironment): Promise<string[]> => {
+const servedSoulPaths = async (env: StateEnvironment, configPath?: string): Promise<string[]> => {
   const paths: string[] = [];
   try {
     for (const file of (await readdir(agentsDirPath(env))).filter((name) => name.endsWith('.md')).sort()) {
@@ -92,14 +95,21 @@ const servedSoulPaths = async (env: StateEnvironment): Promise<string[]> => {
       throw error;
     }
   }
-  try {
-    const configured = (await loadConfigFile(globalConfigPath(env))).soul;
-    if (typeof configured === 'string' && path.isAbsolute(configured)) {
-      paths.push(configured);
+  const explicit = configPath ?? readNonEmptyString(readProcessEnv(env).STRATUS_CONFIG);
+  const configs = [globalConfigPath(env)];
+  if (explicit !== undefined) {
+    configs.push(path.resolve(readWorkingDirectory(env), String(explicit)));
+  }
+  for (const config of configs) {
+    try {
+      const configured = (await loadConfigFile(config)).soul;
+      if (typeof configured === 'string' && path.isAbsolute(configured)) {
+        paths.push(configured);
+      }
+    } catch {
+      // No config, or one that does not parse: the daemon will not start on
+      // the second either, and a soul it names is not one to edit blind.
     }
-  } catch {
-    // No config, or one that does not parse: the daemon will not start on
-    // the second either, and a soul it names is not one to edit blind.
   }
   return paths;
 };
@@ -109,11 +119,11 @@ const servedSoulPaths = async (env: StateEnvironment): Promise<string[]> => {
  * list. Idempotent: a soul that has the line has a list, and is skipped.
  * Returns what changed, for the migration report, or undefined.
  */
-export const applyEveryToolLines = async (env: StateEnvironment): Promise<string | undefined> => {
+export const applyEveryToolLines = async (env: StateEnvironment, configPath?: string): Promise<string | undefined> => {
   const written: string[] = [];
   const skipped: string[] = [];
   const seen = new Set<string>();
-  for (const soulPath of await servedSoulPaths(env)) {
+  for (const soulPath of await servedSoulPaths(env, configPath)) {
     let target: string;
     try {
       target = await realpath(soulPath);
@@ -131,7 +141,16 @@ export const applyEveryToolLines = async (env: StateEnvironment): Promise<string
     }
     seen.add(target);
     await withSoulFileLock(async () => {
-      const raw = await readFile(soulPath, 'utf8');
+      let raw: string;
+      try {
+        raw = await readFile(soulPath, 'utf8');
+      } catch {
+        // A directory named like a soul, or a file this user cannot read.
+        // The roster loader skips it and starts the rest, so an upgrade
+        // that stopped here would keep the daemon down over one bad entry.
+        skipped.push(soulPath);
+        return;
+      }
       let soul: ParsedSoul;
       try {
         soul = parseSoul(raw, { seed: soulPath });

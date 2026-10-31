@@ -268,9 +268,11 @@ export interface StateMigration {
    * Idempotent: applying twice must equal applying once, because two
    * processes can race the stamp and a crash can lose the record of a
    * completed run. Returns a line describing what actually changed, or
-   * undefined when there was nothing to do.
+   * undefined when there was nothing to do. `options` is what the caller
+   * passed `runStateMigrations`, for the one migration that needs to know
+   * which config file the daemon starts on.
    */
-  apply(env: StateEnvironment): Promise<string | undefined>;
+  apply(env: StateEnvironment, options?: StateMigrationRunOptions): Promise<string | undefined>;
 }
 
 /**
@@ -400,7 +402,9 @@ const PER_AGENT_WORKSPACES_MIGRATION: StateMigration = {
   description: "move each agent's workspace into agents/<id>/workspace",
   /** Always, for the reason 0003 gives: see `PER_AGENT_LAYOUT_MIGRATION`. */
   requiresExclusive: async () => true,
-  apply: applyPerAgentWorkspaces,
+  // Not handed the run's options: its own second parameter is the link
+  // record's, which only its tests set.
+  apply: (env) => applyPerAgentWorkspaces(env),
 };
 
 /**
@@ -426,9 +430,9 @@ const PER_AGENT_WORKSPACES_MIGRATION: StateMigration = {
 const EXPLICIT_TOOLS_LISTS_MIGRATION: StateMigration = {
   id: '0005-explicit-tools-lists',
   description: 'write tools: ["*"] into each soul with no tools: list, so agents keep every tool now that an omitted list means safe tools only',
-  async apply(env) {
+  async apply(env, options) {
     const onDisk = await readStateStamp(env);
-    return onDisk.applied.length > 0 ? applyEveryToolLines(env) : undefined;
+    return onDisk.applied.length > 0 ? applyEveryToolLines(env, options?.configPath) : undefined;
   },
 };
 
@@ -690,6 +694,15 @@ export const assertStateCompatible = (env: StateEnvironment): void => {
  */
 export interface StateMigrationRunOptions {
   exclusive?: boolean;
+  /**
+   * The config file chosen with `--config` (or pinned in the installed
+   * service unit) for the daemon this run prepares, when the caller knows
+   * one. Without it `STRATUS_CONFIG` from the environment stands in, the
+   * same order the CLI selects a config in. Only `0005` reads it: the
+   * `soul:` that file names is a soul the upgrade has to keep on every
+   * tool, and nothing else on disk says the file exists.
+   */
+  configPath?: string;
 }
 
 const runnableNow = async (migration: StateMigration, env: StateEnvironment, options: StateMigrationRunOptions): Promise<boolean> =>
@@ -774,7 +787,7 @@ export const runStateMigrations = async (
     if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
       continue;
     }
-    const detail = await migration.apply(env);
+    const detail = await migration.apply(env, options);
     stamp.applied.push(migration.id);
     applied.add(migration.id);
     results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });

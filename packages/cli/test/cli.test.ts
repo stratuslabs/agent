@@ -17090,3 +17090,24 @@ test('the startup lines count external-content gated calls among those that ask,
   assert.match(line, /except bea's, which run without asking, except in bea's conversations that read external content/);
   assert.doesNotMatch(line, /only dangerous ones are parked/);
 });
+
+test('the first command of an upgrade keeps the soul its --config names on every tool', async () => {
+  // Codex P1 4430483701: 0005 used to look only at the global config, so a
+  // soul chosen through --config lost its tools on upgrade.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-'));
+  const soulPath = path.join(elsewhere, 'ava.md');
+  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
+  const chosen = path.join(elsewhere, 'prod.json');
+  await writeFile(chosen, JSON.stringify({ provider: 'demo', soul: soulPath }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--config', chosen], streams, env: { cwd: home, homeDir: home, processEnv: {} } });
+  assert.match(output.stderr, /state migration 0005-explicit-tools-lists: wrote tools: \["\*"\] into the soul of ava/);
+  assert.match(await readFile(soulPath, 'utf8'), /^tools: \["\*"\]$/m);
+});
