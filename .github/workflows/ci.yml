@@ -10,13 +10,19 @@ jobs:
     # The two floors every manifest's engines field admits (22.16 and 24.0),
     # and the newest 22.x. Floors are pinned exactly: a range would quietly
     # test whatever is newest, which is how 22.13 failing memory search and
-    # the state upgrade went unnoticed.
-    name: test (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    # the state upgrade went unnoticed. Plus macOS, where most people run
+    # Stratus: its default disk folds case and its shell sandbox is
+    # sandbox-exec, neither of which a Linux runner exercises.
+    name: test (Node ${{ matrix.node }}${{ matrix.os == 'macos-latest' && ', macOS' || '' }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node: ['22.16.0', '24.0.0', '22']
+        include:
+          - os: macos-latest
+            node: '22'
     steps:
       - uses: actions/checkout@v4
 
