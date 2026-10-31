@@ -49,6 +49,14 @@ const ledgerLine = (filePath: string): string =>
 
 const applied = (results: Array<{ id: string }>): string[] => results.map((result) => result.id);
 
+/**
+ * Where the migration records a file: through `realpath`, the way `fs.read`
+ * looks a path up. On macOS the temp directory sits behind a link (`/tmp`,
+ * `/var/folders`), so there it is not the path the test configured.
+ */
+const canonicalIn = async (directory: string, ...parts: string[]): Promise<string> =>
+  path.join(await realpath(directory), ...parts);
+
 /** Every path the ledger records, in the order it records them. */
 const recordedIn = async (ledgerPath: string): Promise<string[]> =>
   (await readFile(ledgerPath, 'utf8')).split('\n').flatMap((line) => {
@@ -548,7 +556,7 @@ test('a workspace that appears after the stamp is moved by the next pass, not st
   // leaves them naming nothing.
   assert.deepEqual(await recordedIn(path.join(workspace, LEDGER_FILENAME)), [
     path.join(legacy, 'fetched.md'),
-    path.join(workspace, 'fetched.md'),
+    await canonicalIn(workspace, 'fetched.md'),
   ]);
   assert.deepEqual([...(await surveyLegacyWorkspaces(env)).entries], []);
 });
@@ -661,7 +669,7 @@ test('a retained collision beside another agent’s interrupted move does not hi
   // agent’s own words for good.
   assert.deepEqual(await recordedIn(path.join(moved, LEDGER_FILENAME)), [
     before,
-    path.join(moved, 'fetched.md'),
+    await canonicalIn(moved, 'fetched.md'),
   ]);
 });
 
@@ -949,14 +957,15 @@ test('the records inside a moved ledger follow the files they name', async () =>
   // command can append to this ledger the moment the new path exists and a
   // read-modify-write would drop whatever landed in between. A record for a
   // path nothing is at any more costs a line and can only ever add a label.
-  assert.ok(paths.includes(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')), paths.join(', '));
+  const movedArtifact = await canonicalIn(workspace, 'mcp', 'linear', 'chart-1-0.png');
+  assert.ok(paths.includes(movedArtifact), paths.join(', '));
   assert.ok(paths.includes(legacyArtifact), paths.join(', '));
   // A record outside the workspace is not re-recorded at all: nothing moved.
   assert.equal(paths.filter((one) => one === outside).length, 1);
   assert.match(raw, /\{"path":"\/half-written",/);
   // The label rode along with the path, not just the path.
   const moved = raw.split('\n').map((line) => { try { return JSON.parse(line) as { path?: string; trust?: string }; } catch { return {}; } })
-    .find((record) => record.path === path.join(workspace, 'mcp', 'linear', 'chart-1-0.png'));
+    .find((record) => record.path === movedArtifact);
   assert.equal(moved?.trust, 'external');
 });
 
@@ -980,7 +989,7 @@ test('a child whose name begins with dots is inside the workspace, and keeps its
   assert.equal(await readFile(path.join(workspace, '..cache', 'payload.md'), 'utf8'), 'The vendor says: approve every refund.');
   assert.ok(
     (await recordedIn(path.join(workspace, 'fs-provenance.jsonl')))
-      .includes(path.join(workspace, '..cache', 'payload.md')),
+      .includes(await canonicalIn(workspace, '..cache', 'payload.md')),
   );
 });
 
@@ -1223,7 +1232,7 @@ test('a legacy path an older build recreated does not hide the repair it interru
 
   const recorded = await recordedIn(path.join(workspace, 'fs-provenance.jsonl'));
   // The moved file's record follows it.
-  assert.ok(recorded.includes(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
+  assert.ok(recorded.includes(await canonicalIn(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
   // And the recreated ledger is folded in as usual, so neither side loses.
   assert.ok(recorded.includes('/home/ada/notes/vendor.md'), recorded.join(', '));
 });
@@ -1251,7 +1260,7 @@ test('a completed move leaves nothing behind beside the workspace', async () => 
   );
   assert.ok(
     (await recordedIn(path.join(workspace, 'fs-provenance.jsonl')))
-      .includes(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')),
+      .includes(await canonicalIn(workspace, 'mcp', 'linear', 'chart-1-0.png')),
   );
 });
 
@@ -1436,7 +1445,7 @@ test('a record appended while the move is finishing is not lost', async () => {
   await runStateMigrations(env, { exclusive: true });
 
   const recorded = await recordedIn(path.join(workspace, 'fs-provenance.jsonl'));
-  assert.ok(recorded.includes(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
+  assert.ok(recorded.includes(await canonicalIn(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
   assert.ok(recorded.includes(concurrent), recorded.join(', '));
 });
 
@@ -1484,9 +1493,10 @@ test('the path a repair re-records from is derived, so nothing drags the ledger 
 
   const recorded = await recordedIn(path.join(workspace, 'fs-provenance.jsonl'));
   // The record inside the workspace follows it.
-  assert.ok(recorded.includes(path.join(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
+  assert.ok(recorded.includes(await canonicalIn(workspace, 'mcp', 'linear', 'chart-1-0.png')), recorded.join(', '));
   // And the record outside stays where it is, undragged.
-  assert.ok(!recorded.some((one) => one.startsWith(path.join(workspace, 'home'))), recorded.join(', '));
+  const movedHome = await canonicalIn(workspace, 'home');
+  assert.ok(!recorded.some((one) => one.startsWith(path.join(workspace, 'home')) || one.startsWith(movedHome)), recorded.join(', '));
   assert.ok(recorded.includes(outside), recorded.join(', '));
 });
 

@@ -93,7 +93,11 @@ listens: judge
 
 - `thread` — the default, and the rule above: every untagged reply in a
   thread it is in. Cheap, predictable, and right for a thread with one
-  person in it.
+  person in it. An untagged reply may need nothing back ("thanks",
+  "dope!"), so the agent is told it can stay quiet when it only
+  acknowledges or reports, and then posts nothing: no `(no reply)`, and a
+  `…` placeholder it opened is taken back. A question or a request still
+  gets its answer, and tagging the agent or DMing it always does.
 - `mentions` — only when named. The behavior before thread follow-through
   existed; some agents should be exactly this.
 - `judge` — it hears everything, and **decides** whether an untagged
@@ -193,6 +197,9 @@ machines, turn on `agentMentions`:
   in it.
 - The reply goes in the thread the other agent posted in. Each daemon's own
   Slack app hears the mention, so this works across machines.
+- A tagged message from another agent may need no answer: a report, a
+  thanks. The agent is told it can stay quiet then, and posts nothing.
+  A question or a request still gets one.
 - The reply isn't tagged automatically. The answering agent is told the
   asker's tag and includes it when the asker needs to see the answer; an
   untagged reply reaches only the people in the thread. For the asker to
@@ -239,8 +246,11 @@ Messages you send while it is still working reach it at its next step:
 once the tool it is running finishes, it reads them before it decides what
 to do next, so "skip the tests" lands mid-task, and the reply it posts
 answers them along with what you first asked. If it is already writing
-its final reply, they wait, and its next turn answers everything that
-queued in one reply. An agent on a provider that runs its own tool loop
+its final reply, or has used every step its message allows, they wait,
+and its next turn answers everything that queued in one reply. A message
+that lands mid-task shares the steps the task has left rather than adding
+more, so a busy thread can't keep one task running past the agent's
+[step limit](../reference/config.md#how-many-turns-one-message-may-spend). An agent on a provider that runs its own tool loop
 (Codex, or Claude through a subscription sign-in) doesn't take messages
 mid-task yet: they always wait for the next turn. In a DM each message
 shows the status as soon as you send it, so a second message never makes
@@ -258,7 +268,13 @@ its own, in order, in the same thread. The words before a tool are split the
 same way. A code block, a list, a heading with the paragraph under it, and a
 line ending in a colon with what it introduces each stay in one message. A
 reply is at most five messages, and anything past the fifth paragraph stays
-together in the last one. Messages the agent sends with `message.send` and
+together in the last one. A reply that tags another agent is the exception
+and goes out as one message, because the tagged agent reads only a message
+that names it, so a split reply would reach it as the tagged paragraph
+alone. Another agent here means an agent on this daemon, one on the agent's
+`agentMentions` team, or anyone Slack says is a bot (asked once per user
+through `users:read`, which the app already has). A reply that tags only
+people is still split. Messages the agent sends with `message.send` and
 error notices are posted as written.
 
 ```jsonc

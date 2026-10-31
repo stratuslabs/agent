@@ -282,3 +282,44 @@ test('a queued message whose text would push the batch past the merged-text budg
   assert.equal(provider.prompts[2], `${long('third')}\n\nDylan: fourth`);
   await gateway.stop();
 });
+
+test('a reply-optional dispatch reaches the turn, and messages merged into one turn may stay quiet only if every one of them may (card 601)', async (t) => {
+  const provider = gatedProvider();
+  const gateway = await startGateway(provider.fetchImpl);
+  t.after(() => gateway.stop());
+
+  // Alone: the flag is stored, and the model is told it may need nothing back.
+  provider.release();
+  const alone = await gateway.dispatch({ sessionId: 'm-601', agentId: 'ava', userMessage: 'Blair: report, all green', replyOptional: true });
+  assert.equal(alone.messages.find((message) => message.role === 'user')?.replyOptional, true);
+  assert.match(provider.prompts[0] ?? '', /Blair: report, all green\n\nThis message was said to you\./);
+
+  // Two reply-optional messages queued behind a running turn: one turn, still reply-optional.
+  const gated = gatedProvider();
+  const second = await startGateway(gated.fetchImpl);
+  t.after(() => second.stop());
+  const head = second.dispatch({ sessionId: 'm-601c', agentId: 'ava', userMessage: 'Dylan: go', onAbsorbed: () => {} });
+  await gated.running;
+  const thanks = second.dispatch({ sessionId: 'm-601c', agentId: 'ava', userMessage: 'Dylan: thanks', replyOptional: true, onAbsorbed: () => {} });
+  const report = second.dispatch({ sessionId: 'm-601c', agentId: 'ava', userMessage: 'Blair: done', replyOptional: true, onAbsorbed: () => {} });
+  gated.release();
+  await head;
+  const [quiet] = await Promise.all([thanks, report]);
+  assert.equal(gated.prompts.length, 2);
+  assert.equal(quiet.messages.filter((message) => message.role === 'user').at(-1)?.replyOptional, true);
+
+  // One of them owed an answer: the merged turn owes it too.
+  const gated2 = gatedProvider();
+  const third = await startGateway(gated2.fetchImpl);
+  t.after(() => third.stop());
+  const head2 = third.dispatch({ sessionId: 'm-601d', agentId: 'ava', userMessage: 'Dylan: go', onAbsorbed: () => {} });
+  await gated2.running;
+  const optional = third.dispatch({ sessionId: 'm-601d', agentId: 'ava', userMessage: 'Dylan: thanks', replyOptional: true, onAbsorbed: () => {} });
+  const asked = third.dispatch({ sessionId: 'm-601d', agentId: 'ava', userMessage: 'Dylan: and one question', onAbsorbed: () => {} });
+  gated2.release();
+  await head2;
+  const [owed] = await Promise.all([optional, asked]);
+  assert.equal(gated2.prompts.length, 2);
+  assert.equal(owed.messages.filter((message) => message.role === 'user').at(-1)?.replyOptional, undefined);
+  assert.doesNotMatch(gated2.prompts[1] ?? '', /This message was said to you/);
+});

@@ -9468,6 +9468,7 @@ test('the managed daemon is pinned to the config setup wrote', async () => {
       cwd: project,
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: stubServiceRunner,
       setupInput: Readable.from(['9\n']),
     },
@@ -9490,7 +9491,7 @@ test('service install can pin the daemon to a config of its own', async () => {
   await runCli({
     argv: ['service', 'install', '--config', './team.json'],
     streams: createStreams().streams,
-    env: { cwd: project, homeDir: home, processEnv: {}, serviceRunner: stubServiceRunner },
+    env: { cwd: project, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: stubServiceRunner },
   });
 
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
@@ -9615,7 +9616,7 @@ test('the unit runs where it was installed, so relative config paths still work'
   await runCli({
     argv: ['service', 'install'],
     streams: createStreams().streams,
-    env: { cwd: project, homeDir: home, processEnv: {}, serviceRunner: stubServiceRunner },
+    env: { cwd: project, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: stubServiceRunner },
   });
 
   // A config's `soul` resolves against the process working directory, so
@@ -9744,6 +9745,7 @@ test('a stored sign-in installs the service as usual', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
       setupInput: Readable.from(['9\n']),
     },
@@ -9767,6 +9769,7 @@ test('opting out in setup removes a service an earlier run installed', async () 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
       // Always on → "Do not run it for me" → Save & finish.
       setupInput: Readable.from(['7\n', '3\n', '9\n']),
@@ -10062,6 +10065,7 @@ test('rerunning setup keeps an existing --no-login install as it was', async () 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => {
         calls.push([command, ...args].join(' '));
         return args.includes('is-enabled')
@@ -10093,6 +10097,7 @@ test('service install pins the config STRATUS_CONFIG selected', async () => {
       // here has to be baked into the unit or the daemon rediscovers and
       // can come up on a different roster.
       processEnv: { STRATUS_CONFIG: './team.json' },
+      servicePlatform: 'linux',
       serviceRunner: stubServiceRunner,
     },
   });
@@ -10144,6 +10149,7 @@ test('a transient status failure does not disable a service on the next save', a
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => {
         calls.push([command, ...args].join(' '));
         return args.includes('is-enabled')
@@ -10221,7 +10227,7 @@ test('an unanswerable enablement is reported as unknown, not as no', async () =>
   await runCli({
     argv: ['service', 'status'],
     streams,
-    env: { cwd: home, homeDir: home, processEnv: {}, serviceRunner: brokenBus },
+    env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: brokenBus },
   });
   assert.match(output.stdout, /at login {2}unknown — the service manager did not answer/);
 
@@ -10285,6 +10291,7 @@ test('a demo setup still installs, since it needs no credential at all', async (
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
     },
   });
@@ -10382,6 +10389,7 @@ test('a service install that throws is reported, not crashed through, and setup 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: stubServiceRunner,
       setupInput: Readable.from(['9\n']),
     },
@@ -10437,6 +10445,7 @@ test('a failed removal is reported, not crashed through, and setup still saves',
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: stubServiceRunner,
       // Always on → "Do not run it for me" → Save & finish.
       setupInput: Readable.from(['7\n', '3\n', '9\n']),
@@ -10498,6 +10507,7 @@ test('an unreadable unit still asks the manager whether it is running', async ()
       cwd: home,
       homeDir: home,
       processEnv: {},
+      servicePlatform: 'linux',
       serviceRunner: async () => ({ code: 0, stdout: 'active\n', stderr: '' }),
     },
   });
