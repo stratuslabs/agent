@@ -303,17 +303,26 @@ const parseResult = (session) => {
 
 // ---------------------------------------------------------------- checks
 
-// Every package tarball carries the license text and the NOTICE that Apache
-// 2.0 asks redistributors to keep. npm packs only a manifest's `files` plus
-// LICENSE, README and package.json, so a NOTICE left out of `files` never ships.
+// Every package tarball carries the license text, and an Apache-2.0 one also
+// the NOTICE that Apache 2.0 asks redistributors to keep. npm packs only a
+// manifest's `files` plus LICENSE, README and package.json, so a NOTICE left
+// out of `files` never ships. Tags from before the relicense are MIT and have
+// no NOTICE, so `--repo` on one of them still passes.
 const checkLicenseFiles = () => {
-  const name = 'every package tarball ships LICENSE and NOTICE';
+  const name = 'every package tarball ships LICENSE, and NOTICE when it is Apache-2.0';
   const tarballs = readdirSync(packs).filter((file) => file.startsWith('stratusagent-') && file.endsWith('.tgz')).sort();
   const missing = [];
   for (const tarball of tarballs) {
-    const listed = run('tar', ['-tzf', path.join(packs, tarball)]);
+    const tarballPath = path.join(packs, tarball);
+    const listed = run('tar', ['-tzf', tarballPath]);
     const entries = new Set(listed.status === 0 ? listed.stdout.split('\n') : []);
-    for (const file of ['LICENSE', 'NOTICE']) {
+    let license;
+    try {
+      license = JSON.parse(run('tar', ['-xzOf', tarballPath, 'package/package.json']).stdout).license;
+    } catch {
+      license = undefined;
+    }
+    for (const file of license === 'Apache-2.0' ? ['LICENSE', 'NOTICE'] : ['LICENSE']) {
       if (!entries.has(`package/${file}`)) {
         missing.push(`${tarball} has no ${file}`);
       }
