@@ -9,12 +9,14 @@ import {
   memoryEntryAbout,
   InMemoryAgentMemoryStore,
   isMemoryEntryCurrent,
+  MEMORY_EPISODIC_DEFAULT_TTL_DAYS,
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_RECENCY_INJECTION_LIMIT,
   memoryContentByteLength,
   memoryEntryTokens,
   memoryQueryMatches,
   memoryValidityAt,
+  memoryWindowAt,
   renderMemorySection,
   selectMemoryInjection,
   MEMORY_INDEX_MAX_BYTES,
@@ -59,6 +61,71 @@ test('validity is one rule for both bounds, and an unparseable bound is no bound
   assert.equal(memoryValidityAt(entry('m1', 'x', { validFrom: AT.toISOString() }), AT), 'current');
   // A bound somebody hand-wrote as prose must not retire the fact it is on.
   assert.ok(isMemoryEntryCurrent(entry('m1', 'x', { validUntil: 'soon' }), AT));
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const daysBefore = (days: number, at: Date = AT): string => new Date(at.getTime() - days * DAY_MS).toISOString();
+
+test('an episodic fact with no validUntil of its own expires after the default window', () => {
+  assert.equal(MEMORY_EPISODIC_DEFAULT_TTL_DAYS, 14);
+  const note = (createdAt: string, extra: Partial<MemoryEntry> = {}) => entry('m1', 'PR 501 head is abc123', { kind: 'episodic', createdAt, ...extra });
+  assert.equal(memoryValidityAt(note(daysBefore(13)), AT), 'current');
+  // The window is half-open like an explicit one: the instant it closes is expired.
+  assert.equal(memoryValidityAt(note(daysBefore(14)), AT), 'expired');
+  assert.equal(memoryValidityAt(note(daysBefore(15)), AT), 'expired');
+  // Only episodic facts: the other kinds, and a fact with no kind, have no default.
+  for (const kind of ['semantic', 'procedural', 'preference'] as const) {
+    assert.equal(memoryValidityAt(entry('m1', 'x', { kind, createdAt: daysBefore(400) }), AT), 'current', kind);
+  }
+  assert.equal(memoryValidityAt(entry('m1', 'x', { createdAt: daysBefore(400) }), AT), 'current');
+  // An explicit validUntil wins in both directions.
+  assert.equal(memoryValidityAt(note(daysBefore(30), { validUntil: '2026-07-01T00:00:00.000Z' }), AT), 'current');
+  assert.equal(memoryValidityAt(note(daysBefore(2), { validUntil: daysBefore(1) }), AT), 'expired');
+  // A validUntil nobody can parse is no bound, so the default applies.
+  assert.equal(memoryValidityAt(note(daysBefore(15), { validUntil: 'soon' }), AT), 'expired');
+  // The window opens at validFrom when that is later than createdAt, so a
+  // note written ahead of time is not spent before it starts.
+  const planned = note(daysBefore(20), { validFrom: daysBefore(5) });
+  assert.equal(memoryValidityAt(planned, AT), 'current');
+  assert.equal(memoryValidityAt(planned, new Date(AT.getTime() + 9 * DAY_MS)), 'expired');
+  // A validFrom earlier than createdAt does not backdate the window.
+  assert.equal(memoryValidityAt(note(daysBefore(2), { validFrom: daysBefore(60) }), AT), 'current');
+  // A createdAt nobody can parse gives no window to count from.
+  assert.equal(memoryValidityAt(note('last week'), AT), 'current');
+  // The record's own window ignores the default.
+  assert.equal(memoryWindowAt(note(daysBefore(400)), AT), 'current');
+  assert.equal(memoryWindowAt(note(daysBefore(2), { validUntil: daysBefore(1) }), AT), 'expired');
+});
+
+test('an episodic successor past the default window still retires what it replaced', () => {
+  // The default says a note has gone stale, not that the fact it replaced
+  // is true again: only the successor's own window ends a retirement.
+  const old = entry('m1', 'Atlas GitHub access is pending', { kind: 'semantic', createdAt: daysBefore(60) });
+  const note = entry('m2', 'Atlas GitHub access verified', { kind: 'episodic', createdAt: daysBefore(30), supersedes: 'm1' });
+  assert.equal(memoryValidityAt(note, AT), 'expired');
+  assert.deepEqual([...supersededMemoryIdsAt([old, note], AT)], ['m1']);
+});
+
+test('the in-memory store drops a stale episodic note from what is true now, keeps it findable, and keeps a pinned one', async () => {
+  let clock = new Date(daysBefore(30));
+  const store = new InMemoryAgentMemoryStore({ now: () => clock });
+  const stale = await store.append('ava', 'loop status: card 900 in progress', { kind: 'episodic', about: ['loop'] });
+  const pinnedNote = await store.append('ava', 'standing note: Dylan merges releases', { kind: 'episodic', about: ['releases'] });
+  const lasting = await store.append('ava', 'the deploy runs on Postgres', { kind: 'semantic', about: ['deploy'] });
+  assert.equal((await store.pin!('ava', pinnedNote.id)).pinned, true);
+  clock = new Date(daysBefore(2));
+  const fresh = await store.append('ava', 'loop status: card 961 in progress', { kind: 'episodic', about: ['loop'] });
+  clock = AT;
+
+  assert.deepEqual((await store.list('ava')).entries.map((found) => found.id), [lasting.id, fresh.id]);
+  assert.deepEqual((await store.topics!('ava')).map((topic) => [topic.name, topic.count]).sort(), [['deploy', 1], ['loop', 1]]);
+  // Pinning is how an agent says a note is still current: the default does not unpin it.
+  assert.deepEqual((await store.pinned!('ava')).map((found) => found.id), [pinnedNote.id]);
+  const injection = await buildMemoryInjection(store, 'ava');
+  assert.ok(!injection.recent.some((recent) => recent.id === stale.id));
+  // Findable, and marked.
+  const found = await store.search('ava', 'loop status');
+  assert.deepEqual(found.entries.map((hit) => [hit.id, memoryValidityAt(hit, AT)]), [[fresh.id, 'current'], [stale.id, 'expired']]);
 });
 
 test('supersession retires a fact exactly while its successor is current', () => {

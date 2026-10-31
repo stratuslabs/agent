@@ -21,6 +21,7 @@ import {
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_READ_MAX_BYTES,
   memoryEntryTokens,
+  memoryWindowAt,
   pinnedCapRefusal,
   pinnedInertRefusal,
   supersededMemoryIdsAt,
@@ -1293,10 +1294,12 @@ export const createFileMemoryStore = (
       // A pinned fact that is not true now does not reach the prompt — one
       // rule, both bounds, the pinned core included. It keeps its place in
       // the budget, which is a property of the record rather than of the
-      // clock, and comes back the moment its window opens.
+      // clock, and comes back the moment its window opens. The pin's own
+      // window, not the episodic default: pinning is how an agent says a
+      // note is still current.
       const live = new Set(liveEntriesFor(records, agentId, at).map((entry) => entry.id));
       return pins
-        .filter((entry) => live.has(entry.id) && isMemoryEntryCurrent(entry, at))
+        .filter((entry) => live.has(entry.id) && memoryWindowAt(entry, at) === 'current')
         .sort(compareMemoryChronology);
     },
 
