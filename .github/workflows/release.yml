@@ -50,3 +50,21 @@ jobs:
         run: ./scripts/publish.sh
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # A separate job so only this step can write to the repository, and only
+  # after every package is on npm: a Release never announces a version that
+  # isn't installable yet.
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the Release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # every tag, so the notes start at the previous release
+
+      - name: Create the GitHub Release
+        run: ./scripts/github-release.sh "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
