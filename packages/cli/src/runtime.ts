@@ -433,6 +433,18 @@ export const createAgentRuntime = async (
       );
     }
 
+    // A soul with no `tools:` list gets only the tools registered as safe.
+    // Said here as the daemon says it at roster load, because an agent that
+    // cannot run a shell or write a file, and is never told so, looks broken
+    // rather than restricted. The built-in agent has `tools: ["*"]`.
+    if (agent.tools === undefined) {
+      writeLine(
+        streams.stderr,
+        `Warning: agent ${agent.id} has no tools: list, so it gets only safe tools (reads and memory)`
+          + ' — add tools: [...] to its soul to give it more, or tools: ["*"] for every tool',
+      );
+    }
+
     // And the same for the tools themselves, after `initialize()` so the
     // plugins have registered theirs: an allowlist entry naming a tool
     // nothing provides grants nothing and says nothing, and a soul made only

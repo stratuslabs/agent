@@ -936,6 +936,28 @@ test('a soul listing only tools nothing provides is warned about, and still runs
   assert.match(output.stderr, /Warning: agent blair has an allowlist that grants nothing/);
 });
 
+test('stratus run names a soul with no tools list, which gets only the safe tools', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const soulPath = path.join(home, 'souls', 'quiet.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(soulPath, '---\nname: Quiet\nid: quiet\n---\n\nYou are Quiet.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: soulPath })}\n`);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  // The daemon says this at roster load; a local run has to as well, or an
+  // agent that cannot run the shell here and does not say why is the result.
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Warning: agent quiet has no tools: list, so it gets only safe tools \(reads and memory\)/);
+});
+
 test('the CLI never imports the gateway at module scope', async () => {
   // `bin.ts` imports the barrel to call `unsupportedNodeMessage`, before
   // anything else has a chance to fail — the whole point being to explain
