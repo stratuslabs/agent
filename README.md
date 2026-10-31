@@ -98,6 +98,32 @@ More in [Agents](docs/concepts/agents.md).
 
 Everything else is in [`docs/`](docs/README.md).
 
+## Known limitations
+
+What doesn't work yet, or works differently than you might assume:
+
+- **The shell needs macOS or Linux.** Commands run under `sandbox-exec` or
+  `bwrap`, and elsewhere `shell.run` refuses them unless you turn the
+  sandbox off. The sandbox leaves the network on, so on a cloud VM, block
+  the metadata service at the host. [Shell](docs/guides/shell.md#what-a-command-can-reach)
+- **An agent remembers what it chooses to save.** Nothing is saved
+  automatically when a conversation ends, and recall matches words, not
+  meaning. [Memory](docs/concepts/memory.md)
+- **Long conversations get summarized.** Once one outgrows the model, its
+  oldest messages reach the agent as a summary, and details the summary
+  leaves out stop reaching it. [Troubleshooting](docs/guides/troubleshooting.md#a-conversation-that-outgrows-the-model)
+- **One daemon per home.** A second `stratus serve` on the same home
+  refuses to start, so there's no failover to another process.
+  [Always on](docs/guides/always-on.md#one-daemon-per-home)
+- **No downgrade after a migration.** An older build refuses a home a newer
+  one has migrated, so back up before you upgrade. [Updating](docs/guides/updating.md)
+- **Logs aren't scrubbed.** A failed run keeps the provider's error text,
+  which can quote your request. [Logs](docs/guides/logs.md#a-trace-not-a-transcript)
+- **Slack is the only chat channel in this repo.** Others come from plugins.
+  [Extending](docs/guides/extending.md)
+
+Found another? [Open an issue](https://github.com/stratuslabs/agent/issues/new/choose).
+
 ## From source
 
 ```bash
@@ -108,7 +134,8 @@ pnpm build && pnpm typecheck && pnpm test    # what CI runs
 node packages/cli/dist/bin.js setup          # the CLI from the checkout
 ```
 
-Read [`CLAUDE.md`](CLAUDE.md) before opening a PR.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR. Report
+security problems privately, as [`SECURITY.md`](SECURITY.md) describes.
 
 ## License
 
