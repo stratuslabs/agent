@@ -8,6 +8,7 @@ import {
   applyMemoryPinBudget,
   boundMemoryList,
   boundMemoryRead,
+  boundRankedMemoryRead,
   clampMemoryRecallLimit,
   collectMemoryTopics,
   compareMemoryChronology,
@@ -119,12 +120,17 @@ const earlierAliasOwners = async (
  *
  * `refill` is omitted by the callers whose reads carry no bound at all —
  * nothing was capped there, so there is nothing to re-read.
+ *
+ * `ranked` is for batches a store ordered by relevance: they are merged by
+ * `interleaveByRank` instead of concatenated, so the caller can bound the
+ * result without re-sorting it by date.
  */
 const settleAliasPrecedence = async (
   ids: readonly string[],
   batches: readonly MemoryReadResult[],
   held: (agentId: string) => Promise<readonly MemoryEntry[]>,
   refill?: (agentId: string) => Promise<MemoryReadResult>,
+  ranked = false,
 ): Promise<{ entries: MemoryEntry[]; truncated: boolean }> => {
   const owners = await earlierAliasOwners(ids, batches, held);
   const settled = await Promise.all(batches.map(async (batch, index) =>
@@ -132,11 +138,34 @@ const settleAliasPrecedence = async (
     && batch.entries.some((entry) => owners[index]!.has(entry.id))
       ? refill(ids[index]!)
       : batch));
+  const kept = settled.map((batch, index) =>
+    batch.entries.filter((entry) => index === 0 || !owners[index]!.has(entry.id)));
   return {
-    entries: firstByAliasOrder(settled.flatMap((batch, index) =>
-      batch.entries.filter((entry) => index === 0 || !owners[index]!.has(entry.id)))),
+    entries: firstByAliasOrder(ranked ? interleaveByRank(kept) : kept.flat()),
     truncated: settled.some((batch) => batch.truncated),
   };
+};
+
+/**
+ * Ranked batches from separate aliases, merged by position: every alias's
+ * best match, then every alias's second, and so on, in alias order. On the
+ * per-agent layout each alias is its own file with its own index, so their
+ * relevance scores would not compare even if the store handed them out,
+ * which it does not. Taking turns is the merge that claims nothing it
+ * cannot know, and it keeps each alias's own order intact.
+ */
+const interleaveByRank = (batches: readonly (readonly MemoryEntry[])[]): MemoryEntry[] => {
+  const merged: MemoryEntry[] = [];
+  const longest = Math.max(0, ...batches.map((batch) => batch.length));
+  for (let rank = 0; rank < longest; rank += 1) {
+    for (const batch of batches) {
+      const entry = batch[rank];
+      if (entry !== undefined) {
+        merged.push(entry);
+      }
+    }
+  }
+  return merged;
 };
 
 /**
@@ -152,8 +181,9 @@ const unboundedList = (options?: MemoryListOptions): MemoryListOptions | undefin
 // delegated on agentId alone would compile, satisfy the interface, and
 // quietly make every inherited entry unfindable and unforgettable — visible
 // in `list`, absent from `recall`. Merged batches sort with everything else
-// by the shared ordering rule, and bounds apply after the merge, never per
-// alias, or a busy legacy id crowds out the others.
+// by the shared ordering rule (a ranked search's take turns by rank
+// instead), and bounds apply after the merge, never per alias, or a busy
+// legacy id crowds out the others.
 export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryStore => {
   const aliasIds = (agentId: string): string[] =>
     agentId === DEFAULT_STRATUS_AGENT.id
@@ -284,6 +314,10 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       // winners: two additions to the contract for a statistic on one
       // legacy id. A ranking strategy that ever reads these changes that.
       const batches = await Promise.all(ids.map((id) => store.search(id, query, options)));
+      // Every batch came from the same store, so they agree on the ordering
+      // it served; reporting the first is reporting all of them.
+      const strategy = batches[0]?.strategy;
+      const ranked = strategy !== undefined && strategy !== 'recency';
       const settled = await settleAliasPrecedence(
         ids,
         batches,
@@ -292,11 +326,10 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
         // refill asks for the store's own ceiling. Past that the single
         // alias path cannot see either, and `truncated` says so.
         (id) => store.search(id, query, { ...options, limit: MEMORY_RECALL_MAX_LIMIT }),
+        ranked,
       );
-      const bounded = boundMemoryRead(settled.entries, clampMemoryRecallLimit(options?.limit));
-      // Every batch came from the same store, so they agree on the ordering
-      // it served; reporting the first is reporting all of them.
-      const strategy = batches[0]?.strategy;
+      const limit = clampMemoryRecallLimit(options?.limit);
+      const bounded = ranked ? boundRankedMemoryRead(settled.entries, limit) : boundMemoryRead(settled.entries, limit);
       return {
         entries: bounded.entries,
         truncated: bounded.truncated || settled.truncated,

@@ -1798,8 +1798,20 @@ export const boundMemoryRead = (
   candidates: readonly MemoryEntry[],
   limit: number,
   maxBytes: number = MEMORY_READ_MAX_BYTES,
+): MemoryReadResult => boundRankedMemoryRead([...candidates].sort(compareMemoryRecallOrder), limit, maxBytes);
+
+/**
+ * The same bound for a read whose order the store has already decided — a
+ * `relevance` or `hybrid` search. The entry limit, the byte budget, and the
+ * oversized-entry skip are `boundMemoryRead`'s exactly; only the re-sort
+ * into recall order is left out, because sorting a ranked read by date
+ * would quietly serve `recency` while the result says otherwise.
+ */
+export const boundRankedMemoryRead = (
+  ordered: readonly MemoryEntry[],
+  limit: number,
+  maxBytes: number = MEMORY_READ_MAX_BYTES,
 ): MemoryReadResult => {
-  const ordered = [...candidates].sort(compareMemoryRecallOrder);
   const entries: MemoryEntry[] = [];
   let bytes = 0;
   let truncated = false;

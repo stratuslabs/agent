@@ -10,11 +10,13 @@ import {
   assertSupersedableMemoryEntry,
   boundMemoryList,
   boundMemoryRead,
+  boundRankedMemoryRead,
   clampMemoryRecallLimit,
   collectMemoryTopics,
   compareMemoryChronology,
   importableMemoryEntry,
   isMemoryEntryCurrent,
+  isMemoryRankingStrategy,
   isTrustLevel,
   memoryContentByteLength,
   memoryEntryFields,
@@ -392,6 +394,45 @@ const pinBudgetFor = (
     (id) => (allocated.has(id) ? memoryContentByteLength(allocated.get(id)!.content) : undefined),
   );
   return { effective: budget.effective, inert: budget.inert, bytes: budget.bytes, allocated };
+};
+
+// ---- ranking ----------------------------------------------------------------
+
+/**
+ * How much a brand-new fact's relevance is multiplied by under `hybrid`,
+ * and how fast that boost fades: 1.5x today, 1.25x at 30 days, 1.125x at
+ * 90, approaching 1x for old facts. Multiplying rather than adding keeps
+ * it independent of BM25's scale, and bounds what recency can do: a fact
+ * passes an older one only if it is at least two thirds as relevant. So a
+ * newer fact matching some of the words does not bury an older one that
+ * matches all of them, and between two that match about equally well the
+ * newer one wins.
+ */
+const HYBRID_RECENCY_BOOST = 0.5;
+const HYBRID_RECENCY_HALF_LIFE_DAYS = 30;
+
+const MS_PER_DAY = 86_400_000;
+/** The Julian day of the Unix epoch, which is how SQLite's `julianday` counts. */
+const UNIX_EPOCH_JULIAN_DAY = 2_440_587.5;
+
+/**
+ * The leading `ORDER BY` terms for a ranked search; the caller appends the
+ * recency tie-break every read shares. `bm25()` is FTS5's relevance score,
+ * lower for a better match, so both orders sort ascending.
+ *
+ * A `createdAt` SQLite cannot read as a date (a hand edit) gets no boost
+ * at all, so it ranks like the oldest fact rather than, through a NULL,
+ * like the newest. One from the future (a skewed clock) counts as today.
+ */
+const rankedOrder = (strategy: 'relevance' | 'hybrid', at: number): { sql: string; params: number[] } => {
+  if (strategy === 'relevance') {
+    return { sql: 'bm25(memory_fts) ASC, ', params: [] };
+  }
+  const today = at / MS_PER_DAY + UNIX_EPOCH_JULIAN_DAY;
+  return {
+    sql: 'bm25(memory_fts) * (1.0 + ? * coalesce(1.0 / (1.0 + max(0.0, ? - julianday(created_at)) / ?), 0.0)) ASC, ',
+    params: [HYBRID_RECENCY_BOOST, today, HYBRID_RECENCY_HALF_LIFE_DAYS],
+  };
 };
 
 // ---- the derived FTS5 index ------------------------------------------------
@@ -1107,11 +1148,13 @@ export const createFileMemoryStore = (
       // The query means its literal text: tokenize and quote each term
       // rather than forwarding the string, so `C++`, an unmatched quote,
       // and a sentence containing AND are searches, never syntax errors.
-      const tokens = tokenizeMemoryText(query);
-      // BM25 is right there in FTS5 and the in-memory store cannot
-      // reproduce it, so this store implements `recency` only and says so.
-      // A caller asking for another ordering is served, not refused.
-      const strategy: MemoryRankingStrategy = 'recency';
+      const tokens = [...new Set(tokenizeMemoryText(query))];
+      // All three orderings are served here; see `rankedOrder` for what
+      // `relevance` and `hybrid` mean. `recency` stays the default and the
+      // one the parity tests hold the two stores to.
+      // Checked, not trusted: a plugin or a hand-written caller passing some
+      // other string gets the default rather than an ordering nobody named.
+      const strategy: MemoryRankingStrategy = isMemoryRankingStrategy(searchOptions.strategy) ? searchOptions.strategy : 'recency';
       if (tokens.length === 0) {
         return { entries: [], truncated: false, strategy };
       }
@@ -1121,7 +1164,11 @@ export const createFileMemoryStore = (
         return opened;
       });
       const clamped = clampMemoryRecallLimit(searchOptions.limit);
-      const match = tokens.map((token) => `"${token}"`).join(' ');
+      // A recency read needs every word, or a query with one common word in
+      // it would return the newest fact that happens to share it. A ranked
+      // read takes any of them, because the ranking is what puts the facts
+      // carrying more of the words, and the rarer ones, first.
+      const match = tokens.map((token) => `"${token}"`).join(strategy === 'recency' ? ' ' : ' OR ');
       const at = now().getTime();
       // Superseded entries leave `search` exactly as forgotten ones do, and
       // which are superseded depends on the clock — hence a join against
@@ -1145,10 +1192,11 @@ export const createFileMemoryStore = (
       // by the same rule, on bytes (`length` over TEXT counts characters),
       // so the bounded read sees the admissible ones it would have kept.
       const admissible = `${liveMatch} AND length(CAST(content AS BLOB)) <= ?`;
+      const order = strategy === 'recency' ? { sql: '', params: [] } : rankedOrder(strategy, at);
       const rows = database.prepare(
         `SELECT id, agent_id, content, created_at, trust, origin, fields ${admissible}`
-        + ' ORDER BY created_at DESC, id ASC LIMIT ?',
-      ).all(match, agentId, agentId, at, at, MEMORY_READ_MAX_BYTES, clamped + 1) as {
+        + ` ORDER BY ${order.sql}created_at DESC, id ASC LIMIT ?`,
+      ).all(match, agentId, agentId, at, at, MEMORY_READ_MAX_BYTES, ...order.params, clamped + 1) as {
         id: string;
         agent_id: string;
         content: string;
@@ -1169,7 +1217,9 @@ export const createFileMemoryStore = (
           ...(origin !== undefined ? { origin } : {}),
         };
       });
-      const bounded = boundMemoryRead(candidates, clamped);
+      // The rows are already in the order asked for; a recency read is
+      // re-sorted by the shared rule anyway, which is what it always did.
+      const bounded = strategy === 'recency' ? boundMemoryRead(candidates, clamped) : boundRankedMemoryRead(candidates, clamped);
       // A match the filter above removed is still a live entry beyond what
       // came back, which is what `truncated` means — so it is asked for
       // rather than inferred, and the flag says the same thing it would
