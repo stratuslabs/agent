@@ -7541,8 +7541,11 @@ test('setup does not count a soul with no tools list as able to call a plugin, a
 
   assert.equal(exitCode, 0);
   // An omitted list is the safe tools now, not every tool, so enabling
-  // tool-fs granted this agent nothing that writes.
-  assert.match(output.stdout, /No agent can call it yet — no soul's `tools:` list names what it contributes, a soul with no list gets only the tools registered as safe/);
+  // tool-fs granted this agent nothing that writes. It did grant fs.read,
+  // which is safe, so "no agent can call it" would be false (Codex P2
+  // 4430483703).
+  assert.match(output.stdout, /No soul's `tools:` list names what it contributes\. Ava \(stratus\) has no list, so it gets only the ones registered as safe/);
+  assert.doesNotMatch(output.stdout, /No agent can call it yet/);
   assert.doesNotMatch(output.stdout, /which means every registered tool/);
 });
 

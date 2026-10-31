@@ -1782,8 +1782,11 @@ export const runSetup = async (
       // Allowlisted souls, every one of them short the setting: neither the
       // "callable by" line above nor the "no soul names it" one below is
       // true, and each would send the operator to fix the wrong gate.
-      writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — ${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted for it, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
+      // "No agent" only when every soul has a list: one without a list may
+      // reach a safe tool of this plugin, which this menu does not rate.
+      writeLine(streams.stdout, `${name} is enabled. ${unlisted.length > 0 ? 'No agent that lists it can call it yet' : 'No agent can call it yet'} — ${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted for it, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
       writeLine(streams.stdout, `Set ${shortfall.key} for ${shortfall.one ? 'it' : 'them'} under plugins["${name}"].agents, then run \`stratus plugins\` to see the whole chain.`);
+      unlistedLine();
       skillLine();
       return;
     }
@@ -1801,8 +1804,13 @@ export const runSetup = async (
       return;
     }
 
+    // Not "no agent can call it" when a soul has no list: that soul gets
+    // whichever of these tools are registered as safe, and which ones those
+    // are is the manifest's risk under the operator's floors and overrides,
+    // which `stratus plugins` reads and this menu does not re-derive.
+    const one = unlisted.length === 1;
     writeLine(streams.stdout, unlisted.length > 0
-      ? `${name} is enabled. No agent can call it yet — no soul's \`tools:\` list names what it contributes, a soul with no list gets only the tools registered as safe, and a soul grants tools by naming them:`
+      ? `${name} is enabled. No soul's \`tools:\` list names what it contributes. ${label(unlisted)} ${one ? 'has' : 'have'} no list, so ${one ? 'it gets' : 'they get'} only the ones registered as safe; \`stratus plugins\` shows which those are. A soul grants the rest by naming them:`
       : `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list and none of them names what it contributes, and a soul grants tools by naming them:`);
     writeLine(streams.stdout, `  tools: [${everyTool[0] as string}]`);
     writeLine(streams.stdout, `Add it to the \`tools:\` list in ${state.soulPath ?? 'your agent\'s soul file'}, then run \`stratus plugins\` to see the whole chain and what it contributes.`);

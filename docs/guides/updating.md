@@ -308,17 +308,21 @@ safe (reads, search and memory); before, it got every registered tool.
 Migration `0005-explicit-tools-lists` keeps existing agents as they were: on
 a home an older build has used, it writes `tools: ["*"]`, with a one-line
 comment saying why, at the top of each soul in `~/.stratus/agents/` that has
-no list, and of the config's `soul:` when that is an absolute path. Only
-those two lines are added; nothing else in the file is rewritten, and a
-linked soul is edited behind its link. The log names every agent it
-changed, and any soul it could not read (a broken link, a soul that does not
-parse), which then gets safe tools until you add a list.
+no list. It does the same for the `soul:` of the global config and of the
+config the command runs on (`--config` or `STRATUS_CONFIG`; for `stratus
+update`, the config the service unit is pinned to) when that is an absolute
+path. Only those two lines are added; nothing else in the file is rewritten,
+and a linked soul is edited behind its link. The log names every agent it
+changed, and any soul it could not read (a broken link, a directory named
+like a soul, a soul that does not parse), which then gets safe tools until
+you add a list.
 
 A fresh install is left alone, so a soul you write by hand starts with the
-safe default. So is a soul named only by `--soul`, `STRATUS_SOUL` or a
-relative `soul:` path, which the migration cannot see; the daemon names any
-soul without a list each time it loads the roster. Narrow `"*"` to what
-each agent needs whenever you like. No schema change: an older build reads
+safe default. So is a soul named only by `--soul`, `STRATUS_SOUL`, a
+relative `soul:` path, or a `--config` the first command of the new build
+was not given, which the migration cannot see; the daemon names any soul
+without a list each time it loads the roster. Narrow `"*"` to what each
+agent needs whenever you like. No schema change: an older build reads
 `tools: ["*"]` as every tool, which is what it already granted.
 
 ## `stratus update` does the sequence in the order that cannot lose data
