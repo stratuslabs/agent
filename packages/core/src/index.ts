@@ -4044,10 +4044,12 @@ export const NO_REPLY_MARKER = 'NO_REPLY';
  * message was said to the agent, so the note leans toward answering: only
  * a message that needs nothing back may get nothing. In the message for the
  * same reason as that note: a harness holding its own history takes only
- * the newest message.
+ * the newest message. That history keeps this note and the marker answer
+ * that followed it, so the last sentence says the permission ends with the
+ * message: a later question with no note is owed an answer.
  */
 export const REPLY_OPTIONAL_NOTE =
-  `This may not need an answer. Reply as usual if it asks you something, asks you to do something, or needs you. If it only acknowledges, thanks you or reports something that needs nothing from you, reply with exactly ${NO_REPLY_MARKER} and nothing else.`;
+  `This may not need an answer. Reply as usual if it asks you something, asks you to do something, or needs you. If it only acknowledges, thanks you or reports something that needs nothing from you, reply with exactly ${NO_REPLY_MARKER} and nothing else. Any message without a note like this one always gets an answer.`;
 
 /**
  * What a turn nobody asked for is told, after the message it ends on.
