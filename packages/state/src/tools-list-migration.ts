@@ -69,22 +69,41 @@ export const withEveryToolLine = (raw: string, seed: string): string | undefined
   return next;
 };
 
+/** The configs 0005 is told about beyond the global one; see {@link servedSoulPaths}. */
+export interface ServedConfigs {
+  /** The config this run was started on (`--config`); `STRATUS_CONFIG` stands in without it. */
+  configPath?: string;
+  /**
+   * The config the installed service unit pins the daemon to, and the
+   * directory the unit runs it from. A relative `soul:` in it resolves
+   * against that directory, as the daemon reads it; with none named, only
+   * an absolute one is read.
+   */
+  serviceConfig?: { path: string; workingDirectory?: string };
+}
+
 /**
  * The souls a daemon on this home serves from files: every `*.md` in the
  * agents directory, keyed by the path the loader seeds identity with, plus
- * the `soul:` of the global config and of the config the daemon is started
- * on (`configPath`, else `STRATUS_CONFIG`, resolved from the working
- * directory as the CLI resolves it) when that is an absolute path.
+ * the `soul:` of each config a daemon here can start on, resolved the way
+ * the process reading that config resolves it.
  *
- * Absolute only. The loader resolves a relative `soul:` against the
- * working directory of whatever process reads it, and the one running this
- * may stand somewhere else, where the same name is another file. Setup and
- * `agent new` write absolute paths, so this is only a hand-written config,
- * and for that one the daemon's startup line says what to add. Souls named
- * by `--soul` or `STRATUS_SOUL` are not knowable from here at all, and nor
- * is a `--config` the command that first runs this build was not given.
+ * - The global config: an absolute `soul:` only, since a relative one
+ *   resolves against the working directory of whichever process reads it,
+ *   and the one running this may stand somewhere else. Setup and `agent
+ *   new` write absolute paths.
+ * - The config this run was started on (`configPath`, else
+ *   `STRATUS_CONFIG`): a relative `soul:` resolves from this run's working
+ *   directory, because that is the file this run itself loads as its soul.
+ * - The installed service unit's pinned config: from the unit's own
+ *   working directory, so the first command after an upgrade covers the
+ *   daemon's soul whatever that command was and wherever it was typed.
+ *
+ * Souls named by `--soul` or `STRATUS_SOUL`, and configs none of these
+ * name, are not knowable from here; the daemon's startup line names each
+ * agent left without a list and what to add.
  */
-const servedSoulPaths = async (env: StateEnvironment, configPath?: string): Promise<string[]> => {
+const servedSoulPaths = async (env: StateEnvironment, configs: ServedConfigs = {}): Promise<string[]> => {
   const paths: string[] = [];
   try {
     for (const file of (await readdir(agentsDirPath(env))).filter((name) => name.endsWith('.md')).sort()) {
@@ -95,20 +114,33 @@ const servedSoulPaths = async (env: StateEnvironment, configPath?: string): Prom
       throw error;
     }
   }
-  const explicit = configPath ?? readNonEmptyString(readProcessEnv(env).STRATUS_CONFIG);
-  const configs = [globalConfigPath(env)];
+  const cwd = readWorkingDirectory(env);
+  const sources: Array<{ config: string; relativeTo?: string }> = [{ config: globalConfigPath(env) }];
+  const explicit = configs.configPath ?? readNonEmptyString(readProcessEnv(env).STRATUS_CONFIG);
   if (explicit !== undefined) {
-    configs.push(path.resolve(readWorkingDirectory(env), String(explicit)));
+    sources.push({ config: path.resolve(cwd, String(explicit)), relativeTo: cwd });
   }
-  for (const config of configs) {
+  if (configs.serviceConfig !== undefined) {
+    const { path: pinned, workingDirectory } = configs.serviceConfig;
+    sources.push({
+      config: path.resolve(workingDirectory ?? cwd, pinned),
+      ...(workingDirectory !== undefined ? { relativeTo: workingDirectory } : {}),
+    });
+  }
+  for (const { config, relativeTo } of sources) {
     try {
       const configured = (await loadConfigFile(config)).soul;
-      if (typeof configured === 'string' && path.isAbsolute(configured)) {
+      if (typeof configured !== 'string' || configured.length === 0) {
+        continue;
+      }
+      if (path.isAbsolute(configured)) {
         paths.push(configured);
+      } else if (relativeTo !== undefined) {
+        paths.push(path.resolve(relativeTo, configured));
       }
     } catch {
       // No config, or one that does not parse: the daemon will not start on
-      // the second either, and a soul it names is not one to edit blind.
+      // it either, and a soul it names is not one to edit blind.
     }
   }
   return paths;
@@ -119,11 +151,11 @@ const servedSoulPaths = async (env: StateEnvironment, configPath?: string): Prom
  * list. Idempotent: a soul that has the line has a list, and is skipped.
  * Returns what changed, for the migration report, or undefined.
  */
-export const applyEveryToolLines = async (env: StateEnvironment, configPath?: string): Promise<string | undefined> => {
+export const applyEveryToolLines = async (env: StateEnvironment, configs: ServedConfigs = {}): Promise<string | undefined> => {
   const written: string[] = [];
   const skipped: string[] = [];
   const seen = new Set<string>();
-  for (const soulPath of await servedSoulPaths(env, configPath)) {
+  for (const soulPath of await servedSoulPaths(env, configs)) {
     let target: string;
     try {
       target = await realpath(soulPath);

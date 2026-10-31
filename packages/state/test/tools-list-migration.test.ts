@@ -201,3 +201,41 @@ test('the soul of a config chosen with STRATUS_CONFIG is covered, resolved from 
   await runStateMigrations(env);
   assert.deepEqual(parseSoul(await readFile(outside, 'utf8'), { seed: outside }).agent.tools, ['*']);
 });
+
+test('a relative soul in the config this run is given resolves from the working directory, as this run reads it', async () => {
+  // Codex P1 4430773211: only an absolute soul: was read, so the first
+  // `stratus serve --config prod.json` of an upgrade, with soul: souls/ava.md,
+  // stamped 0005 and left ava on safe tools only.
+  const base = await home({ upgraded: true });
+  const project = path.join(base.homeDir, 'project');
+  const soul = await soulAt(path.join(project, 'souls', 'ava.md'), AVA);
+  await writeFile(path.join(project, 'prod.json'), JSON.stringify({ soul: path.join('souls', 'ava.md') }));
+
+  await runStateMigrations({ ...base, cwd: project }, { configPath: path.join(project, 'prod.json') });
+  assert.deepEqual(parseSoul(await readFile(soul, 'utf8'), { seed: soul }).agent.tools, ['*']);
+});
+
+test('the soul of the config the installed service is pinned to is covered, a relative one resolved from the unit\'s directory', async () => {
+  // Codex P1 4430773209: a first command with no --config of its own (say
+  // `stratus agents`) stamped 0005 without ever reading the unit's config.
+  const base = await home({ upgraded: true });
+  const project = path.join(base.homeDir, 'project');
+  const soul = await soulAt(path.join(project, 'ava.md'), AVA);
+  await writeFile(path.join(project, 'prod.json'), JSON.stringify({ soul: 'ava.md' }));
+
+  await runStateMigrations(
+    { ...base, cwd: base.homeDir },
+    { serviceConfig: { path: path.join(project, 'prod.json'), workingDirectory: project } },
+  );
+  assert.deepEqual(parseSoul(await readFile(soul, 'utf8'), { seed: soul }).agent.tools, ['*']);
+});
+
+test('a relative soul in the pinned config is not guessed at when the unit names no directory', async () => {
+  const base = await home({ upgraded: true });
+  const project = path.join(base.homeDir, 'project');
+  const soul = await soulAt(path.join(project, 'ava.md'), AVA);
+  await writeFile(path.join(project, 'prod.json'), JSON.stringify({ soul: 'ava.md' }));
+
+  await runStateMigrations({ ...base, cwd: project }, { serviceConfig: { path: path.join(project, 'prod.json') } });
+  assert.equal(await readFile(soul, 'utf8'), AVA);
+});

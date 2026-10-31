@@ -89,8 +89,9 @@ already had (state migration `0005-explicit-tools-lists`), so nothing an
 existing agent can do changes. A soul it could not read, such as a link
 into a home this one was copied from, is named in the migration's report
 and gets safe tools until you give it a list. Souls named only by
-`--soul` or `STRATUS_SOUL`, or by a relative `soul:` path in the config,
-are not visible to the migration; the line above names them at start.
+`--soul` or `STRATUS_SOUL`, or by a config neither the first command nor
+the service unit names, are not visible to the migration; the line above
+names them at start.
  A bare `tools:` with nothing
 indented under it is the empty list — the shape you get by writing the key
 and not filling it, or by deleting the last entry — so that one is warned

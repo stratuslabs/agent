@@ -432,7 +432,13 @@ const EXPLICIT_TOOLS_LISTS_MIGRATION: StateMigration = {
   description: 'write tools: ["*"] into each soul with no tools: list, so agents keep every tool now that an omitted list means safe tools only',
   async apply(env, options) {
     const onDisk = await readStateStamp(env);
-    return onDisk.applied.length > 0 ? applyEveryToolLines(env, options?.configPath) : undefined;
+    if (onDisk.applied.length === 0) {
+      return undefined;
+    }
+    return applyEveryToolLines(env, {
+      ...(options?.configPath !== undefined ? { configPath: options.configPath } : {}),
+      ...(options?.serviceConfig !== undefined ? { serviceConfig: options.serviceConfig } : {}),
+    });
   },
 };
 
@@ -695,14 +701,23 @@ export const assertStateCompatible = (env: StateEnvironment): void => {
 export interface StateMigrationRunOptions {
   exclusive?: boolean;
   /**
-   * The config file chosen with `--config` (or pinned in the installed
-   * service unit) for the daemon this run prepares, when the caller knows
-   * one. Without it `STRATUS_CONFIG` from the environment stands in, the
-   * same order the CLI selects a config in. Only `0005` reads it: the
+   * The config file this run was started on with `--config`, when the
+   * caller knows one. Without it `STRATUS_CONFIG` from the environment
+   * stands in, the same order the CLI selects a config in. Only `0005`
+   * reads it: the
    * `soul:` that file names is a soul the upgrade has to keep on every
-   * tool, and nothing else on disk says the file exists.
+   * tool, and nothing else on disk says the file exists. A relative
+   * `soul:` in it resolves from the run's working directory.
    */
   configPath?: string;
+  /**
+   * The `--config` the installed service unit pins the daemon to, and the
+   * unit's working directory, which a relative `soul:` in that config
+   * resolves against. Every command passes it when a unit is installed, so
+   * the first one after an upgrade covers the daemon's soul whatever it was.
+   * Only `0005` reads it.
+   */
+  serviceConfig?: { path: string; workingDirectory?: string };
 }
 
 const runnableNow = async (migration: StateMigration, env: StateEnvironment, options: StateMigrationRunOptions): Promise<boolean> =>

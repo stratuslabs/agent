@@ -17147,3 +17147,30 @@ test('the first command of an upgrade keeps the soul its --config names on every
   assert.match(output.stderr, /state migration 0005-explicit-tools-lists: wrote tools: \["\*"\] into the soul of ava/);
   assert.match(await readFile(soulPath, 'utf8'), /^tools: \["\*"\]$/m);
 });
+
+test('the first command of an upgrade, with no --config of its own, keeps the soul of the service unit\'s config on every tool', async () => {
+  // Codex P1 4430773209: `stratus agents` before any daemon restart stamped
+  // 0005 having read only the agents directory and the global config, so
+  // the unit's --config soul (relative to the unit's directory) was lost.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  const soulPath = path.join(project, 'ava.md');
+  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
+  const pinned = path.join(project, 'prod.json');
+  await writeFile(pinned, JSON.stringify({ provider: 'demo', soul: 'ava.md' }));
+  const installed = await installService(
+    { platform: 'linux', homeDir: home, cwd: project, run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+    { configPath: pinned },
+  );
+  assert.equal(installed.ok, true, installed.messages.join('\n'));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['agents'], streams, env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux' } });
+  assert.match(output.stderr, /state migration 0005-explicit-tools-lists: wrote tools: \["\*"\] into the soul of ava/);
+  assert.match(await readFile(soulPath, 'utf8'), /^tools: \["\*"\]$/m);
+});
