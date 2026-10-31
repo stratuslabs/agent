@@ -317,7 +317,9 @@ test('every tool this plugin registers is one its manifest declares', async () =
 });
 
 test('the agent’s workspace is created before the first command runs', async () => {
-  const workspaceRoot = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-ws-')), 'workspaces');
+  // `pwd` prints the physical path, and the temp dir is behind a link on
+  // macOS (/var -> /private/var), so the expected path goes through realpath.
+  const workspaceRoot = path.join(await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-ws-'))), 'workspaces');
   // Nothing has created this yet — which on a fresh install is the state of
   // every agent's workspace, and `spawn` reports a missing cwd as `ENOENT`
   // naming the *shell*, so it reads as a broken interpreter.
@@ -355,7 +357,7 @@ test('the workspace is prepared once, before the command, and not again to read 
 });
 
 test('with no configured root the workspace comes from the host, which is not a root plus an id', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-seam-'));
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-seam-')));
   // The layout the daemon actually has: the id is in the middle, so a
   // plugin that joined it onto a root would run in the wrong directory.
   const workspaces: AgentWorkspaces = {

@@ -455,18 +455,26 @@ test('a replacement environment gives the child only what was granted', async (t
     delete process.env.STRATUS_TEST_AMBIENT;
   });
 
+  // `env` prints exactly the environment it was started with. A Node child
+  // would not: on macOS, CoreFoundation adds __CF_USER_TEXT_ENCODING to a
+  // process's own environment as it starts, so a Node child reports a
+  // variable the executor never passed.
   const dumpEnv = (envMode: 'inherit' | 'replace'): Tool => defineLocalCommandTool({
     name: `demo.env.${envMode}`,
     async createCommand() {
       return {
-        command: process.execPath,
-        args: ['-e', 'console.log(JSON.stringify(process.env))'],
+        command: '/usr/bin/env',
+        args: [],
         env: { GRANTED: 'yes' },
         envMode,
       };
     },
     parseResult(result) {
-      return JSON.parse(result.stdout) as Record<string, string>;
+      const entries = result.stdout.split('\n').flatMap((line) => {
+        const at = line.indexOf('=');
+        return at > 0 ? [[line.slice(0, at), line.slice(at + 1)] as const] : [];
+      });
+      return Object.fromEntries(entries) as Record<string, string>;
     },
   });
 
