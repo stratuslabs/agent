@@ -6695,11 +6695,26 @@ export const lowerSessionTrust = (session: Session, trust: TrustLevel, source: s
   return lowered;
 };
 
+/**
+ * Runs every call without asking. Never a default: an app that wants every
+ * gated and dangerous call to run unasked passes this as `approvals`, so
+ * the choice is written down where the runner is built.
+ */
 export class AllowAllApprovalPolicy implements ApprovalPolicy {
   async approve(): Promise<boolean> {
     return true;
   }
 }
+
+/**
+ * What a runner built without `approvals` decides: a `safe` call runs and
+ * anything above it is refused. This used to be `AllowAllApprovalPolicy`,
+ * so an app embedding the runner that never thought about approvals ran
+ * every shell command and file write its model asked for (card 966).
+ */
+const SAFE_ONLY_APPROVALS: ApprovalPolicy = {
+  approve: async ({ risk }) => risk === 'safe',
+};
 
 /**
  * The `images` field of a user message, or nothing: a message that carried
@@ -7463,6 +7478,12 @@ export interface AgentRunnerOptions {
   provider: ModelProvider;
   tools?: ToolRegistry;
   executor?: Executor;
+  /**
+   * Decides every tool call before it runs. Omitted, only `safe` tools run:
+   * a `gated` or `dangerous` call (and a tool that declares no risk, which
+   * reads as `gated`) is refused with an error naming this option. Pass
+   * `AllowAllApprovalPolicy` to run every call without asking.
+   */
   approvals?: ApprovalPolicy;
   store?: SessionStore;
   bus?: EventBus;
@@ -7646,7 +7667,7 @@ export class AgentRunner {
     this.imageReplayBudget = options.imageReplayBudget;
     this.tools = options.tools ?? new ToolRegistry();
     this.executor = options.executor ?? new DefaultExecutor();
-    this.approvals = options.approvals ?? new AllowAllApprovalPolicy();
+    this.approvals = options.approvals ?? SAFE_ONLY_APPROVALS;
     this.plugins = options.plugins ?? new PluginRegistry();
     this.agents = options.agents ?? new AgentRegistry();
     this.skills = options.skills;
@@ -9329,7 +9350,13 @@ export class AgentRunner {
         toolName: call.toolName,
         ok: false,
         output: null,
-        error: `Tool call denied by approval policy: ${call.toolName}`,
+        // With no policy there is nobody whose "no" this was, and the fix
+        // is in the app's code, not in anything the agent can do.
+        error: this.options.approvals === undefined
+          ? `${call.toolName} did not run: it is a ${risk} tool, and this runner was built with no \`approvals\` policy, `
+            + 'so only safe tools run. The app that builds the runner passes one to allow it; '
+            + 'AllowAllApprovalPolicy runs every call without asking.'
+          : `Tool call denied by approval policy: ${call.toolName}`,
         trust: 'agent',
       };
     }

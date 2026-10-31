@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   EventBus,
   InMemorySessionStore,
   describeToolAllowlistFinding,
@@ -153,7 +154,7 @@ test('a call is not dispatched once the page it was judged on has moved', async 
     }
   });
 
-  const runner = new AgentRunner({ provider, tools, bus, store: new InMemorySessionStore() });
+  const runner = new AgentRunner({ provider, tools, bus, store: new InMemorySessionStore(), approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
   const session = await runner.run({
     sessionId: 'moved-1',
@@ -192,7 +193,7 @@ test('a tool that names no origin is dispatched exactly as before', async () => 
     },
   };
 
-  const runner = new AgentRunner({ provider, tools, store: new InMemorySessionStore() });
+  const runner = new AgentRunner({ provider, tools, store: new InMemorySessionStore(), approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
   const session = await runner.run({
     sessionId: 'plain-1',
