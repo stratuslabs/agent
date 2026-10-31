@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   PREDATES_SAFE_TOOLS_FACT,
+  STATE_MIGRATIONS,
   agentsDirPath,
   mergeStateStamp,
   readStateStamp,
@@ -97,4 +98,16 @@ test('merging stamps keeps a fact either side recorded', () => {
   assert.deepEqual(mergeStateStamp(latest, next).facts, [PREDATES_SAFE_TOOLS_FACT]);
   assert.deepEqual(mergeStateStamp(next, latest).facts, [PREDATES_SAFE_TOOLS_FACT]);
   assert.equal('facts' in mergeStateStamp(next, next), false);
+});
+
+test('a run that finds 0005 already recorded by another run of this build adds nothing, so a fresh home stays fresh', async () => {
+  // An ordinary command reads the empty stamp of a fresh install, then a
+  // `serve` that started beside it writes the whole stamp (0005 included,
+  // no fact) before this run reaches 0005. What is on disk now is this
+  // build's, not an older one's, and must not read as an upgraded home.
+  const env = await home({ schemaVersion: 4, applied: [...BEFORE, MIGRATION] });
+  const migration = STATE_MIGRATIONS.find((candidate) => candidate.id === MIGRATION);
+  assert.ok(migration);
+  assert.equal(await migration.apply(env), undefined);
+  assert.equal(unlistedToolsFor(env), 'safe');
 });

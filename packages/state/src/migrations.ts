@@ -437,7 +437,8 @@ const SAFE_TOOLS_DEFAULT_MIGRATION_ID = '0005-safe-tools-default';
  * writes no soul: which souls a home has, and who else is writing them,
  * is not something one run can know, and the rule needs neither.
  *
- * "Already used" is a stamp that records any migration before this run.
+ * "Already used" is a stamp on disk that records a migration and not this
+ * one (only this build and later write 0005).
  * A fresh install reads as schema 0 until its first `stratus serve` or
  * `stratus update`, and that run applies this with the stamp still empty
  * on disk. The one home this misreads is one no build since the stamp
@@ -451,8 +452,14 @@ const SAFE_TOOLS_DEFAULT_MIGRATION: StateMigration = {
   id: SAFE_TOOLS_DEFAULT_MIGRATION_ID,
   description: 'record whether this home predates the safe-tools default, so its souls with no tools: list keep every tool',
   async apply(env) {
+    // Read at apply time, not from the run's snapshot: earlier migrations
+    // in this run are not on disk yet. A stamp that already has 0005 was
+    // written by another run of this build, which judged the home already;
+    // the merge keeps what it recorded, so this run adds nothing. Without
+    // that, a command racing a fresh install's first `serve` would read
+    // serve's stamp as an older build's and mark the home as upgraded.
     const onDisk = await readStateStamp(env);
-    if (onDisk.applied.length === 0) {
+    if (onDisk.applied.length === 0 || onDisk.applied.includes(SAFE_TOOLS_DEFAULT_MIGRATION_ID)) {
       return undefined;
     }
     return {
