@@ -12011,6 +12011,50 @@ test('message.say refuses past three a turn, on a streaming turn, and with no tu
   assert.ok(!streamed.web.posts.some((post) => post.text === 'hello'));
 });
 
+test('message.say goes to the turn running now, never a Slack message queued behind it (Codex on #513)', async () => {
+  // A recovered turn is running on the session while a newer message's
+  // renderer waits at the head of the queue. The recovery did not come from
+  // that message: its line must not post in that turn's place, or use up
+  // the newer turn's three.
+  const { socket, web, adapter } = quietAdapter();
+  const refusals: string[] = [];
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    for (const n of [1, 2, 3]) {
+      await adapter.say!({ sessionId, agentId: 'ava', text: `note ${n}` }).catch((error: Error) => refusals.push(error.message));
+    }
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    const stubActiveTurn = gateway.activeTurnId!;
+    gateway.activeTurnId = () => 'recovered-turn';
+    await adapter.say!({ sessionId: input.sessionId, agentId: 'ava', text: 'from the recovery' })
+      .catch((error: Error) => refusals.push(error.message));
+    gateway.activeTurnId = stubActiveTurn;
+    return stubDispatch.call(gateway, input);
+  };
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['note 1', 'note 2', 'note 3', 'Done.']);
+  assert.equal(refusals.length, 1);
+  assert.match(refusals[0] ?? '', /no turn of yours running/);
+});
+
+test('message.say is one message in texts mode, whatever its text (Codex on #513)', async () => {
+  // `texts` splits a reply a paragraph to a message; a mid-task line is one
+  // post, so three calls are never more than three messages.
+  const { socket, web, adapter } = quietAdapter({ replies: 'texts' });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await adapter.say!({ sessionId, agentId: 'ava', text: 'Need your OK.\n\nIt deletes feature-x.' });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['Need your OK.\n\nIt deletes feature-x.', 'Done.']);
+});
+
 test('a long task posts its first line and its reply, and nothing between them', async () => {
   for (const replies of ['final', 'texts'] as const) {
     const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {

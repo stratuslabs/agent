@@ -557,12 +557,6 @@ export interface ConversationArchiveResult {
   alreadyArchived: boolean;
 }
 
-/**
- * A credential an agent asked for, handed to the channel its conversation
- * is in so a person there can be shown a form. Everything the answer needs
- * stays with the gateway under `requestId`; the channel only has to show
- * the question and quote the id back through `GatewayLike.provideCredential`.
- */
 /** What `ChannelAdapter.say` is handed. */
 export interface ChannelSayRequest {
   sessionId: string;
@@ -570,6 +564,12 @@ export interface ChannelSayRequest {
   text: string;
 }
 
+/**
+ * A credential an agent asked for, handed to the channel its conversation
+ * is in so a person there can be shown a form. Everything the answer needs
+ * stays with the gateway under `requestId`; the channel only has to show
+ * the question and quote the id back through `GatewayLike.provideCredential`.
+ */
 export interface ChannelCredentialRequest {
   sessionId: string;
   agentId: string;

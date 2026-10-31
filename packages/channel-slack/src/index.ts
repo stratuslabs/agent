@@ -1752,7 +1752,10 @@ class ReplyRenderer {
         const landed: string[] = [];
         let chunks: string[] = [];
         try {
-          chunks = await this.chunksOf(text);
+          // A `message.say` line is one message in every reply mode: split
+          // at its paragraphs, one call would post several, past the
+          // per-turn cap (Codex on #513).
+          chunks = first ? await this.chunksOf(text) : [text];
           for (const chunk of chunks) {
             const posted = await this.web.chat.postMessage({
               channel: this.channel,
@@ -9095,9 +9098,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     resolveOutbound,
     // A `message.say` line goes to the turn running for that session, in
     // its thread, through the same agent's app, or nowhere (card 1009).
+    // Running means the gateway's active turn, matched by id as for a
+    // credential form: the head of the queue can be a newer message's turn
+    // still waiting behind a recovery, which did not come from it.
     say: async ({ sessionId, agentId, text }: { sessionId: string; agentId: string; text: string }): Promise<void> => {
       const connection = connectionFor(agentId);
-      const renderer = renderers.get(sessionId)?.[0];
+      const active = gatewayRef?.activeTurnId?.(sessionId);
+      const renderer = active === undefined
+        ? undefined
+        : (renderers.get(sessionId) ?? []).find((candidate) => candidate.turnId === active);
       if (!connection || !renderer || !renderer.postsAs(connection.web)) {
         throw new Error('This conversation has no turn of yours running in Slack right now, so there is nothing to send into. Say it in your reply.');
       }

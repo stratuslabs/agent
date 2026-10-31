@@ -52,6 +52,21 @@ test('message.say refuses empty text and anything longer than one short line, an
   assert.equal(said.length, 1);
 });
 
+test('message.say refuses a line break, so one call is one message (Codex on #513)', async () => {
+  // A channel that splits a reply at paragraph breaks (Slack `texts` mode)
+  // would post one call as several messages, past the per-turn cap.
+  const said: string[] = [];
+  const tool = createMessageSayTool(async ({ text }) => {
+    said.push(text);
+  });
+  for (const text of ['Need your OK.\n\nIt deletes feature-x.', 'A or B?\nA keeps it.', 'one\rtwo']) {
+    await assert.rejects(() => tool.execute({ text }, sessionFor('ava')), /one line.*reply/);
+  }
+  // Trailing breaks are trimmed, as other whitespace is, and are fine.
+  await tool.execute({ text: 'Need your OK.\n' }, sessionFor('ava'));
+  assert.deepEqual(said, ['Need your OK.']);
+});
+
 test('message.say passes on why a conversation cannot take the message', async () => {
   const tool = createMessageSayTool(async () => {
     throw new Error('This conversation\'s channel (cli) cannot take a mid-task message. Say it in your reply.');

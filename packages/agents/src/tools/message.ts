@@ -167,7 +167,9 @@ export const createMessageSayTool = (say: ConversationSayer): Tool => ({
     if (!text) {
       throw new Error('message.say requires a non-empty "text".');
     }
-    if (text.length > MESSAGE_SAY_MAX_LENGTH) {
+    // One line is the contract, so one call is one message: a channel that
+    // splits text at its paragraphs would otherwise post several.
+    if (text.length > MESSAGE_SAY_MAX_LENGTH || /[\r\n]/.test(text)) {
       throw new Error(`message.say takes one line of at most ${MESSAGE_SAY_MAX_LENGTH} characters. Put the rest in your reply.`);
     }
     await say({ session, text });

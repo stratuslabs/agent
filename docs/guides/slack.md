@@ -235,7 +235,8 @@ replying in, such as "Need your OK to delete feature-x, it isn't merged."
 The default prompt tells it to do that only when it needs you or the news
 is worth your time, never to narrate its steps. The tool reaches only that
 conversation, so it is `safe` and never waits on an approval. A turn can
-send at most three, each at most 500 characters. In `stream` mode the
+send at most three, each one line of at most 500 characters and posted
+as one message in every reply mode. In `stream` mode the
 words already show as they are written, so the tool refuses there.
 
 While it works, Slack shows its own loading status under the
