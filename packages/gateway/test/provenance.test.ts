@@ -34,7 +34,7 @@ import {
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-prov-'));
 
-const AGENT = { id: 'ava', name: 'Ava' };
+const AGENT = { id: 'ava', name: 'Ava', tools: ['*'] };
 
 const scriptedProvider = (turns: ToolCall[][]): ModelProvider => {
   let turn = -1;
