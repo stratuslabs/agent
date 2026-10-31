@@ -4092,8 +4092,10 @@ const failureSignature = (calls: ToolCall[], results: ToolResult[]): string | un
  * same way twice before the process died and once more on the recovered
  * turn has failed three times, and counting from the recovery alone let it
  * fail twice more. Walked back through runs of tool results and the
- * responses they answer, and no further than the first message that is
- * neither — the person's own message, which is where this run began.
+ * responses they answer, past any message steered in between them
+ * (`Message.steered`), which shares the run's budget, and no further than
+ * the first message that is none of those: the person's own message,
+ * which is where this run began.
  */
 const responsesThroughCall = (
   session: Session,
@@ -4139,14 +4141,19 @@ const responsesThroughCall = (
   }
   const responses = [responseAt(start, end, messages.length)];
   for (;;) {
-    let resultsStart = start;
+    // A message steered in between two responses joined this run rather
+    // than starting one, so the walk goes on past it.
+    let resultsEnd = start;
+    while (resultsEnd > 0 && messages[resultsEnd - 1]!.role === 'user' && messages[resultsEnd - 1]!.steered === true) {
+      resultsEnd -= 1;
+    }
+    let resultsStart = resultsEnd;
     while (resultsStart > 0 && messages[resultsStart - 1]!.role === 'tool') {
       resultsStart -= 1;
     }
-    if (resultsStart === start || resultsStart === 0 || messages[resultsStart - 1]!.role !== 'assistant') {
+    if (resultsStart === resultsEnd || resultsStart === 0 || messages[resultsStart - 1]!.role !== 'assistant') {
       break;
     }
-    const resultsEnd = start;
     end = resultsStart - 1;
     start = runStart(end);
     responses.unshift(responseAt(start, end, resultsEnd));
@@ -6694,16 +6701,19 @@ export interface RunInput {
    * the next provider call (card 948). What it hands over goes into the
    * transcript right there, as a user message marked `steered`, so the
    * agent reads a correction at its next step instead of after its whole
-   * turn. The message gives the turn a fresh step budget and failure
-   * streak, as it would have had as its own turn; its sender lowers the
-   * session's trust like any sender; its keys join the turn's message.
+   * turn. The message shares the steps the turn has left: it renews
+   * neither the step budget, the auto-continue count nor the failure
+   * streak, so however often somebody writes, the turn stops where it
+   * would have (card 996). Its sender lowers the session's trust like any
+   * sender; its keys join the turn's message.
    *
-   * Never asked before the first provider call, after an answer, on a
-   * turn nobody asked for (`addressed: false`, whose answer may be
-   * silence), or by a provider that hosts its own tool loop, whose steps
-   * the runner never sees. A host that omits it gets turns that hear
-   * nothing until they end, as before; what is handed over is the host's
-   * to answer for, since the runner only records it.
+   * Never asked before the first provider call, after an answer, once the
+   * turn is out of steps (the wrap-up can't act on it, so it waits and
+   * runs as its own turn), on a turn nobody asked for (`addressed:
+   * false`, whose answer may be silence), or by a provider that hosts its
+   * own tool loop, whose steps the runner never sees. A host that omits it
+   * gets turns that hear nothing until they end, as before; what is handed
+   * over is the host's to answer for, since the runner only records it.
    */
   steer?: () => Promise<SteeredMessage | undefined>;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
@@ -7789,10 +7799,10 @@ export class AgentRunner {
     // as an answered call with nothing left to run, so the loop counts this
     // message's responses (`responsesThroughCall`) and goes straight to the
     // next provider turn — the wrap-up, if the ceiling has been reached.
-    // Any user message, a steered one included: a message that reached the
-    // turn mid-way renewed its budget (`RunInput.steer`), so the responses
-    // counted are the ones since.
-    const userIndex = working.messages.findLastIndex((candidate) => candidate.role === 'user');
+    // From the message the turn started on, past any steered in: one that
+    // reached the turn mid-way shares its budget (`RunInput.steer`), so a
+    // crash right after one must not hand the turn a fresh allowance.
+    const userIndex = working.messages.findLastIndex(startsTurn);
     const callIndex = working.messages.findLastIndex((candidate) => candidate.role === 'assistant' && (candidate.toolCalls?.length ?? 0) > 0);
     const lastCall = callIndex > userIndex ? working.messages[callIndex]?.toolCalls?.at(-1) : undefined;
     const lastResult = lastCall === undefined
@@ -8216,7 +8226,9 @@ export class AgentRunner {
       // permitted turn buy the whole allowance again.
       // Consecutive turns whose every call failed the same way, and how.
       // Local to this run: a person replying is new information, and the
-      // call that failed before may work now.
+      // call that failed before may work now. A message steered into the
+      // run doesn't reset it: a call that changes after it isn't the same
+      // failure anyway, and one that doesn't is still stuck.
       let lastFailure: string | undefined;
       let failureRun = 0;
       let stuck: { toolName: string; times: number } | undefined;
@@ -8240,25 +8252,6 @@ export class AgentRunner {
       let continued = 0;
       for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
-        // Between a tool step and the next call, and only there: every call
-        // of the last response has its result, so a user message here
-        // splits no call from its answer. Before the budget below is read,
-        // because what arrives renews it.
-        if (steer !== undefined && pendingEntry === undefined && session.messages.at(-1)?.role === 'tool' && !isUnaddressedTurn(session)) {
-          const steered = await steer();
-          throwIfAborted(signal);
-          if (steered !== undefined) {
-            await this.takeSteered(session, steered);
-            // A person's message is new information, as it would have been
-            // as its own turn: the steps it gets are counted from here, and
-            // a call that kept failing may work now.
-            ceiling = turn - 1 + this.maxTurns;
-            continued = 0;
-            lastFailure = undefined;
-            failureRun = 0;
-            stuck = undefined;
-          }
-        }
         // Out of budget and still working — the last response called a
         // tool — so with auto-continue on it gets another allowance rather
         // than a wrap-up. A loop, because a recovered turn can start
@@ -8280,6 +8273,28 @@ export class AgentRunner {
         // saying what happened.
         if (turn > ceiling + 1 || (wrappingUp && pendingEntry)) {
           throw new Error(turnLimitMessage(this.maxTurns));
+        }
+        // Between a tool step and the next call, and only there: every call
+        // of the last response has its result, so a user message here
+        // splits no call from its answer. Only while the turn may still
+        // call a tool: the wrap-up can't act on a message, so one that
+        // arrives then waits and runs as its own turn, on a budget of its
+        // own. What joins the turn shares the steps it has left. It renews
+        // neither the budget, the auto-continue count nor the failure
+        // streak, so a conversation that writes at every step can't keep
+        // one turn going past its ceiling (card 996).
+        if (
+          steer !== undefined
+          && !wrappingUp
+          && pendingEntry === undefined
+          && session.messages.at(-1)?.role === 'tool'
+          && !isUnaddressedTurn(session)
+        ) {
+          const steered = await steer();
+          throwIfAborted(signal);
+          if (steered !== undefined) {
+            await this.takeSteered(session, steered);
+          }
         }
 
         if (pendingEntry) {

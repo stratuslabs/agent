@@ -239,8 +239,11 @@ Messages you send while it is still working reach it at its next step:
 once the tool it is running finishes, it reads them before it decides what
 to do next, so "skip the tests" lands mid-task, and the reply it posts
 answers them along with what you first asked. If it is already writing
-its final reply, they wait, and its next turn answers everything that
-queued in one reply. An agent on a provider that runs its own tool loop
+its final reply, or has used every step its message allows, they wait,
+and its next turn answers everything that queued in one reply. A message
+that lands mid-task shares the steps the task has left rather than adding
+more, so a busy thread can't keep one task running past the agent's
+[step limit](../reference/config.md#how-many-turns-one-message-may-spend). An agent on a provider that runs its own tool loop
 (Codex, or Claude through a subscription sign-in) doesn't take messages
 mid-task yet: they always wait for the next turn. In a DM each message
 shows the status as soon as you send it, so a second message never makes
