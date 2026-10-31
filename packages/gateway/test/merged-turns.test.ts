@@ -292,7 +292,7 @@ test('a reply-optional dispatch reaches the turn, and messages merged into one t
   provider.release();
   const alone = await gateway.dispatch({ sessionId: 'm-601', agentId: 'ava', userMessage: 'Blair: report, all green', replyOptional: true });
   assert.equal(alone.messages.find((message) => message.role === 'user')?.replyOptional, true);
-  assert.match(provider.prompts[0] ?? '', /Blair: report, all green\n\nThis may not need an answer\./);
+  assert.match(provider.prompts[0] ?? '', /Blair: report, all green\n\nThis message was said to you\./);
 
   // Two reply-optional messages queued behind a running turn: one turn, still reply-optional.
   const gated = gatedProvider();
@@ -321,5 +321,5 @@ test('a reply-optional dispatch reaches the turn, and messages merged into one t
   const [owed] = await Promise.all([optional, asked]);
   assert.equal(gated2.prompts.length, 2);
   assert.equal(owed.messages.filter((message) => message.role === 'user').at(-1)?.replyOptional, undefined);
-  assert.doesNotMatch(gated2.prompts[1] ?? '', /This may not need an answer/);
+  assert.doesNotMatch(gated2.prompts[1] ?? '', /This message was said to you/);
 });

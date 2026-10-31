@@ -51,6 +51,14 @@ test('the marker is the one word both notes tell the model to answer with when i
   assert.ok(UNADDRESSED_TURN_NOTE.includes(`reply with exactly ${NO_REPLY_MARKER} and nothing else`));
 });
 
+test('the reply-optional note opens on answering, and says a question or request from anyone gets one', () => {
+  // A wording that opened on "This may not need an answer" had models skip
+  // questions, a teammate agent's most of all (live check, card 601).
+  assert.match(REPLY_OPTIONAL_NOTE, /^This message was said to you\. Answer it as you normally would/);
+  assert.ok(REPLY_OPTIONAL_NOTE.includes('a question or a request always gets an answer, whether a person or an agent sent it'));
+  assert.ok(REPLY_OPTIONAL_NOTE.indexOf('answer') < REPLY_OPTIONAL_NOTE.indexOf(NO_REPLY_MARKER));
+});
+
 test('a reply-optional message is said to the agent, and only the newest is followed by the note', () => {
   const message = user('Blair: shipped it', { replyOptional: true });
   assert.equal(promptTextOf(message, { latest: true }), `Blair: shipped it\n\n${REPLY_OPTIONAL_NOTE}`);

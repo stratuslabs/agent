@@ -4047,9 +4047,18 @@ export const NO_REPLY_MARKER = 'NO_REPLY';
  * the newest message. That history keeps this note and the marker answer
  * that followed it, so the last sentence says the permission ends with the
  * message: a later question with no note is owed an answer.
+ *
+ * It opens on answering, and says the message was said to the agent, because
+ * an earlier wording that opened on "This may not need an answer" was read as
+ * leave to skip questions: on a live Fly check a teammate agent's tagged
+ * "what is 5+5?" went unanswered in 4 of 6 runs (claude-sonnet-4-5), and in
+ * a direct API probe both claude-sonnet-4-5 and claude-haiku-4-5 answered
+ * NO_REPLY to every question. This wording answered every question and
+ * request and stayed silent on every thanks, acknowledgment and report in
+ * the same probe.
  */
 export const REPLY_OPTIONAL_NOTE =
-  `This may not need an answer. Reply as usual if it asks you something, asks you to do something, or needs you. If it only acknowledges, thanks you or reports something that needs nothing from you, reply with exactly ${NO_REPLY_MARKER} and nothing else. Any message without a note like this one always gets an answer.`;
+  `This message was said to you. Answer it as you normally would: a question or a request always gets an answer, whether a person or an agent sent it, even one you cannot fully help with. Only if it just thanks you, acknowledges something or reports something, and asks nothing of you, reply with exactly ${NO_REPLY_MARKER} and nothing else. Any message without a note like this one always gets an answer.`;
 
 /**
  * What a turn nobody asked for is told, after the message it ends on.
