@@ -64,8 +64,14 @@ test('hybrid puts an older fact matching every word above a newer one matching o
   assert.equal(relevance.strategy, 'relevance');
   assert.deepEqual(ids(relevance.entries), ['ava:memory:old-exact', 'ava:memory:new-partial']);
 
-  // Recency is still there, unchanged: every word has to appear, newest first.
-  for (const recency of [await store.search('ava', 'deploy pipeline'), await store.search('ava', 'deploy pipeline', { strategy: 'recency' })]) {
+  // Recency is still there, unchanged: every word has to appear, newest
+  // first. It is also what an ordering nobody defined gets, from a caller
+  // the type system did not check.
+  for (const recency of [
+    await store.search('ava', 'deploy pipeline'),
+    await store.search('ava', 'deploy pipeline', { strategy: 'recency' }),
+    await store.search('ava', 'deploy pipeline', { strategy: 'semantic' as never }),
+  ]) {
     assert.equal(recency.strategy, 'recency');
     assert.deepEqual(ids(recency.entries), ['ava:memory:old-exact']);
   }
