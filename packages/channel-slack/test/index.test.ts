@@ -260,6 +260,8 @@ const sessionWithReply = (id: string, reply: string): Session => {
 
 interface StubGateway extends GatewayLike {
   dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string; images?: ImageAttachment[]; addressed?: boolean; earlier?: Array<{ message: string; metadata?: JsonObject }> }>;
+  /** The messages dispatched as reply-optional (card 601), in dispatch order. */
+  replyOptional: string[];
   /** What each agent heard without answering, in the order the gateway was asked. */
   observes: Array<{ sessionId: string; agentId?: string; message: string; metadata?: JsonObject }>;
   resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string; reason?: string }>;
@@ -275,6 +277,7 @@ const createStubGateway = (
   const gateway: StubGateway = {
     bus,
     dispatches: [],
+    replyOptional: [],
     observes: [],
     resolutions: [],
     pendingApprovals: new Set<string>(),
@@ -306,6 +309,9 @@ const createStubGateway = (
         ...(input.addressed !== undefined ? { addressed: input.addressed } : {}),
         ...(input.earlier !== undefined ? { earlier: input.earlier } : {}),
       });
+      if (input.replyOptional === true) {
+        gateway.replyOptional.push(input.userMessage);
+      }
       // As the gateway does: the caller's turn id is the session's active
       // turn for as long as the turn runs, and the session reports
       // `running` as the turn begins.
@@ -17302,3 +17308,188 @@ test('a reload before start or after stop connects nothing', async () => {
   assert.equal(setup.sockets.length, after);
 });
 
+// Card 601: a turn can end without a reply. A teammate agent's tagged
+// report and a person's untagged follow-up in a thread a `thread`-rule agent
+// holds are reply-optional; a direct mention and a DM still owe an answer.
+
+test('an untagged follow-up in a thread the agent holds may get no reply: nothing is posted for it, while a tag and a DM still owe one (card 601)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let ended = 0;
+  const gateway = createStubGateway(({ sessionId, userMessage }) => {
+    ended += 1;
+    return sessionWithReply(sessionId, /thanks/.test(userMessage) ? '' : 'on it');
+  });
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:500.0', '2026-01-01T00:00:00.000Z']]));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('message', channelMessage({ text: 'thanks, that works', ts: '500.1', thread: '500.0' }));
+  await until(() => ended === 1);
+  // Silence: the streaming placeholder is taken back, and nothing says
+  // `(no reply)`.
+  await until(() => web.deletes.length === 1);
+  assert.deepEqual(web.posts.map((post) => post.text), ['…']);
+  assert.equal(web.updates.length, 0);
+  await socket.deliver('message', channelMessage({ text: 'and the second one?', ts: '500.2', thread: '500.0' }));
+  await until(() => ended === 2);
+  // Tagged, in the same thread: owed an answer.
+  await socket.deliver('app_mention', mention('<@B-AVA> thanks', { ts: '500.3', thread_ts: '500.0' }));
+  await until(() => ended === 3);
+  // A DM: owed an answer.
+  await socket.deliver('message', mention('thanks', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  await until(() => ended === 4);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.replyOptional, ['Dylan: thanks, that works', 'Dylan: and the second one?']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [undefined, undefined, undefined, undefined]);
+  // The answered follow-up is posted; the tagged thanks and the DM, whose
+  // turns said nothing, say `(no reply)` where the answer would have gone.
+  const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+  assert.ok(said.includes('on it'), said.join(' | '));
+  assert.equal(said.filter((text) => text === '(no reply)').length, 2, said.join(' | '));
+});
+
+test('a teammate agent tagging this one is reply-optional: a report needs no answer, a question gets one (card 601)', async () => {
+  const { socketAva, webAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    await dispatch(input);
+    return sessionWithReply(input.sessionId, input.sessionId.endsWith(':120.0') ? '' : 'CI is green.');
+  };
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> deployed, all green', ts: '120.1', thread: '120.0' }));
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> is CI green?', ts: '121.1', thread: '121.0' }));
+  await adapter.stop();
+
+  assert.equal(gateway.replyOptional.length, 2);
+  // The report's placeholder is taken back; nothing is said under it.
+  assert.deepEqual(webAva.posts.filter((post) => post.thread_ts === '120.0').map((post) => post.text), ['…']);
+  assert.equal(webAva.deletes.length, 1);
+  assert.equal([...webAva.posts, ...webAva.updates].some((entry) => entry.text === '(no reply)'), false);
+  const answered = [...webAva.posts, ...webAva.updates].map((entry) => entry.text);
+  assert.ok(answered.includes('CI is green.'), answered.join(' | '));
+});
+
+test('a reply-optional turn that fails still says so, unlike a turn nobody asked for (card 601)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(() => {
+    throw new Error('provider exploded');
+  });
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:510.0', '2026-01-01T00:00:00.000Z']]));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'can you redo it?', ts: '510.1', thread: '510.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.replyOptional, ['Dylan: can you redo it?']);
+  const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)].join(' | ');
+  assert.match(said, /provider exploded/);
+});
+
+test('an addressed turn that answers with only the no-reply word has it posted, and logged (card 601)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const logs: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'NO_REPLY'));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: (line) => logs.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> is the build green?', { ts: '530.1' }));
+  await adapter.stop();
+
+  const said = [...web.posts.map((post) => post.text), ...web.updates.map((update) => update.text)];
+  assert.ok(said.includes('NO_REPLY'), said.join(' | '));
+  assert.equal(logs.filter((line) => /answered NO_REPLY on a turn that owes an answer/.test(line)).length, 1, logs.join('\n'));
+});
+
+test('on final replies, a reply-optional turn that says nothing posts nothing and takes its loading status down (card 601)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const statuses = recordStatuses(web);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:540.0', '2026-01-01T00:00:00.000Z']]));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'final' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'dope!', ts: '540.1', thread: '540.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.replyOptional, ['Dylan: dope!']);
+  assert.deepEqual(web.posts, []);
+  assert.deepEqual(web.updates, []);
+  // Said while it worked, as any turn does, and cleared once it chose silence.
+  assert.ok(statuses.length > 0);
+  assert.equal(statuses.at(-1)?.status, '');
+});
+
+test('a reply-optional turn that works long enough for a progress message and then says nothing takes that message down too (card 601)', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await runTool(gateway, sessionId, 'c1');
+    await runTool(gateway, sessionId, 'c2');
+    return sessionWithReply(sessionId, '');
+  });
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:550.0', '2026-01-01T00:00:00.000Z']]));
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'deployed, all green', ts: '550.1', thread: '550.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.replyOptional, ['Dylan: deployed, all green']);
+  // The progress message opened while it worked: a status line, not words.
+  const progress = web.posts.find((post) => (post.text ?? '').startsWith('⚙ Working'));
+  assert.ok(progress, JSON.stringify(web.posts));
+  const progressTs = `bot-ts-${web.posts.indexOf(progress) + 1}`;
+  // Chosen silence leaves nothing standing: the status line comes down
+  // rather than ending as `✓ Done`, and nothing says `(no reply)`.
+  assert.deepEqual(web.deletes.map((removed) => removed.ts), [progressTs]);
+  assert.equal(web.posts.length, 1, JSON.stringify(web.posts));
+  assert.equal(editsOf(web, progressTs).some((text) => text.startsWith('✓ Done')), false, JSON.stringify(web.updates));
+  assert.equal([...web.posts, ...web.updates].some((entry) => entry.text === '(no reply)'), false);
+});
+
+test('a reply-optional turn that said something in its progress message keeps it when it ends silent (card 601)', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'The deploy log shows one retried step.');
+    await runTool(gateway, sessionId, 'c2');
+    return sessionWithReply(sessionId, '');
+  });
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:560.0', '2026-01-01T00:00:00.000Z']]));
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'deployed, all green', ts: '560.1', thread: '560.0' }));
+  await adapter.stop();
+
+  const progress = web.posts.find((post) => (post.text ?? '').startsWith('⚙ Working'));
+  assert.ok(progress, JSON.stringify(web.posts));
+  const progressTs = `bot-ts-${web.posts.indexOf(progress) + 1}`;
+  // What it said along the way was said: the message stays, closed with
+  // its words, and they are not posted again as a reply the turn chose not
+  // to give.
+  assert.deepEqual(web.deletes, []);
+  assert.equal(web.posts.length, 1, JSON.stringify(web.posts));
+  assert.equal(editsOf(web, progressTs).at(-1), '✓ Done · 2 steps\n\nThe deploy log shows one retried step.');
+  assert.equal([...web.posts, ...web.updates].some((entry) => entry.text === '(no reply)'), false);
+});

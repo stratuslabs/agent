@@ -231,6 +231,16 @@ test('a turn nobody asked for takes nothing steered: its answer may be silence',
   assert.equal(steering.asked(), 0);
 });
 
+test('a reply-optional turn takes nothing steered either: a question folded in could be lost to its silence (card 601)', async () => {
+  const provider = createSteppingProvider(1);
+  const runner = new AgentRunner({ provider, tools: createStepTools() });
+  const steering = steerOnce({ userMessage: 'Dylan: wait, a question' });
+
+  await runner.run({ sessionId: 'steer-601', agent, userMessage: 'Blair: report, all green', replyOptional: true, steer: steering.steer });
+
+  assert.equal(steering.asked(), 0);
+});
+
 /** A turn in flight that took a steered message after its first step. */
 const steeredTranscript = (): Session => {
   const at = new Date().toISOString();

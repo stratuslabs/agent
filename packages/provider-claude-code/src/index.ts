@@ -12,7 +12,7 @@ import { z } from 'zod';
 import {
   DEFAULT_MAX_TURNS,
   markPromptDelivered,
-  isUnaddressedTurn,
+  isReplyOptionalTurn,
   TURN_LIMIT_NOTE,
   CONTINUE_NOTE,
   omitImage,
@@ -1015,11 +1015,14 @@ export const createClaudeCodeProvider = ({
     }
 
     if (resultText === undefined || resultText.length === 0) {
-      // Silence is the answer a turn nobody asked for may give — see
-      // `RunInput.addressed` in core — when the SDK said the turn finished
-      // with nothing to say. A stream that ended without a result is a run
-      // that did not complete, and on any turn is an error.
-      if (completed && isUnaddressedTurn(request.session)) {
+      // Silence is the answer a turn that may stay quiet may give — see
+      // `RunInput.addressed` and `RunInput.replyOptional` in core — when
+      // the SDK said the turn finished with nothing to say. Rarely reached:
+      // the SDK asks the model again after an answer with no visible text,
+      // which is why such a turn is told to answer `NO_REPLY_MARKER`
+      // instead. A stream that ended without a result is a run that did
+      // not complete, and on any turn is an error.
+      if (completed && isReplyOptionalTurn(request.session)) {
         return { parts: [], ...(wrappedUp ? { stoppedEarly: 'turn-limit' as const } : {}) };
       }
       throw markIfDelivered(markIfSideEffects(new Error(

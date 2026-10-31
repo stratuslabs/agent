@@ -330,6 +330,18 @@ test('error results and empty responses surface as errors', async () => {
     queryFn: createFakeQuery([{ type: 'result', subtype: 'success', is_error: false, result: '' }]).queryFn,
   });
   assert.deepEqual(await silent.generate({ session: unasked }), { parts: [] });
+  // And on one whose message may need nothing back (card 601); an
+  // addressed turn still may not end empty.
+  const optional = createSession();
+  optional.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'Blair: report, all green',
+    createdAt: new Date().toISOString(),
+    replyOptional: true,
+  });
+  assert.deepEqual(await silent.generate({ session: optional }), { parts: [] });
+  await assert.rejects(() => silent.generate({ session: createSession() }), /empty response/);
 
   // A failure after the SDK yielded anything says the prompt was
   // delivered — the harness has it — and one before it does not.

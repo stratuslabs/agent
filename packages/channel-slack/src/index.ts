@@ -8,6 +8,7 @@ import {
   filePathsOf,
   isLatestTurn,
   latestTurnReply,
+  NO_REPLY_MARKER,
   MAX_IDEMPOTENCY_KEY_LENGTH,
   turnFailureFor,
   turnFilesFor,
@@ -1302,6 +1303,14 @@ class ReplyRenderer {
    */
   readonly lazy: boolean;
   /**
+   * A reply-optional turn (card 601): said to the agent, so it shows what
+   * any turn shows while it works — status, placeholder, words along the
+   * way — but one that ends with nothing to say posts nothing: no
+   * `(no reply)`, its placeholder taken back, its status cleared. Unlike a
+   * lazy turn, a failure or a stop still says so.
+   */
+  readonly mayStaySilent: boolean;
+  /**
    * Whether this turn streams into a placeholder. When it does not, there
    * is never a placeholder: `finalize` finds none and posts the reply as
    * messages of its own, and a handover has nothing to hand over and says
@@ -1383,6 +1392,7 @@ class ReplyRenderer {
     warn: (line: string) => void,
     options: {
       lazy?: boolean;
+      mayStaySilent?: boolean;
       now?: () => number;
       streaming?: boolean;
       texts?: boolean;
@@ -1401,6 +1411,7 @@ class ReplyRenderer {
     this.editIntervalMs = editIntervalMs;
     this.warn = warn;
     this.lazy = options.lazy ?? false;
+    this.mayStaySilent = options.mayStaySilent ?? false;
     this.now = options.now ?? Date.now;
     this.streaming = options.streaming ?? true;
     this.texts = !this.streaming && options.texts === true;
@@ -2010,6 +2021,26 @@ class ReplyRenderer {
   }
 
   /**
+   * Take down a progress message that holds no words, for a reply-optional
+   * turn that ended silent (card 601). A delete Slack refuses closes it the
+   * ordinary way instead, so it never stands at `⚙ Working`.
+   */
+  private async retractProgress(): Promise<void> {
+    this.clearProgressTimers();
+    const ref = this.progressRef;
+    if (!ref) {
+      return;
+    }
+    try {
+      await this.web.chat.delete({ channel: ref.channel, ts: ref.ts });
+      this.progressRef = undefined;
+    } catch (error) {
+      this.warn(`could not take down the progress message: ${error instanceof Error ? error.message : String(error)}`);
+      await this.closeProgress(false);
+    }
+  }
+
+  /**
    * Post what the model said before a call that is about to ask for
    * approval, and resolve once it has landed (or could not), or at once
    * when there is nothing to post (card 950).
@@ -2212,8 +2243,11 @@ class ReplyRenderer {
     // posts them as the reply, and the progress message lets them go. Left
     // as its last note, the answer would sit in the message that says how
     // the work went, above where anyone looks for it.
+    // A reply-optional turn that chose to say nothing (card 601) has no
+    // answer for its last words to stand in for.
+    const silent = this.mayStaySilent && reply.trim().length === 0;
     let promoted = false;
-    if (this.interimPosted && !this.ref) {
+    if (this.interimPosted && !this.ref && !silent) {
       const rest = this.unsaid(reply);
       promoted = rest.length === 0 && this.lastSaidWasNote && this.lastInterim !== undefined;
       reply = promoted && this.lastInterim !== undefined ? this.lastInterim : rest;
@@ -2223,7 +2257,28 @@ class ReplyRenderer {
     // Words promoted to the reply are the exception: they leave the
     // progress message only once the reply holding them has landed, so a
     // reply Slack refuses does not take the answer out of the thread.
-    const closed = promoted ? undefined : this.closeProgress(false);
+    // Chosen silence takes down a progress message that only ever said how
+    // the work went: left as `✓ Done`, it would be the post the turn chose
+    // not to make. One holding words the turn said along the way stays.
+    const closed = promoted
+      ? undefined
+      : silent && this.progressNotes.length === 0 && !this.progressNotesCut
+        ? this.retractProgress()
+        : this.closeProgress(false);
+    if (silent && (!this.ref || await this.retract())) {
+      // A reply-optional turn that decided to say nothing (card 601): no
+      // `(no reply)`, and a placeholder it opened is taken back. What it
+      // said along the way, and the files it posted, stay: they were said.
+      await (closed ?? Promise.resolve());
+      await this.uploadChain;
+      // Nothing posts after this to take the status down, so it is cleared.
+      if (hadStatus) {
+        this.setStatus('');
+        await this.statusChain;
+      }
+      const spoke = this.interimPosted || this.uploaded;
+      return this.outcome(this.interimPosted, spoke);
+    }
     if (!this.ref && this.interimPosted && reply.trim().length === 0) {
       await (closed ?? this.closeProgress(false));
       // Nothing posts after this to take the status down, so it is cleared.
@@ -3864,6 +3919,15 @@ interface Admission {
    * a stop or an approver's reply.
    */
   fromAgent?: string;
+  /**
+   * Said to this agent, but possibly needing no answer (card 601): another
+   * agent's tagged message, or a person's untagged follow-up in a thread
+   * this agent holds on the `thread` rule. Dispatched `replyOptional`, and
+   * rendered like a judged turn — nothing posted until it speaks, and a
+   * turn that says nothing leaves the thread untouched — except that a
+   * failure still says so. A direct mention or a DM never carries it.
+   */
+  replyOptional?: boolean;
 }
 
 interface AgentConnection {
@@ -8065,6 +8129,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       overhear: false,
       judge: false,
       fromAgent: name,
+      replyOptional: true,
     };
   };
 
@@ -8391,11 +8456,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         return { ...admission, overhear: true };
       }
       rememberAddressee(threadKey, connection.config.agentId, event.ts);
-      return admission;
+      // Untagged, so it may need nothing back: a thanks, an acknowledgment
+      // (card 601). A stop never gets here as a turn to answer.
+      return { ...admission, replyOptional: true };
     }
     // Nothing seen for this thread since startup: only the sessions can
     // answer, and that answer has to be awaited.
-    return { ...admission, settled: false };
+    return { ...admission, settled: false, replyOptional: true };
   };
 
   const handleInbound = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
@@ -8539,6 +8606,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (admitted.judgeReason !== undefined) {
         const reason = admitted.settled || judged ? admitted.judgeReason : 'another agent\'s, from the thread read';
         log(`slack: judge: ${connection.config.agentId} ${judged ? 'took' : 'heard'} ${event.ts} in ${event.channel} (${reason})`);
+      }
+      // Said to this agent, but possibly needing nothing back (card 601):
+      // only for a message this agent answers, and never for a judged one,
+      // whose turn already may stay quiet. One line, never the text.
+      const replyOptional = admitted.replyOptional === true && !judged && !overhear;
+      if (replyOptional) {
+        log(`slack: ${connection.config.agentId} took ${event.ts} in ${event.channel} (reply optional: ${admitted.fromAgent !== undefined ? 'agent mention' : 'untagged follow-up'})`);
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
       // Fetched inside the chain, like the lookups below: it is network
@@ -8697,6 +8771,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const ahead = streaming ? undefined : replyOrder.get(sessionId);
       const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, {
         lazy: judged,
+        mayStaySilent: replyOptional,
         now,
         streaming,
         progressAfterMs,
@@ -8776,6 +8851,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         userMessage,
         ...(images.length > 0 ? { images } : {}),
         ...(judged ? { addressed: false } : {}),
+        ...(replyOptional ? { replyOptional: true } : {}),
         ...(earlier.length > 0 ? { earlier } : {}),
         turnId: renderer.turnId,
         metadata,
@@ -8927,7 +9003,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // other turn says `(no reply)` where its answer would have gone — one
       // rule with the gateway's `sessionRouting`, which posts the same
       // message for a turn this adapter did not start.
-      const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : reply ?? NO_REPLY_TEXT);
+      const finalized = renderer.finalize(renderer.lazy || renderer.mayStaySilent ? reply ?? '' : reply ?? NO_REPLY_TEXT);
+      // A turn that owed an answer and gave only the word a turn that may
+      // stay quiet says nothing with: posted as said, and counted, so how
+      // often it happens is known before anything heavier is built.
+      if (!renderer.lazy && !renderer.mayStaySilent && reply?.trim() === NO_REPLY_MARKER) {
+        log(`slack: ${connection.config.agentId} answered NO_REPLY on a turn that owes an answer (${event.ts} in ${event.channel})`);
+      }
       // What the turn said along the way as well as its reply: interim
       // messages are in the thread, so they are in what the others hear.
       // Heard once the posts have settled, and the reply only if it landed:
