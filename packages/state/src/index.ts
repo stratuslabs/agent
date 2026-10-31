@@ -218,6 +218,7 @@ export {
   type IgnoredConfigKey,
   ignoredConfigKeys,
   loadConfigFile,
+  isLoopbackHost,
   normalizePublicUrl,
   validateConfigFile,
   resolveAgentApprovals,

@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { isIPv4 } from 'node:net';
 import path from 'node:path';
 import {
   BUILTIN_EXECUTOR_NAME,
@@ -389,6 +390,22 @@ export const normalizePublicUrl = (value: unknown): string => {
     throw new Error('links are built by appending a path to it, so it can carry no query or fragment, not even an empty one.');
   }
   return parsed.href.replace(/\/+$/, '');
+};
+
+/**
+ * Whether a bind address keeps a listener on this machine: `localhost`, the
+ * IPv6 loopback, or anything in 127.0.0.0/8 (IPv4-mapped included). A
+ * wildcard (`0.0.0.0`, `::`) is not: it is every interface. The one rule for
+ * "is this exposed", shared by `serve`'s warning, `doctor`, and the control
+ * API's Host check, so the three cannot disagree about an address.
+ */
+export const isLoopbackHost = (host: string): boolean => {
+  const bare = host.trim().replace(/^\[(.*)\]$/, '$1').toLowerCase();
+  if (bare === 'localhost' || bare === '::1' || bare === '0:0:0:0:0:0:0:1') {
+    return true;
+  }
+  const v4 = bare.startsWith('::ffff:') ? bare.slice('::ffff:'.length) : bare;
+  return isIPv4(v4) && v4.startsWith('127.');
 };
 
 const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {

@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import {
   gatewayTokenPath,
+  isLoopbackHost,
   readNonEmptyString,
   readProcessEnv,
   stratusHomePath,
@@ -12,6 +13,8 @@ import {
   type StateEnvironment,
   writeFileSynced,
 } from '@stratusagent/state';
+
+import { authority } from './authority.ts';
 
 /** How long a browser session lasts before it has to be re-opened. */
 const SESSION_TTL_MS = 12 * 60 * 60_000;
@@ -397,6 +400,64 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
 };
 
 export type Authenticator = ReturnType<typeof createAuthenticator>;
+
+/**
+ * The name a `Host` header carries, without its port, lowercased; undefined
+ * when it names nothing a browser could have sent. A browser builds `Host`
+ * from the URL it connected to, so a value with a user part, a path or
+ * whitespace in it came from something else, and is not given the benefit
+ * of the name URL parsing would dig out of it.
+ */
+export const hostName = (header: string): string | undefined => {
+  if (/[@/\\?#\s]/.test(header)) {
+    return undefined;
+  }
+  const parsed = URL.parse(`http://${header}`);
+  return parsed && parsed.hostname !== '' ? parsed.hostname.toLowerCase() : undefined;
+};
+
+/**
+ * The names a loopback-bound API answers to, or undefined when it checks none.
+ *
+ * DNS rebinding is why: a page on `evil.example` re-resolves its own name to
+ * `127.0.0.1`, and the browser then connects here as that page's own origin,
+ * sending `Host: evil.example`. No cookie rides along (the session cookie is
+ * scoped to the name it was set on) and no page can read the bearer token, so
+ * every authenticated route already refuses it; the names are the layer that
+ * holds even for a route that authenticates itself, and for any route added
+ * later. A tunnel sends its public name as `Host` too and cannot be told apart
+ * from that page by anything else it sends, so the public name is the one the
+ * operator gives as `api.publicUrl`.
+ *
+ * A wildcard or LAN bind checks nothing: it is reached on addresses it cannot
+ * list, and binding it is the exposure `stratus serve` already warns about.
+ */
+export const allowedHostNames = (bindHost: string, publicUrl: string | undefined): Set<string> | undefined => {
+  if (!isLoopbackHost(bindHost)) {
+    return undefined;
+  }
+  const names = new Set(['localhost', '127.0.0.1', '[::1]']);
+  const bound = hostName(authority(bindHost, 1));
+  if (bound !== undefined) {
+    names.add(bound);
+  }
+  const named = publicUrl === undefined ? undefined : URL.parse(publicUrl)?.hostname.toLowerCase();
+  if (named) {
+    names.add(named);
+  }
+  return names;
+};
+
+/** Whether a request's `Host` is one this API answers to. See `allowedHostNames`. */
+export const hostAllowed = (names: Set<string> | undefined, header: string | undefined): boolean => {
+  // No `Host` at all is an HTTP/1.0 client, never a browser: every browser
+  // request, and every WebSocket handshake, carries one.
+  if (names === undefined || header === undefined || header === '') {
+    return true;
+  }
+  const name = hostName(header);
+  return name !== undefined && names.has(name);
+};
 
 /**
  * The origins a cookie-authenticated request may come from.
