@@ -214,18 +214,13 @@ rewritten in front of you. Whatever it writes before its first tool is
 posted as that tool starts — "On it, checking the three PRs" reaches the
 thread at once, not an hour later.
 
-After that, a task keeps one progress message up to date instead of
-posting each step. Its first line comes from the tools the agent actually
-called, not from what it says about them: "⚙ Working · step 3: `shell.run`",
-"⏸ Waiting for approval to run `shell.run`", and at the end "✓ Done ·
-7 steps", "■ Stopped after 3 steps" or "✗ Failed after 3 steps". Anything
-else the agent writes between tools goes under that line, newest last;
-a passage too long to fit there is posted whole as a message of its own.
-The progress message opens once a task has worked for ten seconds, or as
-soon as the agent writes something more between tools, so a quick answer
-is just the answer. The finished reply follows as its own message; when
-the agent's last words came before its last tool call, those words are
-the reply rather than a line in the progress message.
+After that, what it writes between tools is not posted. That is the
+model talking to itself while it works, and a thread of step-by-step
+commentary is something you would have to scroll past. Nor is it added to
+the reply. The finished reply follows as its own message; when the
+agent's last words came before its last tool call, those words are the
+reply. A task that fails or is stopped says so where the reply would
+have gone.
 
 While it works, Slack shows its own loading status under the
 agent's name: "is thinking…", or "is running shell.run…" while a tool runs.
