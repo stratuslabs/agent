@@ -157,7 +157,7 @@ test('a call is not dispatched once the page it was judged on has moved', async 
   await runner.initialize();
   const session = await runner.run({
     sessionId: 'moved-1',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'go',
   });
 
@@ -196,7 +196,7 @@ test('a tool that names no origin is dispatched exactly as before', async () => 
   await runner.initialize();
   const session = await runner.run({
     sessionId: 'plain-1',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'go',
   });
 
@@ -251,7 +251,7 @@ test('the dispatch check uses the origin the policy judged, not one from before 
   await runner.initialize();
   const session = await runner.run({
     sessionId: 'judged-1',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'go',
   });
 

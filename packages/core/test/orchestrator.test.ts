@@ -93,7 +93,7 @@ test('agent runner loops provider -> tool -> provider until no tool calls remain
 
   const session = await runner.run({
     sessionId: 'session-1',
-    agent: { id: 'agent-1', name: 'Kernel' },
+    agent: { id: 'agent-1', name: 'Kernel', tools: ['*'] },
     userMessage: 'Say hi',
   });
 
@@ -162,7 +162,7 @@ test('plugins can register tools before a run', async () => {
 
   const session = await runner.run({
     sessionId: 'session-2',
-    agent: { id: 'agent-2', name: 'Plugin Agent' },
+    agent: { id: 'agent-2', name: 'Plugin Agent', tools: ['*'] },
     userMessage: 'Run ping',
   });
 
@@ -223,7 +223,7 @@ test('the approval policy is handed the resolved tool and its risk', async () =>
 
   const session = await runner.run({
     sessionId: 'risk-session',
-    agent: { id: 'risk-agent', name: 'Risk Agent' },
+    agent: { id: 'risk-agent', name: 'Risk Agent', tools: ['*'] },
     userMessage: 'use the tools',
   });
 
@@ -293,7 +293,7 @@ test('denied tool calls are fed back to the provider instead of failing the sess
 
   const session = await runner.run({
     sessionId: 'session-3',
-    agent: { id: 'agent-3', name: 'Guarded Agent' },
+    agent: { id: 'agent-3', name: 'Guarded Agent', tools: ['*'] },
     userMessage: 'Try the guarded tool',
   });
 
@@ -325,7 +325,7 @@ test('unknown tools produce a failure result the provider can react to', async (
   const runner = new AgentRunner({ provider });
   const session = await runner.run({
     sessionId: 'session-4',
-    agent: { id: 'agent-4', name: 'Curious Agent' },
+    agent: { id: 'agent-4', name: 'Curious Agent', tools: ['*'] },
     userMessage: 'Use a tool that does not exist',
   });
 
@@ -348,7 +348,7 @@ test('the smallest maxTurns still answers a turn that needs no tool call', async
 
   const answered = await new AgentRunner({ provider, maxTurns: 1 }).run({
     sessionId: 'session-max-turns-1',
-    agent: { id: 'agent-max-turns-1', name: 'Terse Agent' },
+    agent: { id: 'agent-max-turns-1', name: 'Terse Agent', tools: ['*'] },
     userMessage: 'Something I can answer without tools',
   });
   assert.equal(answered.status, 'completed');
@@ -372,7 +372,7 @@ test('the smallest maxTurns still answers a turn that needs no tool call', async
   await assert.rejects(
     () => new AgentRunner({ provider: calling, tools, maxTurns: 1 }).run({
       sessionId: 'session-max-turns-1-tool',
-      agent: { id: 'agent-max-turns-1-tool', name: 'Tool Agent' },
+      agent: { id: 'agent-max-turns-1-tool', name: 'Tool Agent', tools: ['*'] },
       userMessage: 'Something that needs a tool',
     }),
     /maximum of 1 provider turns/,
@@ -408,7 +408,7 @@ test('sessions fail when the provider never stops requesting tools', async () =>
   await assert.rejects(
     () => runner.run({
       sessionId: 'session-5',
-      agent: { id: 'agent-5', name: 'Loop Agent' },
+      agent: { id: 'agent-5', name: 'Loop Agent', tools: ['*'] },
       userMessage: 'Loop forever',
     }),
     /maximum of 3 provider turns/,
@@ -451,7 +451,7 @@ test('a message that uses every turn wraps up with where it got to instead of fa
   const runner = new AgentRunner({ provider, tools, maxTurns: 3 });
   const session = await runner.run({
     sessionId: 'wrap-up',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'Do the whole migration',
   });
 
@@ -500,7 +500,7 @@ test('with auto-continue on, a message out of budget gets another and works unti
       continued.push(event.continuation);
     }
   });
-  const session = await runner.run({ sessionId: 'auto', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Do the whole migration' });
+  const session = await runner.run({ sessionId: 'auto', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Do the whole migration' });
 
   assert.equal(session.status, 'completed');
   assert.deepEqual(ran, [1, 2, 3, 4, 5, 6, 7]);
@@ -525,7 +525,7 @@ test('auto-continue stops at its cap, and wraps up there as it always did', asyn
     },
   };
   const runner = new AgentRunner({ provider, tools, maxTurns: 2, autoContinue: 2 });
-  const session = await runner.run({ sessionId: 'capped', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+  const session = await runner.run({ sessionId: 'capped', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Go' });
 
   // Two of its own, two more twice over, then the wrap-up.
   assert.equal(requests.length, 7);
@@ -556,7 +556,7 @@ test('auto-continue wraps up instead when somebody has written to the session me
       waiting = true;
     }
   });
-  const session = await runner.run({ sessionId: 'yield', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+  const session = await runner.run({ sessionId: 'yield', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Go' });
 
   assert.equal(requests.length, 5);
   assert.equal(requests.at(-1)?.toolChoice, 'none');
@@ -575,7 +575,7 @@ test('auto-continue never renews a budget of nothing', async () => {
     },
   };
   const runner = new AgentRunner({ provider, tools, maxTurns: 0, autoContinue: true });
-  const session = await runner.run({ sessionId: 'zero', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+  const session = await runner.run({ sessionId: 'zero', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Go' });
   assert.equal(session.messages.at(-1)?.content, 'No steps to spend.');
 });
 
@@ -606,7 +606,7 @@ test('a provider with its own loop is offered the same grants, cap and yield inc
         events += 1;
       }
     });
-    await runner.run({ sessionId: `h-${Math.random()}`, agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+    await runner.run({ sessionId: `h-${Math.random()}`, agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Go' });
     await new Promise((resolve) => setImmediate(resolve));
     return { grants, offered, events };
   };
@@ -632,7 +632,7 @@ test('auto-continue never extends a message stuck repeating a failure', async ()
   };
   // Renewed once at turn 3 (two failures so far), then stuck at the third.
   const runner = new AgentRunner({ provider, tools, maxTurns: 2, autoContinue: true });
-  const session = await runner.run({ sessionId: 'stuck-auto', agent: { id: 'ava', name: 'Ava' }, userMessage: 'List' });
+  const session = await runner.run({ sessionId: 'stuck-auto', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'List' });
 
   assert.equal(requests.length, 4);
   assert.equal(requests.at(-1)?.toolChoice, 'none');
@@ -670,7 +670,7 @@ test('a message that makes the same failing call three times running wraps up an
   const runner = new AgentRunner({ provider, tools });
   const session = await runner.run({
     sessionId: 'stuck-loop',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'List the files',
   });
 
@@ -713,7 +713,7 @@ test('failures that change between turns are not a loop', async () => {
   const runner = new AgentRunner({ provider, tools });
   const session = await runner.run({
     sessionId: 'searching',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'Find the config',
   });
 
@@ -736,7 +736,7 @@ test('resume continues an existing session with new user input', async () => {
 
   await runner.run({
     sessionId: 'session-6',
-    agent: { id: 'agent-6', name: 'Chat Agent' },
+    agent: { id: 'agent-6', name: 'Chat Agent', tools: ['*'] },
     userMessage: 'First message',
   });
 
@@ -812,7 +812,7 @@ test('credentials are scoped per agent and denied outside the allowlist', async 
   assert.equal(await scoped.get('SLACK_TOKEN'), 'xoxb-secret');
   await assert.rejects(() => scoped.get('ADMIN_KEY'), /not allowed to access credential: ADMIN_KEY/);
 
-  const noCredsAgent = { id: 'bare', name: 'Bare' };
+  const noCredsAgent = { id: 'bare', name: 'Bare', tools: ['*'] };
   const bare = scopeCredentials(noCredsAgent, resolver);
   await assert.rejects(() => bare.get('SLACK_TOKEN'), /not allowed to access credential/);
 });
@@ -838,7 +838,7 @@ test('event handler errors are isolated and never fail the run', async () => {
   const runner = new AgentRunner({ provider, bus });
   const session = await runner.run({
     sessionId: 'session-7',
-    agent: { id: 'agent-7', name: 'Stable Agent' },
+    agent: { id: 'agent-7', name: 'Stable Agent', tools: ['*'] },
     userMessage: 'Hello',
   });
 
@@ -884,7 +884,7 @@ test('executeHostedToolCall runs a tool with approvals, allowlists, and events',
 
   const session: Session = {
     id: 'hosted-1',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     status: 'running',
     messages: [],
     createdAt: new Date().toISOString(),
@@ -951,7 +951,7 @@ test('streaming runners drain every provider.delta before the final provider.res
   await runner.initialize();
   await runner.run({
     sessionId: 'stream-1',
-    agent: { id: 'streamer', name: 'Streamer' },
+    agent: { id: 'streamer', name: 'Streamer', tools: ['*'] },
     userMessage: 'hi',
   });
 
@@ -971,7 +971,7 @@ test('non-streaming runners never hand providers a delta sink', async () => {
   await runner.initialize();
   const session = await runner.run({
     sessionId: 'plain-1',
-    agent: { id: 'plain', name: 'Plain' },
+    agent: { id: 'plain', name: 'Plain', tools: ['*'] },
     userMessage: 'hi',
   });
   assert.equal(session.status, 'completed');
@@ -1013,7 +1013,7 @@ test('aborting a run fails the session with a distinguishable reason', async () 
     () =>
       runner.run({
         sessionId: 'abort-1',
-        agent: { id: 'aborter', name: 'Aborter' },
+        agent: { id: 'aborter', name: 'Aborter', tools: ['*'] },
         userMessage: 'go',
         signal: controller.signal,
       }),
@@ -1054,7 +1054,7 @@ test('an abort that names its reason fails the session with that reason', async 
     () =>
       runner.run({
         sessionId: 'abort-reason-1',
-        agent: { id: 'aborter', name: 'Aborter' },
+        agent: { id: 'aborter', name: 'Aborter', tools: ['*'] },
         userMessage: 'go',
         signal: controller.signal,
       }),
@@ -1098,7 +1098,7 @@ test('approval policies receive the turn signal in their context', async () => {
   await runner.initialize();
   await runner.run({
     sessionId: 'approval-signal-1',
-    agent: { id: 'gatee', name: 'Gatee' },
+    agent: { id: 'gatee', name: 'Gatee', tools: ['*'] },
     userMessage: 'go',
     signal: controller.signal,
   });
@@ -1124,7 +1124,7 @@ test('resumed input is durable before any provider work begins', async () => {
 
   const runner = new AgentRunner({ provider, store });
   await runner.initialize();
-  await runner.run({ sessionId: 'durable-1', agent: { id: 'a', name: 'A' }, userMessage: 'first' });
+  await runner.run({ sessionId: 'durable-1', agent: { id: 'a', name: 'A', tools: ['*'] }, userMessage: 'first' });
 
   await assert.rejects(() => runner.resume({ sessionId: 'durable-1', userMessage: 'second' }));
   // The resumed message was already saved when the provider started —
@@ -1162,7 +1162,7 @@ test('hosted tool calls persist their paired messages to the stored session', as
 
   const session = await store.create({
     id: 'hosted-1',
-    agent: { id: 'a', name: 'A' },
+    agent: { id: 'a', name: 'A', tools: ['*'] },
     status: 'running',
     messages: [],
   });
@@ -1212,7 +1212,7 @@ test('kernel tool activity is saved as it happens, not only at turn end', async 
   const runner = new AgentRunner({ provider, tools, store });
   await runner.run({
     sessionId: 'durable-tools-1',
-    agent: { id: 'a', name: 'A' },
+    agent: { id: 'a', name: 'A', tools: ['*'] },
     userMessage: 'remember this',
   });
 
@@ -1259,7 +1259,7 @@ test('rejected tool calls settle with a tool.completed event', async () => {
   const runner = new AgentRunner({ provider, bus });
   const session = await runner.run({
     sessionId: 'rejected-1',
-    agent: { id: 'a', name: 'A' },
+    agent: { id: 'a', name: 'A', tools: ['*'] },
     userMessage: 'call a ghost',
   });
 
@@ -1279,7 +1279,7 @@ test('resume reconciles a tool call whose result was never recorded', async () =
   // before execution, the result never landed.
   await store.create({
     id: 'dangling-1',
-    agent: { id: 'a', name: 'A' },
+    agent: { id: 'a', name: 'A', tools: ['*'] },
     status: 'running',
     messages: [
       { id: 'u1', role: 'user', content: 'remember it', createdAt: now },
@@ -1371,7 +1371,7 @@ test('every tool call in a response is durable before the first executes', async
   const runner = new AgentRunner({ provider, tools, store });
   const session = await runner.run({
     sessionId: 'multi-call-1',
-    agent: { id: 'a', name: 'A' },
+    agent: { id: 'a', name: 'A', tools: ['*'] },
     userMessage: 'do two things',
   });
 
@@ -1388,7 +1388,7 @@ test('reconciliation matches repeated tool-call ids by occurrence', async () => 
   // id twice. The first occurrence was answered; the second is dangling.
   await store.create({
     id: 'dup-id-1',
-    agent: { id: 'a', name: 'A' },
+    agent: { id: 'a', name: 'A', tools: ['*'] },
     status: 'running',
     messages: [
       { id: 'u1', role: 'user', content: 'step one', createdAt: now },
@@ -1467,7 +1467,7 @@ test('the response is durable before provider.response reaches subscribers', asy
   const runner = new AgentRunner({ provider, store, bus });
   await runner.run({
     sessionId: 'durable-response-1',
-    agent: { id: 'a', name: 'A' },
+    agent: { id: 'a', name: 'A', tools: ['*'] },
     userMessage: 'ask',
   });
 
@@ -1569,7 +1569,7 @@ const parkAndAbandon = async (
   });
   void dying.run({
     sessionId,
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'go',
   }).catch(() => undefined);
 
@@ -1641,7 +1641,7 @@ test('a turn parked on approval checkpoints what has not run, and clears it on a
 
   const session = await runner.run({
     sessionId: 'parked-1',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'go',
   });
 
@@ -1938,7 +1938,7 @@ test('a call interrupted mid-execution is not recoverable, only a parked one is'
   const now = new Date().toISOString();
   await store.create({
     id: 'mid-flight',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     status: 'running',
     messages: [
       { id: 'm1', role: 'user', content: 'go', createdAt: now },
@@ -2030,7 +2030,7 @@ test('a parked call is recovered by identity, not by an id an earlier turn also 
   });
   void dying.run({
     sessionId: 'reused-ids',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'go',
   }).catch(() => undefined);
 
@@ -2103,7 +2103,7 @@ test('a hosted tool call is never checkpointed, so a restart fails it cleanly', 
 
   const session = await runner.run({
     sessionId: 'hosted-1',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'go',
   });
   await runner.executeHostedToolCall(session, { id: 'h1', toolName: 'gated', input: {} });
@@ -2138,7 +2138,7 @@ test('a recovered call is re-asked with the time it originally parked', async ()
   const call = { id: 'c1', toolName: 'gated', input: {} };
   await store.create({
     id: 'carried-park',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     status: 'pending_approval',
     messages: [
       { id: 'm1', role: 'user', content: 'go', createdAt: now },
@@ -2187,7 +2187,7 @@ test('recovery holds the checkpoint until the wait is re-established or answered
   const seed = async (id: string): Promise<void> => {
     await store.create({
       id,
-      agent: { id: 'ava', name: 'Ava' },
+      agent: { id: 'ava', name: 'Ava', tools: ['*'] },
       status: 'pending_approval',
       messages: [
         { id: 'm1', role: 'user', content: 'go', createdAt: now },
@@ -2265,7 +2265,7 @@ test('a call parked past a lowered ceiling is refused, not run on the wrap-up tu
   const call = { id: 'c1', toolName: 'gated', input: {} };
   await store.create({
     id: 'lowered',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     status: 'pending_approval',
     messages: [
       { id: 'm1', role: 'user', content: 'go', createdAt: now },
@@ -2307,7 +2307,7 @@ test('a recovered turn spends the provider budget it was already on', async () =
   const call = { id: 'c1', toolName: 'gated', input: {} };
   await store.create({
     id: 'budgeted',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     status: 'pending_approval',
     messages: [
       { id: 'm1', role: 'user', content: 'go', createdAt: now },
@@ -2370,7 +2370,7 @@ test('resuming a parked session retires its checkpoint along with the interrupte
   const now = new Date().toISOString();
   await store.create({
     id: 'parked-then-messaged',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     status: 'pending_approval',
     messages: [
       { id: 'm1', role: 'user', content: 'go', createdAt: now },
@@ -2414,7 +2414,7 @@ test('images sent with a user message are stored on it, and only on it', async (
 
   const first = await runner.run({
     sessionId: 'session-images',
-    agent: { id: 'agent-images', name: 'Looker' },
+    agent: { id: 'agent-images', name: 'Looker', tools: ['*'] },
     userMessage: 'what is this?',
     images: [shot],
   });
@@ -2446,7 +2446,7 @@ test('a stored session keeps only the images inside its replay window', async ()
   const runner = new AgentRunner({ provider, store, imageReplayBudget: { bytes: 12 } });
   const image = (data: string, name: string) => ({ mediaType: 'image/png' as const, data, name });
 
-  await runner.run({ sessionId: 'session-window', agent: { id: 'a', name: 'A' }, userMessage: 'one', images: [image('AAAAAAAA', 'one.png')] });
+  await runner.run({ sessionId: 'session-window', agent: { id: 'a', name: 'A', tools: ['*'] }, userMessage: 'one', images: [image('AAAAAAAA', 'one.png')] });
   await runner.resume({ sessionId: 'session-window', userMessage: 'two', images: [image('BBBBBBBB', 'two.png')] });
   const third = await runner.resume({ sessionId: 'session-window', userMessage: 'three', images: [image('CCCCCCCC', 'three.png')] });
 
@@ -2472,7 +2472,7 @@ test('the first stored turn is held to the replay window too', async () => {
 
   const opened = await runner.run({
     sessionId: 'session-first-window',
-    agent: { id: 'a', name: 'A' },
+    agent: { id: 'a', name: 'A', tools: ['*'] },
     userMessage: 'both',
     images: [image('AAAAAAAA', 'first.png'), image('BBBBBBBB', 'second.png')],
   });
@@ -2542,7 +2542,7 @@ const seedTranscript = async (runner: AgentRunner, sessionId: string, turns: num
   }
   return runner.store.create({
     id: sessionId,
-    agent: { id: 'agent-ctx', name: 'Context Agent' },
+    agent: { id: 'agent-ctx', name: 'Context Agent', tools: ['*'] },
     status: 'idle',
     messages,
   });
@@ -2750,7 +2750,7 @@ test('narrowing falls back to the newest boundary when the midpoint has none aft
   const now = new Date().toISOString();
   await runner.store.create({
     id: 'session-ctx-7',
-    agent: { id: 'agent-ctx', name: 'Context Agent' },
+    agent: { id: 'agent-ctx', name: 'Context Agent', tools: ['*'] },
     status: 'idle',
     messages: [
       { id: 'm1', role: 'user', content: 'an older question', createdAt: now },

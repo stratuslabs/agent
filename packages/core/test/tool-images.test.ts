@@ -17,7 +17,7 @@ import {
 
 // A complete 1×1 PNG: header, IHDR, IDAT, IEND.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
-const AGENT = { id: 'ava', name: 'Ava' };
+const AGENT = { id: 'ava', name: 'Ava', tools: ['*'] };
 
 /** Calls `tool` once, then answers; records the tool message it was shown. */
 const callingProvider = (toolName: string, seen: Message[]): ModelProvider => ({
