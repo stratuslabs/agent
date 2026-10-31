@@ -122,3 +122,18 @@ test('a wildcard bind checks no host name, since it cannot know its own', async 
     await harness.stop();
   }
 });
+
+test('a Host header a browser could not have sent is not read for the name inside it', async () => {
+  const { hostAllowed, allowedHostNames } = await import('../src/auth.ts');
+  const names = allowedHostNames('127.0.0.1', undefined);
+  // URL parsing would read 127.0.0.1 out of each of these.
+  for (const header of ['evil.example@127.0.0.1', 'evil.example:80@localhost', '127.0.0.1/evil', 'localhost\\evil', '127.0.0.1 evil', '127.0.0.1#x']) {
+    assert.equal(hostAllowed(names, header), false, header);
+  }
+  // An HTTP/1.0 client that names no host is not a browser.
+  assert.equal(hostAllowed(names, undefined), true);
+  // A bind to another loopback address answers to that address too.
+  assert.equal(hostAllowed(allowedHostNames('127.0.0.2', undefined), '127.0.0.2:4123'), true);
+  // And a non-loopback bind checks nothing.
+  assert.equal(allowedHostNames('0.0.0.0', 'https://gateway.example'), undefined);
+});

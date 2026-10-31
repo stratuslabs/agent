@@ -11,6 +11,7 @@ import {
   loadCredentials,
   loadRosterSouls,
   loadSoulFile,
+  isLoopbackHost,
   isSignedInRuntime,
   parseProviderName,
   readNonEmptyString,
@@ -38,7 +39,7 @@ import {
   probeProviderModel,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
-import { callRunningGateway, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
+import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
 import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
@@ -351,6 +352,10 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   const intake = health.intake;
   const startupPauseOver = intake?.paused === false || (intake?.paused === true && intake.unreadable === false);
   for (const line of warnings) {
+    // A note under Daemon, not a problem: see EXPOSED_API_WARNING_PREFIX.
+    if (line.startsWith(EXPOSED_API_WARNING_PREFIX)) {
+      continue;
+    }
     if (line.startsWith(INTAKE_WARNING_PREFIX)) {
       if (!startupPauseOver) {
         problems.push(
@@ -1063,6 +1068,10 @@ export const runDoctor = async (
     writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}running${facts.length > 0 ? ` ${facts.join(', ')}` : ''}`);
     if (daemon.configPath !== undefined) {
       writeLine(streams.stdout, `  ${''.padEnd(10)}loaded ${daemon.configPath}`);
+    }
+    const bound = URL.parse(daemon.url)?.hostname;
+    if (bound !== undefined && !isLoopbackHost(bound)) {
+      writeLine(streams.stdout, `  ${''.padEnd(10)}API on ${bound}: other machines can reach it unless a firewall or port mapping stops them`);
     }
   }
 
