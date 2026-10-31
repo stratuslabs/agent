@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { PENDING_APPROVAL_METADATA_KEY, RunAbortedError, type StratusEvent } from '@stratusagent/core';
+import { AllowAllApprovalPolicy, PENDING_APPROVAL_METADATA_KEY, RunAbortedError, type StratusEvent } from '@stratusagent/core';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 
 import {
@@ -608,6 +608,7 @@ test('a stop ends a turn whose tool ignores its abort, and the message queued be
   const window = 2_500;
   const warnings: string[] = [];
   const gateway = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
     idleTimeoutMs: 0,
     stopDrainTimeoutMs: window,

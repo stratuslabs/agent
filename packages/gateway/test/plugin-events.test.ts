@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { EventIngestHandle, JsonObject, PluginContext } from '@stratusagent/core';
+import { AllowAllApprovalPolicy } from '@stratusagent/core';
 import { parseEventFilter } from '@stratusagent/agents';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 import { fleetDbIn } from '@stratusagent/state';
@@ -144,6 +145,7 @@ const createGatewayFor = (
   posts: Array<{ to: string; text: string }>,
   logged: string[],
 ) => createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { ...env, fetch: fetchFake },
     idleTimeoutMs: 0,
     schedules: { tickMs: 25 },

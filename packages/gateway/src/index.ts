@@ -887,6 +887,10 @@ export interface GatewayOptions {
    * transport. Pass a factory whenever the policy parks turns on a human
    * reached through a channel — `remote` mode — since that policy needs the
    * transport the gateway is still constructing.
+   *
+   * Omitted, the runners get core's default: only `safe` tools run, and
+   * every other call is refused with an error naming this option. Pass
+   * `AllowAllApprovalPolicy` from `@stratusagent/core` to run every call.
    */
   approvals?: ApprovalPolicy | ((transport: ApprovalTransport) => ApprovalPolicy);
   /**
