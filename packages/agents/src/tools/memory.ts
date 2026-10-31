@@ -184,7 +184,7 @@ export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOpt
       properties: {
         query: {
           type: 'string',
-          description: 'What to look for, as plain words. Facts matching more of the words, and the rarer ones, come first, and a newer fact comes ahead of an equally good older one. Words also match what a fact is about. If the result\'s strategy is recency, every word had to appear and the newest came first.',
+          description: 'What to look for, as plain words. Facts holding every word come first, then those with more of the words and the rarer ones, and a newer fact comes ahead of an equally good older one. Words also match what a fact is about. If the result\'s strategy is recency, every word had to appear and the newest came first.',
         },
         limit: { type: 'number', description: 'Maximum facts to return. Optional; the store bounds it either way.' },
       },

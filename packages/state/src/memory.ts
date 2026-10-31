@@ -403,10 +403,8 @@ const pinBudgetFor = (
  * and how fast that boost fades: 1.5x today, 1.25x at 30 days, 1.125x at
  * 90, approaching 1x for old facts. Multiplying rather than adding keeps
  * it independent of BM25's scale, and bounds what recency can do: a fact
- * passes an older one only if it is at least two thirds as relevant. So a
- * newer fact matching some of the words does not bury an older one that
- * matches all of them, and between two that match about equally well the
- * newer one wins.
+ * passes an older one only if it is at least two thirds as relevant, and
+ * between two that match about equally well the newer one wins.
  */
 const HYBRID_RECENCY_BOOST = 0.5;
 const HYBRID_RECENCY_HALF_LIFE_DAYS = 30;
@@ -417,21 +415,36 @@ const UNIX_EPOCH_JULIAN_DAY = 2_440_587.5;
 
 /**
  * The leading `ORDER BY` terms for a ranked search; the caller appends the
- * recency tie-break every read shares. `bm25()` is FTS5's relevance score,
- * lower for a better match, so both orders sort ascending.
+ * recency tie-break every read shares. `everyWord` is the query as an
+ * all-words match.
  *
- * A `createdAt` SQLite cannot read as a date (a hand edit) gets no boost
- * at all, so it ranks like the oldest fact rather than, through a NULL,
- * like the newest. One from the future (a skewed clock) counts as today.
+ * Facts holding every word come first, then the rest. BM25 alone can't
+ * promise that: it discounts a word by the length of the fact around it,
+ * so a near-cap fact with both words scores below a short one with only
+ * one, and enough short ones would fill the limit and leave it out. Only
+ * the all-words tier is lifted, not every extra word: a query written like
+ * a sentence shares "the" and "is" with most long facts, and BM25's weight
+ * for a word by its rarity is what keeps those from counting.
+ *
+ * `bm25()` is FTS5's relevance score, lower for a better match, so both
+ * orders sort it ascending. A `createdAt` SQLite cannot read as a date (a
+ * hand edit) gets no boost at all, so it ranks like the oldest fact rather
+ * than, through a NULL, like the newest. One from the future (a skewed
+ * clock) counts as today.
  */
-const rankedOrder = (strategy: 'relevance' | 'hybrid', at: number): { sql: string; params: number[] } => {
+const rankedOrder = (
+  strategy: 'relevance' | 'hybrid',
+  everyWord: string,
+  at: number,
+): { sql: string; params: (string | number)[] } => {
+  const tier = 'rowid IN (SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?) DESC, ';
   if (strategy === 'relevance') {
-    return { sql: 'bm25(memory_fts) ASC, ', params: [] };
+    return { sql: `${tier}bm25(memory_fts) ASC, `, params: [everyWord] };
   }
   const today = at / MS_PER_DAY + UNIX_EPOCH_JULIAN_DAY;
   return {
-    sql: 'bm25(memory_fts) * (1.0 + ? * coalesce(1.0 / (1.0 + max(0.0, ? - julianday(created_at)) / ?), 0.0)) ASC, ',
-    params: [HYBRID_RECENCY_BOOST, today, HYBRID_RECENCY_HALF_LIFE_DAYS],
+    sql: `${tier}bm25(memory_fts) * (1.0 + ? * coalesce(1.0 / (1.0 + max(0.0, ? - julianday(created_at)) / ?), 0.0)) ASC, `,
+    params: [everyWord, HYBRID_RECENCY_BOOST, today, HYBRID_RECENCY_HALF_LIFE_DAYS],
   };
 };
 
@@ -1167,8 +1180,11 @@ export const createFileMemoryStore = (
       // A recency read needs every word, or a query with one common word in
       // it would return the newest fact that happens to share it. A ranked
       // read takes any of them, because the ranking is what puts the facts
-      // carrying more of the words, and the rarer ones, first.
-      const match = tokens.map((token) => `"${token}"`).join(strategy === 'recency' ? ' ' : ' OR ');
+      // holding every word first, then those carrying more of the words and
+      // the rarer ones.
+      const quoted = tokens.map((token) => `"${token}"`);
+      const everyWord = quoted.join(' ');
+      const match = strategy === 'recency' ? everyWord : quoted.join(' OR ');
       const at = now().getTime();
       // Superseded entries leave `search` exactly as forgotten ones do, and
       // which are superseded depends on the clock — hence a join against
@@ -1192,7 +1208,7 @@ export const createFileMemoryStore = (
       // by the same rule, on bytes (`length` over TEXT counts characters),
       // so the bounded read sees the admissible ones it would have kept.
       const admissible = `${liveMatch} AND length(CAST(content AS BLOB)) <= ?`;
-      const order = strategy === 'recency' ? { sql: '', params: [] } : rankedOrder(strategy, at);
+      const order = strategy === 'recency' ? { sql: '', params: [] } : rankedOrder(strategy, everyWord, at);
       const rows = database.prepare(
         `SELECT id, agent_id, content, created_at, trust, origin, fields ${admissible}`
         + ` ORDER BY ${order.sql}created_at DESC, id ASC LIMIT ?`,

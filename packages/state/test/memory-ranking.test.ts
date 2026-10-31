@@ -77,6 +77,51 @@ test('hybrid puts an older fact matching every word above a newer one matching o
   }
 });
 
+test('a long fact holding every word ranks above short newer ones holding only some', async () => {
+  // BM25 discounts a word by how long the fact around it is, so on score
+  // alone a short fact with one of the words beats a near-cap fact with
+  // both, and enough of them would fill the limit and leave it out.
+  const long = `the deploy pipeline notes: ${'checklist '.repeat(400)}`.trim();
+  assert.ok(Buffer.byteLength(long) < 4096);
+  const store = createFileMemoryStore(await seed([
+    ...FILLER,
+    { id: 'ava:memory:long-exact', content: long, createdAt: '2026-01-01T00:00:00.000Z' },
+    ...['refunds', 'payroll', 'invoices', 'exports'].map((name, index) => ({
+      id: `ava:memory:short-${name}`,
+      content: `the ${name} pipeline is green`,
+      createdAt: `2026-05-2${index}T00:00:00.000Z`,
+    })),
+  ]), frozen);
+
+  for (const strategy of ['relevance', 'hybrid'] as const) {
+    const found = await store.search('ava', 'deploy pipeline', { strategy, limit: 3 });
+    assert.equal(found.entries[0]?.id, 'ava:memory:long-exact', strategy);
+    assert.equal(found.entries.length, 3);
+    assert.equal(found.truncated, true);
+  }
+});
+
+test('a question-shaped query is ranked by its rare words, not by how many common ones a fact shares', async () => {
+  // No fact holds every word, so BM25 decides, and it gives "what", "is",
+  // "the" and "for" next to no weight because most facts have them.
+  // Counting matched words instead would put these ten first.
+  const chatter = Array.from({ length: 10 }, (_, index) => ({
+    id: `ava:memory:chatter-${index}`,
+    content: `what the standup is for, week ${index}`,
+    createdAt: '2026-05-01T00:00:00.000Z',
+  }));
+  const store = createFileMemoryStore(await seed([
+    ...FILLER,
+    ...chatter,
+    { id: 'ava:memory:gate-code', content: 'gate code 4417', createdAt: '2026-01-01T00:00:00.000Z' },
+  ]), frozen);
+
+  for (const strategy of ['relevance', 'hybrid'] as const) {
+    const found = await store.search('ava', 'what is the code for the gate', { strategy, limit: 3 });
+    assert.equal(found.entries[0]?.id, 'ava:memory:gate-code', strategy);
+  }
+});
+
 test('hybrid lets a much newer match pass a slightly better older one, never a far better one', async () => {
   const store = createFileMemoryStore(await seed([
     ...FILLER,

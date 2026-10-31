@@ -317,14 +317,17 @@ what the fact is about — and marks anything outside its validity window.
 Every read reports the **ordering** it applied. `memory.recall` and
 `stratus memory search` ask for `hybrid`, and the built-in store serves it:
 
-- **`hybrid`** — any of the words can match. Facts carrying more of the
-  words, and the rarer ones, rank higher (SQLite's BM25 score), and a newer
-  fact gets a boost that fades with age: 1.5× today, 1.25× at 30 days,
-  1.125× at 90. So between two facts that match about equally well the
-  newer one comes first, but a newer fact has to be at least two thirds as
-  good a match to pass an older one. A fact matching some of the words
-  never buries one matching all of them just by being recent.
-- **`relevance`** — the same matching, by BM25 alone.
+- **`hybrid`** — any of the words can match. Facts holding every word come
+  first, then the rest, so a fact matching some of the words never buries
+  one matching all of them, however short or recent it is. Within each
+  group, facts carrying more of the words, and the rarer ones, rank higher
+  (SQLite's BM25 score), and a newer fact gets a boost that fades with age:
+  1.5× today, 1.25× at 30 days, 1.125× at 90. So between two facts that
+  match about equally well the newer one comes first, but a newer fact has
+  to be at least two thirds as good a match to pass an older one. BM25 also
+  favors a short fact over a long one with the same words, which is why
+  the every-word group is kept apart.
+- **`relevance`** — the same matching and grouping, by BM25 alone.
 - **`recency`** — every word has to appear, newest first. This is the one
   ordering the contract requires of every store, and what a read gets when
   it names none.
