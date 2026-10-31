@@ -9393,7 +9393,10 @@ export class AgentRunner {
         // With no policy there is nobody whose "no" this was, and the fix
         // is in the app's code, not in anything the agent can do.
         error: this.options.approvals === undefined
-          ? `${call.toolName} did not run: it is a ${risk} tool, and this runner was built with no \`approvals\` policy, `
+          ? `${call.toolName} did not run: ${risk === resolveToolRisk(tool)
+            ? `it is a ${risk} tool`
+            : `it counts as a ${risk} tool once a conversation has read external content`}, `
+            + 'and this runner was built with no `approvals` policy, '
             + 'so only safe tools run. The app that builds the runner passes one to allow it; '
             + 'AllowAllApprovalPolicy runs every call without asking.'
           : `Tool call denied by approval policy: ${call.toolName}`,

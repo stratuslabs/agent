@@ -180,3 +180,19 @@ test('a policy that refuses gated calls refuses the raised call, and the tool ne
   const result = session.messages.find((message) => message.toolResult?.callId === 'h1')?.toolResult;
   assert.equal(result?.ok, false);
 });
+
+test('with no approvals policy, the raised call is refused with an error that says why it counts as gated', async () => {
+  const registry = new ToolRegistry();
+  registry.register(pageRead());
+  registry.register(handOff({ risk: 'safe', riskAfterExternalContent: 'gated' }));
+  const runner = new AgentRunner({
+    provider: createScript([[call('p1', 'page.read')], [call('h1', 'hand.off')]]),
+    tools: registry,
+    store: new InMemorySessionStore(),
+  });
+  const session = await runner.run({ sessionId: 'no-policy', agent: { id: 'ava', name: 'Ava' }, userMessage: 'go' });
+  const result = session.messages.find((message) => message.toolResult?.callId === 'h1')?.toolResult;
+  assert.equal(result?.ok, false);
+  assert.match(result?.error ?? '', /^hand\.off did not run: it counts as a gated tool once a conversation has read external content, /);
+  assert.match(result?.error ?? '', /no `approvals` policy/);
+});
