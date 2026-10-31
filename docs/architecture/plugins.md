@@ -262,7 +262,8 @@ allowlist come from the host's own records rather than from that object,
 so a plugin cannot widen anything by building one. The host also refuses,
 before anything runs and naming the reason, a parent
 that is not running a turn or is itself a sub-agent, the delegation depth
-limit, a tool outside the parent's allowlist, a pattern instead of a name,
+limit, a tool outside the parent's allowlist (for a parent whose soul has
+no `tools:` list, any tool not registered as safe), a pattern instead of a name,
 and `agent.spawn`, `agent.delegate`, `memory.*`, and `credential.request`
 whatever the parent holds. A sub-agent never asks a person: a gated call it
 has no standing grant for is denied inside it, and the parent's turn gets

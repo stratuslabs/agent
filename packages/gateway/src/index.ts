@@ -64,6 +64,7 @@ import {
   imagesWithinReplayBudget,
   type ObserveEntry,
   matchesToolAllowlist,
+  resolveToolRisk,
   type JsonObject,
   type MemoryStoreContribution,
   type ProviderCallGuard,
@@ -3606,7 +3607,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (!Array.isArray(requested) || requested.some((name) => typeof name !== 'string' || name.length === 0)) {
       return 'A sub-agent\'s tools are a list of tool names.';
     }
-    const allowlist = parent.agent.tools;
+    // Read the way the runner reads it for the parent's own calls: the
+    // session's copy, else the registered agent's.
+    const allowlist = parent.agent.tools ?? registry.get(parent.agent.id)?.tools;
     for (const name of requested as string[]) {
       if (/[*?]/.test(name)) {
         return `A sub-agent's tools are exact names, and ${name} is a pattern.`;
@@ -3614,12 +3617,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (subAgentNeverGets(name)) {
         return `${name} is never given to a sub-agent, even by an agent that holds it.`;
       }
-      if (!tools.get(name)) {
+      const tool = tools.get(name);
+      if (!tool) {
         return `There is no tool named ${name}.`;
       }
       // The parent's allowlist as its running turn holds it: a slice can
-      // only narrow what that turn may already do.
-      if (allowlist !== undefined && !matchesToolAllowlist(name, allowlist)) {
+      // only narrow what that turn may already do. With no list, that is
+      // the tools registered as safe, and the slice is held to the same
+      // rule: naming a gated tool must not hand it to the sub-agent.
+      if (allowlist === undefined) {
+        if (resolveToolRisk(tool) !== 'safe') {
+          return `${name} is not a safe tool, and ${parent.agent.id}'s soul has no tools: list, so it gets only safe tools and a sub-agent of it cannot have ${name}.`;
+        }
+      } else if (!matchesToolAllowlist(name, allowlist)) {
         return `${name} is not one of ${parent.agent.id}'s tools, so a sub-agent of it cannot have it.`;
       }
     }
