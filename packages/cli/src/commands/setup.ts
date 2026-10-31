@@ -1630,13 +1630,13 @@ export const runSetup = async (
     const first = grants?.split(',')[0]?.trim();
     writeLine(streams.stdout);
 
-    // A soul with no `tools:` key is allowlisted for *every* registered
-    // tool — `matchesToolAllowlist` treats an omitted list as permissive,
-    // and the built-in `stratus` agent has none, so a fresh install always
-    // has one. Enabling a plugin therefore can grant capability
-    // immediately, and saying "no agent can call it yet" would understate
-    // what just happened in the most common configuration there is. Read
-    // the roster and say which of the two it was.
+    // A soul with `tools: ["*"]` is allowlisted for *every* registered
+    // tool, and the built-in `stratus` agent says that in code, so a fresh
+    // install always has one. Enabling a plugin therefore can grant
+    // capability immediately, and saying "no agent can call it yet" would
+    // understate what just happened in the most common configuration there
+    // is. A soul with no `tools:` key gets only the tools registered as
+    // safe. Read the roster and say which it was.
     const { entries, loaded } = await channelRoster();
     if (!loaded) {
       // The roster refused to load, so `entries` is empty — which is not
@@ -1669,6 +1669,13 @@ export const runSetup = async (
     const reached = (entry: ChannelRosterEntry): string[] => {
       const tools = entry.soul.agent.tools;
       if (tools === undefined) {
+        // Only the tools registered as safe, and which of these those are
+        // is the manifest and the operator's overrides, which `stratus
+        // plugins` reads. Not re-derived here: such a soul is named on its
+        // own line below instead of counted as reaching anything.
+        return [];
+      }
+      if (tools.includes('*')) {
         return everyTool;
       }
       if (contributed === undefined) {
@@ -1683,7 +1690,7 @@ export const runSetup = async (
     /** Concrete contributed tools no entry of this soul's reaches. */
     const missedTools = (entry: ChannelRosterEntry): string[] => {
       const tools = entry.soul.agent.tools;
-      if (tools === undefined || contributed === undefined) {
+      if (tools === undefined || tools.includes('*') || contributed === undefined) {
         return [];
       }
       // Only the concrete ones: a declared namespace registers its tools at
@@ -1703,8 +1710,18 @@ export const runSetup = async (
     const allowlisted = entries.filter((entry) => reached(entry).length > 0);
     const callable = allowlisted.filter(settingReaches);
     const unset = allowlisted.filter((entry) => !settingReaches(entry));
-    const permissive = callable.filter((entry) => entry.soul.agent.tools === undefined);
-    const explicit = callable.filter((entry) => entry.soul.agent.tools !== undefined);
+    const permissive = callable.filter((entry) => entry.soul.agent.tools?.includes('*') === true);
+    const explicit = callable.filter((entry) => entry.soul.agent.tools?.includes('*') !== true);
+    // Souls with no list at all: not callable for anything this menu can
+    // vouch for, and the reason is not the one a narrow list has.
+    const unlisted = entries.filter((entry) => entry.soul.agent.tools === undefined);
+    const unlistedLine = (): void => {
+      if (unlisted.length === 0 || everyTool.length === 0) {
+        return;
+      }
+      const one = unlisted.length === 1;
+      writeLine(streams.stdout, `${label(unlisted)} ${one ? 'has' : 'have'} no \`tools:\` list, so ${one ? 'it gets' : 'they get'} only the tools registered as safe, which leaves out anything of ${name} that runs, writes or sends. Name ${grants ?? 'its tools'} in a \`tools:\` list to grant ${one ? 'it' : 'them'} the rest.`);
+    };
     // The key travels with the agents rather than beside them, so the
     // branches below cannot ask about one and read the other.
     const shortfall = needsKey !== undefined && unset.length > 0
@@ -1738,11 +1755,11 @@ export const runSetup = async (
 
     if (callable.length > 0) {
       if (permissive.length > 0) {
-        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${permissive.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${permissive.length === 1 ? 'has' : 'have'} \`tools: ["*"]\`, which means every registered tool.`);
         writeLine(streams.stdout, uncheckedReason(name) !== undefined
           ? `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} what ${permissive.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
           : `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
-        writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
+        writeLine(streams.stdout, 'Narrow that list to say which. `stratus plugins` shows who can call what.');
       }
       for (const entry of explicit) {
         // Per soul, and naming what its list *matched* — an allowlist can
@@ -1756,6 +1773,7 @@ export const runSetup = async (
       if (shortfall !== undefined) {
         writeLine(streams.stdout, `${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted too, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} — every call would fail until it is, under plugins["${name}"].agents.`);
       }
+      unlistedLine();
       skillLine();
       return;
     }
@@ -1783,7 +1801,9 @@ export const runSetup = async (
       return;
     }
 
-    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list and none of them names what it contributes, and a soul grants tools by naming them:`);
+    writeLine(streams.stdout, unlisted.length > 0
+      ? `${name} is enabled. No agent can call it yet — no soul's \`tools:\` list names what it contributes, a soul with no list gets only the tools registered as safe, and a soul grants tools by naming them:`
+      : `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list and none of them names what it contributes, and a soul grants tools by naming them:`);
     writeLine(streams.stdout, `  tools: [${everyTool[0] as string}]`);
     writeLine(streams.stdout, `Add it to the \`tools:\` list in ${state.soulPath ?? 'your agent\'s soul file'}, then run \`stratus plugins\` to see the whole chain and what it contributes.`);
     skillLine();

@@ -7450,11 +7450,11 @@ test('setup enables a plugin and writes the setting it is useless without', asyn
     '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes', '~/work'] },
   });
   // No soul files, so the roster is the built-in `stratus` agent — which
-  // has no `tools:` key and is therefore allowlisted for every registered
-  // tool. Enabling granted capability here and now, and the line has to
-  // say so: this is the commonest configuration there is, and claiming
-  // "no agent can call it yet" would understate what just happened.
-  assert.match(output.stdout, /Stratus \(stratus\) has no `tools:` list, which means every registered tool/);
+  // says `tools: ["*"]` in code and is therefore allowlisted for every
+  // registered tool. Enabling granted capability here and now, and the line
+  // has to say so: this is the commonest configuration there is, and
+  // claiming "no agent can call it yet" would understate what just happened.
+  assert.match(output.stdout, /Stratus \(stratus\) has `tools: \["\*"\]`, which means every registered tool/);
   assert.match(output.stdout, /callable by that agent the next time the daemon starts/);
   assert.doesNotMatch(output.stdout, /No agent can call it yet/);
 });
@@ -7492,6 +7492,36 @@ test('setup says a plugin grants nothing yet when every soul has a tools list', 
   // with or without the roster check.
   assert.match(output.stdout, /No agent can call it yet — every soul in the roster has a `tools:` list/);
   assert.match(output.stdout, /tools: \[fs\.read\]/);
+});
+
+test('setup does not count a soul with no tools list as able to call a plugin, and says why', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Takes the reserved id over so the roster holds this soul alone.
+  const soul = path.join(agentsDir, 'ava.md');
+  await writeFile(soul, '---\nname: Ava\nid: stratus\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // An omitted list is the safe tools now, not every tool, so enabling
+  // tool-fs granted this agent nothing that writes.
+  assert.match(output.stdout, /No agent can call it yet — no soul's `tools:` list names what it contributes, a soul with no list gets only the tools registered as safe/);
+  assert.doesNotMatch(output.stdout, /which means every registered tool/);
 });
 
 test('setup names the browser tool-browser needs but cannot install', async () => {
@@ -8041,10 +8071,10 @@ test('setup does not call a plugin callable by an agent its required setting mis
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
   // Ava has the roots; the built-in `stratus` agent is seeded into every
-  // roster and has neither a `tools:` list nor an override. Being
-  // allowlisted for every registered tool buys it nothing here — tool-fs
-  // resolves an empty roots list for it and throws on the first call.
-  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // roster with `tools: ["*"]` and no override. Being allowlisted for
+  // every registered tool buys it nothing here — tool-fs resolves an empty
+  // roots list for it and throws on the first call.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\ntools: ["*"]\n---\n\nYou are Ava.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'anthropic',
     plugins: {
@@ -8067,11 +8097,11 @@ test('setup does not call a plugin callable by an agent its required setting mis
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Ava \(ava\) has no `tools:` list/);
+  assert.match(output.stdout, /Ava \(ava\) has `tools: \["\*"\]`/);
   assert.match(output.stdout, /Stratus \(stratus\) is allowlisted too, but roots is not set for it/);
   // The claim the caveat replaces: naming stratus alongside ava as an
   // agent the filesystem tools are callable by.
-  assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have no `tools:` list/);
+  assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have `tools:/);
 });
 
 test('setup enables a plugin after the roots prompt repairs the value that was wrong', async () => {
