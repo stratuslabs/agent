@@ -4,6 +4,7 @@ import {
   isTaintedTrust,
   leastTrusted,
   MEMORY_ENTRY_KINDS,
+  MEMORY_EPISODIC_DEFAULT_TTL_DAYS,
   MEMORY_RECALL_TOOL_NAME,
   memoryEntryTrust,
   memoryValidityAt,
@@ -92,7 +93,9 @@ export const createRememberTool = (store: AgentMemoryStore): Tool => ({
       kind: {
         type: 'string',
         enum: [...MEMORY_ENTRY_KINDS],
-        description: 'What sort of fact this is: semantic (about the world), episodic (something that happened), procedural (how something is done), or preference.',
+        description: 'What sort of fact this is: semantic (about the world, including decisions that stay true), '
+          + `episodic (something that happened, such as a task's status or where work got to; it leaves your prompt ${MEMORY_EPISODIC_DEFAULT_TTL_DAYS} days after it was written unless you give validUntil), `
+          + 'procedural (how something is done), or preference.',
       },
       about: {
         type: 'array',

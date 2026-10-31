@@ -28,7 +28,7 @@ A fact is more than its text. Beyond the four fields every line must have —
 
 | Field | Means |
 | --- | --- |
-| `kind` | `semantic` (about the world), `episodic` (something that happened), `procedural` (how something is done), or `preference`. These have different useful lifetimes, and one flat bucket is how a store goes noisy. |
+| `kind` | `semantic` (about the world), `episodic` (something that happened), `procedural` (how something is done), or `preference`. These have different useful lifetimes, and one flat bucket is how a store goes noisy. An `episodic` fact with no `validUntil` expires after 14 days; see [Task notes expire by default](#task-notes-expire-by-default). |
 | `about` | The entities the fact concerns — people, systems, projects. This is what the prompt's topic index is built from, and it **participates in search**: a fact reading "it now runs on Postgres" with `about: ["deploy pipeline"]` is found by a search for the pipeline. |
 | `validFrom`, `validUntil` | When the fact starts and stops being true. A different axis from `createdAt`, which is when it was written — conflating the two is why assistants confidently report where someone used to work. ISO-8601; a date alone is UTC midnight, and a *time* must carry `Z` or an offset, or the same bound would mean a different instant on every machine. A day that does not exist is refused rather than rolled forward — `2026-02-30` would otherwise be stored as March 2nd, moving the bound two days with nothing on record to say so. |
 | `supersedes` | The id of a fact this one replaces. |
@@ -54,6 +54,26 @@ Being outside the window is not deletion. The entry is in the file, in
 search, and in `stratus memory audit`; it is just not what is true now,
 which is the only claim the injected slice makes.
 
+### Task notes expire by default
+
+Most of what a working agent remembers is short-lived: a PR's head, a
+loop's status, where a task got to. Without an end date those notes read as
+current forever. So an `episodic` fact with no `validUntil` of its own
+leaves what is true now **14 days** after it was written, or after its
+`validFrom` if that is later. From then on it behaves exactly like a fact
+whose window closed: out of the topic index and the recency tail, still
+returned by `memory.recall` and `stratus memory list`, marked `expired`.
+
+Nothing in the file changes. The default is read off `kind` and
+`createdAt`, so notes written before it existed expire the same way, and a
+note given a `validUntil` keeps that date instead, longer or shorter. Facts
+of every other kind, and lines with no `kind`, have no default.
+
+Two things do not follow from a note going stale. A **pinned** note stays
+in the pinned core, because pinning is how an agent says a note is still
+current. And a note that **superseded** a fact keeps that fact retired: a
+stale note is not evidence that the belief it replaced is true again.
+
 ### Facts the agent stopped believing
 
 `memory.remember` takes a `supersedes` id, and that field *is* the
@@ -64,7 +84,8 @@ prompt exactly as a forgotten one does, and stays visible in
 `stratus memory audit` beside the entry that replaced it, which is strictly
 more than a delete would leave behind.
 
-The retirement is scoped to the **successor's** validity window. A revision
+The retirement is scoped to the **successor's** own validity window (its
+`validFrom` and `validUntil`, not the episodic default). A revision
 dated from next Monday leaves the old fact standing until then, and a
 revision that has already expired displaces nothing — otherwise recording a
 change you know is coming would make the agent forget something it still
