@@ -63,9 +63,9 @@ test('message.send sends an agent that wants to message the person it is replyin
   // On a live Slack check, a model asked to "send me a mid-task message"
   // reached for message.send by its name, made up a thread id, and posted
   // at the channel's top level. Its description now says where that goes.
-  const send = createMessageSendTool(async () => ({ sent: true }));
-  assert.match(send.description, /conversation you are replying in/);
-  assert.match(send.description, /message\.say/);
+  const description = createMessageSendTool(async () => ({})).description ?? '';
+  assert.match(description, /conversation you are replying in/);
+  assert.match(description, /message\.say/);
 });
 
 test('message.say tells the agent its words between tool calls are not shown, and covers a person who asked to hear mid-task (card 1009 live check)', () => {
@@ -73,8 +73,8 @@ test('message.say tells the agent its words between tool calls are not shown, an
   // text between two tool calls, which Slack holds, and never called a
   // tool: nothing reached the person. The description now carries the fact
   // the choice depends on.
-  const tool = createMessageSayTool(async () => {});
-  assert.match(tool.description, /between tool calls are not shown/);
-  assert.match(tool.description, /asked to hear from you mid-task/);
-  assert.match(tool.description, /Never use it to narrate your steps/);
+  const description = createMessageSayTool(async () => {}).description ?? '';
+  assert.match(description, /between tool calls are not shown/);
+  assert.match(description, /asked to hear from you mid-task/);
+  assert.match(description, /Never use it to narrate your steps/);
 });
