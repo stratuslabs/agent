@@ -725,3 +725,10 @@ an agent cannot cold-message a workspace. This is what the
 `channels:read` / `groups:read` / `mpim:read` scopes in the manifest are
 for — an app created before this shipped needs them added under **OAuth &
 Permissions** and reinstalled once, or every destination reads as invisible.
+
+A reply names its thread by the ts of the thread's first message. Slack posts
+a reply to a ts it has no message for at the top level and still answers
+`ok`, so the adapter checks where Slack put the first chunk: when it landed at
+the top level, the adapter deletes it, sends nothing more, and refuses with
+"`C…` has no thread `…`". If the delete fails, the refusal says the message
+is still at the top level and gives its ts.
