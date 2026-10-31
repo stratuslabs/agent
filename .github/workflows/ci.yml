@@ -43,4 +43,6 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
-        run: pnpm test
+        # --no-bail: a failing package doesn't hide the failures in the ones
+        # after it, so one run shows everything that broke.
+        run: pnpm -r --no-bail test
