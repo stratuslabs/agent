@@ -55,6 +55,7 @@ export const createMessageSendTool = (
 ): Tool => ({
   name: MESSAGE_SEND_TOOL_NAME,
   description: 'Send a message to a channel or DM you are not currently talking in, at the top level or as a reply in one of its threads. '
+    + 'Not for the conversation you are replying in: say that in your reply, or mid-task with message.say. '
     + 'Returns the posted message\'s id, and the thread to name to reply under it: '
     + 'pass that returned thread (never a reply\'s id) to every later send in the same thread. '
     + 'Scheduled turns may post to their schedule\'s approved destination without asking; anywhere else needs approval.',

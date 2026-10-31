@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { JsonObject, Session } from '@stratusagent/core';
-import { createMessageSayTool, GATEWAY_ONLY_TOOL_NAMES, MESSAGE_SAY_MAX_LENGTH, MESSAGE_SAY_TOOL_NAME } from '../src/index.ts';
+import { createMessageSayTool, createMessageSendTool, GATEWAY_ONLY_TOOL_NAMES, MESSAGE_SAY_MAX_LENGTH, MESSAGE_SAY_TOOL_NAME } from '../src/index.ts';
 
 const sessionFor = (agentId: string, sessionId = 'sess-1'): Session => {
   const now = new Date().toISOString();
@@ -57,4 +57,13 @@ test('message.say passes on why a conversation cannot take the message', async (
     throw new Error('This conversation\'s channel (cli) cannot take a mid-task message. Say it in your reply.');
   });
   await assert.rejects(() => tool.execute({ text: 'hi' }, sessionFor('ava')), /cannot take a mid-task message/);
+});
+
+test('message.send sends an agent that wants to message the person it is replying to over to message.say (card 1009 live check)', () => {
+  // On a live Slack check, a model asked to "send me a mid-task message"
+  // reached for message.send by its name, made up a thread id, and posted
+  // at the channel's top level. Its description now says where that goes.
+  const send = createMessageSendTool(async () => ({ sent: true }));
+  assert.match(send.description, /conversation you are replying in/);
+  assert.match(send.description, /message\.say/);
 });
