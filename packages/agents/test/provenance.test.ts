@@ -30,8 +30,10 @@ import {
   RECALL_TOOL_NAME,
 } from '../src/index.ts';
 
-const AVA = { id: 'ava', name: 'Ava', delegates: ['bea'] };
-const BEA = { id: 'bea', name: 'Bea' };
+// Both say tools: ['*']: page.read declares no risk, so it is not a safe
+// tool, and a soul with no list would be refused it before any taint.
+const AVA = { id: 'ava', name: 'Ava', delegates: ['bea'], tools: ['*'] };
+const BEA = { id: 'bea', name: 'Bea', tools: ['*'] };
 
 const sessionAt = (trust: TrustLevel | undefined, taintedBy?: string): Session => ({
   id: 'session-1',

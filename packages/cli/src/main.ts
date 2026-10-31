@@ -26,6 +26,8 @@ import { runRestart } from './commands/restart.ts';
 import { runSchedules } from './commands/schedules.ts';
 import { runServe } from './commands/serve.ts';
 import { runService } from './commands/service.ts';
+import { serviceEnvFor } from './daemon.ts';
+import { pinnedServiceConfig, readServiceCommand } from './service.ts';
 import { runSessionRollover } from './commands/session.ts';
 import { runSessions } from './commands/sessions.ts';
 import { runSetup } from './commands/setup.ts';
@@ -140,7 +142,17 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
         writeLine(streams.stderr, `Warning: ${newerStateMessage(stamp.schemaVersion)}`);
       } else {
         try {
-          for (const migration of await runStateMigrations(resolvedEnv)) {
+          // The command's own --config and the installed unit's pinned one,
+          // so 0005 keeps the souls they name on every tool whichever
+          // command an upgrade runs first; STRATUS_CONFIG is read from the
+          // environment. Reading the unit is one file read, and a unit
+          // that cannot be read pins nothing.
+          const configPath = 'configPath' in command ? command.configPath : undefined;
+          const serviceConfig = pinnedServiceConfig(await readServiceCommand(serviceEnvFor(resolvedEnv)).catch(() => undefined));
+          for (const migration of await runStateMigrations(resolvedEnv, {
+            ...(configPath !== undefined ? { configPath } : {}),
+            ...(serviceConfig !== undefined ? { serviceConfig } : {}),
+          })) {
             if (migration.detail !== undefined) {
               writeLine(streams.stderr, `state migration ${migration.id}: ${migration.detail}`);
             }

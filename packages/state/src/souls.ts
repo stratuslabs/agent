@@ -20,7 +20,18 @@ export const DEFAULT_STRATUS_AGENT = {
   id: 'stratus',
   name: 'Stratus',
   instructions: 'You are Stratus, a personal agent on the Stratus Agent platform. Be warm, direct, and concise. When asked who or what you are, you are Stratus — a Stratus agent — regardless of which model is serving the conversation.',
+  // Every tool, as it always had. It has no soul file to write a list
+  // into, so it says so here instead of relying on an omitted list, which
+  // is safe tools only.
+  tools: ['*'],
 };
+
+/**
+ * The `tools:` list that grants every registered tool. An omitted list is
+ * only the tools registered as safe, so a soul that should have everything
+ * says this, and new souls are written with it.
+ */
+export const EVERY_TOOL: readonly string[] = ['*'];
 
 // A soul travels with the run: an explicit soul path outranks STRATUS_SOUL,
 // which outranks the config file's "soul" key.
@@ -180,19 +191,30 @@ export const grantSoulCredential = async (
     const next: ParsedSoul = { ...soul, agent: { ...soul.agent, credentials: [...granted, name] } };
     const rendered = formatSoul(next);
     parseSoul(rendered, { seed: soulPath });
-    const target = await realpath(soulPath);
-    const temporary = `${target}.${randomUUID()}.tmp`;
-    try {
-      await writeFileSynced(temporary, rendered, { mode: (await stat(target)).mode & 0o777 });
-      await rename(temporary, target);
-      await syncDirectory(path.dirname(target));
-    } catch (error) {
-      await rm(temporary, { force: true });
-      throw error;
-    }
+    await replaceSoulFile(soulPath, rendered);
     return true;
   };
   return withSoulFileLock(grant);
+};
+
+/**
+ * Replace a soul file's bytes the way every soul write does: to a sibling
+ * of the file behind any link, then renamed over it, keeping its mode. A
+ * dispatch re-reading the soul never sees it half-written, a crash leaves
+ * the old one, and a linked soul (the visible agents folder) keeps its
+ * link. Callers parse what they write first and hold `withSoulFileLock`.
+ */
+export const replaceSoulFile = async (soulPath: string, rendered: string): Promise<void> => {
+  const target = await realpath(soulPath);
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  try {
+    await writeFileSynced(temporary, rendered, { mode: (await stat(target)).mode & 0o777 });
+    await rename(temporary, target);
+    await syncDirectory(path.dirname(target));
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
 };
 
 export interface RosterEntry {

@@ -64,6 +64,7 @@ import {
   imagesWithinReplayBudget,
   type ObserveEntry,
   matchesToolAllowlist,
+  resolveToolRisk,
   type JsonObject,
   type MemoryStoreContribution,
   type ProviderCallGuard,
@@ -2399,16 +2400,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
   /**
-   * Said at load, because the allowlist fails open: `tools` omitted is
-   * every registered tool, the opposite of what `skills` and `credentials`
-   * do when omitted, and a soul that never wrote the key holds `shell.run`
-   * the moment that plugin is enabled. The built-in agent is exempt — it
-   * has no file to add the key to.
+   * Said at load, because an omitted `tools` list is a quiet downgrade: it
+   * is only the tools registered as safe, so an agent whose soul never
+   * wrote the key cannot run a shell, write a file or send a message, and
+   * nothing else says why. The upgrade wrote `tools: ["*"]` into every soul
+   * a home already had, so this names a soul written since, or one it could
+   * not read. The built-in agent is exempt: it has no file, and says
+   * `tools: ["*"]` in code.
    */
   const warnNoToolsList = (agentId: string, soulPath: string): void => {
     warn(
-      `agent ${agentId} has no tools: list, so it may call every tool this daemon loads — `
-      + `add tools: [...] to ${soulPath} to say which`,
+      `agent ${agentId} has no tools: list, so it gets only safe tools (reads and memory) — `
+      + `add tools: [...] to ${soulPath} to give it more, or tools: ["*"] for every tool`,
     );
   };
 
@@ -3186,7 +3189,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // bearer credential the model is handed, and whoever it reaches can
     // store a key and amend the soul. That is the operator's to allow.
     const allowlist = session.agent.tools ?? registry.get(agentId)?.tools;
-    const linkAllowed = allowlist === undefined || matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
+    // An omitted list grants the safe tools, this one among them, but a
+    // link is the operator's to allow by naming it, so only a list says yes.
+    const linkAllowed = allowlist !== undefined && matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
     // Why no form went up, said to the agent beside the link that replaces
     // it, so it can tell the person why they are getting a link instead.
     let formUnavailable: string | undefined;
@@ -3602,7 +3607,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (!Array.isArray(requested) || requested.some((name) => typeof name !== 'string' || name.length === 0)) {
       return 'A sub-agent\'s tools are a list of tool names.';
     }
-    const allowlist = parent.agent.tools;
+    // Read the way the runner reads it for the parent's own calls: the
+    // session's copy, else the registered agent's.
+    const allowlist = parent.agent.tools ?? registry.get(parent.agent.id)?.tools;
     for (const name of requested as string[]) {
       if (/[*?]/.test(name)) {
         return `A sub-agent's tools are exact names, and ${name} is a pattern.`;
@@ -3610,12 +3617,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (subAgentNeverGets(name)) {
         return `${name} is never given to a sub-agent, even by an agent that holds it.`;
       }
-      if (!tools.get(name)) {
+      const tool = tools.get(name);
+      if (!tool) {
         return `There is no tool named ${name}.`;
       }
       // The parent's allowlist as its running turn holds it: a slice can
-      // only narrow what that turn may already do.
-      if (allowlist !== undefined && !matchesToolAllowlist(name, allowlist)) {
+      // only narrow what that turn may already do. With no list, that is
+      // the tools registered as safe, and the slice is held to the same
+      // rule: naming a gated tool must not hand it to the sub-agent.
+      if (allowlist === undefined) {
+        if (resolveToolRisk(tool) !== 'safe') {
+          return `${name} is not a safe tool, and ${parent.agent.id}'s soul has no tools: list, so it gets only safe tools and a sub-agent of it cannot have ${name}.`;
+        }
+      } else if (!matchesToolAllowlist(name, allowlist)) {
         return `${name} is not one of ${parent.agent.id}'s tools, so a sub-agent of it cannot have it.`;
       }
     }

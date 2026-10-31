@@ -238,6 +238,7 @@ export {
 
 export {
   DEFAULT_STRATUS_AGENT,
+  EVERY_TOOL,
   resolveSoulPath,
   resolveSoul,
   resolveConfiguredSoul,

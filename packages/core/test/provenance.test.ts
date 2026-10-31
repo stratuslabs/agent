@@ -34,7 +34,7 @@ import {
   type ToolResult,
 } from '../src/index.ts';
 
-const AGENT = { id: 'ava', name: 'Ava' };
+const AGENT = { id: 'ava', name: 'Ava', tools: ['*'] };
 
 /**
  * A provider that answers each user turn with the scripted tool calls and

@@ -39,7 +39,8 @@ const startLinking = async (request: object = { name: 'github.token', reason: 'T
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
   const soulFile = path.join(agentsDir, 'kai.md');
-  await writeFile(soulFile, '---\nname: Kai\nprovider: openai\nmodel: model-a\n---\n\nYou are Kai.\n');
+  // A link needs a tools: list naming credential.request; "*" names it.
+  await writeFile(soulFile, '---\nname: Kai\nprovider: openai\nmodel: model-a\ntools: ["*"]\n---\n\nYou are Kai.\n');
   let calls = 0;
   const fetchImpl = (async () => {
     calls += 1;

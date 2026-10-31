@@ -577,6 +577,19 @@ export const readServiceCommand = async (env: ServiceEnvironment = {}): Promise<
 };
 
 /**
+ * The config the installed unit pins the daemon to, with the directory the
+ * unit runs it from, as state migration 0005 reads it: the first command of
+ * an upgrade, whatever it is and wherever it was typed, then keeps the soul
+ * that config names (a relative one from the unit's directory) on every
+ * tool. Undefined when no unit is installed or it pins no config.
+ */
+export const pinnedServiceConfig = (
+  unit: ServiceCommandInfo | undefined,
+): { path: string; workingDirectory?: string } | undefined => (unit?.configPath === undefined
+  ? undefined
+  : { path: unit.configPath, ...(unit.workingDirectory !== undefined ? { workingDirectory: unit.workingDirectory } : {}) });
+
+/**
  * Whose unit the manager has loaded under this user's one stratusd label.
  *
  * The label (`com.stratusagent.stratusd`, `stratusd.service`) belongs to

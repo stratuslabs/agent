@@ -66,25 +66,39 @@ tools: [fs.read, fs.search, web.fetch]
 
 `fs.*` grants a whole toolset, so an agent given "the filesystem" does not
 need editing every time the pack gains a tool. The prefix keeps its dot:
-`fs.*` never matches `fsx.read`. Omitting the key grants every registered
-tool, which is fine for a private agent and is not what you want once a
-shell is installed.
+`fs.*` never matches `fsx.read`. `tools: ["*"]` grants every registered
+tool, which is fine for a private agent and is what setup, `stratus agent
+new` and the dashboard write into a new soul, so you can see it and narrow
+it once a shell is installed.
 
-**Omitting `tools:` and writing `tools: []` are opposites.** No key grants
-everything; an empty list grants nothing. Because no key fails open, the
-daemon says so for every roster soul that has none, each time it loads
-the roster:
+**Omitting `tools:`, `tools: []` and `tools: ["*"]` are three different
+grants.** No key grants only the tools registered at risk `safe` (reads,
+search and memory, plus any tool an operator re-rated as safe); an empty
+list grants nothing; `"*"` grants everything. The daemon names every roster
+soul with no key each time it loads the roster, because an agent that
+cannot run a shell or send a message and does not say why is hard to
+diagnose:
 
 ```
-agent blair has no tools: list, so it may call every tool this daemon loads — add tools: [...] to ~/.stratus/agents/blair.md to say which
+agent blair has no tools: list, so it gets only safe tools (reads and memory) — add tools: [...] to ~/.stratus/agents/blair.md to give it more, or tools: ["*"] for every tool
 ```
+
+Until 0.14.3 an omitted key meant every registered tool. Upgrading writes
+`tools: ["*"]`, under a comment saying why, into every soul the home
+already had (state migration `0005-explicit-tools-lists`), so nothing an
+existing agent can do changes. A soul it could not read, such as a link
+into a home this one was copied from, is named in the migration's report
+and gets safe tools until you give it a list. Souls named only by
+`--soul` or `STRATUS_SOUL`, or by a config neither the first command nor
+the service unit names, are not visible to the migration; the line above
+names them at start.
  A bare `tools:` with nothing
 indented under it is the empty list — the shape you get by writing the key
 and not filling it, or by deleting the last entry — so that one is warned
 about too:
 
 ```
-agent blair has an empty tools: list, which grants nothing — remove the key to allow every registered tool, or list the ones it should have
+agent blair has an empty tools: list, which grants nothing — list the tools it should have, or write tools: ["*"] to allow every registered tool
 ```
 
 **An entry naming a tool nothing provides is inert, and says so.** A `fs.*`
@@ -335,8 +349,8 @@ spawn every server you configured. Two consequences worth knowing:
   on, not a broken one.
 - **The built-in agent counts, and grants everything.** Unless a configured
   default soul takes the reserved `stratus` id over, the daemon registers
-  the built-in agent, and it has no `tools:` key — so it may call every
-  registered tool. On a fresh install it is the only agent there is, which
+  the built-in agent, which has no soul file and is given `tools: ["*"]` in
+  code — so it may call every registered tool. On a fresh install it is the only agent there is, which
   is why nothing there reads `granted to nobody`.
 - **The approvals line is about this machine, not just the mode.** `headless`
   refuses a gated call *last*, after the standing grants, the command scopes,
