@@ -1372,6 +1372,20 @@ class ReplyRenderer {
     this.setStatus(this.statusText ?? THINKING_STATUS);
   }
 
+  /**
+   * A post of an app's landed in `channel` under `thread` from outside this
+   * turn: `message.send` from another of its sessions, say. Slack clears
+   * the app's status in a thread on any post of the app's there, so a turn
+   * of the same app working in that thread puts its status back rather
+   * than wait for the next refresh (card 1009). Another app's post clears
+   * nothing of this one's.
+   */
+  appPosted(web: SlackWebLike, channel: string, thread: string): void {
+    if (web === this.web && channel === this.channel && thread === this.statusThread) {
+      this.refreshLoading();
+    }
+  }
+
   private stopLoading(): void {
     if (this.statusTimer) {
       clearInterval(this.statusTimer);
@@ -5023,6 +5037,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           }
         } finally {
           accepted(sent === chunks.length ? text : sent > 0 ? chunks.slice(0, sent).join('\n') : undefined);
+          if (thread && sent > 0) {
+            // The post took down the status of any turn of this app's
+            // working in that thread; the turn at each session's head puts
+            // its own back.
+            for (const queue of renderers.values()) {
+              queue[0]?.appPosted(web, channelId, thread);
+            }
+          }
         }
         return first ?? { channel: channelId, ts: '' };
       },

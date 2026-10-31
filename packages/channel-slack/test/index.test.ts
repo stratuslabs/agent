@@ -485,6 +485,44 @@ test('the loading status comes back once an approval asked mid-turn is answered'
   assert.deepEqual(statuses.slice(before).map((status) => status.status), ['is thinking…']);
 });
 
+test('a post sent into the thread of a working turn puts that turn\'s loading status back (card 1009)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C1', { is_member: true });
+  const statuses = recordStatuses(web);
+  let adapter!: ReturnType<typeof createAdapterAsShipped>;
+  let before = -1;
+  let after: RecordedStatus[] = [];
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+    await new Promise((resolve) => setImmediate(resolve));
+    before = statuses.length;
+    // Another of this app's sessions (a scheduled report, say) posts into
+    // the thread while this turn's tool is still running. Slack clears
+    // the thread's status on any post of the app's there. A post into
+    // another thread leaves this one's status alone.
+    await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C1', thread: '200.1' })).post('Elsewhere.');
+    await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C1', thread: '100.1' })).post('Nightly report.');
+    await new Promise((resolve) => setImmediate(resolve));
+    after = statuses.slice(before);
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+
+  adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> run the build'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Elsewhere.', '200.1'], ['Nightly report.', '100.1'], ['Done.', '100.1']]);
+  assert.deepEqual(after.map((status) => [status.status, status.thread_ts]), [['is running shell.run…', '100.1']]);
+});
+
 test('a final reply waiting on a slow upload is not overtaken by the turn queued behind it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
