@@ -118,6 +118,10 @@ export const applyEveryToolLines = async (env: StateEnvironment): Promise<string
     try {
       target = await realpath(soulPath);
     } catch {
+      // A link into a home this one was copied from, say. Named rather
+      // than passed over, because once it is restored the agent comes back
+      // with safe tools only, and this report is where that is said first.
+      skipped.push(soulPath);
       continue;
     }
     // One file reached two ways (a configured soul that is also in the
@@ -152,7 +156,7 @@ export const applyEveryToolLines = async (env: StateEnvironment): Promise<string
     parts.push(`wrote ${EVERY_TOOL_LINE} into the soul of ${written.join(', ')}, so ${written.length === 1 ? 'it keeps' : 'they keep'} every tool`);
   }
   if (skipped.length > 0) {
-    parts.push(`left ${skipped.join(', ')} as ${skipped.length === 1 ? 'it was' : 'they were'} (not a soul that loads), so ${skipped.length === 1 ? 'it gets' : 'they get'} only safe tools until given a tools: list`);
+    parts.push(`left ${skipped.join(', ')} as ${skipped.length === 1 ? 'it was' : 'they were'} (unreadable, or not a soul that loads), so ${skipped.length === 1 ? 'it gets' : 'they get'} only safe tools until given a tools: list`);
   }
   return parts.length > 0 ? parts.join('; ') : undefined;
 };

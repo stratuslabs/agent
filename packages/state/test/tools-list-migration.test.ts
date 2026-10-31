@@ -160,3 +160,12 @@ test('a soul that does not load is left as it was and named in the report', asyn
   assert.equal(await readFile(soulPath, 'utf8'), broken);
   assert.match(applied[0]?.detail ?? '', /left .*ava\.md as it was/);
 });
+
+test('a soul link that points at nothing is named in the report, not passed over', async () => {
+  const env = await home({ upgraded: true });
+  const dangling = path.join(agentsDirPath(env), 'bob.md');
+  await symlink(path.join(env.homeDir, 'gone', 'bob', 'soul.md'), dangling);
+
+  const applied = await runStateMigrations(env);
+  assert.match(applied[0]?.detail ?? '', /left .*bob\.md as it was \(unreadable/);
+});
