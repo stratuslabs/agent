@@ -191,17 +191,30 @@ cap; a number caps the extra budgets per message. It still stops to sum up:
 
 - when it is stuck repeating the same failing call (kernel loop only — Anthropic and OpenAI-compatible providers; the claude-code and codex runtimes run their own loops and do not have this check);
 - when its cap is reached;
-- when somebody has sent it another message in that conversation
-  meanwhile: they get the summary, and their message runs next.
+- when somebody has sent it another message in that conversation that
+  is still waiting when the budget runs out: they get the summary, and
+  their message runs next.
 
 Approvals, grants and trust labels apply exactly as they did. Off for every
 agent not listed, because it spends tokens without a ceiling; the startup
 log names the agents it is on for. It applies to the built-in model loop
 (Anthropic and OpenAI-compatible providers) and to the `claude-code`
 runtime, which carries on in the same Claude Code session with a fresh
-budget. The `codex` runtime is not covered yet and wraps up as before. Nothing stops a running
-turn from Slack yet, so an uncapped runaway turn ends with a new message to
-the agent or a daemon restart.
+budget. The `codex` runtime is not covered yet and wraps up as before. With
+`true` there is no ceiling, and a message that joins the turn mid-task
+(below) doesn't end it, so a runaway turn ends with
+[`stop` in Slack](../guides/slack.md#stopping-a-turn) or a daemon restart.
+
+**A message sent mid-task shares the budget.** On Slack, a message sent
+while the agent works [joins the running turn](../guides/slack.md#how-replies-appear) at its
+next step (not under the `codex` and `claude-code` runtimes, where it waits
+for the next turn). It gets the steps the turn has left and adds none: the budget,
+the auto-continue cap and the repeated-failure count below carry on as
+they were, so a conversation that writes at every step can't keep one turn
+going past its ceiling. A message that arrives once the turn is out of
+steps isn't taken in: the turn wraps up, and the message runs next as its
+own turn, with a budget of its own. A turn continued after a daemon
+restart carries on with the steps it had already spent.
 
 A provider that ignores the no-tools request and calls a tool anyway on
 that last call fails the turn with `Session exceeded the maximum of N
