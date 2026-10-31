@@ -831,14 +831,21 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       if (options.ledger !== undefined) {
         context?.markTrust?.(await recordedLabel(options.ledger, session.agent.id));
       }
+      const credentialEnv = await credentialEnvFor(config, session, options.credentials);
       const settings = settingsFor(
         config,
         session,
         options.processEnv ?? process.env,
         options.workspaces,
         options.home,
-        await credentialEnvFor(config, session, options.credentials),
+        credentialEnv,
       );
+      // What the store put in the environment comes back masked if the
+      // command prints it (`printenv`, a CLI's debug output): the result goes
+      // into the transcript, every later model request, the event stream and
+      // whatever the model saves to memory. Values from `env` stay visible,
+      // as the operator wrote them where anyone reading the config sees them.
+      const redact = Object.values(credentialEnv);
       if (settings.cwd) {
         // `spawn` fails with a bare `ENOENT` naming the *shell* when its
         // working directory does not exist — which on a fresh install is
@@ -889,6 +896,7 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
         // stdout must not be held whole in the daemon's heap for a result
         // that is about to be cut to this size anyway.
         maxOutputBytes: settings.maxOutputBytes,
+        ...(redact.length > 0 ? { redact } : {}),
       };
     },
     // And again after: another turn of this agent may record a tainted

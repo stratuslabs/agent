@@ -709,6 +709,11 @@ test('with the external-content gate on, a shell read of a tainted file closes t
   assert.match(decisions[1]?.reason ?? '', /after this conversation read external content \(from shell\.run\)/);
 });
 
+// A command printing each variable's value uppercased, in brackets. The tool
+// masks a stored credential the command prints as is, so these tests, which
+// are about which value reached the command, print it changed.
+const shown = (...names: string[]) => `echo "${names.map((name) => `[$(printf %s "$${name}" | tr a-z A-Z)]`).join('')}"`;
+
 // A store that holds ava's and blair's keys and records what it was asked.
 const credentialStore = (stored: Record<string, Record<string, string>>) => {
   const asked: string[] = [];
@@ -749,20 +754,20 @@ test('credentialsEnv puts an agent\'s own stored credential in its shell, and on
     credentialsEnv: { GH_TOKEN: 'github.token' },
     agents: { ava: { credentialsEnv: { VERCEL_TOKEN: 'vercel.token' } } },
   };
-  const ava = await runAs(config, { credentials: resolver }, 'echo "[$GH_TOKEN][$VERCEL_TOKEN]"', { id: 'ava', credentials: ['github.token', 'vercel.token'] });
-  assert.equal(String((ava.output as JsonObject).stdout).trim(), '[ghs-ava][vc-ava]', JSON.stringify(ava));
+  const ava = await runAs(config, { credentials: resolver }, shown('GH_TOKEN', 'VERCEL_TOKEN'), { id: 'ava', credentials: ['github.token', 'vercel.token'] });
+  assert.equal(String((ava.output as JsonObject).stdout).trim(), '[GHS-AVA][VC-AVA]', JSON.stringify(ava));
   // The fleet-wide mapping, resolved for blair: her own token, never ava's,
   // and no VERCEL_TOKEN, which only ava's entry maps.
-  const blair = await runAs(config, { credentials: resolver }, 'echo "[$GH_TOKEN][$VERCEL_TOKEN]"', { id: 'blair', credentials: ['github.token'] });
-  assert.equal(String((blair.output as JsonObject).stdout).trim(), '[ghs-blair][]');
+  const blair = await runAs(config, { credentials: resolver }, shown('GH_TOKEN', 'VERCEL_TOKEN'), { id: 'blair', credentials: ['github.token'] });
+  assert.equal(String((blair.output as JsonObject).stdout).trim(), '[GHS-BLAIR][]');
   // An agent whose soul doesn't grant the name gets nothing, and the store
   // is never asked for it.
-  const kai = await runAs(config, { credentials: resolver }, 'echo "[$GH_TOKEN]"', { id: 'kai' });
+  const kai = await runAs(config, { credentials: resolver }, shown('GH_TOKEN'), { id: 'kai' });
   assert.equal(String((kai.output as JsonObject).stdout).trim(), '[]');
   assert.ok(!asked.some((entry) => entry.startsWith('kai:')), asked.join());
   // The stored value wins over the same name set in env: one source of truth.
-  const both = await runAs({ ...config, env: { GH_TOKEN: 'stale' } }, { credentials: resolver }, 'echo "[$GH_TOKEN]"', { id: 'ava', credentials: ['github.token'] });
-  assert.equal(String((both.output as JsonObject).stdout).trim(), '[ghs-ava]');
+  const both = await runAs({ ...config, env: { GH_TOKEN: 'stale' } }, { credentials: resolver }, shown('GH_TOKEN'), { id: 'ava', credentials: ['github.token'] });
+  assert.equal(String((both.output as JsonObject).stdout).trim(), '[GHS-AVA]');
 });
 
 test('credentialsEnv refuses a variable that runs or finds programs, and a host with no credential store', async () => {
@@ -791,11 +796,11 @@ test('the plugin hands the host\'s credential store to the tool', async () => {
     credentials: resolver as never,
   });
   const result = await createLocalCommandExecutor().execute(
-    { id: 'call-1', toolName: 'shell.run', input: { command: 'echo "[$GH_TOKEN]"' } },
+    { id: 'call-1', toolName: 'shell.run', input: { command: shown('GH_TOKEN') } },
     tools.get('shell.run')!,
     { ...session('ava'), agent: { id: 'ava', name: 'ava', credentials: ['github.token'] } },
   );
-  assert.equal(String((result.output as JsonObject).stdout).trim(), '[ghs-ava]', JSON.stringify(result));
+  assert.equal(String((result.output as JsonObject).stdout).trim(), '[GHS-AVA]', JSON.stringify(result));
 });
 
 // A store whose bindings can change between commands, as a form answer
@@ -819,7 +824,7 @@ test('a credential binding reaches the next command through the same tool, with 
   const store = bindingStore({});
   const tool = createShellTool({ sandbox: 'off', passEnv: ['PATH'] }, { processEnv: { PATH: process.env.PATH }, credentials: store.resolver });
   const run = () => createLocalCommandExecutor().execute(
-    { id: 'call-1', toolName: 'shell.run', input: { command: 'echo "[$TWILIO_AUTH_TOKEN]"' } },
+    { id: 'call-1', toolName: 'shell.run', input: { command: shown('TWILIO_AUTH_TOKEN') } },
     tool,
     { ...session('ava'), agent: { id: 'ava', name: 'ava', credentials: ['twilio.authToken'] } },
   );
@@ -829,7 +834,7 @@ test('a credential binding reaches the next command through the same tool, with 
   // tool object, built before it existed, hands it to the next command.
   store.bound.ava = { TWILIO_AUTH_TOKEN: 'tw-secret' };
   const after = await run();
-  assert.equal(String((after.output as JsonObject).stdout).trim(), '[tw-secret]', JSON.stringify(after));
+  assert.equal(String((after.output as JsonObject).stdout).trim(), '[TW-SECRET]', JSON.stringify(after));
 });
 
 test('the config\'s credentialsEnv pins a variable over a binding, and a binding the variable rule refuses refuses the command', async () => {
@@ -837,21 +842,21 @@ test('the config\'s credentialsEnv pins a variable over a binding, and a binding
   const agent = { id: 'ava', credentials: ['github.token'] };
   // The operator mapped GH_TOKEN, so the binding for it is ignored; the
   // other binding still applies.
-  const pinned = await runAs({ credentialsEnv: { GH_TOKEN: 'github.token' } }, { credentials: store.resolver }, 'echo "[$GH_TOKEN][$NPM_TOKEN]"', agent);
-  assert.equal(String((pinned.output as JsonObject).stdout).trim(), '[ghs-config][npm-bound]', JSON.stringify(pinned));
+  const pinned = await runAs({ credentialsEnv: { GH_TOKEN: 'github.token' } }, { credentials: store.resolver }, shown('GH_TOKEN', 'NPM_TOKEN'), agent);
+  assert.equal(String((pinned.output as JsonObject).stdout).trim(), '[GHS-CONFIG][NPM-BOUND]', JSON.stringify(pinned));
   // Pinned even when the mapped name isn't granted: the operator said where
   // GH_TOKEN comes from, and a binding doesn't fill it in.
-  const ungranted = await runAs({ credentialsEnv: { GH_TOKEN: 'github.token' } }, { credentials: store.resolver }, 'echo "[$GH_TOKEN]"', { id: 'ava' });
+  const ungranted = await runAs({ credentialsEnv: { GH_TOKEN: 'github.token' } }, { credentials: store.resolver }, shown('GH_TOKEN'), { id: 'ava' });
   assert.equal(String((ungranted.output as JsonObject).stdout).trim(), '[]');
   // An agent's own empty entry withholds a fleet mapping, and that holds
   // against a binding too (Codex P2 4402851919).
   const withheld = await runAs(
     { credentialsEnv: { GH_TOKEN: 'github.token' }, agents: { ava: { credentialsEnv: { GH_TOKEN: '' } } } },
     { credentials: store.resolver },
-    'echo "[$GH_TOKEN][$NPM_TOKEN]"',
+    shown('GH_TOKEN', 'NPM_TOKEN'),
     agent,
   );
-  assert.equal(String((withheld.output as JsonObject).stdout).trim(), '[][npm-bound]', JSON.stringify(withheld));
+  assert.equal(String((withheld.output as JsonObject).stdout).trim(), '[][NPM-BOUND]', JSON.stringify(withheld));
   // Only a hand-edited file gets here; the command is refused, by variable,
   // and no value is echoed into the error.
   for (const variable of ['PATH', 'NODE_OPTIONS_X', 'BASH_ENV', 'GIT_DIR']) {
@@ -867,6 +872,29 @@ test('the config\'s credentialsEnv pins a variable over a binding, and a binding
     assert.match(result.error ?? '', new RegExp(`stored credential binding names ${variable}`), variable);
     assert.ok(!(result.error ?? '').includes('bound-value'), variable);
   }
+});
+
+test('a stored credential a command prints comes back masked, on success and failure; a config env value stays visible', async () => {
+  const key = 'ghs-ava-0123456789';
+  const { resolver } = credentialStore({ ava: { 'github.token': key } });
+  const agent = { id: 'ava', credentials: ['github.token'] };
+  const config = { credentialsEnv: { GH_TOKEN: 'github.token' }, env: { GIT_AUTHOR_NAME: 'Ava Bot' } };
+  const printed = await runAs(config, { credentials: resolver }, 'echo "[$GH_TOKEN] $GIT_AUTHOR_NAME"; echo "$GH_TOKEN" >&2', agent);
+  assert.equal(printed.ok, true, JSON.stringify(printed));
+  assert.equal(String((printed.output as JsonObject).stdout).trim(), '[[redacted]] Ava Bot');
+  assert.equal(String((printed.output as JsonObject).stderr).trim(), '[redacted]');
+  // The command still had the value to use.
+  const used = await runAs(config, { credentials: resolver }, shown('GH_TOKEN'), agent);
+  assert.equal(String((used.output as JsonObject).stdout).trim(), '[GHS-AVA-0123456789]');
+  // A failing command's output reaches the model too.
+  const failing = await runAs(config, { credentials: resolver }, 'printenv GH_TOKEN; exit 1', agent);
+  assert.equal(failing.ok, false);
+  assert.equal(String((failing.output as JsonObject).stdout).trim(), '[redacted]');
+  assert.ok(!JSON.stringify(failing).includes(key), JSON.stringify(failing));
+  // A binding from a credential form is masked the same way.
+  const bound = bindingStore({ ava: { NPM_TOKEN: 'npm-bound-0123456789' } });
+  const viaBinding = await runAs({}, { credentials: bound.resolver }, 'echo "$NPM_TOKEN"', agent);
+  assert.equal(String((viaBinding.output as JsonObject).stdout).trim(), '[redacted]', JSON.stringify(viaBinding));
 });
 
 test('with the external-content gate on, a tainted ledger closes grants before the first shell call is judged', async () => {

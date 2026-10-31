@@ -92,7 +92,10 @@ linked own the full story.
   is for one agent, even on a shared key: a delegated agent runs as itself
   and gets only its own, while a sub-agent runs under its parent and gets
   the parent's. The config's `credentialsEnv` pins a variable over any
-  binding, and the audit line names the variable.
+  binding, and the audit line names the variable. A command that prints a
+  stored value as is gets `[redacted]` back in its place, which keeps an
+  accidental `printenv` out of the conversation but stops no command that
+  means to show it.
   ([tool-shell](../../packages/tool-shell/README.md#stored-credentials-in-the-environment))
 - **A credential link is a bearer capability, by choice.** Where no form
   can be shown, an agent whose soul lists `credential.request` (or has no
