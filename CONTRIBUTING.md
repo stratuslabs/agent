@@ -23,7 +23,8 @@ Security problems don't go in issues or pull requests. See
 ## Set up a checkout
 
 You need Node 22.16+ on the 22.x line, or Node 24+ (not 23.x), and pnpm
-through Corepack.
+through Corepack. Node 25 and later no longer ship Corepack, so on those
+run `npm install -g corepack` first.
 
 ```bash
 corepack enable && corepack prepare pnpm@10.18.3 --activate

@@ -106,6 +106,7 @@ What doesn't work yet, or works differently than you might assume, is in
 ## From source
 
 ```bash
+# Node 25+ no longer ships Corepack: npm install -g corepack
 corepack enable && corepack prepare pnpm@10.18.3 --activate
 git clone https://github.com/stratuslabs/agent.git && cd agent
 pnpm install --frozen-lockfile
