@@ -121,6 +121,58 @@ export const createMessageSendTool = (
   },
 });
 
+export const MESSAGE_SAY_TOOL_NAME = 'message.say';
+
+/** The most a mid-task message may say: one line, not a report (card 1009). */
+export const MESSAGE_SAY_MAX_LENGTH = 500;
+
+/**
+ * Posts one message into the conversation `session` is replying in, now.
+ * The gateway implements it over the channel contract's optional `say`,
+ * and rejects, with a sentence for the agent, when the session's channel
+ * cannot take one (a terminal run, a schedule with nobody watching, a
+ * channel without the method).
+ */
+export type ConversationSayer = (input: { session: Session; text: string }) => Promise<void>;
+
+/**
+ * A mid-task message to the person the agent is working for, in the
+ * conversation it is already replying in (card 1009). Slack holds the
+ * words a model writes between tool calls, so this is how an agent says
+ * something before its reply on purpose: a question only the person can
+ * answer, or news they would want before it finishes.
+ *
+ * `safe`, unlike `message.send`: it takes no destination, so it can reach
+ * no one the reply could not, and it says nothing the reply could not
+ * have said. What keeps it from becoming narration is the description,
+ * the one-line cap here, and a per-turn cap in the channel.
+ */
+export const createMessageSayTool = (say: ConversationSayer): Tool => ({
+  name: MESSAGE_SAY_TOOL_NAME,
+  description: 'Send the person you are working for one short message now, in the conversation you are replying in, before your reply. '
+    + 'Use it only when you need them (a decision, an OK, something only they can give) or they would want to know something before you finish. '
+    + 'Never use it to narrate your steps: your reply follows when you are done. It reaches only this conversation.',
+  risk: 'safe',
+  parameters: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: `One line, at most ${MESSAGE_SAY_MAX_LENGTH} characters.` },
+    },
+    required: ['text'],
+  },
+  async execute(input: JsonObject, session: Session) {
+    const text = typeof input.text === 'string' ? input.text.trim() : '';
+    if (!text) {
+      throw new Error('message.say requires a non-empty "text".');
+    }
+    if (text.length > MESSAGE_SAY_MAX_LENGTH) {
+      throw new Error(`message.say takes one line of at most ${MESSAGE_SAY_MAX_LENGTH} characters. Put the rest in your reply.`);
+    }
+    await say({ session, text });
+    return { sent: true };
+  },
+});
+
 export const MESSAGE_READ_TOOL_NAME = 'message.read';
 
 /** The most messages one `message.read` call returns. */

@@ -222,13 +222,24 @@ agent's last words came before its last tool call, those words are the
 reply. A task that fails or is stopped says so where the reply would
 have gone.
 
+When an agent does need you before it finishes, it says so on purpose
+with `message.say`: one short message into the conversation it is
+replying in, such as "Need your OK to delete feature-x, it isn't merged."
+The default prompt tells it to do that only when it needs you or the news
+is worth your time, never to narrate its steps. The tool reaches only that
+conversation, so it is `safe` and never waits on an approval. A turn can
+send at most three, each at most 500 characters. In `stream` mode the
+words already show as they are written, so the tool refuses there.
+
 While it works, Slack shows its own loading status under the
 agent's name: "is thinking…", or "is running shell.run…" while a tool runs.
 The same step also goes out as Slack's loading message ("Running
 shell.run…"), for Slack's newer agent sessions, which replace the status
 line with their own text ("Finding answers…"). A turn nobody asked for (an agent that
 [judges](#how-an-agent-listens)) shows no status, since it may decide to
-say nothing.
+say nothing. Slack takes the status down whenever the agent's app posts
+in the thread, so the agent puts it back after its own posts, uploads,
+answered approvals, and a `message.send` from another of its sessions.
 
 Messages you send while it is still working reach it at its next step:
 once the tool it is running finishes, it reads them before it decides what

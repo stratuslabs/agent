@@ -11890,6 +11890,72 @@ const runTool = async (gateway: StubGateway, sessionId: string, id: string, tool
 const say = (gateway: StubGateway, sessionId: string, text: string) =>
   gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text } });
 
+test('message.say posts a mid-task line after the first line, between the held words, and puts the status back (card 1009)', async () => {
+  for (const replies of ['final', 'texts'] as const) {
+    const { socket, web, adapter } = quietAdapter({ replies });
+    const statuses = recordStatuses(web);
+    let landedWhenResolved = false;
+    let statusesBefore = -1;
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      await say(gateway, sessionId, 'On it, cleaning up the branches.');
+      await runTool(gateway, sessionId, 'c1');
+      await say(gateway, sessionId, 'Three are merged, one is not.');
+      await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c2', toolName: 'message.say', input: {} } });
+      statusesBefore = statuses.length;
+      await adapter.say!({ sessionId, agentId: 'ava', text: 'Need your OK to delete feature-x, it is not merged.' });
+      landedWhenResolved = web.posts.some((post) => post.text === 'Need your OK to delete feature-x, it is not merged.');
+      await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c2', toolName: 'message.say', ok: true, output: { sent: true } } });
+      return sessionWithReply(sessionId, 'Deleted three merged branches. feature-x waits on your OK.');
+    });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> clean up the branches'));
+    await adapter.stop();
+
+    assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [
+      ['On it, cleaning up the branches.', '100.1'],
+      ['Need your OK to delete feature-x, it is not merged.', '100.1'],
+      ['Deleted three merged branches. feature-x waits on your OK.', '100.1'],
+    ], replies);
+    assert.ok(landedWhenResolved, 'the call returns once Slack has the message');
+    assert.ok(statuses.slice(statusesBefore).some((status) => status.status !== ''), 'the status is put back after the post');
+  }
+});
+
+test('message.say refuses past three a turn, on a streaming turn, and with no turn running, and posts nothing for them', async () => {
+  const { socket, web, adapter } = quietAdapter();
+  const refusals: string[] = [];
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    for (const n of [1, 2, 3, 4]) {
+      await adapter.say!({ sessionId, agentId: 'ava', text: `note ${n}` }).catch((error: Error) => refusals.push(error.message));
+    }
+    // Another agent's app does not post into this agent's turn.
+    await adapter.say!({ sessionId, agentId: 'bob', text: 'not mine' }).catch((error: Error) => refusals.push(error.message));
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await assert.rejects(() => adapter.say!({ sessionId: 'no-such-session', agentId: 'ava', text: 'late' }), /no turn of yours running.*reply/);
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['note 1', 'note 2', 'note 3', 'Done.']);
+  assert.equal(refusals.length, 2);
+  assert.match(refusals[0] ?? '', /already sent 3 mid-task messages.*reply/);
+  assert.match(refusals[1] ?? '', /no turn of yours running/);
+
+  const streamed = quietAdapter({ replies: 'stream' });
+  let streamRefusal = '';
+  const streaming: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await streamed.adapter.say!({ sessionId, agentId: 'ava', text: 'hello' }).catch((error: Error) => {
+      streamRefusal = error.message;
+    });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  await streamed.adapter.start(streaming);
+  await streamed.socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await streamed.adapter.stop();
+  assert.match(streamRefusal, /shows your words as you write them/);
+  assert.ok(!streamed.web.posts.some((post) => post.text === 'hello'));
+});
+
 test('a long task posts its first line and its reply, and nothing between them', async () => {
   for (const replies of ['final', 'texts'] as const) {
     const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {

@@ -207,6 +207,12 @@ const settledWithin = (work: Promise<unknown>, ms: number): Promise<void> => new
 });
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 const NO_REPLY_TEXT = '(no reply)';
+/**
+ * The most `message.say` lines one turn may post (card 1009). Enough for a
+ * question and a heads-up or two; a turn past it is narrating, which is
+ * what holding the words between tools exists to stop.
+ */
+const SAY_LIMIT_PER_TURN = 3;
 
 /** How an agent's replies appear in Slack; see `SlackAgentConfig.replies`. */
 export type SlackReplyMode = 'final' | 'stream' | 'texts';
@@ -1196,6 +1202,8 @@ class ReplyRenderer {
    */
   private generation = 0;
   private finalized = false;
+  /** How many `message.say` lines this turn has sent; see {@link SAY_LIMIT_PER_TURN}. */
+  private saidMidTask = 0;
   /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
   private uploaded = false;
   /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
@@ -1381,8 +1389,36 @@ class ReplyRenderer {
    * nothing of this one's.
    */
   appPosted(web: SlackWebLike, channel: string, thread: string): void {
-    if (web === this.web && channel === this.channel && thread === this.statusThread) {
+    if (this.postsAs(web) && channel === this.channel && thread === this.statusThread) {
       this.refreshLoading();
+    }
+  }
+
+  /** Whether this turn posts through `web`: the same agent's app. */
+  postsAs(web: SlackWebLike): boolean {
+    return web === this.web;
+  }
+
+  /**
+   * A `message.say` line (card 1009): posted now, after whatever the turn
+   * has already posted, and resolved once it landed. Refused, with a
+   * sentence for the agent, on a turn that has already replied, a
+   * streaming turn (its words show as they are written), and past
+   * {@link SAY_LIMIT_PER_TURN}.
+   */
+  async say(text: string): Promise<void> {
+    if (this.finalized) {
+      throw new Error('This turn has already posted its reply, so a mid-task message has nowhere to go.');
+    }
+    if (this.streaming) {
+      throw new Error('This conversation shows your words as you write them, so no separate message is needed. Just write it.');
+    }
+    if (this.saidMidTask >= SAY_LIMIT_PER_TURN) {
+      throw new Error(`This turn already sent ${SAY_LIMIT_PER_TURN} mid-task messages. Put the rest in your reply.`);
+    }
+    this.saidMidTask += 1;
+    if (!(await this.postLine(text, false))) {
+      throw new Error('Slack did not take the message. Say it in your reply.');
     }
   }
 
@@ -1653,6 +1689,17 @@ class ReplyRenderer {
       return undefined;
     }
     this.firstWordsSaid = true;
+    return this.postLine(text, true);
+  }
+
+  /**
+   * Post one line of the turn's into its thread, behind the turn ahead and
+   * any handover, on the upload chain, so it lands after everything the
+   * turn posted before it. Resolves with whether any of it landed. The
+   * first line (card 950) is also what a hosted-loop reply is stripped of;
+   * a `message.say` line is not, since the reply never contained it.
+   */
+  private postLine(text: string, first: boolean): Promise<boolean> {
     const handover = this.handover;
     const after = this.after;
     let heard = '';
@@ -1687,13 +1734,15 @@ class ReplyRenderer {
           }
           settleLanded(landed.length > 0);
         }
-        this.lastInterim = text;
-        this.interimSaid.push(text);
+        if (first) {
+          this.lastInterim = text;
+          this.interimSaid.push(text);
+        }
         // A post of the app's in this thread takes the status down while
         // the turn is still working; put it back.
         this.refreshLoading();
       })
-      .catch((error) => this.warn(`chat.postMessage failed for an interim message: ${error instanceof Error ? error.message : String(error)}`))
+      .catch((error) => this.warn(`chat.postMessage failed for ${first ? 'an interim' : 'a mid-task'} message: ${error instanceof Error ? error.message : String(error)}`))
       // Settled whatever happened above, or the other agents' intake would
       // wait on it for good. A second settle is a no-op.
       .finally(() => settleLanded(false));
@@ -8901,6 +8950,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     name: 'slack',
     ...(options.loadAgents !== undefined ? { reload } : {}),
     resolveOutbound,
+    // A `message.say` line goes to the turn running for that session, in
+    // its thread, through the same agent's app, or nowhere (card 1009).
+    say: async ({ sessionId, agentId, text }: { sessionId: string; agentId: string; text: string }): Promise<void> => {
+      const connection = connectionFor(agentId);
+      const renderer = renderers.get(sessionId)?.[0];
+      if (!connection || !renderer || !renderer.postsAs(connection.web)) {
+        throw new Error('This conversation has no turn of yours running in Slack right now, so there is nothing to send into. Say it in your reply.');
+      }
+      await renderer.say(text);
+    },
     readConversation,
     sessionConversation,
     createConversation,
