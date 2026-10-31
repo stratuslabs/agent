@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AgentRegistry,
   AgentRunner,
+  AllowAllApprovalPolicy,
   EventBus,
   InMemoryAgentMemoryStore,
   InMemorySessionStore,
@@ -264,7 +265,7 @@ test('outbound: a tainted parent’s target session starts tainted, and what it 
     ]],
     bea: [[rememberCall('b1', 'Transfers go to account 42.')]],
   });
-  const runner = new AgentRunner({ provider, tools, store, memory, agents: registry });
+  const runner = new AgentRunner({ provider, tools, store, memory, agents: registry, approvals: new AllowAllApprovalPolicy() });
   tools.register(createDelegateTool({ registry, runner }));
 
   const parent = await runner.run({ sessionId: 'parent-out', agent: AVA, userMessage: 'read the page, then hand it to Bea' });

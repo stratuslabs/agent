@@ -861,6 +861,23 @@ export const raiseRiskTo = (risk: ToolRisk, floor: ToolRisk): ToolRisk =>
   atLeastAsRisky(risk, floor) ? risk : floor;
 
 /**
+ * The risk one call is judged at: the tool's declared risk, raised to its
+ * `riskAfterExternalContent` once `session` has read external content.
+ * What the runner hands the approval policy, so every policy (a headless
+ * daemon, an open posture, the external-content gate) judges the raised
+ * call exactly as it judges any other call at that risk.
+ */
+export const resolveCallRisk = (
+  tool: Pick<Tool, 'risk' | 'riskAfterExternalContent'>,
+  session: Pick<Session, 'metadata'>,
+): ToolRisk => {
+  const declared = resolveToolRisk(tool);
+  return tool.riskAfterExternalContent !== undefined && sessionTrustOf(session) === 'external'
+    ? raiseRiskTo(declared, tool.riskAfterExternalContent)
+    : declared;
+};
+
+/**
  * The origin of a URL — scheme, host, and port, and nothing else — or
  * nothing when it does not have one this codebase is willing to name.
  *
@@ -3330,6 +3347,24 @@ export interface Tool {
   /** See ToolRisk. Omitted means `gated`, never `safe`. */
   risk?: ToolRisk;
   /**
+   * The risk a call is judged at once its session has read external
+   * content (`sessionTrustOf` is `external`), for a tool that is fine to
+   * run unattended in a clean conversation but not on a web page's say-so.
+   * `agent.delegate` is the case: in a clean session it is `safe`, and
+   * after a page has been read it asks like any other `gated` call, so
+   * injected text cannot start work as another agent.
+   *
+   * It only ever raises: a value at or below `risk` changes nothing. Only
+   * `external` raises it, for the reason the external-content gate in
+   * `@stratusagent/permissions` keys on `external` and not `unknown`: a
+   * shell's output is `unknown`, and a rule that fires on every coding
+   * session's first command is one an operator turns off. Judged against
+   * the label as the call before it left it, so a tool that declares this
+   * never runs beside its neighbours (`readOnly`). `resolveCallRisk` reads
+   * it; the tool's advertised risk (`ToolRegistry.describe`) stays `risk`.
+   */
+  riskAfterExternalContent?: ToolRisk;
+  /**
    * Where this tool's output comes from, declared once for every call —
    * `risk`'s twin for provenance. `browser.read` returns a page's text and
    * `web.fetch` a document's, so both declare `external` statically; a
@@ -3356,8 +3391,9 @@ export interface Tool {
    * together (card 956): only `safe`, because any other call may be held
    * for a human, and those questions are asked one at a time, in order,
    * with one durable checkpoint per session. A tool that also lowers trust
-   * before it runs (`trustBeforeCall`) is judged against the label as
-   * the call before it left it, so it stays in line too.
+   * before it runs (`trustBeforeCall`), or whose risk rises with the label
+   * (`riskAfterExternalContent`), is judged against the label as the call
+   * before it left it, so it stays in line too.
    *
    * Declare it only when it is true of every call. A tool that is wrong
    * about it can have a write overlap whatever ran beside it. Leave it off
@@ -8976,7 +9012,8 @@ export class AgentRunner {
     return tool !== undefined
       && tool.readOnly === true
       && resolveToolRisk(tool) === 'safe'
-      && tool.trustBeforeCall === undefined;
+      && tool.trustBeforeCall === undefined
+      && tool.riskAfterExternalContent === undefined;
   }
 
   /**
@@ -9191,7 +9228,11 @@ export class AgentRunner {
     // question with no useful answer, and the model needs the reason, not a
     // human's click, to fix it. Only for calls that would be asked about; a
     // `safe` tool's own checks answer it as they always have.
-    if (resolveToolRisk(tool) !== 'safe') {
+    // Resolved once, before the policy is asked: the session's label is
+    // what the calls before this one left it at, which is what a tool's
+    // `riskAfterExternalContent` is judged against.
+    const risk = resolveCallRisk(tool, session);
+    if (risk !== 'safe') {
       const problem = inputProblem(tool.parameters, call.input);
       if (problem) {
         return rejected(`Invalid input for ${call.toolName}: ${problem}. Fix the call and try again.`);
@@ -9214,7 +9255,6 @@ export class AgentRunner {
     // a `safe` one is never asked about, and writing a record for it would
     // add a save to every unattended call to describe a wait that does not
     // happen.
-    const risk = resolveToolRisk(tool);
     // Asked about either way — only whether the wait leaves a re-enterable
     // checkpoint differs.
     const checkpointed = risk !== 'safe' && options.recoverable !== false;
