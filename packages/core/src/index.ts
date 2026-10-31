@@ -388,8 +388,8 @@ export interface AgentDefinition extends AgentDescriptor {
   /**
    * What this agent may call: exact tool names (`fs.read`), toolset globs
    * (`fs.*`), or `*` for every registered tool. Omitted = only the tools
-   * registered at risk `safe` (reads and memory); see `toolPermitted` in
-   * the runner. `matchesToolAllowlist` is the only reading of the entries.
+   * registered at risk `safe` (reads and memory), or every tool where the
+   * host passes `unlistedTools: 'every'`; see `toolPermitted` in the runner. `matchesToolAllowlist` is the only reading of the entries.
    */
   tools?: string[];
   /**
@@ -829,6 +829,9 @@ export type ProviderDelta =
  */
 export type ToolRisk = 'safe' | 'gated' | 'dangerous';
 
+/** What an agent with no `tools:` list may call; see `AgentRunnerOptions.unlistedTools`. */
+export type UnlistedTools = 'safe' | 'every';
+
 export const DEFAULT_TOOL_RISK: ToolRisk = 'gated';
 
 /** The declared risk, or the fail-closed default for a tool that omits it. */
@@ -947,9 +950,9 @@ const trustBeforeCallOf = async (tool: Pick<Tool, 'trustBeforeCall'>, session: S
  * does **not** match `fsx.read`, so a namespace cannot be widened by a
  * package that named itself to look like a prefix of another. A bare `*`
  * is every registered tool. That is not what omitting the allowlist means
- * (an omitted list is only the tools registered as safe), so `*` is how a
- * soul grants everything, and the upgrade writes it into the souls an
- * existing install already had.
+ * (an omitted list is only the tools registered as safe, on a home this
+ * build set up), so `*` is how a soul grants everything, and new souls are
+ * written with it.
  *
  * Exported because both gates use it — the descriptors a provider is shown
  * and the check before execution — and because a second reading of `fs.*`
@@ -7391,6 +7394,14 @@ export interface AgentRunnerOptions {
    */
   grantedToEveryAgent?: readonly string[];
   /**
+   * What an agent with no `tools:` list may call. `safe`, the default, is
+   * the tools registered at risk `safe`. `every` is every registered tool,
+   * which is what an omitted list meant before, and what a host passes for
+   * a home set up by an older build so an upgrade takes nothing away. An
+   * agent with a list is held to its list either way.
+   */
+  unlistedTools?: UnlistedTools;
+  /**
    * The skill catalog. Passing one makes `skill.read` available — the
    * runner registers it if the host has not — to exactly the agents whose
    * soul enables any skill; see the two gates in `executeTurns` and
@@ -8138,14 +8149,19 @@ export class AgentRunner {
    * that never wrote the key held `shell.run` the moment that plugin was
    * enabled. The risk is the one the registry holds, so an operator's
    * per-tool risk override counts, and `tools: ["*"]` is how a soul says
-   * "everything". A name nothing registered is let through here so the
-   * call is refused as not found, the same as for any other agent.
+   * "everything". A host passes `unlistedTools: 'every'` for a home an
+   * older build set up, where an omitted list keeps its old meaning. A name
+   * nothing registered is let through here so the call is refused as not
+   * found, the same as for any other agent.
    */
   private toolPermitted(name: string, allowedTools: readonly string[] | undefined): boolean {
     if ((this.options.grantedToEveryAgent ?? []).includes(name)) {
       return true;
     }
     if (allowedTools === undefined) {
+      if (this.options.unlistedTools === 'every') {
+        return true;
+      }
       const registered = this.tools.get(name);
       return registered === undefined || resolveToolRisk(registered) === 'safe';
     }

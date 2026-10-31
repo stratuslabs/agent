@@ -268,10 +268,7 @@ const serveHeldHome = async (
   // so for an install that is never updated through `stratus update` this
   // is where the move actually happens: before the stores are opened, so
   // nothing here reads a path the migration is still populating.
-  for (const migration of await runStateMigrations(env, {
-    exclusive: true,
-    ...(command.configPath !== undefined ? { configPath: command.configPath } : {}),
-  })) {
+  for (const migration of await runStateMigrations(env, { exclusive: true })) {
     log(`state migration ${migration.id}: ${migration.detail ?? migration.description}`);
   }
 

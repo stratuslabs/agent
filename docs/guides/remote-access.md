@@ -111,7 +111,7 @@ instead, and the agent is handed it to pass on. Every agent can ask through
 a form, but a link only goes to an agent whose soul lists
 `credential.request` under `tools:` (by name, a glob, or `"*"`), because
 the link is a bearer credential. A soul with no `tools:` key gets forms
-only:
+only, except on a home set up before 0.14.3, where it may still get a link:
 
 ```
 https://mac-mini.example.ts.net/api/v1/credential-links/<token>

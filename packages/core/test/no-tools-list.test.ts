@@ -17,8 +17,8 @@ import {
 // A soul with no `tools:` key used to be allowed every registered tool,
 // so enabling a plugin handed its tools to every such agent at once. It now
 // gets the tools registered at risk `safe` and nothing else; `tools: ["*"]`
-// is how a soul says "everything", and the upgrade writes that line into
-// the souls an existing install already has.
+// is how a soul says "everything". A home an older build already used
+// keeps the old reading, which the host passes as `unlistedTools: 'every'`.
 
 const tool = (name: string, risk: ToolRisk): Tool => ({
   name,
@@ -50,7 +50,7 @@ const callingProvider = (calls: string[]): { provider: ModelProvider; requests: 
 const run = async (
   agent: Pick<AgentDefinition, 'tools'>,
   calls: string[],
-  options: { granted?: string[] } = {},
+  options: { granted?: string[]; unlisted?: 'safe' | 'every' } = {},
 ) => {
   const tools = new ToolRegistry();
   tools.register(tool('memory.recall', 'safe'));
@@ -64,6 +64,7 @@ const run = async (
     tools,
     store: new InMemorySessionStore(),
     ...(options.granted !== undefined ? { grantedToEveryAgent: options.granted } : {}),
+    ...(options.unlisted !== undefined ? { unlistedTools: options.unlisted } : {}),
   });
   await runner.initialize();
   const session = await runner.run({
@@ -121,4 +122,17 @@ test('a tool the host grants to every agent still reaches an agent with no tools
 test('a call naming no registered tool is still "not found", not "not permitted"', async () => {
   const { byName } = await run({}, ['nope.nothing']);
   assert.match(byName('nope.nothing')?.error ?? '', /Tool not found: nope\.nothing/);
+});
+
+test('on a home that predates the safe default, an agent with no tools list keeps every tool', async () => {
+  const { advertised, byName } = await run({}, ['shell.run', 'fs.delete'], { unlisted: 'every' });
+  assert.deepEqual(advertised, ['fs.delete', 'fs.read', 'fs.write', 'memory.recall', 'shell.run']);
+  assert.equal(byName('shell.run')?.ok, true);
+  assert.equal(byName('fs.delete')?.ok, true);
+});
+
+test('unlistedTools: every changes nothing for an agent that has a list', async () => {
+  const { advertised, byName } = await run({ tools: ['fs.read'] }, ['shell.run'], { unlisted: 'every' });
+  assert.deepEqual(advertised, ['fs.read']);
+  assert.equal(byName('shell.run')?.ok, false);
 });

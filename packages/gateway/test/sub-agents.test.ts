@@ -132,9 +132,14 @@ const fanoutGateway = async (options: {
    * risks, `safe` included.
    */
   packageName?: string;
+  /** Stamp the home the way 0.14.2 left it: set up before the safe-tools default. */
+  olderHome?: boolean;
 }) => {
   const home = await newHome();
   await writeSoul(home, options.soul);
+  if (options.olderHome) {
+    await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({ schemaVersion: 4, applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'] }));
+  }
   const primaryCalls: string[] = [];
   if (options.primaryDown) {
     await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
@@ -392,6 +397,28 @@ test('a parent whose soul has no tools: list can hand a sub-agent only the safe 
   assert.match(seen[0] ?? '', /^refused: .*test\.gated.*safe/);
   assert.equal(seen[1], 'ran: result');
   assert.equal(harness.gatedRuns(), 0, 'a gated tool ran for a parent with no tools: list');
+});
+
+test('on a home an older build set up, a parent with no tools: list keeps every tool, for itself and its slices', async () => {
+  // Such a home read an omitted list as every tool before the safe-tools
+  // default, and keeps reading it that way. The fan-out tool comes from an
+  // untrusted package here, so it is gated: the parent calling it at all
+  // is the runner keeping every tool, and the gated slice is the gateway.
+  const harness = await fanoutGateway({
+    soul: SOUL.replace('tools: [test.*, memory.*]\n', ''),
+    olderHome: true,
+    tasks: [{ instruction: 'widen', tools: ['test.gated'] }],
+    subAgent: () => openAiText('widened'),
+  });
+  await harness.gateway.start();
+  try {
+    const parent = await harness.gateway.dispatch({ sessionId: 'parent-older-home', agentId: 'ava', userMessage: 'PARENT-TASK fan out' });
+    assert.equal(parent.status, 'completed');
+  } finally {
+    await harness.gateway.stop();
+  }
+  const seen = harness.outcomes.map((outcome) => ('refused' in outcome ? `refused: ${outcome.refused}` : `ran: ${outcome.status}`));
+  assert.deepEqual(seen, ['ran: result']);
 });
 
 test('a gated call inside a sub-agent fails there and asks no one', async () => {

@@ -83,15 +83,13 @@ diagnose:
 agent blair has no tools: list, so it gets only safe tools (reads and memory) — add tools: [...] to ~/.stratus/agents/blair.md to give it more, or tools: ["*"] for every tool
 ```
 
-Until 0.14.3 an omitted key meant every registered tool. Upgrading writes
-`tools: ["*"]`, under a comment saying why, into every soul the home
-already had (state migration `0005-explicit-tools-lists`), so nothing an
-existing agent can do changes. A soul it could not read, such as a link
-into a home this one was copied from, is named in the migration's report
-and gets safe tools until you give it a list. Souls named only by
-`--soul` or `STRATUS_SOUL`, or by a config neither the first command nor
-the service unit names, are not visible to the migration; the line above
-names them at start.
+That is the rule on a home set up with 0.14.3 or later. Until 0.14.3 an
+omitted key meant every registered tool, and **on a home an older build
+already used it still does**, so upgrading changes nothing an existing
+agent can do. State migration `0005-safe-tools-default` records which kind
+of home this is; it writes no soul. On such a home the daemon's line keeps
+its old wording (`so it may call every tool this daemon loads`), and
+giving a soul a list narrows it the same way it always did.
  A bare `tools:` with nothing
 indented under it is the empty list — the shape you get by writing the key
 and not filling it, or by deleting the last entry — so that one is warned

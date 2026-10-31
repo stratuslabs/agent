@@ -301,33 +301,28 @@ interrupted is finished by the next start, provenance ledger included.
 `stratus update --check` lists the move while one is still to happen, and
 counts it as something to apply.
 
-## Souls without a `tools:` list get `tools: ["*"]` (0.14.3)
+## Souls without a `tools:` list keep every tool on an upgraded home (0.14.3)
 
 Since 0.14.3 a soul with no `tools:` key gets only the tools registered as
-safe (reads, search and memory); before, it got every registered tool.
-Migration `0005-explicit-tools-lists` keeps existing agents as they were: on
-a home an older build has used, it writes `tools: ["*"]`, with a one-line
-comment saying why, at the top of each soul in `~/.stratus/agents/` that has
-no list. It does the same for the `soul:` of three configs: the global one
-(an absolute path only), the one the command runs on (`--config` or
-`STRATUS_CONFIG`; a relative path resolves from where the command runs, as
-the command itself reads it), and the one the installed service unit is
-pinned to (a relative path resolves from the unit's working directory), so
-whichever command of the new build runs first covers the daemon's soul.
-Only those two lines are added; nothing else in the file is rewritten,
-and a linked soul is edited behind its link. The log names every agent it
-changed, and any soul it could not read (a broken link, a directory named
-like a soul, a soul that does not parse), which then gets safe tools until
-you add a list.
+safe (reads, search and memory) on a **new** install; before, it got every
+registered tool. A home an older build already used keeps the old reading,
+for every soul on it, including one you write by hand later: migration
+`0005-safe-tools-default` records in `~/.stratus/state.json` that the home
+predates the safe default, and the daemon, `stratus run`, `stratus plugins`,
+setup and `stratus template add` all read that. The log says so once:
 
-A fresh install is left alone, so a soul you write by hand starts with the
-safe default. So is a soul named only by `--soul`, `STRATUS_SOUL`, a
-relative `soul:` in the global config, or a config that neither the first
-command of the new build nor the service unit names, which the migration
-cannot see; the daemon names any soul
-without a list each time it loads the roster. Narrow `"*"` to what each
-agent needs whenever you like. No schema change: an older build reads
-`tools: ["*"]` as every tool, which is what it already granted.
+```
+state migration 0005-safe-tools-default: this home predates the safe-tools default, so its souls with no tools: list keep every tool (no soul was changed)
+```
+
+No soul file is rewritten, so it does not matter which souls a config,
+`--soul` or `STRATUS_SOUL` names, or whether an older daemon is still
+running while you upgrade. New souls from setup, `stratus agent new` and
+the dashboard are written with `tools: ["*"]` on either kind of home, so
+you can see the grant and narrow it. To get the safe default for one
+agent, give its soul a list naming what it needs. No schema change: an
+older build reads an omitted list as every tool, which is what this home
+keeps.
 
 ## `stratus update` does the sequence in the order that cannot lose data
 

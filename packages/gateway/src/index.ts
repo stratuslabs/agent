@@ -73,6 +73,7 @@ import {
   type SteeredMessage,
   type StratusEvent,
   type ToolRisk,
+  type UnlistedTools,
   type TrustLevel,
 } from '@stratusagent/core';
 import {
@@ -249,6 +250,7 @@ import {
   runsOnHarness,
   applySoulPins,
   assertStateCompatible,
+  unlistedToolsFor,
   stratusHomePath,
   intakeStatePath,
   fleetDbIn,
@@ -883,6 +885,13 @@ export interface GatewayOptions {
    * a host that omits this lets a plugin double up on a host adapter.
    */
   hostChannelClaims?: Array<{ kind: string; agents: readonly string[] }>;
+  /**
+   * What an agent whose soul has no `tools:` list may call; see
+   * `AgentRunnerOptions.unlistedTools`. Omitted, the gateway asks the home
+   * (`unlistedToolsFor`): every tool on one an older build set up, safe
+   * tools only on a new one.
+   */
+  unlistedTools?: UnlistedTools;
   /**
    * The policy, or a factory that builds one from the gateway's approval
    * transport. Pass a factory whenever the policy parks turns on a human
@@ -2400,19 +2409,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
   /**
-   * Said at load, because an omitted `tools` list is a quiet downgrade: it
-   * is only the tools registered as safe, so an agent whose soul never
-   * wrote the key cannot run a shell, write a file or send a message, and
-   * nothing else says why. The upgrade wrote `tools: ["*"]` into every soul
-   * a home already had, so this names a soul written since, or one it could
-   * not read. The built-in agent is exempt: it has no file, and says
-   * `tools: ["*"]` in code.
+   * Read from the home once, on first use, which is after the migrations
+   * `serve` runs before it starts the gateway. It changes only when 0005
+   * first records it, and that happens before a daemon of this build runs.
+   */
+  let unlistedToolsRead: UnlistedTools | undefined;
+  const unlistedTools = (): UnlistedTools => options.unlistedTools ?? (unlistedToolsRead ??= unlistedToolsFor(env));
+  /**
+   * Said at load, because an omitted `tools` list is a quiet downgrade on a
+   * home this build set up: it is only the tools registered as safe, so an
+   * agent whose soul never wrote the key cannot run a shell, write a file
+   * or send a message, and nothing else says why. On a home an older build
+   * set up it is every tool, as it always was there, and the line says so
+   * the way it always did. The built-in agent is exempt: it has no file,
+   * and says `tools: ["*"]` in code.
    */
   const warnNoToolsList = (agentId: string, soulPath: string): void => {
-    warn(
-      `agent ${agentId} has no tools: list, so it gets only safe tools (reads and memory) — `
-      + `add tools: [...] to ${soulPath} to give it more, or tools: ["*"] for every tool`,
-    );
+    warn(unlistedTools() === 'every'
+      ? `agent ${agentId} has no tools: list, so it may call every tool this daemon loads — `
+        + `add tools: [...] to ${soulPath} to say which`
+      : `agent ${agentId} has no tools: list, so it gets only safe tools (reads and memory) — `
+        + `add tools: [...] to ${soulPath} to give it more, or tools: ["*"] for every tool`);
   };
 
   const defaultAgentId = async (): Promise<string> => {
@@ -3191,7 +3208,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const allowlist = session.agent.tools ?? registry.get(agentId)?.tools;
     // An omitted list grants the safe tools, this one among them, but a
     // link is the operator's to allow by naming it, so only a list says yes.
-    const linkAllowed = allowlist !== undefined && matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
+    // On a home an older build set up an omitted list is every tool, and
+    // has always allowed a link there.
+    const linkAllowed = allowlist === undefined
+      ? unlistedTools() === 'every'
+      : matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
     // Why no form went up, said to the agent beside the link that replaces
     // it, so it can tell the person why they are getting a link instead.
     let formUnavailable: string | undefined;
@@ -3623,10 +3644,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       // The parent's allowlist as its running turn holds it: a slice can
       // only narrow what that turn may already do. With no list, that is
-      // the tools registered as safe, and the slice is held to the same
-      // rule: naming a gated tool must not hand it to the sub-agent.
+      // the tools registered as safe (every tool on a home an older build
+      // set up), and the slice is held to the same rule: naming a gated
+      // tool must not hand it to the sub-agent.
       if (allowlist === undefined) {
-        if (resolveToolRisk(tool) !== 'safe') {
+        if (unlistedTools() !== 'every' && resolveToolRisk(tool) !== 'safe') {
           return `${name} is not a safe tool, and ${parent.agent.id}'s soul has no tools: list, so it gets only safe tools and a sub-agent of it cannot have ${name}.`;
         }
       } else if (!matchesToolAllowlist(name, allowlist)) {
@@ -3825,6 +3847,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Asking a person for a key is harmless to grant: they decide
       // everything after the question, so no soul has to list it.
       grantedToEveryAgent: subAgent ? [] : [CREDENTIAL_REQUEST_TOOL_NAME],
+      unlistedTools: unlistedTools(),
       ...(subAgent ? {} : { skills: skillCatalog, memory }),
       streaming: true,
       ...(maxTurns !== undefined ? { maxTurns } : {}),

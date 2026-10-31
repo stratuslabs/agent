@@ -1651,39 +1651,3 @@ test('a new build that did not take over leaves the plugins for the next update'
   assert.match(output.stderr, /Plugins were not updated/);
   assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION);
 });
-
-test('update keeps the soul the service unit\'s pinned config names on every tool', async () => {
-  // Codex P1 4430483701: the unit's --config is what the restarted daemon
-  // runs on, and this shell has neither it nor STRATUS_CONFIG.
-  const home = await freshHome();
-  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
-    schemaVersion: 4,
-    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
-  }));
-  const soulPath = path.join(home, 'souls', 'ava.md');
-  await mkdir(path.dirname(soulPath), { recursive: true });
-  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
-  const configPath = path.join(home, 'pinned.config.json');
-  await writeFile(configPath, JSON.stringify({ soul: soulPath }));
-  const seeded = await installService(
-    { homeDir: home, cwd: home, execPath: process.execPath, scriptPath: path.join(home, 'old-bin.js'), execArgv: [], run: runningServiceRunner },
-    { configPath },
-  );
-  assert.equal(seeded.ok, true, seeded.messages.join('\n'));
-
-  const { streams, output } = createStreams();
-  const env = (): CliEnvironment => ({
-    homeDir: home,
-    cwd: path.join(home, 'souls'),
-    processEnv: {},
-    serviceRunner: runningServiceRunner,
-    packageVersionFetcher: async () => '99.0.0',
-    installedVersionReader: async () => undefined,
-    packageInstaller: async () => ({ ok: true, message: '' }),
-    updateContinuation: continueInProcess(streams, env),
-  });
-  const code = await runCli({ argv: ['update'], streams, env: env() });
-  assert.equal(code, 0, `update failed:\n${output.stdout}\n${output.stderr}`);
-  assert.match(await readFile(soulPath, 'utf8'), /^tools: \["\*"\]$/m);
-});

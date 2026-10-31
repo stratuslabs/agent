@@ -985,6 +985,34 @@ test('stratus run names a soul with no tools list, which gets only the safe tool
   assert.match(output.stderr, /Warning: agent quiet has no tools: list, so it gets only safe tools \(reads and memory\)/);
 });
 
+test('on a home an older build set up, stratus run keeps a soul with no tools list on every tool and leaves the soul alone', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const soulPath = path.join(home, 'souls', 'quiet.md');
+  const soul = '---\nname: Quiet\nid: quiet\n---\n\nYou are Quiet.\n';
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(soulPath, soul);
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: soulPath })}\n`);
+  // What 0.14.2 left behind.
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stderr, /state migration 0005-safe-tools-default: this home predates the safe-tools default, so its souls with no tools: list keep every tool/);
+  assert.doesNotMatch(output.stderr, /has no tools: list/);
+  assert.equal(await readFile(soulPath, 'utf8'), soul, 'no soul is rewritten');
+});
+
 test('the CLI never imports the gateway at module scope', async () => {
   // `bin.ts` imports the barrel to call `unsupportedNodeMessage`, before
   // anything else has a chance to fail — the whole point being to explain
@@ -7580,6 +7608,38 @@ test('setup does not count a soul with no tools list as able to call a plugin, a
   assert.match(output.stdout, /No soul's `tools:` list names what it contributes\. Ava \(stratus\) has no list, so it gets only the ones registered as safe/);
   assert.doesNotMatch(output.stdout, /No agent can call it yet/);
   assert.doesNotMatch(output.stdout, /which means every registered tool/);
+});
+
+test('on a home an older build set up, setup counts a soul with no tools list as having every tool, as it always did', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  const soul = path.join(agentsDir, 'ava.md');
+  await writeFile(soul, '---\nname: Ava\nid: stratus\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Ava \(stratus\) has no `tools:` list, which means every registered tool\./);
+  assert.match(output.stdout, /Give a soul a `tools:` list to narrow that\./);
+  assert.doesNotMatch(output.stdout, /only the ones registered as safe|only the tools registered as safe/);
 });
 
 test('setup names the browser tool-browser needs but cannot install', async () => {
@@ -14227,6 +14287,29 @@ test('a soul with no tools list is reviewed as safe tools only, and one listing 
   assert.doesNotMatch(output.stdout, /Wide \(wide\) — no tools/);
 });
 
+test('on a home an older build set up, a template soul with no tools list is reviewed as every tool', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'agents/wide.md': '---\nname: Wide\n---\n\nI have no tools list.\n',
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stdout, /Wide \(wide\) — EVERY tool, because the soul has no tools: list/);
+});
+
 test('a soul whose id is already claimed by another file is refused, --force included', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
@@ -17125,52 +17208,4 @@ test('the startup lines count external-content gated calls among those that ask,
   const line = describeRemoteMode(mixed, ['ava', 'bea'], ['ava', 'bea']);
   assert.match(line, /except bea's, which run without asking, except in bea's conversations that read external content/);
   assert.doesNotMatch(line, /only dangerous ones are parked/);
-});
-
-test('the first command of an upgrade keeps the soul its --config names on every tool', async () => {
-  // Codex P1 4430483701: 0005 used to look only at the global config, so a
-  // soul chosen through --config lost its tools on upgrade.
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
-    schemaVersion: 4,
-    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
-  }));
-  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-'));
-  const soulPath = path.join(elsewhere, 'ava.md');
-  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
-  const chosen = path.join(elsewhere, 'prod.json');
-  await writeFile(chosen, JSON.stringify({ provider: 'demo', soul: soulPath }));
-
-  const { streams, output } = createStreams();
-  await runCli({ argv: ['plugins', '--config', chosen], streams, env: { cwd: home, homeDir: home, processEnv: {} } });
-  assert.match(output.stderr, /state migration 0005-explicit-tools-lists: wrote tools: \["\*"\] into the soul of ava/);
-  assert.match(await readFile(soulPath, 'utf8'), /^tools: \["\*"\]$/m);
-});
-
-test('the first command of an upgrade, with no --config of its own, keeps the soul of the service unit\'s config on every tool', async () => {
-  // Codex P1 4430773209: `stratus agents` before any daemon restart stamped
-  // 0005 having read only the agents directory and the global config, so
-  // the unit's --config soul (relative to the unit's directory) was lost.
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
-    schemaVersion: 4,
-    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
-  }));
-  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
-  const soulPath = path.join(project, 'ava.md');
-  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
-  const pinned = path.join(project, 'prod.json');
-  await writeFile(pinned, JSON.stringify({ provider: 'demo', soul: 'ava.md' }));
-  const installed = await installService(
-    { platform: 'linux', homeDir: home, cwd: project, run: async () => ({ code: 0, stdout: '', stderr: '' }) },
-    { configPath: pinned },
-  );
-  assert.equal(installed.ok, true, installed.messages.join('\n'));
-
-  const { streams, output } = createStreams();
-  await runCli({ argv: ['agents'], streams, env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux' } });
-  assert.match(output.stderr, /state migration 0005-explicit-tools-lists: wrote tools: \["\*"\] into the soul of ava/);
-  assert.match(await readFile(soulPath, 'utf8'), /^tools: \["\*"\]$/m);
 });

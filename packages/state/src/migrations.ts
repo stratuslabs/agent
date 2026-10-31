@@ -26,7 +26,6 @@ import {
   makeAgentStateDirectory,
 } from './layout-migration.ts';
 import { applyPerAgentWorkspaces } from './workspace-migration.ts';
-import { applyEveryToolLines } from './tools-list-migration.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -232,6 +231,30 @@ export interface StateStamp {
   schemaVersion: number;
   /** Ids of migrations that have run to completion, in application order. */
   applied: string[];
+  /**
+   * What a migration found out about this home's history and a later run
+   * reads, such as `PREDATES_SAFE_TOOLS_FACT`. Absent when there are none,
+   * so a home with nothing to record keeps the stamp older builds wrote.
+   * Only ever added to, like `applied`. An older build keeps the key only
+   * while it writes no stamp, which it does not on a home this build has
+   * finished migrating: it has nothing left to apply.
+   */
+  facts?: string[];
+}
+
+/**
+ * Recorded by 0005 on a home an older build had already used: there, a soul
+ * with no `tools:` list has always meant every tool, so it still does. See
+ * `unlistedToolsFor`.
+ */
+export const PREDATES_SAFE_TOOLS_FACT = 'predates-safe-tools-default';
+
+/** What a migration's run produced, when it has a fact to record. */
+export interface StateMigrationOutcome {
+  /** A line describing what changed, as a plain string return is. */
+  detail?: string;
+  /** Facts to add to the stamp along with this migration's id. */
+  facts?: readonly string[];
 }
 
 export interface StateMigration {
@@ -268,11 +291,10 @@ export interface StateMigration {
    * Idempotent: applying twice must equal applying once, because two
    * processes can race the stamp and a crash can lose the record of a
    * completed run. Returns a line describing what actually changed, or
-   * undefined when there was nothing to do. `options` is what the caller
-   * passed `runStateMigrations`, for the one migration that needs to know
-   * which config file the daemon starts on.
+   * undefined when there was nothing to do, or an outcome that also names
+   * facts for the stamp. Facts land in the same single write as the id.
    */
-  apply(env: StateEnvironment, options?: StateMigrationRunOptions): Promise<string | undefined>;
+  apply(env: StateEnvironment): Promise<string | StateMigrationOutcome | undefined>;
 }
 
 /**
@@ -402,43 +424,41 @@ const PER_AGENT_WORKSPACES_MIGRATION: StateMigration = {
   description: "move each agent's workspace into agents/<id>/workspace",
   /** Always, for the reason 0003 gives: see `PER_AGENT_LAYOUT_MIGRATION`. */
   requiresExclusive: async () => true,
-  // Not handed the run's options: its own second parameter is the link
-  // record's, which only its tests set.
-  apply: (env) => applyPerAgentWorkspaces(env),
+  apply: applyPerAgentWorkspaces,
 };
 
+const SAFE_TOOLS_DEFAULT_MIGRATION_ID = '0005-safe-tools-default';
+
 /**
- * An omitted `tools:` list now means only the tools registered as safe,
- * where it used to mean every registered tool. Every soul a home already
- * had gets `tools: ["*"]` written in, so an upgrade changes nothing an
- * agent can do; see `applyEveryToolLines` for which souls and how.
+ * A soul with no `tools:` list gets only the tools registered as safe on a
+ * home this build sets up. On a home an older build already used it keeps
+ * meaning every tool, as it always did there, so the upgrade changes
+ * nothing an agent can do. This records which of the two a home is. It
+ * writes no soul: which souls a home has, and who else is writing them,
+ * is not something one run can know, and the rule needs neither.
  *
- * Only on a home an older build has used, which is one whose stamp records
- * any migration *before this run*. A fresh install reads as schema 0 until
- * its first `stratus serve` or `stratus update`, and that run applies this
- * with the stamp still empty on disk, so a soul written by hand on a new
- * install keeps the new default. Ordinary commands on a fresh home defer
- * 0003 and record nothing, so they keep reading the same empty stamp and
- * keep answering the same way. The one home this misreads is one no build
- * since the stamp arrived (0.11) has ever touched; its agents get safe
- * tools, and the daemon names each at start.
+ * "Already used" is a stamp that records any migration before this run.
+ * A fresh install reads as schema 0 until its first `stratus serve` or
+ * `stratus update`, and that run applies this with the stamp still empty
+ * on disk. The one home this misreads is one no build since the stamp
+ * arrived (0.11) has ever touched; its agents get safe tools, and the
+ * daemon names each soul with no list at start.
  *
- * Not exclusive and no schema bump: an older build reads `tools: ["*"]`
- * as every tool, which is what it already granted, so nothing it does
- * changes and nothing needs refusing.
+ * Not exclusive and no schema bump: an older build reads an omitted list
+ * as every tool, which is what this home keeps.
  */
-const EXPLICIT_TOOLS_LISTS_MIGRATION: StateMigration = {
-  id: '0005-explicit-tools-lists',
-  description: 'write tools: ["*"] into each soul with no tools: list, so agents keep every tool now that an omitted list means safe tools only',
-  async apply(env, options) {
+const SAFE_TOOLS_DEFAULT_MIGRATION: StateMigration = {
+  id: SAFE_TOOLS_DEFAULT_MIGRATION_ID,
+  description: 'record whether this home predates the safe-tools default, so its souls with no tools: list keep every tool',
+  async apply(env) {
     const onDisk = await readStateStamp(env);
     if (onDisk.applied.length === 0) {
       return undefined;
     }
-    return applyEveryToolLines(env, {
-      ...(options?.configPath !== undefined ? { configPath: options.configPath } : {}),
-      ...(options?.serviceConfig !== undefined ? { serviceConfig: options.serviceConfig } : {}),
-    });
+    return {
+      detail: 'this home predates the safe-tools default, so its souls with no tools: list keep every tool (no soul was changed)',
+      facts: [PREDATES_SAFE_TOOLS_FACT],
+    };
   },
 };
 
@@ -447,7 +467,7 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
   PROVENANCE_LABELS_MIGRATION,
   PER_AGENT_LAYOUT_MIGRATION,
   PER_AGENT_WORKSPACES_MIGRATION,
-  EXPLICIT_TOOLS_LISTS_MIGRATION,
+  SAFE_TOOLS_DEFAULT_MIGRATION,
 ];
 
 const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });
@@ -467,9 +487,11 @@ const parseStateStamp = (raw: string): StateStamp => {
   try {
     const parsed = JSON.parse(raw) as Partial<StateStamp> | null;
     if (typeof parsed === 'object' && parsed !== null && typeof parsed.schemaVersion === 'number') {
+      const facts = Array.isArray(parsed.facts) ? parsed.facts.filter((fact): fact is string => typeof fact === 'string') : [];
       return {
         schemaVersion: parsed.schemaVersion,
         applied: Array.isArray(parsed.applied) ? parsed.applied.filter((id): id is string => typeof id === 'string') : [],
+        ...(facts.length > 0 ? { facts } : {}),
       };
     }
   } catch {
@@ -549,10 +571,17 @@ export const mergeStateStamp = (latest: StateStamp, next: StateStamp): StateStam
       applied.push(id);
     }
   }
+  const facts = [...(latest.facts ?? [])];
+  for (const fact of next.facts ?? []) {
+    if (!facts.includes(fact)) {
+      facts.push(fact);
+    }
+  }
   const complete = STATE_MIGRATIONS.every((migration) => applied.includes(migration.id));
   return {
     schemaVersion: Math.max(latest.schemaVersion, complete ? STATE_SCHEMA_VERSION : next.schemaVersion),
     applied,
+    ...(facts.length > 0 ? { facts } : {}),
   };
 };
 
@@ -690,6 +719,31 @@ export const assertStateCompatible = (env: StateEnvironment): void => {
 };
 
 /**
+ * What a soul with no `tools:` list may call on this home: `every` tool on
+ * one an older build already used, `safe` tools only on one this build set
+ * up. Read once by whatever builds a runner, after this run's migrations.
+ *
+ * Every tool when 0005 recorded `PREDATES_SAFE_TOOLS_FACT`, and also when
+ * an older build's stamp records migrations but not 0005 yet: a run that
+ * defers an exclusive migration writes no stamp, and that home is still
+ * the old one. A missing or unreadable stamp is a fresh home, which fails
+ * closed to safe tools, and the daemon names each soul that has no list.
+ * Synchronous for the reason `readStateStampSync` gives.
+ */
+export const unlistedToolsFor = (env: StateEnvironment): 'safe' | 'every' => {
+  let stamp: StateStamp;
+  try {
+    stamp = readStateStampSync(env);
+  } catch {
+    return 'safe';
+  }
+  if (stamp.facts?.includes(PREDATES_SAFE_TOOLS_FACT) === true) {
+    return 'every';
+  }
+  return stamp.applied.length > 0 && !stamp.applied.includes(SAFE_TOOLS_DEFAULT_MIGRATION_ID) ? 'every' : 'safe';
+};
+
+/**
  * Who is asking to migrate, which decides whether the exclusive ones run.
  *
  * `exclusive: true` is a claim about the caller, not a preference: it says
@@ -700,24 +754,6 @@ export const assertStateCompatible = (env: StateEnvironment): void => {
  */
 export interface StateMigrationRunOptions {
   exclusive?: boolean;
-  /**
-   * The config file this run was started on with `--config`, when the
-   * caller knows one. Without it `STRATUS_CONFIG` from the environment
-   * stands in, the same order the CLI selects a config in. Only `0005`
-   * reads it: the
-   * `soul:` that file names is a soul the upgrade has to keep on every
-   * tool, and nothing else on disk says the file exists. A relative
-   * `soul:` in it resolves from the run's working directory.
-   */
-  configPath?: string;
-  /**
-   * The `--config` the installed service unit pins the daemon to, and the
-   * unit's working directory, which a relative `soul:` in that config
-   * resolves against. Every command passes it when a unit is installed, so
-   * the first one after an upgrade covers the daemon's soul whatever it was.
-   * Only `0005` reads it.
-   */
-  serviceConfig?: { path: string; workingDirectory?: string };
 }
 
 const runnableNow = async (migration: StateMigration, env: StateEnvironment, options: StateMigrationRunOptions): Promise<boolean> =>
@@ -789,6 +825,7 @@ export const runStateMigrations = async (
   await assertStampWritable(env);
   const results: AppliedStateMigration[] = [];
   const applied = new Set(stamp.applied);
+  const facts = [...(stamp.facts ?? [])];
   // Asked once, before anything runs, rather than per migration inside the
   // loop: `requiresExclusive` is a filesystem question, and 0003 is the
   // migration that changes its own answer — asking after it has run would
@@ -802,7 +839,13 @@ export const runStateMigrations = async (
     if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
       continue;
     }
-    const detail = await migration.apply(env, options);
+    const outcome = await migration.apply(env);
+    const detail = typeof outcome === 'object' ? outcome.detail : outcome;
+    for (const fact of typeof outcome === 'object' ? outcome.facts ?? [] : []) {
+      if (!facts.includes(fact)) {
+        facts.push(fact);
+      }
+    }
     stamp.applied.push(migration.id);
     applied.add(migration.id);
     results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
@@ -833,7 +876,11 @@ export const runStateMigrations = async (
   // keeps the part that matters without writing anything, and runs at the
   // top of this function rather than here.
   if (!deferring && (results.length > 0 || stamp.schemaVersion !== STATE_SCHEMA_VERSION)) {
-    await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
+    await writeStateStamp(env, {
+      schemaVersion: STATE_SCHEMA_VERSION,
+      applied: stamp.applied,
+      ...(facts.length > 0 ? { facts } : {}),
+    });
   }
   return results;
 };

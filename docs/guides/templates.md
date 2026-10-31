@@ -72,7 +72,8 @@ is copied.
 **Read the tool list.** A soul with `tools: ["*"]` may call *every*
 registered tool, and the review says so in those words. A soul with no
 `tools:` line gets only the tools registered as safe (reads and memory),
-and an empty list gets nothing.
+except on a home set up before 0.14.3, where it gets every tool and the
+review says that instead. An empty list gets nothing.
 
 **Read the credential line too.** A soul's `credentials:` list is a second
 gate, and it works the other way round: a name on it reaches the stored

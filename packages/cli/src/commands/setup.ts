@@ -58,6 +58,7 @@ import {
   type FallbackRuntime,
   type RuntimeConfig,
   type StoredCredential,
+  unlistedToolsFor,
 } from '@stratusagent/state';
 import {
   installService,
@@ -1666,8 +1667,17 @@ export const runSetup = async (
     // soul granting the whole namespace. An entry says exactly what it
     // says, and a discovered namespace has no tool names to enumerate
     // until the bridge connects.
+    // On a home an older build set up, a soul with no list has every tool,
+    // as it always did there; the daemon reads it the same way.
+    const unlistedEvery = unlistedToolsFor(env) === 'every';
+    const grantsEvery = (entry: ChannelRosterEntry): boolean => (entry.soul.agent.tools === undefined
+      ? unlistedEvery
+      : entry.soul.agent.tools.includes('*'));
     const reached = (entry: ChannelRosterEntry): string[] => {
       const tools = entry.soul.agent.tools;
+      if (tools === undefined && unlistedEvery) {
+        return everyTool;
+      }
       if (tools === undefined) {
         // Only the tools registered as safe, and which of these those are
         // is the manifest and the operator's overrides, which `stratus
@@ -1710,11 +1720,12 @@ export const runSetup = async (
     const allowlisted = entries.filter((entry) => reached(entry).length > 0);
     const callable = allowlisted.filter(settingReaches);
     const unset = allowlisted.filter((entry) => !settingReaches(entry));
-    const permissive = callable.filter((entry) => entry.soul.agent.tools?.includes('*') === true);
-    const explicit = callable.filter((entry) => entry.soul.agent.tools?.includes('*') !== true);
-    // Souls with no list at all: not callable for anything this menu can
-    // vouch for, and the reason is not the one a narrow list has.
-    const unlisted = entries.filter((entry) => entry.soul.agent.tools === undefined);
+    const permissive = callable.filter(grantsEvery);
+    const explicit = callable.filter((entry) => !grantsEvery(entry));
+    // Souls with no list at all, on a home where that is the safe tools:
+    // not callable for anything this menu can vouch for, and the reason is
+    // not the one a narrow list has.
+    const unlisted = unlistedEvery ? [] : entries.filter((entry) => entry.soul.agent.tools === undefined);
     const unlistedLine = (): void => {
       if (unlisted.length === 0 || everyTool.length === 0) {
         return;
@@ -1755,11 +1766,19 @@ export const runSetup = async (
 
     if (callable.length > 0) {
       if (permissive.length > 0) {
-        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${permissive.length === 1 ? 'has' : 'have'} \`tools: ["*"]\`, which means every registered tool.`);
+        const has = permissive.length === 1 ? 'has' : 'have';
+        const withoutList = permissive.filter((entry) => entry.soul.agent.tools === undefined).length;
+        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${withoutList === permissive.length
+          ? `${has} no \`tools:\` list, which means every registered tool.`
+          : withoutList === 0
+            ? `${has} \`tools: ["*"]\`, which means every registered tool.`
+            : `${permissive.length === 1 ? 'is' : 'are'} allowed every registered tool.`}`);
         writeLine(streams.stdout, uncheckedReason(name) !== undefined
           ? `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} what ${permissive.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
           : `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
-        writeLine(streams.stdout, 'Narrow that list to say which. `stratus plugins` shows who can call what.');
+        writeLine(streams.stdout, withoutList > 0
+          ? 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.'
+          : 'Narrow that list to say which. `stratus plugins` shows who can call what.');
       }
       for (const entry of explicit) {
         // Per soul, and naming what its list *matched* — an allowlist can

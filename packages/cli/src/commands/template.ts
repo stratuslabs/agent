@@ -28,6 +28,7 @@ import {
   validateConfigFile,
   saveConfigFile,
   stratusHomePath,
+  unlistedToolsFor,
   writeNewSoulFile,
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment, CliConfigFile } from '../environment.ts';
@@ -481,7 +482,10 @@ const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvi
     // An absent `tools:` is not "none", it is the safe tools; `*` is every
     // tool and said that way — see TemplateAgentPlan.
     const tools = agent.tools === undefined
-      ? 'only safe tools (reads and memory), because the soul has no tools: list'
+      ? unlistedToolsFor(env) === 'every'
+        // A home an older build set up reads an omitted list as every tool.
+        ? 'EVERY tool, because the soul has no tools: list'
+        : 'only safe tools (reads and memory), because the soul has no tools: list'
       : agent.tools.includes('*')
         ? 'EVERY tool, because the soul lists tools: ["*"]'
         : agent.tools.length > 0 ? fromTemplate(agent.tools.join(', ')) : 'no tools';

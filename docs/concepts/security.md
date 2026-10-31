@@ -157,7 +157,8 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   enables the plugin, and the agent's own soul lists what it may call.
   The built-ins (echo, memory, delegation, schedules) register without a
   plugin, so an empty `plugins` block is not an empty toolbox. A soul that
-  omits `tools:` gets only the tools registered as safe; `tools: ["*"]`,
+  omits `tools:` gets only the tools registered as safe (every tool on a
+  home set up before 0.14.3); `tools: ["*"]`,
   which setup writes into new souls, gets every registered tool.
   ([Plugins](./plugins.md), [Tools](../guides/tools.md))
 - **Under the default open posture, gated tools run without asking**; the
@@ -213,7 +214,8 @@ mostly works invites the trust it cannot earn. What limits the damage is how
 little a steered agent can do. For an agent that browses or searches:
 
 - **List its tools.** A soul with `tools: ["*"]` gets every registered
-  tool, and one without `tools:` gets only the safe ones. Give a browsing
+  tool, and one without `tools:` gets only the safe ones (every tool on a home
+  set up before 0.14.3). Give a browsing
   agent `web.*` and `browser.*` and nothing that writes, sends, or runs
   commands, unless its job needs one.
 - **Give it no credentials and no `delegates`.** A key it holds is a key a

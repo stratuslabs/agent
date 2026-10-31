@@ -1,4 +1,4 @@
-import { matchesToolAllowlist, toolScopesOverlap, type ToolRisk } from '@stratusagent/core';
+import { matchesToolAllowlist, toolScopesOverlap, type ToolRisk, type UnlistedTools } from '@stratusagent/core';
 import { DEFAULT_STRATUS_AGENT, foldedAgentId, loadRosterSouls, resolveConfiguredSoul } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
@@ -20,7 +20,9 @@ import type { CliEnvironment } from './environment.ts';
  * asks it per tool to build the who-can-call-what table, and the setup
  * menu asks it per agent to say what enabling just granted. An omitted
  * list is the tools registered at risk `safe`, so it reaches a tool only
- * when the caller knows that risk and it is `safe`; a *declared namespace*
+ * when the caller knows that risk and it is `safe`, except on a home an
+ * older build set up (`unlisted: 'every'`), where it reaches every tool,
+ * as the daemon reads it (`unlistedToolsFor`); a *declared namespace*
  * is matched by overlap rather than by prefix, since `mcp.linear.*` sits
  * under a granted `mcp.*` and neither is the other's prefix.
  *
@@ -33,9 +35,10 @@ export const soulGrantsTool = (
   name: string,
   discovered: boolean,
   risk?: ToolRisk,
+  unlisted: UnlistedTools = 'safe',
 ): boolean => {
   if (tools === undefined) {
-    return risk === 'safe';
+    return unlisted === 'every' || risk === 'safe';
   }
   return discovered
     ? tools.some((granted) => toolScopesOverlap(granted, name))

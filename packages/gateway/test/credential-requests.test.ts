@@ -88,10 +88,15 @@ const startRequesting = async (options: {
   also?: GatewayChannelAdapter[];
   /** Serve Kai as the configured default soul, from outside the roster. */
   configSoul?: boolean;
+  /** Stamp the home the way 0.14.2 left it: set up before the safe-tools default. */
+  olderHome?: boolean;
 } = {}) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-credreq-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
+  if (options.olderHome) {
+    await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({ schemaVersion: 4, applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'] }));
+  }
   const soulFile = options.configSoul ? path.join(home, 'souls', 'kai-a.md') : path.join(agentsDir, 'kai.md');
   if (options.configSoul) {
     await mkdir(path.dirname(soulFile), { recursive: true });
@@ -554,6 +559,21 @@ test('an agent with no tools: list asks through forms only: the link is for a so
     assert.equal(viaForm.delivered.length, 1);
   } finally {
     await viaForm.gateway.stop();
+  }
+});
+
+test('on a home an older build set up, an agent with no tools: list may still be handed a link', async () => {
+  // An omitted list is every tool there, as it always was, and that has
+  // always included a link.
+  const unlisted = '---\nname: Kai\nprovider: openai\nmodel: model-a\n---\n\nYou are Kai.\n';
+  const links = createLinkIssuer();
+  const viaLink = await startRequesting({ soul: unlisted, olderHome: true, request: { name: 'github.token', via: 'link' }, also: [links.adapter] });
+  try {
+    const session = await viaLink.gateway.dispatch({ sessionId: 'kai-35', agentId: 'kai', userMessage: 'go', metadata: SLACK });
+    assert.equal(session.messages.find((message) => message.role === 'tool')?.toolResult?.ok, true);
+    assert.equal(links.issued.length, 1, 'a link was issued');
+  } finally {
+    await viaLink.gateway.stop();
   }
 });
 

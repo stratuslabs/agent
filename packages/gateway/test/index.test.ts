@@ -2146,6 +2146,21 @@ test('a roster soul with no tools: list is named at load, because the omitted ke
   assert.ok(!warnings.some((line) => line.includes('agent stratus has no tools')));
 });
 
+test('on a home an older build set up, a soul with no tools: list is named the way it always was: it may call every tool', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'open.md', '---\nname: Open\n---\n\nI have every tool.\n');
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({ schemaVersion: 4, applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'] }));
+
+  const warnings: string[] = [];
+  const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  await gateway.stop();
+
+  const named = warnings.filter((line) => line.includes('has no tools: list'));
+  assert.equal(named.length, 1, `expected one warning, got ${JSON.stringify(warnings)}`);
+  assert.match(named[0] ?? '', /agent open has no tools: list, so it may call every tool this daemon loads — add tools: \[\.\.\.\] to .*open\.md to say which/);
+});
+
 test('a config-only default soul with no tools: list is named too, and a roster-backed one only once', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
