@@ -195,67 +195,6 @@ const DEFAULT_STOP_WAIT_MS = 10_000;
  */
 const DEFAULT_APPROVAL_PROMPT_WAIT_MS = 5_000;
 
-/**
- * How long a task works before its progress message opens (card 949): long
- * enough that a quick answer, a lookup or two, is just its reply; short
- * enough that a task taking minutes shows what it is doing while it does.
- */
-const DEFAULT_PROGRESS_AFTER_MS = 10_000;
-
-/** Room kept for a progress message's first line and its `…` when its notes are trimmed. */
-const PROGRESS_HEADER_ROOM = 200;
-
-/**
- * The most a progress message holds under its first line. Words longer than
- * this are content, not a step — an analysis written before a tool call —
- * and are posted whole as messages of their own, as before card 949, rather
- * than cut to fit and lost.
- */
-const PROGRESS_NOTE_ROOM = SLACK_MAX_MESSAGE_CHARS - PROGRESS_HEADER_ROOM;
-
-/** How a turn with a progress message ended, for that message's last edit. */
-type ProgressEnd = 'done' | 'stopped' | 'failed';
-
-/** What a progress message's first line is made of: the turn's own tool events, never its words. */
-interface ProgressState {
-  steps: number;
-  /** Calls started and not yet settled, by call id: more than one when tools run side by side. */
-  running: Map<string, string>;
-  waitingOn: string | undefined;
-  end: ProgressEnd | undefined;
-}
-
-const stepCount = (steps: number): string => `${steps} ${steps === 1 ? 'step' : 'steps'}`;
-
-/** A tool's name as code, which no backtick of its own can close early. */
-const toolCode = (toolName: string): string => `\`${escapeSlackText(toolName.replace(/`/g, ''))}\``;
-
-/**
- * The first line of a progress message: what the turn is doing, from the
- * tool calls it made and is making. Words the model wrote are under it, as
- * notes; this line is the part that cannot claim more than happened.
- */
-const progressHeader = (state: ProgressState): string => {
-  switch (state.end) {
-    case 'done':
-      return `✓ Done · ${stepCount(state.steps)}`;
-    case 'stopped':
-      return `■ Stopped after ${stepCount(state.steps)}`;
-    case 'failed':
-      return `✗ Failed after ${stepCount(state.steps)}`;
-    default:
-      break;
-  }
-  if (state.waitingOn !== undefined) {
-    return `⏸ Waiting for approval to run ${toolCode(state.waitingOn)}`;
-  }
-  const latest = [...state.running.values()].at(-1);
-  if (latest !== undefined) {
-    return `⚙ Working · step ${state.steps}: ${toolCode(latest)}`;
-  }
-  return `⚙ Working · ${stepCount(state.steps)} done`;
-};
-
 /** Resolves when `work` settles or after `ms`, whichever is first; never rejects. */
 const settledWithin = (work: Promise<unknown>, ms: number): Promise<void> => new Promise<void>((resolve) => {
   const timer = setTimeout(resolve, ms);
@@ -268,6 +207,12 @@ const settledWithin = (work: Promise<unknown>, ms: number): Promise<void> => new
 });
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 const NO_REPLY_TEXT = '(no reply)';
+/**
+ * The most `message.say` lines one turn may post (card 1009). Enough for a
+ * question and a heads-up or two; a turn past it is narrating, which is
+ * what holding the words between tools exists to stop.
+ */
+const SAY_LIMIT_PER_TURN = 3;
 
 /** How an agent's replies appear in Slack; see `SlackAgentConfig.replies`. */
 export type SlackReplyMode = 'final' | 'stream' | 'texts';
@@ -765,9 +710,9 @@ export interface SlackAdapterOptions {
    */
   approvalPromptWaitMs?: number;
   /**
-   * How long a task works before its progress message opens (card 949).
-   * Words the model writes after its first line open it at once. Defaults
-   * to `DEFAULT_PROGRESS_AFTER_MS`.
+   * @deprecated Ignored. Slack no longer gets a progress message (card
+   * 1009); Slack's own status line shows a turn is working. Accepted so a
+   * caller that set it still compiles.
    */
   progressAfterMs?: number;
   /**
@@ -1191,59 +1136,40 @@ class ReplyRenderer {
   stoppedBy: string | undefined;
   private buffer = '';
   /**
-   * In `final` mode, what the model has said since its last tool call. A
-   * turn that writes "On it, checking the PRs" and then works for an hour
-   * should not leave the thread showing only a loading status: text the
-   * model wrote before calling a tool is posted when the call starts, as a
-   * message of its own, and the finished reply follows it.
+   * In `final` and `texts` mode, what the model has said since its last
+   * tool call. Only its first words, written before its first tool, are
+   * posted (card 950): one line saying what it set out to do, as the tool
+   * starts. Words it writes after that are held (card 1009): not posted,
+   * and not added to the reply. Slack's own status line is what shows the
+   * turn is still working.
    */
   private interim = '';
-  /** The last interim message posted, so a reply that repeats it is not posted twice. */
+  /** The first line, once it landed, so a reply that repeats it is not posted twice. */
   private lastInterim: string | undefined;
-  /** Whether any interim message landed — something said, whatever the reply's fate. */
+  /** Whether the first line landed — something said, whatever the reply's fate. */
   private interimPosted = false;
-  /** Every interim message that landed whole, in order: what a hosted-loop reply is stripped of. */
+  /** The first line, once it landed whole: what a hosted-loop reply is stripped of first. */
   private readonly interimSaid: string[] = [];
   /**
-   * Told of each interim message as it is queued — before the reply, and
-   * before anything typed while its tool runs — with what of it landed,
-   * once that is known, so the thread's other agents hear it in its place.
+   * Told of the first line as it is queued — before the reply, and before
+   * anything typed while its tool runs — with what of it landed, once that
+   * is known, so the thread's other agents hear it in its place.
    */
   private readonly onInterim: ((heard: () => string, landed: Promise<boolean>) => void) | undefined;
-  /**
-   * Card 949, `final` mode: a task says what it is about to do in a
-   * message of its own (its first words before a tool), then keeps ONE
-   * progress message up to date — a first line built from its tool events,
-   * and under it whatever else it wrote between tools — and posts its reply
-   * as a message of its own. Narration that used to be a post per step is
-   * an edit, so a long task is three messages, not twenty.
-   *
-   * Whether this turn's first words have gone out, so later words are notes.
-   */
+  /** Whether this turn's first words have gone out, so later words are held. */
   private firstWordsSaid = false;
-  /** Whether the progress message has been asked for; it may not have landed yet. */
-  private progressOpen = false;
-  /** The progress message, once Slack took it. */
-  private progressRef: OutboundMessageRef | undefined;
-  /** What the first line says, from this turn's own tool events only. */
-  private readonly progress: ProgressState = { steps: 0, running: new Map(), waitingOn: undefined, end: undefined };
+  /** Whether a tool of this turn's has been called: words after one are held, with or without a first line. */
+  private toolCalled = false;
   /**
-   * The notes under that line, as sent: converted, oldest dropped past one
-   * message's room. `shown` once a write that held the note has landed: a
-   * note trimmed while its write was still queued never reached anyone.
+   * Words written between tools after the first line, in order. Never
+   * posted; kept only so a hosted-loop reply that repeats them is stripped
+   * of them, and so a turn that ends on them can post them as its reply.
    */
-  private progressNotes: Array<{ text: string; shown?: boolean }> = [];
-  /** Whether older notes were dropped for room, so the message says so. */
-  private progressNotesCut = false;
-  /** Whether the last thing this turn said is a note rather than a message of its own. */
-  private lastSaidWasNote = false;
-  private progressTimer: NodeJS.Timeout | undefined;
-  private progressOpenTimer: NodeJS.Timeout | undefined;
-  private lastProgressAt = 0;
-  private turnStartedAt = 0;
-  /** How the turn ended, for the progress message: a stop or a failure says so before it finalizes. */
-  private ending: ProgressEnd = 'done';
-  private readonly progressAfterMs: number;
+  private readonly held: string[] = [];
+  /** Whether the last words this turn wrote before a tool were held rather than posted. */
+  private lastWasHeld = false;
+  /** Held words posted as the reply, because the turn ended on them (see `finalizeInOrder`). */
+  private promotedReply: string | undefined;
   /** The lowest trust this turn's session was lowered to while it ran (`session.tainted`). */
   taintedTo: TrustLevel | undefined;
   private turnBreakPending = false;
@@ -1276,6 +1202,10 @@ class ReplyRenderer {
    */
   private generation = 0;
   private finalized = false;
+  /** How many `message.say` lines this turn has sent; see {@link SAY_LIMIT_PER_TURN}. */
+  private saidMidTask = 0;
+  /** A judged turn's status, waiting on its first tool call; see `showLoading`. */
+  private loadOnFirstTool = false;
   /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
   private uploaded = false;
   /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
@@ -1385,7 +1315,6 @@ class ReplyRenderer {
       after?: Promise<unknown>;
       dmWith?: string;
       onInterim?: (heard: () => string, landed: Promise<boolean>) => void;
-      progressAfterMs?: number;
     } = {},
   ) {
     this.web = web;
@@ -1402,17 +1331,25 @@ class ReplyRenderer {
     this.after = options.after ?? Promise.resolve();
     this.dmWith = options.dmWith;
     this.onInterim = options.onInterim;
-    this.progressAfterMs = options.progressAfterMs ?? DEFAULT_PROGRESS_AFTER_MS;
   }
 
   /**
    * Show Slack's loading status for this turn, and keep it up until the
-   * turn is finalized. Not for a streaming turn, which has its placeholder,
-   * nor for one nobody asked for: "is thinking…" over a turn that may
-   * decide to say nothing is the interruption silence exists to avoid.
+   * turn is finalized. Not for a streaming turn, which has its placeholder.
+   * One nobody asked for waits for its first tool call: "is thinking…"
+   * over every turn that only decides to say nothing is the interruption
+   * silence exists to avoid, but one that went to work was missing its
+   * status (card 1009).
    */
   showLoading(head: boolean): void {
-    if (this.streaming || this.lazy || this.loading || this.finalized) {
+    if (this.streaming || this.loading || this.finalized) {
+      return;
+    }
+    if (this.lazy) {
+      // Shown once it calls its first tool instead (card 1009): by then it
+      // is working on something, and a status, unlike a placeholder,
+      // leaves no trace when the turn still ends silent.
+      this.loadOnFirstTool = true;
       return;
     }
     this.loading = true;
@@ -1452,6 +1389,48 @@ class ReplyRenderer {
       return;
     }
     this.setStatus(this.statusText ?? THINKING_STATUS);
+  }
+
+  /**
+   * A post of an app's landed in `channel` under `thread` from outside this
+   * turn: `message.send` from another of its sessions, say. Slack clears
+   * the app's status in a thread on any post of the app's there, so a turn
+   * of the same app working in that thread puts its status back rather
+   * than wait for the next refresh (card 1009). Another app's post clears
+   * nothing of this one's.
+   */
+  appPosted(web: SlackWebLike, channel: string, thread: string): void {
+    if (this.postsAs(web) && channel === this.channel && thread === this.statusThread) {
+      this.refreshLoading();
+    }
+  }
+
+  /** Whether this turn posts through `web`: the same agent's app. */
+  postsAs(web: SlackWebLike): boolean {
+    return web === this.web;
+  }
+
+  /**
+   * A `message.say` line (card 1009): posted now, after whatever the turn
+   * has already posted, and resolved once it landed. Refused, with a
+   * sentence for the agent, on a turn that has already replied, a
+   * streaming turn (its words show as they are written), and past
+   * {@link SAY_LIMIT_PER_TURN}.
+   */
+  async say(text: string): Promise<void> {
+    if (this.finalized) {
+      throw new Error('This turn has already posted its reply, so a mid-task message has nowhere to go.');
+    }
+    if (this.streaming) {
+      throw new Error('This conversation shows your words as you write them, so no separate message is needed. Just write it.');
+    }
+    if (this.saidMidTask >= SAY_LIMIT_PER_TURN) {
+      throw new Error(`This turn already sent ${SAY_LIMIT_PER_TURN} mid-task messages. Put the rest in your reply.`);
+    }
+    this.saidMidTask += 1;
+    if (!(await this.postLine(text, false))) {
+      throw new Error('Slack did not take the message. Say it in your reply.');
+    }
   }
 
   private stopLoading(): void {
@@ -1501,9 +1480,6 @@ class ReplyRenderer {
    * included, so this turn's placeholder starts empty.
    */
   beginTurn(): void {
-    if (!this.turnStarted) {
-      this.turnStartedAt = Date.now();
-    }
     this.turnStarted = true;
     if (this.pendingEdit) {
       clearTimeout(this.pendingEdit);
@@ -1592,12 +1568,15 @@ class ReplyRenderer {
       this.activeTools.set(event.call.id, event.call.toolName);
       this.showActiveTool();
       this.flushInterim(ofThisTurn);
-      if (ofThisTurn && this.mayShowProgress()) {
-        this.progress.steps += 1;
-        this.progress.running.set(event.call.id, event.call.toolName);
-        this.progress.waitingOn = undefined;
-        this.openProgressInTime();
-        this.scheduleProgress();
+      if (ofThisTurn && this.turnStarted) {
+        this.toolCalled = true;
+        // Running, so at the head of its session: nothing of a turn ahead
+        // is left for this status to overwrite.
+        if (this.loadOnFirstTool && !this.finalized) {
+          this.loadOnFirstTool = false;
+          this.loading = true;
+          this.publishLoading();
+        }
       }
       this.scheduleEdit();
       return;
@@ -1613,9 +1592,6 @@ class ReplyRenderer {
       // Words written before a call that was refused were still said
       // before a tool, and must not run into the next response's.
       this.flushInterim(ofThisTurn);
-      if (ofThisTurn) {
-        this.settleProgressStep(event.call.id);
-      }
       this.scheduleEdit();
       return;
     }
@@ -1625,9 +1601,6 @@ class ReplyRenderer {
       // Settled here too for a call rejected before it ran, which never
       // reached `tool.called`; after one that did, this is empty.
       this.flushInterim(ofThisTurn);
-      if (ofThisTurn) {
-        this.settleProgressStep(event.result.callId);
-      }
       // Also a boundary, and not only for symmetry: a call rejected before
       // execution settles as tool.completed without ever having emitted
       // tool.called, so this is the only mark that attempt leaves.
@@ -1711,11 +1684,12 @@ class ReplyRenderer {
   }
 
   /**
-   * Post what the model said before the tool it is now calling, in `final`
-   * mode only: a streaming turn already shows it in its placeholder, and a
-   * turn nobody asked for must not speak before it decides to. Behind the
-   * turn ahead and any handover, on the upload chain, so interim text,
-   * files, and the reply land in the order they happened.
+   * Post what the model said before the first tool it calls, in `final`
+   * and `texts` mode only: a streaming turn already shows it in its
+   * placeholder, and a turn nobody asked for must not speak before it
+   * decides to. Behind the turn ahead and any handover, on the upload
+   * chain, so the first line, files, and the reply land in the order they
+   * happened. Words written after that are held, not posted (card 1009).
    */
   private flushInterim(ofThisTurn: boolean): Promise<boolean> | undefined {
     const text = this.interim.trim();
@@ -1724,15 +1698,26 @@ class ReplyRenderer {
       return undefined;
     }
     // Only words before the turn's first tool are a message of their own:
-    // after one, a step has run, and what follows is progress whether or
-    // not the turn opened with a line.
-    if (this.firstWordsSaid || this.progressOpen || this.progress.steps > 0) {
-      const note = toSlackMrkdwn(text);
-      if (note.length <= PROGRESS_NOTE_ROOM) {
-        return this.noteProgress(text, note);
-      }
+    // after one, a step has run, and what follows is the model working,
+    // whether or not the turn opened with a line. It is held: posted, it
+    // is the running commentary a person has to scroll past (card 1009).
+    if (this.firstWordsSaid || this.toolCalled) {
+      this.held.push(text);
+      this.lastWasHeld = true;
+      return undefined;
     }
     this.firstWordsSaid = true;
+    return this.postLine(text, true);
+  }
+
+  /**
+   * Post one line of the turn's into its thread, behind the turn ahead and
+   * any handover, on the upload chain, so it lands after everything the
+   * turn posted before it. Resolves with whether any of it landed. The
+   * first line (card 950) is also what a hosted-loop reply is stripped of;
+   * a `message.say` line is not, since the reply never contained it.
+   */
+  private postLine(text: string, first: boolean): Promise<boolean> {
     const handover = this.handover;
     const after = this.after;
     let heard = '';
@@ -1767,236 +1752,19 @@ class ReplyRenderer {
           }
           settleLanded(landed.length > 0);
         }
-        this.lastInterim = text;
-        this.interimSaid.push(text);
-        this.lastSaidWasNote = false;
+        if (first) {
+          this.lastInterim = text;
+          this.interimSaid.push(text);
+        }
         // A post of the app's in this thread takes the status down while
         // the turn is still working; put it back.
         this.refreshLoading();
       })
-      .catch((error) => this.warn(`chat.postMessage failed for an interim message: ${error instanceof Error ? error.message : String(error)}`))
+      .catch((error) => this.warn(`chat.postMessage failed for ${first ? 'an interim' : 'a mid-task'} message: ${error instanceof Error ? error.message : String(error)}`))
       // Settled whatever happened above, or the other agents' intake would
       // wait on it for good. A second settle is a no-op.
       .finally(() => settleLanded(false));
     return landedNow;
-  }
-
-  /**
-   * Whether this turn keeps a progress message (card 949): `final` mode,
-   * a turn somebody asked for, and its own — the same turns that post
-   * their words before a tool. A streaming turn's placeholder already
-   * shows its tool lines, and a turn nobody asked for must not speak
-   * before it decides to.
-   */
-  private mayShowProgress(): boolean {
-    return !this.streaming && !this.lazy && this.turnStarted && !this.finalized;
-  }
-
-  /**
-   * Words the turn wrote between tools after its first line: a note in the
-   * progress message, opening it if need be, rather than a post of their
-   * own. Heard by the thread's other agents and stripped from a reply that
-   * repeats them, as a message of their own would be. A note Slack refused
-   * is taken out again, so a later edit never shows words nobody heard.
-   */
-  private noteProgress(text: string, converted: string): Promise<boolean> {
-    this.progressOpen = true;
-    this.clearProgressOpenTimer();
-    const note: { text: string; shown?: boolean } = { text: converted };
-    this.progressNotes.push(note);
-    this.trimProgressNotes();
-    let heard = '';
-    let settleLanded!: (landed: boolean) => void;
-    const landedNow = new Promise<boolean>((resolve) => {
-      settleLanded = resolve;
-    });
-    this.onInterim?.(() => heard, landedNow);
-    // Said once a write that held it has landed, whichever write that was,
-    // and only then. Its own write can land after a slow Slack let later
-    // notes trim it out unseen, or be refused after an earlier write showed
-    // it. Unseen, it is not said: the others do not hear it, and a reply
-    // that repeats it keeps it.
-    const settle = () => {
-      if (!note.shown) {
-        this.progressNotes = this.progressNotes.filter((kept) => kept !== note);
-        settleLanded(false);
-        return;
-      }
-      this.interimPosted = true;
-      heard = text;
-      this.lastInterim = text;
-      this.interimSaid.push(text);
-      this.lastSaidWasNote = true;
-      settleLanded(true);
-    };
-    this.queueProgressWrite(settle, settle);
-    return landedNow;
-  }
-
-  /**
-   * Keep the notes to what one message holds with its first line: the
-   * newest, since the oldest are what a reader has already seen. Past
-   * that the message opens with `…`, and memory stays bounded however
-   * long the task runs.
-   */
-  private trimProgressNotes(): void {
-    let size = this.progressNotes.reduce((total, note) => total + note.text.length + 2, 0);
-    while (size > PROGRESS_NOTE_ROOM && this.progressNotes.length > 1) {
-      size -= (this.progressNotes.shift()?.text.length ?? 0) + 2;
-      this.progressNotesCut = true;
-    }
-  }
-
-  private progressText(omitLast = false): string {
-    const notes = omitLast ? this.progressNotes.slice(0, -1) : this.progressNotes;
-    const parts = [progressHeader(this.progress), ...(this.progressNotesCut ? ['…'] : []), ...notes.map((note) => note.text)];
-    return truncateForSlack(parts.join('\n\n'));
-  }
-
-  /**
-   * Put the progress message as it stands now into the thread: posted the
-   * first time, edited after. On the upload chain, behind the turn ahead
-   * and any handover, so it lands below this turn's first line and above
-   * its files and reply, and reads its state when it runs, not when asked.
-   */
-  private queueProgressWrite(landed?: () => void, refused?: () => void): void {
-    const handover = this.handover;
-    const after = this.after;
-    this.uploadChain = this.uploadChain
-      .then(() => handover)
-      .then(() => after)
-      .then(async () => {
-        this.lastProgressAt = Date.now();
-        const held = [...this.progressNotes];
-        await this.writeProgress(this.progressText());
-        for (const note of held) {
-          note.shown = true;
-        }
-        landed?.();
-      })
-      .catch((error) => {
-        refused?.();
-        this.warn(`could not update the progress message: ${error instanceof Error ? error.message : String(error)}`);
-      });
-  }
-
-  private async writeProgress(text: string): Promise<void> {
-    const ref = this.progressRef;
-    if (ref) {
-      await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text });
-      return;
-    }
-    const posted = await this.web.chat.postMessage({
-      channel: this.channel,
-      text,
-      ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-    });
-    if (posted.ts) {
-      this.progressRef = { channel: posted.channel ?? this.channel, ts: posted.ts };
-    }
-    this.placeText(posted.ts);
-    // A post of the app's in this thread takes the status down while the
-    // turn is still working; put it back.
-    this.refreshLoading();
-  }
-
-  /** Edit the progress message for a step that started or settled, at most once per edit interval. */
-  private scheduleProgress(): void {
-    if (!this.progressOpen || this.finalized || this.progressTimer) {
-      return;
-    }
-    const delay = Math.max(0, this.editIntervalMs - (Date.now() - this.lastProgressAt));
-    this.progressTimer = setTimeout(() => {
-      this.progressTimer = undefined;
-      if (!this.finalized) {
-        this.queueProgressWrite();
-      }
-    }, delay);
-    this.progressTimer.unref?.();
-  }
-
-  /**
-   * Open the progress message once the turn has worked `progressAfterMs`:
-   * now, if it has, or when it will have. Asked on a tool call, so there
-   * is always a step to show; a quick answer ends first and opens none.
-   */
-  private openProgressInTime(): void {
-    if (this.progressOpen || this.progressOpenTimer) {
-      return;
-    }
-    const open = () => {
-      this.progressOpen = true;
-      this.queueProgressWrite();
-    };
-    const wait = this.progressAfterMs - (Date.now() - this.turnStartedAt);
-    if (wait <= 0) {
-      open();
-      return;
-    }
-    this.progressOpenTimer = setTimeout(() => {
-      this.progressOpenTimer = undefined;
-      if (!this.finalized && !this.progressOpen) {
-        open();
-      }
-    }, wait);
-    this.progressOpenTimer.unref?.();
-  }
-
-  /** A step of this turn's finished or was refused. */
-  private settleProgressStep(callId: string): void {
-    if (!this.mayShowProgress()) {
-      return;
-    }
-    this.progress.running.delete(callId);
-    this.progress.waitingOn = undefined;
-    this.scheduleProgress();
-  }
-
-  /**
-   * A call of this turn's is waiting on a person: the progress message says
-   * so until the call runs or is refused. The prompt itself is a message
-   * of its own, below it.
-   */
-  awaitingApproval(toolName: string, ofThisTurn: boolean): void {
-    if (!ofThisTurn || !this.mayShowProgress()) {
-      return;
-    }
-    this.progress.waitingOn = toolName;
-    this.scheduleProgress();
-  }
-
-  private clearProgressOpenTimer(): void {
-    if (this.progressOpenTimer) {
-      clearTimeout(this.progressOpenTimer);
-      this.progressOpenTimer = undefined;
-    }
-  }
-
-  private clearProgressTimers(): void {
-    this.clearProgressOpenTimer();
-    if (this.progressTimer) {
-      clearTimeout(this.progressTimer);
-      this.progressTimer = undefined;
-    }
-  }
-
-  /**
-   * The progress message's last edit: how the task ended, and every note
-   * but one that became the reply. Resolves once Slack has answered; a
-   * refusal leaves the last state that landed, and is logged.
-   */
-  private async closeProgress(omitLast: boolean): Promise<void> {
-    this.clearProgressTimers();
-    const ref = this.progressRef;
-    if (!ref) {
-      return;
-    }
-    this.progress.end = this.ending;
-    try {
-      await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text: this.progressText(omitLast) });
-    } catch (error) {
-      this.warn(`could not finish the progress message: ${error instanceof Error ? error.message : String(error)}`);
-    }
   }
 
   /**
@@ -2023,22 +1791,25 @@ class ReplyRenderer {
    * repeats the last of them. Read once the turn's posts have landed.
    */
   spokenText(reply: string): string {
-    return this.unsaid(reply);
+    if (reply.trim().length === 0) {
+      return '';
+    }
+    return this.promotedReply ?? this.unsaid(reply);
   }
 
   /**
-   * The part of a reply not already posted as interim messages. A provider
-   * that hosts its own loop (codex) returns every message of the turn
-   * joined into one reply, so the interim messages are stripped from its
-   * front in order; one whose last words came before its final tool call
-   * returns just those words, which were posted already.
+   * The part of a reply that is not the first line or words held after it.
+   * A provider that hosts its own loop (codex) returns every message of
+   * the turn joined into one reply, so those are stripped from its front
+   * in order; one whose last words came before its final tool call returns
+   * just those words, which are already accounted for.
    */
   private unsaid(reply: string): string {
     let rest = reply.trim();
     // Whole messages only, at the separator the codex provider joins them
     // with: a reply of its own that merely begins with the same words
     // ("Sure" then "Sure, the build passes.") is not cut.
-    for (const said of this.interimSaid) {
+    for (const said of [...this.interimSaid, ...this.held]) {
       if (rest === said) {
         rest = '';
       } else if (rest.startsWith(`${said}\n\n`)) {
@@ -2047,7 +1818,8 @@ class ReplyRenderer {
         break;
       }
     }
-    return rest === this.lastInterim ? '' : rest;
+    const last = this.lastWasHeld ? this.held.at(-1) : this.lastInterim;
+    return rest === last ? '' : rest;
   }
 
   /** Point both status lines at the newest call still running, or clear them. */
@@ -2168,7 +1940,6 @@ class ReplyRenderer {
     const hadStatus = this.statusTimer !== undefined;
     this.stopLoading();
     this.finalized = true;
-    this.clearProgressTimers();
     if (!this.streaming) {
       await this.after;
       await this.statusChain;
@@ -2190,32 +1961,34 @@ class ReplyRenderer {
       // has spoken, for the thread rule.
       await this.editChain;
       await this.uploadChain;
+      // A status it showed from its first tool has no post to take it
+      // down, so it is cleared here.
+      if (hadStatus) {
+        this.setStatus('');
+        await this.statusChain;
+      }
       return this.outcome(false, this.uploaded);
     }
-    // Interim messages land before the reply is judged: one that already
-    // said what the reply says (the model's last words came before a
-    // tool call) is not posted again, and a turn that said things along
-    // the way is not followed by `(no reply)`.
+    // The first line lands before the reply is judged: one that already
+    // said what the reply says (the model's only words came before a tool
+    // call) is not posted again, and a turn that said it is not followed
+    // by `(no reply)`.
     await this.uploadChain;
     // Words the turn ended on, written before its last tool call, are its
-    // answer (card 949): a reply that only repeats them, or an empty one,
-    // posts them as the reply, and the progress message lets them go. Left
-    // as its last note, the answer would sit in the message that says how
-    // the work went, above where anyone looks for it.
-    let promoted = false;
-    if (this.interimPosted && !this.ref) {
+    // answer: a reply that only repeats them, or an empty one, posts them
+    // as the reply. They were held, so this is the first the thread sees
+    // of them. Any other held words stay unsaid (card 1009).
+    if (!this.ref && (this.interimPosted || this.held.length > 0)) {
       const rest = this.unsaid(reply);
-      promoted = rest.length === 0 && this.lastSaidWasNote && this.lastInterim !== undefined;
-      reply = promoted && this.lastInterim !== undefined ? this.lastInterim : rest;
+      const lastHeld = this.held.at(-1);
+      if (rest.length === 0 && this.lastWasHeld && lastHeld !== undefined) {
+        this.promotedReply = lastHeld;
+        reply = lastHeld;
+      } else {
+        reply = rest;
+      }
     }
-    // Alongside the reply rather than ahead of it: an edit keeps its place,
-    // and the answer should not wait on a round trip for a status line.
-    // Words promoted to the reply are the exception: they leave the
-    // progress message only once the reply holding them has landed, so a
-    // reply Slack refuses does not take the answer out of the thread.
-    const closed = promoted ? undefined : this.closeProgress(false);
     if (!this.ref && this.interimPosted && reply.trim().length === 0) {
-      await (closed ?? this.closeProgress(false));
       // Nothing posts after this to take the status down, so it is cleared.
       if (hadStatus) {
         this.setStatus('');
@@ -2253,7 +2026,6 @@ class ReplyRenderer {
     // avoid, so it is taken back like an abandoned attempt's. One Slack
     // will not let go stands, and a message the thread can see is the
     // last thing said whatever it says.
-    await (closed ?? this.closeProgress(published));
     let stranded = false;
     if (this.lazy && this.ref !== undefined && !landed && !this.edited) {
       stranded = !(await this.retract());
@@ -2338,7 +2110,6 @@ class ReplyRenderer {
       const hadStatus = this.statusTimer !== undefined;
       this.stopLoading();
       this.finalized = true;
-      this.clearProgressTimers();
       // The barrier `finalizeInOrder` takes, for the same reason: the turn
       // queued behind this one waits on `posted`, and settling it before
       // the reply ahead has posted would let that turn's reply overtake it.
@@ -2374,7 +2145,6 @@ class ReplyRenderer {
     if (this.lazy && !this.ref && this.buffer.trim().length === 0) {
       return this.finalize('');
     }
-    this.ending = 'stopped';
     return this.finalize(`Stopped by <@${by}>.`);
   }
 
@@ -2401,8 +2171,7 @@ class ReplyRenderer {
       this.warn(`a turn nobody asked for failed before saying anything: ${message}`);
       return this.finalize('');
     }
-    // A spent budget is a limit working, not a fault: the task stopped.
-    this.ending = refused ? 'stopped' : 'failed';
+    // A spent budget is a limit working, not a fault.
     return this.finalize(refused ? message : `Something went wrong: ${message}`);
   }
 
@@ -3974,7 +3743,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
   const stopWaitMs = options.stopWaitMs ?? DEFAULT_STOP_WAIT_MS;
   const approvalPromptWaitMs = options.approvalPromptWaitMs ?? DEFAULT_APPROVAL_PROMPT_WAIT_MS;
-  const progressAfterMs = options.progressAfterMs ?? DEFAULT_PROGRESS_AFTER_MS;
   const now = options.now ?? Date.now;
 
   const connections: AgentConnection[] = [];
@@ -5342,6 +5110,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           }
         } finally {
           accepted(sent === chunks.length ? text : sent > 0 ? chunks.slice(0, sent).join('\n') : undefined);
+          if (thread && sent > 0) {
+            // The post took down the status of any turn of this app's
+            // working in that thread; the turn at each session's head puts
+            // its own back.
+            for (const queue of renderers.values()) {
+              queue[0]?.appPosted(web, channelId, thread);
+            }
+          }
         }
         return first ?? { channel: channelId, ts: '' };
       },
@@ -8637,7 +8413,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         lazy: judged,
         now,
         streaming,
-        progressAfterMs,
         texts: connection.config.replies === 'texts',
         statusThread: thread ?? event.ts,
         statusWarned: connection.statusWarned,
@@ -9199,6 +8974,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     name: 'slack',
     ...(options.loadAgents !== undefined ? { reload } : {}),
     resolveOutbound,
+    // A `message.say` line goes to the turn running for that session, in
+    // its thread, through the same agent's app, or nowhere (card 1009).
+    say: async ({ sessionId, agentId, text }: { sessionId: string; agentId: string; text: string }): Promise<void> => {
+      const connection = connectionFor(agentId);
+      const renderer = renderers.get(sessionId)?.[0];
+      if (!connection || !renderer || !renderer.postsAs(connection.web)) {
+        throw new Error('This conversation has no turn of yours running in Slack right now, so there is nothing to send into. Say it in your reply.');
+      }
+      await renderer.say(text);
+    },
     readConversation,
     sessionConversation,
     createConversation,
@@ -9290,7 +9075,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // the question it leads to (card 950). The wait is bounded: a line
         // Slack is slow to take must not keep the question from anyone.
         if (event.type === 'tool.approval-requested') {
-          head?.awaitingApproval(event.call.toolName, !foreign);
           const said = head?.sayBeforeAsking(!foreign);
           if (!said) {
             track(renderApprovalRequest(event));
