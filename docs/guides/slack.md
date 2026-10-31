@@ -261,7 +261,13 @@ its own, in order, in the same thread. The words before a tool are split the
 same way. A code block, a list, a heading with the paragraph under it, and a
 line ending in a colon with what it introduces each stay in one message. A
 reply is at most five messages, and anything past the fifth paragraph stays
-together in the last one. Messages the agent sends with `message.send` and
+together in the last one. A reply that tags another agent is the exception
+and goes out as one message, because the tagged agent reads only a message
+that names it, so a split reply would reach it as the tagged paragraph
+alone. Another agent here means an agent on this daemon, one on the agent's
+`agentMentions` team, or anyone Slack says is a bot (asked once per user
+through `users:read`, which the app already has). A reply that tags only
+people is still split. Messages the agent sends with `message.send` and
 error notices are posted as written.
 
 ```jsonc

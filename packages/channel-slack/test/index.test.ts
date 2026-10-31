@@ -116,6 +116,12 @@ interface FakeWeb extends SlackWebLike {
   userInfoDelayMs?: (callIndex: number) => number;
   /** Profile names to answer with, by user id, ahead of the default `name-<id>`. */
   displayNames?: Map<string, string>;
+  /** Users users.info says are bots (`is_bot: true`). */
+  botUsers?: Set<string>;
+  /** Users users.info fails for, as a rate limit would. */
+  userInfoFails?: Set<string>;
+  /** Every user users.info was asked about, in order. */
+  userInfoAsked: string[];
   /** Scopes auth.test reports, for testing the scope check. */
   grantedScopes: string[];
   /** Called as chat.postMessage is entered, before it awaits `postGate`. */
@@ -138,6 +144,7 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
   let counter = 0;
   let userInfoCalls = 0;
   const web: FakeWeb = {
+    userInfoAsked: [],
     posts: [],
     updates: [],
     deletes: [],
@@ -218,12 +225,21 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
     users: {
       async info({ user }) {
         userInfoCalls += 1;
+        web.userInfoAsked.push(user);
         const delay = web.userInfoDelayMs?.(userInfoCalls) ?? 0;
         if (delay > 0) {
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
+        if (web.userInfoFails?.has(user)) {
+          throw new Error('ratelimited');
+        }
         const known: Record<string, string> = { 'U-DYLAN': 'Dylan', 'B-AVA': 'Ava', 'B-BEA': 'Bea' };
-        return { user: { profile: { display_name: web.displayNames?.get(user) ?? known[user] ?? `name-${user}` } } };
+        return {
+          user: {
+            ...(web.botUsers?.has(user) ? { is_bot: true } : {}),
+            profile: { display_name: web.displayNames?.get(user) ?? known[user] ?? `name-${user}` },
+          },
+        };
       },
     },
   };
@@ -12850,6 +12866,164 @@ test('on texts, the reply of a turn finished after a restart is split the same w
   await adapter.stop();
 
   assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Back up.', '700.1'], ['The approval went through.', '700.1']]);
+});
+
+test('on texts, a reply that tags another agent goes out as one message, so that agent hears all of it', async () => {
+  // Card 1014: the tagged agent admits only a message that names it, so a
+  // reply split a paragraph to a message reached it as the tagged part.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const handoff = 'Main is green.\n\n<@B-BEA> can you tag the release?\n\nThe notes are in the PR.';
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, sessionId.startsWith('slack:ava:') ? handoff : 'tagged'));
+  const adapter = createAdapterAsShipped({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'texts' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', agentMentions: {} },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', mention('<@B-AVA> status?', { ts: '960.1' }));
+  assert.deepEqual(webAva.posts.map((post) => post.text), [handoff]);
+  // What Bea's socket gets for that post: one message, naming it.
+  await socketBea.deliver('message', botMention({ user: 'B-AVA', text: webAva.posts[0]?.text ?? '', ts: '960.2', thread: '960.1', type: 'message' }));
+  await adapter.stop();
+
+  const beaTurns = gateway.dispatches.filter((dispatch) => dispatch.agentId === 'bea');
+  assert.equal(beaTurns.length, 1);
+  assert.match(beaTurns[0]?.userMessage ?? '', /The notes are in the PR\.$/);
+  // An agent on this daemon is known without asking Slack.
+  assert.ok(!webAva.userInfoAsked.includes('B-BEA'), JSON.stringify(webAva.userInfoAsked));
+});
+
+test('on texts, a reply that tags a bot Slack knows is one message, and Slack is asked about that bot once', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, '<@U-QUINN> over to you.\n\nThe logs are attached.'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hand it off', { ts: '961.1' }));
+  await socket.deliver('app_mention', mention('<@B-AVA> and again', { ts: '962.1' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), [
+    '<@U-QUINN> over to you.\n\nThe logs are attached.',
+    '<@U-QUINN> over to you.\n\nThe logs are attached.',
+  ]);
+  assert.equal(web.userInfoAsked.filter((user) => user === 'U-QUINN').length, 1);
+});
+
+test('on texts, a reply that tags an agent on its agentMentions team is one message, with no lookup', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, '<@U-NOVA> the page is live.\n\nScreenshots are in the thread.'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts', agentMentions: { team: { nova: 'U-NOVA' } } }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> tell nova', { ts: '963.1' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['<@U-NOVA> the page is live.\n\nScreenshots are in the thread.']);
+  assert.ok(!web.userInfoAsked.includes('U-NOVA'), JSON.stringify(web.userInfoAsked));
+});
+
+test('on texts, a reply that tags only a person still goes out a paragraph to a message', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, '<@U-DYLAN> merged.\n\nTagging is yours.'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> merge it', { ts: '964.1' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['<@U-DYLAN> merged.', 'Tagging is yours.']);
+});
+
+test('on texts, a reply that tags someone Slack cannot say is a bot or not goes out as one message', async () => {
+  // Kept whole: a split handoff loses the other agent everything after
+  // the tag, and a person tagged in one message loses nothing.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.userInfoFails = new Set(['U-WHO']);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, '<@U-WHO> can you check?\n\nDetails below.'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> ask them', { ts: '965.1' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['<@U-WHO> can you check?\n\nDetails below.']);
+});
+
+test('on texts, words before a tool that tag another agent go out as one message', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'On it.\n\n<@U-QUINN> can you watch CI meanwhile?' } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'On it.\n\n<@U-QUINN> can you watch CI meanwhile?\n\nAll 40 pass.');
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go', { ts: '966.1' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => post.text), ['On it.\n\n<@U-QUINN> can you watch CI meanwhile?', 'All 40 pass.']);
+});
+
+test('on texts, the reply of a turn finished after a restart that tags another agent is one message', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '967.0', conversation: { kind: 'channel' }, sessionTrust: 'user' },
+    reply: 'Back up.\n\n<@U-QUINN> the approval went through.',
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:967.0' });
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Back up.\n\n<@U-QUINN> the approval went through.', '967.0']]);
 });
 
 test('what an agent said before its turn failed is still heard by the thread\'s other agents, and the error note is not', async () => {
