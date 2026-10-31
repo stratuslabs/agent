@@ -41,6 +41,7 @@ tree is where the depth lives.
 | Keep a fact in front of an agent every turn, or move its memory to another machine | [Memory](./concepts/memory.md#pinned-facts) |
 | Understand what installing a plugin does (and does not do) | [Plugins](./concepts/plugins.md) |
 | See the security posture in one place | [Security](./concepts/security.md) |
+| Know what doesn't work yet | [Known limitations](./concepts/limitations.md) |
 | Drive a daemon over HTTP/WebSocket | [Control API reference](../packages/control-api/README.md) |
 | Understand the design and why it was built that way | [Architecture](./architecture/stratus-v2.md) |
 
@@ -49,7 +50,8 @@ tree is where the depth lives.
 - **`start/`** — the path from nothing to a working agent.
 - **`guides/`** — one task each: doing a thing with a running install.
 - **`reference/`** — lookup tables: every command, flag, and config key.
-- **`concepts/`** — the ideas underneath: agents, memory, plugins, security.
+- **`concepts/`** — the ideas underneath: agents, memory, plugins, security,
+  and the known limitations.
 - **`architecture/`** — design documents; [`plugins.md`](./architecture/plugins.md)
   is the contract the ecosystem builds against.
 
