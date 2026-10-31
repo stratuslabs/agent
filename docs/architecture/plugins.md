@@ -992,6 +992,12 @@ after an approval (deciding once more if it dropped, refusing on a second drop),
 and hands the decided label to `execute` as `ExecutionContext.decidedTrust`
 so the tool can check once more before it acts. A throw or a slow answer reads
 `external`.
+A tool that is fine unattended in a clean conversation but not on a web page's
+say-so may declare `Tool.riskAfterExternalContent`: once the session's label is
+`external`, the runner judges its calls at that risk instead (`resolveCallRisk`),
+and it never lowers `risk`. `agent.delegate` declares `gated` there. Such a tool
+never runs beside its read-only neighbours, so the label it is judged against
+includes every call before it.
 
 Two more packages ship from this repository today, both added before any
 plugin lived in `stratuslabs/plugins`: `provider-codex` and the MCP bridge
