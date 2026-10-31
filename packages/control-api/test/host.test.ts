@@ -134,6 +134,10 @@ test('a Host header a browser could not have sent is not read for the name insid
   assert.equal(hostAllowed(names, undefined), true);
   // A bind to another loopback address answers to that address too.
   assert.equal(hostAllowed(allowedHostNames('127.0.0.2', undefined), '127.0.0.2:4123'), true);
+  // A short form of a loopback address is still a loopback bind, and checked.
+  const short = allowedHostNames('127.1', undefined);
+  assert.equal(hostAllowed(short, '127.0.0.1:4123'), true);
+  assert.equal(hostAllowed(short, 'evil.example'), false);
   // And a non-loopback bind checks nothing.
   assert.equal(allowedHostNames('0.0.0.0', 'https://gateway.example'), undefined);
 });

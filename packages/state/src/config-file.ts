@@ -1,5 +1,5 @@
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { isIPv4 } from 'node:net';
+import { isIPv4, isIPv6 } from 'node:net';
 import path from 'node:path';
 import {
   BUILTIN_EXECUTOR_NAME,
@@ -398,14 +398,32 @@ export const normalizePublicUrl = (value: unknown): string => {
  * wildcard (`0.0.0.0`, `::`) is not: it is every interface. The one rule for
  * "is this exposed", shared by `serve`'s warning, `doctor`, and the control
  * API's Host check, so the three cannot disagree about an address.
+ *
+ * The address is read the way the resolver binds it: `127.1`, `0x7f.1` and
+ * `2130706433` all listen on 127.0.0.1, so URL parsing (which follows the
+ * same numeric rules) canonicalizes it first. Anything URL parsing would dig
+ * a different name out of (a user part, a path, a percent escape, a port)
+ * counts as not loopback: such a value fails to bind, so the answer only
+ * decides a warning.
  */
 export const isLoopbackHost = (host: string): boolean => {
-  const bare = host.trim().replace(/^\[(.*)\]$/, '$1').toLowerCase();
-  if (bare === 'localhost' || bare === '::1' || bare === '0:0:0:0:0:0:0:1') {
+  const bare = host.trim().replace(/^\[(.*)\]$/, '$1');
+  if (bare === '' || /[@/\\?#%\s]/.test(bare)) {
+    return false;
+  }
+  const parsed = URL.parse(`http://${isIPv6(bare) ? `[${bare}]` : bare}`);
+  if (parsed === null || parsed.port !== '') {
+    return false;
+  }
+  const name = parsed.hostname.toLowerCase();
+  if (name === 'localhost' || name === '[::1]') {
     return true;
   }
-  const v4 = bare.startsWith('::ffff:') ? bare.slice('::ffff:'.length) : bare;
-  return isIPv4(v4) && v4.startsWith('127.');
+  if (isIPv4(name)) {
+    return name.startsWith('127.');
+  }
+  // An IPv4-mapped address canonicalizes to hex: ::ffff:127.0.0.1 is [::ffff:7f00:1].
+  return /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(name);
 };
 
 const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {
