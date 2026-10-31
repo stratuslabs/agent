@@ -407,8 +407,8 @@ test('the skill reader cannot stand in for a grant the tools allowlist never mad
 });
 
 test('an empty tools list is an allowlist granting nothing, not an absent one', () => {
-  // Omitting the key grants every registered tool; `tools: []` grants none
-  // of them. The soul parser keeps the two apart — a bare `tools:` with
+  // Omitting the key grants the tools registered as safe; `tools: []`
+  // grants none of them. The soul parser keeps the two apart — a bare `tools:` with
   // nothing under it parses to the empty list, which is what someone gets
   // by writing the key and not filling it — so this check has to as well,
   // or the plainest spelling of the failure it exists for goes unreported.
@@ -427,8 +427,8 @@ test('an empty tools list is an allowlist granting nothing, not an absent one', 
   assert.deepEqual(
     describeToolAllowlistFinding('blair', { unmatched: [], inert: [], elsewhere: [], none: true }),
     [
-      'agent blair has an empty tools: list, which grants nothing — remove the key to allow'
-        + ' every registered tool, or list the ones it should have',
+      'agent blair has an empty tools: list, which grants nothing — list the tools it should'
+        + ' have, or write tools: ["*"] to allow every registered tool',
     ],
   );
 });
