@@ -1282,7 +1282,9 @@ export interface ToolDescriptor {
  * value, and no policy can tell them apart from prose.
  *
  * - `semantic` — a fact about the world.
- * - `episodic` — a thing that happened.
+ * - `episodic` — a thing that happened. Without a `validUntil` of its own
+ *   it stops being current `MEMORY_EPISODIC_DEFAULT_TTL_DAYS` after it was
+ *   written: see `effectiveMemoryValidityAt`.
  * - `procedural` — how something is done.
  * - `preference` — how the people it works with want things.
  */
@@ -1608,6 +1610,14 @@ const validityInstant = (value: string | undefined): number | undefined => {
  * One rule, both bounds: a fact holds from `validFrom` (inclusive) until
  * `validUntil` (exclusive). Pure in the entry and the clock, so both store
  * implementations compute the same answer from the record alone.
+ *
+ * This is the record's own window and nothing else. Supersession and the
+ * pinned core read it. What a store lists as true now also applies the
+ * episodic default (`effectiveMemoryValidityAt`): a note gone stale is not
+ * the same claim as "the fact it replaced is true again" or "the agent no
+ * longer wants it in front of it", so neither may follow from it. A store
+ * plugin that filters its pinned core with this, or with
+ * `isMemoryEntryCurrent`, keeps its pins across the default.
  */
 export const memoryValidityAt = (
   entry: Pick<MemoryEntry, 'validFrom' | 'validUntil'>,
@@ -1625,7 +1635,54 @@ export const memoryValidityAt = (
   return 'current';
 };
 
-/** Shorthand for the only status that is true now. */
+/**
+ * How long an episodic fact with no `validUntil` of its own stays current.
+ *
+ * Most of what a working agent remembers is short-lived: a PR's head, a
+ * loop's status, where a task got to. Written beside lasting facts and never
+ * retired, those notes read as current forever. The kind already says which
+ * is which, so a note expires by kind rather than by a model judging prose.
+ * Expired is not deleted: the note leaves what is true now and stays in
+ * `search`, marked, exactly like a fact whose explicit window closed.
+ */
+export const MEMORY_EPISODIC_DEFAULT_TTL_DAYS = 14;
+
+const EPISODIC_DEFAULT_TTL_MS = MEMORY_EPISODIC_DEFAULT_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a fact is true at a given instant: its own window
+ * (`memoryValidityAt`), plus a default end for an episodic fact that has no
+ * parseable `validUntil`. That default closes `MEMORY_EPISODIC_DEFAULT_TTL_DAYS`
+ * after the later of `createdAt` and `validFrom`, so a note written ahead of
+ * time is not spent before it starts and a backdated `validFrom` does not
+ * expire a note on the day it is written. An explicit `validUntil` wins in
+ * both directions, and an entry with no `kind` or no parseable `createdAt`
+ * has no default.
+ *
+ * The built-in stores' reads of what is true now use this: `list`, the
+ * recency tail, the topic index, and the status `memory.recall` and
+ * `stratus memory` mark `search` results with.
+ */
+export const effectiveMemoryValidityAt = (
+  entry: Pick<MemoryEntry, 'validFrom' | 'validUntil'> & Partial<Pick<MemoryEntry, 'kind' | 'createdAt'>>,
+  at: Date,
+): MemoryValidity => {
+  const window = memoryValidityAt(entry, at);
+  if (window !== 'current' || entry.kind !== 'episodic' || validityInstant(entry.validUntil) !== undefined) {
+    return window;
+  }
+  const written = validityInstant(entry.createdAt);
+  if (written === undefined) {
+    return window;
+  }
+  const opened = Math.max(written, validityInstant(entry.validFrom) ?? written);
+  return at.getTime() >= opened + EPISODIC_DEFAULT_TTL_MS ? 'expired' : 'current';
+};
+
+/**
+ * Shorthand for `memoryValidityAt(entry, at) === 'current'`: inside the
+ * record's own window, without the episodic default.
+ */
 export const isMemoryEntryCurrent = (
   entry: Pick<MemoryEntry, 'validFrom' | 'validUntil'>,
   at: Date,
@@ -1635,7 +1692,9 @@ export const isMemoryEntryCurrent = (
  * The ids retired by supersession at a given instant, over one agent's
  * un-tombstoned entries.
  *
- * An entry is retired exactly while a successor of it is *current*, which
+ * An entry is retired exactly while a successor of it is *current* by its
+ * own window (`isMemoryEntryCurrent`, so the episodic default never revives
+ * the fact a note replaced), which
  * is the only reading that keeps supersession and validity from cancelling
  * each other: a successor dated from next Monday retiring its predecessor
  * today would leave neither fact available as true now — the old one
@@ -2127,7 +2186,9 @@ export const memoryInjectionEntries = (
  *   successor supersedes it (`supersededMemoryIdsAt`). An entry outside its
  *   validity window is a different thing: still live, out of `list` by
  *   default because it is not true now, and still found by `search` — where
- *   the caller reads its status with `memoryValidityAt`.
+ *   the caller reads its status with `effectiveMemoryValidityAt`. The
+ *   built-in stores also leave an episodic fact past its default window out
+ *   of `list` and `topics`; `pinned` reads only the record's own window.
  */
 export interface AgentMemoryStore {
   /**
@@ -2380,7 +2441,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     const at = this.now();
     const live = options.validity === 'all'
       ? this.live(agentId, at)
-      : this.live(agentId, at).filter((entry) => isMemoryEntryCurrent(entry, at));
+      : this.live(agentId, at).filter((entry) => effectiveMemoryValidityAt(entry, at) === 'current');
     if (options.limit === undefined) {
       return { entries: live.sort(compareMemoryChronology), truncated: false };
     }
@@ -2527,6 +2588,8 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
       return pins.sort(compareMemoryChronology);
     }
     const live = new Set(this.live(agentId, at).map((entry) => entry.id));
+    // The pin's own window, not the episodic default: pinning is how an
+    // agent says a note is still current.
     return pins
       .filter((entry) => live.has(entry.id) && isMemoryEntryCurrent(entry, at))
       .sort(compareMemoryChronology);
@@ -2534,7 +2597,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
 
   async topics(agentId: string): Promise<MemoryTopic[]> {
     const at = this.now();
-    return collectMemoryTopics(this.live(agentId, at).filter((entry) => isMemoryEntryCurrent(entry, at)));
+    return collectMemoryTopics(this.live(agentId, at).filter((entry) => effectiveMemoryValidityAt(entry, at) === 'current'));
   }
 
   async importEntries(agentId: string, entries: readonly MemoryEntry[]): Promise<MemoryImportResult> {

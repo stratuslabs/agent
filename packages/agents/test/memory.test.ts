@@ -5,6 +5,7 @@ import {
   AgentRunner,
   InMemoryAgentMemoryStore,
   MEMORY_ENTRY_MAX_BYTES,
+  MEMORY_EPISODIC_DEFAULT_TTL_DAYS,
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_RECENCY_INJECTION_LIMIT,
   memoryInjectionEntries,
@@ -264,6 +265,26 @@ test('a memory.recall hit that is out of window comes back marked as such', asyn
   // The alias case: the query matches only the `about` key.
   const aliased = await recall.execute({ query: 'Ada' }, sessionFor('ava')) as { results: unknown[] };
   assert.equal(aliased.results.length, 3);
+});
+
+test('a stale task note comes back from memory.recall marked expired, and memory.remember says when notes expire', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  let clock = new Date(at.getTime() - 20 * 24 * 60 * 60 * 1000);
+  const store = new InMemoryAgentMemoryStore({ now: () => clock });
+  const remember = createRememberTool(store);
+  await remember.execute({ fact: 'card 900 is in progress', kind: 'episodic', about: ['card 900'] }, sessionFor('ava'));
+  await remember.execute({ fact: 'card 900 ships channel.join', kind: 'semantic', about: ['card 900'] }, sessionFor('ava'));
+  clock = at;
+
+  const recall = createRecallTool(store, { now: () => at });
+  const found = await recall.execute({ query: 'card 900' }, sessionFor('ava')) as { results: { content: string; validity: string }[] };
+  assert.deepEqual(
+    Object.fromEntries(found.results.map((result) => [result.content, result.validity])),
+    { 'card 900 is in progress': 'expired', 'card 900 ships channel.join': 'current' },
+  );
+  // The model files a note by kind, so the description is where it learns what that costs.
+  const kind = (remember.parameters as { properties: { kind: { description: string } } }).properties.kind.description;
+  assert.match(kind, new RegExp(`episodic \\(.*${MEMORY_EPISODIC_DEFAULT_TTL_DAYS} days.*validUntil\\)`));
 });
 
 test('memory.pin is safe, records rather than rewrites, and reports a refusal instead of throwing', async () => {

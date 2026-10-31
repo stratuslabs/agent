@@ -4,7 +4,7 @@ import {
   BUILTIN_MEMORY_STORE_NAME,
   escapeControlCharacters,
   memoryEntryTrust,
-  memoryValidityAt,
+  effectiveMemoryValidityAt,
   type MemoryAuditEntry,
   type MemoryEntry,
 } from '@stratusagent/core';
@@ -88,7 +88,7 @@ export const runMemory = async (
     trust: memoryEntryTrust(entry),
     content: entry.content,
     createdAt: entry.createdAt,
-    validity: memoryValidityAt(entry, at),
+    validity: effectiveMemoryValidityAt(entry, at),
     ...(entry.kind ? { kind: entry.kind } : {}),
     ...(entry.about ? { about: entry.about } : {}),
     ...(entry.validFrom ? { validFrom: entry.validFrom } : {}),
@@ -106,7 +106,7 @@ export const runMemory = async (
    * operator is deciding from.
    */
   const printEntry = (entry: MemoryAuditEntry, pinnedIds: ReadonlySet<string>): void => {
-    const validity = memoryValidityAt(entry, at);
+    const validity = effectiveMemoryValidityAt(entry, at);
     const marks = [
       `[${memoryEntryTrust(entry)}]`,
       ...(pinnedIds.has(entry.id) ? ['[pinned]'] : []),

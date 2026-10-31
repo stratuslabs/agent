@@ -14,6 +14,7 @@ import {
   clampMemoryRecallLimit,
   collectMemoryTopics,
   compareMemoryChronology,
+  effectiveMemoryValidityAt,
   importableMemoryEntry,
   isMemoryEntryCurrent,
   isMemoryRankingStrategy,
@@ -1148,7 +1149,7 @@ export const createFileMemoryStore = (
       // expired rather than vanishing.
       const current = listOptions.validity === 'all'
         ? live
-        : live.filter((entry) => isMemoryEntryCurrent(entry, at));
+        : live.filter((entry) => effectiveMemoryValidityAt(entry, at) === 'current');
       if (listOptions.limit === undefined) {
         return { entries: current.sort(compareMemoryChronology), truncated: false };
       }
@@ -1359,7 +1360,9 @@ export const createFileMemoryStore = (
       // A pinned fact that is not true now does not reach the prompt — one
       // rule, both bounds, the pinned core included. It keeps its place in
       // the budget, which is a property of the record rather than of the
-      // clock, and comes back the moment its window opens.
+      // clock, and comes back the moment its window opens. The pin's own
+      // window, not the episodic default: pinning is how an agent says a
+      // note is still current.
       const live = new Set(liveEntriesFor(records, agentId, at).map((entry) => entry.id));
       return pins
         .filter((entry) => live.has(entry.id) && isMemoryEntryCurrent(entry, at))
@@ -1369,7 +1372,7 @@ export const createFileMemoryStore = (
     async topics(agentId: string): Promise<MemoryTopic[]> {
       const at = now();
       const live = liveEntriesFor(await readRecords(), agentId, at);
-      return collectMemoryTopics(live.filter((entry) => isMemoryEntryCurrent(entry, at)));
+      return collectMemoryTopics(live.filter((entry) => effectiveMemoryValidityAt(entry, at) === 'current'));
     },
 
     async importEntries(agentId: string, entries: readonly MemoryEntry[]): Promise<MemoryImportResult> {

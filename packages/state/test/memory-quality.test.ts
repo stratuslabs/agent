@@ -10,6 +10,7 @@ import {
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_READ_MAX_BYTES,
   memoryContentByteLength,
+  effectiveMemoryValidityAt,
   memoryValidityAt,
   renderMemorySection,
   type AgentMemoryStore,
@@ -96,6 +97,62 @@ test('an out-of-window entry leaves what is true now, stays in search, and comes
   assert.deepEqual(statuses, { [expired.id]: 'expired', [future.id]: 'not-yet-valid', [current.id]: 'current' });
   // The operator's read shows them; the default one does not.
   assert.equal((await store.list('ava', { validity: 'all' })).entries.length, 3);
+});
+
+test('an existing store’s old episodic notes leave the prompt by default, stay findable, and the file is untouched', async () => {
+  const day = 24 * 60 * 60 * 1000;
+  const ago = (days: number): string => new Date(AT.getTime() - days * day).toISOString();
+  const filePath = await newFile();
+  // Written by hand, as a store from before the default would hold them:
+  // no validUntil on any note, and nothing on the record to migrate.
+  const records = [
+    { id: 'ava:memory:stale', agentId: 'ava', content: 'loop status: card 900 in progress', createdAt: ago(30), kind: 'episodic', about: ['loop'] },
+    { id: 'ava:memory:pinned', agentId: 'ava', content: 'standing note: Dylan merges releases', createdAt: ago(30), kind: 'episodic' },
+    { pins: 'ava:memory:pinned', agentId: 'ava', pinned: true, createdAt: ago(30) },
+    { id: 'ava:memory:kept', agentId: 'ava', content: 'loop status: card 800 parked until July', createdAt: ago(30), kind: 'episodic', validUntil: '2026-07-01T00:00:00.000Z' },
+    { id: 'ava:memory:old-belief', agentId: 'ava', content: 'GitHub access is pending', createdAt: ago(60), kind: 'semantic' },
+    { id: 'ava:memory:note', agentId: 'ava', content: 'GitHub access verified', createdAt: ago(30), kind: 'episodic', supersedes: 'ava:memory:old-belief' },
+    { id: 'ava:memory:lasting', agentId: 'ava', content: 'the deploy runs on Postgres', createdAt: ago(400), kind: 'semantic', about: ['deploy'] },
+    { id: 'ava:memory:unkinded', agentId: 'ava', content: 'the staging cluster is named tortoise', createdAt: ago(400) },
+    { id: 'ava:memory:fresh', agentId: 'ava', content: 'loop status: card 961 in progress', createdAt: ago(2), kind: 'episodic', about: ['loop'] },
+  ];
+  await writeFile(filePath, records.map((record) => `${JSON.stringify(record)}\n`).join(''));
+  const before = await readFile(filePath, 'utf8');
+  const store = createFileMemoryStore(filePath, frozen());
+
+  assert.deepEqual(
+    (await store.list('ava')).entries.map((entry) => entry.id),
+    ['ava:memory:lasting', 'ava:memory:unkinded', 'ava:memory:kept', 'ava:memory:fresh'],
+  );
+  assert.deepEqual((await store.topics!('ava')).map((topic) => [topic.name, topic.count]).sort(), [['deploy', 1], ['loop', 1]]);
+  // Pinning is how an agent says a note is still current.
+  assert.deepEqual((await store.pinned!('ava')).map((entry) => entry.id), ['ava:memory:pinned']);
+  const prompt = await injectedPrompt(store, 'ava');
+  assert.equal(prompt.includes('card 900'), false);
+  assert.equal(prompt.includes('Dylan merges releases'), true);
+  // A stale note that replaced a belief still retires it.
+  assert.equal(prompt.includes('GitHub access is pending'), false);
+  assert.deepEqual((await store.search('ava', 'GitHub access')).entries.map((entry) => entry.id), ['ava:memory:note']);
+  // Findable, and marked.
+  const found = await store.search('ava', 'loop status');
+  assert.deepEqual(
+    found.entries.map((entry) => [entry.id, effectiveMemoryValidityAt(entry, AT)]),
+    [['ava:memory:fresh', 'current'], ['ava:memory:kept', 'current'], ['ava:memory:stale', 'expired']],
+  );
+  assert.equal((await store.list('ava', { validity: 'all' })).entries.length, 7);
+  // Nothing was written back: the default is read off the record.
+  assert.equal(await readFile(filePath, 'utf8'), before);
+
+  // The in-memory store gives the same answers from the same entries.
+  const memory = new InMemoryAgentMemoryStore(frozen());
+  await memory.importEntries!('ava', records.filter((record) => 'content' in record) as MemoryEntry[]);
+  await memory.pin!('ava', 'ava:memory:pinned');
+  assert.deepEqual((await memory.list('ava')).entries.map((entry) => entry.id), (await store.list('ava')).entries.map((entry) => entry.id));
+  assert.deepEqual((await memory.pinned!('ava')).map((entry) => entry.id), ['ava:memory:pinned']);
+  assert.deepEqual(
+    (await memory.search('ava', 'loop status')).entries.map((entry) => [entry.id, effectiveMemoryValidityAt(entry, AT)]),
+    found.entries.map((entry) => [entry.id, effectiveMemoryValidityAt(entry, AT)]),
+  );
 });
 
 test('a superseded entry leaves list, search, and the prompt; audit shows both and which replaced which', async () => {

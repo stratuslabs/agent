@@ -4,9 +4,10 @@ import {
   isTaintedTrust,
   leastTrusted,
   MEMORY_ENTRY_KINDS,
+  MEMORY_EPISODIC_DEFAULT_TTL_DAYS,
   MEMORY_RECALL_TOOL_NAME,
   memoryEntryTrust,
-  memoryValidityAt,
+  effectiveMemoryValidityAt,
   sessionTaintedBy,
   sessionWriteTrust,
   type AgentMemoryStore,
@@ -92,7 +93,9 @@ export const createRememberTool = (store: AgentMemoryStore): Tool => ({
       kind: {
         type: 'string',
         enum: [...MEMORY_ENTRY_KINDS],
-        description: 'What sort of fact this is: semantic (about the world), episodic (something that happened), procedural (how something is done), or preference.',
+        description: 'What sort of fact this is: semantic (about the world, including decisions that stay true), '
+          + `episodic (something that happened, such as a task's status or where work got to; it leaves your prompt ${MEMORY_EPISODIC_DEFAULT_TTL_DAYS} days after it was written unless you give validUntil), `
+          + 'procedural (how something is done), or preference.',
       },
       about: {
         type: 'array',
@@ -217,7 +220,7 @@ export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOpt
           // returning it *unmarked* is not: an expired fact that reads
           // exactly like a current one is the confusion `validFrom` and
           // `validUntil` exist to prevent, arriving through the other door.
-          validity: memoryValidityAt(entry, at),
+          validity: effectiveMemoryValidityAt(entry, at),
           ...(entry.about ? { about: entry.about } : {}),
           ...(entry.kind ? { kind: entry.kind } : {}),
           ...(entry.validFrom ? { validFrom: entry.validFrom } : {}),
