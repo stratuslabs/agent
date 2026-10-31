@@ -305,6 +305,16 @@ export interface Message {
    */
   overheard?: boolean;
   /**
+   * A user message said to the agent that may need no answer: a
+   * teammate agent's tagged report, a person's untagged follow-up in a
+   * thread the agent holds (card 601). Dispatched with
+   * `RunInput.replyOptional`; never set beside `overheard`, which already
+   * lets a turn end in silence. Rendered as said, followed on the newest
+   * message by `REPLY_OPTIONAL_NOTE`. Present only when true; an older
+   * build reads past it, and the message is then one that was answered.
+   */
+  replyOptional?: boolean;
+  /**
    * Appended by `observe`, so it started no turn. `overheard` alone cannot
    * say so: a turn dispatched with `addressed: false` is overheard too, and
    * is a turn. Present only when true; a message observed before this was
@@ -3890,11 +3900,15 @@ export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'l
  * annotated with advice.
  */
 export const promptTextOf = (
-  message: Pick<Message, 'content' | 'overheard'>,
+  message: Pick<Message, 'content' | 'overheard' | 'replyOptional'>,
   options: PromptTextOptions = {},
 ): string => {
   if (message.overheard !== true) {
-    return message.content;
+    // Said to the agent, as written; a reply-optional one is told, when it
+    // is the turn's, that it may need nothing back (card 601).
+    return message.replyOptional === true && options.latest === true
+      ? `${message.content}\n\n${REPLY_OPTIONAL_NOTE}`
+      : message.content;
   }
   const quoted = message.content
     .split(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/)
@@ -3925,6 +3939,32 @@ export const OVERHEARD_IMAGES_NOTE = '(attached to the overheard message above, 
  */
 export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =>
   turnMessageOf(session)?.overheard === true;
+
+/**
+ * Whether the turn a session is on may end without a reply: one nobody
+ * asked for (`isUnaddressedTurn`), or one whose message was said to the
+ * agent but may need no answer (`Message.replyOptional`, card 601). The
+ * rule every provider's empty answer is judged by, and the only turn on
+ * which an answer of exactly `NO_REPLY_MARKER` is silence.
+ */
+export const isReplyOptionalTurn = (session: Pick<Session, 'messages'>): boolean => {
+  const message = turnMessageOf(session);
+  return message?.overheard === true || message?.replyOptional === true;
+};
+
+/**
+ * Whether a response is the marker a turn that may stay quiet answers
+ * with to say nothing: no tool call, and its text, trimmed, exactly
+ * `NO_REPLY_MARKER`. The whole answer or nothing: the word inside a
+ * sentence is a sentence.
+ */
+export const isNoReplyAnswer = (response: Pick<ProviderResponse, 'parts'>): boolean => {
+  if (response.parts.some((part) => part.type !== 'text')) {
+    return false;
+  }
+  const text = response.parts.map((part) => (part.type === 'text' ? part.text : '')).join('');
+  return text.trim() === NO_REPLY_MARKER;
+};
 
 /**
  * Where the dispatch carrying `idempotencyKey` stands in this session:
@@ -3987,6 +4027,29 @@ export interface PromptTextOptions {
 }
 
 /**
+ * The whole answer a turn that may stay quiet gives to say nothing
+ * (card 601). Silence itself is not dependable: the Claude Agent SDK's
+ * query loop answers a response with no visible text by asking the model
+ * once more to produce some ("Your previous response had no visible
+ * output…"), and the model then explains, in the thread, why it is not
+ * answering. A word is visible text to every harness, and the runner
+ * turns it back into silence (`isNoReplyAnswer`) before anything else
+ * sees the response. An empty answer still counts as silence too.
+ */
+export const NO_REPLY_MARKER = 'NO_REPLY';
+
+/**
+ * What a reply-optional turn is told, after the message it is on
+ * (`Message.replyOptional`, card 601). Unlike `UNADDRESSED_TURN_NOTE`, the
+ * message was said to the agent, so the note leans toward answering: only
+ * a message that needs nothing back may get nothing. In the message for the
+ * same reason as that note: a harness holding its own history takes only
+ * the newest message.
+ */
+export const REPLY_OPTIONAL_NOTE =
+  `This may not need an answer. Reply as usual if it asks you something, asks you to do something, or needs you. If it only acknowledges, thanks you or reports something that needs nothing from you, reply with exactly ${NO_REPLY_MARKER} and nothing else.`;
+
+/**
  * What a turn nobody asked for is told, after the message it ends on.
  *
  * The load-bearing sentence of reading the room, and the one that cannot
@@ -4000,7 +4063,7 @@ export interface PromptTextOptions {
  * followed more often than one read an hour ago.
  */
 export const UNADDRESSED_TURN_NOTE =
-  'Nobody said that to you, and nobody is waiting on you. Reply only if you have something these people would want from you and do not have — an answer to a question left open, a correction to something wrong, a thing you were asked to watch for. Otherwise reply with nothing at all: no acknowledgement, no summary, no offer to help. Saying nothing is usually the right answer here.';
+  `Nobody said that to you, and nobody is waiting on you. Reply only if you have something these people would want from you and do not have — an answer to a question left open, a correction to something wrong, a thing you were asked to watch for. Otherwise reply with exactly ${NO_REPLY_MARKER} and nothing else: no acknowledgement, no summary, no offer to help. Saying nothing is usually the right answer here.`;
 
 /**
  * What the last turn of a message is told, once the message has used every
@@ -6657,6 +6720,16 @@ export interface RunInput {
    */
   addressed?: boolean;
   /**
+   * Said to the agent, but possibly needing no answer (card 601): the
+   * message is stored `replyOptional`, followed by `REPLY_OPTIONAL_NOTE`,
+   * and the turn may end with nothing — an empty answer, or exactly
+   * `NO_REPLY_MARKER` — which completes it with an empty assistant
+   * message, as an unaddressed turn's silence does. Ignored with
+   * `addressed: false`, whose frame already says so. Who sets it is the
+   * channel's call: a direct mention or a DM should never.
+   */
+  replyOptional?: boolean;
+  /**
    * The caller's name for this dispatch, stored on the user message
    * (`Message.idempotencyKey`) in the same write as the message itself.
    * The runner only records it; refusing a repeat is the host's job — see
@@ -6739,6 +6812,8 @@ export interface ResumeInput {
   images?: ImageAttachment[];
   /** See `RunInput.addressed`. */
   addressed?: boolean;
+  /** See `RunInput.replyOptional`. */
+  replyOptional?: boolean;
   /** See `RunInput.idempotencyKey`. */
   idempotencyKey?: string;
   /** See `RunInput.absorbedKeys`. */
@@ -7613,6 +7688,7 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.addressed !== false && input.replyOptional === true ? { replyOptional: true } : {}),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.absorbedKeys !== undefined && input.absorbedKeys.length > 0 ? { absorbedKeys: [...input.absorbedKeys] } : {}),
       ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
@@ -7718,6 +7794,7 @@ export class AgentRunner {
       // difference is only that a turn runs on it, and every renderer
       // frames it from the same mark.
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.addressed !== false && input.replyOptional === true ? { replyOptional: true } : {}),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.absorbedKeys !== undefined && input.absorbedKeys.length > 0 ? { absorbedKeys: [...input.absorbedKeys] } : {}),
       ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
@@ -8282,13 +8359,15 @@ export class AgentRunner {
         // own. What joins the turn shares the steps it has left. It renews
         // neither the budget, the auto-continue count nor the failure
         // streak, so a conversation that writes at every step can't keep
-        // one turn going past its ceiling (card 996).
+        // one turn going past its ceiling (card 996). Never into a turn
+        // that may stay quiet: a question folded into one could be lost
+        // to its silence, so it waits and runs as its own (card 601).
         if (
           steer !== undefined
           && !wrappingUp
           && pendingEntry === undefined
           && session.messages.at(-1)?.role === 'tool'
-          && !isUnaddressedTurn(session)
+          && !isReplyOptionalTurn(session)
         ) {
           const steered = await steer();
           throwIfAborted(signal);
@@ -8538,6 +8617,12 @@ export class AgentRunner {
         }
         throwIfAborted(signal);
         await deltaChain;
+        // A turn that may stay quiet said so with the marker: from here on
+        // it is the silence an empty answer is, before anything records,
+        // announces or posts it (card 601).
+        if (isReplyOptionalTurn(session) && isNoReplyAnswer(response)) {
+          response = { ...response, parts: [] };
+        }
         // Checked before anything of the response is saved: a call made on
         // the turn that may not make one is never run, and recording it
         // would leave a call in the transcript with no result to answer it.
@@ -8575,8 +8660,10 @@ export class AgentRunner {
           });
         }
         if (response.parts.length === 0) {
-          // Silence, recorded. Only a turn nobody asked for ends this way —
-          // every provider refuses an empty answer on one somebody did —
+          // Silence, recorded. Only a turn that may stay quiet ends this
+          // way (`isReplyOptionalTurn`: one nobody asked for, or one whose
+          // message may need nothing back) — every provider refuses an
+          // empty answer on any other, and the marker became this above —
           // and the decision has to leave a mark: a harness holding its own
           // history is sent every user message since the agent last spoke
           // (`latestUserMessagePrompt`), and without an assistant message
