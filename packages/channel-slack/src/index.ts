@@ -1348,6 +1348,13 @@ class ReplyRenderer {
   private statusTimer: NodeJS.Timeout | undefined;
   /** The tool the turn is running, for the status line; the streamed `toolLine` is the other mode's. */
   private runningTool: string | undefined;
+  /**
+   * Calls started and not yet settled, by call id, oldest first. Core runs
+   * a response's read-only calls together, so one can settle while another
+   * still runs: both lines name the newest call still running, and clear
+   * only once none is.
+   */
+  private readonly activeTools = new Map<string, string>();
   private readonly web: SlackWebLike;
   /**
    * The one person in the conversation when this turn is a DM: whoever sent
@@ -1504,6 +1511,7 @@ class ReplyRenderer {
     }
     this.buffer = '';
     this.interim = '';
+    this.activeTools.clear();
     this.toolLine = undefined;
     this.runningTool = undefined;
     this.turnBreakPending = false;
@@ -1581,8 +1589,8 @@ class ReplyRenderer {
       // all, so this is the only thing between the text before a tool and
       // the text after it — without it they fuse in the live message.
       this.turnBreakPending = true;
-      this.toolLine = `⚙ ${event.call.toolName}…`;
-      this.runningTool = event.call.toolName;
+      this.activeTools.set(event.call.id, event.call.toolName);
+      this.showActiveTool();
       this.flushInterim(ofThisTurn);
       if (ofThisTurn && this.mayShowProgress()) {
         this.progress.steps += 1;
@@ -1599,8 +1607,8 @@ class ReplyRenderer {
       // else clears the status line or marks the boundary for it — the
       // message would keep claiming a refused tool is running, and the
       // model's follow-up would fuse with the text before the attempt.
-      this.toolLine = undefined;
-      this.runningTool = undefined;
+      this.activeTools.delete(event.call.id);
+      this.showActiveTool();
       this.turnBreakPending = true;
       // Words written before a call that was refused were still said
       // before a tool, and must not run into the next response's.
@@ -1612,8 +1620,8 @@ class ReplyRenderer {
       return;
     }
     if (event.type === 'tool.completed') {
-      this.toolLine = undefined;
-      this.runningTool = undefined;
+      this.activeTools.delete(event.result.callId);
+      this.showActiveTool();
       // Settled here too for a call rejected before it ran, which never
       // reached `tool.called`; after one that did, this is empty.
       this.flushInterim(ofThisTurn);
@@ -2040,6 +2048,13 @@ class ReplyRenderer {
       }
     }
     return rest === this.lastInterim ? '' : rest;
+  }
+
+  /** Point both status lines at the newest call still running, or clear them. */
+  private showActiveTool(): void {
+    const running = [...this.activeTools.values()].at(-1);
+    this.runningTool = running;
+    this.toolLine = running === undefined ? undefined : `⚙ ${running}…`;
   }
 
   private currentText(): string {

@@ -30,6 +30,8 @@ test('memory.recall searches the calling agent’s store; nothing learned yet is
   const store = new InMemoryAgentMemoryStore();
   const recall = createRecallTool(store);
   assert.equal(recall.risk, 'safe');
+  // A response's recalls may run together (card 956); the writers below may not.
+  assert.equal(recall.readOnly, true);
 
   const empty = await recall.execute({ query: 'anything at all' }, sessionFor('ava')) as { results: unknown[]; truncated: boolean; strategy: string };
   // The ordering the store served comes back even on an empty result: a
@@ -48,6 +50,7 @@ test('memory.forget retires the agent’s own entry and refuses ids that are not
   const store = new InMemoryAgentMemoryStore();
   const forget = createForgetTool(store);
   assert.equal(forget.risk, 'safe');
+  assert.equal(forget.readOnly, undefined);
 
   const mine = await store.append('ava', 'a fact to drop');
   const theirs = await store.append('scout', 'a fact to keep');
@@ -66,6 +69,8 @@ test('memory.remember refuses an over-cap fact and stores nothing', async () => 
   // cannot record what it learned does not learn: this assertion fails
   // loudly if anyone reclassifies the memory tools.
   assert.equal(remember.risk, 'safe');
+  // Safe, and a write: it runs in its place, never alongside another call.
+  assert.equal(remember.readOnly, undefined);
   await assert.rejects(
     () => remember.execute({ fact: 'x'.repeat(MEMORY_ENTRY_MAX_BYTES + 1) }, sessionFor('ava')),
     /capped at \d+ UTF-8 bytes/,

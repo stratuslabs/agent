@@ -38,6 +38,13 @@ const run = async (tools: ToolRegistry, name: string, input: JsonObject, session
   return tool.execute(input, session);
 };
 
+test('only the tools that change nothing declare it, so only they run alongside other calls', async () => {
+  const tools = await registryFor({ roots: [os.tmpdir()] });
+  const readOnly = tools.list().filter((tool) => tool.readOnly === true).map((tool) => tool.name).sort();
+  assert.deepEqual(readOnly, ['fs.list', 'fs.read', 'fs.search']);
+  assert.ok(tools.list().some((tool) => tool.name === 'fs.write'), 'the writers are registered and undeclared');
+});
+
 test('an agent reads and searches inside its root', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-'));
   await writeFile(path.join(root, 'notes.md'), 'the kettle is in the cupboard\nand the tea is not\n');
