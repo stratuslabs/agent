@@ -698,7 +698,7 @@ export interface SlackWebLike {
     archive?(args: { channel: string }): Promise<unknown>;
   };
   users: {
-    info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
+    info(args: { user: string }): Promise<{ user?: { name?: string; is_bot?: boolean; profile?: { display_name?: string; real_name?: string } } }>;
   };
   /**
    * A channel's bookmarks, all of them in one call (Slack has no paging
@@ -1317,6 +1317,12 @@ class ReplyRenderer {
    */
   private readonly texts: boolean;
   /**
+   * Whether a text tags another agent, which `texts` mode then posts as
+   * one message (card 1014): the tagged agent admits only a message that
+   * names it, so a split reply reached it as the tagged part alone.
+   */
+  private readonly tagsAnAgent: ((text: string) => Promise<boolean>) | undefined;
+  /**
    * The thread the loading status belongs to: the reply's thread, or the
    * message itself in a DM, whose reply has no thread to key one on.
    */
@@ -1380,6 +1386,7 @@ class ReplyRenderer {
       now?: () => number;
       streaming?: boolean;
       texts?: boolean;
+      tagsAnAgent?: (text: string) => Promise<boolean>;
       statusThread?: string;
       statusWarned?: { value: boolean };
       after?: Promise<unknown>;
@@ -1397,6 +1404,7 @@ class ReplyRenderer {
     this.now = options.now ?? Date.now;
     this.streaming = options.streaming ?? true;
     this.texts = !this.streaming && options.texts === true;
+    this.tagsAnAgent = options.tagsAnAgent;
     this.statusThread = options.statusThread ?? threadTs;
     this.statusWarned = options.statusWarned ?? { value: false };
     this.after = options.after ?? Promise.resolve();
@@ -1746,8 +1754,10 @@ class ReplyRenderer {
       .then(() => after)
       .then(async () => {
         const landed: string[] = [];
+        let chunks: string[] = [];
         try {
-          for (const chunk of this.chunksOf(text)) {
+          chunks = await this.chunksOf(text);
+          for (const chunk of chunks) {
             const posted = await this.web.chat.postMessage({
               channel: this.channel,
               text: chunk,
@@ -1763,7 +1773,7 @@ class ReplyRenderer {
           // reply, where repeating a few lines beats losing the rest.
           if (landed.length > 0) {
             this.interimPosted = true;
-            heard = landed.length === this.chunksOf(text).length ? text : landed.join('\n\n');
+            heard = landed.length === chunks.length ? text : landed.join('\n\n');
           }
           settleLanded(landed.length > 0);
         }
@@ -2224,7 +2234,7 @@ class ReplyRenderer {
       return this.outcome(true, true);
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
-    const chunks = this.chunksOf(text);
+    const chunks = await this.chunksOf(text);
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
@@ -2276,9 +2286,14 @@ class ReplyRenderer {
     return this.outcome(published, landed || this.edited || this.uploaded || stranded, !published);
   }
 
-  /** This turn's text as the messages it is posted as, in this agent's reply mode. */
-  private chunksOf(text: string): string[] {
-    return messageChunks(text, this.texts ? 'texts' : undefined);
+  /**
+   * This turn's text as the messages it is posted as, in this agent's reply
+   * mode: `texts` splits it a paragraph to a message unless it tags another
+   * agent.
+   */
+  private async chunksOf(text: string): Promise<string[]> {
+    const texts = this.texts && !(await this.tagsAnAgent?.(text));
+    return messageChunks(text, texts ? 'texts' : undefined);
   }
 
   private placeText(ts: string | undefined): void {
@@ -4018,6 +4033,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const intakeInFlight = new Map<string, number>();
   const stopsBySession = new Map<string, { count: number; by: string }>();
   const displayNames = new Map<string, string>();
+  /** Whether a user is a bot, as users.info said, keyed `team:user` like `displayNames`. */
+  const botUsers = new Map<string, boolean>();
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
   const seenOrder: string[] = [];
@@ -4597,10 +4614,52 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const info = await connection.web.users.info({ user: userId });
       const name = info.user?.profile?.display_name || info.user?.profile?.real_name || info.user?.name || userId;
       displayNames.set(cacheKey, name);
+      if (typeof info.user?.is_bot === 'boolean') {
+        botUsers.set(cacheKey, info.user.is_bot);
+      }
       return name;
     } catch {
       return userId;
     }
+  };
+
+  /**
+   * Whether `text` tags another agent (card 1014), which `texts` mode then
+   * posts as one message: the tagged agent admits only a message that
+   * names it, so a reply split a paragraph to a message reached it as the
+   * tagged part alone. Another agent is one on this daemon, one on this
+   * agent's `agentMentions` team, or any user Slack says is a bot, asked
+   * once a user. A user Slack could not answer for counts as an agent: a
+   * person tagged in one message loses nothing, and an agent handed a
+   * split reply loses everything after the tag.
+   */
+  const tagsAnAgent = async (connection: AgentConnection, text: string): Promise<boolean> => {
+    const tagged = new Set([...text.matchAll(/<@([^>|]+)(?:\|[^>]*)?>/g)].map((match) => match[1] as string));
+    tagged.delete(connection.botUserId);
+    const team = Object.values(connection.config.agentMentions?.team ?? {});
+    for (const user of tagged) {
+      if (isFleetBot(connection.teamId, user) || team.includes(user)) {
+        return true;
+      }
+    }
+    for (const user of tagged) {
+      const cacheKey = `${connection.teamId}:${user}`;
+      let isBot = botUsers.get(cacheKey);
+      if (isBot === undefined) {
+        try {
+          const info = await connection.web.users.info({ user });
+          isBot = info.user?.is_bot === true;
+          botUsers.set(cacheKey, isBot);
+        } catch (error) {
+          warn(`slack: could not tell whether ${user} is a bot, so a texts reply tagging them is posted as one message: ${error instanceof Error ? error.message : String(error)}`);
+          return true;
+        }
+      }
+      if (isBot) {
+        return true;
+      }
+    }
+    return false;
   };
 
   /**
@@ -6559,7 +6618,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // last. `NO_REPLY_TEXT` is what a rendered turn with nothing to say
     // puts in its own message too. With nothing queued behind, there is no
     // order to keep and nothing to say, so the files go on their own.
-    const chunks = routing.reply ? messageChunks(routing.reply, connection.config.replies) : [];
+    const replies = connection.config.replies === 'texts' && routing.reply && await tagsAnAgent(connection, routing.reply)
+      ? 'final'
+      : connection.config.replies;
+    const chunks = routing.reply ? messageChunks(routing.reply, replies) : [];
     const posting = chunks.length > 0 ? chunks : (behind && files.length > 0 ? [NO_REPLY_TEXT] : []);
     let landed: string[] = [];
     const uploads = async (): Promise<void> => {
@@ -8639,6 +8701,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         streaming,
         progressAfterMs,
         texts: connection.config.replies === 'texts',
+        tagsAnAgent: (text: string) => tagsAnAgent(connection, text),
         statusThread: thread ?? event.ts,
         statusWarned: connection.statusWarned,
         ...(ahead ? { after: ahead } : {}),
