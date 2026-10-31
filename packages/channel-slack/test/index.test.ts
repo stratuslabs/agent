@@ -1940,8 +1940,12 @@ test('what an agent replied is heard by the thread\'s other agents, under its ow
   });
   await adapter.start(gateway);
 
-  const both = (message: ReturnType<typeof channelMessage>) =>
-    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Each message waits for the turns before it: the next one's routing
+  // depends on what those turns said, and that outlives the delivery wait.
+  const both = async (message: ReturnType<typeof channelMessage>) => {
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+    await Promise.all([socketAva.settled(), socketBea.settled()]);
+  };
   // Ava answers; Bea hears the question and the answer.
   await both(channelMessage({ text: 'say more', ts: '920.1', thread: '920.0' }));
   // Bea is named and answers; Ava hears both halves.
@@ -2021,8 +2025,12 @@ test('a message typed while a reply is still streaming is heard before the reply
   const during = both(channelMessage({ text: 'and also', ts: '930.2', thread: '930.0' }));
   release();
   await Promise.all([first, during]);
+  // The replies are final once both turns have finished, which outlives
+  // the delivery wait.
+  await Promise.all([socketAva.settled(), socketBea.settled()]);
   // Typed after the replies were final.
   await both(channelMessage({ text: 'thanks', ts: '930.3', thread: '930.0' }));
+  await Promise.all([socketAva.settled(), socketBea.settled()]);
   await adapter.stop();
 
   assert.deepEqual(
@@ -2284,8 +2292,12 @@ test('a reply Slack refused to publish is heard by nobody', async () => {
   });
   await adapter.start(gateway);
 
-  const both = (message: ReturnType<typeof channelMessage>) =>
-    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Each message waits for the turns before it: the next one's routing
+  // depends on what those turns said, and that outlives the delivery wait.
+  const both = async (message: ReturnType<typeof channelMessage>) => {
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+    await Promise.all([socketAva.settled(), socketBea.settled()]);
+  };
   // A turn of Ava's whose final edit is refused, and a recovered reply of
   // hers whose every post is refused: neither was said in the thread, so
   // Bea does not hear either.
@@ -2961,8 +2973,12 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   });
   await adapter.start(gateway);
 
-  const both = (message: ReturnType<typeof channelMessage>) =>
-    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Each message waits for the turns before it: the next one's routing
+  // depends on what those turns said, and that outlives the delivery wait.
+  const both = async (message: ReturnType<typeof channelMessage>) => {
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+    await Promise.all([socketAva.settled(), socketBea.settled()]);
+  };
   // Bea answers first, so the thread is hers; then Dylan names Ava, so
   // his untagged follow-ups are Ava's to judge (card 541).
   clock.at('1060.05');
@@ -3076,7 +3092,6 @@ test('an untagged reply is for whoever\'s reply sits lowest in the thread, not f
   const clock = stampsAfter();
   webAva.stamp = clock.stamp;
   webBea.stamp = clock.stamp;
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
   let releaseAva!: () => void;
   const gateAva = new Promise<void>((resolve) => {
     releaseAva = resolve;
@@ -3132,12 +3147,17 @@ test('an untagged reply is for whoever\'s reply sits lowest in the thread, not f
 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Waits for every turn either agent has started: who spoke last outlives
+  // the delivery wait. Only between gates, since a gated turn never ends.
+  const settled = () => Promise.all([socketAva.settled(), socketBea.settled()]);
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
   // untagged follow-ups are Ava's to judge (card 541), and Sam's are Bea's.
   clock.at('1070.05');
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1070.05', thread: '1070.0' }));
+  await settled();
   clock.at('1070.07');
   await both(channelMessage({ text: '<@B-AVA> look', ts: '1070.07', thread: '1070.0' }));
+  await settled();
   clock.at('1070.1');
   await both(channelMessage({ text: 'first', ts: '1070.1', thread: '1070.0' }));
   clock.at('1070.2');
@@ -3145,11 +3165,12 @@ test('an untagged reply is for whoever\'s reply sits lowest in the thread, not f
   // Ava's reply lands below Bea's second placeholder; Bea's edit into that
   // placeholder lands after it, and sits above it.
   releaseAva();
-  await tick();
+  await socketAva.settled();
   releaseBea();
-  await tick();
+  await settled();
   clock.at('1070.3');
   await both(channelMessage({ text: 'third', ts: '1070.3', thread: '1070.0', user: 'U-SAM' }));
+  await settled();
   await adapter.stop();
 
   const of = (agentId: string) => gateway.dispatches.filter((dispatch) => dispatch.agentId === agentId).map((dispatch) => dispatch.userMessage);
@@ -3303,8 +3324,12 @@ test('a judging agent that posts a file and says nothing has still spoken, for t
   });
   await adapter.start(gateway);
 
-  const both = (message: ReturnType<typeof channelMessage>) =>
-    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Each message waits for the turns before it: the next one's routing
+  // depends on what those turns said, and that outlives the delivery wait.
+  const both = async (message: ReturnType<typeof channelMessage>) => {
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+    await Promise.all([socketAva.settled(), socketBea.settled()]);
+  };
   // Dylan's, so Ava's to judge; she and answers with a file and
   // no words.
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
@@ -3382,8 +3407,12 @@ test('a file sits where the share Slack answers with says, not where the clock d
   });
   await adapter.start(gateway);
 
-  const both = (message: ReturnType<typeof channelMessage>) =>
-    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Each message waits for the turns before it: the next one's routing
+  // depends on what those turns said, and that outlives the delivery wait.
+  const both = async (message: ReturnType<typeof channelMessage>) => {
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+    await Promise.all([socketAva.settled(), socketBea.settled()]);
+  };
   // Dylan's, so Ava's to judge; she and answers with a file and
   // no words.
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
@@ -3542,8 +3571,12 @@ test('a judged turn that posted a file and then failed has still spoken, for the
   });
   await adapter.start(gateway);
 
-  const both = (message: ReturnType<typeof channelMessage>) =>
-    Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  // Each message waits for the turns before it: the next one's routing
+  // depends on what those turns said, and that outlives the delivery wait.
+  const both = async (message: ReturnType<typeof channelMessage>) => {
+    await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+    await Promise.all([socketAva.settled(), socketBea.settled()]);
+  };
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
   // untagged follow-ups are Ava's to judge (card 541), and Sam's are
   // the owner's.
