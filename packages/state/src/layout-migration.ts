@@ -421,7 +421,9 @@ const openDatabase = async (filePath: string, own = true): Promise<SqliteDatabas
 /**
  * The legacy database as an `ATTACH` target that cannot be written through:
  * a `mode=ro` URI, which SQLite honours on the attached schema even from a
- * writable connection. Every attach of it here only reads.
+ * writable connection. Every attach of it here only reads. `node:sqlite`
+ * opens `file:` URIs only from Node 22.15.0 and 23.10.0, one of the two
+ * reasons for the supported Node floor (`SUPPORTED_NODE_RANGE` in the CLI).
  */
 const readOnlyAttachTarget = (filePath: string): string => `${pathToFileURL(filePath).href}?mode=ro`;
 

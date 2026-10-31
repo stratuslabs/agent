@@ -2,9 +2,12 @@
 
 ## Requirements
 
-Stratus Agent needs **Node.js 22.13+** (or **23.4+** if you are on the 23.x
-line — `node:sqlite` was unflagged separately there, so 23.0–23.3 are too old
-despite the higher number). On macOS, `brew install node` gets you a new
+Stratus Agent needs **Node.js 22.16+** on the 22.x line, or **Node 24+**. The
+23.x line is too old despite the higher number. The floor is set by the SQLite
+that `node:sqlite` bundles: memory search is built on its FTS5 full-text index,
+first shipped in 22.16.0 and 24.0.0 and never on 23.x, and upgrading an older
+home attaches its old session store read-only through a `file:` URI, which
+needs 22.15.0 or later. On macOS, `brew install node` gets you a new
 enough one; on Linux, use your package manager or nvm. Every package declares
 the range in `engines`, and `stratus` checks it before it does anything, so an
 unsupported Node says so plainly rather than failing on a missing builtin
