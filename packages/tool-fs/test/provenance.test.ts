@@ -1,7 +1,7 @@
 import test from 'node:test';
 import { constants } from 'node:fs';
 import assert from 'node:assert/strict';
-import { link, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -105,10 +105,13 @@ test('write-then-read across sessions: a file a tainted session wrote comes back
   const records = (await readFile(ledgerPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { path: string; trust: string | null });
   // The file, and the `research/` directory the tainted write created for
   // it — a name that session chose as much as the file's. One line each,
-  // appended; the clean write of `own.md` had nothing to record.
+  // appended; the clean write of `own.md` had nothing to record. Keyed by
+  // the resolved name, as `fs.read` looks them up: the temp dir is behind a
+  // link on macOS (/var -> /private/var).
+  const recordedRoot = await realpath(root);
   assert.deepEqual(
     records.map((record) => [record.path, record.trust]),
-    [[path.join(root, 'research'), 'external'], [path.join(root, 'research', 'vendor.md'), 'external']],
+    [[path.join(recordedRoot, 'research'), 'external'], [path.join(recordedRoot, 'research', 'vendor.md'), 'external']],
   );
 });
 
@@ -585,8 +588,10 @@ test('the ledger lives at the host’s ledgerRoot, not at whatever workspaceRoot
   await mkdir(ledgerRoot, { recursive: true });
   const tools = await registryFor({ roots: [root], workspaceRoot, ledgerRoot });
   await run(tools, 'fs.write', { path: 'fetched.md', content: 'fetched' }, sessionAt('ava', 'external'));
-  assert.equal(await createFileLedger(under(ledgerRoot)).lookup('ava', path.join(root, 'fetched.md')), 'external');
-  assert.equal(await createFileLedger(under(workspaceRoot)).lookup('ava', path.join(root, 'fetched.md')), undefined);
+  // The ledger is keyed by the resolved name (the temp dir is behind a link on macOS).
+  const fetched = path.join(await realpath(root), 'fetched.md');
+  assert.equal(await createFileLedger(under(ledgerRoot)).lookup('ava', fetched), 'external');
+  assert.equal(await createFileLedger(under(workspaceRoot)).lookup('ava', fetched), undefined);
   // And it is the ledger the reads consult.
   const read = marking();
   await run(tools, 'fs.read', { path: 'fetched.md' }, sessionAt('ava', 'user'), read.context);
@@ -634,7 +639,9 @@ test('a ledger record with a label nobody can read still marks its path, at unkn
 });
 
 test('the post-open check is bound to the descriptor: a decoy at the expected name is not the file that was opened', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
+  // Canonical from the start: the honest case below is a name spelled
+  // through no link, and the temp dir is behind one on macOS.
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-')));
   const rootA = path.join(home, 'a');
   const rootB = path.join(home, 'b');
   await mkdir(path.join(rootA, 'new'), { recursive: true });
@@ -758,8 +765,10 @@ test('the ledger follows the host’s seam, not a workspaceRoot an operator wrot
   const tools = await registryFor({ roots: [root], workspaceRoot }, workspaces);
   await run(tools, 'fs.write', { path: 'fetched.md', content: 'fetched' }, sessionAt('ava', 'external'));
 
-  assert.equal(await createFileLedger(workspaces.forAgent).lookup('ava', path.join(root, 'fetched.md')), 'external');
-  assert.equal(await createFileLedger(under(workspaceRoot)).lookup('ava', path.join(root, 'fetched.md')), undefined);
+  // The ledger is keyed by the resolved name (the temp dir is behind a link on macOS).
+  const fetched = path.join(await realpath(root), 'fetched.md');
+  assert.equal(await createFileLedger(workspaces.forAgent).lookup('ava', fetched), 'external');
+  assert.equal(await createFileLedger(under(workspaceRoot)).lookup('ava', fetched), undefined);
   // And it is the ledger the reads consult.
   const read = marking();
   await run(tools, 'fs.read', { path: 'fetched.md' }, sessionAt('ava', 'user'), read.context);
