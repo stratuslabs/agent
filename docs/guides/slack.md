@@ -93,7 +93,11 @@ listens: judge
 
 - `thread` — the default, and the rule above: every untagged reply in a
   thread it is in. Cheap, predictable, and right for a thread with one
-  person in it.
+  person in it. An untagged reply may need nothing back ("thanks",
+  "dope!"), so the agent is told it can stay quiet when it only
+  acknowledges or reports, and then posts nothing: no `(no reply)`, and a
+  `…` placeholder it opened is taken back. A question or a request still
+  gets its answer, and tagging the agent or DMing it always does.
 - `mentions` — only when named. The behavior before thread follow-through
   existed; some agents should be exactly this.
 - `judge` — it hears everything, and **decides** whether an untagged
@@ -193,6 +197,9 @@ machines, turn on `agentMentions`:
   in it.
 - The reply goes in the thread the other agent posted in. Each daemon's own
   Slack app hears the mention, so this works across machines.
+- A tagged message from another agent may need no answer: a report, a
+  thanks. The agent is told it can stay quiet then, and posts nothing.
+  A question or a request still gets one.
 - The reply isn't tagged automatically. The answering agent is told the
   asker's tag and includes it when the asker needs to see the answer; an
   untagged reply reaches only the people in the thread. For the asker to
