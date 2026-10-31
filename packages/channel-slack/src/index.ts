@@ -2021,6 +2021,26 @@ class ReplyRenderer {
   }
 
   /**
+   * Take down a progress message that holds no words, for a reply-optional
+   * turn that ended silent (card 601). A delete Slack refuses closes it the
+   * ordinary way instead, so it never stands at `⚙ Working`.
+   */
+  private async retractProgress(): Promise<void> {
+    this.clearProgressTimers();
+    const ref = this.progressRef;
+    if (!ref) {
+      return;
+    }
+    try {
+      await this.web.chat.delete({ channel: ref.channel, ts: ref.ts });
+      this.progressRef = undefined;
+    } catch (error) {
+      this.warn(`could not take down the progress message: ${error instanceof Error ? error.message : String(error)}`);
+      await this.closeProgress(false);
+    }
+  }
+
+  /**
    * Post what the model said before a call that is about to ask for
    * approval, and resolve once it has landed (or could not), or at once
    * when there is nothing to post (card 950).
@@ -2223,8 +2243,11 @@ class ReplyRenderer {
     // posts them as the reply, and the progress message lets them go. Left
     // as its last note, the answer would sit in the message that says how
     // the work went, above where anyone looks for it.
+    // A reply-optional turn that chose to say nothing (card 601) has no
+    // answer for its last words to stand in for.
+    const silent = this.mayStaySilent && reply.trim().length === 0;
     let promoted = false;
-    if (this.interimPosted && !this.ref) {
+    if (this.interimPosted && !this.ref && !silent) {
       const rest = this.unsaid(reply);
       promoted = rest.length === 0 && this.lastSaidWasNote && this.lastInterim !== undefined;
       reply = promoted && this.lastInterim !== undefined ? this.lastInterim : rest;
@@ -2234,8 +2257,15 @@ class ReplyRenderer {
     // Words promoted to the reply are the exception: they leave the
     // progress message only once the reply holding them has landed, so a
     // reply Slack refuses does not take the answer out of the thread.
-    const closed = promoted ? undefined : this.closeProgress(false);
-    if (this.mayStaySilent && reply.trim().length === 0 && (!this.ref || await this.retract())) {
+    // Chosen silence takes down a progress message that only ever said how
+    // the work went: left as `✓ Done`, it would be the post the turn chose
+    // not to make. One holding words the turn said along the way stays.
+    const closed = promoted
+      ? undefined
+      : silent && this.progressNotes.length === 0 && !this.progressNotesCut
+        ? this.retractProgress()
+        : this.closeProgress(false);
+    if (silent && (!this.ref || await this.retract())) {
       // A reply-optional turn that decided to say nothing (card 601): no
       // `(no reply)`, and a placeholder it opened is taken back. What it
       // said along the way, and the files it posted, stay: they were said.

@@ -17443,3 +17443,53 @@ test('on final replies, a reply-optional turn that says nothing posts nothing an
   assert.ok(statuses.length > 0);
   assert.equal(statuses.at(-1)?.status, '');
 });
+
+test('a reply-optional turn that works long enough for a progress message and then says nothing takes that message down too (card 601)', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await runTool(gateway, sessionId, 'c1');
+    await runTool(gateway, sessionId, 'c2');
+    return sessionWithReply(sessionId, '');
+  });
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:550.0', '2026-01-01T00:00:00.000Z']]));
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'deployed, all green', ts: '550.1', thread: '550.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.replyOptional, ['Dylan: deployed, all green']);
+  // The progress message opened while it worked: a status line, not words.
+  const progress = web.posts.find((post) => (post.text ?? '').startsWith('⚙ Working'));
+  assert.ok(progress, JSON.stringify(web.posts));
+  const progressTs = `bot-ts-${web.posts.indexOf(progress) + 1}`;
+  // Chosen silence leaves nothing standing: the status line comes down
+  // rather than ending as `✓ Done`, and nothing says `(no reply)`.
+  assert.deepEqual(web.deletes.map((removed) => removed.ts), [progressTs]);
+  assert.equal(web.posts.length, 1, JSON.stringify(web.posts));
+  assert.equal(editsOf(web, progressTs).some((text) => text.startsWith('✓ Done')), false, JSON.stringify(web.updates));
+  assert.equal([...web.posts, ...web.updates].some((entry) => entry.text === '(no reply)'), false);
+});
+
+test('a reply-optional turn that said something in its progress message keeps it when it ends silent (card 601)', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'The deploy log shows one retried step.');
+    await runTool(gateway, sessionId, 'c2');
+    return sessionWithReply(sessionId, '');
+  });
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:560.0', '2026-01-01T00:00:00.000Z']]));
+  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'deployed, all green', ts: '560.1', thread: '560.0' }));
+  await adapter.stop();
+
+  const progress = web.posts.find((post) => (post.text ?? '').startsWith('⚙ Working'));
+  assert.ok(progress, JSON.stringify(web.posts));
+  const progressTs = `bot-ts-${web.posts.indexOf(progress) + 1}`;
+  // What it said along the way was said: the message stays, closed with
+  // its words, and they are not posted again as a reply the turn chose not
+  // to give.
+  assert.deepEqual(web.deletes, []);
+  assert.equal(web.posts.length, 1, JSON.stringify(web.posts));
+  assert.equal(editsOf(web, progressTs).at(-1), '✓ Done · 2 steps\n\nThe deploy log shows one retried step.');
+  assert.equal([...web.posts, ...web.updates].some((entry) => entry.text === '(no reply)'), false);
+});
