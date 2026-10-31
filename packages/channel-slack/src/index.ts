@@ -8,6 +8,7 @@ import {
   filePathsOf,
   isLatestTurn,
   latestTurnReply,
+  NO_REPLY_MARKER,
   MAX_IDEMPOTENCY_KEY_LENGTH,
   turnFailureFor,
   turnFilesFor,
@@ -643,7 +644,7 @@ export interface SlackWebLike {
     archive?(args: { channel: string }): Promise<unknown>;
   };
   users: {
-    info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
+    info(args: { user: string }): Promise<{ user?: { name?: string; is_bot?: boolean; profile?: { display_name?: string; real_name?: string } } }>;
   };
   /**
    * A channel's bookmarks, all of them in one call (Slack has no paging
@@ -1232,6 +1233,14 @@ class ReplyRenderer {
    */
   readonly lazy: boolean;
   /**
+   * A reply-optional turn (card 601): said to the agent, so it shows what
+   * any turn shows while it works — status, placeholder, words along the
+   * way — but one that ends with nothing to say posts nothing: no
+   * `(no reply)`, its placeholder taken back, its status cleared. Unlike a
+   * lazy turn, a failure or a stop still says so.
+   */
+  readonly mayStaySilent: boolean;
+  /**
    * Whether this turn streams into a placeholder. When it does not, there
    * is never a placeholder: `finalize` finds none and posts the reply as
    * messages of its own, and a handover has nothing to hand over and says
@@ -1246,6 +1255,12 @@ class ReplyRenderer {
    * is one placeholder to stream into.
    */
   private readonly texts: boolean;
+  /**
+   * Whether a text tags another agent, which `texts` mode then posts as
+   * one message (card 1014): the tagged agent admits only a message that
+   * names it, so a split reply reached it as the tagged part alone.
+   */
+  private readonly tagsAnAgent: ((text: string) => Promise<boolean>) | undefined;
   /**
    * The thread the loading status belongs to: the reply's thread, or the
    * message itself in a DM, whose reply has no thread to key one on.
@@ -1307,9 +1322,11 @@ class ReplyRenderer {
     warn: (line: string) => void,
     options: {
       lazy?: boolean;
+      mayStaySilent?: boolean;
       now?: () => number;
       streaming?: boolean;
       texts?: boolean;
+      tagsAnAgent?: (text: string) => Promise<boolean>;
       statusThread?: string;
       statusWarned?: { value: boolean };
       after?: Promise<unknown>;
@@ -1323,9 +1340,11 @@ class ReplyRenderer {
     this.editIntervalMs = editIntervalMs;
     this.warn = warn;
     this.lazy = options.lazy ?? false;
+    this.mayStaySilent = options.mayStaySilent ?? false;
     this.now = options.now ?? Date.now;
     this.streaming = options.streaming ?? true;
     this.texts = !this.streaming && options.texts === true;
+    this.tagsAnAgent = options.tagsAnAgent;
     this.statusThread = options.statusThread ?? threadTs;
     this.statusWarned = options.statusWarned ?? { value: false };
     this.after = options.after ?? Promise.resolve();
@@ -1731,8 +1750,10 @@ class ReplyRenderer {
       .then(() => after)
       .then(async () => {
         const landed: string[] = [];
+        let chunks: string[] = [];
         try {
-          for (const chunk of this.chunksOf(text)) {
+          chunks = await this.chunksOf(text);
+          for (const chunk of chunks) {
             const posted = await this.web.chat.postMessage({
               channel: this.channel,
               text: chunk,
@@ -1748,7 +1769,7 @@ class ReplyRenderer {
           // reply, where repeating a few lines beats losing the rest.
           if (landed.length > 0) {
             this.interimPosted = true;
-            heard = landed.length === this.chunksOf(text).length ? text : landed.join('\n\n');
+            heard = landed.length === chunks.length ? text : landed.join('\n\n');
           }
           settleLanded(landed.length > 0);
         }
@@ -1977,7 +1998,10 @@ class ReplyRenderer {
     // Words the turn ended on, written before its last tool call, are its
     // answer: a reply that only repeats them, or an empty one, posts them
     // as the reply. They were held, so this is the first the thread sees
-    // of them. Any other held words stay unsaid (card 1009).
+    // of them. Any other held words stay unsaid (card 1009). That holds on
+    // a reply-optional turn too (card 601): its words between tools were
+    // held, so they are the only way an answer written before its last
+    // tool call reaches the thread, and silence is judged after them.
     if (!this.ref && (this.interimPosted || this.held.length > 0)) {
       const rest = this.unsaid(reply);
       const lastHeld = this.held.at(-1);
@@ -1988,6 +2012,21 @@ class ReplyRenderer {
         reply = rest;
       }
     }
+    // A reply-optional turn that ended with nothing to say, its last words
+    // not held ones that stand in for an answer (card 601).
+    const silent = this.mayStaySilent && reply.trim().length === 0;
+    if (silent && (!this.ref || await this.retract())) {
+      // No `(no reply)`, and a placeholder it opened is taken back. Its
+      // first line, and the files it posted, stay: they were said.
+      await this.uploadChain;
+      // Nothing posts after this to take the status down, so it is cleared.
+      if (hadStatus) {
+        this.setStatus('');
+        await this.statusChain;
+      }
+      const spoke = this.interimPosted || this.uploaded;
+      return this.outcome(this.interimPosted, spoke);
+    }
     if (!this.ref && this.interimPosted && reply.trim().length === 0) {
       // Nothing posts after this to take the status down, so it is cleared.
       if (hadStatus) {
@@ -1997,7 +2036,7 @@ class ReplyRenderer {
       return this.outcome(true, true);
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
-    const chunks = this.chunksOf(text);
+    const chunks = await this.chunksOf(text);
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
@@ -2048,9 +2087,14 @@ class ReplyRenderer {
     return this.outcome(published, landed || this.edited || this.uploaded || stranded, !published);
   }
 
-  /** This turn's text as the messages it is posted as, in this agent's reply mode. */
-  private chunksOf(text: string): string[] {
-    return messageChunks(text, this.texts ? 'texts' : undefined);
+  /**
+   * This turn's text as the messages it is posted as, in this agent's reply
+   * mode: `texts` splits it a paragraph to a message unless it tags another
+   * agent.
+   */
+  private async chunksOf(text: string): Promise<string[]> {
+    const texts = this.texts && !(await this.tagsAnAgent?.(text));
+    return messageChunks(text, texts ? 'texts' : undefined);
   }
 
   private placeText(ts: string | undefined): void {
@@ -3618,6 +3662,15 @@ interface Admission {
    * a stop or an approver's reply.
    */
   fromAgent?: string;
+  /**
+   * Said to this agent, but possibly needing no answer (card 601): another
+   * agent's tagged message, or a person's untagged follow-up in a thread
+   * this agent holds on the `thread` rule. Dispatched `replyOptional`, and
+   * rendered like a judged turn — nothing posted until it speaks, and a
+   * turn that says nothing leaves the thread untouched — except that a
+   * failure still says so. A direct mention or a DM never carries it.
+   */
+  replyOptional?: boolean;
 }
 
 interface AgentConnection {
@@ -3786,6 +3839,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const intakeInFlight = new Map<string, number>();
   const stopsBySession = new Map<string, { count: number; by: string }>();
   const displayNames = new Map<string, string>();
+  /** Whether a user is a bot, as users.info said, keyed `team:user` like `displayNames`. */
+  const botUsers = new Map<string, boolean>();
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
   const seenOrder: string[] = [];
@@ -4365,10 +4420,52 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const info = await connection.web.users.info({ user: userId });
       const name = info.user?.profile?.display_name || info.user?.profile?.real_name || info.user?.name || userId;
       displayNames.set(cacheKey, name);
+      if (typeof info.user?.is_bot === 'boolean') {
+        botUsers.set(cacheKey, info.user.is_bot);
+      }
       return name;
     } catch {
       return userId;
     }
+  };
+
+  /**
+   * Whether `text` tags another agent (card 1014), which `texts` mode then
+   * posts as one message: the tagged agent admits only a message that
+   * names it, so a reply split a paragraph to a message reached it as the
+   * tagged part alone. Another agent is one on this daemon, one on this
+   * agent's `agentMentions` team, or any user Slack says is a bot, asked
+   * once a user. A user Slack could not answer for counts as an agent: a
+   * person tagged in one message loses nothing, and an agent handed a
+   * split reply loses everything after the tag.
+   */
+  const tagsAnAgent = async (connection: AgentConnection, text: string): Promise<boolean> => {
+    const tagged = new Set([...text.matchAll(/<@([^>|]+)(?:\|[^>]*)?>/g)].map((match) => match[1] as string));
+    tagged.delete(connection.botUserId);
+    const team = Object.values(connection.config.agentMentions?.team ?? {});
+    for (const user of tagged) {
+      if (isFleetBot(connection.teamId, user) || team.includes(user)) {
+        return true;
+      }
+    }
+    for (const user of tagged) {
+      const cacheKey = `${connection.teamId}:${user}`;
+      let isBot = botUsers.get(cacheKey);
+      if (isBot === undefined) {
+        try {
+          const info = await connection.web.users.info({ user });
+          isBot = info.user?.is_bot === true;
+          botUsers.set(cacheKey, isBot);
+        } catch (error) {
+          warn(`slack: could not tell whether ${user} is a bot, so a texts reply tagging them is posted as one message: ${error instanceof Error ? error.message : String(error)}`);
+          return true;
+        }
+      }
+      if (isBot) {
+        return true;
+      }
+    }
+    return false;
   };
 
   /**
@@ -6335,7 +6432,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // last. `NO_REPLY_TEXT` is what a rendered turn with nothing to say
     // puts in its own message too. With nothing queued behind, there is no
     // order to keep and nothing to say, so the files go on their own.
-    const chunks = routing.reply ? messageChunks(routing.reply, connection.config.replies) : [];
+    const replies = connection.config.replies === 'texts' && routing.reply && await tagsAnAgent(connection, routing.reply)
+      ? 'final'
+      : connection.config.replies;
+    const chunks = routing.reply ? messageChunks(routing.reply, replies) : [];
     const posting = chunks.length > 0 ? chunks : (behind && files.length > 0 ? [NO_REPLY_TEXT] : []);
     let landed: string[] = [];
     const uploads = async (): Promise<void> => {
@@ -7779,6 +7879,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       overhear: false,
       judge: false,
       fromAgent: name,
+      replyOptional: true,
     };
   };
 
@@ -8105,11 +8206,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         return { ...admission, overhear: true };
       }
       rememberAddressee(threadKey, connection.config.agentId, event.ts);
-      return admission;
+      // Untagged, so it may need nothing back: a thanks, an acknowledgment
+      // (card 601). A stop never gets here as a turn to answer.
+      return { ...admission, replyOptional: true };
     }
     // Nothing seen for this thread since startup: only the sessions can
     // answer, and that answer has to be awaited.
-    return { ...admission, settled: false };
+    return { ...admission, settled: false, replyOptional: true };
   };
 
   const handleInbound = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
@@ -8253,6 +8356,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (admitted.judgeReason !== undefined) {
         const reason = admitted.settled || judged ? admitted.judgeReason : 'another agent\'s, from the thread read';
         log(`slack: judge: ${connection.config.agentId} ${judged ? 'took' : 'heard'} ${event.ts} in ${event.channel} (${reason})`);
+      }
+      // Said to this agent, but possibly needing nothing back (card 601):
+      // only for a message this agent answers, and never for a judged one,
+      // whose turn already may stay quiet. One line, never the text.
+      const replyOptional = admitted.replyOptional === true && !judged && !overhear;
+      if (replyOptional) {
+        log(`slack: ${connection.config.agentId} took ${event.ts} in ${event.channel} (reply optional: ${admitted.fromAgent !== undefined ? 'agent mention' : 'untagged follow-up'})`);
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
       // Fetched inside the chain, like the lookups below: it is network
@@ -8411,9 +8521,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const ahead = streaming ? undefined : replyOrder.get(sessionId);
       const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn, {
         lazy: judged,
+        mayStaySilent: replyOptional,
         now,
         streaming,
         texts: connection.config.replies === 'texts',
+        tagsAnAgent: (text: string) => tagsAnAgent(connection, text),
         statusThread: thread ?? event.ts,
         statusWarned: connection.statusWarned,
         ...(ahead ? { after: ahead } : {}),
@@ -8488,6 +8600,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         userMessage,
         ...(images.length > 0 ? { images } : {}),
         ...(judged ? { addressed: false } : {}),
+        ...(replyOptional ? { replyOptional: true } : {}),
         ...(earlier.length > 0 ? { earlier } : {}),
         turnId: renderer.turnId,
         metadata,
@@ -8639,7 +8752,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // other turn says `(no reply)` where its answer would have gone — one
       // rule with the gateway's `sessionRouting`, which posts the same
       // message for a turn this adapter did not start.
-      const finalized = renderer.finalize(renderer.lazy ? reply ?? '' : reply ?? NO_REPLY_TEXT);
+      const finalized = renderer.finalize(renderer.lazy || renderer.mayStaySilent ? reply ?? '' : reply ?? NO_REPLY_TEXT);
+      // A turn that owed an answer and gave only the word a turn that may
+      // stay quiet says nothing with: posted as said, and counted, so how
+      // often it happens is known before anything heavier is built.
+      if (!renderer.lazy && !renderer.mayStaySilent && reply?.trim() === NO_REPLY_MARKER) {
+        log(`slack: ${connection.config.agentId} answered NO_REPLY on a turn that owes an answer (${event.ts} in ${event.channel})`);
+      }
       // What the turn said along the way as well as its reply: interim
       // messages are in the thread, so they are in what the others hear.
       // Heard once the posts have settled, and the reply only if it landed:

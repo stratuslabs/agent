@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ContextOverflowError, OVERHEARD_IMAGES_NOTE, UNADDRESSED_TURN_NOTE, UNTRUSTED_TOOL_RESULT_NOTE, renderSystemPromptParts, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session, type ToolResult } from '@stratusagent/core';
+import { ContextOverflowError, OVERHEARD_IMAGES_NOTE, REPLY_OPTIONAL_NOTE, UNADDRESSED_TURN_NOTE, UNTRUSTED_TOOL_RESULT_NOTE, renderSystemPromptParts, type ImageAttachment, type MemoryEntry, type ProviderCallUsage, type ProviderRequest, type Session, type ToolResult } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -377,6 +377,28 @@ test('a turn nobody asked for reaches the API with the note after its newest mes
     fetch: createMockFetch([apiMessage([], 'max_tokens')]).fetchImpl,
   });
   await assert.rejects(() => exhausted.generate({ session }), /stop_reason max_tokens/);
+});
+
+test('a reply-optional turn is said to the agent, told it may need nothing back, and may answer with nothing (card 601)', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const now = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 's:u:1', role: 'user', content: 'Blair: report, all green', createdAt: now, replyOptional: true },
+    ],
+  });
+
+  const response = await provider.generate({ session });
+
+  assert.deepEqual(requests[0]!.body.messages[0], {
+    role: 'user',
+    content: [{ type: 'text', text: `Blair: report, all green\n\n${REPLY_OPTIONAL_NOTE}` }],
+  });
+  assert.deepEqual(response.parts, []);
+  // An addressed turn still may not.
+  const addressed = createAnthropicProvider({ apiKey: 'test-key', fetch: createMockFetch([apiMessage([])]).fetchImpl });
+  await assert.rejects(() => addressed.generate({ session: createSession() }));
 });
 
 test('a transcript past the context window is reported as recoverable, not as a dead turn', async () => {

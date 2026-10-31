@@ -235,15 +235,16 @@ test('a cwd memory file with two ids that differ only in case keeps them apart',
 
   await migrateLegacyMemory(env);
 
-  assert.match(await readFile(agentMemoryFilePath(env, 'Twin'), 'utf8'), /the first twin/);
-  // The second spelling was given no directory at all. That is what this
-  // can assert here: a case-sensitive runner keeps the two apart by itself,
-  // so the file contents look right either way and only the refusal to
-  // create the second directory distinguishes the rule from its absence.
-  await assert.rejects(
-    () => stat(path.dirname(agentMemoryFilePath(env, 'twin'))),
-    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
-  );
+  const first = await readFile(agentMemoryFilePath(env, 'Twin'), 'utf8');
+  assert.match(first, /the first twin/);
+  // Without the rule, a disk that folds case (macOS, Windows) appends the
+  // second agent's memories to the first one's file.
+  assert.doesNotMatch(first, /the second twin/);
+  // And the second spelling was given no directory at all, which is what
+  // tells the rule from its absence on a case-sensitive disk, where the two
+  // files would stay apart by themselves. Read from the listing: a stat of
+  // `twin` on a case-folding disk finds `Twin`.
+  assert.deepEqual((await readdir(agentsDirPath(env))).filter((name) => name.toLowerCase() === 'twin'), ['Twin']);
   // And its records are in the archive, not lost.
   assert.match(
     await readFile(path.join(project, '.stratus', 'memory.jsonl.migrated'), 'utf8'),

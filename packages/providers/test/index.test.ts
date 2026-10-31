@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   ContextOverflowError,
   OVERHEARD_IMAGES_NOTE,
+  REPLY_OPTIONAL_NOTE,
   UNADDRESSED_TURN_NOTE,
   UNTRUSTED_TOOL_RESULT_NOTE,
   type ProviderCallUsage,
@@ -1616,6 +1617,48 @@ test('a turn nobody asked for ends on the note, after its newest message only, o
     ['user', true],
     ['user', true],
   ]);
+});
+
+test('a reply-optional turn ends on its note on every path, and may answer with nothing (card 601)', async () => {
+  const optional = (id: string, content: string): ProviderRequest['session']['messages'][number] => ({
+    ...message(id, 'user', content),
+    replyOptional: true,
+  });
+  const noted = `Blair: report, all green\n\n${REPLY_OPTIONAL_NOTE}`;
+
+  // A resumed harness, one new message: said to the agent, with the note.
+  assert.equal(
+    latestUserMessagePrompt(requestWith([
+      message('u1', 'user', 'Dylan: hello'),
+      message('a1', 'assistant', 'hi'),
+      optional('u2', 'Blair: report, all green'),
+    ])),
+    noted,
+  );
+  // The transcript ends on the note, not on an instruction to reply.
+  const transcript = renderTranscriptPrompt(requestWith([message('u1', 'user', 'Dylan: hello'), message('a1', 'assistant', 'hi'), optional('u2', 'Blair: report, all green')]));
+  assert.ok(transcript.endsWith(`[user] ${noted}`), transcript);
+  assert.doesNotMatch(transcript, /Continue the conversation/);
+  // As history, it is bare.
+  assert.equal(
+    latestUserMessagePrompt(requestWith([optional('u1', 'Blair: report, all green'), message('a1', 'assistant', ''), message('u2', 'user', 'Dylan: Ava?')])),
+    'Dylan: Ava?',
+  );
+
+  // The OpenAI-compatible path: an empty answer is silence here, and only
+  // when the model stopped.
+  const empty = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.test/v1',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: 'stop' }] }),
+    } as Response),
+  });
+  assert.deepEqual(await empty.generate(requestWith([optional('u1', 'Blair: report, all green')])), { parts: [] });
+  await assert.rejects(() => empty.generate(requestWith([message('u1', 'user', 'Dylan: Ava?')])), /empty response/);
 });
 
 test('every line of an overheard message stays quoted, so none of it can pass as addressed', () => {

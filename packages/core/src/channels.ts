@@ -153,6 +153,13 @@ export interface GatewayLike {
      */
     addressed?: boolean;
     /**
+     * Said to the agent, but possibly needing no answer — see
+     * `RunInput.replyOptional` in `@stratusagent/core` (card 601). The turn
+     * may end with nothing, and the adapter posts nothing for it. A host
+     * without it ignores the field, and the turn then owes an answer.
+     */
+    replyOptional?: boolean;
+    /**
      * What was said in the conversation before this message that the agent
      * never heard — a thread it is mentioned into partway — oldest first,
      * each entry with its own metadata for its speaker's trust. Used only

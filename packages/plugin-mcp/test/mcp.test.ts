@@ -530,7 +530,10 @@ test('structured content passes through, and an image lands in the per-agent wor
       );
     },
   });
-  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-ws-'));
+  // Resolved, since a file is reported under the name a read would ask for
+  // and the temp dir is behind a link on macOS; the linked case is the
+  // next test's.
+  const workspaceRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-ws-')));
   const target = new ToolRegistry();
   const plugin = pluginFor(handle, { workspaceRoot });
   await loadThroughView(plugin, target);
@@ -2246,8 +2249,13 @@ test('an attachment is not dropped because a different field had to be cut', asy
   // attachments only got that when nothing anywhere needed cutting — so
   // an image beside a text that did have to be cut was refused, for a
   // result weighing 389 of its 512.
-  const base = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-mixed-'));
-  const workspaceRoot = path.join(base, 'd'.repeat(200), 'e'.repeat(73));
+  // The saved file's path is most of what this result weighs, so the
+  // workspace root has one length (304, what it has under Linux's /tmp)
+  // whatever the temp dir is. Under macOS's deeper /private/var/folders/…
+  // the image rightly stops fitting, and the test would say nothing.
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-mixed-')));
+  const workspaceRoot = path.join(base, 'd'.repeat(304 - base.length - 75), 'e'.repeat(73));
+  assert.equal(workspaceRoot.length, 304);
   const result = await normalizeCallResult(
     {
       content: [
@@ -2528,7 +2536,7 @@ test('a call that fails at the protocol level is bounded like one that answers',
 });
 
 test('a binary block cannot steer the written path: the server-side tool name is folded before it names a file', async () => {
-  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-traversal-'));
+  const workspaceRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-traversal-')));
   const output = await normalizeCallResult(
     { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] },
     { server: 'linear', tool: '../../../escape', agentId: 'ava', workspace: () => path.join(workspaceRoot, 'ava') },

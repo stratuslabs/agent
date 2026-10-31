@@ -60,7 +60,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Approval policy: `posture` (`open`, the default, runs gated tools without asking; `guarded` asks), plus how a guarded daemon asks and what it remembers — trusted configs only, see below and [Approvals](../guides/approvals.md) |
 | `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`principals`, the default, or `anyone`), each with a per-agent `agents` sub-block — trusted configs only, see below |
-| `slack` | How agents' replies appear in Slack: `replies` is `final` (the default — Slack's loading status while the agent works, what it writes before each tool posted as the tool starts, then the finished reply), `stream` (a `…` placeholder edited as the reply is written) or `texts` (`final` with each paragraph posted as its own message, at most five), with a per-agent `agents` sub-block; per agent only, `homeChannels` lists channel ids where it answers top-level messages without a mention; `agentMentions` (default `false`, top level or per agent) lets an agent answer other team agents' bots that mention it, with `team` (name to Slack bot user id, for agents on other daemons) and per-agent `agentMentionsFrom` to narrow who — trusted configs only, see [Slack](../guides/slack.md#how-replies-appear), [home channels](../guides/slack.md#a-home-channel) and [agents tagging each other](../guides/slack.md#when-agents-tag-each-other) |
+| `slack` | How agents' replies appear in Slack: `replies` is `final` (the default — Slack's loading status while the agent works, what it writes before each tool posted as the tool starts, then the finished reply), `stream` (a `…` placeholder edited as the reply is written) or `texts` (`final` with each paragraph posted as its own message, at most five, except that a reply tagging another agent stays one message), with a per-agent `agents` sub-block; per agent only, `homeChannels` lists channel ids where it answers top-level messages without a mention; `agentMentions` (default `false`, top level or per agent) lets an agent answer other team agents' bots that mention it, with `team` (name to Slack bot user id, for agents on other daemons) and per-agent `agentMentionsFrom` to narrow who — trusted configs only, see [Slack](../guides/slack.md#how-replies-appear), [home channels](../guides/slack.md#a-home-channel) and [agents tagging each other](../guides/slack.md#when-agents-tag-each-other) |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `events` | The events listener for `stratus serve`: `listen` (`host`, `port`, default `127.0.0.1:4124`), `maxBodyBytes`, and `sources` by id, each with `verify` (`github` or `standard-webhooks`) and `secrets` (credential names). Nothing listens until a source is named — trusted configs only, see [Events](../guides/events.md) |
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
@@ -191,17 +191,30 @@ cap; a number caps the extra budgets per message. It still stops to sum up:
 
 - when it is stuck repeating the same failing call (kernel loop only — Anthropic and OpenAI-compatible providers; the claude-code and codex runtimes run their own loops and do not have this check);
 - when its cap is reached;
-- when somebody has sent it another message in that conversation
-  meanwhile: they get the summary, and their message runs next.
+- when somebody has sent it another message in that conversation that
+  is still waiting when the budget runs out: they get the summary, and
+  their message runs next.
 
 Approvals, grants and trust labels apply exactly as they did. Off for every
 agent not listed, because it spends tokens without a ceiling; the startup
 log names the agents it is on for. It applies to the built-in model loop
 (Anthropic and OpenAI-compatible providers) and to the `claude-code`
 runtime, which carries on in the same Claude Code session with a fresh
-budget. The `codex` runtime is not covered yet and wraps up as before. Nothing stops a running
-turn from Slack yet, so an uncapped runaway turn ends with a new message to
-the agent or a daemon restart.
+budget. The `codex` runtime is not covered yet and wraps up as before. With
+`true` there is no ceiling, and a message that joins the turn mid-task
+(below) doesn't end it, so a runaway turn ends with
+[`stop` in Slack](../guides/slack.md#stopping-a-turn) or a daemon restart.
+
+**A message sent mid-task shares the budget.** On Slack, a message sent
+while the agent works [joins the running turn](../guides/slack.md#how-replies-appear) at its
+next step (not under the `codex` and `claude-code` runtimes, where it waits
+for the next turn). It gets the steps the turn has left and adds none: the budget,
+the auto-continue cap and the repeated-failure count below carry on as
+they were, so a conversation that writes at every step can't keep one turn
+going past its ceiling. A message that arrives once the turn is out of
+steps isn't taken in: the turn wraps up, and the message runs next as its
+own turn, with a budget of its own. A turn continued after a daemon
+restart carries on with the steps it had already spent.
 
 A provider that ignores the no-tools request and calls a tool anyway on
 that last call fails the turn with `Session exceeded the maximum of N

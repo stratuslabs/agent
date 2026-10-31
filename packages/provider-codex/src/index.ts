@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import {
   DEFAULT_MAX_TURNS,
   markPromptDelivered,
-  isUnaddressedTurn,
+  isReplyOptionalTurn,
   renderSystemPromptSections,
   droppedImageNote,
   renderToolResultContent,
@@ -910,10 +910,10 @@ export const createCodexProvider = ({
       throw markIfDelivered(markIfSideEffects(new Error('Codex ended without completing the turn.')));
     }
     if (resultText.length === 0) {
-      // Silence is the answer a turn nobody asked for may give — see
-      // `RunInput.addressed` in core — when Codex said the turn finished
-      // with nothing to say.
-      if (isUnaddressedTurn(request.session)) {
+      // Silence is the answer a turn that may stay quiet may give — see
+      // `RunInput.addressed` and `RunInput.replyOptional` in core — when
+      // Codex said the turn finished with nothing to say.
+      if (isReplyOptionalTurn(request.session)) {
         return { parts: [], ...(budgetRefused ? { stoppedEarly: 'turn-limit' as const } : {}) };
       }
       throw markIfDelivered(markIfSideEffects(new Error('Codex returned an empty response.')));

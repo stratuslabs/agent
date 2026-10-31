@@ -305,6 +305,16 @@ export interface Message {
    */
   overheard?: boolean;
   /**
+   * A user message said to the agent that may need no answer: a
+   * teammate agent's tagged report, a person's untagged follow-up in a
+   * thread the agent holds (card 601). Dispatched with
+   * `RunInput.replyOptional`; never set beside `overheard`, which already
+   * lets a turn end in silence. Rendered as said, followed on the newest
+   * message by `REPLY_OPTIONAL_NOTE`. Present only when true; an older
+   * build reads past it, and the message is then one that was answered.
+   */
+  replyOptional?: boolean;
+  /**
    * Appended by `observe`, so it started no turn. `overheard` alone cannot
    * say so: a turn dispatched with `addressed: false` is overheard too, and
    * is a turn. Present only when true; a message observed before this was
@@ -3890,11 +3900,15 @@ export const turnFailureFor = (session: Pick<Session, 'messages' | 'status' | 'l
  * annotated with advice.
  */
 export const promptTextOf = (
-  message: Pick<Message, 'content' | 'overheard'>,
+  message: Pick<Message, 'content' | 'overheard' | 'replyOptional'>,
   options: PromptTextOptions = {},
 ): string => {
   if (message.overheard !== true) {
-    return message.content;
+    // Said to the agent, as written; a reply-optional one is told, when it
+    // is the turn's, that it may need nothing back (card 601).
+    return message.replyOptional === true && options.latest === true
+      ? `${message.content}\n\n${REPLY_OPTIONAL_NOTE}`
+      : message.content;
   }
   const quoted = message.content
     .split(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/)
@@ -3925,6 +3939,32 @@ export const OVERHEARD_IMAGES_NOTE = '(attached to the overheard message above, 
  */
 export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =>
   turnMessageOf(session)?.overheard === true;
+
+/**
+ * Whether the turn a session is on may end without a reply: one nobody
+ * asked for (`isUnaddressedTurn`), or one whose message was said to the
+ * agent but may need no answer (`Message.replyOptional`, card 601). The
+ * rule every provider's empty answer is judged by, and the only turn on
+ * which an answer of exactly `NO_REPLY_MARKER` is silence.
+ */
+export const isReplyOptionalTurn = (session: Pick<Session, 'messages'>): boolean => {
+  const message = turnMessageOf(session);
+  return message?.overheard === true || message?.replyOptional === true;
+};
+
+/**
+ * Whether a response is the marker a turn that may stay quiet answers
+ * with to say nothing: no tool call, and its text, trimmed, exactly
+ * `NO_REPLY_MARKER`. The whole answer or nothing: the word inside a
+ * sentence is a sentence.
+ */
+export const isNoReplyAnswer = (response: Pick<ProviderResponse, 'parts'>): boolean => {
+  if (response.parts.some((part) => part.type !== 'text')) {
+    return false;
+  }
+  const text = response.parts.map((part) => (part.type === 'text' ? part.text : '')).join('');
+  return text.trim() === NO_REPLY_MARKER;
+};
 
 /**
  * Where the dispatch carrying `idempotencyKey` stands in this session:
@@ -3987,6 +4027,40 @@ export interface PromptTextOptions {
 }
 
 /**
+ * The whole answer a turn that may stay quiet gives to say nothing
+ * (card 601). Silence itself is not dependable: the Claude Agent SDK's
+ * query loop answers a response with no visible text by asking the model
+ * once more to produce some ("Your previous response had no visible
+ * output…"), and the model then explains, in the thread, why it is not
+ * answering. A word is visible text to every harness, and the runner
+ * turns it back into silence (`isNoReplyAnswer`) before anything else
+ * sees the response. An empty answer still counts as silence too.
+ */
+export const NO_REPLY_MARKER = 'NO_REPLY';
+
+/**
+ * What a reply-optional turn is told, after the message it is on
+ * (`Message.replyOptional`, card 601). Unlike `UNADDRESSED_TURN_NOTE`, the
+ * message was said to the agent, so the note leans toward answering: only
+ * a message that needs nothing back may get nothing. In the message for the
+ * same reason as that note: a harness holding its own history takes only
+ * the newest message. That history keeps this note and the marker answer
+ * that followed it, so the last sentence says the permission ends with the
+ * message: a later question with no note is owed an answer.
+ *
+ * It opens on answering, and says the message was said to the agent, because
+ * an earlier wording that opened on "This may not need an answer" was read as
+ * leave to skip questions: on a live Fly check a teammate agent's tagged
+ * "what is 5+5?" went unanswered in 4 of 6 runs (claude-sonnet-4-5), and in
+ * a direct API probe both claude-sonnet-4-5 and claude-haiku-4-5 answered
+ * NO_REPLY to every question. This wording answered every question and
+ * request and stayed silent on every thanks, acknowledgment and report in
+ * the same probe.
+ */
+export const REPLY_OPTIONAL_NOTE =
+  `This message was said to you. Answer it as you normally would: a question or a request always gets an answer, whether a person or an agent sent it, even one you cannot fully help with. Only if it just thanks you, acknowledges something or reports something, and asks nothing of you, reply with exactly ${NO_REPLY_MARKER} and nothing else. Any message without a note like this one always gets an answer.`;
+
+/**
  * What a turn nobody asked for is told, after the message it ends on.
  *
  * The load-bearing sentence of reading the room, and the one that cannot
@@ -4000,7 +4074,7 @@ export interface PromptTextOptions {
  * followed more often than one read an hour ago.
  */
 export const UNADDRESSED_TURN_NOTE =
-  'Nobody said that to you, and nobody is waiting on you. Reply only if you have something these people would want from you and do not have — an answer to a question left open, a correction to something wrong, a thing you were asked to watch for. Otherwise reply with nothing at all: no acknowledgement, no summary, no offer to help. Saying nothing is usually the right answer here.';
+  `Nobody said that to you, and nobody is waiting on you. Reply only if you have something these people would want from you and do not have — an answer to a question left open, a correction to something wrong, a thing you were asked to watch for. Otherwise reply with exactly ${NO_REPLY_MARKER} and nothing else: no acknowledgement, no summary, no offer to help. Saying nothing is usually the right answer here.`;
 
 /**
  * What the last turn of a message is told, once the message has used every
@@ -4092,8 +4166,10 @@ const failureSignature = (calls: ToolCall[], results: ToolResult[]): string | un
  * same way twice before the process died and once more on the recovered
  * turn has failed three times, and counting from the recovery alone let it
  * fail twice more. Walked back through runs of tool results and the
- * responses they answer, and no further than the first message that is
- * neither — the person's own message, which is where this run began.
+ * responses they answer, past any message steered in between them
+ * (`Message.steered`), which shares the run's budget, and no further than
+ * the first message that is none of those: the person's own message,
+ * which is where this run began.
  */
 const responsesThroughCall = (
   session: Session,
@@ -4139,14 +4215,19 @@ const responsesThroughCall = (
   }
   const responses = [responseAt(start, end, messages.length)];
   for (;;) {
-    let resultsStart = start;
+    // A message steered in between two responses joined this run rather
+    // than starting one, so the walk goes on past it.
+    let resultsEnd = start;
+    while (resultsEnd > 0 && messages[resultsEnd - 1]!.role === 'user' && messages[resultsEnd - 1]!.steered === true) {
+      resultsEnd -= 1;
+    }
+    let resultsStart = resultsEnd;
     while (resultsStart > 0 && messages[resultsStart - 1]!.role === 'tool') {
       resultsStart -= 1;
     }
-    if (resultsStart === start || resultsStart === 0 || messages[resultsStart - 1]!.role !== 'assistant') {
+    if (resultsStart === resultsEnd || resultsStart === 0 || messages[resultsStart - 1]!.role !== 'assistant') {
       break;
     }
-    const resultsEnd = start;
     end = resultsStart - 1;
     start = runStart(end);
     responses.unshift(responseAt(start, end, resultsEnd));
@@ -6650,6 +6731,16 @@ export interface RunInput {
    */
   addressed?: boolean;
   /**
+   * Said to the agent, but possibly needing no answer (card 601): the
+   * message is stored `replyOptional`, followed by `REPLY_OPTIONAL_NOTE`,
+   * and the turn may end with nothing — an empty answer, or exactly
+   * `NO_REPLY_MARKER` — which completes it with an empty assistant
+   * message, as an unaddressed turn's silence does. Ignored with
+   * `addressed: false`, whose frame already says so. Who sets it is the
+   * channel's call: a direct mention or a DM should never.
+   */
+  replyOptional?: boolean;
+  /**
    * The caller's name for this dispatch, stored on the user message
    * (`Message.idempotencyKey`) in the same write as the message itself.
    * The runner only records it; refusing a repeat is the host's job — see
@@ -6694,16 +6785,19 @@ export interface RunInput {
    * the next provider call (card 948). What it hands over goes into the
    * transcript right there, as a user message marked `steered`, so the
    * agent reads a correction at its next step instead of after its whole
-   * turn. The message gives the turn a fresh step budget and failure
-   * streak, as it would have had as its own turn; its sender lowers the
-   * session's trust like any sender; its keys join the turn's message.
+   * turn. The message shares the steps the turn has left: it renews
+   * neither the step budget, the auto-continue count nor the failure
+   * streak, so however often somebody writes, the turn stops where it
+   * would have (card 996). Its sender lowers the session's trust like any
+   * sender; its keys join the turn's message.
    *
-   * Never asked before the first provider call, after an answer, on a
-   * turn nobody asked for (`addressed: false`, whose answer may be
-   * silence), or by a provider that hosts its own tool loop, whose steps
-   * the runner never sees. A host that omits it gets turns that hear
-   * nothing until they end, as before; what is handed over is the host's
-   * to answer for, since the runner only records it.
+   * Never asked before the first provider call, after an answer, once the
+   * turn is out of steps (the wrap-up can't act on it, so it waits and
+   * runs as its own turn), on a turn nobody asked for (`addressed:
+   * false`, whose answer may be silence), or by a provider that hosts its
+   * own tool loop, whose steps the runner never sees. A host that omits it
+   * gets turns that hear nothing until they end, as before; what is handed
+   * over is the host's to answer for, since the runner only records it.
    */
   steer?: () => Promise<SteeredMessage | undefined>;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
@@ -6729,6 +6823,8 @@ export interface ResumeInput {
   images?: ImageAttachment[];
   /** See `RunInput.addressed`. */
   addressed?: boolean;
+  /** See `RunInput.replyOptional`. */
+  replyOptional?: boolean;
   /** See `RunInput.idempotencyKey`. */
   idempotencyKey?: string;
   /** See `RunInput.absorbedKeys`. */
@@ -7603,6 +7699,7 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.addressed !== false && input.replyOptional === true ? { replyOptional: true } : {}),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.absorbedKeys !== undefined && input.absorbedKeys.length > 0 ? { absorbedKeys: [...input.absorbedKeys] } : {}),
       ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
@@ -7708,6 +7805,7 @@ export class AgentRunner {
       // difference is only that a turn runs on it, and every renderer
       // frames it from the same mark.
       ...(input.addressed === false ? { overheard: true } : {}),
+      ...(input.addressed !== false && input.replyOptional === true ? { replyOptional: true } : {}),
       ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.absorbedKeys !== undefined && input.absorbedKeys.length > 0 ? { absorbedKeys: [...input.absorbedKeys] } : {}),
       ...(input.hostedLoop === true ? { hostedLoop: true } : {}),
@@ -7789,10 +7887,10 @@ export class AgentRunner {
     // as an answered call with nothing left to run, so the loop counts this
     // message's responses (`responsesThroughCall`) and goes straight to the
     // next provider turn — the wrap-up, if the ceiling has been reached.
-    // Any user message, a steered one included: a message that reached the
-    // turn mid-way renewed its budget (`RunInput.steer`), so the responses
-    // counted are the ones since.
-    const userIndex = working.messages.findLastIndex((candidate) => candidate.role === 'user');
+    // From the message the turn started on, past any steered in: one that
+    // reached the turn mid-way shares its budget (`RunInput.steer`), so a
+    // crash right after one must not hand the turn a fresh allowance.
+    const userIndex = working.messages.findLastIndex(startsTurn);
     const callIndex = working.messages.findLastIndex((candidate) => candidate.role === 'assistant' && (candidate.toolCalls?.length ?? 0) > 0);
     const lastCall = callIndex > userIndex ? working.messages[callIndex]?.toolCalls?.at(-1) : undefined;
     const lastResult = lastCall === undefined
@@ -8216,7 +8314,9 @@ export class AgentRunner {
       // permitted turn buy the whole allowance again.
       // Consecutive turns whose every call failed the same way, and how.
       // Local to this run: a person replying is new information, and the
-      // call that failed before may work now.
+      // call that failed before may work now. A message steered into the
+      // run doesn't reset it: a call that changes after it isn't the same
+      // failure anyway, and one that doesn't is still stuck.
       let lastFailure: string | undefined;
       let failureRun = 0;
       let stuck: { toolName: string; times: number } | undefined;
@@ -8240,25 +8340,6 @@ export class AgentRunner {
       let continued = 0;
       for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
-        // Between a tool step and the next call, and only there: every call
-        // of the last response has its result, so a user message here
-        // splits no call from its answer. Before the budget below is read,
-        // because what arrives renews it.
-        if (steer !== undefined && pendingEntry === undefined && session.messages.at(-1)?.role === 'tool' && !isUnaddressedTurn(session)) {
-          const steered = await steer();
-          throwIfAborted(signal);
-          if (steered !== undefined) {
-            await this.takeSteered(session, steered);
-            // A person's message is new information, as it would have been
-            // as its own turn: the steps it gets are counted from here, and
-            // a call that kept failing may work now.
-            ceiling = turn - 1 + this.maxTurns;
-            continued = 0;
-            lastFailure = undefined;
-            failureRun = 0;
-            stuck = undefined;
-          }
-        }
         // Out of budget and still working — the last response called a
         // tool — so with auto-continue on it gets another allowance rather
         // than a wrap-up. A loop, because a recovered turn can start
@@ -8280,6 +8361,30 @@ export class AgentRunner {
         // saying what happened.
         if (turn > ceiling + 1 || (wrappingUp && pendingEntry)) {
           throw new Error(turnLimitMessage(this.maxTurns));
+        }
+        // Between a tool step and the next call, and only there: every call
+        // of the last response has its result, so a user message here
+        // splits no call from its answer. Only while the turn may still
+        // call a tool: the wrap-up can't act on a message, so one that
+        // arrives then waits and runs as its own turn, on a budget of its
+        // own. What joins the turn shares the steps it has left. It renews
+        // neither the budget, the auto-continue count nor the failure
+        // streak, so a conversation that writes at every step can't keep
+        // one turn going past its ceiling (card 996). Never into a turn
+        // that may stay quiet: a question folded into one could be lost
+        // to its silence, so it waits and runs as its own (card 601).
+        if (
+          steer !== undefined
+          && !wrappingUp
+          && pendingEntry === undefined
+          && session.messages.at(-1)?.role === 'tool'
+          && !isReplyOptionalTurn(session)
+        ) {
+          const steered = await steer();
+          throwIfAborted(signal);
+          if (steered !== undefined) {
+            await this.takeSteered(session, steered);
+          }
         }
 
         if (pendingEntry) {
@@ -8523,6 +8628,12 @@ export class AgentRunner {
         }
         throwIfAborted(signal);
         await deltaChain;
+        // A turn that may stay quiet said so with the marker: from here on
+        // it is the silence an empty answer is, before anything records,
+        // announces or posts it (card 601).
+        if (isReplyOptionalTurn(session) && isNoReplyAnswer(response)) {
+          response = { ...response, parts: [] };
+        }
         // Checked before anything of the response is saved: a call made on
         // the turn that may not make one is never run, and recording it
         // would leave a call in the transcript with no result to answer it.
@@ -8560,8 +8671,10 @@ export class AgentRunner {
           });
         }
         if (response.parts.length === 0) {
-          // Silence, recorded. Only a turn nobody asked for ends this way —
-          // every provider refuses an empty answer on one somebody did —
+          // Silence, recorded. Only a turn that may stay quiet ends this
+          // way (`isReplyOptionalTurn`: one nobody asked for, or one whose
+          // message may need nothing back) — every provider refuses an
+          // empty answer on any other, and the marker became this above —
           // and the decision has to leave a mark: a harness holding its own
           // history is sent every user message since the agent last spoke
           // (`latestUserMessagePrompt`), and without an assistant message

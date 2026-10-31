@@ -133,19 +133,91 @@ test('a steered stranger lowers the session to their trust before the next call'
   assert.equal(sessionTrustOf(session), 'external');
 });
 
-test('a steered message gives the turn a fresh step budget, as it would have had as its own turn', async () => {
+/** Hands over a new message every time it is asked, up to `limit` (a bound for the test, not the runner). */
+const steerEvery = (limit = 50) => {
+  let asked = 0;
+  const steer = async (): Promise<SteeredMessage | undefined> => {
+    asked += 1;
+    return asked <= limit ? { userMessage: `Bea: and another thing (${asked})` } : undefined;
+  };
+  return { steer, asked: () => asked };
+};
+
+// Card 996: steering used to renew the step budget, the auto-continue count
+// and the failure streak, so a conversation that kept writing kept one
+// turn running with no ceiling. A message that joins a turn now shares the
+// steps it has left.
+
+test('a message steered in at every step adds no steps: the turn still wraps up at maxTurns', async () => {
   // Endless: it only stops calling `step` when the wrap-up takes tools away.
   const provider = createSteppingProvider(Number.POSITIVE_INFINITY, 'Wrapped up.');
+  const runner = new AgentRunner({ provider, tools: createStepTools(), maxTurns: 3 });
+  const steering = steerEvery();
+
+  const session = await runner.run({ sessionId: 'steer-cap', agent, userMessage: 'Dylan: go', steer: steering.steer });
+
+  // Three steps, then the wrap-up, however many messages joined.
+  assert.deepEqual(provider.seen.map((request) => request.toolChoice), [undefined, undefined, undefined, 'none']);
+  assert.equal(session.stoppedEarly?.reason, 'turn-limit');
+  // Asked after steps 1 and 2; not before the wrap-up, which can't act on it.
+  assert.equal(steering.asked(), 2);
+  assert.equal(session.messages.filter((message) => message.steered === true).length, 2);
+});
+
+test('steering at every step does not reset the auto-continue cap', async () => {
+  const provider = createSteppingProvider(Number.POSITIVE_INFINITY, 'Wrapped up.');
+  const runner = new AgentRunner({ provider, tools: createStepTools(), maxTurns: 2, autoContinue: 1 });
+  const steering = steerEvery();
+
+  const session = await runner.run({ sessionId: 'steer-cap-continue', agent, userMessage: 'Dylan: go', steer: steering.steer });
+
+  // maxTurns × (1 + autoContinue) = 4 steps, then the wrap-up.
+  assert.equal(provider.seen.length, 5);
+  assert.equal(provider.seen.at(-1)?.toolChoice, 'none');
+  assert.deepEqual(
+    { reason: session.stoppedEarly?.reason, continuations: session.stoppedEarly?.continuations },
+    { reason: 'turn-limit', continuations: 1 },
+  );
+});
+
+test('a steered message does not reset the repeated-failure streak', async () => {
+  const tools = new ToolRegistry();
+  tools.register({ name: 'step', async execute() { throw new Error('no such directory'); } });
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'stuck',
+    async generate(request) {
+      calls += 1;
+      if (request.toolChoice === 'none') {
+        return { parts: [{ type: 'text', text: 'It keeps failing.' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: `f${calls}`, toolName: 'step', input: { cwd: '/nope' } } }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, tools, maxTurns: 10 });
+  const steering = steerEvery();
+
+  const session = await runner.run({ sessionId: 'steer-streak', agent, userMessage: 'Dylan: go', steer: steering.steer });
+
+  // Three identical failures, then the wrap-up: the messages in between
+  // changed nothing about the call.
+  assert.equal(calls, 4);
+  assert.equal(session.stoppedEarly?.reason, 'repeated-failure');
+});
+
+test('a message that arrives once the turn is out of steps waits for a turn of its own', async () => {
+  const provider = createSteppingProvider(Number.POSITIVE_INFINITY, 'Wrapped up.');
   const runner = new AgentRunner({ provider, tools: createStepTools(), maxTurns: 2 });
-  // Asked after step 1 and after step 2; the message arrives at the second.
+  // Nothing after step 1; the message is there after step 2, the last.
   const steering = steerOnce({ userMessage: 'Dylan: also do the docs' }, 2);
 
   const session = await runner.run({ sessionId: 'steer-4', agent, userMessage: 'Dylan: go', steer: steering.steer });
 
-  // Two steps, the steered message, two more steps, then the wrap-up. With
-  // the old budget the third call would have been the wrap-up.
-  assert.equal(provider.seen.length, 5);
-  assert.deepEqual(provider.seen.map((request) => request.toolChoice), [undefined, undefined, undefined, undefined, 'none']);
+  // Two steps, then the wrap-up. The runner never takes the message, so
+  // the host runs it next as its own turn with its own budget.
+  assert.deepEqual(provider.seen.map((request) => request.toolChoice), [undefined, undefined, 'none']);
+  assert.equal(steering.asked(), 1);
+  assert.equal(session.messages.some((message) => message.steered === true), false);
   assert.equal(session.stoppedEarly?.reason, 'turn-limit');
 });
 
@@ -155,6 +227,16 @@ test('a turn nobody asked for takes nothing steered: its answer may be silence',
   const steering = steerOnce({ userMessage: 'to you' });
 
   await runner.run({ sessionId: 'steer-5', agent, userMessage: 'Bea: to someone else', addressed: false, steer: steering.steer });
+
+  assert.equal(steering.asked(), 0);
+});
+
+test('a reply-optional turn takes nothing steered either: a question folded in could be lost to its silence (card 601)', async () => {
+  const provider = createSteppingProvider(1);
+  const runner = new AgentRunner({ provider, tools: createStepTools() });
+  const steering = steerOnce({ userMessage: 'Dylan: wait, a question' });
+
+  await runner.run({ sessionId: 'steer-601', agent, userMessage: 'Blair: report, all green', replyOptional: true, steer: steering.steer });
 
   assert.equal(steering.asked(), 0);
 });
@@ -219,6 +301,37 @@ test('a turn that crashed after a steered message continues from it, marked on t
   assert.equal(continued?.messages[2]?.continuedAfterCrash, true);
   assert.equal(continued?.messages[5]?.continuedAfterCrash, undefined);
   assert.equal(turnReplyFor(continued!, 'k2'), 'Skipped them.');
+});
+
+test('a turn continued after a crash past a steered message spends the budget it was on', async () => {
+  // Two steps taken, one on each side of the steered message: at maxTurns 2
+  // the continued turn is the wrap-up, not two more steps.
+  const store = new InMemorySessionStore();
+  await store.create(steeredTranscript());
+  const provider = createSteppingProvider(Number.POSITIVE_INFINITY, 'Out of steps.');
+  const runner = new AgentRunner({ provider, tools: createStepTools(), store, maxTurns: 2 });
+
+  const continued = await runner.continueTurn('s');
+
+  assert.deepEqual(provider.seen.map((request) => request.toolChoice), ['none']);
+  assert.equal(continued?.stoppedEarly?.reason, 'turn-limit');
+});
+
+test('a turn that crashed right after taking a steered message spends the budget it was on', async () => {
+  const store = new InMemorySessionStore();
+  const session = steeredTranscript();
+  // One step taken, then the steered message saved, then the crash.
+  session.messages.splice(6);
+  await store.create(session);
+  const provider = createSteppingProvider(Number.POSITIVE_INFINITY, 'Out of steps.');
+  const runner = new AgentRunner({ provider, tools: createStepTools(), store, maxTurns: 1 });
+
+  const continued = await runner.continueTurn('s');
+
+  assert.deepEqual(provider.seen.map((request) => request.toolChoice), ['none']);
+  // The wrap-up still reads it: the steered message, then the out-of-steps note.
+  assert.deepEqual(provider.seen[0]?.roles.slice(-3), ['tool', 'user', 'user']);
+  assert.equal(continued?.stoppedEarly?.reason, 'turn-limit');
 });
 
 test('a turn whose own message was unkeyed is keyed by a message it took in, so a planned stop leaves it for the next start', () => {
