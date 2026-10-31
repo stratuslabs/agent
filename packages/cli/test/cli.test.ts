@@ -1432,7 +1432,13 @@ test('source bin script works with piped stdin', async () => {
   assert.equal(exitCode, 0);
   assert.match(stdout, /Starting Stratus Agent local loop with provider=demo/);
   assert.match(stdout, /please inspect this tool/);
-  assert.equal(stderr, '');
+  // Running the .ts source, Node itself prints a Type Stripping warning on
+  // releases where that is still experimental (the 22.16.0 and 24.0.0 floors
+  // among them), before any of our code runs to filter it. The published
+  // bin is dist/bin.js and never sees it. Anything else on stderr still
+  // fails.
+  const nodeTypeStrippingWarning = /^\(node:\d+\) ExperimentalWarning: Type Stripping is an experimental feature[^\n]*\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\n/;
+  assert.equal(stderr.replace(nodeTypeStrippingWarning, ''), '');
 });
 
 test('parseCommand accepts the anthropic provider and soul flag', () => {
