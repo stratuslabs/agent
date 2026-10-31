@@ -25,7 +25,7 @@
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",

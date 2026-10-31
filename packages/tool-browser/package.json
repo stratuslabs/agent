@@ -33,7 +33,7 @@
     "typescript": "^5.9.3",
     "@stratusagent/tool-web": "workspace:*"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
