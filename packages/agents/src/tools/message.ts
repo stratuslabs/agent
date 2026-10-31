@@ -151,7 +151,8 @@ export type ConversationSayer = (input: { session: Session; text: string }) => P
 export const createMessageSayTool = (say: ConversationSayer): Tool => ({
   name: MESSAGE_SAY_TOOL_NAME,
   description: 'Send the person you are working for one short message now, in the conversation you are replying in, before your reply. '
-    + 'Use it only when you need them (a decision, an OK, something only they can give) or they would want to know something before you finish. '
+    + 'Words you write between tool calls are not shown to them, so this is how to reach them before you finish. '
+    + 'Use it only when you need them (a decision, an OK, something only they can give), they asked to hear from you mid-task, or they would want to know something before you finish. '
     + 'Never use it to narrate your steps: your reply follows when you are done. It reaches only this conversation.',
   risk: 'safe',
   parameters: {

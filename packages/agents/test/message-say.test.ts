@@ -67,3 +67,14 @@ test('message.send sends an agent that wants to message the person it is replyin
   assert.match(send.description, /conversation you are replying in/);
   assert.match(send.description, /message\.say/);
 });
+
+test('message.say tells the agent its words between tool calls are not shown, and covers a person who asked to hear mid-task (card 1009 live check)', () => {
+  // On a live Slack check, a model asked for a mid-task message wrote it as
+  // text between two tool calls, which Slack holds, and never called a
+  // tool: nothing reached the person. The description now carries the fact
+  // the choice depends on.
+  const tool = createMessageSayTool(async () => {});
+  assert.match(tool.description, /between tool calls are not shown/);
+  assert.match(tool.description, /asked to hear from you mid-task/);
+  assert.match(tool.description, /Never use it to narrate your steps/);
+});
