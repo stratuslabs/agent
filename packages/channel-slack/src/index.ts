@@ -1204,6 +1204,8 @@ class ReplyRenderer {
   private finalized = false;
   /** How many `message.say` lines this turn has sent; see {@link SAY_LIMIT_PER_TURN}. */
   private saidMidTask = 0;
+  /** A judged turn's status, waiting on its first tool call; see `showLoading`. */
+  private loadOnFirstTool = false;
   /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
   private uploaded = false;
   /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
@@ -1333,12 +1335,21 @@ class ReplyRenderer {
 
   /**
    * Show Slack's loading status for this turn, and keep it up until the
-   * turn is finalized. Not for a streaming turn, which has its placeholder,
-   * nor for one nobody asked for: "is thinking…" over a turn that may
-   * decide to say nothing is the interruption silence exists to avoid.
+   * turn is finalized. Not for a streaming turn, which has its placeholder.
+   * One nobody asked for waits for its first tool call: "is thinking…"
+   * over every turn that only decides to say nothing is the interruption
+   * silence exists to avoid, but one that went to work was missing its
+   * status (card 1009).
    */
   showLoading(head: boolean): void {
-    if (this.streaming || this.lazy || this.loading || this.finalized) {
+    if (this.streaming || this.loading || this.finalized) {
+      return;
+    }
+    if (this.lazy) {
+      // Shown once it calls its first tool instead (card 1009): by then it
+      // is working on something, and a status, unlike a placeholder,
+      // leaves no trace when the turn still ends silent.
+      this.loadOnFirstTool = true;
       return;
     }
     this.loading = true;
@@ -1559,6 +1570,13 @@ class ReplyRenderer {
       this.flushInterim(ofThisTurn);
       if (ofThisTurn && this.turnStarted) {
         this.toolCalled = true;
+        // Running, so at the head of its session: nothing of a turn ahead
+        // is left for this status to overwrite.
+        if (this.loadOnFirstTool && !this.finalized) {
+          this.loadOnFirstTool = false;
+          this.loading = true;
+          this.publishLoading();
+        }
       }
       this.scheduleEdit();
       return;
@@ -1943,6 +1961,12 @@ class ReplyRenderer {
       // has spoken, for the thread rule.
       await this.editChain;
       await this.uploadChain;
+      // A status it showed from its first tool has no post to take it
+      // down, so it is cleared here.
+      if (hadStatus) {
+        this.setStatus('');
+        await this.statusChain;
+      }
       return this.outcome(false, this.uploaded);
     }
     // The first line lands before the reply is judged: one that already

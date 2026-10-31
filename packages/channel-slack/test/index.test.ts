@@ -12143,6 +12143,47 @@ test('while a task waits on an approval the prompt posts below its first line, a
   assert.ok(!texts.some((text) => text.includes('stale caches')), JSON.stringify(texts));
 });
 
+test('a judged turn shows the loading status from its first tool call, and clears it when it ends silent (card 1009)', async () => {
+  const cases = [
+    { name: 'answers after a tool', tool: true, reply: 'Found it.' },
+    { name: 'ends silent after a tool', tool: true, reply: '' },
+    { name: 'ends silent without a tool', tool: false, reply: '' },
+  ];
+  for (const { name, tool, reply } of cases) {
+    const statusAtTool: string[] = [];
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      if (tool) {
+        await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'memory.recall', input: {} } });
+        await new Promise((resolve) => setImmediate(resolve));
+        statusAtTool.push(...statuses.map((status) => status.status));
+        await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'memory.recall', ok: true, output: null } });
+      }
+      return sessionWithReply(sessionId, reply);
+    });
+    gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+    gateway.sessionRouting = async () => ({ agentId: 'ava', metadata: {}, lastSpokeAt: new Date(990 * 1000).toISOString() });
+    const { socket, web, adapter } = quietAdapter();
+    const statuses = recordStatuses(web);
+    await adapter.start(gateway);
+    await socket.deliver('message', channelMessage({ text: 'where is it?', ts: '990.1', thread: '990.0' }));
+    await adapter.stop();
+
+    assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false], name);
+    assert.deepEqual(web.posts.map((post) => post.text), reply ? [reply] : [], name);
+    if (!tool) {
+      // Nothing it did showed: no status for a turn that only decided.
+      assert.deepEqual(statuses, [], name);
+      continue;
+    }
+    assert.deepEqual(statusAtTool.slice(0, 1), ['is thinking…'], name);
+    assert.ok(statuses.every((status) => status.thread_ts === '990.0'), name);
+    if (!reply) {
+      // Nothing posts to take it down, so the turn clears it itself.
+      assert.equal(statuses.at(-1)?.status, '', name);
+    }
+  }
+});
+
 test('a judged turn and a streaming turn post no first line of their own', async () => {
   for (const replies of ['stream', undefined] as const) {
     const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {

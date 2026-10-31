@@ -236,8 +236,9 @@ agent's name: "is thinking…", or "is running shell.run…" while a tool runs.
 The same step also goes out as Slack's loading message ("Running
 shell.run…"), for Slack's newer agent sessions, which replace the status
 line with their own text ("Finding answers…"). A turn nobody asked for (an agent that
-[judges](#how-an-agent-listens)) shows no status, since it may decide to
-say nothing. Slack takes the status down whenever the agent's app posts
+[judges](#how-an-agent-listens)) shows the status only once it calls its
+first tool, since it may decide to say nothing; one that then stays
+silent clears it. Slack takes the status down whenever the agent's app posts
 in the thread, so the agent puts it back after its own posts, uploads,
 answered approvals, and a `message.send` from another of its sessions.
 
