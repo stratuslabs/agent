@@ -114,7 +114,7 @@ every pull request and push to `main` (`.github/workflows/docker.yml`).
 
 ## First run: a system unit
 
-Node `>=22.13 <23 || >=23.4` on the host, then:
+Node `>=22.16 <23 || >=24` on the host, then:
 
 ```bash
 sudo apt install bubblewrap        # or dnf install bubblewrap: the shell tool's sandbox

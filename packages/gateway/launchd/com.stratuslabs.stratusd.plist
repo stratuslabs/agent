@@ -4,7 +4,7 @@
   launchd template for stratusd. launchd does NOT expand ~, so every path
   below must be absolute. Install per user:
 
-    1. Replace __NODE__ with `which node` (must be Node 22.13+),
+    1. Replace __NODE__ with `which node` (must be Node 22.16+ or 24+),
        __STRATUS__ with `which stratus` (or the absolute path to
        packages/cli/dist/bin.js in a checkout), and __HOME__ with your
        home directory (`echo $HOME`).

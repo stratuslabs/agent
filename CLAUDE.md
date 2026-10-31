@@ -166,11 +166,14 @@ hand and by review:
 
 ## Runtime and tests
 
-- **Node `>=22.13 <23 || >=23.4`.** The gateway's session store uses
-  `node:sqlite`, which was unflagged on each release line separately —
-  22.13.0 and 23.4.0 — so 23.0 through 23.3 are newer than the 22.x floor
-  and still ship it behind a flag. Write the range, never a bare `>=22.13`,
-  and do not raise or lower it casually.
+- **Node `>=22.16 <23 || >=24`.** Set by the SQLite that `node:sqlite`
+  bundles, not by when it was unflagged (22.13.0 / 23.4.0): the memory
+  store's search index needs FTS5 (22.16.0 and 24.0.0; no 23.x release has
+  it), and the layout migration attaches a legacy store read-only through a
+  `file:` URI (22.15.0 / 23.10.0). So the whole 23.x line is out despite the
+  higher number. Write the range, never a bare `>=22.16`, and do not raise
+  or lower it casually: every manifest's `engines`, `SUPPORTED_NODE_RANGE`
+  in the CLI's preflight and the CI test matrix move together.
 - Tests run under `node --test --experimental-strip-types`. Type
   stripping means **no TypeScript parameter properties** (`constructor(private x)`)
   and no enums — write the assignment out.

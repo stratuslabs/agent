@@ -7,7 +7,16 @@ on:
 
 jobs:
   test:
+    # The two floors every manifest's engines field admits (22.16 and 24.0),
+    # and the newest 22.x. Floors are pinned exactly: a range would quietly
+    # test whatever is newest, which is how 22.13 failing memory search and
+    # the state upgrade went unnoticed.
+    name: test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.16.0', '24.0.0', '22']
     steps:
       - uses: actions/checkout@v4
 
@@ -15,7 +24,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - name: Install dependencies

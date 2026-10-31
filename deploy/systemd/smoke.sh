@@ -13,7 +13,7 @@
 # For a throwaway Linux machine with systemd (a CI runner): it uses sudo to
 # create the `stratus` system account, /etc/stratus, /var/lib/stratus,
 # /opt/stratus and the unit, refuses to start if any of them exists already,
-# and removes what it created on the way out. Needs node (>=22.13), pnpm,
+# and removes what it created on the way out. Needs node (>=22.16 <23 || >=24), pnpm,
 # npm, curl and bubblewrap.
 set -euo pipefail
 
