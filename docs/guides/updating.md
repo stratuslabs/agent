@@ -320,7 +320,15 @@ No soul file is rewritten, so it does not matter which souls a config,
 running while you upgrade. New souls from setup, `stratus agent new` and
 the dashboard are written with `tools: ["*"]` on either kind of home, so
 you can see the grant and narrow it. To get the safe default for one
-agent, give its soul a list naming what it needs. No schema change: an
+agent, give its soul a list naming what it needs.
+
+Two kinds of upgraded home read as new, because nothing on disk says an
+older build used them: one no build since 0.11 has touched, and one an older
+build only ever used through ordinary commands such as `stratus run`, never
+`stratus serve` or `stratus update` (those are what write the stamp). Their
+souls with no list get safe tools only. The daemon and `stratus run` name
+each such soul when they start, and `tools: ["*"]` gives one back every
+tool. No schema change: an
 older build reads an omitted list as every tool, which is what this home
 keeps.
 
