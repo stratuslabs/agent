@@ -21,7 +21,7 @@
     "render-in-chromium": "node --experimental-strip-types scripts/render-in-chromium.ts"
   },
   "engines": {
-    "node": ">=22.13 <23 || >=23.4"
+    "node": ">=22.16 <23 || >=24"
   },
   "dependencies": {
     "@stratusagent/core": "workspace:*",

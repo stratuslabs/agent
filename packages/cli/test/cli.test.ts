@@ -19,6 +19,7 @@ import { DEFAULT_STOP_DRAIN_TIMEOUT_MS, claimHome } from '@stratusagent/gateway'
 import {
   createFileMemoryStore,
   unsupportedNodeMessage,
+  SUPPORTED_NODE_RANGE,
   filterSqliteExperimentalWarning,
   withoutSqliteExperimentalWarning,
   CLI_VERSION,
@@ -143,24 +144,50 @@ test('the CLI refuses Node versions below the floor its manifests declare', () =
   // The failure this replaces is an ERR_UNKNOWN_BUILTIN_MODULE for
   // node:sqlite, thrown from a lazy import well after install, naming
   // neither Node nor the version needed.
-  // 23.0 through 23.3 are the interesting ones: newer than the 22.x floor,
-  // and still shipping node:sqlite behind --experimental-sqlite, because it
-  // was unflagged separately on each line (22.13.0 and 23.4.0).
-  for (const version of ['20.11.0', 'v18.20.4', '22.12.0', '22.9.1', '23.0.0', '23.3.0', 'v23.3.9']) {
+  // The floor is where the bundled node:sqlite has FTS5 (memory search) and
+  // opens file: URIs (the state upgrade): 22.16.0, and 24.0.0 after it.
+  // 22.13 through 22.15 run node:sqlite but fail one or both; no 23.x release
+  // ships FTS5, so the whole line is below the floor despite the number.
+  for (const version of [
+    '20.11.0', 'v18.20.4', '22.12.0', '22.9.1', '22.13.0', 'v22.13.1', '22.14.2', '22.15.0', '22.15.1',
+    '23.0.0', '23.3.0', '23.4.0', '23.10.0', 'v23.11.1',
+  ]) {
     const message = unsupportedNodeMessage(version);
     assert.ok(message, `${version} is below the floor`);
-    assert.match(message, /needs Node 22\.13 or newer/);
-    assert.match(message, /23\.4 or newer on the 23\.x line/);
+    assert.match(message, /needs Node 22\.16 or newer on the 22\.x line, or Node 24 or newer/);
     assert.match(message, new RegExp(version.replace(/^v/, '').replace(/\./g, '\\.')));
   }
 
-  for (const version of ['22.13.0', '22.14.2', '23.4.0', '23.11.1', '24.1.0', 'v22.13.1']) {
+  for (const version of ['22.16.0', 'v22.16.1', '22.21.0', '24.0.0', '24.1.0', '26.10.0']) {
     assert.equal(unsupportedNodeMessage(version), undefined, `${version} is supported`);
   }
 
   // An unrecognized build string is a bad reason to refuse to run.
   for (const version of ['', 'nightly', 'v-broken']) {
     assert.equal(unsupportedNodeMessage(version), undefined);
+  }
+});
+
+test('every package declares the Node range the CLI enforces', async () => {
+  // The floor lives in each manifest's engines field and in the preflight
+  // check. A release that moves one and not the others either refuses a
+  // Node its manifests allow or admits one that fails the state upgrade.
+  const packagesDir = fileURLToPath(new URL('../../', import.meta.url));
+  const declared: Record<string, string | undefined> = {};
+  for (const entry of await readdir(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const manifest = JSON.parse(
+      await readFile(path.join(packagesDir, entry.name, 'package.json'), 'utf8').catch(() => '{}'),
+    ) as { name?: string; engines?: { node?: string } };
+    if (manifest.name !== undefined) {
+      declared[manifest.name] = manifest.engines?.node;
+    }
+  }
+  assert.ok(Object.keys(declared).length > 1, 'found the workspace packages');
+  for (const [name, range] of Object.entries(declared)) {
+    assert.equal(range, SUPPORTED_NODE_RANGE, `${name} declares engines.node ${range ?? '(none)'}`);
   }
 });
 
