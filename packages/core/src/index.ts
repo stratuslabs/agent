@@ -6711,9 +6711,9 @@ export interface RunInput {
    * turn is out of steps (the wrap-up can't act on it, so it waits and
    * runs as its own turn), on a turn nobody asked for (`addressed:
    * false`, whose answer may be silence), or by a provider that hosts its
-   * own tool loop, whose steps the runner never sees. A host that omits it gets turns that hear
-   * nothing until they end, as before; what is handed over is the host's
-   * to answer for, since the runner only records it.
+   * own tool loop, whose steps the runner never sees. A host that omits it
+   * gets turns that hear nothing until they end, as before; what is handed
+   * over is the host's to answer for, since the runner only records it.
    */
   steer?: () => Promise<SteeredMessage | undefined>;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
