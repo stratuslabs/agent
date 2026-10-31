@@ -248,3 +248,22 @@ test('the legacy alias wrapper keeps a ranked order instead of re-sorting it by 
   assert.equal(recency.strategy, 'recency');
   assert.deepEqual(ids(recency.entries), ['stratus:memory:old-exact', 'demo-agent:memory:legacy']);
 });
+
+test('across aliases, a fact holding every word comes ahead of another alias\'s partial match', async () => {
+  const store = withLegacyDefaultMemories(createFileMemoryStore(await seed([
+    ...FILLER.map((line) => ({ ...line, agentId: DEFAULT_STRATUS_AGENT.id })),
+    { id: 'stratus:memory:new-partial', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the refunds pipeline is manual', createdAt: '2026-05-31T00:00:00.000Z' },
+    { id: 'demo-agent:memory:exact', agentId: 'demo-agent', content: 'the deploy pipeline needs a token', createdAt: '2025-12-01T00:00:00.000Z' },
+  ]), frozen));
+
+  // The current alias's best is only a partial match; an inherited alias
+  // holds the one fact with every word. Taking turns by rank alone would
+  // put the partial first and let a limit of one drop the exact match.
+  for (const strategy of ['hybrid', 'relevance'] as const) {
+    const top = await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy pipeline', { strategy, limit: 1 });
+    assert.deepEqual(ids(top.entries), ['demo-agent:memory:exact'], strategy);
+    assert.equal(top.truncated, true, strategy);
+    const all = await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy pipeline', { strategy });
+    assert.deepEqual(ids(all.entries), ['demo-agent:memory:exact', 'stratus:memory:new-partial'], strategy);
+  }
+});
