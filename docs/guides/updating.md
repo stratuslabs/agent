@@ -301,6 +301,26 @@ interrupted is finished by the next start, provenance ledger included.
 `stratus update --check` lists the move while one is still to happen, and
 counts it as something to apply.
 
+## Souls without a `tools:` list get `tools: ["*"]` (0.14.3)
+
+Since 0.14.3 a soul with no `tools:` key gets only the tools registered as
+safe (reads, search and memory); before, it got every registered tool.
+Migration `0005-explicit-tools-lists` keeps existing agents as they were: on
+a home an older build has used, it writes `tools: ["*"]`, with a one-line
+comment saying why, at the top of each soul in `~/.stratus/agents/` that has
+no list, and of the config's `soul:` when that is an absolute path. Only
+those two lines are added; nothing else in the file is rewritten, and a
+linked soul is edited behind its link. The log names every agent it
+changed, and any soul it could not read (a broken link, a soul that does not
+parse), which then gets safe tools until you add a list.
+
+A fresh install is left alone, so a soul you write by hand starts with the
+safe default. So is a soul named only by `--soul`, `STRATUS_SOUL` or a
+relative `soul:` path, which the migration cannot see; the daemon names any
+soul without a list each time it loads the roster. Narrow `"*"` to what
+each agent needs whenever you like. No schema change: an older build reads
+`tools: ["*"]` as every tool, which is what it already granted.
+
 ## `stratus update` does the sequence in the order that cannot lose data
 
 ```bash
