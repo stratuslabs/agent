@@ -1446,8 +1446,12 @@ class ReplyRenderer {
     if (this.saidMidTask >= SAY_LIMIT_PER_TURN) {
       throw new Error(`This turn already sent ${SAY_LIMIT_PER_TURN} mid-task messages. Put the rest in your reply.`);
     }
+    // Counted before the post, so calls racing each other cannot pass the
+    // limit, and given back when Slack refused it: a line that never
+    // landed was not said (Codex round 2 on #513).
     this.saidMidTask += 1;
     if (!(await this.postLine(text, false))) {
+      this.saidMidTask -= 1;
       throw new Error('Slack did not take the message. Say it in your reply.');
     }
   }

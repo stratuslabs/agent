@@ -12041,6 +12041,31 @@ test('message.say goes to the turn running now, never a Slack message queued beh
   assert.match(refusals[0] ?? '', /no turn of yours running/);
 });
 
+test('a message.say Slack refuses does not count toward the three (Codex round 2 on #513)', async () => {
+  const { socket, web, adapter } = quietAdapter();
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    if (args.text === 'refused') {
+      throw new Error('ratelimited');
+    }
+    return post(args);
+  };
+  const refusals: string[] = [];
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    for (const text of ['refused', 'refused', 'refused', 'note 1', 'note 2', 'note 3', 'note 4']) {
+      await adapter.say!({ sessionId, agentId: 'ava', text }).catch((error: Error) => refusals.push(error.message));
+    }
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['note 1', 'note 2', 'note 3', 'Done.']);
+  assert.equal(refusals.length, 4);
+  assert.ok(refusals.slice(0, 3).every((message) => /Slack did not take the message/.test(message)));
+  assert.match(refusals[3] ?? '', /already sent 3 mid-task messages/);
+});
+
 test('message.say is one message in texts mode, whatever its text (Codex on #513)', async () => {
   // `texts` splits a reply a paragraph to a message; a mid-task line is one
   // post, so three calls are never more than three messages.
