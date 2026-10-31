@@ -2,7 +2,7 @@ import {
   ContextOverflowError,
   redactedError,
   redactSecrets,
-  isUnaddressedTurn,
+  isReplyOptionalTurn,
   transcriptOf,
   droppedImageNote,
   imagesWithinReplayBudget,
@@ -632,7 +632,7 @@ export const createOpenAICompatibleProvider = ({
         // `{}`, or no choices is no completion at all, and a missing
         // finish reason is tolerated only on one that is.
         const stoppedNormally = choice?.message !== undefined && (finishReason === undefined || finishReason === 'stop');
-        if (!isUnaddressedTurn(request.session) || !stoppedNormally) {
+        if (!isReplyOptionalTurn(request.session) || !stoppedNormally) {
           throw new Error(
             finishReason !== undefined && finishReason !== 'stop'
               ? `Provider returned an empty response (finish_reason: ${finishReason}).`
@@ -1234,8 +1234,8 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
   }
   // A turn nobody asked for ends on an overheard message carrying its own
   // instruction, and "reply to the latest user message" would countermand
-  // it in the next line.
-  if (latest?.overheard !== true) {
+  // it in the next line. So does a reply-optional one (card 601).
+  if (latest?.overheard !== true && latest?.replyOptional !== true) {
     lines.push('', 'Continue the conversation by replying to the latest user message.');
   }
   return lines.join('\n');
@@ -1277,7 +1277,9 @@ export const latestUserMessagePrompt = (request: ProviderRequest, options: Promp
   const unheard = since.filter((message) => message.overheard === true || message === newest);
   const inline = options.inlineImages === true;
   if (unheard.length === 1 && newest.overheard !== true) {
-    return userMessageText(newest, false, inline);
+    // The turn's own message: a reply-optional one carries its note
+    // (card 601); any other renders bare, as it always did.
+    return userMessageText(newest, true, inline);
   }
   return unheard.map((message) => userMessageText(message, message === newest, inline && message === newest)).join('\n');
 };

@@ -12,7 +12,7 @@ import {
   ContextOverflowError,
   redactedError,
   transcriptOf,
-  isUnaddressedTurn,
+  isReplyOptionalTurn,
   droppedImageNote,
   imagesWithinReplayBudget,
   omitImage,
@@ -1021,15 +1021,16 @@ export const createAnthropicProvider = ({
       ];
 
       if (parts.length === 0) {
-        // Nothing said is the answer a turn nobody asked for may give — see
-        // `RunInput.addressed` in core — but only when the turn ended of
+        // Nothing said is the answer a turn that may stay quiet may give —
+        // see `RunInput.addressed` and `RunInput.replyOptional` in core —
+        // but only when the turn ended of
         // its own accord. Budget exhaustion is one way it does not, and it
         // never reaches here: the check above refuses it whether or not
         // anything surfaced. What is left is a stop reason that is neither
         // an ending nor an exhaustion — a refusal, a pause — which is not
         // a decision to stay quiet either.
         const ended = response.stop_reason === 'end_turn' || response.stop_reason === 'stop_sequence';
-        if (!isUnaddressedTurn(request.session) || !ended) {
+        if (!isReplyOptionalTurn(request.session) || !ended) {
           // With its stop reason, so a refusal reads as one and not as a
           // fault of ours, the way the OpenAI-compatible adapter names its
           // finish_reason.

@@ -184,6 +184,16 @@ test('failed turns and empty responses surface as errors', async () => {
     overheard: true,
   });
   assert.deepEqual(await empty.generate({ session: unasked }), { parts: [] });
+  // And on one whose message may need nothing back (card 601).
+  const optional = createSession();
+  optional.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'Blair: report, all green',
+    createdAt: new Date().toISOString(),
+    replyOptional: true,
+  });
+  assert.deepEqual(await empty.generate({ session: optional }), { parts: [] });
   // A stream that ends after `thread.started` without `turn.completed` is a
   // run that did not complete, not silence.
   const cutOff = createCodexProvider({
