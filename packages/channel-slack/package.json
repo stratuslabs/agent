@@ -12,7 +12,8 @@
   },
   "files": [
     "dist",
-    "manifest"
+    "manifest",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -b",

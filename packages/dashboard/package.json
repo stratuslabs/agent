@@ -12,7 +12,8 @@
   },
   "files": [
     "dist",
-    "ui"
+    "ui",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -b",

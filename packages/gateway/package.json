@@ -12,7 +12,8 @@
   },
   "files": [
     "dist",
-    "launchd"
+    "launchd",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -b",
