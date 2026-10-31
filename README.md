@@ -6,7 +6,7 @@
 
 [![npm](https://img.shields.io/npm/v/%40stratusagent%2Fcli?label=%40stratusagent%2Fcli)](https://www.npmjs.com/package/@stratusagent/cli)
 [![node](https://img.shields.io/badge/node-%E2%89%A522.16-brightgreen)](docs/start/installation.md)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 Stratus is a small, readable runtime for a team of persistent AI agents.
 Each agent has its own name, memory, tools, and Slack presence, and it
@@ -112,4 +112,4 @@ Read [`CLAUDE.md`](CLAUDE.md) before opening a PR.
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE)
