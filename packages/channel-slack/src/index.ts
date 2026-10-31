@@ -581,7 +581,12 @@ export interface SlackHistoryPage {
 export interface SlackWebLike {
   auth: { test(): Promise<{ user_id?: string; team_id?: string; response_metadata?: { scopes?: string[] } }> };
   chat: {
-    postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[]; unfurl_links?: boolean; unfurl_media?: boolean }): Promise<{ ts?: string; channel?: string }>;
+    /**
+     * `message` is the post as Slack placed it. A reply naming a thread
+     * Slack has no message for is still `ok`, posted at the top level, and
+     * its `message` then has no `thread_ts`.
+     */
+    postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[]; unfurl_links?: boolean; unfurl_media?: boolean }): Promise<{ ts?: string; channel?: string; message?: { ts?: string; thread_ts?: string } }>;
     update(args: { channel: string; ts: string; text: string; blocks?: SlackBlock[] }): Promise<unknown>;
     /**
      * Take a message back. The one caller is a turn nobody asked for that
@@ -5443,6 +5448,30 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // a long one goes to the same thread, so a split reply stays together.
     const thread = address.thread?.trim() || undefined;
     const speaker = address.speaker;
+    /**
+     * Slack posts a reply to a thread it has no message for at the top
+     * level and answers `ok` (card 1019: a made-up thread id put an agent's
+     * mid-task line at the top of a channel). The first chunk shows it: that
+     * one is taken back, the rest is never sent, and the refusal says what
+     * is left in Slack. A reply whose answer leaves `message` out says
+     * nothing about where it went, so it is trusted, as before.
+     */
+    const refuseMisplaced = async (postedChannel: string, ts: string | undefined): Promise<never> => {
+      const missing = `slack: ${channelId} has no thread ${thread}`;
+      const fix = 'Name a thread by the id of its first message, or post at the top level instead.';
+      if (!ts) {
+        throw new Error(`${missing}, and Slack posted the message at the top level instead without saying its id. ${fix}`);
+      }
+      try {
+        await web.chat.delete({ channel: postedChannel, ts });
+      } catch (error) {
+        throw new Error(
+          `${missing}. Slack posted the message at the top level (${ts}) instead, and taking it back failed `
+          + `(${error instanceof Error ? error.message : String(error)}). ${fix}`,
+        );
+      }
+      throw new Error(`${missing}, so nothing was posted. ${fix}`);
+    };
     return {
       async post(text: string): Promise<OutboundMessageRef> {
         const chunks = messageChunks(text.trim().length > 0 ? text : '(empty message)');
@@ -5458,6 +5487,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         try {
           for (const chunk of chunks) {
             const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
+            if (thread && sent === 0 && posted.message !== undefined && !posted.message.thread_ts) {
+              await refuseMisplaced(posted.channel ?? channelId, posted.ts ?? posted.message.ts);
+            }
             sent += 1;
             if (!first) {
               first = { channel: posted.channel ?? channelId, ts: posted.ts ?? '' };

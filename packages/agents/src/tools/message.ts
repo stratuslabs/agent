@@ -69,7 +69,9 @@ export const createMessageSendTool = (
       text: { type: 'string', description: 'The message text.' },
       thread: {
         type: 'string',
-        description: 'The id of a message in that conversation to reply under (for Slack, its ts, e.g. 1791332967.606559). Omit to post at the top level, or, in a scheduled run sending to its own destination, into the schedule\'s report thread.',
+        description: 'The thread to reply in, by the id of its first message (for Slack, its ts), as message.read lists it or an earlier send returned it. '
+          + 'Never make one up. '
+          + 'Omit to post at the top level, or, in a scheduled run sending to its own destination, into the schedule\'s report thread.',
       },
       topLevel: {
         type: 'boolean',
