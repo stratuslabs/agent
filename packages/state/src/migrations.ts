@@ -26,6 +26,7 @@ import {
   makeAgentStateDirectory,
 } from './layout-migration.ts';
 import { applyPerAgentWorkspaces } from './workspace-migration.ts';
+import { applyEveryToolLines } from './tools-list-migration.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -402,11 +403,41 @@ const PER_AGENT_WORKSPACES_MIGRATION: StateMigration = {
   apply: applyPerAgentWorkspaces,
 };
 
+/**
+ * An omitted `tools:` list now means only the tools registered as safe,
+ * where it used to mean every registered tool. Every soul a home already
+ * had gets `tools: ["*"]` written in, so an upgrade changes nothing an
+ * agent can do; see `applyEveryToolLines` for which souls and how.
+ *
+ * Only on a home an older build has used, which is one whose stamp records
+ * any migration *before this run*. A fresh install reads as schema 0 until
+ * its first `stratus serve` or `stratus update`, and that run applies this
+ * with the stamp still empty on disk, so a soul written by hand on a new
+ * install keeps the new default. Ordinary commands on a fresh home defer
+ * 0003 and record nothing, so they keep reading the same empty stamp and
+ * keep answering the same way. The one home this misreads is one no build
+ * since the stamp arrived (0.11) has ever touched; its agents get safe
+ * tools, and the daemon names each at start.
+ *
+ * Not exclusive and no schema bump: an older build reads `tools: ["*"]`
+ * as every tool, which is what it already granted, so nothing it does
+ * changes and nothing needs refusing.
+ */
+const EXPLICIT_TOOLS_LISTS_MIGRATION: StateMigration = {
+  id: '0005-explicit-tools-lists',
+  description: 'write tools: ["*"] into each soul with no tools: list, so agents keep every tool now that an omitted list means safe tools only',
+  async apply(env) {
+    const onDisk = await readStateStamp(env);
+    return onDisk.applied.length > 0 ? applyEveryToolLines(env) : undefined;
+  },
+};
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   OWNER_ONLY_STATE_FILES_MIGRATION,
   PROVENANCE_LABELS_MIGRATION,
   PER_AGENT_LAYOUT_MIGRATION,
   PER_AGENT_WORKSPACES_MIGRATION,
+  EXPLICIT_TOOLS_LISTS_MIGRATION,
 ];
 
 const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });
