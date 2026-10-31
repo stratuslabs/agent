@@ -18,7 +18,7 @@ stratus setup
 
 That one package is everything you need to run agents: the runtime, the
 providers, the agent roster, and the always-on gateway all come with it.
-Needs **Node.js 22.13+** (23.x line: 23.4+) — the CLI checks at startup and
+Needs **Node.js 22.16+** or **24+** (not 23.x) — the CLI checks at startup and
 says so plainly if yours is too old. Details:
 [Installation](https://github.com/stratuslabs/agent/blob/main/docs/start/installation.md).
 

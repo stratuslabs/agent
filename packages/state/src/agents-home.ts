@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { type Dirent, constants, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { type Dirent, constants, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import {
   copyFile,
   link,
@@ -287,7 +287,9 @@ const linksWork = (env: StateEnvironment): boolean => {
     }
     throw error;
   }
-  rmSync(probe, { force: true });
+  // unlink, not rm: the probe is a dangling link, and Node 24.0.0's rmSync
+  // returns without removing one.
+  unlinkSync(probe);
   return true;
 };
 

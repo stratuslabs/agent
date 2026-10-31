@@ -430,6 +430,20 @@ test('the plan names the folder only where it can be used, and creates nothing',
   assert.deepEqual((await readdir(agentsDirPath(env))).filter((name) => name.startsWith('.link-probe-')), []);
 });
 
+test('checking whether links can be made leaves no probe link behind', async () => {
+  // The probe is a dangling symlink. Node 24.0.0's rmSync returns without
+  // removing one (no error, even without force), so a probe removed that way
+  // stayed in the hidden agents directory after every start.
+  const home = await newHome();
+  const env = { homeDir: home, processEnv: {} };
+  await mkdir(agentsDirPath(env), { recursive: true });
+
+  assert.equal((await planAgentsHome(env)).agentsHome, path.join(home, 'Agents'));
+  assert.equal(claimAgentsHome(env), path.join(home, 'Agents'));
+
+  assert.deepEqual((await readdir(agentsDirPath(env))).filter((name) => name.startsWith('.link-probe-')), []);
+});
+
 test('the plan lists what the next pass would move, and is empty after it', async () => {
   const home = await newHome();
   const env = { homeDir: home, processEnv: {} };

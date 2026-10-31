@@ -5,7 +5,7 @@
 **Always-on agents that get smarter over time.**
 
 [![npm](https://img.shields.io/npm/v/%40stratusagent%2Fcli?label=%40stratusagent%2Fcli)](https://www.npmjs.com/package/@stratusagent/cli)
-[![node](https://img.shields.io/badge/node-%E2%89%A522.13-brightgreen)](docs/start/installation.md)
+[![node](https://img.shields.io/badge/node-%E2%89%A522.16-brightgreen)](docs/start/installation.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Stratus is a small, readable runtime for a team of persistent AI agents.
@@ -24,7 +24,7 @@ stratus setup     # sign in, create an agent, pick tools, connect Slack
 stratus chat      # talk; the conversation persists
 ```
 
-Needs Node 22.13+ or 23.4+ ([Installation](docs/start/installation.md)). No key yet?
+Needs Node 22.16+ or 24+ ([Installation](docs/start/installation.md)). No key yet?
 [Quickstart](docs/start/quickstart.md) has an offline demo.
 
 ## Why Stratus

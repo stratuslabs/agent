@@ -1,11 +1,14 @@
 /**
- * The range every package declares in its `engines` field. Two floors, not
- * one: `node:sqlite` was unflagged in 22.13.0 on the LTS line and in 23.4.0
- * on the 23.x line, so 23.0 through 23.3 are NEWER than the 22.x floor and
- * still ship it behind `--experimental-sqlite`. A plain `>=22.13` admits
- * exactly those releases.
+ * The range every package declares in its `engines` field, set by what the
+ * bundled `node:sqlite` can do rather than by when it was unflagged (22.13.0
+ * and 23.4.0). Two features matter: FTS5, which the memory store's search
+ * index is built on (22.16.0 and 24.0.0; no 23.x release ships it), and
+ * `file:` URIs, through which the layout migration attaches a legacy store
+ * read-only (22.15.0 and 23.10.0). So the 22.x floor is 22.16, and the whole
+ * 23.x line is out even though it is newer: a plain `>=22.16` admits exactly
+ * those releases.
  */
-export const SUPPORTED_NODE_RANGE = '>=22.13 <23 || >=23.4';
+export const SUPPORTED_NODE_RANGE = '>=22.16 <23 || >=24';
 
 /**
  * Why the CLI checks a version its manifests already declare: `engines` is
@@ -26,14 +29,12 @@ export const unsupportedNodeMessage = (version: string): string | undefined => {
   if (!Number.isInteger(major) || !Number.isInteger(minor)) {
     return undefined;
   }
-  const supported = major > 23
-    || (major === 23 && minor >= 4)
-    || (major === 22 && minor >= 13);
+  const supported = major >= 24 || (major === 22 && minor >= 16);
   if (supported) {
     return undefined;
   }
-  return `Stratus Agent needs Node 22.13 or newer, and 23.4 or newer on the 23.x line — this is Node ${version.replace(/^v/, '')}.\n`
-    + "The gateway's session store uses node:sqlite, unflagged in 22.13.0 and, on the 23.x line, not until 23.4.0.\n"
+  return `Stratus Agent needs Node 22.16 or newer on the 22.x line, or Node 24 or newer — this is Node ${version.replace(/^v/, '')}.\n`
+    + 'Its memory search and state upgrade need SQLite features (FTS5, file: URIs) that node:sqlite first ships in 22.16.0 and 24.0.0; no 23.x release has FTS5.\n'
     + 'Upgrade with `brew install node` on macOS, or your package manager or nvm on Linux.';
 };
 

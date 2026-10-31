@@ -26,7 +26,7 @@
     "eval:skill": "node --experimental-strip-types ./eval/stratus-skill/run.ts"
   },
   "engines": {
-    "node": ">=22.13 <23 || >=23.4"
+    "node": ">=22.16 <23 || >=24"
   },
   "dependencies": {
     "@stratusagent/agents": "workspace:*",
