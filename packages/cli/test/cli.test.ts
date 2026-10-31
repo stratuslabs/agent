@@ -14114,14 +14114,16 @@ test('the example template in this repository installs', async () => {
   await stat(path.join(home, '.stratus', 'skills', 'meeting-notes', 'SKILL.md'));
 });
 
-test('a soul with no tools list is reviewed as unrestricted, not as "no tools"', async () => {
+test('a soul with no tools list is reviewed as safe tools only, and one listing * as every tool', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const source = await writeTemplateDir({
     'template.json': EXAMPLE_MANIFEST,
-    // No `tools:` line at all. `executeToolCall` skips the allowlist check
-    // for an undefined list, so this agent may call every registered tool —
-    // the opposite of the empty list it looks like.
+    // No `tools:` line at all: the safe tools, not the nothing an empty
+    // list grants and not the everything it used to be.
     'agents/wide.md': '---\nname: Wide\n---\n\nI have no tools list.\n',
+    // A template asking for everything has to say `*`, and the review says
+    // that in the loudest words it has.
+    'agents/star.md': '---\nname: Star\ntools: ["*"]\n---\n\nI asked for everything.\n',
   });
 
   const { streams, output } = createStreams();
@@ -14132,7 +14134,8 @@ test('a soul with no tools list is reviewed as unrestricted, not as "no tools"',
   });
 
   assert.equal(code, 0, output.stderr);
-  assert.match(output.stdout, /EVERY tool, because the soul has no tools: list/);
+  assert.match(output.stdout, /Wide \(wide\) — only safe tools \(reads and memory\), because the soul has no tools: list/);
+  assert.match(output.stdout, /Star \(star\) — EVERY tool, because the soul lists tools: \["\*"\]/);
   assert.doesNotMatch(output.stdout, /Wide \(wide\) — no tools/);
 });
 

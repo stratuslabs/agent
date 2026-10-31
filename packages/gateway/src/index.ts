@@ -2399,16 +2399,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
   /**
-   * Said at load, because the allowlist fails open: `tools` omitted is
-   * every registered tool, the opposite of what `skills` and `credentials`
-   * do when omitted, and a soul that never wrote the key holds `shell.run`
-   * the moment that plugin is enabled. The built-in agent is exempt — it
-   * has no file to add the key to.
+   * Said at load, because an omitted `tools` list is a quiet downgrade: it
+   * is only the tools registered as safe, so an agent whose soul never
+   * wrote the key cannot run a shell, write a file or send a message, and
+   * nothing else says why. The upgrade wrote `tools: ["*"]` into every soul
+   * a home already had, so this names a soul written since, or one it could
+   * not read. The built-in agent is exempt: it has no file, and says
+   * `tools: ["*"]` in code.
    */
   const warnNoToolsList = (agentId: string, soulPath: string): void => {
     warn(
-      `agent ${agentId} has no tools: list, so it may call every tool this daemon loads — `
-      + `add tools: [...] to ${soulPath} to say which`,
+      `agent ${agentId} has no tools: list, so it gets only safe tools (reads and memory) — `
+      + `add tools: [...] to ${soulPath} to give it more, or tools: ["*"] for every tool`,
     );
   };
 
@@ -3186,7 +3188,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // bearer credential the model is handed, and whoever it reaches can
     // store a key and amend the soul. That is the operator's to allow.
     const allowlist = session.agent.tools ?? registry.get(agentId)?.tools;
-    const linkAllowed = allowlist === undefined || matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
+    // An omitted list grants the safe tools, this one among them, but a
+    // link is the operator's to allow by naming it, so only a list says yes.
+    const linkAllowed = allowlist !== undefined && matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
     // Why no form went up, said to the agent beside the link that replaces
     // it, so it can tell the person why they are getting a link instead.
     let formUnavailable: string | undefined;

@@ -90,11 +90,10 @@ interface TemplateAgentPlan {
   name: string;
   /**
    * The soul's allowlist, `undefined` when it has no `tools:` line — which
-   * means **every registered tool**, because `executeToolCall` skips the
-   * allowlist check entirely for an undefined list. Kept undefined rather
-   * than normalised to `[]` so the review can say so: an empty list and a
-   * missing one are opposites, and reporting the wider one as "no tools"
-   * is the review lying in the one direction that matters.
+   * means only the tools registered as safe. Kept undefined rather than
+   * normalised to `[]` so the review can say so: an empty list grants
+   * nothing and a missing one grants the reads, and `*` (every tool) is
+   * the one the review has to say loudest.
    */
   tools: string[] | undefined;
   /**
@@ -479,10 +478,13 @@ const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvi
   writeLine(streams.stdout, `${fromTemplate(plan.name)} — ${fromTemplate(plan.description)}`);
   writeLine(streams.stdout);
   for (const agent of plan.agents) {
-    // An absent `tools:` is not "none", it is "all" — see TemplateAgentPlan.
+    // An absent `tools:` is not "none", it is the safe tools; `*` is every
+    // tool and said that way — see TemplateAgentPlan.
     const tools = agent.tools === undefined
-      ? 'EVERY tool, because the soul has no tools: list'
-      : agent.tools.length > 0 ? fromTemplate(agent.tools.join(', ')) : 'no tools';
+      ? 'only safe tools (reads and memory), because the soul has no tools: list'
+      : agent.tools.includes('*')
+        ? 'EVERY tool, because the soul lists tools: ["*"]'
+        : agent.tools.length > 0 ? fromTemplate(agent.tools.join(', ')) : 'no tools';
     writeLine(streams.stdout, `  agent    ${fromTemplate(agent.name)} (${fromTemplate(agent.id)}) — ${tools}`);
     // The other gate, and the one nobody expects a folder of markdown to
     // move: a name here reaches the stored secret of that name the moment
