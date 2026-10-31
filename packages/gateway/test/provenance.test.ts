@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  AllowAllApprovalPolicy,
   AgentRunner,
   InMemoryAgentMemoryStore,
   SENDER_TRUST_METADATA_KEY,
@@ -74,6 +75,7 @@ test('taint survives a daemon restart mid-session: the session still writes exte
   tools.register(pageRead);
   tools.register(createRememberTool(memory));
   const first = new AgentRunner({
+    approvals: new AllowAllApprovalPolicy(),
     provider: scriptedProvider([[{ id: 'c1', toolName: 'page.read', input: {} }]]),
     tools,
     store: firstStore,

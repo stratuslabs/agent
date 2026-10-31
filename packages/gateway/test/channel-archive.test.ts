@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { ExecutionContext, JsonObject, PluginContext, ProviderResponse, Session, StratusEvent } from '@stratusagent/core';
+import { AllowAllApprovalPolicy } from '@stratusagent/core';
 import { createPermissionPolicy } from '@stratusagent/permissions';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 
@@ -189,7 +190,7 @@ const archiveGateway = async (options: {
           approvals: (transport: ApprovalTransport) =>
             createPermissionPolicy({ mode: 'remote', request: transport.request, destinations: transport.destinations }),
         }
-      : {}),
+      : { approvals: new AllowAllApprovalPolicy() }),
     log: () => {},
     warn: () => {},
   });

@@ -17,6 +17,7 @@ import { z } from 'zod';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   EventBus,
   SESSION_TRUST_METADATA_KEY,
   ToolRegistry,
@@ -464,7 +465,7 @@ test('an agent whose soul allowlists mcp.linear.* calls a bridged tool; one with
         };
       },
     };
-    const runner = new AgentRunner({ provider, tools: target });
+    const runner = new AgentRunner({ provider, tools: target, approvals: new AllowAllApprovalPolicy() });
 
     const granted = await runner.run({
       sessionId: 'granted',
@@ -1348,8 +1349,8 @@ test('an agent that works only through a server you vouch for still remembers as
   };
   const agent = { id: 'ava', name: 'Ava', tools: ['mcp.linear.*'] };
   try {
-    const mine = await new AgentRunner({ provider, tools: vouched }).run({ sessionId: 'vouched', agent, userMessage: 'look up ENG-1' });
-    const theirs = await new AgentRunner({ provider, tools: defaulted }).run({ sessionId: 'default', agent, userMessage: 'look up ENG-1' });
+    const mine = await new AgentRunner({ provider, tools: vouched, approvals: new AllowAllApprovalPolicy() }).run({ sessionId: 'vouched', agent, userMessage: 'look up ENG-1' });
+    const theirs = await new AgentRunner({ provider, tools: defaulted, approvals: new AllowAllApprovalPolicy() }).run({ sessionId: 'default', agent, userMessage: 'look up ENG-1' });
     assert.equal(mine.messages.find((message) => message.role === 'tool')?.toolResult?.ok, true);
     assert.equal(theirs.messages.find((message) => message.role === 'tool')?.toolResult?.ok, true);
 

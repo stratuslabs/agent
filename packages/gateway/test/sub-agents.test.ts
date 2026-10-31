@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { JsonObject, Session, StratusEvent, SubAgentHandle, SubAgentOutcome, ExecutionContext } from '@stratusagent/core';
+import { AllowAllApprovalPolicy } from '@stratusagent/core';
 import { createPermissionPolicy } from '@stratusagent/permissions';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 import { agentMemoryFilePath } from '@stratusagent/state';
@@ -248,7 +249,7 @@ const fanoutGateway = async (options: {
           approvals: (transport: ApprovalTransport) =>
             createPermissionPolicy({ mode: 'remote', request: transport.request, destinations: transport.destinations }),
         }
-      : {}),
+      : { approvals: new AllowAllApprovalPolicy() }),
     log: () => undefined,
     warn: () => undefined,
   });

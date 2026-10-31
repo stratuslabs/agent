@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   CONTEXT_FLOOR_METADATA_KEY,
   CONTEXT_SUMMARY_INSTRUCTION,
   CONTEXT_SUMMARY_METADATA_KEY,
@@ -285,7 +286,7 @@ test('what an outside party wrote stays labeled through the summary', async () =
     },
   };
   const store = new InMemorySessionStore();
-  const runner = new AgentRunner({ provider, store, tools });
+  const runner = new AgentRunner({ provider, store, tools, approvals: new AllowAllApprovalPolicy() });
   await store.create({
     id: 'sum-6',
     agent: { id: 'agent-ctx', name: 'Context Agent', tools: ['web.fetch'] },

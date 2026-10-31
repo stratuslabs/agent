@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
+  AllowAllApprovalPolicy,
   InMemoryAgentMemoryStore,
   MEMORY_STORE_CONTRACT_VERSION,
   type AgentDefinition,
@@ -273,6 +274,7 @@ test('outbound speech goes to the adapter that carries the agent when one kind h
     },
   });
   const gateway = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { homeDir: home, cwd: home, processEnv: {} },
     idleTimeoutMs: 0,
     plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-chan-b': {}, 'stratus-plugin-sender': {} },
@@ -337,6 +339,7 @@ test('message.send hands the thread to the adapter and the posted id back to the
     },
   });
   const gateway = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { homeDir: home, cwd: home, processEnv: {} },
     idleTimeoutMs: 0,
     plugins: { 'stratus-plugin-chan': {}, 'stratus-plugin-sender': {} },
@@ -399,6 +402,7 @@ test('message.read goes through the adapter that carries the calling agent, and 
     },
   });
   const gateway = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { homeDir: home, cwd: home, processEnv: {} },
     idleTimeoutMs: 0,
     plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-reader': {} },
@@ -476,6 +480,7 @@ test('message.read asks the channel for images and the model gets them with the 
     },
   });
   const gateway = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { homeDir: home, cwd: home, processEnv: {} },
     idleTimeoutMs: 0,
     plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-reader': {} },
@@ -539,6 +544,7 @@ test('channel.create goes through the adapter that carries the calling agent, an
     },
   });
   const gateway = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { homeDir: home, cwd: home, processEnv: {} },
     idleTimeoutMs: 0,
     plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-maker': {} },
@@ -633,6 +639,7 @@ test('channel.join and channel.invite go through the adapter that carries the ca
     },
   });
   const gateway = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { homeDir: home, cwd: home, processEnv: {} },
     idleTimeoutMs: 0,
     plugins: { 'stratus-plugin-chan-a': {}, 'stratus-plugin-chan-b': {}, 'stratus-plugin-member': {} },

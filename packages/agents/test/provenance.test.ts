@@ -188,6 +188,7 @@ test('a fact written after a producer ran is external, and one written in a clea
   tools.register(createRememberTool(memory));
   tools.register(pageRead);
   const runner = new AgentRunner({
+    approvals: new AllowAllApprovalPolicy(),
     provider: perAgentProvider({
       ava: [[
         { id: 'c1', toolName: 'page.read', input: {} },
@@ -333,7 +334,7 @@ test('inbound: an untainted parent whose target fetched writes external after th
     ]],
     bea: [[{ id: 'b1', toolName: 'page.read', input: {} }]],
   });
-  const runner = new AgentRunner({ provider, tools, memory, agents: registry });
+  const runner = new AgentRunner({ provider, tools, memory, agents: registry, approvals: new AllowAllApprovalPolicy() });
   tools.register(createDelegateTool({ registry, runner }));
 
   const parent = await runner.run({ sessionId: 'parent-in', agent: AVA, userMessage: 'ask Bea about the page' });

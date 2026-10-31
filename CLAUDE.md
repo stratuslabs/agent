@@ -150,7 +150,8 @@ hand and by review:
   kernel.** The seams are the optional `AgentRunnerOptions` slots —
   `SessionStore`, `Executor`, `ApprovalPolicy`, `ModelProvider`,
   `AgentMemoryStore`, `Plugin` — interfaces with permissive in-memory
-  defaults. Extend one with an optional, defaulted method plus a JSDoc
+  defaults, except `ApprovalPolicy`: a runner given none runs only `safe`
+  tools, so allowing everything is a choice an embedding app writes down. Extend one with an optional, defaulted method plus a JSDoc
   note on what a host that omits it gives up; never by subclassing.
 - **Split a file when a concern is separately testable or separately
   shared, not by line count.** `state` grew `memory.ts` and `gateway`
