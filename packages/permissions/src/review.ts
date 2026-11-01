@@ -362,8 +362,9 @@ const sendsOutside = (call: { toolName: string; command?: string }): boolean => 
   }
   const commands = commandsOf(call.command);
   if (commands === undefined) {
-    // Unreadable: a client named anywhere counts.
-    return [...NETWORK_CLIENTS].some((client) => new RegExp(`(?:^|[\\s;&|(\`'"])${client}(?=$|\\s)`).test(call.command as string));
+    // Unreadable (a path-qualified program is, too): a client named
+    // anywhere counts, by itself or as the last part of a path.
+    return [...NETWORK_CLIENTS].some((client) => new RegExp(`(?:^|[\\s;&|(\`'"/])${client}(?=$|\\s)`).test(call.command as string));
   }
   return commands.some((analysis) => {
     const program = programOf(analysis);
