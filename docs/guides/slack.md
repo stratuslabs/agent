@@ -197,6 +197,11 @@ machines, turn on `agentMentions`:
   in it.
 - The reply goes in the thread the other agent posted in. Each daemon's own
   Slack app hears the mention, so this works across machines.
+- A tag carries the files its sender posted just above it. An agent that
+  posts a screenshot and then asks another agent about it sends them as two
+  messages, so the tagged agent also gets the files on the sender's own
+  messages directly above the tag, with nobody else speaking between and
+  within the hour before it, read as if they were attached to the tag.
 - A tagged message from another agent may need no answer: a report, a
   thanks. The agent is told it can stay quiet then, and posts nothing.
   A question or a request still gets one.
