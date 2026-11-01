@@ -1936,6 +1936,38 @@ test('a steered message the SDK took off the stream and then stopped reading aft
   assert.match(handlerOutcome, /ended before it took a message sent while it worked/);
 });
 
+test('an SDK that stops reading its input while a steered message waits fails the turn as stalled instead of hanging it', async () => {
+  let handlerOutcome = 'pending';
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const tools = (params.options as { mcpServers?: Record<string, { instance?: { _registeredTools?: RegisteredTools } }> })
+      .mcpServers?.stratus?.instance?._registeredTools;
+    const signal = (params.options as { abortController?: AbortController }).abortController?.signal;
+    const prompt = params.prompt as AsyncIterable<unknown>;
+    return (async function* () {
+      // Takes the turn's message, then neither reads its input again nor
+      // ends it, and fails only once the provider aborts it.
+      await prompt[Symbol.asyncIterator]().next();
+      const handler = tools!.demo_echo!.handler({ text: 'build' }, {}).then(
+        () => 'returned',
+        (error: Error) => error.message,
+      );
+      const aborted = new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+      handlerOutcome = await Promise.race([
+        aborted.then(() => handler),
+        new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 1000)),
+      ]);
+      throw new DOMException('aborted', 'AbortError');
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn, executeTool: echoExecutor, idleTimeoutMs: 50 });
+
+  await assert.rejects(
+    provider.generate(steeringRequest(async () => ({ userMessage: 'Dylan: skip the tests' }))),
+    /produced no output for 50ms; the run was aborted as stalled/,
+  );
+  assert.match(handlerOutcome, /ended before it took a message sent while it worked/);
+});
+
 test('a turn stopped while a steered message waits to be taken fails the call instead of waiting forever', async () => {
   let handlerOutcome = 'pending';
   const queryFn: ClaudeCodeQueryFn = (params) => {
