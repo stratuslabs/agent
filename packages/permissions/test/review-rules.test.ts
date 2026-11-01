@@ -111,6 +111,13 @@ test('a cloud metadata address anywhere in a call is blocked', () => {
     assert.equal(hit?.rule, 'metadata-address');
   }
   assert.equal(builtInReviewRule({ toolName: 'web.fetch', input: { url: 'http://169.254.169.25/' } }, []), undefined);
+  // The whole host or address, not a longer one that contains it.
+  for (const url of ['http://169.254.169.2540/', 'https://169.254.169.254.example.com/', 'https://metadata.google.internal.example.com/', 'https://x169.254.169.254/', 'http://[fd00:ec2::2541]/']) {
+    assert.equal(builtInReviewRule({ toolName: 'web.fetch', input: { url } }, []), undefined, url);
+  }
+  for (const url of ['http://169.254.169.254:80/latest', 'http://metadata.google.internal./x', 'curl 169.254.169.254']) {
+    assert.equal(builtInReviewRule({ toolName: 'web.fetch', input: { url } }, [])?.rule, 'metadata-address', url);
+  }
 });
 
 test('a token or a stored credential in a call that sends outside is blocked, and only there', () => {

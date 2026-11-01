@@ -1210,10 +1210,23 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (reviewAsk === undefined && !resumed && sessionTrustOf(session) !== 'external') {
           return report(context, 'risk', true, `${call.toolName} not reviewed: this conversation has read nothing from outside`);
         }
+        // The stored values, for the rule against sending one out. A store
+        // that can't be read asks, like any other part of the review that
+        // couldn't run: never a failed turn, never an allow.
+        let secrets: readonly string[] | undefined;
         if (reviewAsk === undefined) {
+          try {
+            secrets = (await review?.secretsFor?.(session.agent.id)) ?? [];
+          } catch {
+            reviewNotes.set(context, { verdict: 'ask', reviewCode: 'review-failed' });
+            const reason = `${call.toolName} needs a person's yes because the review couldn't run: secrets-unreadable`;
+            reviewAsk = { layer: 'review', reason, told: reason, note: 'the review couldn\'t run: secrets-unreadable' };
+          }
+        }
+        if (reviewAsk === undefined && secrets !== undefined) {
           const hit = builtInReviewRule(
             { toolName: call.toolName, input: call.input, ...(resolvedForReview.command === undefined ? {} : { command: resolvedForReview.command }) },
-            (await review?.secretsFor?.(session.agent.id)) ?? [],
+            secrets,
           );
           if (hit !== undefined) {
             reviewNotes.set(context, { verdict: hit.verdict });
@@ -1664,6 +1677,21 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           const { answer } = outcome;
           reviewNotes.set(context, { verdict: answer.verdict, reviewCode: answer.code });
           if (answer.verdict === 'allow') {
+            // The review took time, and a page can move in it: a yes given
+            // for one site must not land a click on another. Same rule as
+            // a person's yes (`allowUnlessMoved`).
+            if (context.tool.originFor !== undefined && reviewHooks <= 1) {
+              const settled = originScopeFor(context.tool.originFor(session, call.input) ?? '')?.origin;
+              if (settled !== resolvedForReview.origin) {
+                return report(
+                  context,
+                  'review',
+                  false,
+                  `${call.toolName} was allowed by the reviewer on ${resolvedForReview.origin ?? 'a page with no origin'}, `
+                    + `but the conversation is on ${settled ?? 'no page'} now — it did not run`,
+                );
+              }
+            }
             return report(context, 'review', true, `${call.toolName} was allowed by the reviewer (${answer.code})`);
           }
           if (answer.verdict === 'block') {

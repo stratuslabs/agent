@@ -306,6 +306,39 @@ test('shadow mode runs every call as open does and records the review off the ca
   assert.equal(second.reported.at(-1)?.shadow, true);
 });
 
+test('a secret store that cannot be read asks instead of failing the turn', async () => {
+  const h = harness({}, allowing);
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    review: { settingsFor: () => ({}), reviewer: allowing, secretsFor: async () => { throw new Error('EACCES'); } },
+  });
+  const answer = await policy.approve({
+    call: { id: 'c', toolName: 'notes.add', input: {} },
+    tool: notes,
+    risk: 'gated',
+    session: sessionFor('ava', true),
+  });
+  assert.equal(ran(answer), false);
+  assert.match((answer as { reason: string }).reason, /the review couldn't run: secrets-unreadable/);
+  assert.equal(h.reviews.length, 0);
+});
+
+test('a reviewer allow on a page that moved during the review does not run there', async () => {
+  let page = 'https://a.test/form';
+  const act = toolAt('browser.act', 'gated', { originFor: () => page });
+  const h = harness({}, async () => {
+    page = 'https://b.test/other';
+    return { verdict: 'allow', code: 'asked-for', reason: 'asked' };
+  });
+  const moved = await h.decide(act, sessionFor('ava', true), { selector: '#go' });
+  assert.equal(ran(moved.answer), false);
+  assert.match(moved.reported.at(-1)?.reason ?? '', /https:\/\/a\.test.*https:\/\/b\.test/);
+  // And on a page that stayed put, it runs.
+  page = 'https://a.test/form';
+  const stay = harness({}, allowing);
+  assert.equal(ran((await stay.decide(act, sessionFor('ava', true), { selector: '#go' })).answer), true);
+});
+
 test('without review settings for the agent nothing changes', async () => {
   const h = harness(undefined, allowing);
   const refused = await h.decide(notes, sessionFor('ava'));
