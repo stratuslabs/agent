@@ -34,8 +34,10 @@ updates:
       npm-minor-and-patch:
         patterns: ['*']
         update-types: [minor, patch]
-    # Majors we have decided to wait on. These rules hold security updates
-    # back too, so a fix for one of these has to come from the current major.
+    # Majors we have decided to wait on. The two update-types rules hold only
+    # these weekly version updates: a security fix that needs a new undici or
+    # @types/node major still opens a pull request. The typescript versions
+    # rule holds security updates too.
     ignore:
       # undici 8 needs Node 22.19 or later, and engines allows 22.16. Revisit
       # when the Node floor moves.
