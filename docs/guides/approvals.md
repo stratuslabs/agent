@@ -75,7 +75,7 @@ call in the context of what the person actually asked for.
 {
   "approvals": {
     "posture": "review",
-    "review": { "model": "claude-haiku-4-5", "shadow": true, "timeoutMs": 20000 },
+    "review": { "model": "claude-haiku-5-5", "shadow": true, "timeoutMs": 20000 },
     "rules": [
       { "tool": "web.fetch", "origin": "https://*.github.com", "verdict": "allow" },
       { "tool": "shell.run", "command": "git push", "verdict": "allow" },
@@ -148,6 +148,10 @@ model, counted against the agent's budget like any other call. It sees:
   description (never for an `mcp.*` tool, whose description its server
   wrote) and input, marked as data the agent composed. A call over 8 KB
   is shown as its first and last 4 KB with the size of the middle named;
+- **what the call's inputs mean**: the first line of the tool's own
+  description of each input the call sets, when it has one (never for an
+  `mcp.*` tool), up to 200 characters a line and about 2,000 in all, with a
+  count of the inputs left out past that;
 - where outside content came from, whether a person is in the conversation,
   and the destination or site the call names.
 
@@ -188,6 +192,12 @@ awaited) and recorded as a decision marked shadow. Nothing is asked and
 nothing is blocked. This is how to see what `review` would do before you
 turn it on.
 
+The review model matters more than you might expect. Measure the one you
+pick with the review eval (`pnpm eval:review -- --model <model>`, see
+`packages/cli/eval/review-step`) before you turn shadow off: on its 60
+cases, `claude-haiku-5-5` asked about 1 of the 40 calls people asked for,
+and `claude-haiku-4-5` about a third of them.
+
 ### Seeing decisions
 
 Each decision is a `permission.decided` event with its verdict, the check
@@ -202,7 +212,7 @@ decision with `verdict=` and `code=` (a shadow one starts with `shadow`),
 which is what to count:
 
 ```text
-approvals: posture review for atlas (model claude-haiku-4-5, shadow: reviewed and logged, never enforced)
+approvals: posture review for atlas (model claude-haiku-5-5, shadow: reviewed and logged, never enforced)
 atlas: shadow [review] message.send was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for (session slack:atlas:…)
 ```
 
