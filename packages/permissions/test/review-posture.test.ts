@@ -159,11 +159,12 @@ test('an operator ask rule wins over what the external-content gate leaves alone
 test('an ask rule on a destination reaches the person without looking up its workspace', async () => {
   const h = harness({ rules: [rule({ tool: 'message.send', destination: 'slack:C999', verdict: 'ask' })] }, allowing, {
     destinations: {
+      isPreauthorized: () => false,
       accountFor: async () => {
         throw new Error('workspace lookup failed');
       },
     },
-  } as Partial<PermissionPolicyOptions>);
+  });
   const asked = await h.decide(send, sessionFor('ava'), { destination: 'slack:C999', text: 'hi' });
   assert.equal(ran(asked.answer), false);
   assert.match((asked.answer as { reason: string }).reason, /nobody is set up to approve this/);
