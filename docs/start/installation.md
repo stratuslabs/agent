@@ -20,6 +20,16 @@ npm install -g @stratusagent/cli
 stratus setup
 ```
 
+On Linux, `EACCES` from `npm install -g` means Node is a system install whose
+global folder only root can write. Skip `sudo`: setup installs providers and
+plugins with the same `npm install -g`, run as you, so it would fail there
+next. Install Node with nvm instead, or give npm a folder you own:
+
+```bash
+npm config set prefix ~/.npm-global
+export PATH="$HOME/.npm-global/bin:$PATH"   # add this line to ~/.profile too
+```
+
 That one package carries the runtime, the agent roster and the always-on
 gateway. Model providers come separately, so an install carries only the one
 its agents use, and `stratus setup` installs the one you pick. The two

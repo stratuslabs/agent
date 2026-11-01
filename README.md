@@ -24,7 +24,8 @@ stratus setup     # sign in, create an agent, pick tools, connect Slack
 stratus chat      # talk; the conversation persists
 ```
 
-Needs Node 22.16+ or 24+ ([Installation](docs/start/installation.md)). No key yet?
+Needs Node 22.16+ or 24+ ([Installation](docs/start/installation.md), which also
+covers `EACCES` on Linux). No key yet?
 [Quickstart](docs/start/quickstart.md) has an offline demo.
 
 ## Why Stratus

@@ -5019,6 +5019,50 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
   });
 });
 
+test('setup ends with the serve line for plugin channel secrets it leaves stored, not ones it stored and removed', async () => {
+  // No service manager, so nothing will start stratusd. The fixture plugin
+  // is enabled with no agent bound by its config, so only the secrets this
+  // run leaves behind bind anything.
+  const finish = async (input: string[]) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(
+      path.join(home, '.stratus', 'config.json'),
+      `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': {} } })}\n`,
+    );
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        servicePlatform: 'linux',
+        serviceSystemdBooted: false,
+        serviceRunner: stubServiceRunner,
+        setupInput: Readable.from(input.map((line) => `${line}\n`)),
+      },
+    });
+    assert.equal(exitCode, 0, output.stderr);
+    return output.stdout;
+  };
+
+  // Channels → fixture → Stratus → Store secrets → "token" → value → Back → Back → Save & finish
+  assert.match(
+    await finish(['5', '2', '1', '1', 'token', 'fixture-token-1', '3', '3', '9']),
+    /^ {2}stratus dashboard\n\nYour channels answer only while stratusd runs — start it with `stratus serve`\.$/m,
+  );
+  // … then Stratus again → Remove the stored secrets, before saving: the
+  // save ends with nothing bound, so there is nothing to bring online.
+  assert.doesNotMatch(
+    await finish(['5', '2', '1', '1', 'token', 'fixture-token-1', '1', '2', '3', '3', '9']),
+    /only while stratusd runs/,
+  );
+});
+
 test('setup counts an agent bound by any plugin carrying the channel kind, not only the first', async () => {
   // Channels key on agent and kind, so two plugins may carry one kind for
   // different agents. The twin binds Blair; listing only the first plugin's
@@ -5185,6 +5229,78 @@ test('setup suggests serve with the same --config it was run with', async () => 
   // A bare `stratus serve` would read a different config — and therefore a
   // different roster — so the stored Slack app would be skipped.
   assert.match(output.stdout, /run `stratus serve --config \.\/custom\.json` to bring them online/);
+  // Always on stayed on and the stub service reports running, so the
+  // finish screen has nothing to add about starting stratusd.
+  assert.doesNotMatch(output.stdout, /answers only while stratusd runs/);
+});
+
+test('setup ends by saying how to bring Slack online when nothing will run stratusd', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → tokens → no member ID → Back → Always on → "Do not run it for me" → Save.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '7\n', '3\n', '9\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The save line says it too, but optional-package installs scroll it
+  // away, and the closing list is what a first run reads last. Same
+  // --config as setup, for the same reason as the save line.
+  assert.match(
+    output.stdout,
+    /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve --config \.\/custom\.json`\.$/m,
+  );
+});
+
+test('setup on Linux without systemd ends by saying how to bring Slack online', async () => {
+  // The fresh-container case: Always on is left at its default, but there
+  // is no service manager to run it, so nothing will start stratusd.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceSystemdBooted: false,
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → tokens → no member ID → Back → Save.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve`\.$/m);
 });
 
 test('setup reloads a running daemon once the channel secrets are written, and says whether Slack picked them up', async () => {
@@ -7551,7 +7667,9 @@ test('setup enables a plugin and writes the setting it is useless without', asyn
   // say so: this is the commonest configuration there is, and claiming
   // "no agent can call it yet" would understate what just happened.
   assert.match(output.stdout, /Stratus \(stratus\) has no `tools:` list, which means every registered tool/);
-  assert.match(output.stdout, /callable by that agent the next time the daemon starts/);
+  // One agent, five tools: the verb follows neither count, because the
+  // sentence names the agent as the one that calls.
+  assert.match(output.stdout, /So the next time the daemon starts, that agent can call fs\.read, fs\.list, fs\.search, fs\.write, fs\.move\./);
   assert.doesNotMatch(output.stdout, /No agent can call it yet/);
 });
 
@@ -8386,7 +8504,8 @@ test('setup says what it did not check when enabling a plugin it could not have 
   // below it used to promise the tools were callable at the next daemon
   // start regardless, leaving two sentences that contradict each other.
   assert.match(output.stdout, /subject to the caveat above, which setup did not check/);
-  assert.doesNotMatch(output.stdout, /callable by that agent the next time the daemon starts/);
+  assert.match(output.stdout, /So at the next daemon start, that agent would gain mcp\.<server>\.<tool>, discovered at connect — subject to the caveat above/);
+  assert.doesNotMatch(output.stdout, /the next time the daemon starts, that agent can call/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.equal(config.plugins['@stratusagent/plugin-mcp'].enabled, true);
 });
@@ -9709,7 +9828,7 @@ test('opting out in setup removes a service an earlier run installed', async () 
   assert.ok(await readFile(unitPath, 'utf8').catch(() => undefined), 'installed to begin with');
 
   const calls: string[] = [];
-  const { streams } = createStreams();
+  const { streams, output } = createStreams();
   await runCli({
     argv: ['setup'],
     streams,
@@ -9728,6 +9847,77 @@ test('opting out in setup removes a service an earlier run installed', async () 
   // the menu said "off" — still burning usage and still answering in Slack.
   assert.ok(calls.some((call) => /disable --now/.test(call)), calls.join(', '));
   assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+  // No channel is stored, so stopping stratusd leaves nothing silent.
+  assert.doesNotMatch(output.stdout, /only while stratusd runs/);
+});
+
+test('opting out in setup with Slack stored ends by saying how to bring it back online', async () => {
+  // A rerun: Slack was connected and answered through the service an
+  // earlier run installed. This run edits no channel, so the save never
+  // mentions Slack, but turning Always on off stops the daemon that was
+  // answering, and the finish screen has to say so.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: async () => ({ code: 0, stdout: '', stderr: '' }),
+      // Always on → "Do not run it for me" → Save & finish.
+      setupInput: Readable.from(['7\n', '3\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /stratusd is stopped and will not start at login/);
+  assert.match(output.stdout, /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve`\.$/m);
+});
+
+test('opting out in setup with a plugin channel bound ends by saying how to bring it back online', async () => {
+  // Bound by its plugin's config alone, as a channel that needs no secret
+  // is, so nothing under channels.* in the credentials says it exists.
+  const optOut = async (agents: Record<string, unknown> | undefined) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(
+      path.join(home, '.stratus', 'config.json'),
+      `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': agents === undefined ? {} : { agents } } })}\n`,
+    );
+    await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        servicePlatform: 'linux',
+        serviceRunner: async () => ({ code: 0, stdout: '', stderr: '' }),
+        // Always on → "Do not run it for me" → Save & finish.
+        setupInput: Readable.from(['7\n', '3\n', '9\n']),
+      },
+    });
+    assert.equal(exitCode, 0, output.stderr);
+    assert.match(output.stdout, /stratusd is stopped and will not start at login/);
+    return output.stdout;
+  };
+
+  assert.match(await optOut({ ava: {} }), /^ {2}stratus dashboard\n\nYour channels answer only while stratusd runs — start it with `stratus serve`\.$/m);
+  // Enabled with no agent bound: nothing was answering there.
+  assert.doesNotMatch(await optOut(undefined), /only while stratusd runs/);
 });
 
 test('starting a LaunchAgent works after it has been booted out', async () => {
