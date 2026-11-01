@@ -380,7 +380,7 @@ test('parseCommand accepts the agents command and the agent list alias', () => {
   assert.deepEqual(parseCommand(['agents']), { command: 'agents', format: 'text' });
   assert.deepEqual(parseCommand(['agents', '--format', 'json']), { command: 'agents', format: 'json' });
   assert.deepEqual(parseCommand(['agent', 'list']), { command: 'agents', format: 'text' });
-  assert.throws(() => parseCommand(['agents', '--format', 'soul']), /Unsupported format: soul/);
+  assert.throws(() => parseCommand(['agents', '--format', 'soul']), /Unsupported --format: soul\. Use text or json\./);
   assert.throws(() => parseCommand(['agents', '--bogus']), /Unknown option: --bogus/);
 });
 
@@ -11586,7 +11586,7 @@ test('parseCommand reads the schedules command and its cancel form', () => {
     format: 'text',
   });
   assert.throws(() => parseCommand(['schedules', 'cancel']), /needs the schedule id/);
-  assert.throws(() => parseCommand(['schedules', '--format', 'yaml']), /Unsupported format/);
+  assert.throws(() => parseCommand(['schedules', '--format', 'yaml']), /Unsupported --format: yaml\. Use text or json\./);
 });
 
 test('stratus schedules lists the daemon database and cancel revokes a row', async () => {
@@ -15186,7 +15186,7 @@ test('plugins ignores a plugins block a project-local config tried to set', asyn
 test('plugins rejects a format it cannot print', () => {
   assert.throws(
     () => parseCommand(['plugins', '--format', 'yaml']),
-    /Invalid value for --format: yaml\. Use text or json\./,
+    /Unsupported --format: yaml\. Use text or json\./,
   );
   assert.throws(() => parseCommand(['plugins', '--wat']), /Unknown option: --wat/);
   assert.deepEqual(parseCommand(['plugin', 'list']), { command: 'plugins', format: 'text' });
@@ -17039,7 +17039,7 @@ test('parseCommand reads serve --log-format and health, and refuses what neither
     gateway: 'http://10.0.0.5:4123',
     token: 't',
   });
-  assert.throws(() => parseCommand(['health', '--format', 'yaml']), /Unsupported format: yaml/);
+  assert.throws(() => parseCommand(['health', '--format', 'yaml']), /Unsupported --format: yaml\. Use text or json\./);
   assert.throws(() => parseCommand(['health', '--agent', 'ava']), /Unknown option: --agent/);
 });
 
@@ -17220,7 +17220,7 @@ test('parseCommand reads stratus sessions and its filters', () => {
   assert.deepEqual(parseCommand(['sessions', '--status', 'stopped-early']), { command: 'sessions', status: 'stopped-early', format: 'text' });
   assert.throws(() => parseCommand(['sessions', '--limit', '0']), /--limit takes a whole number of 1 or more/);
   assert.throws(() => parseCommand(['sessions', '--limit', 'ten']), /--limit takes a whole number of 1 or more/);
-  assert.throws(() => parseCommand(['sessions', '--format', 'yaml']), /Unsupported format: yaml/);
+  assert.throws(() => parseCommand(['sessions', '--format', 'yaml']), /Unsupported --format: yaml\. Use text or json\./);
   assert.throws(() => parseCommand(['sessions', 'extra']), /Unexpected argument: extra/);
   assert.deepEqual(parseCommand(['sessions', '--help']), { command: 'help' });
 });
@@ -17474,4 +17474,23 @@ test('stratus memory list and audit name every fact a merge replaced, and the ev
     },
   });
   assert.deepEqual(merged, { tool: 'memory.remember', ok: true, entry: 'ava:memory:3', supersedes: ['ava:memory:1', 'ava:memory:2'] });
+});
+
+for (const argv of [
+  ['agents'], ['agent', 'list'], ['doctor'], ['logs'], ['health'], ['events'], ['plugins'],
+  ['schedules'], ['grants'], ['memory', 'search', 'query'], ['sessions'], ['run', '--prompt', 'hello'],
+]) {
+  test(`parseCommand lists accepted formats for ${argv.join(' ')}`, () => {
+    assert.throws(() => parseCommand([...argv, '--format', 'yaml']), {
+      message: 'Unsupported --format: yaml. Use text or json.',
+    });
+    assert.throws(() => parseCommand([...argv, '--format']), { message: 'Missing value for --format' });
+  });
+}
+
+test('parseCommand lists soul as an accepted agent new format', () => {
+  assert.throws(() => parseCommand(['agent', 'new', '--format', 'yaml']), {
+    message: 'Unsupported --format: yaml. Use text, json or soul.',
+  });
+  assert.equal(parseCommand(['agent', 'new', '--format', 'soul']).command, 'agent-new');
 });
