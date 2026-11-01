@@ -1908,6 +1908,34 @@ test('a steered message waiting when the turn runs out of turns keeps the input 
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Skipped the tests.' }]);
 });
 
+test('a steered message the SDK took off the stream and then stopped reading after fails the call instead of waiting forever', async () => {
+  let handlerOutcome = 'pending';
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const tools = (params.options as { mcpServers?: Record<string, { instance?: { _registeredTools?: RegisteredTools } }> })
+      .mcpServers?.stratus?.instance?._registeredTools;
+    const prompt = params.prompt as AsyncIterable<unknown>;
+    return (async function* () {
+      const iterator = prompt[Symbol.asyncIterator]();
+      await iterator.next();
+      const handler = tools!.demo_echo!.handler({ text: 'build' }, {}).then(
+        () => 'returned',
+        (error: Error) => error.message,
+      );
+      // Takes the steered message, then ends its input without asking for
+      // another, as an SDK whose CLI went away does.
+      await iterator.next();
+      await iterator.return?.(undefined);
+      handlerOutcome = await Promise.race([handler, new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 200))]);
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'Done.', session_id: 'sdk-958' } as ClaudeCodeStreamMessage;
+    })();
+  };
+  const provider = createClaudeCodeProvider({ queryFn, executeTool: echoExecutor });
+
+  await provider.generate(steeringRequest(async () => ({ userMessage: 'Dylan: skip the tests' })));
+
+  assert.match(handlerOutcome, /ended before it took a message sent while it worked/);
+});
+
 test('a turn stopped while a steered message waits to be taken fails the call instead of waiting forever', async () => {
   let handlerOutcome = 'pending';
   const queryFn: ClaudeCodeQueryFn = (params) => {

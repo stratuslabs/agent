@@ -363,15 +363,22 @@ interface SteerableInput {
 const STEER_UNTAKEN = 'The Claude Code run ended before it took a message sent while it worked.';
 
 const createSteerableInput = (first: SDKUserMessage, signal: AbortSignal): SteerableInput => {
-  const queue: Array<{ message: SDKUserMessage; taken: () => void; refused: (error: Error) => void }> = [];
+  type Entry = { message: SDKUserMessage; taken: () => void; refused: (error: Error) => void };
+  const queue: Entry[] = [];
+  // The message the SDK has been handed and not yet moved past: it counts
+  // as taken only once the SDK asks for the next one.
+  let handedOver: Entry | undefined;
   let wake: (() => void) | undefined;
   let closed = false;
-  // Closing refuses whatever is still queued: the query stopped or the
-  // turn ended, and a hosted call waiting on a message nobody will take
-  // must not wait forever.
+  // Closing refuses whatever is still queued, and the message handed over
+  // if the SDK never came back for another: the query stopped or the turn
+  // ended, and a hosted call waiting on a message nobody will take must
+  // not wait forever.
   const close = (): void => {
     closed = true;
-    for (const entry of queue.splice(0)) {
+    const unsettled = [...(handedOver !== undefined ? [handedOver] : []), ...queue.splice(0)];
+    handedOver = undefined;
+    for (const entry of unsettled) {
       entry.refused(new Error(STEER_UNTAKEN));
     }
     wake?.();
@@ -384,7 +391,9 @@ const createSteerableInput = (first: SDKUserMessage, signal: AbortSignal): Steer
         for (;;) {
           const entry = queue.shift();
           if (entry !== undefined) {
+            handedOver = entry;
             yield entry.message;
+            handedOver = undefined;
             entry.taken();
             continue;
           }
