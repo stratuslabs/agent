@@ -8,7 +8,7 @@
  * own text: that is what stops a page from arguing with the reviewer
  * directly.
  */
-import { sessionTaintedBy, type Session, type Tool, type ToolCall, type ToolRisk } from '@stratusagent/core';
+import { sessionTaintedBy, type Session, type Tool, type ToolCall, type ToolRisk, type TrustLevel } from '@stratusagent/core';
 
 import { isScheduleSessionId } from './schedules.ts';
 
@@ -116,7 +116,7 @@ export interface ReviewCaseInput {
    * for that turn. The firing's message also carries the events, which came
    * from outside and never count as the request.
    */
-  firing?: { kind: 'schedule' | 'trigger'; prompt: string };
+  firing?: { kind: 'schedule' | 'trigger'; prompt: string; trust?: TrustLevel };
   /** A sub-agent's session, whose request is the delegating agent's instruction. */
   delegated?: boolean;
 }
@@ -124,10 +124,16 @@ export interface ReviewCaseInput {
 /** The request: the people's turns, newest last, or the firing's prompt. */
 const requestOf = (input: ReviewCaseInput): { who: string; text: string } => {
   if (input.firing !== undefined) {
+    const what = input.firing.kind === 'trigger' ? 'an event trigger\'s prompt' : 'a schedule\'s prompt';
+    if (input.firing.trust === 'external') {
+      // Written in a conversation that had read outside content, so the
+      // prompt may be that content's: it can't vouch for any call.
+      return { who: `${what}, set by a conversation that had read outside content, so it is not counted`, text: '' };
+    }
     return {
       who: input.firing.kind === 'trigger'
-        ? 'an event trigger\'s prompt, approved by an operator (the events it delivered are not part of the request)'
-        : 'a schedule\'s prompt, approved by an operator',
+        ? `${what}, set when the trigger was created (the events it delivered are not part of the request)`
+        : `${what}, set when the schedule was created`,
       text: input.firing.prompt,
     };
   }

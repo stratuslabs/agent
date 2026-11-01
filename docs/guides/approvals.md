@@ -126,6 +126,13 @@ doesn't offer (`shell.run` with an `origin`) can never match, and the
 daemon warns about it at startup. Rules apply only under `review`; under
 `open` and `guarded` they are ignored, and the startup lines say so.
 
+A `command` rule reads the line as written. It understands quoting, a
+program called by its path, wrappers like `sudo` and `env`, options between
+the program and the rule's words, and one level of `bash -c "…"`. It does
+not understand variables, `eval`, aliases or encoded text. So an `ask` or
+`block` command rule catches the usual ways of writing a command, but it is
+not a boundary: the shell sandbox is.
+
 ### The reviewer
 
 The reviewer is one call on the agent's own provider and credentials, with
@@ -134,8 +141,9 @@ model, counted against the agent's budget like any other call. It sees:
 
 - **the request**: only what the people the agent serves wrote in this
   conversation (newest last, up to 4 KB), or a schedule's or trigger's own
-  prompt (never the event text a trigger delivers), or a delegating agent's
-  instruction, marked as such;
+  prompt (never the event text a trigger delivers, and nothing at all when
+  the schedule was set by a conversation that had read outside content), or
+  a delegating agent's instruction, marked as such;
 - **the proposed call**: tool, risk, the first line of the tool's
   description (never for an `mcp.*` tool, whose description its server
   wrote) and input, marked as data the agent composed. A call over 8 KB

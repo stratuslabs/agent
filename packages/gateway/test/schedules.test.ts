@@ -651,9 +651,9 @@ test('a firing\'s prompt is known while it runs and after a restart resumes it, 
   runtime.stop();
   await runtime.drain();
 
-  assert.deepEqual(during, [{ kind: 'schedule', prompt: 'summarize new PRs' }]);
+  assert.deepEqual(during, [{ kind: 'schedule', prompt: 'summarize new PRs', trust: 'unknown' }]);
   // After the turn, as a recovered firing would be.
-  assert.deepEqual(runtime.firingPromptFor(sessionLike(firingSessionId, 'ava', 'sched-1')), { kind: 'schedule', prompt: 'summarize new PRs' });
+  assert.deepEqual(runtime.firingPromptFor(sessionLike(firingSessionId, 'ava', 'sched-1')), { kind: 'schedule', prompt: 'summarize new PRs', trust: 'unknown' });
   // Never for another agent, another schedule's id, or a session outside the namespace.
   assert.equal(runtime.firingPromptFor(sessionLike(firingSessionId, 'bea', 'sched-1')), undefined);
   assert.equal(runtime.firingPromptFor(sessionLike(firingSessionId, 'ava', 'sched-2')), undefined);

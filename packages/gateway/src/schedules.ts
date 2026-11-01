@@ -437,7 +437,7 @@ export interface SchedulerRuntime {
    * (live, or resumed after a restart), so metadata alone never names a
    * prompt.
    */
-  firingPromptFor(session: Session): { kind: 'schedule' | 'trigger'; prompt: string } | undefined;
+  firingPromptFor(session: Session): { kind: 'schedule' | 'trigger'; prompt: string; trust: TrustLevel } | undefined;
   /** All agents' schedules, for the operator surfaces. */
   list(): ScheduleRecord[];
   /** Cancel any agent's schedule — the operator's stop button. */
@@ -1299,7 +1299,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       if (record === undefined || record.agentId !== session.agent.id) {
         return undefined;
       }
-      return { kind: record.cadence.kind === 'event' ? 'trigger' : 'schedule', prompt: record.prompt };
+      return { kind: record.cadence.kind === 'event' ? 'trigger' : 'schedule', prompt: record.prompt, trust: record.trust ?? 'unknown' };
     },
     approvalDestinationFor(session) {
       if (!activeFirings.has(session.id)) {
