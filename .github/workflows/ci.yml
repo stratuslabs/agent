@@ -46,3 +46,49 @@ jobs:
         # --no-bail: a failing package doesn't hide the failures in the ones
         # after it, so one run shows everything that broke.
         run: pnpm -r --no-bail test
+
+  audit:
+    # Report only: an advisory in a dependency that can't be upgraded yet
+    # shouldn't hold up every pull request. pnpm's table goes to the run's
+    # summary, and a finding (or an audit that couldn't run) leaves a warning
+    # on the run, while the job itself passes. Only what ships is audited:
+    # dependencies, not devDependencies.
+    name: Dependency audit (report only)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Reads pnpm-lock.yaml and asks the npm registry about every resolved
+      # version, so nothing needs installing first.
+      - name: pnpm audit --prod
+        run: |
+          set +e
+          pnpm audit --prod > "$RUNNER_TEMP/audit.txt" 2>&1
+          status=$?
+          set -e
+          {
+            echo '### pnpm audit --prod'
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/audit.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/audit.txt"
+          if [ "$status" -ne 0 ]; then
+            # Actions runs this with pipefail, so a grep that matches nothing
+            # needs || true or it ends the step.
+            found=$(grep -E 'vulnerabilit(y|ies) found|^Severity:' "$RUNNER_TEMP/audit.txt" | tr '\n' ' ' || true)
+            if [ -n "$found" ]; then
+              echo "::warning title=pnpm audit --prod::${found}(the run summary lists them)"
+            else
+              echo "::warning title=pnpm audit --prod::the audit could not finish (exit $status); its output is in the run summary"
+            fi
+          fi

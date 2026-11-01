@@ -1,0 +1,41 @@
+# Weekly pull requests that keep dependencies and workflow actions current.
+#
+# These are version updates. A security update for an open advisory is a
+# separate Dependabot feature, switched on in the repository's security
+# settings rather than here, and it is not held by the cooldown below.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    # The root covers every workspace package: Dependabot reads
+    # pnpm-workspace.yaml and updates pnpm-lock.yaml with each manifest.
+    directory: /
+    schedule:
+      interval: weekly
+    # The packages here are libraries other people install, so a range moves
+    # only when the new version falls outside it (a major). A minor or patch
+    # inside the range updates pnpm-lock.yaml alone and leaves every
+    # published range as it is.
+    versioning-strategy: increase-if-necessary
+    # A new release waits a week before it is proposed. A bad or malicious
+    # publish is usually caught and pulled within days, and nothing here
+    # needs a release the day it lands.
+    cooldown:
+      default-days: 7
+    groups:
+      # Minors and patches arrive as one pull request a week. A major gets its
+      # own, because it can change behavior and needs its own review.
+      npm-minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ['*']
