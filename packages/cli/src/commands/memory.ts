@@ -238,6 +238,10 @@ export const runMemory = async (
       writeLine(streams.stdout, JSON.stringify({ agentId: command.agentId, passId, forgotten }, null, 2));
       return 0;
     }
+    if (forgotten.length === 0) {
+      writeLine(streams.stdout, `Pass ${escapeControlCharacters(passId)} has no live entries left for ${command.agentId}; nothing was forgotten.`);
+      return 0;
+    }
     writeLine(
       streams.stdout,
       `Forgot ${forgotten.length} entr${forgotten.length === 1 ? 'y' : 'ies'} pass ${escapeControlCharacters(passId)} wrote for ${command.agentId}. `

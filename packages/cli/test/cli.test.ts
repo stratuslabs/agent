@@ -13528,6 +13528,9 @@ test('stratus memory passes lists the ledger, list --pass shows what one pass wr
   assert.match(undone.output.stdout, /Forgot 1 entry pass p1 wrote/);
   const live = (await store.list('ava')).entries.map((entry) => entry.id);
   assert.deepEqual(live, [old.id], 'what the pass replaced is live again');
+  const again = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'p1'], streams: again.streams, env }), 0);
+  assert.match(again.output.stdout, /p1 has no live entries left for ava; nothing was forgotten/);
   const afterUndo = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'p1'], streams: afterUndo.streams, env }), 0);
   assert.match(afterUndo.output.stdout, new RegExp(`${merged.id}.*\\[forgotten `), 'list --pass still shows it, forgotten');
