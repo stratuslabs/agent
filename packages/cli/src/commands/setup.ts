@@ -3045,9 +3045,12 @@ export const runSetup = async (
           ? `${saved}. ${kinds.map((kind) => channelReloadLine(answered, kind)).join(' ')}`
           : `${saved} — run \`${serveCommand()}\` to bring them online.`);
         if (answered === undefined) {
-          for (const edit of state.pluginChannelEdits) {
-            if (edit.secrets !== undefined) {
-              awaitingServe.add(edit.kind);
+          // From what the save leaves bound, not the edits: a store then a
+          // remove of the same binding leaves nothing to bring online.
+          const bound = await boundPluginChannelKinds();
+          for (const kind of kinds) {
+            if (bound.includes(kind)) {
+              awaitingServe.add(kind);
             }
           }
         }

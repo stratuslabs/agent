@@ -5019,6 +5019,50 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
   });
 });
 
+test('setup ends with the serve line for plugin channel secrets it leaves stored, not ones it stored and removed', async () => {
+  // No service manager, so nothing will start stratusd. The fixture plugin
+  // is enabled with no agent bound by its config, so only the secrets this
+  // run leaves behind bind anything.
+  const finish = async (input: string[]) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(
+      path.join(home, '.stratus', 'config.json'),
+      `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': {} } })}\n`,
+    );
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        servicePlatform: 'linux',
+        serviceSystemdBooted: false,
+        serviceRunner: stubServiceRunner,
+        setupInput: Readable.from(input.map((line) => `${line}\n`)),
+      },
+    });
+    assert.equal(exitCode, 0, output.stderr);
+    return output.stdout;
+  };
+
+  // Channels → fixture → Stratus → Store secrets → "token" → value → Back → Back → Save & finish
+  assert.match(
+    await finish(['5', '2', '1', '1', 'token', 'fixture-token-1', '3', '3', '9']),
+    /^ {2}stratus dashboard\n\nYour channels answer only while stratusd runs — start it with `stratus serve`\.$/m,
+  );
+  // … then Stratus again → Remove the stored secrets, before saving: the
+  // save ends with nothing bound, so there is nothing to bring online.
+  assert.doesNotMatch(
+    await finish(['5', '2', '1', '1', 'token', 'fixture-token-1', '1', '2', '3', '3', '9']),
+    /only while stratusd runs/,
+  );
+});
+
 test('setup counts an agent bound by any plugin carrying the channel kind, not only the first', async () => {
   // Channels key on agent and kind, so two plugins may carry one kind for
   // different agents. The twin binds Blair; listing only the first plugin's
