@@ -65,6 +65,7 @@ import {
   readServiceStatus,
   servicePlatform,
   serviceUnitPath,
+  SYSTEMD_NOT_RUNNING,
   uninstallService,
 } from '../service.ts';
 import { type ApprovalReach, classifyApprovalReach, unattendedReachParts } from '../approvals.ts';
@@ -1343,8 +1344,11 @@ export const runSetup = async (
   };
 
   const serviceSummary = (): string => {
-    if (!servicePlatform(serviceEnvFor(env))) {
-      return `not available on ${env.processEnv?.OSTYPE ?? process.platform} — run \`stratus serve\` yourself`;
+    const serviceEnv = serviceEnvFor(env);
+    if (!servicePlatform(serviceEnv)) {
+      return (serviceEnv.platform ?? process.platform) === 'linux'
+        ? `not available (${SYSTEMD_NOT_RUNNING}) — run \`stratus serve\` yourself`
+        : `not available on ${env.processEnv?.OSTYPE ?? process.platform} — run \`stratus serve\` yourself`;
     }
     if (!state.service.install) {
       return 'off — start stratusd yourself with `stratus serve`';
@@ -1360,9 +1364,12 @@ export const runSetup = async (
    * every Slack app configured above is silent until stratusd runs.
    */
   const chooseService = async (): Promise<void> => {
-    if (!servicePlatform(serviceEnvFor(env))) {
+    const serviceEnv = serviceEnvFor(env);
+    if (!servicePlatform(serviceEnv)) {
       writeLine(streams.stdout);
-      writeLine(streams.stdout, `Stratus has no service integration for ${process.platform} yet — run \`stratus serve\` yourself, or supervise it however you prefer.`);
+      writeLine(streams.stdout, (serviceEnv.platform ?? process.platform) === 'linux'
+        ? `Always on runs stratusd as a systemd user service, and ${SYSTEMD_NOT_RUNNING} — run \`stratus serve\` yourself, or supervise it however you prefer.`
+        : `Stratus has no service integration for ${process.platform} yet — run \`stratus serve\` yourself, or supervise it however you prefer.`);
       await prompter.ask('Press Enter to return to the menu… ');
       return;
     }
@@ -1773,9 +1780,15 @@ export const runSetup = async (
           : withoutList === 0
             ? `${has} \`tools: ["*"]\`, which means every registered tool.`
             : `${permissive.length === 1 ? 'is' : 'are'} allowed every registered tool.`}`);
+        // The agents are the subject, so no verb has to agree with the
+        // tool list: "web.fetch are callable" and "fs.read, … is callable"
+        // were both printed when the verb followed the agent count. The
+        // list goes last because one entry ends in its own descriptor
+        // (plugin-mcp's "…, discovered at connect").
+        const who = permissive.length === 1 ? 'that agent' : 'those agents';
         writeLine(streams.stdout, uncheckedReason(name) !== undefined
-          ? `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} what ${permissive.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
-          : `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+          ? `So at the next daemon start, ${who} would gain ${grants ?? 'what it contributes'} — subject to the caveat above, which setup did not check.`
+          : `So the next time the daemon starts, ${who} can call ${grants ?? 'what it contributes'}.`);
         writeLine(streams.stdout, withoutList > 0
           ? 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.'
           : 'Narrow that list to say which. `stratus plugins` shows who can call what.');
@@ -2557,6 +2570,25 @@ export const runSetup = async (
   };
 
   /**
+   * The plugin channels some agent is bound to, by stored secrets or by its
+   * plugin's config block, as the channel menu below counts a binding.
+   */
+  const boundPluginChannelKinds = async (): Promise<string[]> => {
+    const bound: string[] = [];
+    for (const { kind, plugins } of await pluginChannelKinds()) {
+      state.pluginChannelSecrets[kind] ??= await loadChannelTransportSecrets(env, kind);
+      const inConfig = plugins.some((plugin) => {
+        const configured = state.plugins?.[plugin]?.agents;
+        return typeof configured === 'object' && configured !== null && !Array.isArray(configured) && Object.keys(configured).length > 0;
+      });
+      if (inConfig || Object.keys(state.pluginChannelSecrets[kind]).length > 0) {
+        bound.push(kind);
+      }
+    }
+    return bound;
+  };
+
+  /**
    * Slack alone, as it always was, until a plugin declares a channel: then
    * the row asks which channel first. A setup with no channel plugin sees
    * exactly the screens it saw before there could be one.
@@ -2906,6 +2938,13 @@ export const runSetup = async (
     // it for me" starts a daemon at login the user asked not to have, which
     // is no more a successful setup than one that will not come up at all.
     let serviceStepFailed = false;
+    // Channels whose secrets this save stored with no running daemon to
+    // pick them up, and whether the service step below leaves one running.
+    // Together they decide the finish screen's last line: the save line
+    // says "run `stratus serve`" too, but optional-package installs scroll
+    // it away, and the closing list is what a first run reads last.
+    const awaitingServe = new Set<string>();
+    let serviceRunning = false;
     // Typed as the file rather than as a bag of scalars: the carried blocks
     // below are objects, and a `Record<string, string | boolean>` was what
     // made dropping them the path of least resistance.
@@ -3042,6 +3081,9 @@ export const runSetup = async (
         writeLine(streams.stdout, answered !== undefined
           ? `${saved}. ${channelReloadLine(answered, 'slack')}`
           : connected > 0 ? `${saved} — run \`${serveCommand()}\` to bring them online.` : `${saved}.`);
+        if (answered === undefined && connected > 0) {
+          awaitingServe.add('slack');
+        }
       }
       if (state.pluginChannelEdits.length > 0) {
         const saved = `Saved your channel secrets to ${credentialsPath(env)}`;
@@ -3049,6 +3091,16 @@ export const runSetup = async (
         writeLine(streams.stdout, answered !== undefined
           ? `${saved}. ${kinds.map((kind) => channelReloadLine(answered, kind)).join(' ')}`
           : `${saved} — run \`${serveCommand()}\` to bring them online.`);
+        if (answered === undefined) {
+          // From what the save leaves bound, not the edits: a store then a
+          // remove of the same binding leaves nothing to bring online.
+          const bound = await boundPluginChannelKinds();
+          for (const kind of kinds) {
+            if (bound.includes(kind)) {
+              awaitingServe.add(kind);
+            }
+          }
+        }
       }
       if (reload !== undefined && 'warning' in reload) {
         writeLine(streams.stderr, `Warning: ${reload.warning}`);
@@ -3099,6 +3151,15 @@ export const runSetup = async (
         }
         if (!removed.ok) {
           serviceStepFailed = true;
+        } else {
+          // That was the daemon answering every stored channel, edited in
+          // this run or not, so each one is silent from here on.
+          if (Object.keys(state.channels.slack ?? {}).length > 0) {
+            awaitingServe.add('slack');
+          }
+          for (const kind of await boundPluginChannelKinds()) {
+            awaitingServe.add(kind);
+          }
         }
       }
     } else if (state.service.install && servicePlatform(serviceEnvFor(env))) {
@@ -3131,6 +3192,8 @@ export const runSetup = async (
       } else if (!running) {
         writeLine(streams.stderr, 'Setup is saved either way. Check `stratus service status` once you have looked at the logs.');
         serviceStepFailed = true;
+      } else {
+        serviceRunning = true;
       }
     }
     writeLine(streams.stdout);
@@ -3221,6 +3284,10 @@ export const runSetup = async (
     writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag}${shadowConfigFlag} "say hello"`);
     // Whether or not its packages are here: the command offers them itself.
     writeLine(streams.stdout, '  stratus dashboard');
+    if (awaitingServe.size > 0 && !serviceRunning) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `${awaitingServe.size === 1 && awaitingServe.has('slack') ? 'Slack answers' : 'Your channels answer'} only while stratusd runs — start it with \`${serveCommand()}\`.`);
+    }
     return !serviceStepFailed && !providerInstallFailed;
   };
 

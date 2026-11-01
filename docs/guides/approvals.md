@@ -77,6 +77,18 @@ read external content; see below), `risk` (a `dangerous` tool, which nothing
 can grant), `approver` (a person said no) or `cancelled` (the turn stopped
 while it waited).
 
+The agent is told the same sentence as the call's error, so it can pick a
+way that doesn't need the approval, or tell you what it would need,
+instead of trying the same call again. The sentence names the command's
+base and subcommand, a destination or a site, never the call's arguments.
+
+Every decision, allowed or refused, also goes out as a `permission.decided`
+event: the dashboard shows it beside the call in a conversation's live view
+(`allowed · scope`, `refused · grant`, with a refusal's reason under it),
+and the structured log keeps one line per decision with the tool, whether
+it ran and the check, without the reason. The dashboard shows decisions
+only while the turn runs; for an earlier conversation, read the log.
+
 That is the honest default (`headless`) behind a service manager. If
 somebody *is* reachable, `--approvals remote` asks them instead — see
 below. What somebody has already answered **Always allow** to still runs
@@ -91,7 +103,9 @@ built-in tools (`demo.echo`, `memory.remember`, `memory.recall`,
 `memory.forget`, `agent.delegate`, `schedule.list`, `schedule.cancel`) are
 `safe`; the built-in exceptions are `schedule.every`, `schedule.at`,
 `schedule.on` and `message.send`, which are `gated` because they act past
-the end of the turn — see [Schedules](./schedules.md). Anything you install is where this
+the end of the turn — see [Schedules](./schedules.md). `agent.delegate` is
+`gated` too once the conversation has read external content; see
+[After an agent reads the web](#after-an-agent-reads-the-web). Anything you install is where this
 starts to bite, which is what [Tools](./tools.md) is about.
 
 Three tools are the exception to the whole paragraph, because their risk is
@@ -134,7 +148,8 @@ that decided to call a tool, so a policy that gated on spend would have to
 gate the conversation itself. Delegation stays `safe` for the same reason:
 it hands work to a teammate inside the fleet, that teammate's own tool
 calls face this policy again under their allowlist, and the chain is depth
-bounded.
+bounded. That holds until the conversation reads external content, when
+the choice to hand work over may be the page's.
 
 ## Asking a human: remote approval
 
@@ -744,6 +759,17 @@ stdin filters like `grep fix`),
 and a schedule's pre-authorized destination — a schedule that reads the web
 and reports to the channel you approved it for is the job it was approved
 to do, and the page can only change the words it sends there.
+
+One `safe` tool changes with the label itself, whatever `externalContent`
+says: `agent.delegate`. Once a conversation has read external content, a
+delegation is judged as a `gated` call, so your posture, your grants and
+this gate decide it exactly as they would `message.send`. A delegate runs
+under its own tools, credentials and memory, which is the move an
+instruction on a page would want. Under `headless` with `guarded`, it is
+refused; with `open`, it runs unless `externalContent` is `gate`. The
+teammate's own conversation starts at the same label, so the rule holds
+down a chain. A conversation that hasn't read anything from outside
+delegates without asking, as before.
 
 Three limits to know before relying on it:
 

@@ -49,6 +49,7 @@ import {
   readServiceCommand,
   readServiceStatus,
   serviceUnitPath,
+  servicePlatform,
   startService,
   stopService,
   uninstallService,
@@ -72,6 +73,11 @@ import {
 } from '../src/index.ts';
 import {
   agentMemoryFilePath,
+  agentMemoryPassesFileIn,
+  agentMemoryShadowFileIn,
+  createHomeMemoryStore,
+  createMemoryPassLedger,
+  createMemoryShadowFile,
   fleetDbPath,
   loadChannelCredentials,
   loadChannelTransportSecrets,
@@ -82,6 +88,7 @@ import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
 import { SESSION_TRUST_METADATA_KEY } from '@stratusagent/core';
 import type { Session, Tool } from '@stratusagent/core';
 import { BUNDLED_PLUGIN_INDEX } from '../src/plugin-index.ts';
+import { memoryCommandWritesState } from '../src/parse.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 // Isolated HOME so tests never read or write the real ~/.stratus.
@@ -5062,6 +5069,50 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
   });
 });
 
+test('setup ends with the serve line for plugin channel secrets it leaves stored, not ones it stored and removed', async () => {
+  // No service manager, so nothing will start stratusd. The fixture plugin
+  // is enabled with no agent bound by its config, so only the secrets this
+  // run leaves behind bind anything.
+  const finish = async (input: string[]) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(
+      path.join(home, '.stratus', 'config.json'),
+      `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': {} } })}\n`,
+    );
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        servicePlatform: 'linux',
+        serviceSystemdBooted: false,
+        serviceRunner: stubServiceRunner,
+        setupInput: Readable.from(input.map((line) => `${line}\n`)),
+      },
+    });
+    assert.equal(exitCode, 0, output.stderr);
+    return output.stdout;
+  };
+
+  // Channels → fixture → Stratus → Store secrets → "token" → value → Back → Back → Save & finish
+  assert.match(
+    await finish(['5', '2', '1', '1', 'token', 'fixture-token-1', '3', '3', '9']),
+    /^ {2}stratus dashboard\n\nYour channels answer only while stratusd runs — start it with `stratus serve`\.$/m,
+  );
+  // … then Stratus again → Remove the stored secrets, before saving: the
+  // save ends with nothing bound, so there is nothing to bring online.
+  assert.doesNotMatch(
+    await finish(['5', '2', '1', '1', 'token', 'fixture-token-1', '1', '2', '3', '3', '9']),
+    /only while stratusd runs/,
+  );
+});
+
 test('setup counts an agent bound by any plugin carrying the channel kind, not only the first', async () => {
   // Channels key on agent and kind, so two plugins may carry one kind for
   // different agents. The twin binds Blair; listing only the first plugin's
@@ -5228,6 +5279,78 @@ test('setup suggests serve with the same --config it was run with', async () => 
   // A bare `stratus serve` would read a different config — and therefore a
   // different roster — so the stored Slack app would be skipped.
   assert.match(output.stdout, /run `stratus serve --config \.\/custom\.json` to bring them online/);
+  // Always on stayed on and the stub service reports running, so the
+  // finish screen has nothing to add about starting stratusd.
+  assert.doesNotMatch(output.stdout, /answers only while stratusd runs/);
+});
+
+test('setup ends by saying how to bring Slack online when nothing will run stratusd', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → tokens → no member ID → Back → Always on → "Do not run it for me" → Save.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '7\n', '3\n', '9\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The save line says it too, but optional-package installs scroll it
+  // away, and the closing list is what a first run reads last. Same
+  // --config as setup, for the same reason as the save line.
+  assert.match(
+    output.stdout,
+    /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve --config \.\/custom\.json`\.$/m,
+  );
+});
+
+test('setup on Linux without systemd ends by saying how to bring Slack online', async () => {
+  // The fresh-container case: Always on is left at its default, but there
+  // is no service manager to run it, so nothing will start stratusd.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceSystemdBooted: false,
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → tokens → no member ID → Back → Save.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve`\.$/m);
 });
 
 test('setup reloads a running daemon once the channel secrets are written, and says whether Slack picked them up', async () => {
@@ -7356,6 +7479,62 @@ test('the systemd unit restarts on failure and enables at login', async () => {
   ]);
 });
 
+test('Linux without systemd running has no service manager: nothing is written or run', async () => {
+  // A simulated Linux has systemd unless the test says otherwise.
+  assert.equal(servicePlatform({ platform: 'linux' }), 'systemd');
+  assert.equal(servicePlatform({ platform: 'linux', systemdBooted: true }), 'systemd');
+  assert.equal(servicePlatform({ platform: 'linux', systemdBooted: false }), undefined);
+
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const result = await installService({
+    platform: 'linux',
+    systemdBooted: false,
+    homeDir: home,
+    run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.messages.join('\n'), /systemd isn't running on this machine/);
+  assert.match(result.messages.join('\n'), /stratus serve/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(stat(path.join(home, '.config', 'systemd', 'user', 'stratusd.service')));
+});
+
+test('setup on Linux without systemd saves cleanly and leaves starting stratusd to the user', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceSystemdBooted: false,
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+      // Providers > Demo, then Save & finish with Always on left at its default.
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.deepEqual(calls, []);
+  await assert.rejects(stat(path.join(home, '.config', 'systemd', 'user', 'stratusd.service')));
+  assert.match(output.stdout, /Always on\s+not available \(systemd isn't running on this machine\)/);
+  assert.doesNotMatch(output.stderr, /systemctl|failed/);
+
+  const status = createStreams();
+  assert.equal(await runCli({
+    argv: ['service', 'status'],
+    streams: status.streams,
+    env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceSystemdBooted: false, serviceRunner: stubServiceRunner },
+  }), 1);
+  assert.match(status.output.stdout, /systemd isn't running on this machine/);
+});
+
 test('a failing service manager is reported, not swallowed', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const { streams, output } = createStreams();
@@ -7538,7 +7717,9 @@ test('setup enables a plugin and writes the setting it is useless without', asyn
   // has to say so: this is the commonest configuration there is, and
   // claiming "no agent can call it yet" would understate what just happened.
   assert.match(output.stdout, /Stratus \(stratus\) has `tools: \["\*"\]`, which means every registered tool/);
-  assert.match(output.stdout, /callable by that agent the next time the daemon starts/);
+  // One agent, five tools: the verb follows neither count, because the
+  // sentence names the agent as the one that calls.
+  assert.match(output.stdout, /So the next time the daemon starts, that agent can call fs\.read, fs\.list, fs\.search, fs\.write, fs\.move\./);
   assert.doesNotMatch(output.stdout, /No agent can call it yet/);
 });
 
@@ -8438,7 +8619,8 @@ test('setup says what it did not check when enabling a plugin it could not have 
   // below it used to promise the tools were callable at the next daemon
   // start regardless, leaving two sentences that contradict each other.
   assert.match(output.stdout, /subject to the caveat above, which setup did not check/);
-  assert.doesNotMatch(output.stdout, /callable by that agent the next time the daemon starts/);
+  assert.match(output.stdout, /So at the next daemon start, that agent would gain mcp\.<server>\.<tool>, discovered at connect — subject to the caveat above/);
+  assert.doesNotMatch(output.stdout, /the next time the daemon starts, that agent can call/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.equal(config.plugins['@stratusagent/plugin-mcp'].enabled, true);
 });
@@ -9761,7 +9943,7 @@ test('opting out in setup removes a service an earlier run installed', async () 
   assert.ok(await readFile(unitPath, 'utf8').catch(() => undefined), 'installed to begin with');
 
   const calls: string[] = [];
-  const { streams } = createStreams();
+  const { streams, output } = createStreams();
   await runCli({
     argv: ['setup'],
     streams,
@@ -9780,6 +9962,77 @@ test('opting out in setup removes a service an earlier run installed', async () 
   // the menu said "off" — still burning usage and still answering in Slack.
   assert.ok(calls.some((call) => /disable --now/.test(call)), calls.join(', '));
   assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+  // No channel is stored, so stopping stratusd leaves nothing silent.
+  assert.doesNotMatch(output.stdout, /only while stratusd runs/);
+});
+
+test('opting out in setup with Slack stored ends by saying how to bring it back online', async () => {
+  // A rerun: Slack was connected and answered through the service an
+  // earlier run installed. This run edits no channel, so the save never
+  // mentions Slack, but turning Always on off stops the daemon that was
+  // answering, and the finish screen has to say so.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: async () => ({ code: 0, stdout: '', stderr: '' }),
+      // Always on → "Do not run it for me" → Save & finish.
+      setupInput: Readable.from(['7\n', '3\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /stratusd is stopped and will not start at login/);
+  assert.match(output.stdout, /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve`\.$/m);
+});
+
+test('opting out in setup with a plugin channel bound ends by saying how to bring it back online', async () => {
+  // Bound by its plugin's config alone, as a channel that needs no secret
+  // is, so nothing under channels.* in the credentials says it exists.
+  const optOut = async (agents: Record<string, unknown> | undefined) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(
+      path.join(home, '.stratus', 'config.json'),
+      `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': agents === undefined ? {} : { agents } } })}\n`,
+    );
+    await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        servicePlatform: 'linux',
+        serviceRunner: async () => ({ code: 0, stdout: '', stderr: '' }),
+        // Always on → "Do not run it for me" → Save & finish.
+        setupInput: Readable.from(['7\n', '3\n', '9\n']),
+      },
+    });
+    assert.equal(exitCode, 0, output.stderr);
+    assert.match(output.stdout, /stratusd is stopped and will not start at login/);
+    return output.stdout;
+  };
+
+  assert.match(await optOut({ ava: {} }), /^ {2}stratus dashboard\n\nYour channels answer only while stratusd runs — start it with `stratus serve`\.$/m);
+  // Enabled with no agent bound: nothing was answering there.
+  assert.doesNotMatch(await optOut(undefined), /only while stratusd runs/);
 });
 
 test('starting a LaunchAgent works after it has been booted out', async () => {
@@ -13550,6 +13803,21 @@ test('parseCommand reads the memory and session commands', () => {
   assert.throws(() => parseCommand(['memory', 'pin', 'ava']), /at least one entry id/);
   assert.throws(() => parseCommand(['memory', 'import', 'ava']), /--file/);
   assert.throws(() => parseCommand(['memory', 'compact', 'ava']), /Unknown memory subcommand/);
+  // Spec 962's three: the ledger, what one pass wrote, and taking it back.
+  assert.deepEqual(parseCommand(['memory', 'passes', 'ava', '--limit', '5', '--format', 'json']), {
+    command: 'memory', action: 'passes', agentId: 'ava', ids: [], allUnknown: false, limit: 5, preserveTrust: false, format: 'json',
+  });
+  assert.deepEqual(parseCommand(['memory', 'list', 'ava', '--pass', 'p1']), {
+    command: 'memory', action: 'list', agentId: 'ava', ids: [], allUnknown: false, pass: 'p1', preserveTrust: false, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'undo-pass', 'ava', 'p1']), {
+    command: 'memory', action: 'undo-pass', agentId: 'ava', ids: [], allUnknown: false, pass: 'p1', preserveTrust: false, format: 'text',
+  });
+  assert.throws(() => parseCommand(['memory', 'undo-pass', 'ava']), /pass id/);
+  assert.throws(() => parseCommand(['memory', 'undo-pass', 'ava', 'p1', 'p2']), /one pass/);
+  assert.throws(() => parseCommand(['memory', 'audit', 'ava', '--pass', 'p1']), /Unknown option: --pass/);
+  assert.equal(memoryCommandWritesState('passes'), false);
+  assert.equal(memoryCommandWritesState('undo-pass'), true);
 
   assert.deepEqual(parseCommand(['session', 'rollover', 'slack:ava:T1:D1']), {
     command: 'session', action: 'rollover', sessionId: 'slack:ava:T1:D1',
@@ -13559,6 +13827,81 @@ test('parseCommand reads the memory and session commands', () => {
   });
   assert.throws(() => parseCommand(['session', 'rollover']), /session id/);
   assert.throws(() => parseCommand(['session', 'archive', 's-1']), /Unknown session subcommand/);
+});
+
+test('stratus memory passes lists the ledger, list --pass shows what one pass wrote, and undo-pass takes it back', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-passes-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const stateDir = path.join(home, '.stratus');
+  const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(stateDir, 'ava'));
+  await ledger.append({ type: 'start', at: '2026-11-01T01:00:00.000Z', run: 'r1', mode: 'write' });
+  await ledger.append({
+    type: 'claim', at: '2026-11-01T01:10:00.000Z', run: 'r1', passId: 'p1', kind: 'save', mode: 'write', model: 'm',
+    sessionId: 'slack:ava:T1:C1', slice: { from: 'm1', to: 'm4', count: 4, cut: { messageId: 'm4', bytesOmitted: 900 } },
+  });
+  await ledger.append({ type: 'end', at: '2026-11-01T01:11:00.000Z', run: 'r1', passId: 'p1', status: 'done', saved: 1, superseded: 1, released: false });
+  // A hand-edited session id with a newline: escaped, never a forged line.
+  await ledger.append({
+    type: 'claim', at: '2026-11-01T01:20:00.000Z', run: 'r1', passId: 'p2', kind: 'save', mode: 'shadow', model: 'm',
+    sessionId: 's2\nforged  done', slice: { from: 'm9', to: 'm9', count: 1 },
+  });
+  await ledger.append({ type: 'end', at: '2026-11-01T01:21:00.000Z', run: 'r1', passId: 'p2', status: 'failed', reason: 'model', saved: 0, superseded: 0, released: true });
+  const store = createHomeMemoryStore(env);
+  const old = await store.append('ava', 'Ava prefers short replies.');
+  const merged = await store.append('ava', 'Ava prefers short replies, answer first.', {
+    supersedes: old.id, metadata: { memoryPass: { id: 'p1', kind: 'save' } },
+  });
+  const shadow = createMemoryShadowFile(agentMemoryShadowFileIn(stateDir, 'ava'));
+  await shadow.append({
+    id: 'shadow-1', agentId: 'ava', createdAt: '2026-11-01T01:20:30.000Z', content: 'Would have saved this.', trust: 'agent',
+    metadata: { memoryPass: { id: 'p2', kind: 'save' } },
+  });
+
+  const passes = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'ava'], streams: passes.streams, env }), 0);
+  const lines = passes.output.stdout.split('\n');
+  assert.match(lines[0]!, /^p2 {2}save shadow {2}failed \(model\) {2}saved 0, superseded 0 {2}2026-11-01T01:20:00\.000Z$/, 'newest first');
+  assert.match(passes.output.stdout, /session s2\\nforged {2}done: 1 message, m9/);
+  assert.match(passes.output.stdout, /^p1 {2}save write {2}done {2}saved 1, superseded 1/m);
+  assert.match(passes.output.stdout, /session slack:ava:T1:C1: 4 messages, m1 to m4; m4 was cut to fit, 900 bytes left out/);
+  const limited = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'ava', '--limit', '1', '--format', 'json'], streams: limited.streams, env }), 0);
+  const parsed = JSON.parse(limited.output.stdout) as { total: number; passes: Array<{ passId: string }> };
+  assert.equal(parsed.total, 2);
+  assert.deepEqual(parsed.passes.map((pass) => pass.passId), ['p2']);
+  const none = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'bea'], streams: none.streams, env }), 0);
+  assert.match(none.output.stdout, /bea has no memory passes/);
+
+  const wrote = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'p1'], streams: wrote.streams, env }), 0);
+  assert.match(wrote.output.stdout, /Ava prefers short replies, answer first\./);
+  assert.doesNotMatch(wrote.output.stdout, /Ava prefers short replies\.\n/, 'only what the pass wrote');
+  const wouldHave = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'p2'], streams: wouldHave.streams, env }), 0);
+  assert.match(wouldHave.output.stdout, /shadow mode/);
+  assert.match(wouldHave.output.stdout, /Would have saved this\./);
+  const unknownPass = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'nope'], streams: unknownPass.streams, env }), 1);
+  assert.match(unknownPass.output.stderr, /no pass nope/);
+
+  const undone = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'p1'], streams: undone.streams, env }), 0);
+  assert.match(undone.output.stdout, /Forgot 1 entry pass p1 wrote/);
+  const live = (await store.list('ava')).entries.map((entry) => entry.id);
+  assert.deepEqual(live, [old.id], 'what the pass replaced is live again');
+  const again = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'p1'], streams: again.streams, env }), 0);
+  assert.match(again.output.stdout, /p1 has no live entries left for ava; nothing was forgotten/);
+  const afterUndo = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'p1'], streams: afterUndo.streams, env }), 0);
+  assert.match(afterUndo.output.stdout, new RegExp(`${merged.id}.*\\[forgotten `), 'list --pass still shows it, forgotten');
+  const shadowUndo = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'p2'], streams: shadowUndo.streams, env }), 0);
+  assert.match(shadowUndo.output.stdout, /shadow mode, so it wrote nothing to memory/);
+  const missingUndo = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'nope'], streams: missingUndo.streams, env }), 1);
+  assert.match(missingUndo.output.stderr, /no pass nope/);
 });
 
 test('stratus memory list shows each entry’s label, and reassert moves the unlabelled ones as an operator', async () => {
@@ -13790,12 +14133,29 @@ test('stratus memory refuses when the fleet keeps its memories in a contributed 
 
   // Answering from the JSONL would report a store the agent does not use,
   // and pinning into it would write records nothing reads.
-  for (const argv of [['memory', 'list', 'ava'], ['memory', 'pin', 'ava', 'ava:memory:1'], ['memory', 'export', 'ava']]) {
+  for (const argv of [
+    ['memory', 'list', 'ava'],
+    ['memory', 'pin', 'ava', 'ava:memory:1'],
+    ['memory', 'export', 'ava'],
+    ['memory', 'list', 'ava', '--pass', 'p1'],
+    ['memory', 'undo-pass', 'ava', 'p1'],
+  ]) {
     const streams = createStreams();
     assert.equal(await runCli({ argv, streams: streams.streams, env }), 1, argv.join(' '));
     assert.match(streams.output.stderr, /selects memoryStore sqlite/);
     assert.doesNotMatch(streams.output.stdout, /Likes jazz/);
   }
+  // The pass ledger is the daemon's own record beside the agent's other
+  // state, whichever store holds the facts, so listing it still answers.
+  const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(path.join(home, '.stratus'), 'ava'));
+  await ledger.append({ type: 'start', at: '2026-11-01T00:00:00.000Z', run: 'r1', mode: 'write' });
+  await ledger.append({
+    type: 'claim', at: '2026-11-01T00:01:00.000Z', run: 'r1', passId: 'p1', kind: 'save', mode: 'write', model: 'm', sessionId: 's1', slice: { from: 'm1', to: 'm1', count: 1 },
+  });
+  await ledger.append({ type: 'end', at: '2026-11-01T00:02:00.000Z', run: 'r1', passId: 'p1', status: 'done', saved: 1, superseded: 0, released: false });
+  const passes = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'ava'], streams: passes.streams, env }), 0, passes.output.stderr);
+  assert.match(passes.output.stdout, /^p1 {2}save write {2}done {2}saved 1, superseded 0/m);
 
   // A project-local config cannot make that decision — where an agent keeps
   // its memories is not a call a cloned repository gets to make — so it is
@@ -17218,4 +17578,41 @@ test('the startup lines count external-content gated calls among those that ask,
   const line = describeRemoteMode(mixed, ['ava', 'bea'], ['ava', 'bea']);
   assert.match(line, /except bea's, which run without asking, except in bea's conversations that read external content/);
   assert.doesNotMatch(line, /only dangerous ones are parked/);
+});
+
+test('stratus memory list and audit name every fact a merge replaced, and the event trace carries the list', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-merge-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const line = (entry: Record<string, unknown>): string => JSON.stringify(entry);
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), [
+    line({ id: 'ava:memory:1', agentId: 'ava', content: 'The deploy runs on Postgres.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'agent' }),
+    line({ id: 'ava:memory:2', agentId: 'ava', content: 'Deploys go to Postgres.', createdAt: '2026-01-02T00:00:00.000Z', trust: 'agent' }),
+    line({ id: 'ava:memory:3', agentId: 'ava', content: 'The deploy database is Postgres.', createdAt: '2026-01-03T00:00:00.000Z', trust: 'agent', supersedes: ['ava:memory:1', 'ava:memory:2'] }),
+    '',
+  ].join('\n'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  assert.match(listed.output.stdout, /ava:memory:3 .*\(replaces ava:memory:1, ava:memory:2\)/);
+  assert.doesNotMatch(listed.output.stdout, /Deploys go to Postgres/);
+  const json = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--format', 'json'], streams: json.streams, env }), 0);
+  assert.match(json.output.stdout, /"supersedes": \[\s*"ava:memory:1",\s*"ava:memory:2"\s*\]/);
+
+  const audited = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'audit', 'ava'], streams: audited.streams, env }), 0);
+  assert.equal(audited.output.stdout.match(/replaced by: ava:memory:3/g)?.length, 2);
+
+  const merged = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: {
+      callId: 'call-1',
+      toolName: 'memory.remember',
+      ok: true,
+      output: { remembered: true, id: 'ava:memory:3', supersedes: ['ava:memory:1', 'ava:memory:2'] },
+    },
+  });
+  assert.deepEqual(merged, { tool: 'memory.remember', ok: true, entry: 'ava:memory:3', supersedes: ['ava:memory:1', 'ava:memory:2'] });
 });

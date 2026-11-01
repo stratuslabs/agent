@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   DefaultExecutor,
   EventBus,
   InMemoryAgentMemoryStore,
@@ -137,6 +138,7 @@ test('a tool that declares itself a producer taints the session with no kernel c
   tools.register(pageRead);
   tools.register(echo);
   const runner = new AgentRunner({
+    approvals: new AllowAllApprovalPolicy(),
     provider: scriptedProvider([
       [{ id: 'c1', toolName: 'page.read', input: {} }],
       [{ id: 'c2', toolName: 'echo', input: { text: 'after' } }],
@@ -173,6 +175,7 @@ test('a tool that marks one call through the context sink taints only that call'
   const bus = new EventBus();
   const events = collectEvents(bus);
   const runner = new AgentRunner({
+    approvals: new AllowAllApprovalPolicy(),
     provider: scriptedProvider([[
       { id: 'c1', toolName: 'files.read', input: { path: 'notes.txt' } },
       { id: 'c2', toolName: 'files.read', input: { path: 'downloaded.txt' } },
@@ -201,6 +204,7 @@ test('an executor that returns no label is read as unknown, never as trusted', a
   const bus = new EventBus();
   const events = collectEvents(bus);
   const runner = new AgentRunner({
+    approvals: new AllowAllApprovalPolicy(),
     provider: scriptedProvider([[{ id: 'c1', toolName: 'echo', input: { text: 'hi' } }]]),
     tools,
     bus,
@@ -309,6 +313,7 @@ test('a fresh session is labelled from the first write, and an agent talking to 
   const bus = new EventBus();
   const events = collectEvents(bus);
   const runner = new AgentRunner({
+    approvals: new AllowAllApprovalPolicy(),
     provider: scriptedProvider([[{ id: 'c1', toolName: 'echo', input: { text: 'hi' } }]]),
     tools,
     store,

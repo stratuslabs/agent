@@ -4,6 +4,7 @@ import { getEventListeners } from 'node:events';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   EventBus,
   InMemorySessionStore,
   RunAbortedError,
@@ -79,7 +80,7 @@ test('a tool that ignores the turn\'s abort is left behind after a short grace, 
   const bus = new EventBus();
   bus.subscribe((event) => { events.push(event); });
   const store = new InMemorySessionStore();
-  const runner = new AgentRunner({ provider: toolCallOnce('hang.wait'), tools, store, bus });
+  const runner = new AgentRunner({ provider: toolCallOnce('hang.wait'), tools, store, bus, approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
 
   const unhandled: unknown[] = [];
@@ -149,7 +150,7 @@ test('a tool that stops when asked keeps its own result', async (t) => {
     },
   });
   const store = new InMemorySessionStore();
-  const runner = new AgentRunner({ provider: toolCallOnce('shell.like'), tools, store });
+  const runner = new AgentRunner({ provider: toolCallOnce('shell.like'), tools, store, approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
 
   const controller = new AbortController();
@@ -175,6 +176,7 @@ test('a hosted call (a harness\'s bridged tool) is left behind the same way', as
   const tools = new ToolRegistry();
   tools.register(hung.tool);
   const runner = new AgentRunner({
+    approvals: new AllowAllApprovalPolicy(),
     provider: { name: 'unused', async generate() { return { parts: [{ type: 'text', text: 'unused' }] }; } },
     tools,
   });
@@ -207,6 +209,7 @@ test('a tool that runs without a stop is waited for as long as it takes', async 
   tools.register(hung.tool);
   const store = new InMemorySessionStore();
   const runner = new AgentRunner({
+    approvals: new AllowAllApprovalPolicy(),
     provider: {
       name: 'tool-then-text',
       async generate({ session }) {
@@ -249,7 +252,7 @@ test('an executor whose late answer is a rejection does not take the process dow
       return new Promise<ToolResult>((_resolve, reject) => { failLater = reject; });
     },
   };
-  const runner = new AgentRunner({ provider: toolCallOnce('remote.run'), tools, executor });
+  const runner = new AgentRunner({ provider: toolCallOnce('remote.run'), tools, executor, approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
 
   const unhandled: unknown[] = [];

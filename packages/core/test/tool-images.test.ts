@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   EventBus,
   ToolRegistry,
   createImageCollector,
@@ -41,7 +42,7 @@ const runWith = async (tool: Tool) => {
     events.push(event);
   });
   const seen: Message[] = [];
-  const runner = new AgentRunner({ provider: callingProvider(tool.name, seen), tools, bus });
+  const runner = new AgentRunner({ provider: callingProvider(tool.name, seen), tools, bus, approvals: new AllowAllApprovalPolicy() });
   const session = await runner.run({ sessionId: 's1', agent: AGENT, userMessage: 'look' });
   return { session, seen, events };
 };

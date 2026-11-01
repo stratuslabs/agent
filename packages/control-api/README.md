@@ -109,6 +109,8 @@ log, and an address bar is one that gets noticed when it changes.
 | PUT | `/agents/:id` | Edit a soul, by field (`name`, `instructions`, `tools`, `skills`, `credentials`, `provider`, `model`, `listens` — one of `mentions`, `thread`, `judge`, an empty string clearing it; anything else answers `400 invalid_listens` — `language` — a language tag, an empty string clearing it back to the config's or the default; anything else answers `400 invalid_language`; a field edit that omits it keeps the soul's; a field edit keeps the soul's `effort`, which only a raw edit changes) or as raw markdown |
 | GET | `/agents/:id/grants` | What this agent may do unattended beyond the built-in safe list — its command scopes, commands granted by name (`commands`: `{ command, grantedAt, grantedBy? }`), origins, and standing tool grants, from `~/.stratus/agents/<id>/whitelist.json`. A tool grant the engine would not honour carries `stale` saying why (the tool is now contributed by another package, or nothing loads it). The id is validated but not looked up: a grant can outlive its agent, and this is how it is found. `501 grants_unavailable` from a daemon started without a grant store |
 | POST | `/agents/:id/grants/revoke` | Take one back: exactly one of `{ tool }`, `{ scope }` (the listed `description`, such as `git push`, or a command granted by name, such as `grep`), `{ origin }`, or `{ destination }` (every tool granted on that conversation) → `{ revoked: true }`. Through the daemon's own store, so the next call is judged without it — no restart. `404 grant_not_found` when nothing matched; `400 invalid_grant` for none or several; `409 grants_unreadable` when the agent's whitelist file exists but will not parse, since nothing is written over a grant list nobody can read |
+| GET | `/agents/:id/memory/passes` | The agent's memory passes, newest first, from `~/.stratus/agents/<id>/memory-passes.jsonl`: `passId`, `kind`, `mode`, `model`, `claimedAt`, `sessionId` and `slice` (with `cut` when a message was cut to fit), `status` (`done`, `nothing-new`, `skipped`, `failed`, `interrupted`, or `open` while a pass runs or until the next start settles one a crash cut off), `reason`, `saved`, `superseded`, `endedAt`. Only passes that claimed a slice are recorded. Never any content. The id is validated but not looked up, like grants. What `stratus memory passes` shows |
+| GET | `/agents/:id/memory/passes/:passId` | One pass as `pass`, plus `entries`: what it wrote, from the store this daemon writes to, forgotten ones included (in shadow mode, what it would have written). `404 memory_pass_not_found` when the ledger has no such pass. What `stratus memory list --pass` shows |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul, then reload every channel that can. Answers `{ agents, channels }`, where each channel entry is `{ name, outcome }`: `reloaded`, `failed` (with `reason`), or `still-reloading` after 30 s |
 | POST | `/skills/reload` | Re-read `~/.stratus/skills` and serve it, no restart — the `skills` half of `/catalog/tools` as the response. A skill that will not load answers `422 skills_reload_refused` naming the file, and the previous set keeps serving |
 | GET | `/intake` | Whether the daemon is taking new work: `{ paused: false }`, or `{ paused: true, message?, since, unreadable }`. `unreadable` is true only for the pause the daemon started in because `intake.json` could not be read, and false once a pause or resume has replaced it |
@@ -633,7 +635,18 @@ retry, a compaction, a message boundary — so a client draws nothing for it.
 `session.stopped-early` joined it with the stopped-early marker: the
 message ended in a wrap-up instead of finishing, sent just before its
 `session.completed`, with `reason` and `continuations` and no content. The
-session's `stoppedEarly` says the same until its next message starts.)
+session's `stoppedEarly` says the same until its next message starts.
+`permission.decided` joined it with decisions you can see: why a call was
+allowed or refused, sent just before that call's `tool.called` or
+`tool.denied` with the same `callId`: `toolName`, `risk`, `allowed`,
+`layer` (the check that decided: `risk`, `scope`, `parse`, `autonomy`,
+`grant`, `gate`, `approver`, `cancelled`) and a one-line `reason` with no
+tool input, plus `verdict`, `reviewCode` and `shadow` when a review step
+decided. Only a policy that reports its decisions sends it, which the
+daemon's does. A call judged again because what it may read became less
+trusted during its approval can have more than one; the last stands, and
+it is the runner's own, with layer `trust`, when that happened twice and
+the call was refused.)
 The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own

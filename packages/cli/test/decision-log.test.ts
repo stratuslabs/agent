@@ -24,12 +24,13 @@ test('a headless refusal is logged with the layer that refused it first', async 
   const decisions: PermissionDecision[] = [];
   const policy = createPermissionPolicy({ mode: 'headless', commands: {}, onDecision: (decision) => decisions.push(decision) });
 
-  assert.equal(await policy.approve(context('git push')), false);
+  // The refusal carries the logged reason, which is what the agent is told.
+  assert.deepEqual(await policy.approve(context('git push')), { allowed: false, reason: decisions[0]?.reason ?? 'not logged yet' });
   assert.equal(
     refusalLogLine(decisions[0]!),
     'ava: [scope] shell.run was called outside every approved scope (git) and nobody is available to approve it (session sess-1)',
   );
-  assert.equal(await policy.approve(context('echo "unterminated')), false);
+  assert.equal((await policy.approve(context('echo "unterminated'))) === true, false);
   assert.match(refusalLogLine(decisions[1]!), /^ava: \[parse\] shell\.run cannot run unattended: /);
 });
 

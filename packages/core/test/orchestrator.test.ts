@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   CONTEXT_FLOOR_METADATA_KEY,
   CONTEXT_SUMMARY_REQUEST,
   ContextOverflowError,
@@ -88,7 +89,7 @@ test('agent runner loops provider -> tool -> provider until no tool calls remain
 
   tools.register(echoTool);
 
-  const runner = new AgentRunner({ provider, tools, executor, bus });
+  const runner = new AgentRunner({ provider, tools, executor, bus, approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
 
   const session = await runner.run({
@@ -403,7 +404,7 @@ test('sessions fail when the provider never stops requesting tools', async () =>
     },
   };
 
-  const runner = new AgentRunner({ provider, tools, maxTurns: 3 });
+  const runner = new AgentRunner({ provider, tools, maxTurns: 3, approvals: new AllowAllApprovalPolicy() });
 
   await assert.rejects(
     () => runner.run({
@@ -448,7 +449,7 @@ test('a message that uses every turn wraps up with where it got to instead of fa
     },
   };
 
-  const runner = new AgentRunner({ provider, tools, maxTurns: 3 });
+  const runner = new AgentRunner({ provider, tools, maxTurns: 3, approvals: new AllowAllApprovalPolicy() });
   const session = await runner.run({
     sessionId: 'wrap-up',
     agent: { id: 'ava', name: 'Ava', tools: ['*'] },
@@ -493,7 +494,7 @@ test('with auto-continue on, a message out of budget gets another and works unti
       return { parts: [{ type: 'text', text: 'All seven steps are done.' }] };
     },
   };
-  const runner = new AgentRunner({ provider, tools, maxTurns: 3, autoContinue: true });
+  const runner = new AgentRunner({ provider, tools, maxTurns: 3, autoContinue: true, approvals: new AllowAllApprovalPolicy() });
   const continued: number[] = [];
   runner.bus.subscribe((event) => {
     if (event.type === 'session.continued') {
@@ -549,7 +550,7 @@ test('auto-continue wraps up instead when somebody has written to the session me
     },
   };
   let waiting = false;
-  const runner = new AgentRunner({ provider, tools, maxTurns: 2, autoContinue: true, waitingInput: () => waiting });
+  const runner = new AgentRunner({ provider, tools, maxTurns: 2, autoContinue: true, waitingInput: () => waiting, approvals: new AllowAllApprovalPolicy() });
   runner.bus.subscribe((event) => {
     // A person writes during the second allowance.
     if (event.type === 'session.continued') {
@@ -667,7 +668,7 @@ test('a message that makes the same failing call three times running wraps up an
     },
   };
 
-  const runner = new AgentRunner({ provider, tools });
+  const runner = new AgentRunner({ provider, tools, approvals: new AllowAllApprovalPolicy() });
   const session = await runner.run({
     sessionId: 'stuck-loop',
     agent: { id: 'ava', name: 'Ava', tools: ['*'] },
@@ -710,7 +711,7 @@ test('failures that change between turns are not a loop', async () => {
     },
   };
 
-  const runner = new AgentRunner({ provider, tools });
+  const runner = new AgentRunner({ provider, tools, approvals: new AllowAllApprovalPolicy() });
   const session = await runner.run({
     sessionId: 'searching',
     agent: { id: 'ava', name: 'Ava', tools: ['*'] },
@@ -1006,7 +1007,7 @@ test('aborting a run fails the session with a distinguishable reason', async () 
   };
 
   const store = new InMemorySessionStore();
-  const runner = new AgentRunner({ provider, tools, store });
+  const runner = new AgentRunner({ provider, tools, store, approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
 
   await assert.rejects(
@@ -1157,7 +1158,7 @@ test('hosted tool calls persist their paired messages to the stored session', as
     },
   };
 
-  const runner = new AgentRunner({ provider, tools, store });
+  const runner = new AgentRunner({ provider, tools, store, approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
 
   const session = await store.create({
@@ -1209,7 +1210,7 @@ test('kernel tool activity is saved as it happens, not only at turn end', async 
     },
   };
 
-  const runner = new AgentRunner({ provider, tools, store });
+  const runner = new AgentRunner({ provider, tools, store, approvals: new AllowAllApprovalPolicy() });
   await runner.run({
     sessionId: 'durable-tools-1',
     agent: { id: 'a', name: 'A', tools: ['*'] },
@@ -1368,7 +1369,7 @@ test('every tool call in a response is durable before the first executes', async
     },
   };
 
-  const runner = new AgentRunner({ provider, tools, store });
+  const runner = new AgentRunner({ provider, tools, store, approvals: new AllowAllApprovalPolicy() });
   const session = await runner.run({
     sessionId: 'multi-call-1',
     agent: { id: 'a', name: 'A', tools: ['*'] },

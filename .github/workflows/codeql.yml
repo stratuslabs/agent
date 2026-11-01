@@ -1,0 +1,50 @@
+name: CodeQL
+
+# Static analysis for common vulnerability patterns: injection, path
+# traversal, unsafe deserialization and the like in the TypeScript source,
+# and untrusted input reaching a run step in these workflows. Findings are
+# code scanning alerts in the repository's Security tab, and a pull request
+# that adds one gets an annotation on the changed line.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so updated queries also run over code that hasn't changed.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # To upload the results as code scanning alerts.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Neither language needs a build: CodeQL reads the TypeScript source and
+      # the workflow files as they are, so nothing is installed or run here.
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

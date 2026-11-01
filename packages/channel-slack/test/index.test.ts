@@ -138,6 +138,12 @@ interface FakeWeb extends SlackWebLike {
    * sorts after every real timestamp.
    */
   stamp?: () => string;
+  /**
+   * Thread ids Slack has no message for. A reply naming one is posted at
+   * the top level anyway, as real Slack does: `ok`, with a `message` that
+   * carries no thread_ts.
+   */
+  missingThreads?: Set<string>;
 }
 
 const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
@@ -176,7 +182,8 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
         if (web.postGate) {
           await web.postGate;
         }
-        return { ts, channel: args.channel };
+        const threaded = args.thread_ts !== undefined && !web.missingThreads?.has(args.thread_ts);
+        return { ts, channel: args.channel, message: { ts, ...(threaded ? { thread_ts: args.thread_ts } : {}) } };
       },
       async update(args) {
         web.updates.push(args);
@@ -7012,6 +7019,69 @@ test('resolveOutbound with a thread posts every chunk as a reply under it', asyn
   await connection.post(['a'.repeat(3000), 'b'.repeat(3000)].join('\n'));
   assert.equal(web.posts.length, 3);
   assert.deepEqual(web.posts.slice(1).map((post) => post.thread_ts), [top.ts, top.ts]);
+  assert.deepEqual(web.deletes, []);
+
+  await adapter.stop();
+});
+
+// Card 1019: Slack answers `ok` to a reply naming a thread it has no message
+// for, and posts it at the top level. Seen live: an agent's made-up thread id
+// put "Halfway there." at the top of a channel while the tool said it replied.
+test('resolveOutbound refuses a thread Slack does not have, and takes back the top-level post Slack made instead', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.missingThreads = new Set(['1732968897.606559']);
+  const adapter = await startedAdapterWith(web);
+
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '1732968897.606559' });
+  await assert.rejects(
+    () => connection.post(['a'.repeat(3000), 'b'.repeat(3000)].join('\n')),
+    /C-ENG has no thread 1732968897\.606559, so nothing was posted/,
+  );
+  // The first chunk is the one Slack misplaced; it is taken back, and the
+  // rest never goes out.
+  assert.equal(web.posts.length, 1);
+  assert.deepEqual(web.deletes, [{ channel: 'C-ENG', ts: 'bot-ts-1' }]);
+
+  await adapter.stop();
+});
+
+test('a misplaced post that cannot be taken back is reported as still at the top level', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.missingThreads = new Set(['1732968897.606559']);
+  web.chat.delete = async () => { throw new Error('cant_delete_message'); };
+  const adapter = await startedAdapterWith(web);
+
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '1732968897.606559' });
+  await assert.rejects(
+    () => connection.post('Halfway there.'),
+    (error: Error) => {
+      assert.match(error.message, /C-ENG has no thread 1732968897\.606559/);
+      assert.match(error.message, /top level \(bot-ts-1\)/);
+      assert.match(error.message, /cant_delete_message/);
+      assert.doesNotMatch(error.message, /nothing was posted/);
+      return true;
+    },
+  );
+
+  await adapter.stop();
+});
+
+test('a reply Slack answers without saying where it went is trusted, as before', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  // An older SDK or a Slack-compatible server may leave `message` out.
+  const inner = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    const { message: _placed, ...posted } = await inner(args);
+    return posted;
+  };
+  const adapter = await startedAdapterWith(web);
+
+  const ref = await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '1732968897.606559' })).post('report');
+  assert.equal(ref.ts, 'bot-ts-1');
+  assert.deepEqual(web.deletes, []);
 
   await adapter.stop();
 });
@@ -15596,6 +15666,16 @@ test('an own post Slack refused is not heard', async () => {
   const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '500.0', speaker: { sessionId: 'schedule:abc:1', trust: 'agent' } });
   await assert.rejects(() => connection.post('report'));
   web.chat.postMessage = original;
+  await settle();
+  assert.deepEqual(gateway.observes, []);
+  await adapter.stop();
+});
+
+test('an own post Slack put at the top level for a missing thread is not heard in that thread', async () => {
+  const { adapter, gateway, web } = await ownPostAdapter();
+  web.missingThreads = new Set(['500.0']);
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '500.0', speaker: { sessionId: 'schedule:abc:1', trust: 'agent' } });
+  await assert.rejects(() => connection.post('report'), /has no thread 500\.0/);
   await settle();
   assert.deepEqual(gateway.observes, []);
   await adapter.stop();

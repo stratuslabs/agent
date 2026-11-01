@@ -26,6 +26,10 @@ const session = await gateway.dispatch({
 await gateway.stop(); // drains in-flight turns first
 ```
 
+With no `approvals` option, only `safe` tools run: every other call is refused with an error that names the option. `stratus serve` builds its policy from the `approvals` config ([Approvals](https://github.com/stratuslabs/agent/blob/main/docs/guides/approvals.md)). A host that wants every call to run without asking passes `approvals: new AllowAllApprovalPolicy()` from `@stratusagent/core`.
+
+A policy answers `true` to run a call, and `false` or `{ allowed: false, reason }` to refuse it; only `true` runs. The `reason` becomes the tool error the agent reads, so write it as what would let the call run. A policy may also report why it decided through the context's `decided({ allowed, layer, reason })`, which the runner emits as a `permission.decided` event ahead of the call's `tool.called` or `tool.denied`, built from those fields only, so no tool input reaches the bus.
+
 Run it in the foreground with `stratus serve`. A launchd template for macOS lives in `launchd/com.stratuslabs.stratusd.plist`.
 
 **A host that starts the gateway itself owns the state migration.** `stratus serve` claims the home (`claimHome`) and runs the pending migrations before it ever calls `createGateway`. A host doing its own wiring must do the same on a directory written by a build before the per-agent layout: `start()` refuses one that still holds a shared `sessions.db` or an `<id>.whitelist.json`, rather than opening empty stores over it and starting a second population beside every session, schedule, and grant already there. The message names the fix — claim the home, then `await runStateMigrations(env, { exclusive: true })` from `@stratusagent/state`. The gateway will not do it unasked: the move needs the directory to itself, and only the host knows whether it has it.

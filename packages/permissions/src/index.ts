@@ -4,6 +4,8 @@ import type {
   ApprovalContext,
   ApprovalOutcome,
   ApprovalPolicy,
+  ApprovalRefusal,
+  ApprovalVerdict,
   JsonObject,
   JsonValue,
   Session,
@@ -21,6 +23,35 @@ import { sessionTaintedBy, sessionTrustOf } from '@stratusagent/core';
 export { atLeastAsRisky } from '@stratusagent/core';
 
 import { downloadInsideWorkspace, gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
+import {
+  builtInReviewRule,
+  describeReviewRule,
+  matchReviewRule,
+  readReviewAnswer,
+  ReviewFailure,
+  type ReviewCode,
+  type ReviewOptions,
+} from './review.ts';
+
+export {
+  builtInReviewRule,
+  describeReviewRule,
+  matchReviewRule,
+  parseReviewRule,
+  readReviewAnswer,
+  REVIEW_CODES,
+  ReviewFailure,
+  type BuiltInReviewHit,
+  type BuiltInReviewRuleName,
+  type ReviewAnswer,
+  type ReviewCode,
+  type ReviewedCall,
+  type Reviewer,
+  type ReviewOptions,
+  type ReviewRequest,
+  type ReviewRule,
+  type ReviewSettings,
+} from './review.ts';
 
 export { downloadInsideWorkspace, gitInsideWorkspace, gitPushInsideWorkspace, readsInsideWorkspace } from './workspace.ts';
 import {
@@ -212,6 +243,12 @@ export interface ApprovalRequest {
    */
   parkedAt?: string;
   /**
+   * Why the review posture is asking, in one line: the reviewer's own words
+   * or the rule that asked. A transport shows it beside the call, since it
+   * is what the approver is being asked to second-guess.
+   */
+  reviewNote?: string;
+  /**
    * The turn's abort signal. A transport MUST invalidate its outstanding
    * request when this fires: the answer would otherwise arrive for a turn
    * that no longer exists, and acting on it would run a tool for cancelled
@@ -248,6 +285,10 @@ export type ApprovalRequester = (request: ApprovalRequest) => Promise<ApprovalAn
  * - `gate`: `approvals.externalContent` "gate" set the grants aside.
  * - `approver`: a person answered.
  * - `cancelled`: the turn was cancelled before or during the wait.
+ * - `rule`: under the review posture, an operator rule from
+ *   `approvals.rules` or a built-in review rule.
+ * - `review`: under the review posture, the reviewer, or a review that
+ *   couldn't run.
  *
  * A refusal with nobody to ask names the check that failed to cover the
  * call, not `approver`, because that's the one the operator can change.
@@ -260,7 +301,9 @@ export type DecisionLayer =
   | 'grant'
   | 'gate'
   | 'approver'
-  | 'cancelled';
+  | 'cancelled'
+  | 'rule'
+  | 'review';
 
 /** Why a call was allowed or refused, for logs and events. */
 export interface PermissionDecision {
@@ -270,6 +313,12 @@ export interface PermissionDecision {
   toolName: string;
   sessionId: string;
   agentId: string;
+  /**
+   * The call this decision was about, so a surface can put the decision
+   * beside it. Optional so a decision from an older emitter still
+   * type-checks; this policy always sets it.
+   */
+  callId?: string;
   /**
    * One line, written for a person reading a daemon log at 3am — and
    * deliberately free of the tool's input.
@@ -326,6 +375,12 @@ export interface PermissionDecision {
    * emitter still type-checks; this policy always sets it.
    */
   layer?: DecisionLayer;
+  /** Under the review posture: what the rule or the reviewer answered, when one did. */
+  verdict?: ApprovalVerdict;
+  /** Under the review posture: the reviewer's answer as a fixed code, never its words. */
+  reviewCode?: ReviewCode;
+  /** True for a decision worked out without acting on it (`approvals.review.shadow`). */
+  shadow?: boolean;
 }
 
 export interface PermissionPolicyOptions {
@@ -399,6 +454,15 @@ export interface PermissionPolicyOptions {
    * scope-and-grant path. Omitted, or answering false, nothing changes.
    */
   openFor?: (agentId: string) => boolean;
+  /**
+   * The review posture (`approvals.posture: "review"`): for an agent whose
+   * `settingsFor` answers, a gated call is settled by the operator's
+   * rules, then runs unreviewed if the conversation has read nothing from
+   * outside, then by the built-in rules, then by what the external-content
+   * gate leaves alone, and otherwise by the reviewer. Every ask it makes is
+   * one-shot. Omitted, or answering undefined, nothing changes.
+   */
+  review?: ReviewOptions;
 }
 
 export interface ToolGrantOptions {
@@ -622,6 +686,9 @@ const ALWAYS = new Set(['always', 'a']);
 
 const ABORTED = Symbol('aborted');
 
+/** How long one review may take before it counts as failed (`approvals.review.timeoutMs`). */
+export const DEFAULT_REVIEW_TIMEOUT_MS = 20_000;
+
 /**
  * Waits for `work`, but gives up the moment the turn is cancelled.
  *
@@ -755,6 +822,8 @@ const awaitPrompt = async (
    * create is the same defect as hiding one it will.
    */
   alwaysMeans: string,
+  /** Why the review posture is asking, shown above the question. */
+  note?: string,
 ): Promise<ApprovalOutcome | typeof ABORTED> => {
   const { call, risk, session } = context;
   // The command, when there is one: for a shell call the tool name is the
@@ -777,7 +846,7 @@ const awaitPrompt = async (
       ? `${acting} (${risk}): ${argumentSummary}`
       : `${acting} (${risk})`;
   const pending = ask(
-    `Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${alwaysMeans}) / [N]o: `,
+    `${note === undefined ? '' : `Review: ${note}\n`}Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${alwaysMeans}) / [N]o: `,
   );
   // The answer is never read after this point if the turn ends first,
   // so a late yes cannot execute a tool for work that no longer exists.
@@ -812,6 +881,7 @@ const awaitRemote = async (
   origin: string | undefined,
   oneShot: boolean,
   always: AlwaysMeans | undefined,
+  note?: string,
 ): Promise<ApprovalOutcome | typeof ABORTED> => {
   const pending = request({
     session: context.session,
@@ -822,6 +892,7 @@ const awaitRemote = async (
     ...(oneShot ? { oneShot } : {}),
     ...(always !== undefined ? { always } : {}),
     ...(context.parkedAt ? { parkedAt: context.parkedAt } : {}),
+    ...(note !== undefined ? { reviewNote: note } : {}),
     ...(context.signal ? { signal: context.signal } : {}),
   }).then(
     (outcome): ApprovalOutcome => (typeof outcome === 'string' ? { answer: outcome } : outcome),
@@ -872,8 +943,11 @@ const commandNames = (analysis: CommandAnalysis | undefined): string | undefined
   return analysis.base;
 };
 
+/** What this policy answers: a yes, or a refusal carrying the reason it logged. */
+type Verdict = true | ApprovalRefusal;
+
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
-  const { mode, ask, request, onDecision, commands, destinations, origins, grants, gateExternalContent, openFor } = options;
+  const { mode, ask, request, onDecision, commands, destinations, origins, grants, gateExternalContent, openFor, review } = options;
   if (mode === 'interactive' && !ask) {
     throw new Error('interactive permission mode needs an `ask` function to reach a human.');
   }
@@ -905,6 +979,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
   const rememberForProcess = <T>(tier: Map<string, T[]>, agentId: string, grant: T): void => {
     tier.set(agentId, [...(tier.get(agentId) ?? []), grant]);
   };
+  /**
+   * The review posture's bookkeeping, keyed by the call's context so the
+   * many `report` sites need no new arguments: which contexts are a shadow
+   * review (decisions marked `shadow`, nobody asked), and what a rule or
+   * the reviewer answered for a call that went on to a person.
+   */
+  const shadowContexts = new WeakSet<ApprovalContext>();
+  const reviewNotes = new WeakMap<ApprovalContext, { verdict: ApprovalVerdict; reviewCode?: ReviewCode }>();
 
   /** A site this agent may read without asking: trusted, or approved for `web.fetch`. */
   const readableSite = async (agentId: string, site: string): Promise<boolean> => {
@@ -928,7 +1010,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     origin?: string,
     grant?: ToolGrant,
     destinationGrant?: DestinationGrant,
-  ): boolean => {
+  ): Verdict => {
+    const note = reviewNotes.get(context);
+    const shadow = shadowContexts.has(context);
+    const reviewed = {
+      ...(note === undefined ? {} : { verdict: note.verdict }),
+      ...(note?.reviewCode === undefined ? {} : { reviewCode: note.reviewCode }),
+      ...(shadow ? { shadow: true } : {}),
+    };
     onDecision?.({
       allowed,
       mode,
@@ -936,6 +1025,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       toolName: context.call.toolName,
       sessionId: context.session.id,
       agentId: context.session.agent.id,
+      callId: context.call.id,
       reason,
       ...(command === undefined ? {} : { command }),
       ...(destination === undefined ? {} : { destination }),
@@ -943,24 +1033,241 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       ...(grant === undefined ? {} : { grant }),
       ...(destinationGrant === undefined ? {} : { destinationGrant }),
       layer,
+      ...reviewed,
     });
-    return allowed;
+    // The same three fields the log gets, and nothing else: the runner's
+    // event carries no command, grant or destination record, so what a
+    // dashboard shows is a classification, never the call's input. The
+    // review fields are a verdict and a fixed code, never the reviewer's
+    // words.
+    context.decided?.({ allowed, layer, reason, ...reviewed });
+    // The reason is what the agent is told: it names the check that
+    // refused and what would cover the call, which is what lets the agent
+    // pick another way instead of trying the same call again.
+    return allowed ? true : { allowed: false, reason };
   };
 
-  return {
-    async approve(context: ApprovalContext): Promise<boolean> {
+  /**
+   * A refusal whose words for the agent differ from the log's: the
+   * reviewer's line can echo the call's input, so it goes to the agent
+   * (and, for an ask, the approver) and never into a decision.
+   */
+  const refuse = (context: ApprovalContext, layer: DecisionLayer, reason: string, told: string): Verdict => {
+    report(context, layer, false, reason);
+    return { allowed: false, reason: told };
+  };
+
+  /**
+   * Why the review posture sends a call to a person: the check that asked,
+   * the line the log gets, and the line the agent and the approver get.
+   */
+  interface ReviewAsk {
+    layer: DecisionLayer;
+    /** For the log and the event: no input. */
+    reason: string;
+    /** For the agent, if nobody can be asked. */
+    told: string;
+    /** For the approver, beside the call. */
+    note: string;
+  }
+
+  /**
+   * Puts one call to the reviewer, bounded by `timeoutMs` and the turn's
+   * signal. Never throws: a review that couldn't run is a failure kind,
+   * which the caller turns into an ask.
+   */
+  const runReview = async (
+    context: ApprovalContext,
+    timeoutMs: number,
+    resolved: { command?: string; origin?: string; destination?: string },
+  ): Promise<{ answer: ReturnType<typeof readReviewAnswer> & object } | { failed: string } | typeof ABORTED> => {
+    if (context.signal?.aborted) {
+      return ABORTED;
+    }
+    const reviewer = review?.reviewer;
+    if (reviewer === undefined) {
+      return { failed: 'no reviewer' };
+    }
+    const controller = new AbortController();
+    const onTurnAbort = (): void => controller.abort();
+    context.signal?.addEventListener('abort', onTurnAbort, { once: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<{ failed: string }>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve({ failed: 'timeout' });
+      }, timeoutMs);
+    });
+    try {
+      // Inside a promise, so a reviewer that throws before it returns one
+      // is a failed review like any other, never a failed turn.
+      const asked = new Promise<unknown>((resolve) => {
+        resolve(reviewer({
+          session: context.session,
+          call: context.call,
+          tool: context.tool,
+          risk: context.risk,
+          ...resolved,
+          signal: controller.signal,
+        }));
+      }).then(
+        (raw) => {
+          const answer = readReviewAnswer(raw);
+          return answer === undefined ? { failed: 'unparseable' } : { answer };
+        },
+        (error: unknown) => ({ failed: error instanceof ReviewFailure ? error.kind : 'error' }),
+      );
+      const settled = await untilAborted(Promise.race([asked, timedOut]), context.signal);
+      return settled;
+    } finally {
+      clearTimeout(timer);
+      context.signal?.removeEventListener('abort', onTurnAbort);
+    }
+  };
+
+  const policy: ApprovalPolicy = {
+    async approve(context: ApprovalContext): Promise<Verdict> {
       const { call, risk, session } = context;
 
       if (risk === 'safe') {
         return report(context, 'risk', true, `${call.toolName} is safe and runs without approval`);
       }
 
-      if (risk === 'gated' && openFor?.(session.agent.id) === true) {
+      // The review posture, for a gated call. A shadow review is this same
+      // method run again on a marked copy of the context, off the call
+      // path: it works the review out and asks nobody.
+      const reviewSettings = risk === 'gated' ? review?.settingsFor(session.agent.id) : undefined;
+      const shadowRun = shadowContexts.has(context);
+      const reviewing = reviewSettings !== undefined && (shadowRun || reviewSettings.shadow !== true);
+      if (reviewSettings?.shadow === true && !shadowRun && context.parkedAt === undefined) {
+        const shadowContext: ApprovalContext = { ...context };
+        shadowContexts.add(shadowContext);
+        void policy.approve(shadowContext).catch(() => undefined);
+      }
+
+      // A call parked before a restart is owed a person's answer: the fast
+      // path never takes it, whatever the posture has become since.
+      if (risk === 'gated' && !reviewing && context.parkedAt === undefined
+        && (openFor?.(session.agent.id) === true || reviewSettings?.shadow === true)) {
         const closedByContent = sessionTrustOf(session) === 'external' && gateExternalContent?.(session.agent.id) === true;
         if (!closedByContent) {
-          return report(context, 'risk', true, `${call.toolName} runs without asking (approvals.posture is open)`);
+          return report(
+            context,
+            'risk',
+            true,
+            reviewSettings?.shadow === true
+              ? `${call.toolName} runs without asking (approvals.review.shadow: reviewed off the call path, not enforced)`
+              : `${call.toolName} runs without asking (approvals.posture is open)`,
+          );
         }
       }
+
+      // Steps 3 to 5 of the review, before any grant is read: the
+      // operator's rules, the unreviewed run for a conversation that has
+      // read nothing from outside, and the built-in rules. An ask from any
+      // of them goes to a person and skips everything a grant could cover,
+      // since the first step that settles a call wins.
+      let reviewAsk: ReviewAsk | undefined;
+      const reviewHooks = [context.tool.commandFor, context.tool.destinationFor, context.tool.originFor]
+        .filter((hook) => hook !== undefined).length;
+      const reviewed = reviewing && reviewHooks <= 1
+        ? {
+            command: context.tool.commandFor?.(call.input),
+            destination: context.tool.destinationFor?.(call.input),
+            origin: originScopeFor(context.tool.originFor?.(session, call.input) ?? '')?.origin,
+          }
+        : {};
+      const resolvedForReview = Object.fromEntries(
+        Object.entries(reviewed).filter(([, value]) => value !== undefined),
+      ) as { command?: string; origin?: string; destination?: string };
+      // A call parked before a restart was waiting on a person, and goes
+      // back to one: nothing that would allow it now (a rule, the
+      // unreviewed path, a scope, the reviewer) may turn a pending ask into
+      // an allow. Only a block can still stop it first.
+      const resumed = reviewing && context.parkedAt !== undefined;
+      if (reviewing) {
+        const matched = matchReviewRule(reviewSettings.rules ?? [], { toolName: call.toolName, ...resolvedForReview });
+        if (matched !== undefined) {
+          reviewNotes.set(context, { verdict: matched.verdict });
+          const named = `the operator's rule (${describeReviewRule(matched)}) in approvals.rules`;
+          if (matched.verdict === 'allow' && !resumed) {
+            return report(context, 'rule', true, `${call.toolName} runs under ${named}`);
+          }
+          if (matched.verdict === 'block') {
+            return report(
+              context,
+              'rule',
+              false,
+              `${call.toolName} is blocked by ${named}; only the operator can change it, so a confirmation won't help`,
+            );
+          }
+          if (matched.verdict === 'ask') {
+            reviewAsk = {
+              layer: 'rule',
+              reason: `${call.toolName} is asked about by ${named}`,
+              told: `${call.toolName} is asked about by ${named}`,
+              note: `asked about by the operator's rule (${describeReviewRule(matched)})`,
+            };
+          }
+        }
+        if (reviewAsk === undefined && !resumed && sessionTrustOf(session) !== 'external') {
+          return report(context, 'risk', true, `${call.toolName} not reviewed: this conversation has read nothing from outside`);
+        }
+        // The stored values, for the rule against sending one out, read
+        // within the review's time and the turn. A store that can't be read
+        // (or doesn't answer) asks, like any other part of the review that
+        // couldn't run: never a failed turn, never an allow. The metadata
+        // and token rules need no stored value, so they still run first.
+        let secrets: readonly string[] = [];
+        let secretsUnreadable = false;
+        if (reviewAsk === undefined) {
+          secretsUnreadable = true;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const lookup = Promise.resolve(review?.secretsFor?.(session.agent.id));
+            const timedOut = new Promise<typeof ABORTED>((resolve) => {
+              timer = setTimeout(() => resolve(ABORTED), reviewSettings.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS);
+            });
+            const read = await untilAborted(Promise.race([lookup, timedOut]), context.signal);
+            if (read !== ABORTED) {
+              secrets = read ?? [];
+              secretsUnreadable = false;
+            } else {
+              lookup.catch(() => undefined);
+            }
+          } catch {
+            // Unreadable: stays an ask below.
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+        if (reviewAsk === undefined) {
+          const hit = builtInReviewRule(
+            { toolName: call.toolName, input: call.input, ...(resolvedForReview.command === undefined ? {} : { command: resolvedForReview.command }) },
+            secrets,
+          );
+          if (hit !== undefined) {
+            reviewNotes.set(context, { verdict: hit.verdict });
+            if (hit.verdict === 'block') {
+              return report(context, 'rule', false, `${hit.reason}; only the operator can change that (approvals.rules)`);
+            }
+            reviewAsk = { layer: 'rule', reason: hit.reason, told: hit.reason, note: hit.reason };
+          }
+        }
+        if (reviewAsk === undefined && secretsUnreadable) {
+          reviewNotes.set(context, { verdict: 'ask', reviewCode: 'review-failed' });
+          const reason = `${call.toolName} needs a person's yes because the review couldn't run: secrets-unreadable`;
+          reviewAsk = { layer: 'review', reason, told: reason, note: 'the review couldn\'t run: secrets-unreadable' };
+        }
+        if (reviewAsk === undefined && resumed) {
+          reviewNotes.set(context, { verdict: 'ask' });
+          const reason = `${call.toolName} was waiting for a person before a restart, and goes back to them without another review`;
+          reviewAsk = { layer: 'review', reason, told: reason, note: 'waiting for you before a restart; not reviewed again' };
+        }
+      }
+      // Nothing a grant or a scope could cover applies to a call a review
+      // rule already sent to a person.
+      const grantsConsidered = reviewAsk === undefined;
 
       // What this *invocation* would run, for a tool whose danger lives in
       // its arguments. Resolved before anything else so that the tool-wide
@@ -1020,8 +1327,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // operator turns off, and then it guards nothing. A stranger's
       // message, the other common `unknown`, is what `principals.admit`
       // exists to refuse before the turn starts.
+      // The review posture includes the gate: after outside content, a
+      // grant answered a question about calls the agent chose, not calls a
+      // page might be choosing.
       const externalGate = sessionTrustOf(session) === 'external'
-        && gateExternalContent?.(session.agent.id) === true;
+        && (gateExternalContent?.(session.agent.id) === true || reviewing);
 
       /**
        * Workspace autonomy for one command in one directory: a read inside
@@ -1044,7 +1354,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         // And not for an agent the gate is on for at all: the shell
         // marks its output `unknown`, not `external`, so a page read
         // this way would never close the gate it exists to close.
-        const gated = gateExternalContent?.(session.agent.id) === true;
+        const gated = gateExternalContent?.(session.agent.id) === true || reviewing;
         const site = gated ? undefined : await downloadInsideWorkspace(stage, cwd, workspace);
         if (site !== undefined && await readableSite(session.agent.id, site)) {
           return true;
@@ -1110,7 +1420,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // commands nothing covered.
       const grantRoot = analysis ? commands?.grantRootFor?.(session.agent.id) : undefined;
       let judgement: CompoundJudgement | undefined;
-      if (analysis) {
+      if (analysis && grantsConsidered) {
         if (!analysis.disqualifiedBy) {
           // The built-in safe scopes survive the gate and granted ones do
           // not: `git status` was judged safe for any caller, while a
@@ -1227,7 +1537,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               command,
             );
           }
-        } else if (analysis.disqualifiedBy && mode === 'headless') {
+        } else if (analysis.disqualifiedBy && mode === 'headless' && !reviewing) {
           // Never auto-approved, whatever the base command is: a safe scope
           // in front of a backgrounding `&` is the exact shape this rule
           // exists for.
@@ -1239,7 +1549,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             command,
           );
         }
-      } else if (risk === 'gated' && unscoped && !externalGate) {
+      } else if (risk === 'gated' && unscoped && !externalGate && grantsConsidered) {
         // The standing grant: this process's answers first, then the file.
         // Read per call, never cached here, so a revocation through the
         // store is the next call's answer — the reason a revoke needs no
@@ -1262,6 +1572,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         }
       } else if (risk !== 'dangerous'
         && !externalGate
+        && grantsConsidered
         && !scopedByOrigin
         && !multiplyScoped
         && alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
@@ -1269,11 +1580,13 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }
 
       // Which workspace this destination is in right now, for binding a
-      // grant to it (see `DestinationScopeOptions.accountFor`).
-      const account = destination !== undefined
+      // grant to it (see `DestinationScopeOptions.accountFor`). Only looked
+      // up when a grant could answer: a call an ask rule or the gate sends
+      // to a person doesn't wait on, or fail with, the lookup.
+      const account = destination !== undefined && !externalGate && grantsConsidered
         ? await destinations?.accountFor?.(session.agent.id, destination)
         : undefined;
-      if (destination !== undefined && !externalGate) {
+      if (destination !== undefined && !externalGate && grantsConsidered) {
         // Read per call, never cached here, so a revoke is the next call's answer.
         const standing = findMatchingDestinationGrant(call.toolName, destination, account, contributor, [
           ...(processDestinations.get(session.agent.id) ?? []),
@@ -1304,6 +1617,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // standing yes, so a page the conversation read cannot steer a post.
       if (destination !== undefined
         && !externalGate
+        && grantsConsidered
         && contributor === undefined
         && context.tool.name === call.toolName
         && STANDING_CHANNEL_TOOLS.includes(call.toolName)
@@ -1319,7 +1633,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         );
       }
 
-      if (origin !== undefined) {
+      if (origin !== undefined && grantsConsidered) {
         const granted = findMatchingOriginScope(origin, grantedOrigins, call.toolName);
         if (granted) {
           return report(
@@ -1358,7 +1672,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // reports to a channel is the job such a schedule is approved for,
       // so withdrawing it would refuse every firing; and what the page can
       // steer is only the words, sent to the one place a person picked.
-      if (risk === 'gated' && singlyScoped && destinations) {
+      if (risk === 'gated' && singlyScoped && destinations && grantsConsidered) {
         const destination = context.tool.destinationFor?.(call.input);
         if (destination !== undefined
           && await destinations.isPreauthorized(session, destination)) {
@@ -1371,6 +1685,78 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             destination,
           );
         }
+      }
+
+      // Step 7: nothing above settled it, so the reviewer does. (A resumed
+      // call never gets here: it was sent back to its person above.)
+      if (reviewing && reviewAsk === undefined) {
+        const outcome = await runReview(context, reviewSettings.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS, resolvedForReview);
+        if (outcome === ABORTED) {
+          return report(context, 'cancelled', false, `${call.toolName} was cancelled while it was being reviewed`);
+        }
+        if ('failed' in outcome) {
+          reviewNotes.set(context, { verdict: 'ask', reviewCode: 'review-failed' });
+          const reason = `${call.toolName} needs a person's yes because the review couldn't run: ${outcome.failed}`;
+          reviewAsk = { layer: 'review', reason, told: reason, note: `the review couldn't run: ${outcome.failed}` };
+        } else {
+          const { answer } = outcome;
+          reviewNotes.set(context, { verdict: answer.verdict, reviewCode: answer.code });
+          if (answer.verdict === 'allow') {
+            // The review took time, and a page can move in it: a yes given
+            // for one site must not land a click on another. Same rule as
+            // a person's yes (`allowUnlessMoved`).
+            if (context.tool.originFor !== undefined && reviewHooks <= 1) {
+              const settled = originScopeFor(context.tool.originFor(session, call.input) ?? '')?.origin;
+              if (settled !== resolvedForReview.origin) {
+                return report(
+                  context,
+                  'review',
+                  false,
+                  `${call.toolName} was allowed by the reviewer on ${resolvedForReview.origin ?? 'a page with no origin'}, `
+                    + `but the conversation is on ${settled ?? 'no page'} now — it did not run`,
+                );
+              }
+            }
+            return report(context, 'review', true, `${call.toolName} was allowed by the reviewer (${answer.code})`);
+          }
+          if (answer.verdict === 'block') {
+            // No flag the agent can set to escalate: an injected page could
+            // tell it to set one. The person's confirmation in their next
+            // message is part of what the reviewer sees next time.
+            return refuse(
+              context,
+              'review',
+              `${call.toolName} was blocked by the reviewer (${answer.code})`,
+              `${call.toolName} was blocked: ${answer.reason.replace(/[.\s]+$/, '')}. If the person you're working for really wants this, tell them what it would do and ask them to confirm.`,
+            );
+          }
+          reviewAsk = {
+            layer: 'review',
+            reason: `${call.toolName} was asked about by the reviewer (${answer.code})`,
+            told: `${call.toolName} needs a person's yes: ${answer.reason.replace(/[.\s]+$/, '')}`,
+            note: answer.reason,
+          };
+        }
+      }
+
+      // A shadow review stops here: it reports what it would have asked,
+      // and asks nobody.
+      if (shadowRun) {
+        return report(
+          context,
+          reviewAsk?.layer ?? 'review',
+          false,
+          `${reviewAsk?.reason ?? `${call.toolName} would need a person`} (would ask)`,
+        );
+      }
+
+      if (mode === 'headless' && reviewAsk !== undefined) {
+        return refuse(
+          context,
+          reviewAsk.layer,
+          `${reviewAsk.reason}; nobody is set up to approve this`,
+          `${reviewAsk.told}; nobody is set up to approve this`,
+        );
       }
 
       if (mode === 'headless') {
@@ -1480,7 +1866,10 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // front of the approver was composed after a page had its say, and
       // "always" there would let the page talk a person into exactly the
       // standing authority the gate withdrew.
+      // And under the review posture every ask is one-shot: an "always"
+      // there would promise a grant the policy then sets aside.
       const oneShot = risk === 'dangerous'
+        || reviewing
         || externalGate
         || multiplyScoped
         || (scopedByOrigin && origin === undefined)
@@ -1502,6 +1891,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       const alwaysMeans = oneShot
         ? risk === 'dangerous'
           ? 'not remembered — a dangerous tool asks every time'
+          : reviewing
+            ? 'not remembered — under the review posture an answer covers this call only'
           : externalGate
             ? 'not remembered — this conversation has read external content, so it asks every time'
             : multiplyScoped
@@ -1522,8 +1913,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
                 ? `always ${destination} for ${session.agent.name}, until revoked`
                 : 'always this session';
       const outcome = mode === 'remote'
-        ? await awaitRemote(context, request!, origin, oneShot, always)
-        : await awaitPrompt(context, ask!, command, origin, alwaysMeans);
+        ? await awaitRemote(context, request!, origin, oneShot, always, reviewAsk?.note)
+        : await awaitPrompt(context, ask!, command, origin, alwaysMeans, reviewAsk?.note);
 
       if (outcome === ABORTED) {
         return report(context, 'cancelled', false, `${call.toolName} was cancelled while awaiting approval`);
@@ -1567,7 +1958,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
        * hole: the approver read that site and said always. What must not
        * happen is the *click* landing somewhere they never saw.
        */
-      const allowUnlessMoved = (reason: string, forCommand?: string): boolean => {
+      const allowUnlessMoved = (reason: string, forCommand?: string): Verdict => {
         if (!scopedByOrigin) {
           return report(context, 'approver', true, reason, forCommand, undefined, origin);
         }
@@ -1592,13 +1983,15 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       };
 
       if (answer === 'always') {
-        if (externalGate) {
+        if (externalGate || reviewing) {
           // Before every branch that remembers something, because each of
           // them would: `oneShot` told the transport not to offer this, and
           // a prompt someone typed "always" into is not a transport that
           // listened.
           return allowUnlessMoved(
-            `${call.toolName} was approved once; this conversation has read external content, so nothing is remembered`,
+            reviewing
+              ? `${call.toolName} was approved once; under the review posture nothing is remembered`
+              : `${call.toolName} was approved once; this conversation has read external content, so nothing is remembered`,
             command,
           );
         }
@@ -1834,6 +2227,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       return allowUnlessMoved(`${call.toolName} was approved once`, command);
     },
   };
+  return policy;
 };
 
 export {

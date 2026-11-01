@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { JsonObject, Session, StratusEvent, SubAgentHandle, SubAgentOutcome, ExecutionContext } from '@stratusagent/core';
+import { AllowAllApprovalPolicy } from '@stratusagent/core';
 import { createPermissionPolicy } from '@stratusagent/permissions';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 import { agentMemoryFilePath } from '@stratusagent/state';
@@ -259,7 +260,7 @@ const fanoutGateway = async (options: {
           approvals: (transport: ApprovalTransport) =>
             createPermissionPolicy({ mode: 'remote', request: transport.request, destinations: transport.destinations }),
         }
-      : {}),
+      : { approvals: new AllowAllApprovalPolicy() }),
     log: () => undefined,
     warn: () => undefined,
   });
@@ -447,7 +448,7 @@ test('a gated call inside a sub-agent fails there and asks no one', async () => 
   assert.equal(harness.asked.length, 1);
   const result = child?.messages.find((message) => message.toolResult)?.toolResult;
   assert.equal(result?.ok, false);
-  assert.match(result?.error ?? '', /denied/);
+  assert.equal(result?.error, 'test.gated was not approved');
 });
 
 test('a tool that rewrites its sub-agent session cannot turn a later gated call into a question', async () => {

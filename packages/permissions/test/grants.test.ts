@@ -18,6 +18,7 @@ import {
   type PermissionDecision,
   type ToolGrant,
 } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 const session = (agentId = 'ava', id = `sess-${agentId}`): Session => ({
   id,
@@ -80,15 +81,15 @@ test('always allow on a gated tool is a standing grant: per agent, past a restar
   });
 
   // "Allow once" runs the call and writes nothing.
-  assert.equal(await first.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
+  assert.equal(ran(await first.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
   assert.equal(asks, 1);
   assert.deepEqual(await store.toolGrantsFor('ava'), []);
 
   // "Always allow" is the grant — and the same conversation, the next one,
   // and a restarted daemon all read it back.
-  assert.equal(await first.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
+  assert.equal(ran(await first.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
   assert.equal(asks, 2);
-  assert.equal(await first.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
+  assert.equal(ran(await first.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
   assert.equal(asks, 2, 'covered by the grant, so it did not ask');
   assert.equal(granted.length, 1);
   assert.equal(granted[0]?.tool, 'web.fetch');
@@ -106,16 +107,16 @@ test('always allow on a gated tool is a standing grant: per agent, past a restar
     onDecision: (decision) => decisions.push(decision),
     grants: { store: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
-  assert.equal(await restarted.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
-  assert.equal(await restarted.approve(contextFor(plainTool('fs.write', 'gated'))), false, 'an ungranted gated tool is still refused');
+  assert.equal(ran(await restarted.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
+  assert.equal(ran(await restarted.approve(contextFor(plainTool('fs.write', 'gated')))), false, 'an ungranted gated tool is still refused');
   // The grant is Ava's: her teammate answering the same tool asks for itself.
-  assert.equal(await restarted.approve(contextFor(plainTool('web.fetch', 'gated'), 'juno')), false);
+  assert.equal(ran(await restarted.approve(contextFor(plainTool('web.fetch', 'gated'), 'juno'))), false);
 
   // The log can tell a call that ran under a grant from one that ran
   // because it was safe — the decision carries the grant itself.
   assert.match(decisions[0]!.reason, /ran under a standing grant for ava/);
   assert.equal(decisions[0]!.grant?.tool, 'web.fetch');
-  assert.equal(await restarted.approve(contextFor(plainTool('memory.recall', 'safe'))), true);
+  assert.equal(ran(await restarted.approve(contextFor(plainTool('memory.recall', 'safe')))), true);
   assert.equal(decisions[3]!.grant, undefined);
   assert.match(decisions[3]!.reason, /is safe/);
 });
@@ -234,8 +235,8 @@ test('a revoked grant stops working on the next call, with no restart', async ()
     grants: { store },
   });
 
-  assert.equal(await policy.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
-  assert.equal(await policy.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
   assert.equal(asks, 1);
 
   assert.equal(await store.forgetTool('ava', 'web.fetch'), true);
@@ -245,7 +246,7 @@ test('a revoked grant stops working on the next call, with no restart', async ()
   // The same policy instance, the same process: the next call asks again.
   // The process tier is cleared by the revoke too, or a revoke through the
   // API would be a promise the daemon kept only until its next restart.
-  assert.equal(await policy.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
   assert.equal(asks, 2);
 });
 
@@ -262,7 +263,7 @@ test('a tool that names a command scope can never receive a tool grant, even by 
   // "Always" on a shell command persists the command's scope, and only that:
   // the tools list stays empty, because a grant on the whole shell is the
   // standing yes to every command this engine exists to prevent.
-  assert.equal(await policy.approve(contextFor(shellTool(), 'ava', { command: 'git push origin main' })), true);
+  assert.equal(ran(await policy.approve(contextFor(shellTool(), 'ava', { command: 'git push origin main' }))), true);
   const grants = await store.grantsFor('ava');
   assert.equal(grants.scopes.length, 1);
   assert.deepEqual(grants.tools, []);
@@ -280,7 +281,7 @@ test('a tool that names a command scope can never receive a tool grant, even by 
     commands: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
     grants: { store: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
-  assert.equal(await headless.approve(contextFor(shellTool(), 'ava', { command: 'rm -rf build' })), false);
+  assert.equal(ran(await headless.approve(contextFor(shellTool(), 'ava', { command: 'rm -rf build' }))), false);
   assert.match(decisions[0]!.reason, /nobody is available to approve it/);
 });
 
@@ -297,8 +298,8 @@ test('a dangerous tool cannot receive a standing grant', async () => {
     grants: { store },
   });
 
-  assert.equal(await policy.approve(contextFor(plainTool('fs.delete', 'dangerous'))), true);
-  assert.equal(await policy.approve(contextFor(plainTool('fs.delete', 'dangerous'))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('fs.delete', 'dangerous')))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('fs.delete', 'dangerous')))), true);
   assert.equal(asks, 2, 'asked every time');
   assert.deepEqual(await store.toolGrantsFor('ava'), []);
 
@@ -308,7 +309,7 @@ test('a dangerous tool cannot receive a standing grant', async () => {
     JSON.stringify({ version: 1, scopes: [], tools: [{ tool: 'fs.delete', grantedAt: '2026-09-07T00:00:00.000Z' }] }),
   );
   const headless = createPermissionPolicy({ mode: 'headless', grants: { store: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) } });
-  assert.equal(await headless.approve(contextFor(plainTool('fs.delete', 'dangerous'))), false);
+  assert.equal(ran(await headless.approve(contextFor(plainTool('fs.delete', 'dangerous')))), false);
 });
 
 test('a grant follows the tool as contributed when granted, not a later tool of the same name', async () => {
@@ -327,18 +328,18 @@ test('a grant follows the tool as contributed when granted, not a later tool of 
     grants: { store, contributorOf: () => contributor },
   });
 
-  assert.equal(await policy.approve(contextFor(plainTool('github.comment', 'gated'))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('github.comment', 'gated')))), true);
   const [grant] = await store.toolGrantsFor('ava');
   assert.equal(grant?.package, 'stratus-plugin-github');
   assert.equal(describeToolGrant(grant!), 'github.comment (stratus-plugin-github)');
-  assert.equal(await policy.approve(contextFor(plainTool('github.comment', 'gated'))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('github.comment', 'gated')))), true);
   assert.equal(asks, 1);
 
   // The same name from a different package is a different tool: the
   // realistic case is a plugin update, and the operator said yes to what
   // the tool did then. It asks again, and the new answer replaces the row.
   contributor = 'someone-elses-github';
-  assert.equal(await policy.approve(contextFor(plainTool('github.comment', 'gated'))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('github.comment', 'gated')))), true);
   assert.equal(asks, 2);
   const after = await store.toolGrantsFor('ava');
   assert.equal(after.length, 1, 'one grant per tool per agent');
@@ -361,8 +362,8 @@ test('a remote always records who answered, and the request says what always wou
     grants: { store },
   });
 
-  assert.equal(await policy.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
-  assert.equal(await policy.approve(contextFor(plainTool('fs.delete', 'dangerous'))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('fs.delete', 'dangerous')))), true);
   assert.deepEqual(seen, [
     { tool: 'web.fetch', always: 'tool', oneShot: undefined },
     { tool: 'fs.delete', always: undefined, oneShot: true },
@@ -380,7 +381,7 @@ test('the interactive prompt names the agent and the lifetime for a standing gra
       return 'n';
     },
   });
-  await policy.approve(contextFor(plainTool('web.fetch', 'gated')));
+  ran(await policy.approve(contextFor(plainTool('web.fetch', 'gated'))));
   assert.match(asked[0]!, /\[a\]lways \(always for Ava, until revoked\)/);
 });
 
@@ -393,10 +394,10 @@ test('without a store, a standing grant still holds for the process and for the 
       return 'always';
     },
   });
-  assert.equal(await policy.approve(contextFor(plainTool('web.fetch', 'gated'))), true);
-  assert.equal(await policy.approve({ ...contextFor(plainTool('web.fetch', 'gated')), session: session('ava', 'sess-2') }), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('web.fetch', 'gated')))), true);
+  assert.equal(ran(await policy.approve({ ...contextFor(plainTool('web.fetch', 'gated')), session: session('ava', 'sess-2') })), true);
   assert.equal(asks, 1, 'another session of the same agent is covered');
-  assert.equal(await policy.approve(contextFor(plainTool('web.fetch', 'gated'), 'juno')), true);
+  assert.equal(ran(await policy.approve(contextFor(plainTool('web.fetch', 'gated'), 'juno'))), true);
   assert.equal(asks, 2, 'another agent is not');
 });
 

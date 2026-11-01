@@ -218,7 +218,9 @@ Commands:
                    or written in a conversation with someone not configured
                    as a principal), external (recorded after reading content
                    from outside) — plus what is pinned and what is outside
-                   its validity window. --trust <level> filters; --format json
+                   its validity window. --trust <level> filters; --format json.
+                   --pass <id> shows what one memory pass wrote instead,
+                   forgotten entries included
   memory search    Search one agent's memory the way the agent does: plain
                    words, matched against a fact or what it is about, best
                    matches first and newer ahead of equally good older
@@ -248,6 +250,13 @@ Commands:
                    a record to ~/.stratus/memory.jsonl; a running daemon
                    sees it on its next turn. The only way a label ever
                    rises — no tool can do this
+  memory passes    An agent's memory passes from its ledger, newest first:
+                   kind, mode, status and reason, how many facts each saved
+                   and replaced, and the messages it read, with any message
+                   cut to fit. --limit <n> (default 20); --format json
+  memory undo-pass Forget every entry one pass wrote: stratus memory
+                   undo-pass <agent> <pass-id>. What they replaced is live
+                   again. Append-only, like forget
   session rollover Start a conversation over under the same session id,
                    archiving its transcript so far — for a long-lived
                    session (a Slack DM) that predates provenance tracking
@@ -319,7 +328,9 @@ Options:
                    label to record (user, agent, unknown, external)
   --all-unknown    memory reassert: every live entry with no recorded origin
   --limit          memory search: maximum hits (the store bounds it too);
-                   sessions: how many to list (default 20)
+                   sessions: how many to list (default 20); memory passes:
+                   how many, newest first (default 20)
+  --pass           memory list: only what this memory pass wrote
   --status         sessions: only this status, or stopped-early
   --file           memory export / import: the JSONL path
   --preserve-trust memory import: keep each entry's recorded trust label

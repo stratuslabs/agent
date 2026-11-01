@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   EventBus,
   InMemorySessionStore,
   RunAbortedError,
@@ -147,7 +148,7 @@ test('a call that is not read-only, or not safe, runs alone and in its place', a
     call('c8', 'ledger.one'),
     call('c9', 'ledger.two'),
   ]);
-  const runner = new AgentRunner({ provider, tools });
+  const runner = new AgentRunner({ provider, tools, approvals: new AllowAllApprovalPolicy() });
   await runner.initialize();
 
   const session = await runAs(runner, 'mixed-1');

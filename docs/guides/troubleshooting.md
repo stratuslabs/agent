@@ -262,8 +262,9 @@ What this costs is real and worth knowing:
   budget refusal, or a stop, during the summary call ends the turn before
   the window narrows, so the next turn asks for the summary again.
 - **What an outside party wrote stays labeled.** A summary of a
-  conversation that read a web page or another server's reply carries
-  that label, and the agent is told to treat that part as data.
+  conversation that read a web page, another server's reply, or a tool
+  result with no trust label carries that label, and the agent is told to
+  treat that part as data.
 - **Nothing is deleted.** The window bounds what is *sent*; the transcript
   on disk is whole, and `stratus logs` shows every trim as
   `session.context-trimmed`, with `summarized` saying whether a summary

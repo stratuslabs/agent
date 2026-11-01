@@ -21,6 +21,7 @@ import {
   type ToolGrant,
   type ToolGrantStore,
 } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 const sessionAt = (trust: TrustLevel | undefined, agentId = 'ava', taintedBy = 'web.fetch'): Session => {
   const now = new Date().toISOString();
@@ -111,14 +112,14 @@ test('a standing grant stops covering a conversation once it has read external c
 
   // Before the page, and with content from the operator or the agent's own
   // work, the grant is what it always was.
-  assert.equal(await policy.approve(call(fetchTool, sessionAt(undefined))), true);
-  assert.equal(await policy.approve(call(fetchTool, sessionAt('user'))), true);
-  assert.equal(await policy.approve(call(fetchTool, sessionAt('agent'))), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt(undefined)))), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt('user')))), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt('agent')))), true);
 
   // After it, the same grant covers nothing, and the refusal names the
   // cause and the setting — the operator has a grant on file that reads
   // as if it should have applied.
-  assert.equal(await policy.approve(call(fetchTool, sessionAt('external'))), false);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt('external')))), false);
   const refusal = decisions.at(-1);
   assert.equal(refusal?.allowed, false);
   assert.equal(refusal?.grant, undefined);
@@ -128,14 +129,14 @@ test('a standing grant stops covering a conversation once it has read external c
 
 test('without the gate, external content changes nothing about what a grant covers', async () => {
   const unset = createPermissionPolicy({ mode: 'headless', grants: { store: stubGrants().store } });
-  assert.equal(await unset.approve(call(fetchTool, sessionAt('external'))), true);
+  assert.equal(ran(await unset.approve(call(fetchTool, sessionAt('external')))), true);
 
   const off = createPermissionPolicy({
     mode: 'headless',
     grants: { store: stubGrants().store },
     gateExternalContent: () => false,
   });
-  assert.equal(await off.approve(call(fetchTool, sessionAt('external'))), true);
+  assert.equal(ran(await off.approve(call(fetchTool, sessionAt('external')))), true);
 });
 
 test('unknown content does not trip the gate — a shell output is not a web page', async () => {
@@ -144,7 +145,7 @@ test('unknown content does not trip the gate — a shell output is not a web pag
     grants: { store: stubGrants().store },
     gateExternalContent: () => true,
   });
-  assert.equal(await policy.approve(call(fetchTool, sessionAt('unknown', 'ava', 'shell.run'))), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt('unknown', 'ava', 'shell.run')))), true);
 });
 
 test('the gate is asked per agent, with the agent whose conversation it is', async () => {
@@ -157,8 +158,8 @@ test('the gate is asked per agent, with the agent whose conversation it is', asy
       return agentId === 'scout';
     },
   });
-  assert.equal(await policy.approve(call(fetchTool, sessionAt('external', 'scout'))), false);
-  assert.equal(await policy.approve(call(fetchTool, sessionAt('external', 'ava'))), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt('external', 'scout')))), false);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt('external', 'ava')))), true);
   assert.deepEqual(asked, ['scout', 'ava']);
 });
 
@@ -170,12 +171,12 @@ test('built-in safe command scopes survive the gate and granted ones do not', as
   });
   const tainted = sessionAt('external');
 
-  assert.equal(await policy.approve(call(shellTool, tainted, { command: 'pwd' })), true);
+  assert.equal(ran(await policy.approve(call(shellTool, tainted, { command: 'pwd' }))), true);
   // No git form is built in: git runs programs a repository names.
-  assert.equal(await policy.approve(call(shellTool, tainted, { command: 'git status' })), false);
-  assert.equal(await policy.approve(call(shellTool, tainted, { command: 'git push origin main' })), false);
+  assert.equal(ran(await policy.approve(call(shellTool, tainted, { command: 'git status' }))), false);
+  assert.equal(ran(await policy.approve(call(shellTool, tainted, { command: 'git push origin main' }))), false);
   // The same granted scope still covers a conversation that read nothing.
-  assert.equal(await policy.approve(call(shellTool, sessionAt('user'), { command: 'git push origin main' })), true);
+  assert.equal(ran(await policy.approve(call(shellTool, sessionAt('user'), { command: 'git push origin main' }))), true);
 });
 
 test('a site grant stops covering a conversation that has read external content', async () => {
@@ -184,8 +185,8 @@ test('a site grant stops covering a conversation that has read external content'
     origins: { whitelist: stubOrigins([{ origin: 'https://app.example.com' }]) },
     gateExternalContent: () => true,
   });
-  assert.equal(await policy.approve(call(browserTool, sessionAt('user'))), true);
-  assert.equal(await policy.approve(call(browserTool, sessionAt('external'))), false);
+  assert.equal(ran(await policy.approve(call(browserTool, sessionAt('user')))), true);
+  assert.equal(ran(await policy.approve(call(browserTool, sessionAt('external')))), false);
 });
 
 test('a schedule\'s pre-authorized destination is the one grant the gate spares', async () => {
@@ -195,14 +196,14 @@ test('a schedule\'s pre-authorized destination is the one grant the gate spares'
     gateExternalContent: () => true,
   });
   const tainted = sessionAt('external');
-  assert.equal(await policy.approve(call(sendTool, tainted, { destination: 'slack:C-ENG' })), true);
-  assert.equal(await policy.approve(call(sendTool, tainted, { destination: 'slack:C-OTHER' })), false);
+  assert.equal(ran(await policy.approve(call(sendTool, tainted, { destination: 'slack:C-ENG' }))), true);
+  assert.equal(ran(await policy.approve(call(sendTool, tainted, { destination: 'slack:C-OTHER' }))), false);
 });
 
 test('safe tools run regardless of the gate', async () => {
   const policy = createPermissionPolicy({ mode: 'headless', gateExternalContent: () => true });
   const read: Tool = { name: 'fs.read', risk: 'safe', async execute() { return null; } };
-  assert.equal(await policy.approve(call(read, sessionAt('external'))), true);
+  assert.equal(ran(await policy.approve(call(read, sessionAt('external')))), true);
 });
 
 test('a gated conversation can be approved once but never mints a grant, however the human answers', async () => {
@@ -219,12 +220,12 @@ test('a gated conversation can be approved once but never mints a grant, however
   });
   const tainted = sessionAt('external');
 
-  assert.equal(await policy.approve(call(fetchTool, tainted)), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, tainted))), true);
   assert.match(prompts[0] ?? '', /not remembered — this conversation has read external content/);
   assert.deepEqual(remembered, []);
 
   // Nor did "always" become a session grant: the next call asks again.
-  assert.equal(await policy.approve(call(fetchTool, tainted)), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, tainted))), true);
   assert.equal(prompts.length, 2);
 });
 
@@ -241,12 +242,12 @@ test('a remote request from a gated conversation is one-shot, so no transport of
     gateExternalContent: () => true,
   });
 
-  assert.equal(await policy.approve(call(fetchTool, sessionAt('external'))), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt('external')))), true);
   assert.deepEqual(requests[0], { oneShot: true });
   assert.deepEqual(remembered, []);
 
   // The same tool in a conversation that read nothing still offers one.
-  assert.equal(await policy.approve(call(fetchTool, sessionAt('user'))), true);
+  assert.equal(ran(await policy.approve(call(fetchTool, sessionAt('user')))), true);
   assert.deepEqual(requests[1], {});
   assert.equal(remembered.length, 1);
 });

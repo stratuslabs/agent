@@ -4,7 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { SENDER_TRUST_METADATA_KEY, type JsonObject, type Session } from '@stratusagent/core';
+import { AllowAllApprovalPolicy, SENDER_TRUST_METADATA_KEY, type JsonObject, type Session } from '@stratusagent/core';
 import {
   SCHEDULE_ID_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
@@ -617,6 +617,7 @@ test('a signed delivery wakes the trigger\'s agent through the gateway: one turn
 
   const posts: Array<{ to: string; text: string }> = [];
   const gateway = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { ...env, fetch: fetchFake },
     idleTimeoutMs: 0,
     schedules: { tickMs: 25 },
@@ -671,6 +672,7 @@ test('a signed delivery wakes the trigger\'s agent through the gateway: one turn
   db.close();
   assert.equal(changed, 1);
   const restarted = createGateway({
+    approvals: new AllowAllApprovalPolicy(),
     env: { ...env, fetch: fetchFake },
     idleTimeoutMs: 0,
     schedules: { tickMs: 25 },

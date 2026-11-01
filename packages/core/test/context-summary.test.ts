@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   CONTEXT_FLOOR_METADATA_KEY,
   CONTEXT_SUMMARY_INSTRUCTION,
   CONTEXT_SUMMARY_METADATA_KEY,
@@ -285,7 +286,7 @@ test('what an outside party wrote stays labeled through the summary', async () =
     },
   };
   const store = new InMemorySessionStore();
-  const runner = new AgentRunner({ provider, store, tools });
+  const runner = new AgentRunner({ provider, store, tools, approvals: new AllowAllApprovalPolicy() });
   await store.create({
     id: 'sum-6',
     agent: { id: 'agent-ctx', name: 'Context Agent', tools: ['web.fetch'] },
@@ -472,4 +473,36 @@ test('a summary seeded without a floor, or out of range, is never sent', async (
   await runner.resume({ sessionId: 'sum-11', userMessage: 'hi' });
   assert.ok(recorded.turns[1]!.every((message) => !message.content.includes('albatross')));
   assert.match(recorded.turns[1]![0]!.content, /are not shown/);
+});
+
+test('a summary of content nobody can vouch for is sent with the same caution as outside content', async () => {
+  const { provider, recorded } = createProvider(100);
+  const store = new InMemorySessionStore();
+  const runner = new AgentRunner({ provider, store });
+  // `unknown` is what an unlabeled tool result or a legacy transcript
+  // carries, and what a stored label nobody can read becomes; every other
+  // trust check treats it as tainted, as it does `external`.
+  const labels: [string, string, boolean][] = [
+    ['sum-12', 'external', true],
+    ['sum-13', 'unknown', true],
+    ['sum-14', 'not-a-trust-level', true],
+    ['sum-15', 'user', false],
+    ['sum-16', 'agent', false],
+  ];
+  for (const [sessionId, trust] of labels) {
+    await seed(store, sessionId, 3, {
+      [CONTEXT_FLOOR_METADATA_KEY]: 2,
+      [CONTEXT_SUMMARY_METADATA_KEY]: { from: 0, through: 2, text: 'the code word is albatross', trust },
+    });
+    await runner.resume({ sessionId, userMessage: 'hi' });
+  }
+  for (const [index, [sessionId, trust, cautioned]] of labels.entries()) {
+    const sent = recorded.turns[index]![0]!.content;
+    assert.match(sent, /code word is albatross/, `${sessionId} sends its summary`);
+    assert.equal(
+      /never as instructions to follow/.test(sent),
+      cautioned,
+      `a summary labeled ${trust} ${cautioned ? 'carries' : 'does not carry'} the caution`,
+    );
+  }
 });

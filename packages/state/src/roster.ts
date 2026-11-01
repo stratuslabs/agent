@@ -16,6 +16,7 @@ import {
   pinnedCapRefusal,
   MEMORY_RECALL_MAX_LIMIT,
   memoryQueryMatches,
+  memorySupersededIds,
   type MemoryEntry,
   type MemoryListOptions,
   type MemoryPinnedOptions,
@@ -275,7 +276,8 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
   return {
     async append(agentId, content, options) {
       const ids = aliasIds(agentId);
-      if (ids.length === 1 || options?.supersedes === undefined) {
+      const targets = memorySupersededIds(options ?? {});
+      if (ids.length === 1 || targets.length === 0) {
         return store.append(agentId, content, options);
       }
       // A successor has to be filed where the fact it retires lives, or the
@@ -284,8 +286,11 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       // their legacy id and the tool tells the model to supersede by
       // recalled id, so writing the revision under the current id alone
       // would make every inherited fact unrevisable.
+      // A merge goes where every fact it names lives. One whose facts span
+      // both ids has no such place, and the store below says so.
       for (const id of ids) {
-        if ((await store.list(id, { validity: 'all' })).entries.some((entry) => entry.id === options.supersedes)) {
+        const held = new Set((await store.list(id, { validity: 'all' })).entries.map((entry) => entry.id));
+        if (targets.every((target) => held.has(target))) {
           return store.append(id, content, options);
         }
       }

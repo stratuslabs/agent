@@ -251,26 +251,74 @@ test('a supersession dated from next week leaves the old fact live until then, a
   assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id), [standing.id]);
 });
 
-test('two processes superseding the same entry retire it once and leave both successors live', async () => {
+test('two processes superseding the same entry at once retire it once, and each successor is either live or refused having stored nothing', async () => {
   const filePath = await newFile();
   const seed = createFileMemoryStore(filePath, frozen());
   const old = await seed.append('ava', 'the deploy runs on MySQL');
 
   // Separate stores over one file is the concurrency model: `O_APPEND` and
-  // nothing else. Both read the same live set and both append.
+  // nothing else. Nothing orders one store's guard read against the other's
+  // append, so either order can happen here: both read the old fact live and
+  // both land, or one lands first and the other finds it already retired.
+  // The two tests below pin each order down; this one holds whichever the
+  // scheduler picked to the invariants both share.
   const first = createFileMemoryStore(filePath, frozen());
   const second = createFileMemoryStore(filePath, frozen());
-  const [a, b] = await Promise.all([
+  const outcomes = await Promise.allSettled([
     first.append('ava', 'the deploy runs on Postgres', { supersedes: old.id }),
     second.append('ava', 'the deploy runs on CockroachDB', { supersedes: old.id }),
   ]);
-
+  const landed = outcomes.flatMap((outcome) => (outcome.status === 'fulfilled' ? [outcome.value.id] : []));
+  for (const outcome of outcomes) {
+    if (outcome.status === 'rejected') {
+      assert.match(String(outcome.reason), /No live memory entry with id .* belongs to this agent/);
+    }
+  }
+  assert.ok(landed.length >= 1, 'a supersession of a live entry must land when nothing else retired it first');
+  // One line per write that landed: a refusal stores nothing.
+  assert.equal((await lines(filePath)).length, 1 + landed.length);
   for (const store of [first, second, createFileMemoryStore(filePath, frozen())]) {
-    const live = (await store.list('ava')).entries.map((entry) => entry.id).sort();
+    assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id).sort(), [...landed].sort());
+  }
+});
+
+test('two processes that both read an entry live before either supersedes it leave both successors live', async () => {
+  const filePath = await newFile();
+  const store = createFileMemoryStore(filePath, frozen());
+  const old = await store.append('ava', 'the deploy runs on MySQL');
+  const a = await store.append('ava', 'the deploy runs on Postgres', { supersedes: old.id });
+
+  // The other process passed its guard before `a` landed, so its record
+  // arrives after `a` unchecked. Appended directly, the only way to place
+  // that order: the store's own record for `a`, under a new id.
+  const record = JSON.parse((await lines(filePath)).at(-1)!) as MemoryEntry;
+  const b = { ...record, id: 'ava:memory:other-process', content: 'the deploy runs on CockroachDB' };
+  await appendFile(filePath, `${JSON.stringify(b)}\n`);
+
+  for (const reader of [store, createFileMemoryStore(filePath, frozen())]) {
     // The invariant is the retirement, not a unique replacement: a test
     // expecting one successor would assert a guarantee this design
     // deliberately does not make.
-    assert.deepEqual(live, [a.id, b.id].sort());
+    assert.deepEqual((await reader.list('ava')).entries.map((entry) => entry.id).sort(), [a.id, b.id].sort());
+  }
+});
+
+test('a supersession that arrives after another process retired the entry is refused and stores nothing', async () => {
+  const filePath = await newFile();
+  const seed = createFileMemoryStore(filePath, frozen());
+  const old = await seed.append('ava', 'the deploy runs on MySQL');
+  const first = createFileMemoryStore(filePath, frozen());
+  const second = createFileMemoryStore(filePath, frozen());
+
+  const a = await first.append('ava', 'the deploy runs on Postgres', { supersedes: old.id });
+  const before = await lines(filePath);
+  await assert.rejects(
+    () => second.append('ava', 'the deploy runs on CockroachDB', { supersedes: old.id }),
+    /No live memory entry with id .* belongs to this agent/,
+  );
+  assert.deepEqual(await lines(filePath), before);
+  for (const store of [first, second, createFileMemoryStore(filePath, frozen())]) {
+    assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id), [a.id]);
   }
 });
 
@@ -319,21 +367,27 @@ test('two processes pinning at the cap produce one effective set, with the overf
 
   const left = createFileMemoryStore(filePath, frozen());
   const right = createFileMemoryStore(filePath, frozen());
-  // Started together, so both read the same total before either appends:
-  // the race the write-path check cannot see, since `O_APPEND` is the only
-  // coordination between two processes over one file.
+  // Started together. Each pin reads the total and appends under the memory
+  // write lock, so the second reads the first's record and refuses: the
+  // race needs a writer that takes no lock.
   const outcomes = await Promise.all([left.pin!('ava', first.id), right.pin!('ava', second.id)]);
-  assert.deepEqual(outcomes.map((outcome) => outcome.pinned), [true, true], 'the race did not happen');
+  assert.deepEqual(outcomes.map((outcome) => outcome.pinned).sort(), [false, true]);
+  const refused = outcomes.find((outcome) => !outcome.pinned);
+  assert.match(refused?.reason ?? '', /capped/);
 
-  // Which of the two won is whatever order the appends landed in, and that
-  // is the point: replay reads the file, so every reader agrees, and the
-  // winner is the record that arrived first rather than whoever read last.
+  // A build older than the lock is that writer: its pin lands after the
+  // winner's, read from the total before it. Appended directly, the only
+  // way to place it.
+  const winner = outcomes[0]!.pinned ? first.id : second.id;
+  const loser = winner === first.id ? second.id : first.id;
+  await appendFile(filePath, `${JSON.stringify({ pins: loser, agentId: 'ava', pinned: true, createdAt: AT.toISOString() })}\n`);
+
+  // Replay reads the file, so every reader agrees: the winner is the record
+  // that arrived first rather than whoever read last.
   const pinRecords = (await lines(filePath))
     .map((line) => JSON.parse(line) as { pins?: string })
     .filter((record): record is { pins: string } => typeof record.pins === 'string');
-  assert.deepEqual(pinRecords.map((record) => record.pins).sort(), [first.id, second.id].sort());
-  const winner = pinRecords[0]!.pins;
-
+  assert.deepEqual(pinRecords.map((record) => record.pins), [winner, loser]);
   const effective = await Promise.all(
     [left, right, createFileMemoryStore(filePath, frozen())].map(async (store) =>
       (await store.pinned!('ava')).map((pinned) => pinned.id)),
@@ -342,7 +396,7 @@ test('two processes pinning at the cap produce one effective set, with the overf
   // The overflow is recorded, not lost: its record is in the file and
   // unpinning it is a real operation.
   assert.equal((await lines(filePath)).length, 4);
-  assert.equal(await right.unpin!('ava', pinRecords[1]!.pins), true);
+  assert.equal(await right.unpin!('ava', loser), true);
 });
 
 test('a pin appended later with an earlier or tied timestamp does not displace an already-effective pin', async () => {
