@@ -277,6 +277,19 @@ through `users:read`, which the app already has). A reply that tags only
 people is still split. Messages the agent sends with `message.send` and
 error notices are posted as written.
 
+Slack shows about 4,000 characters in one message, so a longer reply is
+posted in parts, in every mode, and so is a longer `message.send`. When a
+part tags another agent, it goes up as a file upload instead: the part is
+the message, as it would have been, and the whole reply is attached as
+`full-reply.md`. The tagged agent reads only the message that names it, and
+reads a text file on that message as part of it, so it gets all of the
+reply rather than the part with its name in it. People still read every
+part in the thread. Posting one long message is no way around this: Slack
+splits it into parts on its own side. If Slack refuses the upload, the part
+is posted on its own, the log says so, and the tagged agent gets only that
+part. In `stream` mode the first part is the placeholder, edited in place,
+which this does not cover yet.
+
 ```jsonc
 // ~/.stratus/config.json — trusted configs only
 {
