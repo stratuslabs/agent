@@ -338,9 +338,10 @@ test('a message overheard between turns reaches the API framed, in one user turn
     content: [
       { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: Bea, what do you think?' },
       // Marked as said to the agent, or the frame in the block before it
-      // reads as covering the whole turn (card 1034: claude-haiku-4-5
-      // answered a tagged question "I'm overhearing this, so I'll stay
-      // quiet" in 10 of 10 replays without the mark, 0 of 10 with it).
+      // reads as covering the whole turn (card 1034: claude-haiku-4-5 met a
+      // tagged question with "I'm not in this conversation—you're
+      // overhearing something else" in 10 of 10 replays without the mark,
+      // 0 of 10 with it).
       { type: 'text', text: '(said to you)\nDylan: Ava, and you?' },
     ],
   });
