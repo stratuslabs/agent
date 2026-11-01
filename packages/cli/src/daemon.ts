@@ -48,6 +48,7 @@ export const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
   ...(env.serviceRunner !== undefined ? { run: env.serviceRunner } : {}),
   ...(env.serviceSleep !== undefined ? { sleep: env.serviceSleep } : {}),
   ...(env.servicePlatform !== undefined ? { platform: env.servicePlatform } : {}),
+  ...(env.serviceSystemdBooted !== undefined ? { systemdBooted: env.serviceSystemdBooted } : {}),
 });
 
 /** Where a command aimed at "the running daemon" is pointed. */

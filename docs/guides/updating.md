@@ -380,6 +380,37 @@ interrupted is finished by the next start, provenance ledger included.
 `stratus update --check` lists the move while one is still to happen, and
 counts it as something to apply.
 
+## Souls without a `tools:` list keep every tool on an upgraded home (0.14.3)
+
+Since 0.14.3 a soul with no `tools:` key gets only the tools registered as
+safe (reads, search and memory) on a **new** install; before, it got every
+registered tool. A home an older build already used keeps the old reading,
+for every soul on it, including one you write by hand later: migration
+`0005-safe-tools-default` records in `~/.stratus/state.json` that the home
+predates the safe default, and the daemon, `stratus run`, `stratus plugins`,
+setup and `stratus template add` all read that. The log says so once:
+
+```
+state migration 0005-safe-tools-default: this home predates the safe-tools default, so its souls with no tools: list keep every tool (no soul was changed)
+```
+
+No soul file is rewritten, so it does not matter which souls a config,
+`--soul` or `STRATUS_SOUL` names, or whether an older daemon is still
+running while you upgrade. New souls from setup, `stratus agent new` and
+the dashboard are written with `tools: ["*"]` on either kind of home, so
+you can see the grant and narrow it. To get the safe default for one
+agent, give its soul a list naming what it needs.
+
+Two kinds of upgraded home read as new, because nothing on disk says an
+older build used them: one no build since 0.11 has touched, and one an older
+build only ever used through ordinary commands such as `stratus run`, never
+`stratus serve` or `stratus update` (those are what write the stamp). Their
+souls with no list get safe tools only. The daemon and `stratus run` name
+each such soul when they start, and `tools: ["*"]` gives one back every
+tool. No schema change: an
+older build reads an omitted list as every tool, which is what this home
+keeps.
+
 ## `stratus update` does the sequence in the order that cannot lose data
 
 ```bash

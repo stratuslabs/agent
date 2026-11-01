@@ -126,9 +126,12 @@ test('a task that needs tools opens with one line of what the agent is about to 
 
   assert.match(replies, /your first words, before your first tool call, are one line saying what you are about to do/);
   assert.match(replies, /Skip that line for a question you can answer straight away or with one quick lookup, and for a message that was not addressed to you\./);
-  // The start line comes first; updates after it stay rare and short.
-  assert.match(replies, /After that, send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages\./);
-  assert.ok(replies.indexOf('before your first tool call') < replies.indexOf('After that, send a progress update'));
+  // The start line comes first. After it, a message mid-task is one the
+  // person needs or would want, never narration (card 1009): Slack holds
+  // the words between tools, and `message.say` is how one goes out.
+  assert.match(replies, /After that, message the person mid-task only when you need them or it is worth their time, never to narrate your steps; keep it to a line, and never split one long answer across several messages\./);
+  assert.ok(replies.indexOf('before your first tool call') < replies.indexOf('After that, message the person mid-task'));
+  assert.doesNotMatch(replies, /progress update/);
 });
 
 test('every agent is held to grounded claims, whatever its persona', () => {

@@ -100,9 +100,9 @@ are one line saying what it is about to do, so the first message you see is
 what it set out to do rather than a step it already finished. A question it
 can answer straight away or with one quick lookup gets no such line, and
 neither does a message that was not addressed to it. After that it sends an update only when something
-has changed, in a line. In Slack those updates go into one progress message
-that is edited in place, not new posts (see
-[How replies appear](../guides/slack.md#how-replies-appear)). It
+has changed, in a line. In Slack, by default, those updates are not posted:
+only the first line and the reply are, and Slack's status line shows it is
+working (see [How replies appear](../guides/slack.md#how-replies-appear)). It
 carries on with work it was already asked to do instead of asking
 permission for each step, and asks only the questions it cannot go on
 without, all at once, while it keeps doing what does not depend on them.
@@ -214,7 +214,10 @@ A soul's provider/model are hints:
 [plugin provider](../guides/extending.md#providers) registers.
 
 The `tools:` list is the per-identity gate over everything a plugin
-installs — see [Tools](../guides/tools.md) — and `skills:` opts into
+installs — see [Tools](../guides/tools.md). With no `tools:` key an agent
+gets only the tools registered as safe (every tool on a home set up before
+0.14.3); `tools: ["*"]`, which new souls are
+written with, gets every one. `skills:` opts into
 procedures the same way — see [Skills](../guides/skills.md). One tool sits
 outside it: under `stratus serve` every agent can call `credential.request`,
 even with `tools: []`, to ask through an approver's form. Its one-time

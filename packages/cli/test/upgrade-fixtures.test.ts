@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { STATE_SCHEMA_VERSION, createHomeMemoryStore, loadCredentials, loadNamedCredentials } from '@stratusagent/state';
+import { parseSoul } from '@stratusagent/agents';
+import { STATE_SCHEMA_VERSION, createHomeMemoryStore, loadCredentials, loadNamedCredentials, unlistedToolsFor } from '@stratusagent/state';
 
 import { runCli } from '../src/index.ts';
 
@@ -187,6 +188,15 @@ for (const release of RELEASES) {
       // Older than the per-agent layout, so the first start has real work to do.
       assert.match(first, /state migration 0003-per-agent-state-layout/);
     }
+    // Neither soul had a tools: list, which these releases read as every
+    // tool. The home records that it predates the safe-tools default, so
+    // they keep every tool, and no soul is rewritten to say so.
+    assert.match(first, /state migration 0005-safe-tools-default: this home predates the safe-tools default/);
+    for (const id of ['ava', 'bob']) {
+      const soulPath = path.join(home, '.stratus', 'agents', `${id}.md`);
+      assert.equal(parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath }).agent.tools, undefined, id);
+    }
+    assert.equal(unlistedToolsFor({ homeDir: home }), 'every');
 
     const stamp = JSON.parse(await readFile(path.join(home, '.stratus', 'state.json'), 'utf8')) as { schemaVersion: number };
     assert.equal(stamp.schemaVersion, STATE_SCHEMA_VERSION);
@@ -327,7 +337,15 @@ test('a home written by 0.13.5 upgrades with its grants, schedule, sign-ins, con
       return bob.json.session.status === 'completed' && messageContents(bob.json.session).includes('user: Hello again') ? true : undefined;
     }, 'the continued turn to complete');
   });
-  assert.doesNotMatch(first, /state migration/, '0.13.5 is already at the current layout');
+  // Already at the current layout, so the one migration is 0005, which
+  // records that this home predates the safe-tools default: Bob, who has no
+  // tools: list, keeps every tool, and no soul is rewritten.
+  assert.doesNotMatch(first, /state migration 000[1-4]/, '0.13.5 is already at the current layout');
+  assert.match(first, /state migration 0005-safe-tools-default: this home predates the safe-tools default/);
+  const bobSoul = path.join(stratusHome, 'agents', 'bob.md');
+  assert.equal((await lstat(bobSoul)).isSymbolicLink(), true, 'the soul link stays a link');
+  assert.equal(parseSoul(await readFile(bobSoul, 'utf8'), { seed: bobSoul }).agent.tools, undefined);
+  assert.equal(unlistedToolsFor({ homeDir: home }), 'every');
 
   const stamp = JSON.parse(await readFile(path.join(stratusHome, 'state.json'), 'utf8')) as { schemaVersion: number };
   assert.equal(stamp.schemaVersion, STATE_SCHEMA_VERSION);

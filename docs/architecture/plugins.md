@@ -262,7 +262,9 @@ allowlist come from the host's own records rather than from that object,
 so a plugin cannot widen anything by building one. The host also refuses,
 before anything runs and naming the reason, a parent
 that is not running a turn or is itself a sub-agent, the delegation depth
-limit, a tool outside the parent's allowlist, a pattern instead of a name,
+limit, a tool outside the parent's allowlist (for a parent whose soul has
+no `tools:` list on a home set up with 0.14.3 or later, any tool not
+registered as safe), a pattern instead of a name,
 and `agent.spawn`, `agent.delegate`, `memory.*`, and `credential.request`
 whatever the parent holds. A sub-agent never asks a person: a gated call it
 has no standing grant for is denied inside it, and the parent's turn gets
@@ -587,7 +589,11 @@ What each contribution is, and why it is not the bare interface:
   first agent's memories, the way a `tool-fs` that cached its roots would
   hand every agent the first agent's files. The host selects one by name
   (`memoryStore` in a trusted config) behind a store that routes per call,
-  so the memory tools built before any plugin loaded still reach it.
+  so the memory tools built before any plugin loaded still reach it. A
+  store that accepts a list in `supersedes` (one record retiring several
+  facts) says so with `supersedesMany: true`; without it, memory passes
+  hand it one id at a time and never merge, and a tidy pass is skipped
+  (`store-unsupported`).
 - **An executor is `{ name, executor }`**, selected by `executor` in a
   trusted config.
 

@@ -15,6 +15,7 @@ import {
   trustedDomainOf,
   type OriginScope,
 } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 // The policy reads downloader config locations from the daemon's own
 // environment, so pin it to an empty home for every test here.
@@ -227,8 +228,8 @@ test('trusted domains let web.fetch and plain downloads run unattended, and noth
     origins: { trustedDomainsFor: (agentId) => (agentId === 'nova' || agentId === 'blair' ? ['openai.com'] : []) },
     gateExternalContent: (agentId) => agentId === 'blair',
   });
-  const run = (command: string, trust?: 'external', agentId = 'nova') => policy.approve(contextFor(tool, { command }, trust, agentId));
-  const fetch = (url: string, trust?: 'external', agentId = 'nova') => policy.approve(contextFor(fetchTool, { url }, trust, agentId));
+  const run = async (command: string, trust?: 'external', agentId = 'nova') => ran(await policy.approve(contextFor(tool, { command }, trust, agentId)));
+  const fetch = async (url: string, trust?: 'external', agentId = 'nova') => ran(await policy.approve(contextFor(fetchTool, { url }, trust, agentId)));
 
   assert.equal(await fetch('https://developers.openai.com/codex/mcp'), true);
   assert.match(decisions.at(-1) ?? '', /under the trusted domain openai\.com/);
@@ -251,7 +252,7 @@ test('trusted domains let web.fetch and plain downloads run unattended, and noth
 test('trusted domains are for reading tools only, never a tool that acts on the site', async () => {
   const act: Tool = { ...fetchTool, name: 'browser.act' };
   const policy = createPermissionPolicy({ mode: 'headless', origins: { trustedDomainsFor: () => ['openai.com'] } });
-  assert.equal(await policy.approve(contextFor(act, { url: 'https://platform.openai.com/settings' })), false);
+  assert.equal(ran(await policy.approve(contextFor(act, { url: 'https://platform.openai.com/settings' }))), false);
 });
 
 test('a site approved for web.fetch with Always allow also covers a plain download of it', async () => {
@@ -266,9 +267,9 @@ test('a site approved for web.fetch with Always allow also covers a plain downlo
     commands: { workspace: { directoryFor: () => workspace } },
     origins: { whitelist: { originsFor: async () => grants, rememberOrigin: async () => {} } },
   });
-  assert.equal(await policy.approve(contextFor(tool, { command: 'curl -sL -o refs/a.html https://docs.example.com/a' })), true);
+  assert.equal(ran(await policy.approve(contextFor(tool, { command: 'curl -sL -o refs/a.html https://docs.example.com/a' }))), true);
   // A grant to click on a site is not a grant to read from it.
-  assert.equal(await policy.approve(contextFor(tool, { command: 'curl -sL -o refs/a.html https://app.example.com/a' })), false);
+  assert.equal(ran(await policy.approve(contextFor(tool, { command: 'curl -sL -o refs/a.html https://app.example.com/a' }))), false);
 });
 
 test('a curl config file means a download is not plain, unless the command turns config off', async () => {
@@ -321,10 +322,10 @@ test('for an agent the external-content gate is on for, downloads always ask', a
     gateExternalContent: (agentId) => agentId === 'scout',
   });
   const command = 'curl -sL -o refs/x.html https://developers.openai.com/x';
-  assert.equal(await policy.approve(contextFor(tool, { command }, undefined, 'nova')), true);
+  assert.equal(ran(await policy.approve(contextFor(tool, { command }, undefined, 'nova'))), true);
   // A fresh session, before anything external was read: still asks, since
   // the shell's output would never close the gate.
-  assert.equal(await policy.approve(contextFor(tool, { command }, undefined, 'scout')), false);
+  assert.equal(ran(await policy.approve(contextFor(tool, { command }, undefined, 'scout'))), false);
   // web.fetch marks its own output, so it keeps the trusted domain.
-  assert.equal(await policy.approve(contextFor(fetchTool, { url: 'https://developers.openai.com/x' }, undefined, 'scout')), true);
+  assert.equal(ran(await policy.approve(contextFor(fetchTool, { url: 'https://developers.openai.com/x' }, undefined, 'scout'))), true);
 });

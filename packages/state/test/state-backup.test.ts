@@ -109,7 +109,7 @@ test('a run that applies a data migration first copies the state files into a da
 
   const manifest = JSON.parse(await readFile(path.join(backup!.path, 'backup.json'), 'utf8'));
   assert.deepEqual(manifest.from, JSON.parse(stampBytes));
-  assert.deepEqual(manifest.migrations, ['0004-per-agent-workspaces']);
+  assert.deepEqual(manifest.migrations, ['0004-per-agent-workspaces', '0005-safe-tools-default']);
   assert.equal(manifest.createdAt, backup!.createdAt);
 
   // Owner-only: it holds every agent's conversations and memories.
@@ -133,7 +133,7 @@ test('no backup when nothing that runs changes data, or the home holds no conver
   assert.deepEqual(await readdir(backupsDirPath({ homeDir: migrated.home })), before);
 
   // Only migrations that leave the data alone are pending: a permission
-  // change and a stamp.
+  // change, a stamp, and 0005 recording a fact in that stamp.
   const stampOnly = await seedHome();
   await writeFile(stateFilePath({ homeDir: stampOnly.home }), `${JSON.stringify({
     schemaVersion: 4,

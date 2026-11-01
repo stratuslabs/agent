@@ -1,4 +1,4 @@
-import type { StratusEvent } from '@stratusagent/core';
+import { memorySupersededIds, type StratusEvent } from '@stratusagent/core';
 import { FORGET_TOOL_NAME, MEMORY_TOOL_NAME, PIN_TOOL_NAME } from '@stratusagent/agents';
 
 export const formatEvent = (event: StratusEvent): string | null => {
@@ -17,6 +17,14 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• tool.completed ${event.result.toolName} ok=${String(event.result.ok)}`;
     case 'tool.denied':
       return `• tool.denied ${event.call.toolName}`;
+    case 'permission.decided': {
+      // A shadow decision ran nothing differently, so it says what it would
+      // have done; the outcome before it is what actually happened.
+      const review = event.verdict === undefined
+        ? ''
+        : `, ${event.shadow === true ? 'would ' : ''}${event.verdict}${event.reviewCode === undefined ? '' : `: ${event.reviewCode}`}`;
+      return `• permission.decided ${event.toolName} ${event.allowed ? 'allowed' : 'refused'} (${event.layer}${review})`;
+    }
     case 'tool.approval-requested':
       return `• tool.approval-requested ${event.call.toolName} (${event.risk}) for ${event.agentId}`;
     case 'tool.approval-resolved':
@@ -78,7 +86,9 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
         ? output
         : undefined;
       const entry = typeof fields?.id === 'string' ? fields.id : undefined;
-      const supersedes = typeof fields?.supersedes === 'string' ? fields.supersedes : undefined;
+      // One id, or a merge's list of them: references either way.
+      const supersededIds = fields !== undefined ? memorySupersededIds(fields) : [];
+      const supersedes = supersededIds.length > 1 ? supersededIds : supersededIds[0];
       const pinned = event.result.toolName === PIN_TOOL_NAME && typeof fields?.pinned === 'boolean'
         ? fields.pinned
         : undefined;
@@ -90,6 +100,20 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
         ...(pinned !== undefined ? { pinned } : {}),
       };
     }
+    // One line per decision with fixed fields, which is what a script
+    // counts. Not the reason: it is prose a policy wrote, and the refusal
+    // warning already carries it for the calls a person needs to read.
+    case 'permission.decided':
+      return {
+        tool: event.toolName,
+        callId: event.callId,
+        risk: event.risk,
+        allowed: event.allowed,
+        layer: event.layer,
+        ...(event.verdict === undefined ? {} : { verdict: event.verdict }),
+        ...(event.reviewCode === undefined ? {} : { code: event.reviewCode }),
+        ...(event.shadow === true ? { shadow: true } : {}),
+      };
     case 'tool.approval-requested':
       return { tool: event.call.toolName, risk: event.risk, requestId: event.requestId };
     case 'tool.approval-resolved':

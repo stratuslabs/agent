@@ -19,6 +19,34 @@ export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/
 export { syncDirectory, writeFileSynced } from './durable-write.ts';
 export { createFileMemoryStore, createShardedFileMemoryStore, type FileMemoryStoreOptions } from './memory.ts';
 export {
+  MEMORY_PASSES_FILENAME,
+  MEMORY_SHADOW_FILENAME,
+  agentMemoryPassesFileIn,
+  agentMemoryShadowFileIn,
+  createMemoryPassLedger,
+  createMemoryShadowFile,
+  memoryPassActivations,
+  memoryPassEntries,
+  memoryPassMessageCounts,
+  memoryPassOpenClaims,
+  memoryPassTidyClaimed,
+  memoryPassSettleRecord,
+  memoryPassSummaries,
+  memoryPassWatermark,
+  memoryShadowEntriesOf,
+  undoMemoryPass,
+  type MemoryPassActivation,
+  type MemoryPassClaim,
+  type MemoryPassEnd,
+  type MemoryPassLedger,
+  type MemoryPassLedgerOptions,
+  type MemoryPassRecord,
+  type MemoryPassSlice,
+  type MemoryPassSummary,
+  type MemoryShadowEntry,
+  type MemoryShadowFile,
+} from './memory-passes.ts';
+export {
   applyPerAgentWorkspaces,
   repairWorkspacesIfPending,
   surveyLegacyWorkspaces,
@@ -202,8 +230,11 @@ export {
   assertStateCompatible,
   pendingStateMigrations,
   type StateMigrationRunOptions,
+  type StateMigrationOutcome,
   type AppliedStateMigration,
   runStateMigrations,
+  PREDATES_SAFE_TOOLS_FACT,
+  unlistedToolsFor,
 } from './migrations.ts';
 
 export { type StateBackup, backUpStateBeforeMigrating, describeStateBackup } from './state-backup.ts';
@@ -241,6 +272,7 @@ export {
 
 export {
   DEFAULT_STRATUS_AGENT,
+  EVERY_TOOL,
   resolveSoulPath,
   resolveSoul,
   resolveConfiguredSoul,

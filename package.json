@@ -14,7 +14,7 @@
     "eval:skill": "pnpm --filter @stratusagent/cli run eval:skill",
     "smoke:release": "node scripts/release-smoke/run.mjs"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git"

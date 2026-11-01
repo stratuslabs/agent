@@ -76,7 +76,7 @@ const steerOnce = (message: SteeredMessage, at = 1) => {
   return { steer, asked: () => asked };
 };
 
-const agent = { id: 'ava', name: 'Ava' };
+const agent = { id: 'ava', name: 'Ava', tools: ['*'] };
 
 test('a message steered in at a tool step reaches the next provider call after the results, and starts no turn', async () => {
   const provider = createSteppingProvider(1, 'Skipped the tests.');

@@ -1,4 +1,4 @@
-import { matchesToolAllowlist, toolScopesOverlap } from '@stratusagent/core';
+import { matchesToolAllowlist, toolScopesOverlap, type ToolRisk, type UnlistedTools } from '@stratusagent/core';
 import { DEFAULT_STRATUS_AGENT, foldedAgentId, loadRosterSouls, resolveConfiguredSoul } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
@@ -19,9 +19,12 @@ import type { CliEnvironment } from './environment.ts';
  * The second gate, in the form both surfaces need it: `stratus plugins`
  * asks it per tool to build the who-can-call-what table, and the setup
  * menu asks it per agent to say what enabling just granted. An omitted
- * list is every registered tool; a *declared namespace* is matched by
- * overlap rather than by prefix, since `mcp.linear.*` sits under a granted
- * `mcp.*` and neither is the other's prefix.
+ * list is the tools registered at risk `safe`, so it reaches a tool only
+ * when the caller knows that risk and it is `safe`, except on a home an
+ * older build set up (`unlisted: 'every'`), where it reaches every tool,
+ * as the daemon reads it (`unlistedToolsFor`); a *declared namespace*
+ * is matched by overlap rather than by prefix, since `mcp.linear.*` sits
+ * under a granted `mcp.*` and neither is the other's prefix.
  *
  * Shared rather than written twice, and this is the fifth time on this
  * change that mattered: a menu that answers "who can call it" differently
@@ -31,9 +34,11 @@ export const soulGrantsTool = (
   tools: readonly string[] | undefined,
   name: string,
   discovered: boolean,
+  risk?: ToolRisk,
+  unlisted: UnlistedTools = 'safe',
 ): boolean => {
   if (tools === undefined) {
-    return true;
+    return unlisted === 'every' || risk === 'safe';
   }
   return discovered
     ? tools.some((granted) => toolScopesOverlap(granted, name))
@@ -59,8 +64,8 @@ export const rosterSoulsWithConfigured = async (
      */
     configPath?: string;
     /**
-     * Seed the reserved built-in agent, the way `loadRoster` does. It has
-     * no `tools:` key, so it is granted every registered tool — and on a
+     * Seed the reserved built-in agent, the way `loadRoster` does. It is
+     * granted every registered tool (`tools: ["*"]` in code) — and on a
      * fresh install it is the only agent there is, which made "granted to
      * nobody" exactly backwards for the most common configuration of all.
      * Off by default: a caller reporting on souls should not have one

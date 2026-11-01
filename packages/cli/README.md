@@ -63,6 +63,7 @@ stratus memory search blair deploy pipeline             # the way the agent sear
 stratus memory pin blair <id>...       # keep facts in the prompt every turn (also `memory unpin`)
 stratus memory export blair --file blair.jsonl          # move an agent's memory (also `memory import`)
 stratus memory reassert blair --trust user --all-unknown  # vouch for the facts with no recorded origin
+stratus memory passes blair            # what memory passes did (also `memory list --pass`, `memory undo-pass`)
 stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
 stratus dashboard                      # web dashboard, signed in via a one-time link
 ```
@@ -93,7 +94,8 @@ Full reference with every subcommand:
 | `--tool`, `--scope`, `--origin` | `grants revoke`: which grant goes — exactly one |
 | `--trust <level>` | `memory list`: show only that label; `memory reassert`: the label to record (`user`, `agent`, `unknown`, `external`) |
 | `--all-unknown` | `memory reassert`: every live fact with no recorded origin |
-| `--limit <n>` | `memory search`: maximum hits; `sessions`: how many to list (default 20) |
+| `--limit <n>` | `memory search`: maximum hits; `sessions`, `memory passes`: how many to list (default 20) |
+| `--pass <id>` | `memory list`: only what this memory pass wrote |
 | `--status <status>` | `sessions`: only this state (`idle`, `running`, `pending_approval`, `completed`, `failed`) |
 | `--file <path>`, `--preserve-trust` | `memory export` / `memory import`: the JSONL, and keeping each recorded label instead of landing entries `external` |
 | `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one; `credential env`: whose shell the binding is for; `signin set`/`remove`: whose own sign-in it is; `channel set`/`remove`: whose binding it is |
@@ -155,4 +157,4 @@ The reasoning:
 The full index: [docs](https://github.com/stratuslabs/agent/blob/main/docs/README.md).
 
 Part of [Stratus Agent](https://github.com/stratuslabs/agent) — a tiny
-TypeScript agent runtime, MIT licensed.
+TypeScript agent runtime, Apache 2.0 licensed.

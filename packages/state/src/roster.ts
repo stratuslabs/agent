@@ -16,6 +16,7 @@ import {
   pinnedCapRefusal,
   MEMORY_RECALL_MAX_LIMIT,
   memoryQueryMatches,
+  memorySupersededIds,
   type MemoryEntry,
   type MemoryListOptions,
   type MemoryPinnedOptions,
@@ -44,7 +45,7 @@ import {
 } from './provider-names.ts';
 import { type SoulPinContext, applySoulPins } from './served.ts';
 import { signedInProviders } from './runtime.ts';
-import { DEFAULT_STRATUS_AGENT, resolveConfiguredSoul, loadRosterSouls } from './souls.ts';
+import { DEFAULT_STRATUS_AGENT, EVERY_TOOL, resolveConfiguredSoul, loadRosterSouls } from './souls.ts';
 
 // Unsouled runs used to remember facts under a per-provider default agent.
 // Stratus inherits all of them: reads for the built-in agent also return
@@ -275,7 +276,8 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
   return {
     async append(agentId, content, options) {
       const ids = aliasIds(agentId);
-      if (ids.length === 1 || options?.supersedes === undefined) {
+      const targets = memorySupersededIds(options ?? {});
+      if (ids.length === 1 || targets.length === 0) {
         return store.append(agentId, content, options);
       }
       // A successor has to be filed where the fact it retires lives, or the
@@ -284,8 +286,11 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       // their legacy id and the tool tells the model to supersede by
       // recalled id, so writing the revision under the current id alone
       // would make every inherited fact unrevisable.
+      // A merge goes where every fact it names lives. One whose facts span
+      // both ids has no such place, and the store below says so.
       for (const id of ids) {
-        if ((await store.list(id, { validity: 'all' })).entries.some((entry) => entry.id === options.supersedes)) {
+        const held = new Set((await store.list(id, { validity: 'all' })).entries.map((entry) => entry.id));
+        if (targets.every((target) => held.has(target))) {
           return store.append(id, content, options);
         }
       }
@@ -645,7 +650,15 @@ export const claimSoulFile = async (
   // got past them.
   await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
   await mkdir(agentsDirPath(env), { recursive: true });
-  let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
+  // Every tool, said in the soul rather than left to a missing key: an
+  // omitted `tools:` list is safe tools only, and a new agent made through
+  // setup, `agent new` or the API should work the way one always has, in
+  // a line its operator can see and narrow.
+  let agent = defineAgent({
+    ...(input.name ? { name: input.name } : {}),
+    instructions: input.instructions,
+    tools: [...EVERY_TOOL],
+  });
   const baseId = agent.id;
   for (;;) {
     const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
@@ -665,6 +678,7 @@ export const claimSoulFile = async (
       id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
       ...(input.name ? { name: input.name } : { name: agent.name }),
       instructions: input.instructions,
+      tools: [...EVERY_TOOL],
     });
   }
 };

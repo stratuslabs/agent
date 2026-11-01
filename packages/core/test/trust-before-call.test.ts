@@ -9,6 +9,7 @@ import {
   type ExecutionContext,
   type ModelProvider,
   type ProviderResponse,
+  type StratusEvent,
   type Tool,
   type TrustLevel,
 } from '../src/index.ts';
@@ -63,7 +64,7 @@ const runWith = async (tool: Omit<Tool, 'execute'>, approve: () => boolean = () 
     }
   });
   await runner.initialize();
-  const session = await runner.run({ sessionId: `tbc-${tool.name}`, agent: { id: 'ava', name: 'Ava' }, userMessage: 'go' });
+  const session = await runner.run({ sessionId: `tbc-${tool.name}`, agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go' });
   const result = session.messages.find((message) => message.toolResult?.callId === 'c1')?.toolResult;
   harness.result = result ? { ok: result.ok, ...(result.error ? { error: result.error } : {}) } : undefined;
   return harness;
@@ -117,4 +118,55 @@ test('a denied call is not asked about again when the label drops', async () => 
   assert.deepEqual(run.seen, ['unknown']);
   assert.deepEqual(run.decided, []);
   assert.equal(run.result?.ok, false);
+});
+
+test('a call refused for a label that dropped twice reports that refusal as its last decision', async () => {
+  // The policy said yes both times, and reported it; the runner's own "no"
+  // comes after, so a surface showing the latest decision beside the
+  // denied call shows why it was denied, not the two yeses.
+  const labels: TrustLevel[] = ['agent', 'unknown', 'external'];
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'probe.keeps-dropping',
+    description: 'probe',
+    risk: 'gated',
+    trustBeforeCall: () => labels.shift(),
+    async execute() {
+      return { ran: true };
+    },
+  });
+  const runner = new AgentRunner({
+    provider: oneCall('probe.keeps-dropping'),
+    tools,
+    store: new InMemorySessionStore(),
+    approvals: {
+      approve: async (context) => {
+        context.decided?.({ allowed: true, layer: 'scope', reason: 'probe.keeps-dropping is in scope' });
+        return true;
+      },
+    },
+  });
+  const events: StratusEvent[] = [];
+  runner.bus.subscribe((event) => {
+    if (event.type === 'permission.decided' || event.type === 'tool.denied' || event.type === 'tool.called') {
+      events.push(event);
+    }
+  });
+  await runner.initialize();
+  await runner.run({ sessionId: 'tbc-decided', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go' });
+  assert.deepEqual(events.map((event) => event.type), [
+    'permission.decided',
+    'permission.decided',
+    'permission.decided',
+    'tool.denied',
+  ]);
+  const last = events[2];
+  assert.equal(last?.type, 'permission.decided');
+  if (last?.type !== 'permission.decided') {
+    return;
+  }
+  assert.equal(last.callId, 'c1');
+  assert.equal(last.allowed, false);
+  assert.equal(last.layer, 'trust');
+  assert.match(last.reason, /marked less trusted twice while it was being approved/);
 });
