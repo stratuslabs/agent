@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -382,6 +382,18 @@ test('a shadow pass writes to the shadow file, never memory, and keeps its own w
   assert.deepEqual(lines[0].metadata.memoryPass, { id: 'p1', kind: 'save' });
   const write = await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet' });
   assert.equal(write.status, 'done', 'a shadow claim does not move the write watermark');
+});
+
+test('a ledger that cannot be read fails the pass instead of rejecting it', async (t) => {
+  const env = await setup(t);
+  await env.host.handle.start(AGENT, 'write');
+  env.sessions.set('s1', sessionOf('s1', [message('m1', at(1), 'A fact.')]));
+  const file = agentMemoryPassesFileIn(env.home, AGENT);
+  await rm(file);
+  await mkdir(file);
+  const outcome = await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet' });
+  assert.deepEqual([outcome.status, outcome.reason], ['failed', 'state']);
+  assert.equal(env.runs.length, 0);
 });
 
 test('a request that is not one is rejected; a tidy is refused until it is built', async (t) => {

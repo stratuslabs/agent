@@ -39,6 +39,7 @@ import {
   memoryPassWatermark,
   memoryShadowEntriesOf,
   type MemoryPassClaim,
+  type MemoryPassEnd,
   type MemoryPassLedger,
   type MemoryPassSlice,
   type MemoryShadowFile,
@@ -351,6 +352,18 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     return { id, trust };
   };
 
+  /**
+   * An end record that cannot be written leaves its claim open, which the
+   * next start settles from the entries, so the pass still answers.
+   */
+  const appendEnd = async (ledger: MemoryPassLedger, end: MemoryPassEnd): Promise<void> => {
+    try {
+      await ledger.append(end);
+    } catch (error) {
+      options.log(`memory pass ${end.passId}: could not write its end record (${error instanceof Error ? error.message : String(error)}); the next start settles it`);
+    }
+  };
+
   const runSave = async (request: Extract<MemoryPassRequest, { kind: 'save' }>): Promise<MemoryPassOutcome> => {
     const { from, mode } = validSave(request);
     const { agentId, sessionId } = request;
@@ -358,14 +371,22 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     if (closing) {
       return skipped(agentId, mode, passId, 'stopped');
     }
-    if (!started.has(`${agentId}\0${mode}`)) {
+    const begun = started.get(`${agentId}\0${mode}`);
+    if (begun === undefined) {
       return skipped(agentId, mode, passId, 'not-started');
     }
-    // A start still being written counts once it has landed.
-    await started.get(`${agentId}\0${mode}`);
+    // A start still being written counts once it has landed, and one that
+    // failed never started anything.
+    if (!await begun.then(() => true, () => false)) {
+      return skipped(agentId, mode, passId, 'not-started');
+    }
     if (options.memory === undefined) {
       return skipped(agentId, mode, passId, 'store-unsupported');
     }
+    // For the claim. Resolved before the chain is checked, so nothing comes
+    // between the check and the step; a config that cannot resolve now
+    // fails the model run the same way, after the claim.
+    const model = request.model ?? await options.defaultModel(agentId).catch(() => undefined) ?? '';
     if (isMemoryPassSessionId(sessionId)) {
       return skipped(agentId, mode, passId, 'sub-agent');
     }
@@ -384,7 +405,7 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
       type Taken = { refused: MemoryPassReason } | { nothingNew: true } | {
         claim: MemoryPassClaim; prompt: string; trust: TrustLevel; more: boolean;
       };
-      const taken = await options.chain.queue(sessionId, async (): Promise<Taken> => {
+      const step = options.chain.queue(sessionId, async (): Promise<Taken> => {
         const session = await options.sessions.get(sessionId);
         if (session === undefined) {
           return { refused: 'no-session' };
@@ -417,13 +438,25 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
           passId,
           kind: 'save',
           mode,
-          model: request.model ?? await options.defaultModel(agentId) ?? '',
+          model,
           sessionId,
           slice: next.slice,
         };
         await ledger.append(claim);
         return { claim, prompt: saveSlicePrompt(next.entries), trust: sessionWriteTrust(session), more: next.more };
       });
+      let taken: Taken;
+      try {
+        taken = await step;
+      } catch (error) {
+        if (error instanceof MalformedPassRequest) {
+          throw error;
+        }
+        // The session or the ledger could not be read or written: nothing
+        // was claimed, or the claim is open and the next start settles it.
+        options.log(`memory pass ${passId} (${agentId}) could not take its slice: ${error instanceof Error ? error.message : String(error)}`);
+        return finish(agentId, mode, { passId, status: 'failed', reason: 'state', saved: 0, superseded: 0, more: false });
+      }
       if ('refused' in taken) {
         return skipped(agentId, mode, passId, taken.refused);
       }
@@ -462,7 +495,7 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
         const reason: MemoryPassReason = stopAll.signal.aborted ? 'stopped' : 'cancelled';
         const written = await writtenBy(agentId, mode, passId);
         const end = memoryPassSettleRecord(taken.claim, written, { at: now(), run: options.run });
-        await ledger.append({ ...end, reason, more: taken.more });
+        await appendEnd(ledger, { ...end, reason, more: taken.more });
         return finish(agentId, mode, {
           passId, status: 'interrupted', reason, saved: end.saved, superseded: end.superseded, more: taken.more,
         });
@@ -472,13 +505,13 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
         const reason: MemoryPassReason = failure instanceof HostRefusalError ? 'budget' : 'model';
         options.log(`memory pass ${passId} (${agentId}) failed: ${failure instanceof Error ? failure.message : String(failure)}`);
         // Wrote nothing: the slice is given back, so it is read again.
-        await ledger.append({
+        await appendEnd(ledger, {
           type: 'end', at: now(), run: options.run, passId, status: 'failed', reason, saved, superseded,
           more: taken.more, released: saved === 0,
         });
         return finish(agentId, mode, { passId, status: 'failed', reason, saved, superseded, more: taken.more });
       }
-      await ledger.append({
+      await appendEnd(ledger, {
         type: 'end', at: now(), run: options.run, passId, status: 'done', saved, superseded, more: taken.more, released: false,
       });
       return finish(agentId, mode, { passId, status: 'done', saved, superseded, more: taken.more });

@@ -23,6 +23,9 @@ import {
   sessionWriteTrust,
   AgentRegistry,
   AgentRunner,
+  InMemorySessionStore,
+  MEMORY_PASS_MAX_MODEL_CALLS,
+  MEMORY_PASS_RULES,
   ChannelRegistry,
   ContributionRegistry,
   createRoutedMemoryStore,
@@ -115,6 +118,7 @@ import {
   credentialVariableProblem,
 } from '@stratusagent/agents';
 import { createFleetReader } from './fleet.ts';
+import { createMemoryPassHost, type MemoryPassModelRun } from './memory-passes.ts';
 import {
   createEventIntake,
   summarizeEvents,
@@ -5219,6 +5223,97 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return turn;
   };
 
+  // ---- memory passes (spec 962) -------------------------------------------
+
+  /**
+   * A pass's one model turn: the agent's provider and credentials, exactly
+   * the model asked for and never the fallback (cost stays what the
+   * operator chose), only the pass's two tools, no persona, skills, memory
+   * injection or delegates, and a session that is never stored. Its calls
+   * go through the same provider-call guards as every turn, and its events
+   * through the same bus, so a budget sees and counts them.
+   */
+  const runMemoryPassModel = async (run: MemoryPassModelRun): Promise<void> => {
+    const source = await refreshAgent(run.agentId);
+    const resolved = await runtimeForAgent(source);
+    const { fallback: _fallback, ...primary } = resolved as RuntimeConfig & { fallback?: unknown };
+    const config = (run.model !== undefined ? { ...primary, model: run.model } : primary) as RuntimeConfig;
+    const tools = new ToolRegistry();
+    for (const tool of run.tools) {
+      tools.register(tool);
+    }
+    // A step budget of n is n tool steps and one wrap-up, so this is the
+    // pass's model-call cap.
+    const maxTurns = MEMORY_PASS_MAX_MODEL_CALLS - 1;
+    let passRunner: AgentRunner | undefined;
+    const provider = createRuntimeProvider(
+      config,
+      () => {},
+      async (session, call, context) => {
+        if (!passRunner) {
+          throw new Error('The Stratus runtime is not ready to execute tools yet.');
+        }
+        return passRunner.executeHostedToolCall(session, call, context);
+      },
+      maxTurns,
+      async () => {},
+      providerContributions,
+    );
+    passRunner = new AgentRunner({
+      provider,
+      tools,
+      store: new InMemorySessionStore(),
+      bus,
+      maxTurns,
+      providerCallGuards,
+    });
+    const definition: AgentDefinition = {
+      id: source.definition.id,
+      name: source.definition.name,
+      instructions: MEMORY_PASS_RULES,
+      tools: run.tools.map((tool) => tool.name),
+      skills: [],
+      delegates: [],
+      ...(source.definition.credentials !== undefined ? { credentials: [...source.definition.credentials] } : {}),
+    };
+    await passRunner.run({
+      sessionId: run.sessionId,
+      agent: definition,
+      userMessage: run.prompt,
+      metadata: {
+        provider: config.provider,
+        ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
+        // The slice's label: the pass reads at the conversation's trust.
+        [SENDER_TRUST_METADATA_KEY]: run.trust,
+      },
+      signal: run.signal,
+    });
+  };
+
+  const memoryPassHost = createMemoryPassHost({
+    // Beside each agent's memory.jsonl, under the home the memory store uses.
+    stateDir: stratusHomePath(env),
+    stateHome: stratusHomePath(env),
+    run: randomUUID(),
+    memory,
+    sessions: store,
+    chain: {
+      idle: (sessionId) => !sessionChains.has(sessionId),
+      queue: (sessionId, work) => onSessionChain(sessionId, work),
+    },
+    hasAgent: (agentId) => sources.has(agentId),
+    isSubAgentSession: (session) => isSubAgentSession(session),
+    defaultModel: async (agentId) => {
+      const config = await runtimeForAgent(await refreshAgent(agentId));
+      return config.provider !== 'demo' ? config.model : undefined;
+    },
+    runModel: runMemoryPassModel,
+    emit: (event) => {
+      void bus.emit(event);
+    },
+    log,
+  });
+
   /**
    * A scheduled firing's own dispatch — single-flight and stopping-aware
    * like the public one, but permitted into the reserved `schedule:`
@@ -5804,6 +5899,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       log,
       warn,
       subAgents,
+      memoryPasses: memoryPassHost.handle,
       // Metadata only, from the reads the control API makes, with a log
       // line per read naming the plugin. See `createFleetReader`.
       fleet: (packageName) => createFleetReader({
@@ -6248,6 +6344,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // already past its `stopping` check loses to `dispatch`'s own
     // refusal — the second gate is why this needs no handshake.
     scheduler.stop();
+    // Memory passes are low priority: aborted at once rather than drained,
+    // settled from what they wrote, then the stop records. Awaited before
+    // the stores close, since a settle reads the memory store.
+    const passesClosed = memoryPassHost.close().catch((error: unknown) => {
+      warn(`memory passes did not close cleanly: ${error instanceof Error ? error.message : String(error)}`);
+    });
     // Deny what is parked before draining, or the drain waits out every
     // outstanding approval timeout — a shutdown would hang for as long as
     // the longest request had left. Each denial is a real decision the
@@ -6286,6 +6388,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return channelsStopping;
     };
     const drain = (async () => {
+      await passesClosed;
       // A promotion still connecting channels finishes first, so every
       // channel it started is in the list stopped below; seeing `stopping`,
       // it starts nothing after that.

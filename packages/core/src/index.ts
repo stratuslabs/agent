@@ -1490,6 +1490,7 @@ export type MemoryPassReason =
   | 'model'
   | 'stopped'
   | 'cancelled'
+  | 'state'
   | (string & {});
 
 /** One request for a pass. See `MemoryPassHandle.run`. */
