@@ -148,13 +148,20 @@ model, counted against the agent's budget like any other call. It sees:
   description (never for an `mcp.*` tool, whose description its server
   wrote) and input, marked as data the agent composed. A call over 8 KB
   is shown as its first and last 4 KB with the size of the middle named;
+- **what the call's inputs mean**: the first line of the tool's own
+  description of each input the call sets, when it has one (never for an
+  `mcp.*` tool);
 - where outside content came from, whether a person is in the conversation,
   and the destination or site the call names.
 
 It never sees tool output, fetched pages, an MCP server's tool descriptions
 or the agent's own text, so a page or a server can't argue with it directly. It blocks only on a clear sign that the call
 serves outside content or leaks something, asks when it can't tell, and
-allows a risky-looking call the request clearly asked for.
+allows a risky-looking call the request clearly asked for. It judges only
+whether the request covers the call: not whether an earlier step the
+request named happened, whether the machine is set up, or whether a flag is
+the one it would pick. Where the call sends, what it sends and what it acts
+on still have to match the request.
 
 If the review can't run (an unknown model, a provider error, a budget
 refusal, an answer it can't read, `timeoutMs` passing, 20 s by default, or
