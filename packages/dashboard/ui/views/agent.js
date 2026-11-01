@@ -1,6 +1,7 @@
 import { ago, el } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
+import { decisionNote, decisionTone } from '../lib/decisions.js';
 import { onEnvelope, refreshCore, store } from '../app.js';
 
 /** A conversation started from this page, distinguishable from a Slack thread. */
@@ -59,8 +60,19 @@ export const renderAgent = (agentId, initialSessionId) => {
     messages: [],
     /** The reply currently arriving, token by token. */
     streaming: '',
-    /** Tool status lines for the turn in flight. */
+    /**
+     * Tool status lines for the turn in flight: `{ text, callId, decides,
+     * decision }`. `decides` marks the line a permission decision belongs
+     * beside (the call starting, or its refusal).
+     */
     toolLines: [],
+    /**
+     * Decisions (`permission.decided`) that arrived before the line they
+     * belong to, by call id. A decision is copied onto its line when the
+     * line is made rather than looked up at paint time, because an endpoint
+     * that numbers its calls per response reuses ids within one turn.
+     */
+    decisions: new Map(),
     turnId: undefined,
     /**
      * Envelopes that arrived before the POST said which turn is ours.
@@ -161,7 +173,19 @@ export const renderAgent = (agentId, initialSessionId) => {
       nodes.push(el('div', { class: `bubble ${message.role}` }, message.content));
     }
     for (const line of state.toolLines) {
-      nodes.push(el('div', { class: 'bubble tool' }, line));
+      const decision = line.decision;
+      nodes.push(el('div', { class: 'bubble tool' },
+        line.text,
+        decision
+          ? el('span', { class: `decision ${decisionTone(decision)}`, title: decision.reason }, decisionNote(decision))
+          : null,
+        // A refusal's reason is what the agent was told, and the actionable
+        // half for whoever is watching; an allowed call's reason stays in
+        // the title, since every call has one.
+        decision && !decision.allowed && decision.reason
+          ? el('div', { class: 'decision-reason' }, decision.reason)
+          : null,
+      ));
     }
     if (state.streaming) {
       nodes.push(el('div', { class: 'bubble assistant streaming' }, state.streaming));
@@ -202,6 +226,7 @@ export const renderAgent = (agentId, initialSessionId) => {
       state.messages = [];
       state.streaming = '';
       state.toolLines = [];
+      state.decisions = new Map();
       paintTranscript();
       update();
       return;
@@ -226,6 +251,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.messages = messages;
     state.streaming = '';
     state.toolLines = [];
+    state.decisions = new Map();
     paintTranscript();
     update();
   };
@@ -280,6 +306,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.messages = [];
     state.streaming = '';
     state.toolLines = [];
+    state.decisions = new Map();
     paintTranscript();
     update();
   };
@@ -312,6 +339,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.messages = [...state.messages, optimistic];
     state.streaming = '';
     state.toolLines = [];
+    state.decisions = new Map();
     paintTranscript();
     update();
 
@@ -378,6 +406,16 @@ export const renderAgent = (agentId, initialSessionId) => {
    */
   const isOurTurn = (envelope) => envelope.turnId !== undefined && envelope.turnId === state.turnId;
 
+  /** One tool status line, with the decision that arrived ahead of it when it is the line one belongs beside. */
+  const addToolLine = (text, callId, decides) => {
+    const decision = decides ? state.decisions.get(callId) : undefined;
+    if (decision !== undefined) {
+      state.decisions.delete(callId);
+    }
+    state.toolLines = [...state.toolLines, { text, callId, decides, ...(decision ? { decision } : {}) }];
+    paintTranscript();
+  };
+
   const applyEnvelope = (envelope) => {
     const event = envelope.event;
 
@@ -410,21 +448,38 @@ export const renderAgent = (agentId, initialSessionId) => {
           paintTranscript();
         }
         break;
+      case 'permission.decided': {
+        // Usually ahead of its call, so it waits for the line; a decision
+        // made off the call path (shadow) comes after and joins the latest
+        // line for that call that has none yet.
+        const decision = {
+          allowed: event.allowed,
+          layer: event.layer,
+          reason: event.reason,
+          verdict: event.verdict,
+          reviewCode: event.reviewCode,
+          shadow: event.shadow,
+        };
+        const index = state.toolLines.findLastIndex((line) => line.decides && line.callId === event.callId);
+        if (index >= 0 && state.toolLines[index].decision === undefined) {
+          state.toolLines = state.toolLines.map((line, at) => (at === index ? { ...line, decision } : line));
+          paintTranscript();
+        } else {
+          state.decisions.set(event.callId, decision);
+        }
+        break;
+      }
       case 'tool.called':
-        state.toolLines = [...state.toolLines, `running ${event.call.toolName}…`];
-        paintTranscript();
+        addToolLine(`running ${event.call.toolName}…`, event.call.id, true);
         break;
       case 'tool.completed':
-        state.toolLines = [...state.toolLines, `${event.result.toolName} ${event.result.ok ? 'finished' : 'failed'}`];
-        paintTranscript();
+        addToolLine(`${event.result.toolName} ${event.result.ok ? 'finished' : 'failed'}`, event.result.callId, false);
         break;
       case 'tool.denied':
-        state.toolLines = [...state.toolLines, `${event.call.toolName} was denied`];
-        paintTranscript();
+        addToolLine(`${event.call.toolName} was denied`, event.call.id, true);
         break;
       case 'tool.approval-requested':
-        state.toolLines = [...state.toolLines, `${event.call.toolName} is waiting for approval`];
-        paintTranscript();
+        addToolLine(`${event.call.toolName} is waiting for approval`, event.call.id, false);
         break;
       case 'session.failed':
         state.error = event.error;
@@ -698,6 +753,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.pending = [];
     state.streaming = '';
     state.toolLines = [];
+    state.decisions = new Map();
     void loadSessions();
     update();
   };

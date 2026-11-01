@@ -221,26 +221,34 @@ rewritten in front of you. Whatever it writes before its first tool is
 posted as that tool starts — "On it, checking the three PRs" reaches the
 thread at once, not an hour later.
 
-After that, a task keeps one progress message up to date instead of
-posting each step. Its first line comes from the tools the agent actually
-called, not from what it says about them: "⚙ Working · step 3: `shell.run`",
-"⏸ Waiting for approval to run `shell.run`", and at the end "✓ Done ·
-7 steps", "■ Stopped after 3 steps" or "✗ Failed after 3 steps". Anything
-else the agent writes between tools goes under that line, newest last;
-a passage too long to fit there is posted whole as a message of its own.
-The progress message opens once a task has worked for ten seconds, or as
-soon as the agent writes something more between tools, so a quick answer
-is just the answer. The finished reply follows as its own message; when
-the agent's last words came before its last tool call, those words are
-the reply rather than a line in the progress message.
+After that, what it writes between tools is not posted. That is the
+model talking to itself while it works, and a thread of step-by-step
+commentary is something you would have to scroll past. Nor is it added to
+the reply. The finished reply follows as its own message; when the
+agent's last words came before its last tool call, those words are the
+reply. A task that fails or is stopped says so where the reply would
+have gone.
+
+When an agent does need you before it finishes, it says so on purpose
+with `message.say`: one short message into the conversation it is
+replying in, such as "Need your OK to delete feature-x, it isn't merged."
+The default prompt tells it to do that only when it needs you or the news
+is worth your time, never to narrate its steps. The tool reaches only that
+conversation, so it is `safe` and never waits on an approval. A turn can
+send at most three, each one line of at most 500 characters and posted
+as one message in every reply mode. In `stream` mode the
+words already show as they are written, so the tool refuses there.
 
 While it works, Slack shows its own loading status under the
 agent's name: "is thinking…", or "is running shell.run…" while a tool runs.
 The same step also goes out as Slack's loading message ("Running
 shell.run…"), for Slack's newer agent sessions, which replace the status
 line with their own text ("Finding answers…"). A turn nobody asked for (an agent that
-[judges](#how-an-agent-listens)) shows no status, since it may decide to
-say nothing.
+[judges](#how-an-agent-listens)) shows the status only once it calls its
+first tool, since it may decide to say nothing; one that then stays
+silent clears it. Slack takes the status down whenever the agent's app posts
+in the thread, so the agent puts it back after its own posts, uploads,
+answered approvals, and a `message.send` from another of its sessions.
 
 Messages you send while it is still working reach it at its next step:
 once the tool it is running finishes, it reads them before it decides what
@@ -250,9 +258,10 @@ its final reply, or has used every step its message allows, they wait,
 and its next turn answers everything that queued in one reply. A message
 that lands mid-task shares the steps the task has left rather than adding
 more, so a busy thread can't keep one task running past the agent's
-[step limit](../reference/config.md#how-many-turns-one-message-may-spend). An agent on a provider that runs its own tool loop
-(Codex, or Claude through a subscription sign-in) doesn't take messages
-mid-task yet: they always wait for the next turn. In a DM each message
+[step limit](../reference/config.md#how-many-turns-one-message-may-spend).
+An agent on Claude through a subscription sign-in takes them the same way,
+with the result of the tool it was running; one on Codex doesn't take
+messages mid-task yet, and they wait for its next turn. In a DM each message
 shows the status as soon as you send it, so a second message never makes
 the agent look idle; in a channel thread the status keeps saying what the
 running turn is doing until its reply posts.

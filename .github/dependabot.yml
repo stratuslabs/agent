@@ -1,0 +1,66 @@
+# Weekly pull requests that keep dependencies and workflow actions current.
+#
+# These are version updates. A security update for an open advisory is a
+# separate Dependabot feature, switched on in the repository's security
+# settings rather than here, and it is not held by the cooldown below.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    # The root covers every workspace package: Dependabot reads
+    # pnpm-workspace.yaml and updates pnpm-lock.yaml with each manifest.
+    directory: /
+    schedule:
+      interval: weekly
+    # The packages here are libraries other people install, so a range moves
+    # only when the new version falls outside it (a major). A minor or patch
+    # inside the range updates pnpm-lock.yaml alone and leaves every
+    # published range as it is.
+    versioning-strategy: increase-if-necessary
+    # No cooldown for npm while this repo is on pnpm 10. Dependabot enforces a
+    # cooldown by passing it to pnpm as minimumReleaseAge, and pnpm 10 then
+    # re-resolves locked entries younger than the window, not only the one
+    # being updated. Where a range's floor is that young (provider-claude-code's
+    # ^0.3.314 was two days old when this landed), nothing satisfies it, and
+    # every npm update failed. Excluding every package, rather than leaving
+    # cooldown out, also covers Dependabot's 3-day default. Revisit after a
+    # move to pnpm 11. Update PRs still go through review, CI and the daily
+    # fresh-dependencies check before anything merges.
+    cooldown:
+      exclude: ['*']
+    groups:
+      # Minors and patches arrive as one pull request a week. A major gets its
+      # own, because it can change behavior and needs its own review.
+      npm-minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+    # Majors we have decided to wait on. The two update-types rules hold only
+    # these weekly version updates: a security fix that needs a new undici or
+    # @types/node major still opens a pull request. The typescript versions
+    # rule holds security updates too.
+    ignore:
+      # undici 8 needs Node 22.19 or later, and engines allows 22.16. Revisit
+      # when the Node floor moves.
+      - dependency-name: undici
+        update-types: ['version-update:semver-major']
+      # @types/node 26 describes a newer Node than the 22.16 floor and changes
+      # assert's overloads, which fails typecheck. Move it on purpose, not
+      # weekly.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      # TypeScript goes from 5.9 straight to 7.1, whose stable API a CLI test
+      # needs (7.0 has only typescript/unstable). Skipping 6 and 7.0 makes 7.1
+      # the first major pull request.
+      - dependency-name: typescript
+        versions: ['6.x', '~7.0.0']
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ['*']

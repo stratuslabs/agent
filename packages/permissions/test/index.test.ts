@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import type { ApprovalAnswer, ApprovalContext, Session, Tool, ToolCall, ToolRisk } from '@stratusagent/core';
 
 import { atLeastAsRisky, createPermissionPolicy, type PermissionDecision } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 const session = (id = 'sess-1'): Session => ({
   id,
@@ -65,9 +66,9 @@ test('safe calls run unattended and riskier ones do not', async () => {
     onDecision: (decision) => decisions.push(decision),
   });
 
-  assert.equal(await policy.approve(context('memory.remember', 'safe')), true);
-  assert.equal(await policy.approve(context('shell.run', 'gated')), false);
-  assert.equal(await policy.approve(context('fs.delete', 'dangerous')), false);
+  assert.equal(ran(await policy.approve(context('memory.remember', 'safe'))), true);
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated'))), false);
+  assert.equal(ran(await policy.approve(context('fs.delete', 'dangerous'))), false);
 
   // A refusal nobody can see is indistinguishable from an agent that chose
   // not to act, which is the whole reason the daemon logs these.
@@ -88,11 +89,11 @@ test('an interactive prompt takes yes, always, and anything else as no', async (
     },
   });
 
-  assert.equal(await policy.approve(context('shell.run', 'gated')), true);
-  assert.equal(await policy.approve(context('shell.run', 'gated')), false);
-  assert.equal(await policy.approve(context('shell.run', 'gated')), false, 'empty input is not consent');
-  assert.equal(await policy.approve(context('shell.run', 'gated')), false);
-  assert.equal(await policy.approve(context('shell.run', 'gated')), true, 'case does not change the answer');
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated'))), true);
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated'))), false);
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated'))), false, 'empty input is not consent');
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated'))), false);
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated'))), true, 'case does not change the answer');
 
   assert.equal(asked.length, 5, 'every gated call asked, since none said always');
   assert.match(asked[0]!, /Allow shell\.run \(gated\) for Ava\?/);
@@ -111,13 +112,13 @@ test('the interactive prompt renders a gated call\'s arguments, so a schedule sh
   // Approving schedule.every mints recurring unattended work and a standing
   // outbound grant — the operator must see the cadence, prompt, and
   // destination, not just the tool name.
-  await policy.approve(context('schedule.every', 'gated', {
+  ran(await policy.approve(context('schedule.every', 'gated', {
     call: {
       id: 'call-1',
       toolName: 'schedule.every',
       input: { every: '30m', prompt: 'check the repo', destination: { channel: 'slack', to: 'C-ENG' } },
     },
-  }));
+  })));
   assert.match(asked[0]!, /schedule\.every \(gated\):/);
   assert.match(asked[0]!, /30m/);
   assert.match(asked[0]!, /check the repo/);
@@ -126,14 +127,14 @@ test('the interactive prompt renders a gated call\'s arguments, so a schedule sh
   // A call with no arguments still reads exactly as before — no empty
   // "(): " tail.
   asked.length = 0;
-  await policy.approve(context('memory.remember', 'gated'));
+  ran(await policy.approve(context('memory.remember', 'gated')));
   assert.match(asked[0]!, /Allow memory\.remember \(gated\) for Ava\?/);
 
   // A long free-form prompt must not push the destination out of view: the
   // approver is authorizing where the schedule may post, and that field
   // stays visible however long the prompt is.
   asked.length = 0;
-  await policy.approve(context('schedule.every', 'gated', {
+  ran(await policy.approve(context('schedule.every', 'gated', {
     call: {
       id: 'call-1',
       toolName: 'schedule.every',
@@ -143,7 +144,7 @@ test('the interactive prompt renders a gated call\'s arguments, so a schedule sh
         destination: { channel: 'slack', to: 'C-SECRET-OPS' },
       },
     },
-  }));
+  })));
   assert.match(asked[0]!, /C-SECRET-OPS/, 'the destination survives a long prompt');
   assert.match(asked[0]!, /30m/);
 
@@ -155,9 +156,9 @@ test('the interactive prompt renders a gated call\'s arguments, so a schedule sh
   for (let index = 0; index < 40; index += 1) {
     manyFields[`field_${index}`] = 'y'.repeat(100);
   }
-  await policy.approve(context('schedule.every', 'gated', {
+  ran(await policy.approve(context('schedule.every', 'gated', {
     call: { id: 'call-1', toolName: 'schedule.every', input: manyFields },
-  }));
+  })));
   assert.match(asked[0]!, /arguments truncated — inspect the call before approving/);
 });
 
@@ -173,21 +174,21 @@ test('"always" on a destination-scoped tool covers that tool on that one convers
     },
   });
 
-  assert.equal(await policy.approve(sendContext('message.send')), true);
+  assert.equal(ran(await policy.approve(sendContext('message.send'))), true);
   assert.match(asked[0]!, /always slack:C-ENG for Ava, until revoked/, 'the prompt says what it is offering');
-  assert.equal(await policy.approve(sendContext('message.send')), true);
+  assert.equal(ran(await policy.approve(sendContext('message.send'))), true);
   assert.equal(asks, 1, 'the second call did not ask again');
 
   // Another session, same conversation: still covered.
-  assert.equal(await policy.approve(sendContext('message.send', 'sess-2')), true);
+  assert.equal(ran(await policy.approve(sendContext('message.send', 'sess-2'))), true);
   assert.equal(asks, 1);
 
   // A different tool is a different question.
-  assert.equal(await policy.approve(sendContext('message.post')), true);
+  assert.equal(ran(await policy.approve(sendContext('message.post'))), true);
   assert.equal(asks, 2);
 
   // And a different conversation is too: never a yes to every channel.
-  assert.equal(await policy.approve(sendContext('message.send', 'sess-1', 'slack:C-OPS')), true);
+  assert.equal(ran(await policy.approve(sendContext('message.send', 'sess-1', 'slack:C-OPS'))), true);
   assert.equal(asks, 3);
 });
 
@@ -210,10 +211,10 @@ test('an "always" grant cannot leak between sessions with adjacent ids', async (
   const first = sendContext('run', 'a b');
   const second = sendContext('b run', 'a');
 
-  assert.equal(await policy.approve(first), true);
+  assert.equal(ran(await policy.approve(first)), true);
   assert.equal(asks, 1);
 
-  assert.equal(await policy.approve(second), true);
+  assert.equal(ran(await policy.approve(second)), true);
   assert.equal(asks, 2, 'the second session had to ask for itself');
 });
 
@@ -232,13 +233,13 @@ test('an aborted turn is never approved, before or during the prompt', async () 
   });
 
   assert.equal(
-    await policy.approve(context('shell.run', 'gated', { signal: preAborted.signal })),
+    ran(await policy.approve(context('shell.run', 'gated', { signal: preAborted.signal }))),
     false,
     'a turn cancelled before the prompt never reaches a human',
   );
 
   assert.equal(
-    await policy.approve(context('shell.run', 'gated', { signal: controller.signal })),
+    ran(await policy.approve(context('shell.run', 'gated', { signal: controller.signal }))),
     false,
     'an answer arriving after the abort does not execute a tool for a dead turn',
   );
@@ -273,7 +274,7 @@ test('a prompt nobody answers does not outlive the turn', { timeout: 10_000 }, a
   });
 
   controller.abort();
-  assert.equal(await decision, false, 'the abort released the wait');
+  assert.equal(ran(await decision), false, 'the abort released the wait');
 
   // And the answer arriving afterwards changes nothing.
   resolvePrompt?.('y');
@@ -313,12 +314,12 @@ test('a remote answer decides the call, and always on a destination-scoped tool 
     onDecision: (decision) => decisions.push(decision),
   });
 
-  assert.equal(await policy.approve(context('shell.run', 'gated')), true, 'allow once');
-  assert.equal(await policy.approve(sendContext('message.send')), true, 'always allow');
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated'))), true, 'allow once');
+  assert.equal(ran(await policy.approve(sendContext('message.send'))), true, 'always allow');
   // The second send is covered by the "always" above and never reaches
   // the transport — that is what makes the button worth clicking.
-  assert.equal(await policy.approve(sendContext('message.send')), true);
-  assert.equal(await policy.approve(context('fs.delete', 'dangerous')), false, 'deny');
+  assert.equal(ran(await policy.approve(sendContext('message.send'))), true);
+  assert.equal(ran(await policy.approve(context('fs.delete', 'dangerous'))), false, 'deny');
 
   // The request says in advance which lifetime "always" would create, so
   // the transport can word the button and the outcome without guessing.
@@ -332,9 +333,9 @@ test('a remote answer decides the call, and always on a destination-scoped tool 
 
   // Another session in the same conversation is covered; another
   // conversation asks again.
-  assert.equal(await policy.approve(sendContext('message.send', 'sess-2')), true);
+  assert.equal(ran(await policy.approve(sendContext('message.send', 'sess-2'))), true);
   answers.push('deny');
-  assert.equal(await policy.approve(sendContext('message.send', 'sess-2', 'slack:C-OPS')), false);
+  assert.equal(ran(await policy.approve(sendContext('message.send', 'sess-2', 'slack:C-OPS'))), false);
   assert.deepEqual(asked.map(([name]) => name), ['shell.run', 'message.send', 'fs.delete', 'message.send']);
 });
 
@@ -348,7 +349,7 @@ test('a transport that fails denies the call instead of failing the turn', async
 
   // The agent should be told its call was not approved and carry on — a
   // channel outage must not surface as a crashed turn.
-  assert.equal(await policy.approve(context('shell.run', 'gated')), false);
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated'))), false);
 });
 
 test('an aborted turn releases a remote request nobody answered', async () => {
@@ -377,11 +378,11 @@ test('an aborted turn releases a remote request nobody answered', async () => {
   });
 
   controller.abort();
-  assert.equal(await decision, false, 'the abort released the wait');
+  assert.equal(ran(await decision), false, 'the abort released the wait');
 
   // An approval clicked after the turn is gone changes nothing here — the
   // gateway refuses it too, but the policy must not be relying on that.
   answer?.('always');
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(await policy.approve(context('shell.run', 'gated', { signal: controller.signal })), false);
+  assert.equal(ran(await policy.approve(context('shell.run', 'gated', { signal: controller.signal }))), false);
 });

@@ -2348,6 +2348,42 @@ test('event sources and deliveries are readable over the API, and health carries
   }
 });
 
+test('an agent\'s memory passes are readable over the API: the list, and one pass with what it wrote', async () => {
+  const harness = await startApi();
+  try {
+    const { agentMemoryPassesFileIn, createHomeMemoryStore, createMemoryPassLedger, stratusHomePath } = await import('@stratusagent/state');
+    const env = { homeDir: harness.home };
+    const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(stratusHomePath(env), 'stratus'));
+    await ledger.append({ type: 'start', at: '2026-11-01T01:00:00.000Z', run: 'r1', mode: 'write' });
+    await ledger.append({
+      type: 'claim', at: '2026-11-01T01:10:00.000Z', run: 'r1', passId: 'p1', kind: 'save', mode: 'write', model: 'm',
+      sessionId: 's1', slice: { from: 'm1', to: 'm2', count: 2 },
+    });
+    await ledger.append({ type: 'end', at: '2026-11-01T01:11:00.000Z', run: 'r1', passId: 'p1', status: 'done', saved: 1, superseded: 0, released: false });
+    const store = createHomeMemoryStore(env);
+    await store.append('stratus', 'Deploys go out on Tuesdays.', { metadata: { memoryPass: { id: 'p1', kind: 'save' } } });
+    await store.append('stratus', 'Written by a turn, not a pass.');
+
+    const listed = await json<{ agentId: string; passes: Array<Record<string, unknown>> }>(await harness.call('/api/v1/agents/stratus/memory/passes'));
+    assert.equal(listed.agentId, 'stratus');
+    assert.deepEqual(listed.passes.map((pass) => [pass.passId, pass.status, pass.saved, pass.sessionId]), [['p1', 'done', 1, 's1']]);
+    assert.equal(JSON.stringify(listed).includes('Tuesdays'), false, 'the list holds no content');
+
+    const one = await json<{ pass: Record<string, unknown>; entries: Array<{ content: string }> }>(await harness.call('/api/v1/agents/stratus/memory/passes/p1'));
+    assert.equal(one.pass.passId, 'p1');
+    assert.deepEqual(one.entries.map((entry) => entry.content), ['Deploys go out on Tuesdays.']);
+
+    const missing = await harness.call('/api/v1/agents/stratus/memory/passes/nope');
+    assert.equal(missing.status, 404);
+    assert.deepEqual((await json<{ passes: unknown[] }>(await harness.call('/api/v1/agents/nobody/memory/passes'))).passes, [],
+      'an id with no ledger has no passes');
+    assert.equal((await harness.call('/api/v1/agents/..%2Fx/memory/passes')).status, 400);
+    assert.equal((await harness.call('/api/v1/agents/stratus/memory/passes', { auth: 'none' })).status, 401);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('schedules are listable and cancellable over the API', async () => {
   const harness = await startApi();
   try {

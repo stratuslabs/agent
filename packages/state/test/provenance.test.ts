@@ -7,6 +7,7 @@ import path from 'node:path';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   InMemoryAgentMemoryStore,
   ToolRegistry,
   memoryEntryTrust,
@@ -303,7 +304,7 @@ const observe = async (build: (executeTool: ClaudeCodeToolExecutor) => ModelProv
     }
     return runner.executeHostedToolCall(session, call, context);
   };
-  runner = new AgentRunner({ provider: build(executeTool), tools, memory: memoryStore });
+  runner = new AgentRunner({ provider: build(executeTool), tools, memory: memoryStore, approvals: new AllowAllApprovalPolicy() });
   runner.bus.subscribe((event) => {
     if (event.type === 'session.tainted') {
       tainted.push({ trust: event.trust, source: event.source });

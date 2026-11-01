@@ -276,6 +276,44 @@ test('a turn every caller in it gave up on, steered ones included, is cancelled'
   assert.equal(lastUser(provider.calls[1]), 'second');
 });
 
+test('a turn stopped while it looks for messages to take in takes none: they run next, as their own turn', async (t) => {
+  // Card 959. Call 1 asks for a tool; call 2 is the next turn, the waiting message's own.
+  const provider = scriptedProvider([openAiToolCall, () => openAiText('Answered second.')], 1);
+  const gateway = await startGateway(t, provider.fetchImpl);
+  // The store read that judges the waiting keys is where the turn is
+  // stopped: abortTurns stops the running turn and nothing queued, so the
+  // callers' own signals stay live.
+  const read = gateway.store.get.bind(gateway.store);
+  let stopAtNextRead = false;
+  let stoppedAt: string | undefined;
+  gateway.store.get = async (sessionId: string) => {
+    const session = await read(sessionId);
+    if (stopAtNextRead) {
+      stopAtNextRead = false;
+      stoppedAt = session?.messages.at(-1)?.role;
+      gateway.abortTurns(sessionId, 'Stopped from the test.');
+    }
+    return session;
+  };
+
+  const first = gateway.dispatch({ sessionId: 's-1i', agentId: 'ava', userMessage: 'first', idempotencyKey: 'k1', onAbsorbed: () => {} });
+  await provider.waiting;
+  const second = gateway.dispatch({ sessionId: 's-1i', agentId: 'ava', userMessage: 'second', idempotencyKey: 'k2', onAbsorbed: () => {} });
+  stopAtNextRead = true;
+  provider.release();
+  const [one, two] = await Promise.allSettled([first, second]);
+
+  // Stopped between the tool step and the next call, where steering reads.
+  assert.equal(stoppedAt, 'tool');
+  assert.equal(one.status, 'rejected');
+  assert.equal(two.status, 'fulfilled');
+  assert.equal(provider.calls.length, 2);
+  assert.equal(lastUser(provider.calls[1]), 'second');
+  const session = await gateway.store.get('s-1i');
+  assert.equal(session?.messages.some((message) => message.steered === true), false);
+  assert.equal(workItemState(session!, 'k2'), 'finished');
+});
+
 test('a planned stop tells a keyed steered caller its turn continues, even when the turn it joined was unkeyed', async (t) => {
   const home = await newHome();
   const dir = path.join(home, '.stratus', 'agents');

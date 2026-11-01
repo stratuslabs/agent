@@ -612,7 +612,7 @@ const serveHeldHome = async (
     }
   }
 
-  // The daemon had no policy at all: createGateway falls back to
+  // The daemon once had no policy at all: createGateway fell back to
   // AllowAllApprovalPolicy, so every tool call from every agent
   // auto-approved, indefinitely, with nobody watching. That was survivable
   // while `serve` was something you ran in a terminal you were sitting at;

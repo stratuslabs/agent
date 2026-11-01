@@ -587,7 +587,11 @@ What each contribution is, and why it is not the bare interface:
   first agent's memories, the way a `tool-fs` that cached its roots would
   hand every agent the first agent's files. The host selects one by name
   (`memoryStore` in a trusted config) behind a store that routes per call,
-  so the memory tools built before any plugin loaded still reach it.
+  so the memory tools built before any plugin loaded still reach it. A
+  store that accepts a list in `supersedes` (one record retiring several
+  facts) says so with `supersedesMany: true`; without it, memory passes
+  hand it one id at a time and never merge, and a tidy pass is skipped
+  (`store-unsupported`).
 - **An executor is `{ name, executor }`**, selected by `executor` in a
   trusted config.
 
@@ -992,6 +996,12 @@ after an approval (deciding once more if it dropped, refusing on a second drop),
 and hands the decided label to `execute` as `ExecutionContext.decidedTrust`
 so the tool can check once more before it acts. A throw or a slow answer reads
 `external`.
+A tool that is fine unattended in a clean conversation but not on a web page's
+say-so may declare `Tool.riskAfterExternalContent`: once the session's label is
+`external`, the runner judges its calls at that risk instead (`resolveCallRisk`),
+and it never lowers `risk`. `agent.delegate` declares `gated` there. Such a tool
+never runs beside its read-only neighbours, so the label it is judged against
+includes every call before it.
 
 Two more packages ship from this repository today, both added before any
 plugin lived in `stratuslabs/plugins`: `provider-codex` and the MCP bridge

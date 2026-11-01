@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   AgentRegistry,
   AgentRunner,
+  AllowAllApprovalPolicy,
   CONVERSATION_METADATA_KEY,
   ChannelRegistry,
   ContributionRegistry,
@@ -532,6 +533,9 @@ const main = async (): Promise<void> => {
         // another request path than the one that serves a turn.
         streaming: true,
         ...(maxTurns !== undefined ? { maxTurns } : {}),
+        // What the eval always ran with, written down now that a runner
+        // with no policy runs only safe tools.
+        approvals: new AllowAllApprovalPolicy(),
       });
       hostedRunner = runner;
       return runner;

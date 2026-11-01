@@ -55,6 +55,7 @@ export const createMessageSendTool = (
 ): Tool => ({
   name: MESSAGE_SEND_TOOL_NAME,
   description: 'Send a message to a channel or DM you are not currently talking in, at the top level or as a reply in one of its threads. '
+    + 'Not for the conversation you are replying in: say that in your reply, or mid-task with message.say. '
     + 'Returns the posted message\'s id, and the thread to name to reply under it: '
     + 'pass that returned thread (never a reply\'s id) to every later send in the same thread. '
     + 'Scheduled turns may post to their schedule\'s approved destination without asking; anywhere else needs approval.',
@@ -69,7 +70,9 @@ export const createMessageSendTool = (
       text: { type: 'string', description: 'The message text.' },
       thread: {
         type: 'string',
-        description: 'The id of a message in that conversation to reply under (for Slack, its ts, e.g. 1791332967.606559). Omit to post at the top level, or, in a scheduled run sending to its own destination, into the schedule\'s report thread.',
+        description: 'The thread to reply in, by the id of its first message (for Slack, its ts), as message.read lists it or an earlier send returned it. '
+          + 'Never make one up. '
+          + 'Omit to post at the top level, or, in a scheduled run sending to its own destination, into the schedule\'s report thread.',
       },
       topLevel: {
         type: 'boolean',
@@ -118,6 +121,61 @@ export const createMessageSendTool = (
       ...(id !== undefined ? { id } : {}),
       ...(root !== undefined ? { thread: root } : {}),
     };
+  },
+});
+
+export const MESSAGE_SAY_TOOL_NAME = 'message.say';
+
+/** The most a mid-task message may say: one line, not a report (card 1009). */
+export const MESSAGE_SAY_MAX_LENGTH = 500;
+
+/**
+ * Posts one message into the conversation `session` is replying in, now.
+ * The gateway implements it over the channel contract's optional `say`,
+ * and rejects, with a sentence for the agent, when the session's channel
+ * cannot take one (a terminal run, a schedule with nobody watching, a
+ * channel without the method).
+ */
+export type ConversationSayer = (input: { session: Session; text: string }) => Promise<void>;
+
+/**
+ * A mid-task message to the person the agent is working for, in the
+ * conversation it is already replying in (card 1009). Slack holds the
+ * words a model writes between tool calls, so this is how an agent says
+ * something before its reply on purpose: a question only the person can
+ * answer, or news they would want before it finishes.
+ *
+ * `safe`, unlike `message.send`: it takes no destination, so it can reach
+ * no one the reply could not, and it says nothing the reply could not
+ * have said. What keeps it from becoming narration is the description,
+ * the one-line cap here, and a per-turn cap in the channel.
+ */
+export const createMessageSayTool = (say: ConversationSayer): Tool => ({
+  name: MESSAGE_SAY_TOOL_NAME,
+  description: 'Send the person you are working for one short message now, in the conversation you are replying in, before your reply. '
+    + 'Words you write between tool calls are not shown to them, so this is how to reach them before you finish. '
+    + 'Use it only when you need them (a decision, an OK, something only they can give), they asked to hear from you mid-task, or they would want to know something before you finish. '
+    + 'Never use it to narrate your steps: your reply follows when you are done. It reaches only this conversation.',
+  risk: 'safe',
+  parameters: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: `One line, at most ${MESSAGE_SAY_MAX_LENGTH} characters.` },
+    },
+    required: ['text'],
+  },
+  async execute(input: JsonObject, session: Session) {
+    const text = typeof input.text === 'string' ? input.text.trim() : '';
+    if (!text) {
+      throw new Error('message.say requires a non-empty "text".');
+    }
+    // One line is the contract, so one call is one message: a channel that
+    // splits text at its paragraphs would otherwise post several.
+    if (text.length > MESSAGE_SAY_MAX_LENGTH || /[\r\n]/.test(text)) {
+      throw new Error(`message.say takes one line of at most ${MESSAGE_SAY_MAX_LENGTH} characters. Put the rest in your reply.`);
+    }
+    await say({ session, text });
+    return { sent: true };
   },
 });
 

@@ -22,7 +22,7 @@
     "node": ">=22.16 <23 || >=24"
   },
   "dependencies": {
-    "@openai/codex-sdk": "^0.151.0",
+    "@openai/codex-sdk": "^0.166.0",
     "@stratusagent/core": "workspace:*",
     "@stratusagent/providers": "workspace:*"
   },

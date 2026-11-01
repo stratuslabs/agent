@@ -31,7 +31,7 @@ A fact is more than its text. Beyond the four fields every line must have —
 | `kind` | `semantic` (about the world), `episodic` (something that happened), `procedural` (how something is done), or `preference`. These have different useful lifetimes, and one flat bucket is how a store goes noisy. An `episodic` fact with no `validUntil` expires after 14 days; see [Task notes expire by default](#task-notes-expire-by-default). |
 | `about` | The entities the fact concerns — people, systems, projects. This is what the prompt's topic index is built from, and it **participates in search**: a fact reading "it now runs on Postgres" with `about: ["deploy pipeline"]` is found by a search for the pipeline. |
 | `validFrom`, `validUntil` | When the fact starts and stops being true. A different axis from `createdAt`, which is when it was written — conflating the two is why assistants confidently report where someone used to work. ISO-8601; a date alone is UTC midnight, and a *time* must carry `Z` or an offset, or the same bound would mean a different instant on every machine. A day that does not exist is refused rather than rolled forward — `2026-02-30` would otherwise be stored as March 2nd, moving the bound two days with nothing on record to say so. |
-| `supersedes` | The id of a fact this one replaces. |
+| `supersedes` | The id of a fact this one replaces, or a list of ids when one fact merges several (see [Merging duplicates](#merging-duplicates)). |
 
 Every one of them is optional and additive. A line carrying only the four
 required fields still loads, is still recallable, and still reaches the
@@ -102,6 +102,18 @@ invariant is the retirement, not a unique replacement: each is a fact the
 agent wrote, and two live successors that disagree are a contradiction in
 content rather than a storage race.
 
+### Merging duplicates
+
+A `supersedes` list retires every fact it names with one record, so three
+copies of a fact become one, and forgetting that one brings all three back.
+Only a memory pass writes lists today; the agent's own `memory.remember`
+replaces one fact at a time. One id is still written as a plain string. An
+older Stratus reading a list ignores it and shows the merged fact beside the
+ones it replaced: duplicates, never a loss. A memory store plugin takes
+lists only if its contribution declares `supersedesMany: true`, as the
+built-in store does; on any other store a pass replaces one fact at a time
+and tidy passes don't run.
+
 ### Pinned facts
 
 Some things an agent should still know after a year with no search at all:
@@ -115,8 +127,10 @@ pin that did not mean anything. Unpin something first.
 
 The budget is a **prefix** of the pins in the order they were made, so one
 pin that overruns the cap makes every pin recorded after it inert too,
-whatever its size. Two daemons pinning at once can produce that: each reads
-a total that does not yet include the other's write, and both append. The
+whatever its size. Pins take a write lock beside `memory.jsonl`, so two
+pins from this version never both read a stale total, but a build older
+than the lock pinning at the same moment can produce it: each reads a total
+that does not yet include the other's write, and both append. The
 replay resolves it the same way in every store rather than evicting either
 one — and a later pin then refuses **naming the pin that is blocking it**,
 because the effective set is under the cap in that state and unpinning from
@@ -285,6 +299,124 @@ session boundary, not a raised label: `stratus session rollover <id>`
 archives the transcript so far and starts the same id over. The fresh
 session is still `unknown` on its first turn if the entries it injects are,
 which is correct, and what `stratus memory list` is for.
+
+## Memory passes
+
+A memory pass is a short model run, as the agent, that reads the newest
+messages of one conversation and saves the lasting facts in them, so a
+preference stated in passing is still there next week. Nothing in core
+decides when to run one. An operator-installed plugin asks for passes
+through `PluginContext.memoryPasses`: `start(agentId, mode)`, called from
+the plugin's `setup`, turns upkeep on for an agent until the daemon stops,
+and `run(request)` runs one pass and resolves with how it ended. A pass
+asked for before the daemon has loaded its agents is skipped as
+`not-started`. No tool starts a pass, so neither the agent
+nor a chat message can. With no plugin asking, nothing runs and nothing
+changes. Only the daemon offers it: under `stratus run` a plugin gets no
+`memoryPasses`.
+
+What a pass may do is enforced by the runtime, not left to the prompt:
+
+- Its only tools are `memory.recall` and a narrowed `memory.remember`. It
+  saves at most 5 facts in at most 4 model calls, and only `semantic`,
+  `procedural`, or `preference` facts, never `episodic` task notes.
+- It may replace (`supersedes`) only facts it recalled in that same pass,
+  or, for a tidy pass, was handed, and never a pinned fact or one labeled
+  `user`. It may name several to
+  merge them into one, when the store takes lists. The built-in store
+  checks the pin and the label in the same step as the write, under the
+  lock `stratus memory pin` and `reassert` take, so an operator who pins or
+  asserts a fact while a pass is merging it always wins.
+- It runs on exactly the model the request names, or the agent's own, with
+  no fallback.
+- It writes at the conversation's trust label, so a conversation that read
+  a web page writes `external`, and every fact it writes carries
+  `metadata.memoryPass` (`{ id, kind }`) and the conversation's session id.
+
+Which messages it reads:
+
+- Only conversations of the kinds the request lists, `public` when it lists
+  none, so a DM is read only when the plugin's config says so. A session
+  with no channel (your CLI or control API) always counts, and a channel
+  that reports no kind never does.
+- Never a sub-agent's session, and a schedule firing or event trigger's
+  session only when the request sets `scheduled: true`.
+- Only messages written while upkeep was on, and only ones no earlier pass
+  took. A pass reads about 32 KB at a time, oldest first. A message alone
+  over that goes in cut to fit, and the ledger records the cut.
+- Never a conversation with a turn running. That pass is `skipped`
+  (`turn-running`) and the plugin asks again later.
+
+A tidy pass (`run({ kind: 'tidy', agentId })`) merges duplicate facts
+instead of reading a conversation. The runtime picks what it reads:
+
+- A group is three or more live facts with the same `about` key (compared
+  without case), the same kind, and the same trust label. Episodic, pinned
+  and `user`-labeled facts are left out before counting. A fact with two
+  `about` keys counts in both groups.
+- The largest group goes first. A group over about 24 KB goes in chunks,
+  oldest facts first, one chunk per pass, as JSON lines between `<facts>`
+  tags.
+- A chunk an earlier tidy pass of the same mode already looked at (the same
+  member ids) is passed over for the next, so a chunk that merges nothing
+  still moves the tidy on. A merge changes the members, so those chunks are
+  looked at again. The outcome's `more` says another chunk waits.
+- The pass runs at its group's label, and its recall returns only facts
+  with that label that are true now, so the merged fact has the label the
+  duplicates had (tidying `external` facts writes an `external` fact) and
+  an expired fact is never merged back into a current one. If you lower a
+  fact's label with `reassert` while a pass is merging it, the merged fact
+  gets the lower label.
+- A merge is one fact whose `supersedes` lists every duplicate, so one
+  `undo-pass` brings them all back. A store that doesn't take a list in
+  `supersedes` gets no tidy passes (`skipped`, `store-unsupported`).
+
+In `shadow` mode a pass runs the same way but writes what it would have
+saved to `agents/<id>/memory-shadow.jsonl`, and no real fact changes. Shadow
+and write passes keep separate places, so write mode still tidies a group a
+shadow pass looked at.
+
+### The ledger
+
+Each pass that read something is recorded in
+`~/.stratus/agents/<id>/memory-passes.jsonl`, append-only like
+`memory.jsonl`: when upkeep started and stopped, which messages each save
+pass took or which group a tidy pass looked at, and how it ended: ids,
+times, counts, and a tidy's group key (`kind/label/about`), never a message
+or a fact. That is also where each conversation's place is kept, so a pass never competes with a
+turn saving its session. A pass that fails before writing anything gives
+its messages back for the next pass. One that wrote something keeps them,
+so nothing is saved twice. A daemon stop aborts running passes at once
+instead of holding the drain, and a pass a crash cut off is settled the
+same way at the next start.
+
+### Seeing and undoing what passes did
+
+```bash
+stratus memory passes blair            # newest first: status, reason, counts, what it read
+stratus memory list blair --pass <id>  # what one pass wrote, forgotten entries included
+stratus memory undo-pass blair <id>    # forget everything that pass wrote
+```
+
+`passes` shows each pass's kind, mode, status and reason (`failed
+(model)`, `failed (budget)`), how many facts it saved and replaced, and
+which messages it read, with any message cut to fit. `open` means a pass is
+running, or a crash cut it off and the next start will settle it.
+`list --pass` on a shadow pass shows what it would have saved.
+
+`undo-pass` forgets every live entry carrying the pass id. A forget is
+append-only, so the entries stay in the record, and whatever they replaced
+is live again. A shadow pass wrote nothing to memory, so there is nothing
+to undo. Like the rest of `stratus memory`, `list --pass` and `undo-pass`
+work on the built-in store only. `passes` reads the ledger, which the
+daemon keeps whichever store holds the facts, so it works with any.
+
+The control API has the same two reads for a dashboard or script:
+`GET /api/v1/agents/:id/memory/passes`, and
+`GET /api/v1/agents/:id/memory/passes/:passId` for one pass and what it
+wrote, from whichever store the daemon writes to. The bus gets
+`memory.pass-completed` for every pass, with its status and counts and no
+content.
 
 ## Moving an agent's memory
 

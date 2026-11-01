@@ -559,7 +559,8 @@ test('an agent that cannot currently answer still hears, and has it once it can'
     assert.deepEqual(userContents.at(-1), [
       'Dylan: Ava, hello',
       '(overheard, not addressed to you)\n> Dylan: Bea, cover for her?',
-      'Dylan: Ava, back?',
+      // Said to Ava after an overheard message, so marked (card 1034).
+      '(said to you)\nDylan: Ava, back?',
     ]);
   } finally {
     await gateway.stop();

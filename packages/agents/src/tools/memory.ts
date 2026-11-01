@@ -68,6 +68,48 @@ const aboutKeys = (value: unknown): string[] | undefined => {
   return keys.length > 0 ? keys : undefined;
 };
 
+/**
+ * What a `memory.remember` call asks to store, checked: the fact and the
+ * optional fields, in the shape `append` takes. Shared with a memory
+ * pass's own `memory.remember`, so both refuse the same malformed calls.
+ */
+export const rememberInput = (input: JsonObject): {
+  fact: string;
+  fields: Pick<MemoryAppendOptions, 'kind' | 'about' | 'validFrom' | 'validUntil' | 'supersedes'>;
+} => {
+  const fact = typeof input.fact === 'string' ? input.fact.trim() : '';
+  if (!fact) {
+    throw new Error('memory.remember requires a non-empty "fact" string.');
+  }
+  if (input.kind !== undefined && !isMemoryEntryKind(input.kind)) {
+    throw new Error(`"kind" must be one of ${MEMORY_ENTRY_KINDS.join(', ')}. Nothing was stored.`);
+  }
+  const about = aboutKeys(input.about);
+  const validFrom = validityBound(input.validFrom, 'validFrom');
+  const validUntil = validityBound(input.validUntil, 'validUntil');
+  // A window that closes before it opens describes nothing: the entry is
+  // not-yet-valid before `validFrom` and expired after it, so it could
+  // never be true and would never reach a prompt — stored, findable, and
+  // silently inert. The record tolerates whatever a hand edit or an
+  // import puts there; what a model writes is checked here.
+  if (validFrom !== undefined && validUntil !== undefined && Date.parse(validFrom) >= Date.parse(validUntil)) {
+    throw new Error(
+      `validUntil (${validUntil}) must be after validFrom (${validFrom}); a fact whose window closes before it opens is never true. Nothing was stored.`,
+    );
+  }
+  const supersedes = optionalString(input.supersedes);
+  return {
+    fact,
+    fields: {
+      ...(input.kind !== undefined ? { kind: input.kind } : {}),
+      ...(about !== undefined ? { about } : {}),
+      ...(validFrom !== undefined ? { validFrom } : {}),
+      ...(validUntil !== undefined ? { validUntil } : {}),
+      ...(supersedes !== undefined ? { supersedes } : {}),
+    },
+  };
+};
+
 export const MEMORY_TOOL_NAME = 'memory.remember';
 
 /**
@@ -112,41 +154,18 @@ export const createRememberTool = (store: AgentMemoryStore): Tool => ({
     required: ['fact'],
   },
   async execute(input: JsonObject, session: Session) {
-    const fact = typeof input.fact === 'string' ? input.fact.trim() : '';
-    if (!fact) {
-      throw new Error('memory.remember requires a non-empty "fact" string.');
-    }
-    if (input.kind !== undefined && !isMemoryEntryKind(input.kind)) {
-      throw new Error(`"kind" must be one of ${MEMORY_ENTRY_KINDS.join(', ')}. Nothing was stored.`);
-    }
+    const { fact, fields } = rememberInput(input);
+    const supersedes = fields.supersedes;
     // Per session, not per fact: the runner knows this session has seen
     // untrusted content and cannot know which words of the fact came from
     // it, so the write carries the least trusted label the session holds.
     // Coarse and over-marking — the safe direction.
     const taintedBy = sessionTaintedBy(session);
     const origin: MemoryOrigin = { sessionId: session.id, ...(taintedBy !== undefined ? { taintedBy } : {}) };
-    const about = aboutKeys(input.about);
-    const validFrom = validityBound(input.validFrom, 'validFrom');
-    const validUntil = validityBound(input.validUntil, 'validUntil');
-    // A window that closes before it opens describes nothing: the entry is
-    // not-yet-valid before `validFrom` and expired after it, so it could
-    // never be true and would never reach a prompt — stored, findable, and
-    // silently inert. The record tolerates whatever a hand edit or an
-    // import puts there; what a model writes is checked here.
-    if (validFrom !== undefined && validUntil !== undefined && Date.parse(validFrom) >= Date.parse(validUntil)) {
-      throw new Error(
-        `validUntil (${validUntil}) must be after validFrom (${validFrom}); a fact whose window closes before it opens is never true. Nothing was stored.`,
-      );
-    }
-    const supersedes = optionalString(input.supersedes);
     const options: MemoryAppendOptions = {
       metadata: { sessionId: session.id },
       provenance: { trust: sessionWriteTrust(session), origin },
-      ...(input.kind !== undefined ? { kind: input.kind } : {}),
-      ...(about !== undefined ? { about } : {}),
-      ...(validFrom !== undefined ? { validFrom } : {}),
-      ...(validUntil !== undefined ? { validUntil } : {}),
-      ...(supersedes !== undefined ? { supersedes } : {}),
+      ...fields,
     };
     // The store resolves `supersedes` against this agent's own live entries
     // and throws before appending anything, so naming a stranger's id is a
@@ -176,7 +195,7 @@ export const RECALL_TOOL_NAME = MEMORY_RECALL_TOOL_NAME;
  * good older ones. A store without ranking serves `recency` instead, and
  * the result's `strategy` says which one the agent got.
  */
-export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOptions = {}): Tool => {
+export const createRecallTool = (store: Pick<AgentMemoryStore, 'search'>, options: MemoryToolOptions = {}): Tool => {
   const now = clockOf(options);
   return {
     name: RECALL_TOOL_NAME,
