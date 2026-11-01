@@ -75,7 +75,7 @@ call in the context of what the person actually asked for.
 {
   "approvals": {
     "posture": "review",
-    "review": { "model": "claude-haiku-4-5", "shadow": true, "timeoutMs": 20000 },
+    "review": { "model": "claude-haiku-5-5", "shadow": true, "timeoutMs": 20000 },
     "rules": [
       { "tool": "web.fetch", "origin": "https://*.github.com", "verdict": "allow" },
       { "tool": "shell.run", "command": "git push", "verdict": "allow" },
@@ -191,6 +191,12 @@ awaited) and recorded as a decision marked shadow. Nothing is asked and
 nothing is blocked. This is how to see what `review` would do before you
 turn it on.
 
+The review model matters more than you might expect. Measure the one you
+pick with the review eval (`pnpm eval:review -- --model <model>`, see
+`packages/cli/eval/review-step`) before you turn shadow off: on its 60
+cases, `claude-haiku-5-5` asked about 1 of the 40 calls people asked for,
+and `claude-haiku-4-5` about a third of them.
+
 ### Seeing decisions
 
 Each decision is a `permission.decided` event with its verdict, the check
@@ -205,7 +211,7 @@ decision with `verdict=` and `code=` (a shadow one starts with `shadow`),
 which is what to count:
 
 ```text
-approvals: posture review for atlas (model claude-haiku-4-5, shadow: reviewed and logged, never enforced)
+approvals: posture review for atlas (model claude-haiku-5-5, shadow: reviewed and logged, never enforced)
 atlas: shadow [review] message.send was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for (session slack:atlas:…)
 ```
 
