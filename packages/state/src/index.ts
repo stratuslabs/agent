@@ -30,6 +30,7 @@ export {
   memoryPassMessageCounts,
   memoryPassOpenClaims,
   memoryPassSettleRecord,
+  memoryPassSummaries,
   memoryPassWatermark,
   memoryShadowEntriesOf,
   undoMemoryPass,
@@ -40,6 +41,7 @@ export {
   type MemoryPassLedgerOptions,
   type MemoryPassRecord,
   type MemoryPassSlice,
+  type MemoryPassSummary,
   type MemoryShadowEntry,
   type MemoryShadowFile,
 } from './memory-passes.ts';

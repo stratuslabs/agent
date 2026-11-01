@@ -118,7 +118,7 @@ import {
   credentialVariableProblem,
 } from '@stratusagent/agents';
 import { createFleetReader } from './fleet.ts';
-import { createMemoryPassHost, type MemoryPassModelRun } from './memory-passes.ts';
+import { createMemoryPassHost, type MemoryPassDetail, type MemoryPassModelRun } from './memory-passes.ts';
 import {
   createEventIntake,
   summarizeEvents,
@@ -185,6 +185,7 @@ export {
   type NewEventFiring,
   type RefusedEventDelivery,
 } from './events.ts';
+export { type MemoryPassDetail } from './memory-passes.ts';
 export {
   createEventIntake,
   mapGithubDelivery,
@@ -268,6 +269,7 @@ import {
   foldedAgentId,
   syncDirectory,
   writeFileSynced,
+  type MemoryPassSummary,
 } from '@stratusagent/state';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
@@ -1398,6 +1400,17 @@ export interface Gateway {
   eventSummary(): EventsSummary;
   /** Delivery rows, newest first; a row never holds the body. Empty when no source is configured. */
   eventDeliveries(options?: { source?: string; limit?: number }): EventDeliveryRow[];
+  /**
+   * An agent's memory passes from its ledger, newest first (spec 962).
+   * Read from the file each time, so a pass that just ended shows.
+   */
+  memoryPasses(agentId: string): Promise<MemoryPassSummary[]>;
+  /**
+   * One pass and the facts it wrote, from the store this daemon writes
+   * to (in shadow, the facts it would have written). Undefined when the
+   * ledger has no such pass.
+   */
+  memoryPass(agentId: string, passId: string): Promise<MemoryPassDetail | undefined>;
   /**
    * Every registered tool, with the risk it will actually be judged at and
    * the package it came from.
@@ -6828,6 +6841,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     eventDeliveries(options = {}) {
       return eventStore?.deliveries(options) ?? [];
+    },
+
+    memoryPasses(agentId) {
+      return memoryPassHost.passes(agentId);
+    },
+
+    memoryPass(agentId, passId) {
+      return memoryPassHost.pass(agentId, passId);
     },
 
     tools() {

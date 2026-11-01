@@ -384,6 +384,33 @@ test('a shadow pass writes to the shadow file, never memory, and keeps its own w
   assert.equal(write.status, 'done', 'a shadow claim does not move the write watermark');
 });
 
+test('the reads list passes newest first and show what each wrote: real facts for write, would-be facts for shadow', async (t) => {
+  const env = await setup(t);
+  assert.deepEqual(await env.host.passes(AGENT), [], 'no ledger reads as no passes');
+  await env.host.handle.start(AGENT, 'write');
+  await env.host.handle.start(AGENT, 'shadow');
+  env.sessions.set('s1', sessionOf('s1', [message('m1', at(1), 'Ava prefers tea.')]));
+  env.setScript(saves('Ava prefers tea.'));
+  await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet' });
+  env.tick(60_000);
+  await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet', mode: 'shadow' });
+
+  const listed = await env.host.passes(AGENT);
+  assert.deepEqual(listed.map((pass) => [pass.passId, pass.mode, pass.status, pass.saved, pass.sessionId]), [
+    ['p2', 'shadow', 'done', 1, 's1'],
+    ['p1', 'write', 'done', 1, 's1'],
+  ]);
+
+  const write = await env.host.pass(AGENT, 'p1');
+  assert.equal(write?.pass.passId, 'p1');
+  assert.deepEqual(write?.entries.map((entry) => entry.content), ['Ava prefers tea.']);
+  const shadow = await env.host.pass(AGENT, 'p2');
+  assert.deepEqual(shadow?.entries.map((entry) => entry.content), ['Ava prefers tea.']);
+  assert.equal((await env.memory.audit(AGENT)).length, 1, 'the shadow fact stays out of memory');
+  assert.equal(await env.host.pass(AGENT, 'nope'), undefined);
+  assert.deepEqual(await env.host.passes('someone-else'), []);
+});
+
 test('a ledger that cannot be read fails the pass instead of rejecting it', async (t) => {
   const env = await setup(t);
   await env.host.handle.start(AGENT, 'write');

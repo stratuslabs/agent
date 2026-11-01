@@ -383,6 +383,64 @@ export const memoryPassOpenClaims = (
 };
 
 /**
+ * One pass as `stratus memory passes` and the control API show it: its claim
+ * and, once it ended, how. `open` is a claim with no end yet: running now,
+ * or cut off by a crash, which the next start of that mode settles. `run`
+ * is the daemon run that claimed it.
+ */
+export interface MemoryPassSummary {
+  passId: string;
+  kind: MemoryPassKind;
+  mode: MemoryPassMode;
+  model: string;
+  run: string;
+  claimedAt: string;
+  sessionId?: string;
+  slice?: MemoryPassSlice;
+  group?: { key: string; hash: string };
+  status: MemoryPassStatus | 'open';
+  endedAt?: string;
+  reason?: string;
+  saved: number;
+  superseded: number;
+  more?: boolean;
+  tokens?: { input: number; output: number };
+  released?: boolean;
+}
+
+/** Every claimed pass, newest first. An end with no claim belongs to none. */
+export const memoryPassSummaries = (records: readonly MemoryPassRecord[]): MemoryPassSummary[] => {
+  const ends = endsByPass(records);
+  const summaries: MemoryPassSummary[] = [];
+  for (const record of records) {
+    if (record.type !== 'claim') {
+      continue;
+    }
+    const ended = ends.get(record.passId);
+    summaries.push({
+      passId: record.passId,
+      kind: record.kind,
+      mode: record.mode,
+      model: record.model,
+      run: record.run,
+      claimedAt: record.at,
+      ...(record.sessionId !== undefined ? { sessionId: record.sessionId } : {}),
+      ...(record.slice !== undefined ? { slice: record.slice } : {}),
+      ...(record.group !== undefined ? { group: record.group } : {}),
+      status: ended?.status ?? 'open',
+      ...(ended !== undefined ? { endedAt: ended.at } : {}),
+      ...(ended?.reason !== undefined ? { reason: ended.reason } : {}),
+      saved: ended?.saved ?? 0,
+      superseded: ended?.superseded ?? 0,
+      ...(ended?.more !== undefined ? { more: ended.more } : {}),
+      ...(ended?.tokens !== undefined ? { tokens: ended.tokens } : {}),
+      ...(ended !== undefined ? { released: ended.released } : {}),
+    });
+  }
+  return summaries.reverse();
+};
+
+/**
  * The end record that settles a claim a stop or crash left open, from the
  * entries carrying its pass id (`memoryPassEntries`), never from a counter:
  * any entry means the slice was used and the claim is kept, so it is never

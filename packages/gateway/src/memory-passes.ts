@@ -14,6 +14,7 @@ import {
   transcriptEntry,
   type AgentMemoryStore,
   type ConversationKind,
+  type MemoryAuditEntry,
   type MemoryPassHandle,
   type MemoryPassKind,
   type MemoryPassMode,
@@ -36,12 +37,15 @@ import {
   memoryPassMessageCounts,
   memoryPassOpenClaims,
   memoryPassSettleRecord,
+  memoryPassSummaries,
   memoryPassWatermark,
   memoryShadowEntriesOf,
   type MemoryPassClaim,
   type MemoryPassEnd,
   type MemoryPassLedger,
   type MemoryPassSlice,
+  type MemoryPassSummary,
+  type MemoryShadowEntry,
   type MemoryShadowFile,
 } from '@stratusagent/state';
 
@@ -92,8 +96,19 @@ export interface MemoryPassHostOptions {
   passId?: () => string;
 }
 
+/** One pass and the facts it wrote, or in shadow would have, oldest first. */
+export interface MemoryPassDetail {
+  pass: MemoryPassSummary;
+  /** Write mode: from the agent's memory, forgotten ones included. Shadow: from `memory-shadow.jsonl`. */
+  entries: Array<MemoryAuditEntry | MemoryShadowEntry>;
+}
+
 export interface MemoryPassHost {
   handle: MemoryPassHandle;
+  /** The agent's passes from its ledger, newest first. No ledger reads as none. */
+  passes(agentId: string): Promise<MemoryPassSummary[]>;
+  /** One pass and what it wrote; undefined when the ledger has no claim for it. */
+  pass(agentId: string, passId: string): Promise<MemoryPassDetail | undefined>;
   /**
    * The daemon is stopping: refuse new passes, abort running ones (they are
    * low priority and do not hold the drain), settle them, then write a stop
@@ -225,8 +240,12 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
   const stopAll = new AbortController();
   let closing = false;
 
-  /** Entries a pass wrote, from the store it wrote to, for a settle. */
-  const writtenBy = async (agentId: string, mode: MemoryPassMode, passId: string): Promise<{ supersedes?: string }[]> => {
+  /** Entries a pass wrote, from the store it wrote to. */
+  const writtenBy = async (
+    agentId: string,
+    mode: MemoryPassMode,
+    passId: string,
+  ): Promise<Array<MemoryAuditEntry | MemoryShadowEntry>> => {
     if (mode === 'shadow') {
       return memoryShadowEntriesOf(await shadowFor(agentId).read(), passId);
     }
@@ -569,5 +588,13 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     }
   };
 
-  return { handle: { start, run }, close };
+  const passes = async (agentId: string): Promise<MemoryPassSummary[]> =>
+    memoryPassSummaries(await ledgerFor(agentId).read());
+
+  const pass = async (agentId: string, passId: string): Promise<MemoryPassDetail | undefined> => {
+    const found = (await passes(agentId)).find((summary) => summary.passId === passId);
+    return found === undefined ? undefined : { pass: found, entries: await writtenBy(agentId, found.mode, passId) };
+  };
+
+  return { handle: { start, run }, passes, pass, close };
 };

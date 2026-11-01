@@ -17,6 +17,7 @@ import {
   memoryPassMessageCounts,
   memoryPassOpenClaims,
   memoryPassSettleRecord,
+  memoryPassSummaries,
   memoryPassWatermark,
   memoryShadowEntriesOf,
   undoMemoryPass,
@@ -122,6 +123,48 @@ test('open claims are the ones with no end, by mode', () => {
   ];
   assert.deepEqual(memoryPassOpenClaims(records, 'write').map((record) => record.passId), ['p2']);
   assert.deepEqual(memoryPassOpenClaims(records, 'shadow').map((record) => record.passId), ['p3']);
+});
+
+test('summaries pair each claim with its end, newest first, and a claim with no end reads open', () => {
+  const tidy: MemoryPassRecord = {
+    type: 'claim', at: '2026-11-01T01:20:00.000Z', run: 'r1', passId: 't1', kind: 'tidy', mode: 'shadow', model: 'm',
+    group: { key: 'g', hash: 'h' },
+  };
+  const records: MemoryPassRecord[] = [
+    start('2026-11-01T01:00:00.000Z', 'r1'),
+    { ...claim('2026-11-01T01:10:00.000Z', 'r1', 'p1', 's1', 'm1', 'm4'), slice: { from: 'm1', to: 'm4', count: 4, cut: { messageId: 'm4', bytesOmitted: 900 } } } as MemoryPassRecord,
+    // An end with no claim (a hand-edit) belongs to no pass.
+    end('2026-11-01T01:11:00.000Z', 'r1', 'ghost', false),
+    { type: 'end', at: '2026-11-01T01:12:00.000Z', run: 'r1', passId: 'p1', status: 'done', saved: 2, superseded: 1, more: true, tokens: { input: 10, output: 5 }, released: false },
+    tidy,
+    // A second end for the same pass is not this build's; the first one stands.
+    end('2026-11-01T01:30:00.000Z', 'r1', 'p1', true),
+  ];
+  assert.deepEqual(memoryPassSummaries(records), [
+    {
+      passId: 't1', kind: 'tidy', mode: 'shadow', model: 'm', run: 'r1', claimedAt: '2026-11-01T01:20:00.000Z',
+      group: { key: 'g', hash: 'h' }, status: 'open', saved: 0, superseded: 0,
+    },
+    {
+      passId: 'p1', kind: 'save', mode: 'write', model: 'm', run: 'r1', claimedAt: '2026-11-01T01:10:00.000Z',
+      sessionId: 's1', slice: { from: 'm1', to: 'm4', count: 4, cut: { messageId: 'm4', bytesOmitted: 900 } },
+      status: 'done', endedAt: '2026-11-01T01:12:00.000Z', saved: 2, superseded: 1, more: true,
+      tokens: { input: 10, output: 5 }, released: false,
+    },
+  ]);
+  assert.deepEqual(memoryPassSummaries([]), []);
+});
+
+test('a settled pass reads interrupted with its reason', () => {
+  const records: MemoryPassRecord[] = [
+    claim('2026-11-01T01:10:00.000Z', 'r1', 'p1', 's1', 'm1', 'm1'),
+    { type: 'end', at: '2026-11-01T02:00:00.000Z', run: 'r2', passId: 'p1', status: 'interrupted', reason: 'stopped', saved: 0, superseded: 0, released: true },
+  ];
+  const [only] = memoryPassSummaries(records);
+  assert.equal(only?.status, 'interrupted');
+  assert.equal(only?.reason, 'stopped');
+  assert.equal(only?.released, true);
+  assert.equal(only?.run, 'r1');
 });
 
 test('a settle keeps a claim whose pass wrote something and releases one that wrote nothing', () => {
