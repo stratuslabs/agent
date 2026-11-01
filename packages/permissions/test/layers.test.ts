@@ -20,6 +20,7 @@ import {
   type PermissionDecision,
   type PermissionPolicyOptions,
 } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 // Every decision names the check that made it, so an operator reading a
 // refusal knows which knob to turn. One case per layer, each reached with
@@ -77,7 +78,7 @@ const decide = async (
 ): Promise<PermissionDecision> => {
   const decisions: PermissionDecision[] = [];
   const policy = createPermissionPolicy({ ...options, onDecision: (decision) => decisions.push(decision) } as PermissionPolicyOptions);
-  const allowed = await policy.approve(context);
+  const allowed = ran(await policy.approve(context));
   assert.equal(decisions.length, 1, 'one decision per call');
   assert.equal(decisions[0]!.allowed, allowed);
   return decisions[0]!;
@@ -216,8 +217,8 @@ test('grant: standing tool, session, destination, channel, site, trusted domain 
   // A send whose input names no destination the tool can parse: the one
   // shape whose "always" still means this session.
   const unnamed = contextFor(sendTool, {});
-  assert.equal(await interactive.approve(unnamed), true);
-  assert.equal(await interactive.approve(unnamed), true);
+  assert.equal(ran(await interactive.approve(unnamed)), true);
+  assert.equal(ran(await interactive.approve(unnamed)), true);
   assert.deepEqual(decisions.map((decision) => decision.layer), ['approver', 'grant']);
   assert.match(decisions[1]!.reason, /approved for the rest of this session/);
 

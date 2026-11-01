@@ -4,6 +4,7 @@ import type {
   ApprovalContext,
   ApprovalOutcome,
   ApprovalPolicy,
+  ApprovalRefusal,
   JsonObject,
   JsonValue,
   Session,
@@ -270,6 +271,12 @@ export interface PermissionDecision {
   toolName: string;
   sessionId: string;
   agentId: string;
+  /**
+   * The call this decision was about, so a surface can put the decision
+   * beside it. Optional so a decision from an older emitter still
+   * type-checks; this policy always sets it.
+   */
+  callId?: string;
   /**
    * One line, written for a person reading a daemon log at 3am — and
    * deliberately free of the tool's input.
@@ -872,6 +879,9 @@ const commandNames = (analysis: CommandAnalysis | undefined): string | undefined
   return analysis.base;
 };
 
+/** What this policy answers: a yes, or a refusal carrying the reason it logged. */
+type Verdict = true | ApprovalRefusal;
+
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
   const { mode, ask, request, onDecision, commands, destinations, origins, grants, gateExternalContent, openFor } = options;
   if (mode === 'interactive' && !ask) {
@@ -928,7 +938,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     origin?: string,
     grant?: ToolGrant,
     destinationGrant?: DestinationGrant,
-  ): boolean => {
+  ): Verdict => {
     onDecision?.({
       allowed,
       mode,
@@ -936,6 +946,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       toolName: context.call.toolName,
       sessionId: context.session.id,
       agentId: context.session.agent.id,
+      callId: context.call.id,
       reason,
       ...(command === undefined ? {} : { command }),
       ...(destination === undefined ? {} : { destination }),
@@ -944,11 +955,18 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       ...(destinationGrant === undefined ? {} : { destinationGrant }),
       layer,
     });
-    return allowed;
+    // The same three fields the log gets, and nothing else: the runner's
+    // event carries no command, grant or destination record, so what a
+    // dashboard shows is a classification, never the call's input.
+    context.decided?.({ allowed, layer, reason });
+    // The reason is what the agent is told: it names the check that
+    // refused and what would cover the call, which is what lets the agent
+    // pick another way instead of trying the same call again.
+    return allowed ? true : { allowed: false, reason };
   };
 
   return {
-    async approve(context: ApprovalContext): Promise<boolean> {
+    async approve(context: ApprovalContext): Promise<Verdict> {
       const { call, risk, session } = context;
 
       if (risk === 'safe') {
@@ -1567,7 +1585,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
        * hole: the approver read that site and said always. What must not
        * happen is the *click* landing somewhere they never saw.
        */
-      const allowUnlessMoved = (reason: string, forCommand?: string): boolean => {
+      const allowUnlessMoved = (reason: string, forCommand?: string): Verdict => {
         if (!scopedByOrigin) {
           return report(context, 'approver', true, reason, forCommand, undefined, origin);
         }

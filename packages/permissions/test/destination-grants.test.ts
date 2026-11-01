@@ -23,6 +23,7 @@ import {
   type ApprovalRequest,
   type PermissionDecision,
 } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 const session = (id = 'sess-1', trust?: TrustLevel): Session => ({
   id,
@@ -78,7 +79,7 @@ test('always allow on message.read persists for that conversation, past a restar
     },
     destinations: { isPreauthorized: () => false, whitelist: store },
   });
-  assert.equal(await first.approve(call(read, 'C0C6GF7R96X')), true);
+  assert.equal(ran(await first.approve(call(read, 'C0C6GF7R96X'))), true);
   assert.equal(requests[0]?.always, 'destination', 'the transport is told what always will remember');
 
   const file = JSON.parse(await readFile(whitelistPathFor(directory, 'nova'), 'utf8')) as Record<string, unknown>;
@@ -98,7 +99,7 @@ test('always allow on message.read persists for that conversation, past a restar
       whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }),
     },
   });
-  assert.equal(await restarted.approve(call(read, 'C0C6GF7R96X', 'sess-2')), true);
+  assert.equal(ran(await restarted.approve(call(read, 'C0C6GF7R96X', 'sess-2'))), true);
   assert.equal(decisions[0]?.destination, 'slack:C0C6GF7R96X');
   assert.match(decisions[0]?.reason ?? '', /standing grant/);
   // The daemon's grant-use trace needs the grant itself, not prose.
@@ -108,8 +109,8 @@ test('always allow on message.read persists for that conversation, past a restar
 
   // Never wider than what was approved: another channel, or sending to
   // the same one, still has nobody to say yes.
-  assert.equal(await restarted.approve(call(read, 'C-OTHER', 'sess-2')), false);
-  assert.equal(await restarted.approve(call(send, 'C0C6GF7R96X', 'sess-2')), false);
+  assert.equal(ran(await restarted.approve(call(read, 'C-OTHER', 'sess-2'))), false);
+  assert.equal(ran(await restarted.approve(call(send, 'C0C6GF7R96X', 'sess-2'))), false);
 });
 
 test('a revoked destination grant asks again on the very next call', async () => {
@@ -123,12 +124,12 @@ test('a revoked destination grant asks again on the very next call', async () =>
     },
     destinations: { isPreauthorized: () => false, whitelist: store },
   });
-  assert.equal(await policy.approve(call(read, 'C-ENG')), true);
-  assert.equal(await policy.approve(call(read, 'C-ENG')), true);
+  assert.equal(ran(await policy.approve(call(read, 'C-ENG'))), true);
+  assert.equal(ran(await policy.approve(call(read, 'C-ENG'))), true);
   assert.equal(asks, 1);
 
   assert.equal(await store.forgetDestination('nova', 'slack:C-ENG'), true);
-  assert.equal(await policy.approve(call(read, 'C-ENG')), false);
+  assert.equal(ran(await policy.approve(call(read, 'C-ENG'))), false);
   assert.equal(asks, 2);
   assert.equal(await store.forgetDestination('nova', 'slack:C-ENG'), false, 'nothing left to revoke');
 });
@@ -179,10 +180,10 @@ test('a conversation that read external content under the gate neither uses nor 
     destinations: { isPreauthorized: () => false, whitelist: store },
     gateExternalContent: () => true,
   });
-  assert.equal(await policy.approve(call(read, 'C-ENG', 'sess-1', 'external')), true);
+  assert.equal(ran(await policy.approve(call(read, 'C-ENG', 'sess-1', 'external'))), true);
   assert.equal(requests.length, 1, 'the grant did not cover a gated conversation');
   assert.equal(requests[0]?.oneShot, true);
-  assert.equal(await policy.approve(call(read, 'C-NEW', 'sess-1', 'external')), true);
+  assert.equal(ran(await policy.approve(call(read, 'C-NEW', 'sess-1', 'external'))), true);
   assert.deepEqual((await store.destinationsFor('nova')).map((grant) => grant.destination), ['slack:C-ENG']);
 });
 
@@ -197,7 +198,7 @@ test('a call naming no destination still gets only this session from always', as
     },
     destinations: { isPreauthorized: () => false, whitelist: store },
   });
-  assert.equal(await policy.approve(call(read, undefined)), true);
+  assert.equal(ran(await policy.approve(call(read, undefined))), true);
   assert.equal(requests[0]?.always, 'session');
   assert.deepEqual(await store.destinationsFor('nova'), []);
 });
@@ -221,7 +222,7 @@ test('a grant is bound to the workspace it was made in: the same channel id unde
     request: async () => ({ answer: 'always', actor: 'U-DYLAN' }),
     destinations: { isPreauthorized: () => false, whitelist: store, accountFor: () => team },
   });
-  assert.equal(await granting.approve(call(read, 'C0C6GF7R96X')), true);
+  assert.equal(ran(await granting.approve(call(read, 'C0C6GF7R96X'))), true);
   const file = JSON.parse(await readFile(whitelistPathFor(directory, 'nova'), 'utf8')) as Record<string, unknown>;
   assert.equal((file.destinations as Array<Record<string, unknown>>)[0]?.account, 'T-ONE', 'the grant records its workspace');
 
@@ -234,14 +235,14 @@ test('a grant is bound to the workspace it was made in: the same channel id unde
     },
   });
   // Same team after a restart: the grant still holds.
-  assert.equal(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-2')), true);
+  assert.equal(ran(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-2'))), true);
   // The agent's Slack app now belongs to another workspace that happens to
   // reuse the id: nobody approved that conversation.
   team = 'T-TWO';
-  assert.equal(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-3')), false);
+  assert.equal(ran(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-3'))), false);
   // Not connected at all: the workspace is unknown, so nothing matches.
   team = undefined;
-  assert.equal(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-4')), false);
+  assert.equal(ran(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-4'))), false);
 });
 
 test('answering always again in the new workspace replaces the old workspace grant', async () => {
@@ -252,9 +253,9 @@ test('answering always again in the new workspace replaces the old workspace gra
     request: async () => ({ answer: 'always', actor: 'U-DYLAN' }),
     destinations: { isPreauthorized: () => false, whitelist: store, accountFor: () => team },
   });
-  assert.equal(await policy.approve(call(send, 'C0C6GF7R96X')), true);
+  assert.equal(ran(await policy.approve(call(send, 'C0C6GF7R96X'))), true);
   team = 'T-TWO';
-  assert.equal(await policy.approve(call(send, 'C0C6GF7R96X', 'sess-2')), true);
+  assert.equal(ran(await policy.approve(call(send, 'C0C6GF7R96X', 'sess-2'))), true);
   const grants = await store.destinationsFor('nova');
   assert.deepEqual(grants.map(({ destination, account }) => ({ destination, account })), [
     { destination: 'slack:C0C6GF7R96X', account: 'T-TWO' },
@@ -271,7 +272,7 @@ test('a destination grant is bound to the package that contributed the tool: a r
     destinations: { isPreauthorized: () => false, whitelist: store },
     grants: { contributorOf: () => contributor },
   });
-  assert.equal(await granting.approve(call(read, 'C-ENG')), true);
+  assert.equal(ran(await granting.approve(call(read, 'C-ENG'))), true);
   const file = JSON.parse(await readFile(whitelistPathFor(directory, 'nova'), 'utf8')) as Record<string, unknown>;
   assert.equal(
     (file.destinations as Array<Record<string, unknown>>)[0]?.package,
@@ -288,13 +289,13 @@ test('a destination grant is bound to the package that contributed the tool: a r
     grants: { contributorOf: () => contributor },
   });
   // Same package after a restart: the grant still holds.
-  assert.equal(await restart().approve(call(read, 'C-ENG', 'sess-2')), true);
+  assert.equal(ran(await restart().approve(call(read, 'C-ENG', 'sess-2'))), true);
   // Another package now declares message.read: nobody approved its code.
   contributor = '@other/message-tools';
-  assert.equal(await restart().approve(call(read, 'C-ENG', 'sess-3')), false);
+  assert.equal(ran(await restart().approve(call(read, 'C-ENG', 'sess-3'))), false);
   // A kernel tool of that name is a different tool too.
   contributor = undefined;
-  assert.equal(await restart().approve(call(read, 'C-ENG', 'sess-4')), false);
+  assert.equal(ran(await restart().approve(call(read, 'C-ENG', 'sess-4'))), false);
   assert.match(describeAgentGrants(await store.grantsFor('nova')).destinations[0]?.description ?? '', /@acme\/stratus-slack-tools/);
 });
 
@@ -310,7 +311,7 @@ test('a kernel-tool destination grant never matches a plugin of the same name', 
     },
     grants: { contributorOf: () => contributor },
   });
-  assert.equal(await policy().approve(call(send, 'C-ENG')), true);
+  assert.equal(ran(await policy().approve(call(send, 'C-ENG'))), true);
   contributor = '@evil/send';
   const headless = createPermissionPolicy({
     mode: 'headless',
@@ -320,5 +321,5 @@ test('a kernel-tool destination grant never matches a plugin of the same name', 
     },
     grants: { contributorOf: () => contributor },
   });
-  assert.equal(await headless.approve(call(send, 'C-ENG', 'sess-2')), false);
+  assert.equal(ran(await headless.approve(call(send, 'C-ENG', 'sess-2'))), false);
 });
