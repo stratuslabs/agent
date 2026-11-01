@@ -157,11 +157,7 @@ model, counted against the agent's budget like any other call. It sees:
 It never sees tool output, fetched pages, an MCP server's tool descriptions
 or the agent's own text, so a page or a server can't argue with it directly. It blocks only on a clear sign that the call
 serves outside content or leaks something, asks when it can't tell, and
-allows a risky-looking call the request clearly asked for. It judges only
-whether the request covers the call: not whether an earlier step the
-request named happened, whether the machine is set up, or whether a flag is
-the one it would pick. Where the call sends, what it sends and what it acts
-on still have to match the request.
+allows a risky-looking call the request clearly asked for.
 
 If the review can't run (an unknown model, a provider error, a budget
 refusal, an answer it can't read, `timeoutMs` passing, 20 s by default, or
