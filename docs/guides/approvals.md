@@ -203,7 +203,8 @@ the reviewer's reason (`asked-for`, `not-asked-for`,
 `review-failed`). The reviewer's own words go only to the agent and to the
 approver, since they can echo the call's input. The dashboard's live view
 shows each decision beside its call, and a shadow one as `would have
-blocked` beside it, drawn dashed. The daemon log gets one line per review
+blocked` beside it, drawn dashed, even when the review finishes after the
+turn has. The daemon log gets one line per review
 decision with `verdict=` and `code=` (a shadow one starts with `shadow`),
 which is what to count:
 
@@ -248,8 +249,10 @@ Every decision, allowed or refused, also goes out as a `permission.decided`
 event: the dashboard shows it beside the call in a conversation's live view
 (`allowed · scope`, `refused · grant`, with a refusal's reason under it),
 and the structured log keeps one line per decision with the tool, whether
-it ran and the check, without the reason. The dashboard shows decisions
-only while the turn runs; for an earlier conversation, read the log.
+it ran and the check, without the reason. The dashboard shows the
+decisions it saw live: beside the calls while the turn runs, then beside
+that turn's results once it ends, until the next message or another
+conversation. For an earlier conversation, read the log.
 
 That is the honest default (`headless`) behind a service manager. If
 somebody *is* reachable, `--approvals remote` asks them instead — see
