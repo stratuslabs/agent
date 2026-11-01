@@ -1503,6 +1503,30 @@ test('a resumed harness is sent everything since the agent last spoke, overheard
   );
 });
 
+test('a resumed harness marks a message said to the agent after a silent turn on an overheard one, as every other path does', () => {
+  // The empty reply a silent turn records ends what a resumed harness is
+  // sent, but not the run the mark follows (card 1034): the transcript and
+  // API paths drop that reply and carry the overheard message and this one
+  // together, and the harness path agrees with them.
+  const afterSilence = [
+    message('u1', 'user', 'Dylan: hello'),
+    message('a1', 'assistant', 'hi'),
+    message('u2', 'user', 'Dylan: Bea, what do you think?', true),
+    message('a2', 'assistant', ''),
+    message('u3', 'user', 'Dylan: Ava, what is 2+2?'),
+  ];
+  assert.equal(latestUserMessagePrompt(requestWith(afterSilence)), '(said to you)\nDylan: Ava, what is 2+2?');
+  assert.match(renderTranscriptPrompt(requestWith(afterSilence)), /\[user\] \(said to you\)\nDylan: Ava, what is 2\+2\?/);
+
+  // A reply the agent actually gave ends the run: the next message is bare.
+  const afterReply = [
+    message('u2', 'user', 'Dylan: Bea, what do you think?', true),
+    message('a2', 'assistant', 'Bea will know.'),
+    message('u3', 'user', 'Dylan: Ava, what is 2+2?'),
+  ];
+  assert.equal(latestUserMessagePrompt(requestWith(afterReply)), 'Dylan: Ava, what is 2+2?');
+});
+
 test('a turn nobody asked for ends on the note, after its newest message only, on every path', async () => {
   // Two overheard messages, the turn dispatched unaddressed on the second:
   // both framed, the note after the newest and not the earlier one.

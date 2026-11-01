@@ -1268,9 +1268,10 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
  * message is one the harness has never seen, by construction; an
  * addressed one before the newest was some turn's prompt.
  *
- * One addressed message with nothing overheard renders bare, as it always
- * did. Falls back to the full transcript when there is no user message to
- * isolate, so a caller can never end up sending nothing.
+ * One addressed message with nothing overheard before it renders bare, as
+ * it always did; a reply-optional one carries its note (card 601). Falls
+ * back to the full transcript when there is no user message to isolate, so
+ * a caller can never end up sending nothing.
  */
 export const latestUserMessagePrompt = (request: ProviderRequest, options: PromptImageOptions = {}): string => {
   const messages = transcriptOf(request);
@@ -1285,13 +1286,11 @@ export const latestUserMessagePrompt = (request: ProviderRequest, options: Promp
   }
   const unheard = since.filter((message) => message.overheard === true || message === newest);
   const inline = options.inlineImages === true;
-  if (unheard.length === 1 && newest.overheard !== true) {
-    // The turn's own message: a reply-optional one carries its note
-    // (card 601); any other renders bare, as it always did.
-    return userMessageText(newest, true, inline);
-  }
   // One string, so the overheard frames and the message said to the agent
-  // reach the model as one turn: that message is marked (card 1034).
-  const afterOverheard = messagesAfterOverheard(unheard);
+  // reach the model as one turn: that message is marked (card 1034). The
+  // mark follows the whole transcript, not just what is sent: a silent
+  // turn's empty reply ends what the harness is sent but not the run, as
+  // on every other path.
+  const afterOverheard = messagesAfterOverheard(messages);
   return unheard.map((message) => userMessageText(message, message === newest, inline && message === newest, afterOverheard.has(message))).join('\n');
 };
