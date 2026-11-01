@@ -136,13 +136,14 @@ model, counted against the agent's budget like any other call. It sees:
   conversation (newest last, up to 4 KB), or a schedule's or trigger's own
   prompt (never the event text a trigger delivers), or a delegating agent's
   instruction, marked as such;
-- **the proposed call**: tool, risk and input (up to 2 KB), marked as data
-  the agent composed;
+- **the proposed call**: tool, risk, the first line of the tool's
+  description (never for an `mcp.*` tool, whose description its server
+  wrote) and input (up to 2 KB), marked as data the agent composed;
 - where outside content came from, whether a person is in the conversation,
   and the destination or site the call names.
 
-It never sees tool output, fetched pages or the agent's own text, so a page
-can't argue with it directly. It blocks only on a clear sign that the call
+It never sees tool output, fetched pages, an MCP server's tool descriptions
+or the agent's own text, so a page or a server can't argue with it directly. It blocks only on a clear sign that the call
 serves outside content or leaks something, asks when it can't tell, and
 allows a risky-looking call the request clearly asked for.
 
