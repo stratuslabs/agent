@@ -587,7 +587,10 @@ What each contribution is, and why it is not the bare interface:
   first agent's memories, the way a `tool-fs` that cached its roots would
   hand every agent the first agent's files. The host selects one by name
   (`memoryStore` in a trusted config) behind a store that routes per call,
-  so the memory tools built before any plugin loaded still reach it.
+  so the memory tools built before any plugin loaded still reach it. A
+  store that accepts a list in `supersedes` (one record retiring several
+  facts) says so with `supersedesMany: true`; without it, memory passes
+  hand it one id at a time and never merge.
 - **An executor is `{ name, executor }`**, selected by `executor` in a
   trusted config.
 
