@@ -37,6 +37,13 @@ import {
   gatewayInfoPath,
 } from './paths.ts';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
+import {
+  type MigrationMark,
+  type StateBackup,
+  backUpStateBeforeMigrating,
+  markMigrationBegun,
+  settleFailedMigration,
+} from './state-backup.ts';
 
 // Memory used to live under the working directory. Fold any such file into
 // the agents' own stores the first time a run happens from that directory,
@@ -288,6 +295,15 @@ export interface StateMigration {
    */
   requiresExclusive?(env: StateEnvironment): Promise<boolean>;
   /**
+   * Whether the run copies the state files to `~/.stratus/backups/` before
+   * applying it (see `backUpStateBeforeMigrating`). Default true: a
+   * migration that moves or rewrites sessions, memories, grants or
+   * schedules is the one an operator may need to undo. `false` only for one
+   * that leaves their contents alone — a permission change, a stamp that
+   * exists to be refused, a notice.
+   */
+  needsBackup?: boolean;
+  /**
    * Idempotent: applying twice must equal applying once, because two
    * processes can race the stamp and a crash can lose the record of a
    * completed run. Returns a line describing what actually changed, or
@@ -306,6 +322,7 @@ export interface StateMigration {
 const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
   id: '0001-owner-only-state-files',
   description: 'tighten pre-existing state files to owner-only permissions',
+  needsBackup: false,
   async apply(env) {
     const tightened: string[] = [];
     const tightenFile = async (filePath: string): Promise<void> => {
@@ -357,6 +374,7 @@ const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
 const PROVENANCE_LABELS_MIGRATION: StateMigration = {
   id: '0002-provenance-labels',
   description: 'stamp the state as carrying provenance labels, so an older build refuses it rather than ignoring them',
+  needsBackup: false,
   async apply() {
     return undefined;
   },
@@ -451,6 +469,8 @@ const SAFE_TOOLS_DEFAULT_MIGRATION_ID = '0005-safe-tools-default';
 const SAFE_TOOLS_DEFAULT_MIGRATION: StateMigration = {
   id: SAFE_TOOLS_DEFAULT_MIGRATION_ID,
   description: 'record whether this home predates the safe-tools default, so its souls with no tools: list keep every tool',
+  /** It records a fact in the stamp and writes nothing else. */
+  needsBackup: false,
   async apply(env) {
     // Read at apply time, not from the run's snapshot: earlier migrations
     // in this run are not on disk yet. A stamp that already has 0005 was
@@ -761,6 +781,8 @@ export const unlistedToolsFor = (env: StateEnvironment): 'safe' | 'every' => {
  */
 export interface StateMigrationRunOptions {
   exclusive?: boolean;
+  /** Told about the backup taken (or reused) before this run's migrations, to say where it is. */
+  onBackup?(backup: StateBackup): void;
 }
 
 const runnableNow = async (migration: StateMigration, env: StateEnvironment, options: StateMigrationRunOptions): Promise<boolean> =>
@@ -842,20 +864,66 @@ export const runStateMigrations = async (
     runnable.set(migration.id, applied.has(migration.id) || await runnableNow(migration, env, options));
   }
   const deferring = STATE_MIGRATIONS.some((migration) => runnable.get(migration.id) !== true);
-  for (const migration of STATE_MIGRATIONS) {
-    if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
-      continue;
+  // A copy of the state before the first migration that changes it, and no
+  // migration at all if the copy fails: the upgrade is refused with the
+  // home exactly as the older build left it, which that build still runs.
+  const toApply = STATE_MIGRATIONS.filter((migration) => !applied.has(migration.id) && runnable.get(migration.id) === true);
+  let backup: StateBackup | undefined;
+  if (toApply.some((migration) => migration.needsBackup !== false)) {
+    try {
+      backup = await backUpStateBeforeMigrating(env, { schemaVersion: stamp.schemaVersion, applied: [...stamp.applied] }, toApply.map((migration) => migration.id));
+    } catch (error) {
+      throw new Error(
+        `Backing up ${stratusHomePath(env)} before upgrading its state failed `
+        + `(${error instanceof Error ? error.message : String(error)}). Nothing was changed: no migration ran. `
+        + 'Free up space or fix that file and run the command again; until then the build you upgraded from still runs this home.',
+        { cause: error },
+      );
     }
-    const outcome = await migration.apply(env);
-    const detail = typeof outcome === 'object' ? outcome.detail : outcome;
-    for (const fact of typeof outcome === 'object' ? outcome.facts ?? [] : []) {
-      if (!facts.includes(fact)) {
-        facts.push(fact);
+    if (backup !== undefined) {
+      options.onBackup?.(backup);
+    }
+  }
+  // Marked just before the first migration that changes data, so what an
+  // earlier one did (0001 tightening a file's mode) is not taken for a
+  // half-done move when a later one fails.
+  let mark: MigrationMark | undefined;
+  try {
+    for (const migration of STATE_MIGRATIONS) {
+      if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
+        continue;
       }
+      if (backup !== undefined && mark === undefined && migration.needsBackup !== false) {
+        try {
+          mark = await markMigrationBegun(env, backup);
+        } catch (error) {
+          throw new Error(
+            `Backing up ${stratusHomePath(env)} before upgrading its state failed `
+            + `(${backup.path}: ${error instanceof Error ? error.message : String(error)}). No migration that changes data ran. `
+            + 'Free up space or fix that file and run the command again; until then the build you upgraded from still runs this home.',
+            { cause: error },
+          );
+        }
+      }
+      const outcome = await migration.apply(env);
+      const detail = typeof outcome === 'object' ? outcome.detail : outcome;
+      for (const fact of typeof outcome === 'object' ? outcome.facts ?? [] : []) {
+        if (!facts.includes(fact)) {
+          facts.push(fact);
+        }
+      }
+      stamp.applied.push(migration.id);
+      applied.add(migration.id);
+      results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
     }
-    stamp.applied.push(migration.id);
-    applied.add(migration.id);
-    results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
+  } catch (error) {
+    // Whether a retry may copy the state again or must keep this backup as
+    // the way back (see `settleFailedMigration`). The migration's own error
+    // is the one to report.
+    if (mark !== undefined) {
+      await settleFailedMigration(env, mark).catch(() => undefined);
+    }
+    throw error;
   }
   // One write, at the end, and none at all from a run that deferred
   // something.

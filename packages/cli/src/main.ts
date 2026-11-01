@@ -3,6 +3,8 @@ import {
   readStateStamp,
   drainSharedMemory,
   runStateMigrations,
+  describeStateBackup,
+  type StateBackup,
   STATE_SCHEMA_VERSION,
   DEFAULT_STRATUS_AGENT,
   redactProviderReplayState,
@@ -140,7 +142,8 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
         writeLine(streams.stderr, `Warning: ${newerStateMessage(stamp.schemaVersion)}`);
       } else {
         try {
-          for (const migration of await runStateMigrations(resolvedEnv)) {
+          const onBackup = (backup: StateBackup): void => writeLine(streams.stderr, describeStateBackup(backup));
+          for (const migration of await runStateMigrations(resolvedEnv, { onBackup })) {
             if (migration.detail !== undefined) {
               writeLine(streams.stderr, `state migration ${migration.id}: ${migration.detail}`);
             }
