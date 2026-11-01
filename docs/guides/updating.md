@@ -306,7 +306,9 @@ A migration that leaves the data alone, like a stamp or a permission change,
 takes no backup, and neither does a home with no conversation or memory in
 it. A start that runs the same upgrade again within a day, such as a service
 restarting over a migration that keeps failing, reuses the backup it already
-took. If the copy can't be made (a full disk, a file it can't read), no
+took, but only if no state file changed since. If anything was written in
+between (the older version, started again after a failed upgrade, saved a
+conversation), it takes a new backup and keeps the earlier one. If the copy can't be made (a full disk, a file it can't read), no
 migration runs and the command says why: the home is still as the older
 build left it, and that build still runs it.
 

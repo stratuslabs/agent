@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { constants, type Dirent } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, readlink, rename, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
-import { DatabaseSync, backup as backUpDatabase } from 'node:sqlite';
 
 import { isValidAgentId } from '@stratusagent/agents';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
@@ -24,7 +23,7 @@ export interface StateBackup {
   /** What was copied, relative to `~/.stratus` and to `files/`. */
   files: string[];
   createdAt: string;
-  /** An earlier backup of this same state, taken in the last day, was kept instead. */
+  /** An earlier backup of this same state, taken in the last day with nothing written since, was kept instead. */
   reused: boolean;
 }
 
@@ -33,17 +32,29 @@ interface BackupManifest {
   migrations: string[];
   createdAt: string;
   files: string[];
+  /** Each state file as it was just before the copy: see `stateInputs`. */
+  inputs: Record<string, string>;
 }
 
 /**
- * A retry of the same upgrade inside this window reuses its backup. The
- * case it is for is a daemon whose service manager restarts it over a
- * migration that keeps failing: every start runs the migrations again, and
- * a fresh copy of every conversation each time would fill the disk. Past a
- * day the older build may have written more under the same stamp, and the
- * old copy stops being the one to restore.
+ * A retry of the same upgrade inside this window reuses its backup, as long
+ * as no state file changed since that copy. The case it is for is a daemon
+ * whose service manager restarts it over a migration that keeps failing:
+ * every start runs the migrations again, and a fresh copy of every
+ * conversation each time would fill the disk. When anything was written in
+ * between (the older daemon, started again after a failed upgrade, saved a
+ * conversation), the old copy would drop it on restore, so a new one is
+ * taken and the old one stays.
  */
 const REUSE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * `node:sqlite`, loaded only when a database is copied: every importer of
+ * this package would otherwise load it, and with it the experimental
+ * warning Node still prints (see `file-lock.ts`).
+ */
+const sqlite = (): typeof import('node:sqlite') =>
+  process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
 
 const SQLITE_HEADER = 'SQLite format 3\0';
 
@@ -147,9 +158,10 @@ const copyInto = async (source: string, destination: string): Promise<void> => {
     // Opened for writing, though nothing is written: a read-only
     // connection can't remove the -wal and -shm files it creates, and would
     // leave them beside the original.
+    const { DatabaseSync, backup } = sqlite();
     const database = new DatabaseSync(source);
     try {
-      await backUpDatabase(database, destination);
+      await backup(database, destination);
     } finally {
       database.close();
     }
@@ -168,6 +180,8 @@ const readManifest = async (directory: string): Promise<BackupManifest | undefin
       && typeof parsed.from?.schemaVersion === 'number'
       && Array.isArray(parsed.from.applied)
       && Array.isArray(parsed.files)
+      && typeof parsed.inputs === 'object'
+      && parsed.inputs !== null
     ) {
       return parsed as BackupManifest;
     }
@@ -182,9 +196,48 @@ const sameStamp = (a: StateStamp, b: StateStamp): boolean =>
   && a.applied.length === b.applied.length
   && a.applied.every((id, index) => b.applied[index] === id);
 
+/**
+ * What says a state file changed: its type, inode, size and modification
+ * and change times, and a link's target, read without following it. A
+ * database's `-wal` and `-journal` are read too, though never copied: a row
+ * a daemon commits lands in the write-ahead log, and the database file
+ * itself may not change until a checkpoint.
+ */
+const stateInputs = async (env: StateEnvironment, files: readonly string[]): Promise<Record<string, string>> => {
+  const home = stratusHomePath(env);
+  const describe = async (filePath: string): Promise<string | undefined> => {
+    try {
+      const info = await lstat(filePath, { bigint: true });
+      const kind = info.isSymbolicLink() ? `link:${await readlink(filePath)}` : info.isFile() ? 'file' : 'other';
+      return `${kind}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
+  };
+  const inputs: Record<string, string> = {};
+  for (const file of files) {
+    for (const name of [file, `${file}-wal`, `${file}-journal`]) {
+      const described = await describe(path.join(home, name));
+      if (described !== undefined) {
+        inputs[name] = described;
+      }
+    }
+  }
+  return inputs;
+};
+
+const sameInputs = (a: Record<string, string>, b: Record<string, string>): boolean => {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => b[key] === a[key]);
+};
+
 const recentBackupOf = async (
   env: StateEnvironment,
   stamp: StateStamp,
+  inputs: Record<string, string>,
   now: Date,
 ): Promise<StateBackup | undefined> => {
   for (const entry of await listDirectory(backupsDirPath(env))) {
@@ -194,7 +247,12 @@ const recentBackupOf = async (
     const directory = path.join(backupsDirPath(env), entry.name);
     const manifest = await readManifest(directory);
     const age = manifest === undefined ? Number.NaN : now.getTime() - Date.parse(manifest.createdAt);
-    if (manifest !== undefined && sameStamp(manifest.from, stamp) && age >= 0 && age < REUSE_WINDOW_MS) {
+    if (
+      manifest !== undefined
+      && sameStamp(manifest.from, stamp)
+      && age >= 0 && age < REUSE_WINDOW_MS
+      && sameInputs(manifest.inputs, inputs)
+    ) {
       return { path: directory, files: manifest.files, createdAt: manifest.createdAt, reused: true };
     }
   }
@@ -236,7 +294,10 @@ export const backUpStateBeforeMigrating = async (
   if (!holdsData.includes(true)) {
     return undefined;
   }
-  const reusable = await recentBackupOf(env, stamp, now);
+  // Read before anything is copied, so a write that lands during the copy
+  // makes the next retry take a new one rather than trust this one.
+  const inputs = await stateInputs(env, files);
+  const reusable = await recentBackupOf(env, stamp, inputs, now);
   if (reusable !== undefined) {
     return reusable;
   }
@@ -265,7 +326,7 @@ export const backUpStateBeforeMigrating = async (
         }
       });
     }
-    const manifest: BackupManifest = { from: stamp, migrations: [...migrations], createdAt, files };
+    const manifest: BackupManifest = { from: stamp, migrations: [...migrations], createdAt, files, inputs };
     await writeFileSynced(path.join(partial, 'backup.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
     await syncDirectory(partial);
     let name = directoryName(now);

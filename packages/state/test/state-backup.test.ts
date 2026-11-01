@@ -192,6 +192,48 @@ test('a retry of the same upgrade within a day reuses its backup rather than tak
   assert.equal((await readdir(backupsDirPath(env))).length, 3);
 });
 
+test('a retry after the older build wrote more takes a fresh backup, so restoring it never drops what was written', async () => {
+  // A migration failed after its backup, and `stratus update` started the
+  // older daemon again, which went on working under the same stamp.
+  const { home, stratus } = await seedHome();
+  const env = { homeDir: home };
+  const stamp = await readStateStamp(env);
+  const migrations = ['0004-per-agent-workspaces'];
+  const first = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:00:00Z'));
+  assert.equal(first?.reused, false);
+
+  // A conversation row the older daemon committed and has not checkpointed
+  // yet: only sessions.db-wal changed, not sessions.db.
+  const daemon = new DatabaseSync(path.join(stratus, 'agents', 'ava', 'sessions.db'));
+  daemon.exec("PRAGMA wal_autocheckpoint=0; INSERT INTO sessions VALUES ('s3', 'written between the attempts')");
+  let retry: StateBackup | undefined;
+  try {
+    retry = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:05:00Z'));
+  } finally {
+    daemon.close();
+  }
+  assert.equal(retry?.reused, false);
+  assert.notEqual(retry?.path, first?.path);
+  const copied = new DatabaseSync(path.join(retry!.path, 'files', 'agents', 'ava', 'sessions.db'), { readOnly: true });
+  assert.deepEqual({ ...copied.prepare('SELECT body FROM sessions WHERE id = ?').get('s3') }, { body: 'written between the attempts' });
+  copied.close();
+
+  // A memory the older build saved, and a new file it wrote.
+  await writeFile(path.join(stratus, 'agents', 'ava', 'memory.jsonl'), '{"id":"m1","content":"ava likes tea"}\n{"id":"m2","content":"and biscuits"}\n');
+  const afterMemory = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:10:00Z'));
+  assert.equal(afterMemory?.reused, false);
+  await writeFile(path.join(stratus, 'agents', 'ava', 'notes.json'), '{}\n');
+  const afterNewFile = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:15:00Z'));
+  assert.equal(afterNewFile?.reused, false);
+
+  // Nothing written since the newest copy: that one is kept, and every
+  // earlier copy stays where it was.
+  const unchanged = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:20:00Z'));
+  assert.equal(unchanged?.reused, true);
+  assert.equal(unchanged?.path, afterNewFile?.path);
+  assert.equal((await readdir(backupsDirPath(env))).length, 4);
+});
+
 test('a backup that cannot be taken stops the upgrade before anything changes, and leaves no partial copy', async () => {
   const { home, stratus, stampBytes } = await seedHome();
   const env = { homeDir: home };
