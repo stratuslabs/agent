@@ -158,7 +158,7 @@ test('ordinary work still runs sandboxed: files, git, and a subshell in the work
   const fixture = await fixtureHome();
   const result = await run({}, fixture, [
     'echo hello > note.txt && cat note.txt',
-    'git init -q && git -c user.email=a@b -c user.name=a add note.txt && git -c user.email=a@b -c user.name=a commit -q -m one && git log --oneline | wc -l | tr -d " "',
+    'git init -q && git -c user.email=a@b -c user.name=a add note.txt && git -c user.email=a@b -c user.name=a -c commit.gpgsign=false commit -q -m one && git log --oneline | wc -l | tr -d " "',
     'pwd',
     'ls /usr/bin >/dev/null && echo toolchain',
   ].join(' && '));
