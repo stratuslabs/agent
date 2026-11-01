@@ -925,6 +925,48 @@ const originForSession = (
   return reported === undefined ? undefined : originOf(reported);
 };
 
+const APPROVAL_VERDICTS: readonly ApprovalVerdict[] = ['allow', 'ask', 'block'];
+
+/**
+ * The `permission.decided` event for one reported decision, built field by
+ * field from `ApprovalDecision` and the call's id and name. Never spread
+ * from what the policy handed over: a policy that passed its whole
+ * decision record along (a command, a grant, the call itself) would put
+ * the call's input on the bus.
+ */
+const permissionDecidedEvent = (
+  session: Session,
+  call: ToolCall,
+  risk: ToolRisk,
+  decision: ApprovalDecision,
+): StratusEvent => ({
+  type: 'permission.decided',
+  sessionId: session.id,
+  agentId: session.agent.id,
+  callId: call.id,
+  toolName: call.toolName,
+  risk,
+  allowed: decision.allowed === true,
+  layer: typeof decision.layer === 'string' ? decision.layer : '',
+  reason: typeof decision.reason === 'string' ? decision.reason : '',
+  ...(APPROVAL_VERDICTS.includes(decision.verdict as ApprovalVerdict) ? { verdict: decision.verdict } : {}),
+  ...(typeof decision.reviewCode === 'string' ? { reviewCode: decision.reviewCode } : {}),
+  ...(decision.shadow === true ? { shadow: true } : {}),
+});
+
+/**
+ * The reason a policy gave for refusing, or nothing when it gave none: a
+ * plain `false`, a blank reason, or an answer of some other shape, which
+ * keep the generic refusal.
+ */
+const refusalReasonOf = (answer: unknown): string | undefined => {
+  if (typeof answer !== 'object' || answer === null) {
+    return undefined;
+  }
+  const reason = (answer as { reason?: unknown }).reason;
+  return typeof reason === 'string' && reason.trim() !== '' ? reason.trim() : undefined;
+};
+
 /** The longest a tool's `trustBeforeCall` may take before the call is judged as reading `external`. */
 export const TRUST_BEFORE_CALL_TIMEOUT_MS = 2_000;
 
@@ -3828,10 +3870,66 @@ export interface ApprovalContext {
    * turn.
    */
   signal?: AbortSignal;
+  /**
+   * Reports why this call was allowed or refused, as a `permission.decided`
+   * event the runner emits for this session and call. Optional on both
+   * sides: a policy that never calls it emits nothing, and a caller that
+   * builds a context by hand need not supply it.
+   *
+   * Reports made before `approve` returns are emitted before the call's
+   * `tool.called` or `tool.denied`, in the order made; one made later (a
+   * decision worked out off the call path) is emitted when it is made. The
+   * runner builds the event from the fields of `ApprovalDecision` alone,
+   * so nothing else a policy hands over reaches the bus.
+   */
+  decided?: (decision: ApprovalDecision) => void;
+}
+
+/** A review step's answer, for a decision a reviewer made. */
+export type ApprovalVerdict = 'allow' | 'ask' | 'block';
+
+/**
+ * Why one call was allowed or refused, as a policy reports it through
+ * `ApprovalContext.decided`.
+ *
+ * Every field is for a person reading a dashboard or a log, so none of
+ * them may carry the call's input: the event is a trace of decisions, not
+ * a second transcript. `reason` names classifications (a command's base
+ * and subcommand, a destination, an origin), never the arguments.
+ */
+export interface ApprovalDecision {
+  allowed: boolean;
+  /** Which check decided, in the policy's own vocabulary (`risk`, `scope`, `grant`, `approver`, ...). */
+  layer: string;
+  /** One line with no tool input. */
+  reason: string;
+  /** A reviewer's answer, when one decided. */
+  verdict?: ApprovalVerdict;
+  /** A fixed code for the reviewer's reason, since its own words can echo the input. */
+  reviewCode?: string;
+  /** True for a decision worked out without acting on it (shadow mode). */
+  shadow?: boolean;
+}
+
+/**
+ * A policy's "no", with the reason the agent is told.
+ *
+ * The reason becomes the tool error as written, so it should say what
+ * would let the call run, in words the agent can act on. It reaches the
+ * transcript, so the same rule as `ApprovalDecision.reason` holds for a
+ * policy's own words: no secrets.
+ */
+export interface ApprovalRefusal {
+  allowed: false;
+  reason: string;
 }
 
 export interface ApprovalPolicy {
-  approve(context: ApprovalContext): Promise<boolean>;
+  /**
+   * `true` runs the call. `false`, or a refusal with a reason, refuses it;
+   * so does an answer of any other shape, since only `true` is a yes.
+   */
+  approve(context: ApprovalContext): Promise<boolean | ApprovalRefusal>;
 }
 
 /** Where a parked turn's checkpoint lives in `session.metadata`. */
@@ -4695,6 +4793,26 @@ export type StratusEvent =
   | { type: 'tool.called'; sessionId: string; call: ToolCall }
   | { type: 'tool.completed'; sessionId: string; result: ToolResult }
   | { type: 'tool.denied'; sessionId: string; call: ToolCall }
+  /**
+   * Why a call was allowed or refused, when the approval policy reports it
+   * (`ApprovalContext.decided`). By name, like the log: the call's id and
+   * tool, never its input, so a surface can show the decision beside the
+   * `tool.called` or `tool.denied` with the same `callId`.
+   */
+  | {
+      type: 'permission.decided';
+      sessionId: string;
+      agentId: string;
+      callId: string;
+      toolName: string;
+      risk: ToolRisk;
+      allowed: boolean;
+      layer: string;
+      reason: string;
+      verdict?: ApprovalVerdict;
+      reviewCode?: string;
+      shadow?: boolean;
+    }
   /**
    * A gated call is parked, waiting for a human somewhere else. Channels
    * render it (Slack buttons) and resolve it through the gateway; nothing
@@ -9668,23 +9786,51 @@ export class AgentRunner {
     };
 
     let approved: boolean;
+    /** The policy's reason for its last "no", when it gave one. */
+    let refusal: string | undefined;
     let decidedTrust: TrustLevel = sessionTrustOf(session);
     let movedTwice = false;
     try {
       await lowerBeforeCall();
       const decide = async (): Promise<boolean> => {
         decidedTrust = sessionTrustOf(session);
-        const answer = await this.approvals.approve({
-          session,
-          call,
-          tool,
-          risk,
-          ...(signal ? { signal } : {}),
-          ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
-        });
+        // Reports made while the policy decides wait for its answer, so a
+        // surface reads the decision before the call it is about; one made
+        // after (worked out off the call path) goes out when it is made.
+        const reported: StratusEvent[] = [];
+        let answered = false;
+        const decided = (decision: ApprovalDecision): void => {
+          const event = permissionDecidedEvent(session, call, risk, decision);
+          if (answered) {
+            void this.bus.emit(event);
+          } else {
+            reported.push(event);
+          }
+        };
+        let answer: boolean | ApprovalRefusal;
+        try {
+          answer = await this.approvals.approve({
+            session,
+            call,
+            tool,
+            risk,
+            ...(signal ? { signal } : {}),
+            ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
+            decided,
+          });
+        } finally {
+          answered = true;
+        }
         // With nothing awaited since the policy returned (see above).
         originWhenJudged = originForSession(tool, session, call.input);
-        return answer;
+        for (const event of reported) {
+          await this.bus.emit(event);
+        }
+        // Only `true` runs. An object is a refusal now, so reading any
+        // truthy answer as a yes, as a plain-JavaScript policy once could,
+        // would run the very call it refused.
+        refusal = answer === true ? undefined : refusalReasonOf(answer);
+        return answer === true;
       };
       approved = await decide();
       if (approved && tool.trustBeforeCall) {
@@ -9735,8 +9881,11 @@ export class AgentRunner {
             + 'and this runner was built with no `approvals` policy, '
             + 'so only safe tools run. The app that builds the runner passes one to allow it; '
             + 'AllowAllApprovalPolicy runs every call without asking.'
-          : `Tool call denied by approval policy: ${call.toolName}`,
-        trust: 'agent',
+          : refusal ?? `Tool call denied by approval policy: ${call.toolName}`,
+        // A policy's reason may name what the call was about, and the call
+        // was composed in this conversation, so it is labeled no more
+        // trusted than the conversation already is.
+        trust: refusal === undefined ? 'agent' : leastTrusted('agent', sessionTrustOf(session)),
       };
     }
 
