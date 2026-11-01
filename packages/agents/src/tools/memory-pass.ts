@@ -4,6 +4,7 @@ import {
   MEMORY_PASS_MAX_SAVES,
   MEMORY_PASS_METADATA_KEY,
   memoryEntryTrust,
+  memorySupersedesField,
   sessionTaintedBy,
   sessionWriteTrust,
   type AgentMemoryStore,
@@ -45,7 +46,29 @@ export type MemoryPassWrite = (
 export interface MemoryPassToolOptions extends MemoryToolOptions {
   /** Default: `store.append`. */
   write?: MemoryPassWrite;
+  /**
+   * The store takes a list in `supersedes` (its contribution declares
+   * `supersedesMany`), so one fact may replace several. Off by default:
+   * a store that never said so is handed one id at a time.
+   */
+  supersedesMany?: boolean;
 }
+
+/**
+ * What a pass's `supersedes` names, as a list: one id or several, each a
+ * non-empty string. Anything else is refused rather than read as none, so
+ * a malformed merge never saves a duplicate the model meant to replace.
+ */
+const supersedesInput = (value: unknown): string[] | undefined => {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const ids = typeof value === 'string' ? [value] : value;
+  if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string' && id.trim().length > 0)) {
+    throw new Error('"supersedes" must be the id of a fact, or a list of ids. Nothing was stored.');
+  }
+  return [...new Set(ids.map((id: string) => id.trim()))];
+};
 
 /**
  * A memory pass's only two tools (spec 962). Recall is the agent's own;
@@ -53,9 +76,11 @@ export interface MemoryPassToolOptions extends MemoryToolOptions {
  *
  * - kinds: semantic, procedural and preference, never episodic;
  * - at most `MEMORY_PASS_MAX_SAVES` facts;
- * - `supersedes` names only a fact this pass's recall showed it, never a
+ * - `supersedes` names only facts this pass's recall showed it, never a
  *   pinned one or one the operator asserted (`user`), so a transcript that
- *   names an id cannot retire a fact the pass never saw;
+ *   names an id cannot retire a fact the pass never saw. It may name
+ *   several (a merge) only when the store takes a list, and every id is
+ *   checked before anything is stored;
  * - every fact carries `metadata.memoryPass` so it can be found and undone.
  *
  * No forget, no pin: forgetting what a pass wrote undoes all of it.
@@ -118,12 +143,20 @@ export const createMemoryPassTools = (
         },
         validFrom: { type: 'string', description: 'ISO-8601 instant this becomes true, if it is not true yet. Optional.' },
         validUntil: { type: 'string', description: 'ISO-8601 instant this stops being true, if you know one. Optional.' },
-        supersedes: { type: 'string', description: 'The id of a fact memory.recall showed you that this one replaces.' },
+        supersedes: options.supersedesMany === true
+          ? {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'The ids of the facts memory.recall showed you that this one replaces. Name several to merge duplicates into this one fact.',
+          }
+          : { type: 'string', description: 'The id of a fact memory.recall showed you that this one replaces.' },
       },
       required: ['fact'],
     },
     async execute(input: JsonObject, session: Session) {
-      const { fact, fields } = rememberInput(input);
+      const replaces = supersedesInput(input.supersedes);
+      // Checked here, not by `rememberInput`, which reads one id only.
+      const { fact, fields } = rememberInput({ ...input, supersedes: null });
       if (fields.kind !== undefined && !(MEMORY_PASS_KINDS as readonly string[]).includes(fields.kind)) {
         throw new Error(`A memory pass saves only ${MEMORY_PASS_KINDS.join(', ')} facts, never ${fields.kind}. Nothing was stored.`);
       }
@@ -131,19 +164,25 @@ export const createMemoryPassTools = (
         throw new Error(`A memory pass saves at most ${MEMORY_PASS_MAX_SAVES} facts, and this one has. Nothing was stored.`);
       }
       const agentId = session.agent.id;
-      const replaces = fields.supersedes;
-      if (replaces !== undefined) {
-        const label = shown.get(replaces);
+      if (replaces !== undefined && replaces.length > 1 && options.supersedesMany !== true) {
+        throw new Error(
+          'This agent\'s memory store replaces one fact at a time, so a memory pass cannot merge several into one. '
+          + 'Name one id in supersedes. Nothing was stored.',
+        );
+      }
+      for (const replaced of replaces ?? []) {
+        const label = shown.get(replaced);
         if (label === undefined) {
-          throw new Error(`${replaces} is not a fact memory.recall has shown in this pass, so it cannot be superseded. Nothing was stored.`);
+          throw new Error(`${replaced} is not a fact memory.recall has shown in this pass, so it cannot be superseded. Nothing was stored.`);
         }
-        if (label === 'user' || await labelNow(agentId, replaces, label) === 'user') {
-          throw new Error(`${replaces} is a fact the operator asserted, and a memory pass never supersedes one. Nothing was stored.`);
+        if (label === 'user' || await labelNow(agentId, replaced, label) === 'user') {
+          throw new Error(`${replaced} is a fact the operator asserted, and a memory pass never supersedes one. Nothing was stored.`);
         }
-        if (await pinned(agentId, replaces)) {
-          throw new Error(`${replaces} is pinned, and a memory pass never supersedes a pinned fact. Nothing was stored.`);
+        if (await pinned(agentId, replaced)) {
+          throw new Error(`${replaced} is pinned, and a memory pass never supersedes a pinned fact. Nothing was stored.`);
         }
       }
+      const supersedes = memorySupersedesField(replaces ?? []);
       const taintedBy = sessionTaintedBy(session);
       const origin: MemoryOrigin = {
         ...(state.sourceSessionId !== undefined ? { sessionId: state.sourceSessionId } : {}),
@@ -153,12 +192,11 @@ export const createMemoryPassTools = (
         metadata: { [MEMORY_PASS_METADATA_KEY]: { id: state.passId, kind: state.kind } },
         provenance: { trust: leastTrusted(state.trust, sessionWriteTrust(session)), origin },
         ...fields,
+        ...supersedes,
       });
       saved += 1;
-      if (replaces !== undefined) {
-        superseded += 1;
-      }
-      return { remembered: true, id: written.id, trust: written.trust, ...(replaces !== undefined ? { supersedes: replaces } : {}) };
+      superseded += replaces?.length ?? 0;
+      return { remembered: true, id: written.id, trust: written.trust, ...supersedes };
     },
   };
 

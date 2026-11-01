@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import {
   MEMORY_PASS_METADATA_KEY,
+  memorySupersededIds,
   type AgentMemoryStore,
   type JsonObject,
   type MemoryAuditEntry,
@@ -239,7 +240,7 @@ export interface MemoryShadowEntry {
   about?: string[];
   validFrom?: string;
   validUntil?: string;
-  supersedes?: string;
+  supersedes?: string | string[];
   /** Carries `memoryPass`, as a written fact's does. */
   metadata: JsonObject;
 }
@@ -457,7 +458,7 @@ export const memoryPassSettleRecord = <E extends Pick<MemoryEntry, 'supersedes'>
   passId: claim.passId,
   status: 'interrupted',
   saved: written.length,
-  superseded: written.filter((entry) => typeof entry.supersedes === 'string').length,
+  superseded: written.reduce((count, entry) => count + memorySupersededIds(entry).length, 0),
   released: written.length === 0,
 });
 

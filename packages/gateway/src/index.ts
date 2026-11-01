@@ -1792,6 +1792,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // process-global.
   const fileMemory = createHomeMemoryStore(env);
   let selectedMemory: AgentMemoryStore = fileMemory;
+  // The built-in store takes a list in `supersedes`; a plugin's says so.
+  let selectedMemorySupersedesMany = true;
   const memory = createRoutedMemoryStore(() => selectedMemory);
   let selectedExecutor: Executor | undefined;
 
@@ -5309,6 +5311,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     stateHome: stratusHomePath(env),
     run: randomUUID(),
     memory,
+    supersedesMany: () => selectedMemorySupersedesMany,
     sessions: store,
     chain: {
       idle: (sessionId) => !sessionChains.has(sessionId),
@@ -6020,6 +6023,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         );
       }
       selectedMemory = contribution.store;
+      selectedMemorySupersedesMany = contribution.supersedesMany === true;
       log(`memory store ${memoryName} selected, from ${contributorOf('memory', memoryName) ?? 'a plugin'}`);
     }
   };

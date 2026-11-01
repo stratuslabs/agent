@@ -76,6 +76,12 @@ export interface MemoryPassHostOptions {
   /** This daemon run's id, written on every ledger record. */
   run: string;
   memory: AgentMemoryStore | undefined;
+  /**
+   * Whether the selected store takes a list in `supersedes`, so a pass may
+   * merge several facts into one. Asked per pass: the store is chosen once
+   * the plugins have loaded. Default: no.
+   */
+  supersedesMany?: () => boolean;
   sessions: { get(id: string): Promise<Session | undefined> };
   /**
    * The session's single-flight chain: whether it is idle now, and a way
@@ -540,7 +546,10 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
       const tools = createMemoryPassTools(
         memory,
         { passId, kind: 'save', sourceSessionId: sessionId, trust: taken.trust },
-        mode === 'shadow' ? { write: shadowWrite(agentId) } : {},
+        {
+          supersedesMany: options.supersedesMany?.() === true,
+          ...(mode === 'shadow' ? { write: shadowWrite(agentId) } : {}),
+        },
       );
       const signal = request.signal !== undefined ? AbortSignal.any([stopAll.signal, request.signal]) : stopAll.signal;
       let failure: unknown;

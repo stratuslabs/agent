@@ -31,7 +31,7 @@ A fact is more than its text. Beyond the four fields every line must have —
 | `kind` | `semantic` (about the world), `episodic` (something that happened), `procedural` (how something is done), or `preference`. These have different useful lifetimes, and one flat bucket is how a store goes noisy. An `episodic` fact with no `validUntil` expires after 14 days; see [Task notes expire by default](#task-notes-expire-by-default). |
 | `about` | The entities the fact concerns — people, systems, projects. This is what the prompt's topic index is built from, and it **participates in search**: a fact reading "it now runs on Postgres" with `about: ["deploy pipeline"]` is found by a search for the pipeline. |
 | `validFrom`, `validUntil` | When the fact starts and stops being true. A different axis from `createdAt`, which is when it was written — conflating the two is why assistants confidently report where someone used to work. ISO-8601; a date alone is UTC midnight, and a *time* must carry `Z` or an offset, or the same bound would mean a different instant on every machine. A day that does not exist is refused rather than rolled forward — `2026-02-30` would otherwise be stored as March 2nd, moving the bound two days with nothing on record to say so. |
-| `supersedes` | The id of a fact this one replaces. |
+| `supersedes` | The id of a fact this one replaces, or a list of ids when one fact merges several (see [Merging duplicates](#merging-duplicates)). |
 
 Every one of them is optional and additive. A line carrying only the four
 required fields still loads, is still recallable, and still reaches the
@@ -101,6 +101,17 @@ Two revisions of the same fact both retire it and both stay live. The
 invariant is the retirement, not a unique replacement: each is a fact the
 agent wrote, and two live successors that disagree are a contradiction in
 content rather than a storage race.
+
+### Merging duplicates
+
+A `supersedes` list retires every fact it names with one record, so three
+copies of a fact become one, and forgetting that one brings all three back.
+Only a memory pass writes lists today; the agent's own `memory.remember`
+replaces one fact at a time. One id is still written as a plain string. An
+older Stratus reading a list ignores it and shows the merged fact beside the
+ones it replaced: duplicates, never a loss. A memory store plugin takes
+lists only if its contribution declares `supersedesMany: true`, as the
+built-in store does; on any other store a pass replaces one fact at a time.
 
 ### Pinned facts
 
@@ -306,8 +317,9 @@ What a pass may do is enforced by the runtime, not left to the prompt:
 - Its only tools are `memory.recall` and a narrowed `memory.remember`. It
   saves at most 5 facts in at most 4 model calls, and only `semantic`,
   `procedural`, or `preference` facts, never `episodic` task notes.
-- It may replace (`supersedes`) only a fact it recalled in that same pass,
-  and never a pinned fact or one labeled `user`.
+- It may replace (`supersedes`) only facts it recalled in that same pass,
+  and never a pinned fact or one labeled `user`. It may name several to
+  merge them into one, when the store takes lists.
 - It runs on exactly the model the request names, or the agent's own, with
   no fallback.
 - It writes at the conversation's trust label, so a conversation that read

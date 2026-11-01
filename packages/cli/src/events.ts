@@ -1,4 +1,4 @@
-import type { StratusEvent } from '@stratusagent/core';
+import { memorySupersededIds, type StratusEvent } from '@stratusagent/core';
 import { FORGET_TOOL_NAME, MEMORY_TOOL_NAME, PIN_TOOL_NAME } from '@stratusagent/agents';
 
 export const formatEvent = (event: StratusEvent): string | null => {
@@ -78,7 +78,9 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
         ? output
         : undefined;
       const entry = typeof fields?.id === 'string' ? fields.id : undefined;
-      const supersedes = typeof fields?.supersedes === 'string' ? fields.supersedes : undefined;
+      // One id, or a merge's list of them: references either way.
+      const supersededIds = fields !== undefined ? memorySupersededIds(fields) : [];
+      const supersedes = supersededIds.length > 1 ? supersededIds : supersededIds[0];
       const pinned = event.result.toolName === PIN_TOOL_NAME && typeof fields?.pinned === 'boolean'
         ? fields.pinned
         : undefined;

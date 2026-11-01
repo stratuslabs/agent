@@ -17191,3 +17191,40 @@ test('the startup lines count external-content gated calls among those that ask,
   assert.match(line, /except bea's, which run without asking, except in bea's conversations that read external content/);
   assert.doesNotMatch(line, /only dangerous ones are parked/);
 });
+
+test('stratus memory list and audit name every fact a merge replaced, and the event trace carries the list', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-merge-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const line = (entry: Record<string, unknown>): string => JSON.stringify(entry);
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), [
+    line({ id: 'ava:memory:1', agentId: 'ava', content: 'The deploy runs on Postgres.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'agent' }),
+    line({ id: 'ava:memory:2', agentId: 'ava', content: 'Deploys go to Postgres.', createdAt: '2026-01-02T00:00:00.000Z', trust: 'agent' }),
+    line({ id: 'ava:memory:3', agentId: 'ava', content: 'The deploy database is Postgres.', createdAt: '2026-01-03T00:00:00.000Z', trust: 'agent', supersedes: ['ava:memory:1', 'ava:memory:2'] }),
+    '',
+  ].join('\n'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  assert.match(listed.output.stdout, /ava:memory:3 .*\(replaces ava:memory:1, ava:memory:2\)/);
+  assert.doesNotMatch(listed.output.stdout, /Deploys go to Postgres/);
+  const json = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--format', 'json'], streams: json.streams, env }), 0);
+  assert.match(json.output.stdout, /"supersedes": \[\s*"ava:memory:1",\s*"ava:memory:2"\s*\]/);
+
+  const audited = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'audit', 'ava'], streams: audited.streams, env }), 0);
+  assert.equal(audited.output.stdout.match(/replaced by: ava:memory:3/g)?.length, 2);
+
+  const merged = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: {
+      callId: 'call-1',
+      toolName: 'memory.remember',
+      ok: true,
+      output: { remembered: true, id: 'ava:memory:3', supersedes: ['ava:memory:1', 'ava:memory:2'] },
+    },
+  });
+  assert.deepEqual(merged, { tool: 'memory.remember', ok: true, entry: 'ava:memory:3', supersedes: ['ava:memory:1', 'ava:memory:2'] });
+});
