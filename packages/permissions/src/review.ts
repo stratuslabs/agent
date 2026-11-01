@@ -184,9 +184,12 @@ const commandRuleMatches = (rule: ReviewRule, command: string): boolean => {
     && (words.scope.args ?? []).every((arg, index) => analysis.tokens[index + 1] === arg))) {
     return true;
   }
+  // Other words of the same command may sit between the program and each
+  // of the rule's words (`git -C repo push`, `git --no-pager push`), never
+  // a separator that starts another command.
   const sequence = [words.scope.command, ...(words.scope.args ?? [])]
     .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('\\s+');
+    .join('(?:\\s+[^\\s;&|()]+)*?\\s+');
   // A program called by its path (`/usr/bin/git push`) is one the reader
   // above refuses, so the backstop takes a path in front of the name.
   return new RegExp(`(?:^|[\\s;&|("'\`])(?:[^\\s;&|()"'\`<>]*/)?${sequence}(?=$|[\\s;&|)"'\`])`).test(command);
@@ -326,7 +329,7 @@ const sendsOutside = (call: { toolName: string; command?: string }): boolean => 
   if (commands === undefined) {
     // Unreadable (a path-qualified program is, too): a client named
     // anywhere counts, by itself or as the last part of a path.
-    return [...NETWORK_CLIENTS].some((client) => new RegExp(`(?:^|[\\s;&|(\`'"/])${client}(?=$|\\s)`).test(call.command as string));
+    return [...NETWORK_CLIENTS].some((client) => new RegExp(`(?:^|[\\s;&|(\`'"/])${client}(?=$|[\\s;&|)\`'"])`).test(call.command as string));
   }
   // Any word that names a client, not only the program a wrapper runs: a
   // wrapper option no table lists (`sudo -R / curl`) or a client fed by
@@ -503,7 +506,15 @@ export const readReviewAnswer = (raw: unknown): ReviewAnswer | undefined => {
   if (typeof source.reason !== 'string' || source.reason.trim().length === 0) {
     return undefined;
   }
-  const line = source.reason.trim().split(/\r?\n/)[0] as string;
+  // The first line, with every control and bidi character made a space: the
+  // reason is shown at a terminal prompt and may echo the call's own text.
+  const line = (source.reason.trim().split(/\r?\n/)[0] as string)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (line.length === 0) {
+    return undefined;
+  }
   const code = typeof source.code === 'string' && (REVIEW_CODES as readonly string[]).includes(source.code) && source.code !== 'review-failed'
     ? source.code as ReviewCode
     : 'unclear';
