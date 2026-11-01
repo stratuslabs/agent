@@ -333,6 +333,7 @@ const roughPipelines = (text: string): string[][][] => {
   let words: string[] = [];
   let word = '';
   let started = false;
+  // `'`, `"`, or `$'` for ANSI-C quoting, whose backslash escapes decode.
   let quote: string | undefined;
   const endWord = (): void => {
     if (started) {
@@ -358,8 +359,18 @@ const roughPipelines = (text: string): string[][][] => {
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index] as string;
     if (quote !== undefined) {
-      if (char === quote) {
+      if (char === (quote === "$'" ? "'" : quote)) {
         quote = undefined;
+      } else if (char === '\\' && quote === "$'" && index + 1 < text.length) {
+        const escape = /^(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|(.))/s.exec(text.slice(index + 1));
+        const [whole = '', hex, u4, u8, octal, other] = escape ?? [];
+        const code = hex ?? u4 ?? u8;
+        word += code !== undefined
+          ? String.fromCodePoint(Number.parseInt(code, 16) % 0x110000)
+          : octal !== undefined
+            ? String.fromCharCode(Number.parseInt(octal, 8))
+            : ({ n: '\n', t: '\t', r: '\r', a: '\u0007', b: '\b', e: '\u001b', E: '\u001b', f: '\f', v: '\v' } as Record<string, string>)[other ?? ''] ?? other ?? '';
+        index += whole.length;
       } else if (char === '\\' && quote === '"' && index + 1 < text.length) {
         index += 1;
         word += text[index];
@@ -370,6 +381,11 @@ const roughPipelines = (text: string): string[][][] => {
     }
     if (char === '"' || char === "'") {
       quote = char;
+      started = true;
+    } else if (char === '$' && (text[index + 1] === "'" || text[index + 1] === '"')) {
+      // `$'…'` (ANSI-C) and `$"…"` (locale) quoting: the shell drops the `$`.
+      index += 1;
+      quote = text[index] === "'" ? "$'" : '"';
       started = true;
     } else if (char === '\\' && index + 1 < text.length) {
       index += 1;
@@ -414,7 +430,8 @@ const roughPipelines = (text: string): string[][][] => {
  */
 const pipelinesOf = (command: string): string[][][] => {
   const compound = analyzeCompound(command);
-  const top = compound.disqualifiedBy
+  // The analyzer reads `$'git'` as the word `$git`; the shell runs `git`.
+  const top = compound.disqualifiedBy || /\$['"]/.test(command)
     ? roughPipelines(command)
     : compound.pipelines.map((pipeline) => pipeline.map((stage) => [...stage.analysis.tokens]));
   const nested = top.flat(2).filter((word) => /[\s;&|]/.test(word)).flatMap((word) => roughPipelines(word));
