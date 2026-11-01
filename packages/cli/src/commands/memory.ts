@@ -10,9 +10,19 @@ import {
 } from '@stratusagent/core';
 import {
   agentMemoryFilePath,
+  agentMemoryPassesFileIn,
+  agentMemoryShadowFileIn,
   agentsDirPath,
   createHomeMemoryStore,
+  createMemoryPassLedger,
+  createMemoryShadowFile,
+  memoryPassEntries,
+  memoryPassSummaries,
+  memoryShadowEntriesOf,
   migrateLegacyMemory,
+  stratusHomePath,
+  undoMemoryPass,
+  type MemoryPassSummary,
 } from '@stratusagent/state';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -47,7 +57,14 @@ import { loadServeRuntimeSelection } from '../trusted-config.ts';
  * `external`** unless the operator passes `--preserve-trust`: import is the
  * laundering problem with a human in the middle, so the safe default
  * re-labels and the flag is a person vouching for the file.
+ *
+ * `passes`, `list --pass` and `undo-pass` are the audit half of memory
+ * passes (spec 962): the ledger, what one pass wrote, and taking a pass
+ * back. Undo is a forget per entry, so it is append-only like any other.
  */
+/** How many passes `stratus memory passes` shows without --limit, newest first. */
+const DEFAULT_PASSES_LISTED = 20;
+
 export const runMemory = async (
   command: ParsedMemoryCommand,
   streams: CliStreams,
@@ -131,6 +148,29 @@ export const runMemory = async (
     }
   };
 
+  /**
+   * One pass, two lines: its id, kind, mode, status, counts and time, then
+   * what it read. Escaped like an entry: a hand-edited ledger line can
+   * carry a newline in any string.
+   */
+  const printPass = (summary: MemoryPassSummary): void => {
+    const status = summary.reason !== undefined ? `${summary.status} (${summary.reason})` : summary.status;
+    writeLine(
+      streams.stdout,
+      escapeControlCharacters(
+        `${summary.passId}  ${summary.kind} ${summary.mode}  ${status}  saved ${summary.saved}, superseded ${summary.superseded}  ${summary.claimedAt}`,
+      ),
+    );
+    if (summary.sessionId !== undefined && summary.slice !== undefined) {
+      const { slice } = summary;
+      const read = `${slice.count} message${slice.count === 1 ? '' : 's'}, ${slice.count === 1 ? slice.from : `${slice.from} to ${slice.to}`}`;
+      const cut = slice.cut !== undefined ? `; ${slice.cut.messageId} was cut to fit, ${slice.cut.bytesOmitted} bytes left out` : '';
+      writeLine(streams.stdout, `  ${escapeControlCharacters(`session ${summary.sessionId}: ${read}${cut}`)}`);
+    } else if (summary.group !== undefined) {
+      writeLine(streams.stdout, `  ${escapeControlCharacters(`group ${summary.group.key}`)}`);
+    }
+  };
+
   // `allocated`, not the default: a pin that is superseded or outside its
   // validity window still holds its place in the 2 KiB budget and is
   // exactly what makes a later pin refuse — an operator who cannot see it
@@ -138,6 +178,109 @@ export const runMemory = async (
   // not add up.
   const pinnedIds = async (): Promise<Set<string>> =>
     new Set((store.pinned ? await store.pinned(command.agentId, { include: 'allocated' }) : []).map((entry) => entry.id));
+
+  // The pass ledger and shadow file sit beside the agent's other state,
+  // where the daemon writes them. A ledger is ids, times and counts only.
+  const stateDir = stratusHomePath(env);
+  const passesFile = (): string => agentMemoryPassesFileIn(stateDir, command.agentId);
+  const readPasses = async (): Promise<MemoryPassSummary[]> =>
+    memoryPassSummaries(await createMemoryPassLedger(passesFile(), { stateHome: stateDir }).read());
+  const findPass = async (passId: string): Promise<MemoryPassSummary | undefined> =>
+    (await readPasses()).find((summary) => summary.passId === passId);
+  const noSuchPass = (passId: string): number => {
+    writeLine(
+      streams.stderr,
+      `Error: ${command.agentId}'s ledger has no pass ${passId}. stratus memory passes ${command.agentId} lists them.`,
+    );
+    return 1;
+  };
+
+  if (command.action === 'passes') {
+    const all = await readPasses();
+    const shown = all.slice(0, command.limit ?? DEFAULT_PASSES_LISTED);
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({ agentId: command.agentId, total: all.length, passes: shown }, null, 2));
+      return 0;
+    }
+    if (all.length === 0) {
+      writeLine(streams.stdout, `${command.agentId} has no memory passes in ${passesFile()}.`);
+      return 0;
+    }
+    for (const summary of shown) {
+      printPass(summary);
+    }
+    if (shown.length < all.length) {
+      writeLine(streams.stdout, '');
+      writeLine(streams.stdout, `${all.length - shown.length} older pass${all.length - shown.length === 1 ? '' : 'es'} not shown. Raise --limit to see more.`);
+    }
+    return 0;
+  }
+
+  if (command.action === 'undo-pass') {
+    const passId = command.pass!;
+    const found = await findPass(passId);
+    if (found?.mode === 'shadow') {
+      writeLine(streams.stdout, `Pass ${escapeControlCharacters(passId)} ran in shadow mode, so it wrote nothing to memory. Nothing to undo.`);
+      return 0;
+    }
+    const written = await memoryPassEntries(store, command.agentId, passId);
+    if (found === undefined && written.length === 0) {
+      return noSuchPass(escapeControlCharacters(passId));
+    }
+    if (found?.status === 'open') {
+      writeLine(
+        streams.stderr,
+        `Warning: pass ${escapeControlCharacters(passId)} has not ended, so it may still write. Run undo-pass again once stratus memory passes shows it ended.`,
+      );
+    }
+    const { forgotten } = await undoMemoryPass(store, command.agentId, passId);
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({ agentId: command.agentId, passId, forgotten }, null, 2));
+      return 0;
+    }
+    writeLine(
+      streams.stdout,
+      `Forgot ${forgotten.length} entr${forgotten.length === 1 ? 'y' : 'ies'} pass ${escapeControlCharacters(passId)} wrote for ${command.agentId}. `
+      + 'What they replaced is live again. They stay in the record; stratus memory audit still shows them.',
+    );
+    return 0;
+  }
+
+  if (command.action === 'list' && command.pass !== undefined) {
+    const passId = command.pass;
+    const found = await findPass(passId);
+    const shadow = found?.mode === 'shadow';
+    // Write mode: from the store, forgotten ones included, so an undone
+    // pass still shows what it wrote. Shadow: what it would have written.
+    const written: MemoryAuditEntry[] = shadow
+      ? memoryShadowEntriesOf(await createMemoryShadowFile(agentMemoryShadowFileIn(stateDir, command.agentId), { stateHome: stateDir }).read(), passId)
+      : await memoryPassEntries(store, command.agentId, passId);
+    if (found === undefined && written.length === 0) {
+      return noSuchPass(escapeControlCharacters(passId));
+    }
+    const entries = written.filter((entry) => command.trust === undefined || memoryEntryTrust(entry) === command.trust);
+    const pinned = shadow ? new Set<string>() : await pinnedIds();
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({
+        agentId: command.agentId,
+        passId,
+        ...(found !== undefined ? { pass: found } : {}),
+        entries: entries.map((entry) => ({ ...describeEntry(entry), pinned: pinned.has(entry.id) })),
+      }, null, 2));
+      return 0;
+    }
+    if (shadow) {
+      writeLine(streams.stdout, `Pass ${escapeControlCharacters(passId)} ran in shadow mode. These are what it would have saved; none is in memory.`);
+    }
+    if (entries.length === 0) {
+      writeLine(streams.stdout, `Pass ${escapeControlCharacters(passId)} wrote nothing${command.trust === undefined ? '' : ` at ${command.trust}`}.`);
+      return 0;
+    }
+    for (const entry of entries) {
+      printEntry(entry, pinned);
+    }
+    return 0;
+  }
 
   if (command.action === 'list') {
     // `all`, not the default: an operator has to be able to see an expired

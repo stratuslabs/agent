@@ -286,6 +286,91 @@ archives the transcript so far and starts the same id over. The fresh
 session is still `unknown` on its first turn if the entries it injects are,
 which is correct, and what `stratus memory list` is for.
 
+## Memory passes
+
+A memory pass is a short model run, as the agent, that reads the newest
+messages of one conversation and saves the lasting facts in them, so a
+preference stated in passing is still there next week. Nothing in core
+decides when to run one. An operator-installed plugin asks for passes
+through `PluginContext.memoryPasses`: `start(agentId, mode)` turns upkeep
+on for an agent until the daemon stops, and `run(request)` runs one pass
+and resolves with how it ended. No tool starts a pass, so neither the agent
+nor a chat message can. With no plugin asking, nothing runs and nothing
+changes. Only the daemon offers it: under `stratus run` a plugin gets no
+`memoryPasses`.
+
+What a pass may do is enforced by the runtime, not left to the prompt:
+
+- Its only tools are `memory.recall` and a narrowed `memory.remember`. It
+  saves at most 5 facts in at most 4 model calls, and only `semantic`,
+  `procedural`, or `preference` facts, never `episodic` task notes.
+- It may replace (`supersedes`) only a fact it recalled in that same pass,
+  and never a pinned fact or one labeled `user`.
+- It runs on exactly the model the request names, or the agent's own, with
+  no fallback.
+- It writes at the conversation's trust label, so a conversation that read
+  a web page writes `external`, and every fact it writes carries
+  `metadata.memoryPass` (`{ id, kind }`) and the conversation's session id.
+
+Which messages it reads:
+
+- Only conversations of the kinds the request lists, `public` when it lists
+  none, so a DM is read only when the plugin's config says so. A session
+  with no channel (your CLI or control API) always counts, and a channel
+  that reports no kind never does.
+- Never a sub-agent's session, and a schedule firing or event trigger's
+  session only when the request sets `scheduled: true`.
+- Only messages written while upkeep was on, and only ones no earlier pass
+  took. A pass reads about 32 KB at a time, oldest first. A message alone
+  over that goes in cut to fit, and the ledger records the cut.
+- Never a conversation with a turn running. That pass is `skipped`
+  (`turn-running`) and the plugin asks again later.
+
+In `shadow` mode a pass runs the same way but writes what it would have
+saved to `agents/<id>/memory-shadow.jsonl`, and no real fact changes. Tidy
+passes, which merge duplicate facts, are not built yet: a tidy request comes
+back `skipped` (`tidy-unsupported`).
+
+### The ledger
+
+Each pass that read something is recorded in
+`~/.stratus/agents/<id>/memory-passes.jsonl`, append-only like
+`memory.jsonl`: when upkeep started and stopped, which messages each pass
+took, and how it ended. Ids, times, and counts, never content. That is also
+where each conversation's place is kept, so a pass never competes with a
+turn saving its session. A pass that fails before writing anything gives
+its messages back for the next pass. One that wrote something keeps them,
+so nothing is saved twice. A daemon stop aborts running passes at once
+instead of holding the drain, and a pass a crash cut off is settled the
+same way at the next start.
+
+### Seeing and undoing what passes did
+
+```bash
+stratus memory passes blair            # newest first: status, reason, counts, what it read
+stratus memory list blair --pass <id>  # what one pass wrote, forgotten entries included
+stratus memory undo-pass blair <id>    # forget everything that pass wrote
+```
+
+`passes` shows each pass's kind, mode, status and reason (`failed
+(model)`, `failed (budget)`), how many facts it saved and replaced, and
+which messages it read, with any message cut to fit. `open` means a pass is
+running, or a crash cut it off and the next start will settle it.
+`list --pass` on a shadow pass shows what it would have saved.
+
+`undo-pass` forgets every live entry carrying the pass id. A forget is
+append-only, so the entries stay in the record, and whatever they replaced
+is live again. A shadow pass wrote nothing to memory, so there is nothing
+to undo. Like the rest of `stratus memory`, these read the built-in store
+only.
+
+The control API has the same two reads for a dashboard or script:
+`GET /api/v1/agents/:id/memory/passes`, and
+`GET /api/v1/agents/:id/memory/passes/:passId` for one pass and what it
+wrote, from whichever store the daemon writes to. The bus gets
+`memory.pass-completed` for every pass, with its status and counts and no
+content.
+
 ## Moving an agent's memory
 
 ```bash
