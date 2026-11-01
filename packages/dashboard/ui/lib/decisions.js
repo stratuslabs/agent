@@ -11,7 +11,7 @@ export const decisionNote = (decision) => {
   // A shadow decision changed nothing (the call ran as it would have), so
   // it is said as what it would have done, never as what happened.
   const head = decision.verdict === undefined
-    ? (decision.allowed ? 'allowed' : 'refused')
+    ? `${decision.shadow === true ? 'shadow: ' : ''}${decision.allowed ? 'allowed' : 'refused'}`
     : decision.shadow === true
       ? `would have ${PAST[decision.verdict] ?? decision.verdict}`
       : decision.verdict;
@@ -19,8 +19,10 @@ export const decisionNote = (decision) => {
 };
 
 export const decisionTone = (decision) => {
-  if (!decision.allowed) {
-    return 'bad';
+  // Shadow first: the policy reports what it would have done, refusals
+  // included, but nothing was refused, so it is never shown as one.
+  if (decision.shadow === true) {
+    return decision.allowed && (decision.verdict === undefined || decision.verdict === 'allow') ? 'ok' : 'warn';
   }
-  return decision.shadow === true && decision.verdict !== undefined && decision.verdict !== 'allow' ? 'warn' : 'ok';
+  return decision.allowed ? 'ok' : 'bad';
 };
