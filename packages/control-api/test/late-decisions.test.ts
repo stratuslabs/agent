@@ -78,6 +78,13 @@ test('a shadow decision that arrives after its turn is stamped with the turn its
     await bus.emit(decided('call-1', true));
     assert.equal(frames.at(-1)?.turnId, 'turn-B');
 
+    // A reused id on another tool is another call: the shadow decision
+    // about turn B's notes.add call is not taken by turn C's web.fetch.
+    turn('turn-C');
+    await bus.emit({ type: 'tool.called', sessionId: 's1', call: { id: 'call-1', toolName: 'web.fetch', input: {} } });
+    await bus.emit(decided('call-1', true));
+    assert.equal(frames.at(-1)?.turnId, 'turn-B', 'the reused id on another tool does not move the binding');
+
     // A shadow decision for a call never seen goes with what runs now.
     turn(undefined);
     await bus.emit(decided('call-unknown', true));

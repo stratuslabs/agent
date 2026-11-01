@@ -1,7 +1,7 @@
 import { ago, el } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
-import { decisionNote, decisionTone } from '../lib/decisions.js';
+import { decisionNote, decisionTone, settledLines, shadowLineIndex } from '../lib/decisions.js';
 import { onEnvelope, refreshCore, store } from '../app.js';
 
 /** A conversation started from this page, distinguishable from a Slack thread. */
@@ -61,11 +61,21 @@ export const renderAgent = (agentId, initialSessionId) => {
     /** The reply currently arriving, token by token. */
     streaming: '',
     /**
-     * Tool status lines for the turn in flight: `{ text, callId, decides,
-     * decision }`. `decides` marks the line a permission decision belongs
-     * beside (the call starting, or its refusal).
+     * Tool status lines for the turn in flight: `{ text, callId, toolName,
+     * decides, decision, shadow }`. `decides` marks the line a permission
+     * decision belongs beside (the call starting, or its refusal).
      */
     toolLines: [],
+    /**
+     * The lines of this page's last finished turn, `{ sessionId, turnId,
+     * lines }`, kept once the stored transcript replaces them: their
+     * decisions show beside the stored results (`settledLines`), and a
+     * shadow decision that lands after the turn ended still finds its call.
+     * Live only, like every decision here: gone on the next message, from
+     * this page or from anywhere else, on a reconnect, or on another
+     * conversation, and a conversation opened later shows none.
+     */
+    settled: undefined,
     /**
      * Decisions (`permission.decided`) that arrived before the line they
      * belong to, by call id. A decision is copied onto its line when the
@@ -75,9 +85,10 @@ export const renderAgent = (agentId, initialSessionId) => {
     decisions: new Map(),
     /**
      * Shadow decisions (the review posture's, worked out off the call
-     * path) waiting for their line, by call id, oldest first. Kept apart
-     * from `decisions`: a call has its real decision and may have a shadow
-     * one too, and the shadow one often arrives first.
+     * path) waiting for their line, by call id and tool (`shadowKey`),
+     * oldest first. Kept apart from `decisions`: a call has its real
+     * decision and may have a shadow one too, and the shadow one often
+     * arrives first.
      */
     shadows: new Map(),
     turnId: undefined,
@@ -162,14 +173,37 @@ export const renderAgent = (agentId, initialSessionId) => {
 
   // ---- transcript --------------------------------------------------------
 
+  /** A call line's decision and shadow decision, as the notes beside it. */
+  const decisionParts = (line) => {
+    const decision = line?.decision;
+    const shadow = line?.shadow;
+    return [
+      decision
+        ? el('span', { class: `decision ${decisionTone(decision)}`, title: decision.reason }, decisionNote(decision))
+        : null,
+      shadow
+        ? el('span', { class: `decision shadow ${decisionTone(shadow)}`, title: shadow.reason }, decisionNote(shadow))
+        : null,
+      // A refusal's reason is what the agent was told, and the actionable
+      // half for whoever is watching; an allowed call's reason stays in
+      // the title, since every call has one.
+      decision && !decision.allowed && decision.reason
+        ? el('div', { class: 'decision-reason' }, decision.reason)
+        : null,
+    ];
+  };
+
   const bubbles = () => {
     const nodes = [];
-    for (const message of state.messages) {
+    const settled = state.settled !== undefined && state.settled.sessionId === state.sessionId
+      ? settledLines(state.messages, state.settled.lines)
+      : new Map();
+    for (const [index, message] of state.messages.entries()) {
       if (message.role === 'system') {
         continue;
       }
       if (message.role === 'tool') {
-        nodes.push(el('div', { class: 'bubble tool' }, summariseTool(message.content)));
+        nodes.push(el('div', { class: 'bubble tool' }, summariseTool(message.content), ...decisionParts(settled.get(index))));
         continue;
       }
       if (!message.content) {
@@ -180,23 +214,7 @@ export const renderAgent = (agentId, initialSessionId) => {
       nodes.push(el('div', { class: `bubble ${message.role}` }, message.content));
     }
     for (const line of state.toolLines) {
-      const decision = line.decision;
-      const shadow = line.shadow;
-      nodes.push(el('div', { class: 'bubble tool' },
-        line.text,
-        decision
-          ? el('span', { class: `decision ${decisionTone(decision)}`, title: decision.reason }, decisionNote(decision))
-          : null,
-        shadow
-          ? el('span', { class: `decision shadow ${decisionTone(shadow)}`, title: shadow.reason }, decisionNote(shadow))
-          : null,
-        // A refusal's reason is what the agent was told, and the actionable
-        // half for whoever is watching; an allowed call's reason stays in
-        // the title, since every call has one.
-        decision && !decision.allowed && decision.reason
-          ? el('div', { class: 'decision-reason' }, decision.reason)
-          : null,
-      ));
+      nodes.push(el('div', { class: 'bubble tool' }, line.text, ...decisionParts(line)));
     }
     if (state.streaming) {
       nodes.push(el('div', { class: 'bubble assistant streaming' }, state.streaming));
@@ -298,6 +316,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.pending = [];
     // Restored, not cleared: this page may still be waiting on a turn here.
     state.turnId = state.turns.get(sessionId);
+    state.settled = undefined;
     state.sending = state.turnId !== undefined || state.awaitingSend.has(sessionId);
     state.tab = 'chat';
     void loadTranscript();
@@ -321,6 +340,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.toolLines = [];
     state.decisions = new Map();
     state.shadows = new Map();
+    state.settled = undefined;
     paintTranscript();
     update();
   };
@@ -355,6 +375,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.toolLines = [];
     state.decisions = new Map();
     state.shadows = new Map();
+    state.settled = undefined;
     paintTranscript();
     update();
 
@@ -421,20 +442,40 @@ export const renderAgent = (agentId, initialSessionId) => {
    */
   const isOurTurn = (envelope) => envelope.turnId !== undefined && envelope.turnId === state.turnId;
 
+  const shadowKey = (callId, toolName) => `${callId}\u0000${toolName}`;
+
   /** One tool status line, with the decision that arrived ahead of it when it is the line one belongs beside. */
-  const addToolLine = (text, callId, decides) => {
+  const addToolLine = (text, callId, toolName, decides) => {
     const decision = decides ? state.decisions.get(callId) : undefined;
     if (decision !== undefined) {
       state.decisions.delete(callId);
     }
-    const waiting = decides ? state.shadows.get(callId) : undefined;
+    const key = shadowKey(callId, toolName);
+    const waiting = decides ? state.shadows.get(key) : undefined;
     const shadow = waiting?.shift();
     if (waiting !== undefined && waiting.length === 0) {
-      state.shadows.delete(callId);
+      state.shadows.delete(key);
     }
-    state.toolLines = [...state.toolLines, { text, callId, decides, ...(decision ? { decision } : {}), ...(shadow ? { shadow } : {}) }];
+    state.toolLines = [...state.toolLines, { text, callId, toolName, decides, ...(decision ? { decision } : {}), ...(shadow ? { shadow } : {}) }];
     paintTranscript();
   };
+
+  /**
+   * Keeps the lines of the turn that just ended (`state.settled`), so the
+   * stored transcript that replaces them still shows their decisions.
+   */
+  const settleTurn = (envelope) => {
+    state.settled = { sessionId: envelope.sessionId, turnId: envelope.turnId, lines: state.toolLines };
+  };
+
+  const decisionOf = (event) => ({
+    allowed: event.allowed,
+    layer: event.layer,
+    reason: event.reason,
+    verdict: event.verdict,
+    reviewCode: event.reviewCode,
+    shadow: event.shadow,
+  });
 
   const applyEnvelope = (envelope) => {
     const event = envelope.event;
@@ -447,8 +488,28 @@ export const renderAgent = (agentId, initialSessionId) => {
     // that no completion follows is exactly the change this branch exists
     // to notice. The session list re-reads too, since its order follows
     // the row's own timestamp, which an overhear moves.
+    // A shadow review can outlast its turn. The control API stamps its
+    // decision with the turn its call ran in, which here is the one that
+    // just ended, so it joins that turn's call.
+    if (event.type === 'permission.decided' && event.shadow === true && state.settled !== undefined
+      && envelope.turnId !== undefined && envelope.turnId === state.settled.turnId
+      && envelope.sessionId === state.settled.sessionId) {
+      const lines = state.settled.lines;
+      const index = shadowLineIndex(lines, event.callId, event.toolName);
+      if (index >= 0) {
+        state.settled = { ...state.settled, lines: lines.map((line, at) => (at === index ? { ...line, shadow: decisionOf(event) } : line)) };
+        paintTranscript();
+      }
+      return;
+    }
+
     if (!isOurTurn(envelope)) {
       if (event.type === 'session.completed' || event.type === 'session.failed' || event.type === 'session.observed') {
+        // Somebody else added to the conversation after this page's last
+        // turn, so its lines no longer describe the end of the transcript:
+        // matched from the end, they would land beside the newer turn's
+        // results whenever that turn reused an id on the same tool.
+        state.settled = undefined;
         void loadTranscript();
         void loadSessions();
       }
@@ -469,25 +530,16 @@ export const renderAgent = (agentId, initialSessionId) => {
         }
         break;
       case 'permission.decided': {
-        const decision = {
-          allowed: event.allowed,
-          layer: event.layer,
-          reason: event.reason,
-          verdict: event.verdict,
-          reviewCode: event.reviewCode,
-          shadow: event.shadow,
-        };
+        const decision = decisionOf(event);
         if (event.shadow === true) {
-          // Off the call path, so before or after its line. It joins the
-          // earliest line for that call still without one: reviews settle
-          // in the order their calls were made, near enough, which keeps a
-          // reused call id from taking a later call's shadow.
-          const index = state.toolLines.findIndex((line) => line.decides && line.callId === event.callId && line.shadow === undefined);
+          // Off the call path, so before or after its line (`shadowLineIndex`).
+          const index = shadowLineIndex(state.toolLines, event.callId, event.toolName);
           if (index >= 0) {
             state.toolLines = state.toolLines.map((line, at) => (at === index ? { ...line, shadow: decision } : line));
             paintTranscript();
           } else {
-            state.shadows.set(event.callId, [...(state.shadows.get(event.callId) ?? []), decision]);
+            const key = shadowKey(event.callId, event.toolName);
+            state.shadows.set(key, [...(state.shadows.get(key) ?? []), decision]);
           }
           break;
         }
@@ -503,18 +555,19 @@ export const renderAgent = (agentId, initialSessionId) => {
         break;
       }
       case 'tool.called':
-        addToolLine(`running ${event.call.toolName}…`, event.call.id, true);
+        addToolLine(`running ${event.call.toolName}…`, event.call.id, event.call.toolName, true);
         break;
       case 'tool.completed':
-        addToolLine(`${event.result.toolName} ${event.result.ok ? 'finished' : 'failed'}`, event.result.callId, false);
+        addToolLine(`${event.result.toolName} ${event.result.ok ? 'finished' : 'failed'}`, event.result.callId, event.result.toolName, false);
         break;
       case 'tool.denied':
-        addToolLine(`${event.call.toolName} was denied`, event.call.id, true);
+        addToolLine(`${event.call.toolName} was denied`, event.call.id, event.call.toolName, true);
         break;
       case 'tool.approval-requested':
-        addToolLine(`${event.call.toolName} is waiting for approval`, event.call.id, false);
+        addToolLine(`${event.call.toolName} is waiting for approval`, event.call.id, event.call.toolName, false);
         break;
       case 'session.failed':
+        settleTurn(envelope);
         state.error = event.error;
         state.sending = false;
         state.turnId = undefined;
@@ -522,6 +575,7 @@ export const renderAgent = (agentId, initialSessionId) => {
         void loadTranscript();
         break;
       case 'session.completed':
+        settleTurn(envelope);
         state.sending = false;
         state.turnId = undefined;
         state.turns.delete(envelope.sessionId);
@@ -788,6 +842,9 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.toolLines = [];
     state.decisions = new Map();
     state.shadows = new Map();
+    // Events were missed while the socket was down, possibly another turn's
+    // completion, so the last turn's lines may no longer end the transcript.
+    state.settled = undefined;
     void loadSessions();
     update();
   };
