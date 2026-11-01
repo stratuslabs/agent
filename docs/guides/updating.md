@@ -285,6 +285,64 @@ often a `~/.stratus/state.json` that cannot be written: a command that
 writes state refuses rather than persist data the stamp was meant to
 protect, and a read-only one warns and continues.
 
+## Going back to the version you had
+
+Before a migration that moves or rewrites data runs, the state is copied to
+`~/.stratus/backups/<time>/`, and the command that ran it says where:
+
+    state backup: copied 9 state files to /Users/you/.stratus/backups/20261101T013000Z before migrating
+
+That is every file directly in `~/.stratus`, in `agents/` and in each
+`agents/<id>/`: the session and schedule databases (copied through SQLite,
+so the newest turns come too), memories, grants, souls, config and the
+stamp. A link, like a soul or workspace linked into the
+[agents folder](../reference/state-layout.md#the-agents-folder), is copied
+as the link. It leaves out `credentials.json` and `gateway-token`,
+which no migration rewrites, and the workspaces, logs, skills and plugins,
+which no migration rewrites either and can be any size. It is owner-only,
+and nothing deletes it; remove old ones when you no longer need them.
+
+A migration that leaves the data alone, like a stamp or a permission change,
+takes no backup, and neither does a home with no conversation or memory in
+it. A start that runs the same upgrade again within a day, such as a service
+restarting over a migration that keeps failing, reuses the backup it already
+took. If the copy can't be made (a full disk, a file it can't read), no
+migration runs and the command says why: the home is still as the older
+build left it, and that build still runs it.
+
+To go back, stop the daemon, put the backup in place of the home, bring
+over what it leaves out, and install the version you had:
+
+    stratus service stop
+    mv ~/.stratus ~/.stratus.upgraded
+    mkdir -m 700 ~/.stratus
+    cp -Rp ~/.stratus.upgraded/backups/<time>/files/. ~/.stratus/
+    cp -p ~/.stratus.upgraded/credentials.json ~/.stratus/
+    for dir in skills plugins logs workspaces; do
+      if [ -e ~/.stratus.upgraded/$dir ]; then cp -Rp ~/.stratus.upgraded/$dir ~/.stratus/; fi
+    done
+    # A workspace that is a directory rather than a link to the agents folder:
+    for workspace in ~/.stratus.upgraded/agents/*/workspace; do
+      agent=$(basename "$(dirname "$workspace")")
+      restored=~/.stratus/agents/$agent/workspace
+      if [ -d "$workspace" ] && [ ! -L "$workspace" ] && [ ! -e "$restored" ] && [ ! -L "$restored" ]; then
+        mkdir -p ~/.stratus/agents/$agent
+        cp -Rp "$workspace" ~/.stratus/agents/$agent/
+      fi
+    done
+    npm install -g @stratusagent/cli@<the version you had>   # and its companions, below
+    stratus service start
+
+Copying the workspaces back by their new path is right for any upgrade
+that doesn't move them. The one that does is the 0.12 layout move: when the
+`from` stamp in `backup.json` doesn't list `0004-per-agent-workspaces`,
+move each `agents/<id>/workspace` to `workspaces/<id>` instead. Keep
+`~/.stratus.upgraded` until the older version has served for a while; it
+is what you would go forward from again, and it keeps `backups/`.
+
+Upgrading again later migrates the restored home the same way the first
+time did, and takes a new backup first.
+
 ## Souls and workspaces move to the agents folder
 
 Not a migration: no schema version changes, and an older build still finds

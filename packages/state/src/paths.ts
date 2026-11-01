@@ -65,6 +65,13 @@ export const pluginStateDirPath = (env: StateEnvironment, packageName: string): 
   return path.join(stratusHomePath(env), PLUGINS_DIRNAME, ...packageName.split('/'));
 };
 
+/**
+ * Where a migration run keeps the copy of the state it took first, one
+ * dated directory per upgrade (see `backUpStateBeforeMigrating`).
+ */
+export const backupsDirPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), 'backups');
+
 /** Where `stratus serve` keeps its structured log, and `stratus logs` reads it. */
 export const logsDirPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), LOGS_DIRNAME);

@@ -21,6 +21,7 @@ what moves when you rename an agent.
 | `stratusd.lock` | Held by the daemon serving this home; how a second `stratus serve` is refused. |
 | `grants.lock` | Held for a moment while a grant file is read by the daemon or rewritten by `stratus grants revoke`, so a daemon never reads one halfway through a revoke. Empty; safe to delete when nothing is running. |
 | `workspace-links.json` | Only while the upgrade move of `workspaces/` is unfinished: which workspace links that move pointed somewhere new, so a later start can point them back if their target turns out to stay put. An entry saved just before its link is written is held as pending until the link exists, and a start that finds that very link there with the entry still pending refuses, since it cannot tell the link from one you made yourself — the error names the file and how to settle it. An entry is dropped once its target has moved, and the file once it holds none; `workspaces/` being gone does not settle it, since a command of an older build can make an entry again. One that will not read stops the move, naming the file, rather than being skipped. `0600`. |
+| `backups/<time>/` | The state as it was before an upgrade migrated it: `files/` holds a copy of every state file in this directory, in `agents/` and in each `agents/<id>/`, without `credentials.json`, `gateway-token` or the workspaces, and `backup.json` says which stamp it was taken from and for which migrations. Taken only when a migration that changes data runs. Nothing deletes them; remove old ones yourself. See [Updating](../guides/updating.md#going-back-to-the-version-you-had). `0700`. |
 | `logs/` | `stratusd.jsonl`, the structured trace [`stratus logs`](../guides/logs.md) reads, plus the macOS LaunchAgent's stdout/stderr redirects. `0700`. |
 | `skills/` | Operator-installed [skills](../guides/skills.md), one directory each. |
 | `plugins/<package>/` | What one [plugin](../architecture/plugins.md) keeps across restarts, such as a channel's read position, by package name; a scoped package nests under its scope (`plugins/@scope/name/`). Created only when a plugin asks for it. `0700` at every level. |
@@ -222,6 +223,10 @@ with the daemon stopped (`stratus service stop`) or copy `*-wal` and
 you lose. On a server the home is a Docker volume or
 `/var/lib/stratus/.stratus`; [Deployment](../guides/deployment.md#back-up-and-restore)
 has the archive-and-restore procedure and a drill that proves it.
+
+An upgrade that migrates data copies the state into `backups/` first, which
+is a way back to the version you had, not a copy of the home: it leaves out
+the sign-ins and the workspaces.
 
 An install upgrading from before this layout is migrated on first use — see
 [Updating](../guides/updating.md), which also says why the sessions,

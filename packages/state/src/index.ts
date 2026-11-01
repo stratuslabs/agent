@@ -56,6 +56,7 @@ export {
   stratusHomePath,
   globalConfigPath,
   logsDirPath,
+  backupsDirPath,
   credentialsPath,
   credentialAuditPath,
   agentsDirPath,
@@ -204,6 +205,8 @@ export {
   type AppliedStateMigration,
   runStateMigrations,
 } from './migrations.ts';
+
+export { type StateBackup, backUpStateBeforeMigrating, describeStateBackup } from './state-backup.ts';
 
 export {
   drainSharedMemory,

@@ -37,6 +37,7 @@ import {
   gatewayInfoPath,
 } from './paths.ts';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
+import { type StateBackup, backUpStateBeforeMigrating } from './state-backup.ts';
 
 // Memory used to live under the working directory. Fold any such file into
 // the agents' own stores the first time a run happens from that directory,
@@ -264,6 +265,15 @@ export interface StateMigration {
    */
   requiresExclusive?(env: StateEnvironment): Promise<boolean>;
   /**
+   * Whether the run copies the state files to `~/.stratus/backups/` before
+   * applying it (see `backUpStateBeforeMigrating`). Default true: a
+   * migration that moves or rewrites sessions, memories, grants or
+   * schedules is the one an operator may need to undo. `false` only for one
+   * that leaves their contents alone — a permission change, a stamp that
+   * exists to be refused, a notice.
+   */
+  needsBackup?: boolean;
+  /**
    * Idempotent: applying twice must equal applying once, because two
    * processes can race the stamp and a crash can lose the record of a
    * completed run. Returns a line describing what actually changed, or
@@ -281,6 +291,7 @@ export interface StateMigration {
 const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
   id: '0001-owner-only-state-files',
   description: 'tighten pre-existing state files to owner-only permissions',
+  needsBackup: false,
   async apply(env) {
     const tightened: string[] = [];
     const tightenFile = async (filePath: string): Promise<void> => {
@@ -332,6 +343,7 @@ const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
 const PROVENANCE_LABELS_MIGRATION: StateMigration = {
   id: '0002-provenance-labels',
   description: 'stamp the state as carrying provenance labels, so an older build refuses it rather than ignoring them',
+  needsBackup: false,
   async apply() {
     return undefined;
   },
@@ -659,6 +671,8 @@ export const assertStateCompatible = (env: StateEnvironment): void => {
  */
 export interface StateMigrationRunOptions {
   exclusive?: boolean;
+  /** Told about the backup taken (or reused) before this run's migrations, to say where it is. */
+  onBackup?(backup: StateBackup): void;
 }
 
 const runnableNow = async (migration: StateMigration, env: StateEnvironment, options: StateMigrationRunOptions): Promise<boolean> =>
@@ -739,6 +753,26 @@ export const runStateMigrations = async (
     runnable.set(migration.id, applied.has(migration.id) || await runnableNow(migration, env, options));
   }
   const deferring = STATE_MIGRATIONS.some((migration) => runnable.get(migration.id) !== true);
+  // A copy of the state before the first migration that changes it, and no
+  // migration at all if the copy fails: the upgrade is refused with the
+  // home exactly as the older build left it, which that build still runs.
+  const toApply = STATE_MIGRATIONS.filter((migration) => !applied.has(migration.id) && runnable.get(migration.id) === true);
+  if (toApply.some((migration) => migration.needsBackup !== false)) {
+    let backup: StateBackup | undefined;
+    try {
+      backup = await backUpStateBeforeMigrating(env, { schemaVersion: stamp.schemaVersion, applied: [...stamp.applied] }, toApply.map((migration) => migration.id));
+    } catch (error) {
+      throw new Error(
+        `Backing up ${stratusHomePath(env)} before upgrading its state failed `
+        + `(${error instanceof Error ? error.message : String(error)}). Nothing was changed: no migration ran. `
+        + 'Free up space or fix that file and run the command again; until then the build you upgraded from still runs this home.',
+        { cause: error },
+      );
+    }
+    if (backup !== undefined) {
+      options.onBackup?.(backup);
+    }
+  }
   for (const migration of STATE_MIGRATIONS) {
     if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
       continue;
