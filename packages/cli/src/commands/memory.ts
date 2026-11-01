@@ -70,6 +70,59 @@ export const runMemory = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
+  // The pass ledger and shadow file sit beside the agent's other state,
+  // where the daemon writes them. A ledger is ids, times and counts only,
+  // and the daemon keeps it whichever store holds the facts, so listing
+  // passes comes before the store check below.
+  const stateDir = stratusHomePath(env);
+  const passesFile = (): string => agentMemoryPassesFileIn(stateDir, command.agentId);
+  const readPasses = async (): Promise<MemoryPassSummary[]> =>
+    memoryPassSummaries(await createMemoryPassLedger(passesFile(), { stateHome: stateDir }).read());
+
+  /**
+   * One pass, two lines: its id, kind, mode, status, counts and time, then
+   * what it read. Escaped like an entry: a hand-edited ledger line can
+   * carry a newline in any string.
+   */
+  const printPass = (summary: MemoryPassSummary): void => {
+    const status = summary.reason !== undefined ? `${summary.status} (${summary.reason})` : summary.status;
+    writeLine(
+      streams.stdout,
+      escapeControlCharacters(
+        `${summary.passId}  ${summary.kind} ${summary.mode}  ${status}  saved ${summary.saved}, superseded ${summary.superseded}  ${summary.claimedAt}`,
+      ),
+    );
+    if (summary.sessionId !== undefined && summary.slice !== undefined) {
+      const { slice } = summary;
+      const read = `${slice.count} message${slice.count === 1 ? '' : 's'}, ${slice.count === 1 ? slice.from : `${slice.from} to ${slice.to}`}`;
+      const cut = slice.cut !== undefined ? `; ${slice.cut.messageId} was cut to fit, ${slice.cut.bytesOmitted} bytes left out` : '';
+      writeLine(streams.stdout, `  ${escapeControlCharacters(`session ${summary.sessionId}: ${read}${cut}`)}`);
+    } else if (summary.group !== undefined) {
+      writeLine(streams.stdout, `  ${escapeControlCharacters(`group ${summary.group.key}`)}`);
+    }
+  };
+
+  if (command.action === 'passes') {
+    const all = await readPasses();
+    const shown = all.slice(0, command.limit ?? DEFAULT_PASSES_LISTED);
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({ agentId: command.agentId, total: all.length, passes: shown }, null, 2));
+      return 0;
+    }
+    if (all.length === 0) {
+      writeLine(streams.stdout, `${command.agentId} has no memory passes in ${passesFile()}.`);
+      return 0;
+    }
+    for (const summary of shown) {
+      printPass(summary);
+    }
+    if (shown.length < all.length) {
+      writeLine(streams.stdout, '');
+      writeLine(streams.stdout, `${all.length - shown.length} older pass${all.length - shown.length === 1 ? '' : 'es'} not shown. Raise --limit to see more.`);
+    }
+    return 0;
+  }
+
   // Every subcommand here reads and writes the built-in file store
   // directly, with no plugin host and no daemon in the way — which is
   // right, and only right while the fleet's memories actually live there.
@@ -148,29 +201,6 @@ export const runMemory = async (
     }
   };
 
-  /**
-   * One pass, two lines: its id, kind, mode, status, counts and time, then
-   * what it read. Escaped like an entry: a hand-edited ledger line can
-   * carry a newline in any string.
-   */
-  const printPass = (summary: MemoryPassSummary): void => {
-    const status = summary.reason !== undefined ? `${summary.status} (${summary.reason})` : summary.status;
-    writeLine(
-      streams.stdout,
-      escapeControlCharacters(
-        `${summary.passId}  ${summary.kind} ${summary.mode}  ${status}  saved ${summary.saved}, superseded ${summary.superseded}  ${summary.claimedAt}`,
-      ),
-    );
-    if (summary.sessionId !== undefined && summary.slice !== undefined) {
-      const { slice } = summary;
-      const read = `${slice.count} message${slice.count === 1 ? '' : 's'}, ${slice.count === 1 ? slice.from : `${slice.from} to ${slice.to}`}`;
-      const cut = slice.cut !== undefined ? `; ${slice.cut.messageId} was cut to fit, ${slice.cut.bytesOmitted} bytes left out` : '';
-      writeLine(streams.stdout, `  ${escapeControlCharacters(`session ${summary.sessionId}: ${read}${cut}`)}`);
-    } else if (summary.group !== undefined) {
-      writeLine(streams.stdout, `  ${escapeControlCharacters(`group ${summary.group.key}`)}`);
-    }
-  };
-
   // `allocated`, not the default: a pin that is superseded or outside its
   // validity window still holds its place in the 2 KiB budget and is
   // exactly what makes a later pin refuse — an operator who cannot see it
@@ -179,12 +209,6 @@ export const runMemory = async (
   const pinnedIds = async (): Promise<Set<string>> =>
     new Set((store.pinned ? await store.pinned(command.agentId, { include: 'allocated' }) : []).map((entry) => entry.id));
 
-  // The pass ledger and shadow file sit beside the agent's other state,
-  // where the daemon writes them. A ledger is ids, times and counts only.
-  const stateDir = stratusHomePath(env);
-  const passesFile = (): string => agentMemoryPassesFileIn(stateDir, command.agentId);
-  const readPasses = async (): Promise<MemoryPassSummary[]> =>
-    memoryPassSummaries(await createMemoryPassLedger(passesFile(), { stateHome: stateDir }).read());
   const findPass = async (passId: string): Promise<MemoryPassSummary | undefined> =>
     (await readPasses()).find((summary) => summary.passId === passId);
   const noSuchPass = (passId: string): number => {
@@ -194,27 +218,6 @@ export const runMemory = async (
     );
     return 1;
   };
-
-  if (command.action === 'passes') {
-    const all = await readPasses();
-    const shown = all.slice(0, command.limit ?? DEFAULT_PASSES_LISTED);
-    if (command.format === 'json') {
-      writeLine(streams.stdout, JSON.stringify({ agentId: command.agentId, total: all.length, passes: shown }, null, 2));
-      return 0;
-    }
-    if (all.length === 0) {
-      writeLine(streams.stdout, `${command.agentId} has no memory passes in ${passesFile()}.`);
-      return 0;
-    }
-    for (const summary of shown) {
-      printPass(summary);
-    }
-    if (shown.length < all.length) {
-      writeLine(streams.stdout, '');
-      writeLine(streams.stdout, `${all.length - shown.length} older pass${all.length - shown.length === 1 ? '' : 'es'} not shown. Raise --limit to see more.`);
-    }
-    return 0;
-  }
 
   if (command.action === 'undo-pass') {
     const passId = command.pass!;

@@ -363,8 +363,9 @@ running, or a crash cut it off and the next start will settle it.
 `undo-pass` forgets every live entry carrying the pass id. A forget is
 append-only, so the entries stay in the record, and whatever they replaced
 is live again. A shadow pass wrote nothing to memory, so there is nothing
-to undo. Like the rest of `stratus memory`, these read the built-in store
-only.
+to undo. Like the rest of `stratus memory`, `list --pass` and `undo-pass`
+work on the built-in store only. `passes` reads the ledger, which the
+daemon keeps whichever store holds the facts, so it works with any.
 
 The control API has the same two reads for a dashboard or script:
 `GET /api/v1/agents/:id/memory/passes`, and

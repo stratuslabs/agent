@@ -13771,12 +13771,29 @@ test('stratus memory refuses when the fleet keeps its memories in a contributed 
 
   // Answering from the JSONL would report a store the agent does not use,
   // and pinning into it would write records nothing reads.
-  for (const argv of [['memory', 'list', 'ava'], ['memory', 'pin', 'ava', 'ava:memory:1'], ['memory', 'export', 'ava']]) {
+  for (const argv of [
+    ['memory', 'list', 'ava'],
+    ['memory', 'pin', 'ava', 'ava:memory:1'],
+    ['memory', 'export', 'ava'],
+    ['memory', 'list', 'ava', '--pass', 'p1'],
+    ['memory', 'undo-pass', 'ava', 'p1'],
+  ]) {
     const streams = createStreams();
     assert.equal(await runCli({ argv, streams: streams.streams, env }), 1, argv.join(' '));
     assert.match(streams.output.stderr, /selects memoryStore sqlite/);
     assert.doesNotMatch(streams.output.stdout, /Likes jazz/);
   }
+  // The pass ledger is the daemon's own record beside the agent's other
+  // state, whichever store holds the facts, so listing it still answers.
+  const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(path.join(home, '.stratus'), 'ava'));
+  await ledger.append({ type: 'start', at: '2026-11-01T00:00:00.000Z', run: 'r1', mode: 'write' });
+  await ledger.append({
+    type: 'claim', at: '2026-11-01T00:01:00.000Z', run: 'r1', passId: 'p1', kind: 'save', mode: 'write', model: 'm', sessionId: 's1', slice: { from: 'm1', to: 'm1', count: 1 },
+  });
+  await ledger.append({ type: 'end', at: '2026-11-01T00:02:00.000Z', run: 'r1', passId: 'p1', status: 'done', saved: 1, superseded: 0, released: false });
+  const passes = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'ava'], streams: passes.streams, env }), 0, passes.output.stderr);
+  assert.match(passes.output.stdout, /^p1 {2}save write {2}done {2}saved 1, superseded 0/m);
 
   // A project-local config cannot make that decision — where an agent keeps
   // its memories is not a call a cloned repository gets to make — so it is
