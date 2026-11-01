@@ -31,7 +31,7 @@
   },
   "devDependencies": {
     "@stratusagent/dashboard": "workspace:*",
-    "@types/node": "^24.6.0",
+    "@types/node": "^26.6.6",
     "@types/ws": "^8.5.13",
     "typescript": "^5.9.3"
   },

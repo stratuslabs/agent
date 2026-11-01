@@ -27,7 +27,7 @@
     "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^24.6.0",
+    "@types/node": "^26.6.6",
     "typescript": "^5.9.3"
   },
   "description": "ChatGPT/Codex runtime for Stratus Agent: runs turns through the OpenAI Codex harness with kernel tools served over a loopback MCP endpoint",

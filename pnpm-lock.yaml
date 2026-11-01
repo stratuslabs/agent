@@ -55,8 +55,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -77,8 +77,8 @@ importers:
         version: 7.30.1
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -141,8 +141,8 @@ importers:
         specifier: workspace:*
         version: link:../tool-web
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -172,8 +172,8 @@ importers:
         specifier: workspace:*
         version: link:../dashboard
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.2
@@ -184,8 +184,8 @@ importers:
   packages/core:
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -193,8 +193,8 @@ importers:
   packages/dashboard:
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -202,8 +202,8 @@ importers:
   packages/egress:
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -215,8 +215,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -243,8 +243,8 @@ importers:
         specifier: workspace:*
         version: link:../permissions
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -256,8 +256,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -275,8 +275,8 @@ importers:
         version: link:../plugins
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -294,8 +294,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -310,8 +310,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -332,8 +332,8 @@ importers:
         version: 4.6.7
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -351,8 +351,8 @@ importers:
         version: link:../providers
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -364,8 +364,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -383,8 +383,8 @@ importers:
         version: link:../plugins
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -420,8 +420,8 @@ importers:
         specifier: workspace:*
         version: link:../provider-codex
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -445,8 +445,8 @@ importers:
         specifier: workspace:*
         version: link:../tool-web
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -461,8 +461,8 @@ importers:
         version: link:../plugins
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -486,8 +486,8 @@ importers:
         specifier: workspace:*
         version: link:../permissions
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -505,8 +505,8 @@ importers:
         version: link:../plugins
     devDependencies:
       '@types/node':
-        specifier: ^24.6.0
-        version: 24.12.2
+        specifier: ^26.6.6
+        version: 26.6.6
       playwright-core:
         specifier: ^1.62.1
         version: 1.64.1
@@ -663,8 +663,8 @@ packages:
   '@stablelib/base64@1.0.1':
     resolution: {integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==}
 
-  '@types/node@24.12.2':
-    resolution: {integrity: sha512-A1sre26ke7HDIuY/M23nd9gfB+nrmhtYyMINbjI1zHJxYteKR6qSMX56FsmjMcDb3SMcjJg5BiRRgOCC/yBD0g==}
+  '@types/node@26.6.6':
+    resolution: {integrity: sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==}
 
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
@@ -1054,8 +1054,8 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  undici-types@7.16.0:
-    resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   undici@7.30.1:
     resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
@@ -1209,13 +1209,13 @@ snapshots:
 
   '@slack/logger@5.0.0':
     dependencies:
-      '@types/node': 24.12.2
+      '@types/node': 26.6.6
 
   '@slack/socket-mode@3.1.1(undici@7.30.1)':
     dependencies:
       '@slack/logger': 5.0.0
       '@slack/web-api': 8.3.0
-      '@types/node': 24.12.2
+      '@types/node': 26.6.6
       eventemitter3: 5.0.4
       undici: 7.30.1
 
@@ -1225,7 +1225,7 @@ snapshots:
     dependencies:
       '@slack/logger': 5.0.0
       '@slack/types': 3.3.0
-      '@types/node': 24.12.2
+      '@types/node': 26.6.6
       '@types/retry': 0.12.5
       eventemitter3: 5.0.4
       p-queue: 6.6.2
@@ -1234,9 +1234,9 @@ snapshots:
 
   '@stablelib/base64@1.0.1': {}
 
-  '@types/node@24.12.2':
+  '@types/node@26.6.6':
     dependencies:
-      undici-types: 7.16.0
+      undici-types: 8.9.0
 
   '@types/retry@0.12.0': {}
 
@@ -1244,7 +1244,7 @@ snapshots:
 
   '@types/ws@8.18.2':
     dependencies:
-      '@types/node': 24.12.2
+      '@types/node': 26.6.6
 
   accepts@2.0.0:
     dependencies:
@@ -1643,7 +1643,7 @@ snapshots:
 
   typescript@5.9.3: {}
 
-  undici-types@7.16.0: {}
+  undici-types@8.9.0: {}
 
   undici@7.30.1: {}
 
