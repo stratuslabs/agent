@@ -49,6 +49,7 @@ import {
   readServiceCommand,
   readServiceStatus,
   serviceUnitPath,
+  servicePlatform,
   startService,
   stopService,
   uninstallService,
@@ -7310,6 +7311,62 @@ test('the systemd unit restarts on failure and enables at login', async () => {
     'systemctl --user restart stratusd.service',
     'systemctl --user is-active stratusd.service',
   ]);
+});
+
+test('Linux without systemd running has no service manager: nothing is written or run', async () => {
+  // A simulated Linux has systemd unless the test says otherwise.
+  assert.equal(servicePlatform({ platform: 'linux' }), 'systemd');
+  assert.equal(servicePlatform({ platform: 'linux', systemdBooted: true }), 'systemd');
+  assert.equal(servicePlatform({ platform: 'linux', systemdBooted: false }), undefined);
+
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const result = await installService({
+    platform: 'linux',
+    systemdBooted: false,
+    homeDir: home,
+    run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.messages.join('\n'), /systemd isn't running on this machine/);
+  assert.match(result.messages.join('\n'), /stratus serve/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(stat(path.join(home, '.config', 'systemd', 'user', 'stratusd.service')));
+});
+
+test('setup on Linux without systemd saves cleanly and leaves starting stratusd to the user', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceSystemdBooted: false,
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+      // Providers > Demo, then Save & finish with Always on left at its default.
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.deepEqual(calls, []);
+  await assert.rejects(stat(path.join(home, '.config', 'systemd', 'user', 'stratusd.service')));
+  assert.match(output.stdout, /Always on\s+not available \(systemd isn't running on this machine\)/);
+  assert.doesNotMatch(output.stderr, /systemctl|failed/);
+
+  const status = createStreams();
+  assert.equal(await runCli({
+    argv: ['service', 'status'],
+    streams: status.streams,
+    env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceSystemdBooted: false, serviceRunner: stubServiceRunner },
+  }), 1);
+  assert.match(status.output.stdout, /systemd isn't running on this machine/);
 });
 
 test('a failing service manager is reported, not swallowed', async () => {

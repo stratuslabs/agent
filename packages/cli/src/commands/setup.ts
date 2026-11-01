@@ -64,6 +64,7 @@ import {
   readServiceStatus,
   servicePlatform,
   serviceUnitPath,
+  SYSTEMD_NOT_RUNNING,
   uninstallService,
 } from '../service.ts';
 import { type ApprovalReach, classifyApprovalReach, unattendedReachParts } from '../approvals.ts';
@@ -1342,8 +1343,11 @@ export const runSetup = async (
   };
 
   const serviceSummary = (): string => {
-    if (!servicePlatform(serviceEnvFor(env))) {
-      return `not available on ${env.processEnv?.OSTYPE ?? process.platform} — run \`stratus serve\` yourself`;
+    const serviceEnv = serviceEnvFor(env);
+    if (!servicePlatform(serviceEnv)) {
+      return (serviceEnv.platform ?? process.platform) === 'linux'
+        ? `not available (${SYSTEMD_NOT_RUNNING}) — run \`stratus serve\` yourself`
+        : `not available on ${env.processEnv?.OSTYPE ?? process.platform} — run \`stratus serve\` yourself`;
     }
     if (!state.service.install) {
       return 'off — start stratusd yourself with `stratus serve`';
@@ -1359,9 +1363,12 @@ export const runSetup = async (
    * every Slack app configured above is silent until stratusd runs.
    */
   const chooseService = async (): Promise<void> => {
-    if (!servicePlatform(serviceEnvFor(env))) {
+    const serviceEnv = serviceEnvFor(env);
+    if (!servicePlatform(serviceEnv)) {
       writeLine(streams.stdout);
-      writeLine(streams.stdout, `Stratus has no service integration for ${process.platform} yet — run \`stratus serve\` yourself, or supervise it however you prefer.`);
+      writeLine(streams.stdout, (serviceEnv.platform ?? process.platform) === 'linux'
+        ? `Always on runs stratusd as a systemd user service, and ${SYSTEMD_NOT_RUNNING} — run \`stratus serve\` yourself, or supervise it however you prefer.`
+        : `Stratus has no service integration for ${process.platform} yet — run \`stratus serve\` yourself, or supervise it however you prefer.`);
       await prompter.ask('Press Enter to return to the menu… ');
       return;
     }

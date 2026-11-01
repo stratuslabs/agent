@@ -9,6 +9,7 @@ import {
 } from '@stratusagent/state';
 import {
   installService,
+  noServiceManager,
   readServiceCommand,
   readServiceStatus,
   startService,
@@ -59,7 +60,7 @@ export const runService = async (
   if (command.action === 'status') {
     const status = await readServiceStatus(serviceEnv);
     if (!status) {
-      writeLine(streams.stdout, `No service manager for ${process.platform}. Run \`stratus serve\` yourself.`);
+      writeLine(streams.stdout, `${noServiceManager(serviceEnv)} Run \`stratus serve\` yourself.`);
       return 1;
     }
     writeLine(streams.stdout, `stratusd  ${status.running === undefined
