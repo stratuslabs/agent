@@ -49,7 +49,7 @@
     "@stratusagent/tool-fs": "workspace:*",
     "@stratusagent/tool-shell": "workspace:*",
     "@stratusagent/tool-web": "workspace:*",
-    "@types/node": "^24.6.0",
+    "@types/node": "^26.6.6",
     "typescript": "^5.9.3"
   },
   "license": "MIT",

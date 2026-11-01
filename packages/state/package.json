@@ -33,7 +33,7 @@
     "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/provider-claude-code": "workspace:*",
     "@stratusagent/provider-codex": "workspace:*",
-    "@types/node": "^24.6.0",
+    "@types/node": "^26.6.6",
     "typescript": "^5.9.3"
   },
   "license": "MIT",
