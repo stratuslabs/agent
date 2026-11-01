@@ -4418,8 +4418,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     input: DispatchInput,
     absorbedKeys: readonly string[] = [],
     subAgent?: AgentDefinition,
-    /** See `RunInput.steer`; passed by `dispatch` for an opted-in caller. */
-    steer?: () => Promise<SteeredMessage | undefined>,
+    /**
+     * See `RunInput.steer`; passed by `dispatch` for an opted-in caller.
+     * Handed the turn's own signal — the one the runner was given, which
+     * the watchdog, `abortTurns` and a restart's window abort as well as
+     * the callers — so it takes nothing into a turn that is already
+     * stopping (card 959).
+     */
+    steer?: (turnSignal: AbortSignal) => Promise<SteeredMessage | undefined>,
   ): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
@@ -4559,7 +4565,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(hostedLoop ? { hostedLoop } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
-          ...(steer !== undefined ? { steer } : {}),
+          ...(steer !== undefined ? { steer: () => steer(signal) } : {}),
           signal,
         });
       }
@@ -4577,7 +4583,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.earlier !== undefined && input.earlier.length > 0 ? { earlier: input.earlier } : {}),
         metadata,
         runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata, subAgent !== undefined),
-        ...(steer !== undefined ? { steer } : {}),
+        ...(steer !== undefined ? { steer: () => steer(signal) } : {}),
         signal,
       });
     }));
@@ -5701,9 +5707,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // the others' answer with it. A turn with a caller who cannot cancel
       // has no signal to join.
       const joint = turnInput.signal !== undefined ? joinableSignal([turnInput.signal]) : undefined;
+      // Admitted on the turn's own signal, not only the callers' joint one:
+      // the watchdog, `abortTurns` and a restart's window stop the turn
+      // without touching its callers, and a batch taken into a turn stopped
+      // while the store was read would share its failure instead of running
+      // next (card 959). The turn's signal follows the joint one, so this
+      // covers every caller giving up too.
       const steer = mergeable
-        ? (): Promise<SteeredMessage | undefined> => takeSteered(input.sessionId, input.agentId, steered, (parts) => {
-          if (joint?.signal.aborted === true) {
+        ? (turnSignal: AbortSignal): Promise<SteeredMessage | undefined> => takeSteered(input.sessionId, input.agentId, steered, (parts) => {
+          if (turnSignal.aborted) {
             return false;
           }
           for (const part of parts) {
