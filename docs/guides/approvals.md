@@ -251,8 +251,9 @@ event: the dashboard shows it beside the call in a conversation's live view
 and the structured log keeps one line per decision with the tool, whether
 it ran and the check, without the reason. The dashboard shows the
 decisions it saw live: beside the calls while the turn runs, then beside
-that turn's results once it ends, until the next message or another
-conversation. For an earlier conversation, read the log.
+that turn's results once it ends, until the next message (from the
+dashboard or anywhere else) or another conversation. For an earlier
+conversation, read the log.
 
 That is the honest default (`headless`) behind a service manager. If
 somebody *is* reachable, `--approvals remote` asks them instead — see

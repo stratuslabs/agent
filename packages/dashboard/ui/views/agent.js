@@ -71,8 +71,9 @@ export const renderAgent = (agentId, initialSessionId) => {
      * lines }`, kept once the stored transcript replaces them: their
      * decisions show beside the stored results (`settledLines`), and a
      * shadow decision that lands after the turn ended still finds its call.
-     * Live only, like every decision here: gone on the next message or
-     * another conversation, and a conversation opened later shows none.
+     * Live only, like every decision here: gone on the next message, from
+     * this page or from anywhere else, on a reconnect, or on another
+     * conversation, and a conversation opened later shows none.
      */
     settled: undefined,
     /**
@@ -504,6 +505,11 @@ export const renderAgent = (agentId, initialSessionId) => {
 
     if (!isOurTurn(envelope)) {
       if (event.type === 'session.completed' || event.type === 'session.failed' || event.type === 'session.observed') {
+        // Somebody else added to the conversation after this page's last
+        // turn, so its lines no longer describe the end of the transcript:
+        // matched from the end, they would land beside the newer turn's
+        // results whenever that turn reused an id on the same tool.
+        state.settled = undefined;
         void loadTranscript();
         void loadSessions();
       }
@@ -836,6 +842,9 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.toolLines = [];
     state.decisions = new Map();
     state.shadows = new Map();
+    // Events were missed while the socket was down, possibly another turn's
+    // completion, so the last turn's lines may no longer end the transcript.
+    state.settled = undefined;
     void loadSessions();
     update();
   };
