@@ -12,7 +12,7 @@ import { REVIEW_RULES } from '../src/review.ts';
 // Spec 964 through the daemon: the review posture's reviewer is one model
 // call on the agent's provider, with no tools and exactly the model named.
 
-const SOUL = ['---', 'id: ava', 'name: Ava', 'provider: openai', 'model: model-a', '---', '', 'You are Ava, PERSONA-MARKER.', ''].join('\n');
+const SOUL = ['---', 'id: ava', 'name: Ava', 'provider: openai', 'model: model-a', 'credentials: [svc.key]', '---', '', 'You are Ava, PERSONA-MARKER.', ''].join('\n');
 
 const openAiText = (text: string): Response =>
   new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: text } }] }), {
@@ -40,6 +40,11 @@ const reviewGateway = async (reviewer: () => Response) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-review-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), SOUL);
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ named: { shared: { 'other.key': 'not-listed-value' }, agents: { ava: { 'svc.key': 'ava-svc-value-123' } } } }),
+    { mode: 0o600 },
+  );
   const reviews: Seen[] = [];
   const fetchFake = (async (_url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? '{}')) as {
@@ -125,6 +130,17 @@ test('a reply that is not one JSON object, or a provider that fails, is a failed
     assert.deepEqual(await ask(harness), { failed: 'unparseable' });
     reply = () => new Response('{"error":{"message":"overloaded"}}', { status: 500, headers: { 'content-type': 'application/json' } });
     assert.deepEqual(await ask(harness), { failed: 'provider-error' });
+  } finally {
+    await harness.gateway.stop();
+  }
+});
+
+test('the built-in rule is handed the values of the credentials the soul lists, and nothing else', async () => {
+  const harness = await reviewGateway(() => openAiText('{}'));
+  await harness.gateway.start();
+  try {
+    assert.deepEqual(await harness.transport().secretsFor('ava'), ['ava-svc-value-123']);
+    assert.deepEqual(await harness.transport().secretsFor('nobody'), []);
   } finally {
     await harness.gateway.stop();
   }

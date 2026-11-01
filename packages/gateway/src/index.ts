@@ -530,6 +530,13 @@ export interface ApprovalTransport {
    * a person reads in the log, and the policy asks about the call.
    */
   review(request: GatewayReviewRequest): Promise<{ reply: Record<string, unknown> } | { failed: string }>;
+  /**
+   * The values of the stored credentials this agent's soul lists, for the
+   * review posture's built-in rule against sending one out. Read from disk
+   * per call, like every credential, so a key set a moment ago counts.
+   * Never logged; an unreadable store answers nothing.
+   */
+  secretsFor(agentId: string): Promise<string[]>;
 }
 
 /** One call put to the reviewer. Mirrors `@stratusagent/permissions`' `ReviewRequest`. */
@@ -2355,6 +2362,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         request: requestApproval,
         // Late-bound: the side call is built further down this function.
         review: (request) => reviewCall(request),
+        secretsFor: async (agentId) => {
+          try {
+            const { definition } = await refreshAgent(agentId);
+            const resolver = createFileCredentialResolver(env);
+            const values = await Promise.all((definition.credentials ?? []).map((name) => resolver.resolve(definition, name)));
+            return values.filter((value): value is string => typeof value === 'string' && value.length > 0);
+          } catch {
+            return [];
+          }
+        },
         destinations: {
           isPreauthorized: (session, destination) => scheduler.isPreauthorized(session, destination),
           accountFor: (agentId, destination) => {
