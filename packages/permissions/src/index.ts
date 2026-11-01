@@ -1145,7 +1145,10 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         void policy.approve(shadowContext).catch(() => undefined);
       }
 
-      if (risk === 'gated' && !reviewing && (openFor?.(session.agent.id) === true || reviewSettings?.shadow === true)) {
+      // A call parked before a restart is owed a person's answer: the fast
+      // path never takes it, whatever the posture has become since.
+      if (risk === 'gated' && !reviewing && context.parkedAt === undefined
+        && (openFor?.(session.agent.id) === true || reviewSettings?.shadow === true)) {
         const closedByContent = sessionTrustOf(session) === 'external' && gateExternalContent?.(session.agent.id) === true;
         if (!closedByContent) {
           return report(
