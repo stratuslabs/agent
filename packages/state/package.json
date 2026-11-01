@@ -34,7 +34,7 @@
     "@stratusagent/provider-claude-code": "workspace:*",
     "@stratusagent/provider-codex": "workspace:*",
     "@types/node": "^24.6.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "license": "MIT",
   "repository": {

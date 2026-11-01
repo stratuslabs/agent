@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "description": "Claude subscription runtime for Stratus Agent: runs turns through the Claude Agent SDK so Pro/Max plans cover usage",
   "keywords": [

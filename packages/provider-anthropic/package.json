@@ -27,7 +27,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "description": "Anthropic Claude provider for Stratus Agent: tool calling, per-agent personas, and memory, powered by the official SDK",
   "keywords": [
