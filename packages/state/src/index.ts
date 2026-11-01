@@ -151,6 +151,7 @@ export {
   type ApprovalsConfig,
   type ExternalContentApprovals,
   type ApprovalPosture,
+  type ReviewApprovalConfig,
   type AgentPrincipalsConfig,
   type PrincipalsAdmit,
   type PrincipalsConfig,
