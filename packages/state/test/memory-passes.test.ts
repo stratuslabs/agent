@@ -11,14 +11,17 @@ import {
   agentMemoryShadowFileIn,
   createFileMemoryStore,
   createMemoryPassLedger,
+  createMemoryShadowFile,
   memoryPassActivations,
   memoryPassEntries,
   memoryPassMessageCounts,
   memoryPassOpenClaims,
   memoryPassSettleRecord,
   memoryPassWatermark,
+  memoryShadowEntriesOf,
   undoMemoryPass,
   type MemoryPassRecord,
+  type MemoryShadowEntry,
 } from '../src/index.ts';
 
 const start = (at: string, run: string, mode: 'write' | 'shadow' = 'write'): MemoryPassRecord =>
@@ -171,6 +174,37 @@ test('a ledger line that is JSON but not a record is skipped, never trusted', as
     '',
   ].join('\n'));
   assert.deepEqual(await createMemoryPassLedger(file).read(), [start('2026-11-01T01:00:00.000Z', 'r1')]);
+});
+
+test('a shadow file keeps what a pass would have written, owner-only, and reads past a torn or foreign line', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'memory-passes-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const file = agentMemoryShadowFileIn(home, 'ava');
+  const shadow = createMemoryShadowFile(file, { stateHome: home });
+  assert.deepEqual(await shadow.read(), [], 'no file reads as none');
+  const entry = (id: string, passId: string, supersedes?: string): MemoryShadowEntry => ({
+    id,
+    agentId: 'ava',
+    createdAt: '2026-11-01T01:00:00.000Z',
+    content: `fact ${id}`,
+    trust: 'agent',
+    kind: 'semantic',
+    ...(supersedes !== undefined ? { supersedes } : {}),
+    metadata: { memoryPass: { id: passId, kind: 'save' } },
+  });
+  await shadow.append(entry('s1', 'p1'));
+  await writeFile(file, `${await readFile(file, 'utf8')}${JSON.stringify({ id: 'x' })}\n{"id":"s`, { flag: 'w' });
+  await shadow.append(entry('s2', 'p2'));
+  await shadow.append(entry('s3', 'p1', 'ava:memory:old'));
+  const all = await shadow.read();
+  assert.deepEqual(all.map((found) => found.id), ['s1', 's2', 's3']);
+  assert.deepEqual(memoryShadowEntriesOf(all, 'p1').map((found) => found.id), ['s1', 's3']);
+  const claimed = claim('2026-11-01T01:00:00.000Z', 'r1', 'p1', 'sess', 'm1', 'm2', 'shadow') as Extract<MemoryPassRecord, { type: 'claim' }>;
+  const settled = memoryPassSettleRecord(claimed, memoryShadowEntriesOf(all, 'p1'), { at: '2026-11-01T02:00:00.000Z', run: 'r2' });
+  assert.equal(settled.released, false);
+  assert.equal(settled.saved, 2);
+  assert.equal(settled.superseded, 1);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
 });
 
 test('undo forgets every live entry a pass wrote, and what it superseded is back', async (t) => {

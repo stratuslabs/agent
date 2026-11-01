@@ -4,11 +4,15 @@ import path from 'node:path';
 import {
   MEMORY_PASS_METADATA_KEY,
   type AgentMemoryStore,
+  type JsonObject,
   type MemoryAuditEntry,
   type MemoryEntry,
+  type MemoryEntryKind,
+  type MemoryOrigin,
   type MemoryPassKind,
   type MemoryPassMode,
   type MemoryPassStatus,
+  type TrustLevel,
 } from '@stratusagent/core';
 import { assertDerivedStatePath } from '@stratusagent/permissions';
 
@@ -151,7 +155,15 @@ export interface MemoryPassLedger {
   append(record: MemoryPassRecord): Promise<void>;
 }
 
-export const createMemoryPassLedger = (filePath: string, options: MemoryPassLedgerOptions = {}): MemoryPassLedger => {
+/**
+ * One append-only JSONL file in an agent's directory: read tolerates a torn
+ * or foreign line by skipping it, append writes one `O_APPEND` line.
+ */
+const jsonlFile = <T>(
+  filePath: string,
+  accept: (value: unknown) => value is T,
+  options: MemoryPassLedgerOptions,
+): { read(): Promise<T[]>; append(record: T): Promise<void> } => {
   const assertOwned = async (): Promise<void> => {
     if (options.stateHome !== undefined) {
       await assertDerivedStatePath(options.stateHome, filePath, 'file');
@@ -169,7 +181,7 @@ export const createMemoryPassLedger = (filePath: string, options: MemoryPassLedg
         }
         throw error;
       }
-      const records: MemoryPassRecord[] = [];
+      const records: T[] = [];
       for (const line of raw.split('\n')) {
         if (line.trim().length === 0) {
           continue;
@@ -180,7 +192,7 @@ export const createMemoryPassLedger = (filePath: string, options: MemoryPassLedg
         } catch {
           continue;
         }
-        if (isRecord(parsed)) {
+        if (accept(parsed)) {
           records.push(parsed);
         }
       }
@@ -206,6 +218,50 @@ export const createMemoryPassLedger = (filePath: string, options: MemoryPassLedg
     },
   };
 };
+
+export const createMemoryPassLedger = (filePath: string, options: MemoryPassLedgerOptions = {}): MemoryPassLedger =>
+  jsonlFile(filePath, isRecord, options);
+
+/**
+ * A fact a shadow pass would have written (spec 962): what its
+ * `memory.remember` would have stored, kept in `memory-shadow.jsonl` so no
+ * real fact changes. The same privacy class as `memory.jsonl`: facts, not
+ * transcripts.
+ */
+export interface MemoryShadowEntry {
+  id: string;
+  agentId: string;
+  createdAt: string;
+  content: string;
+  trust: TrustLevel;
+  origin?: MemoryOrigin;
+  kind?: MemoryEntryKind;
+  about?: string[];
+  validFrom?: string;
+  validUntil?: string;
+  supersedes?: string;
+  /** Carries `memoryPass`, as a written fact's does. */
+  metadata: JsonObject;
+}
+
+const isShadowEntry = (value: unknown): value is MemoryShadowEntry => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const entry = value as Record<string, unknown>;
+  return isString(entry.id) && isString(entry.agentId) && isString(entry.createdAt)
+    && typeof entry.content === 'string' && isString(entry.trust)
+    && typeof entry.metadata === 'object' && entry.metadata !== null && !Array.isArray(entry.metadata);
+};
+
+export interface MemoryShadowFile {
+  /** Every entry, in the order written. No file reads as none. */
+  read(): Promise<MemoryShadowEntry[]>;
+  append(entry: MemoryShadowEntry): Promise<void>;
+}
+
+export const createMemoryShadowFile = (filePath: string, options: MemoryPassLedgerOptions = {}): MemoryShadowFile =>
+  jsonlFile(filePath, isShadowEntry, options);
 
 /** A span when upkeep was on for one mode. No `to`: still on, in the current run. */
 export interface MemoryPassActivation {
@@ -332,9 +388,9 @@ export const memoryPassOpenClaims = (
  * any entry means the slice was used and the claim is kept, so it is never
  * re-run; none means it is released, so a routine restart drops nothing.
  */
-export const memoryPassSettleRecord = (
+export const memoryPassSettleRecord = <E extends Pick<MemoryEntry, 'supersedes'>>(
   claim: MemoryPassClaim,
-  written: readonly MemoryEntry[],
+  written: readonly E[],
   at: { at: string; run: string },
 ): MemoryPassEnd => ({
   type: 'end',
@@ -347,7 +403,7 @@ export const memoryPassSettleRecord = (
   released: written.length === 0,
 });
 
-const passIdOf = (entry: MemoryAuditEntry): string | undefined => {
+const passIdOf = (entry: { metadata?: JsonObject }): string | undefined => {
   const marker = entry.metadata?.[MEMORY_PASS_METADATA_KEY];
   if (typeof marker !== 'object' || marker === null || Array.isArray(marker)) {
     return undefined;
@@ -363,6 +419,12 @@ export const memoryPassEntries = async (
   passId: string,
 ): Promise<MemoryAuditEntry[]> =>
   (await store.audit(agentId)).filter((entry) => passIdOf(entry) === passId);
+
+/** The entries of a shadow file one pass would have written, oldest first. */
+export const memoryShadowEntriesOf = (
+  entries: readonly MemoryShadowEntry[],
+  passId: string,
+): MemoryShadowEntry[] => entries.filter((entry) => passIdOf(entry) === passId);
 
 /**
  * `stratus memory undo-pass`: forget every live entry the pass wrote. A

@@ -24,12 +24,14 @@ export {
   agentMemoryPassesFileIn,
   agentMemoryShadowFileIn,
   createMemoryPassLedger,
+  createMemoryShadowFile,
   memoryPassActivations,
   memoryPassEntries,
   memoryPassMessageCounts,
   memoryPassOpenClaims,
   memoryPassSettleRecord,
   memoryPassWatermark,
+  memoryShadowEntriesOf,
   undoMemoryPass,
   type MemoryPassActivation,
   type MemoryPassClaim,
@@ -38,6 +40,8 @@ export {
   type MemoryPassLedgerOptions,
   type MemoryPassRecord,
   type MemoryPassSlice,
+  type MemoryShadowEntry,
+  type MemoryShadowFile,
 } from './memory-passes.ts';
 export {
   applyPerAgentWorkspaces,
