@@ -1049,9 +1049,11 @@ interface HandoverClaim {
    * below. `untaken` when there is nothing to hand over — no placeholder,
    * or the renderer finished before the hold was taken — and the caller
    * posts the chunks itself; `partial` when the placeholder took the first
-   * chunk and Slack refused one of the rest.
+   * chunk and Slack refused one of the rest. `whole` is the reply the
+   * chunks were cut from, attached to a later chunk that tags another
+   * agent (card 1033).
    */
-  take(chunks: readonly string[], between?: () => Promise<void>): Promise<'complete' | 'partial' | 'untaken'>;
+  take(chunks: readonly string[], between?: () => Promise<void>, whole?: string): Promise<'complete' | 'partial' | 'untaken'>;
   /** Give the hold back unspent, letting the queued turn finish. */
   release(): void;
 }
@@ -1877,11 +1879,9 @@ class ReplyRenderer {
         try {
           chunks = await this.chunksOf(text);
           for (const chunk of chunks) {
-            const posted = await this.web.chat.postMessage({
-              channel: this.channel,
-              text: chunk,
-              ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-            });
+            // A part that tags another agent carries all of these words (card 1033).
+            const whole = chunks.length > 1 && await this.tagsAnAgent?.(chunk) ? text : undefined;
+            const posted = await postPart(this.web, { channel: this.channel, thread: this.threadTs, text: chunk, whole }, this.warn);
             this.placeText(posted.ts);
             landed.push(chunk);
           }
@@ -2616,13 +2616,13 @@ class ReplyRenderer {
       }
     };
     return {
-      take: async (chunks, between) => {
+      take: async (chunks, between, whole) => {
         if (spent) {
           return 'untaken';
         }
         try {
           await previous;
-          return await this.handoverTo(chunks, drained, between);
+          return await this.handoverTo(chunks, drained, between, whole);
         } finally {
           settle();
         }
@@ -2641,6 +2641,7 @@ class ReplyRenderer {
     chunks: readonly string[],
     drained: Promise<void>,
     between: (() => Promise<void>) | undefined,
+    whole?: string,
   ): Promise<'complete' | 'partial' | 'untaken'> {
     const [first, ...rest] = chunks;
     const given = this.ref;
@@ -2665,11 +2666,9 @@ class ReplyRenderer {
     this.ref = undefined;
     for (const chunk of rest) {
       try {
-        await this.web.chat.postMessage({
-          channel: this.channel,
-          text: chunk,
-          ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-        });
+        // A part that tags another agent carries the whole reply (card 1033).
+        const full = whole !== undefined && await this.tagsAnAgent?.(chunk) ? whole : undefined;
+        await postPart(this.web, { channel: this.channel, thread: this.threadTs, text: chunk, whole: full }, this.warn);
       } catch (error) {
         complete = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -6634,7 +6633,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     between?: () => Promise<void>,
     whole?: string,
   ): Promise<boolean> => {
-    const taken = behind ? await behind.take(chunks, between) : 'untaken';
+    const taken = behind ? await behind.take(chunks, between, chunks.length > 1 ? whole : undefined) : 'untaken';
     if (taken !== 'untaken') {
       return taken === 'complete';
     }

@@ -13389,6 +13389,80 @@ test('the reply of a turn finished after a restart, in parts and tagging another
   assert.deepEqual(web.timeline, [web.uploads[0]?.initial_comment, 'shared:F-1', web.posts[0]?.text]);
 });
 
+test('words before a tool that Slack shows in parts and tag another agent attach all of them to the tagged part', async () => {
+  // Card 1033, Codex on #565: a turn that writes more than one message's
+  // worth before its first tool posts those words as interim messages, and
+  // the reply later leaves them out. The tagged part is an upload carrying
+  // all of the interim words, as a reply's is.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const interim = twoPartReply('<@U-QUINN>', 'last');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: interim } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, `${interim}\n\nAll 40 pass.`);
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go', { ts: '978.1' }));
+  await adapter.stop();
+
+  assert.equal(web.uploads.length, 1);
+  assert.equal(web.uploads[0]?.contents, interim);
+  assert.equal(web.uploads[0]?.thread_ts, '978.1');
+  assert.match(web.uploads[0]?.initial_comment ?? '', /<@U-QUINN> can you tag the release\?/);
+  // The untagged first part is a plain post, ahead of the upload.
+  assert.equal(words(web.posts[0]?.text, web.uploads[0]?.initial_comment), words(interim));
+  assert.deepEqual(web.timeline.slice(0, 3), [web.posts[0]?.text, web.uploads[0]?.initial_comment, 'shared:F-1']);
+});
+
+test('a recovered reply handed to a queued placeholder, whose overflow part tags another agent, uploads that part', async () => {
+  // Card 1033, Codex on #565: a turn finished after a restart, with a newer
+  // turn's placeholder queued in the thread, edits the placeholder to its
+  // first part and posts the rest. A later part that tags another agent
+  // carries the whole reply there too.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const recovered = twoPartReply('<@U-QUINN>', 'last');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: recovered,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  // Handed over: the placeholder took the first part.
+  const edited = web.updates.find((entry) => entry.ts === 'bot-ts-1')?.text;
+  assert.ok(edited !== undefined && edited !== '…' && !/<@U-QUINN>/.test(edited), 'the placeholder was edited to the untagged first part');
+  assert.equal(web.uploads.length, 1);
+  assert.equal(web.uploads[0]?.contents, recovered);
+  assert.match(web.uploads[0]?.initial_comment ?? '', /<@U-QUINN> can you tag the release\?/);
+  assert.equal(web.posts.filter((post) => /<@U-QUINN>/.test(post.text)).length, 0, 'the tagged part was not also posted plainly');
+});
+
 test('what an agent said before its turn failed is still heard by the thread\'s other agents, and the error note is not', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
