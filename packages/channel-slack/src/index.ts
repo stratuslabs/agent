@@ -483,12 +483,21 @@ export interface SlackSocketLike {
  * and a reader without one falls back (see `ReplyRenderer.queueUpload`).
  */
 export interface SlackUploadResult {
-  files?: Array<{
-    shares?: {
-      public?: Record<string, Array<{ ts?: string }>>;
-      private?: Record<string, Array<{ ts?: string }>>;
-    };
-  }>;
+  files?: SlackUploadedFile[];
+}
+
+/**
+ * One file in an upload's answer, or in `files.info`'s. The SDK's
+ * `uploadV2` nests the files Slack completed under each part it uploaded,
+ * so a file may carry `files` of its own.
+ */
+export interface SlackUploadedFile {
+  id?: string;
+  files?: SlackUploadedFile[];
+  shares?: {
+    public?: Record<string, Array<{ ts?: string; thread_ts?: string }>>;
+    private?: Record<string, Array<{ ts?: string; thread_ts?: string }>>;
+  };
 }
 
 export interface SlackHistoryArgs {
@@ -559,7 +568,13 @@ export interface SlackWebLike {
   files: {
     // The real SDK takes file DATA (a buffer or stream), never a path
     // string — typing it that way here keeps fakes honest too.
-    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string }): Promise<SlackUploadResult>;
+    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string; initial_comment?: string }): Promise<SlackUploadResult>;
+    /**
+     * Where an upload landed, once Slack has shared it: the upload's own
+     * answer does not say (card 1033). Optional: an older fake without it
+     * leaves a part posted as an upload with no ts, never unposted.
+     */
+    info?(args: { file: string }): Promise<{ file?: SlackUploadedFile }>;
   };
   conversations: {
     /**
@@ -979,9 +994,11 @@ interface HandoverClaim {
    * below. `untaken` when there is nothing to hand over — no placeholder,
    * or the renderer finished before the hold was taken — and the caller
    * posts the chunks itself; `partial` when the placeholder took the first
-   * chunk and Slack refused one of the rest.
+   * chunk and Slack refused one of the rest. `whole` is the reply the
+   * chunks were cut from, attached to a later chunk that tags another
+   * agent (card 1033).
    */
-  take(chunks: readonly string[], between?: () => Promise<void>): Promise<'complete' | 'partial' | 'untaken'>;
+  take(chunks: readonly string[], between?: () => Promise<void>, whole?: string): Promise<'complete' | 'partial' | 'untaken'>;
   /** Give the hold back unspent, letting the queued turn finish. */
   release(): void;
 }
@@ -1093,17 +1110,105 @@ const slackTs = (ms: number): string => (ms / 1000).toFixed(6);
  * `channel`, from the shares the upload answers with. Undefined when the
  * answer carries none.
  */
-const uploadPlace = (result: SlackUploadResult, channel: string): string | undefined => {
-  for (const file of result.files ?? []) {
+const uploadPlace = (result: SlackUploadResult, channel: string): string | undefined => shareOf(result.files, channel)?.ts;
+
+/** The first share in `channel` of any of `files`, nested ones included. */
+const shareOf = (files: readonly SlackUploadedFile[] | undefined, channel: string): { ts: string; thread_ts?: string } | undefined => {
+  for (const file of files ?? []) {
     for (const scope of [file.shares?.public, file.shares?.private]) {
       for (const share of scope?.[channel] ?? []) {
         if (share.ts !== undefined) {
-          return share.ts;
+          return { ts: share.ts, ...(share.thread_ts !== undefined ? { thread_ts: share.thread_ts } : {}) };
         }
       }
     }
+    const nested = shareOf(file.files, channel);
+    if (nested !== undefined) {
+      return nested;
+    }
   }
   return undefined;
+};
+
+/** The id of the first file in an upload's answer, nested ones included. */
+const uploadedFileId = (files: readonly SlackUploadedFile[] | undefined): string | undefined => {
+  for (const file of files ?? []) {
+    const id = file.id ?? uploadedFileId(file.files);
+    if (id !== undefined) {
+      return id;
+    }
+  }
+  return undefined;
+};
+
+/** What a reply's whole text is called when it goes up with a part that tags another agent (card 1033). */
+const FULL_REPLY_FILENAME = 'full-reply.md';
+
+/**
+ * How many times, and how far apart, a part posted as an upload asks Slack
+ * where it landed. The upload's answer names no message: Slack shares the
+ * file a moment later (55 to 607 ms in a live check, Nov 1 2026), and
+ * `files.info` says where once it has. The next part waits for that, so
+ * the thread reads in order.
+ */
+const SHARE_POLLS = 10;
+const SHARE_POLL_MS = 250;
+
+/** Where an upload landed in `channel`, from its answer or from `files.info`; undefined when Slack never says. */
+const landedShare = async (web: SlackWebLike, result: SlackUploadResult, channel: string): Promise<{ ts: string; thread_ts?: string } | undefined> => {
+  const answered = shareOf(result.files, channel);
+  const id = uploadedFileId(result.files);
+  if (answered !== undefined || id === undefined || !web.files.info) {
+    return answered;
+  }
+  for (let poll = 0; poll < SHARE_POLLS; poll += 1) {
+    if (poll > 0) {
+      await new Promise((resolve) => setTimeout(resolve, SHARE_POLL_MS));
+    }
+    const info = await web.files.info({ file: id }).catch(() => undefined);
+    const share = info?.file ? shareOf([info.file], channel) : undefined;
+    if (share !== undefined) {
+      return share;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Post one part of a reply. A part that tags another agent, in a reply
+ * Slack shows as more than one message, goes up as an upload instead
+ * (card 1033): the part is the message, as it would have been, and the
+ * whole reply rides along as `full-reply.md`. The tagged agent admits only
+ * the message that names it and reads a text file on it into its turn, so
+ * it hears all of the reply rather than the part with its name in it.
+ * Posting it as one long message is no way around this: Slack splits a
+ * post past about 4,000 characters on its own side (live, Nov 1 2026).
+ * An upload Slack refuses is posted plainly, as before, so the thread
+ * still reads all of it and the tagged agent hears its part.
+ */
+const postPart = async (
+  web: SlackWebLike,
+  part: { channel: string; thread?: string | undefined; text: string; whole?: string | undefined },
+  warn: (line: string) => void,
+): Promise<{ ts?: string; channel?: string; message?: { ts?: string; thread_ts?: string } }> => {
+  const { channel, thread, text, whole } = part;
+  if (whole !== undefined) {
+    try {
+      const result = await web.files.uploadV2({
+        channel_id: channel,
+        file: Buffer.from(whole, 'utf8'),
+        filename: FULL_REPLY_FILENAME,
+        title: 'Full reply',
+        initial_comment: text,
+        ...(thread ? { thread_ts: thread } : {}),
+      });
+      const share = await landedShare(web, result, channel);
+      return share === undefined ? { channel } : { ts: share.ts, channel, message: share };
+    } catch (error) {
+      warn(`slack: could not attach the full reply to a part that tags another agent, so it is posted on its own and that agent hears only this part: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return web.chat.postMessage({ channel, text, ...(thread ? { thread_ts: thread } : {}) });
 };
 
 /**
@@ -1766,11 +1871,9 @@ class ReplyRenderer {
           // per-turn cap (Codex on #513).
           chunks = first ? await this.chunksOf(text) : [text];
           for (const chunk of chunks) {
-            const posted = await this.web.chat.postMessage({
-              channel: this.channel,
-              text: chunk,
-              ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-            });
+            // A part that tags another agent carries all of these words (card 1033).
+            const whole = chunks.length > 1 && await this.tagsAnAgent?.(chunk) ? text : undefined;
+            const posted = await postPart(this.web, { channel: this.channel, thread: this.threadTs, text: chunk, whole }, this.warn);
             this.placeText(posted.ts);
             landed.push(chunk);
           }
@@ -2059,11 +2162,9 @@ class ReplyRenderer {
     await this.uploadChain;
     for (const chunk of rest) {
       try {
-        const posted = await this.web.chat.postMessage({
-          channel: this.channel,
-          text: chunk,
-          ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-        });
+        // A part that tags another agent carries the whole reply (card 1033).
+        const whole = chunks.length > 1 && await this.tagsAnAgent?.(chunk) ? text : undefined;
+        const posted = await postPart(this.web, { channel: this.channel, thread: this.threadTs, text: chunk, whole }, this.warn);
         landed = true;
         this.placeText(posted.ts);
       } catch (error) {
@@ -2265,13 +2366,13 @@ class ReplyRenderer {
       }
     };
     return {
-      take: async (chunks, between) => {
+      take: async (chunks, between, whole) => {
         if (spent) {
           return 'untaken';
         }
         try {
           await previous;
-          return await this.handoverTo(chunks, drained, between);
+          return await this.handoverTo(chunks, drained, between, whole);
         } finally {
           settle();
         }
@@ -2290,6 +2391,7 @@ class ReplyRenderer {
     chunks: readonly string[],
     drained: Promise<void>,
     between: (() => Promise<void>) | undefined,
+    whole?: string,
   ): Promise<'complete' | 'partial' | 'untaken'> {
     const [first, ...rest] = chunks;
     const given = this.ref;
@@ -2314,11 +2416,9 @@ class ReplyRenderer {
     this.ref = undefined;
     for (const chunk of rest) {
       try {
-        await this.web.chat.postMessage({
-          channel: this.channel,
-          text: chunk,
-          ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-        });
+        // A part that tags another agent carries the whole reply (card 1033).
+        const full = whole !== undefined && await this.tagsAnAgent?.(chunk) ? whole : undefined;
+        await postPart(this.web, { channel: this.channel, thread: this.threadTs, text: chunk, whole: full }, this.warn);
       } catch (error) {
         complete = false;
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -5235,7 +5335,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         let sent = 0;
         try {
           for (const chunk of chunks) {
-            const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
+            // A part that tags another agent carries the whole text (card 1033).
+            const whole = chunks.length > 1 && await tagsAnAgent(connection, chunk) ? text : undefined;
+            const posted = await postPart(web, { channel: channelId, thread, text: chunk, whole }, warn);
             if (thread && sent === 0 && posted.message !== undefined && !posted.message.thread_ts) {
               await refuseMisplaced(posted.channel ?? channelId, posted.ts ?? posted.message.ts);
             }
@@ -6286,8 +6388,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     thread: string | undefined,
     chunks: readonly string[],
     between?: () => Promise<void>,
+    whole?: string,
   ): Promise<boolean> => {
-    const taken = behind ? await behind.take(chunks, between) : 'untaken';
+    const taken = behind ? await behind.take(chunks, between, chunks.length > 1 ? whole : undefined) : 'untaken';
     if (taken !== 'untaken') {
       return taken === 'complete';
     }
@@ -6296,11 +6399,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     let published = true;
     for (const chunk of chunks) {
       try {
-        await connection.web.chat.postMessage({
-          channel,
-          text: chunk,
-          ...(thread ? { thread_ts: thread } : {}),
-        });
+        // A part that tags another agent carries the whole reply (card 1033).
+        const full = whole !== undefined && chunks.length > 1 && await tagsAnAgent(connection, chunk) ? whole : undefined;
+        await postPart(connection.web, { channel, thread, text: chunk, whole: full }, warn);
       } catch (error) {
         published = false;
         warn(`slack: could not post part of a turn's outcome: ${error instanceof Error ? error.message : String(error)}`);
@@ -6490,7 +6591,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // A reply the thread's other agents hear like any other, taking their
     // place for it before the post, as `handleInbound` does. A DM thread
     // has nobody else in it to hear, as on the live path.
-    const published = postAheadOf(behind, connection, channel, thread, posting, uploads);
+    const published = postAheadOf(behind, connection, channel, thread, posting, uploads, routing.reply);
     const conversation = metadata[CONVERSATION_METADATA_KEY];
     const isDm = typeof conversation === 'object' && conversation !== null && !Array.isArray(conversation)
       && (conversation as JsonObject).kind === 'direct';
