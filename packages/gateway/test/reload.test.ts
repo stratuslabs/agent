@@ -682,10 +682,8 @@ test('a stop that has to shut down around a stuck firing and a stuck plugin stil
   const firingStarted = new Promise<void>((resolve) => { firing = resolve; });
   const fetchImpl = (() => new Promise<Response>(() => { firing(); })) as typeof fetch;
 
-  // A full second, so the slack in the bound below is wider than a stalled
-  // event loop: a loaded CI runner has held this process for a quarter of a
-  // second in the middle of a stop.
-  const window = 1_000;
+  // Nothing below is timed, so the window only sets how long this takes.
+  const window = 250;
   const warnings: string[] = [];
   const gateway = createGateway({
     env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
@@ -713,16 +711,21 @@ test('a stop that has to shut down around a stuck firing and a stuck plugin stil
   scheduleStore.close();
   await firingStarted;
 
-  const began = Date.now();
   await gateway.stop();
-  const elapsed = Date.now() - began;
 
   assert.ok(warnings.some((line) => /did not stop after being aborted/.test(line)), warnings.join('\n'));
-  assert.ok(warnings.some((line) => /a plugin did not release what it holds/.test(line)), warnings.join('\n'));
-  // Two windows plus half a window of slack. A timer never fires early, so
-  // any phase that took a window of its own would make it at least three,
-  // and one window per phase would be four.
-  assert.ok(elapsed < 2.5 * window, `stop took ${elapsed}ms with a ${window}ms window`);
+  // The wait after the abort uses up the second window, so the phases after
+  // it are left nothing of it. One that took a window of its own, or a
+  // deadline set further out, would name a whole window here. Read from the
+  // warnings rather than timed: a stalled runner can only shrink what is
+  // left, where it pushes a timed stop past any slack.
+  const given = (pattern: RegExp): number => {
+    const found = warnings.map((line) => pattern.exec(line)).find((match) => match !== null);
+    assert.ok(found, `${pattern} in:\n${warnings.join('\n')}`);
+    return Number(found[1]);
+  };
+  assert.ok(given(/a scheduled firing did not stop within (\d+)ms/) < window / 2, warnings.join('\n'));
+  assert.ok(given(/a plugin did not release what it holds within (\d+)ms/) < window / 2, warnings.join('\n'));
 });
 
 test('a turn that outlives the drain window is aborted as restarting, and the restart still happens', async () => {

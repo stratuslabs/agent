@@ -6546,10 +6546,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // up: the wrapper it would wait for is around the very turn that
     // ignored its abort.
     const schedulerDrain = scheduler.drain();
+    const schedulerWindow = remaining();
     if (drained || abortAfterMs === undefined) {
       await schedulerDrain;
-    } else if (!(await settlesWithin(schedulerDrain, remaining()))) {
-      warn(`${kind}: a scheduled firing did not stop after being aborted; shutting down around it`);
+    } else if (!(await settlesWithin(schedulerDrain, schedulerWindow))) {
+      warn(`${kind}: a scheduled firing did not stop within ${schedulerWindow}ms after being aborted; shutting down around it`);
     }
     // After the turns that might still be using them. A plugin holding a
     // browser is the reason this exists, and closing it out from under a
