@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, constants, ftruncateSync, lstatSync, mkdirSync, openSync } from 'node:fs';
+import { chmodSync, closeSync, constants, ftruncateSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { StateEnvironment } from './environment.ts';
@@ -196,6 +196,33 @@ export const claimFileLock = (lockPath: string, options: { waitMs?: number } = {
  */
 export const GRANTS_LOCK_WAIT_MS = 5_000;
 
+/**
+ * One name per lock file, for the queue and the held set: SQLite locks the
+ * file, not the string, so a relative spelling, an absolute one, or one
+ * through a linked directory must land in the same queue. Otherwise the
+ * second writer blocks the thread in `claimFileLock` on a lock the first,
+ * suspended mid-section, cannot resume to release. The nearest directory
+ * that exists is resolved through its links and the rest kept as spelled,
+ * so the name is the same before `claimFileLock` makes the directory as
+ * after. The lock file itself is never a link (`refuseSymlink`).
+ */
+const lockKey = (lockPath: string): string => {
+  let existing = path.dirname(path.resolve(lockPath));
+  const rest: string[] = [path.basename(lockPath)];
+  for (;;) {
+    try {
+      return path.join(realpathSync.native(existing), ...rest);
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) {
+        return path.resolve(lockPath);
+      }
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+};
+
 /** Lock paths this process holds across an async write, so its own reads do not wait on it. */
 const heldHere = new Set<string>();
 /** One grant write at a time per lock path, in this process. */
@@ -220,7 +247,7 @@ export const grantReadSerializer = (env: StateEnvironment, options: { waitMs?: n
   <T>(read: () => T): T => {
     // Inside this process's own write, which already holds the lock: claiming
     // it again would wait on ourselves for the whole wait.
-    if (heldHere.has(grantsLockPath(env))) {
+    if (heldHere.has(lockKey(grantsLockPath(env)))) {
       return read();
     }
     const lock = claimFileLock(grantsLockPath(env), { waitMs: options.waitMs ?? GRANTS_LOCK_WAIT_MS });
@@ -265,17 +292,18 @@ export const serializeFileWrite = <T>(
   write: () => Promise<T>,
   options: { waitMs?: number } = {},
 ): Promise<T> => {
+  const key = lockKey(lockPath);
   const run = async (): Promise<T> => {
     const lock = claimFileLock(lockPath, { waitMs: options.waitMs ?? 0 });
-    heldHere.add(lockPath);
+    heldHere.add(key);
     try {
       return await write();
     } finally {
-      heldHere.delete(lockPath);
+      heldHere.delete(key);
       lock.release();
     }
   };
-  const queued = (writeQueues.get(lockPath) ?? Promise.resolve()).then(run, run);
-  writeQueues.set(lockPath, queued.then(() => undefined, () => undefined));
+  const queued = (writeQueues.get(key) ?? Promise.resolve()).then(run, run);
+  writeQueues.set(key, queued.then(() => undefined, () => undefined));
   return queued;
 };

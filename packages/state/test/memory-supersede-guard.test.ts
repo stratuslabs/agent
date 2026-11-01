@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,4 +85,25 @@ test('two stores over one file in one process take turns at the lock rather than
   assert.equal(merged.supersedes, a.id);
   assert.equal(pinned.pinned, true);
   assert.ok(Date.now() - started < 1000, 'no wait on a lock this process already holds');
+});
+
+test('two stores naming one file by different spellings still take turns at the lock', async () => {
+  const filePath = await newFile();
+  const clock = ticking();
+  const first = createFileMemoryStore(filePath, { ...clock, lockWaitMs: 200 });
+  // The same file, named relative to the working directory: one lock, so one queue.
+  const second = createFileMemoryStore(path.relative(process.cwd(), filePath), { ...clock, lockWaitMs: 200 });
+  // And through its directory's real path (macOS's /tmp and /var are links).
+  const third = createFileMemoryStore(path.join(realpathSync(path.dirname(filePath)), 'memory.jsonl'), { ...clock, lockWaitMs: 200 });
+  const a = await first.append('ava', 'fact a');
+  const b = await first.append('ava', 'fact b');
+  const c = await first.append('ava', 'fact c');
+  const [merged, pinned, reasserted] = await Promise.all([
+    first.append('ava', 'fact a, again', { supersedes: a.id, refuseProtected: true }),
+    second.pin!('ava', b.id),
+    third.reassertTrust!('ava', c.id, 'user'),
+  ]);
+  assert.equal(merged.supersedes, a.id);
+  assert.equal(pinned.pinned, true);
+  assert.equal(reasserted, true);
 });
