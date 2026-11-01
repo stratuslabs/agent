@@ -663,6 +663,12 @@ export interface GatewayTool {
   package?: string;
   /** Whether that package is trusted to declare a tool `safe`. */
   trusted?: boolean;
+  /**
+   * What a call to it is judged by, when it offers exactly one scope hook
+   * (`Tool.commandFor`, `originFor`, `destinationFor`): what an
+   * `approvals.rules` matcher for it can name. Absent for none or several.
+   */
+  scopedBy?: 'command' | 'origin' | 'destination';
 }
 
 /** One skill this daemon serves — identity and provenance, never the body. */
@@ -6987,11 +6993,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const provenanceByName = toolProvenance();
       return tools.describe().map((descriptor) => {
         const provenance = provenanceByName.get(descriptor.name);
+        const tool = tools.get(descriptor.name);
+        const hooks = ([
+          ['command', tool?.commandFor],
+          ['origin', tool?.originFor],
+          ['destination', tool?.destinationFor],
+        ] as const).filter(([, hook]) => hook !== undefined).map(([name]) => name);
         return {
           name: descriptor.name,
           ...(descriptor.description ? { description: descriptor.description } : {}),
           risk: descriptor.risk ?? 'gated',
           ...(provenance ? { package: provenance.package, trusted: provenance.trusted } : {}),
+          ...(hooks.length === 1 ? { scopedBy: hooks[0] } : {}),
         };
       });
     },

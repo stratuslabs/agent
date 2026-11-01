@@ -33,6 +33,7 @@ import {
   describePrincipals,
   describePosture,
   describeReviewPosture,
+  describeUnmatchableRules,
   describeRemoteMode,
   describeUnreachable,
   loadServeApprovals,
@@ -15994,6 +15995,31 @@ test('the review posture is named at startup with its model, shadow, and what ha
     'approvals.rules are ignored for dee: they apply only under posture review',
   ]);
   assert.deepEqual(describeReviewPosture({}, 'remote', ['ava']), []);
+});
+
+test('a review rule naming a matcher its tool does not offer is named at startup', () => {
+  const tools = [
+    { name: 'shell.run', risk: 'gated' as const, scopedBy: 'command' as const },
+    { name: 'web.fetch', risk: 'gated' as const, scopedBy: 'origin' as const },
+    { name: 'mcp.stripe.refund', risk: 'gated' as const },
+  ];
+  const approvals = {
+    posture: 'review' as const,
+    rules: [
+      { tool: 'shell.run', command: 'git push', verdict: 'allow' as const },
+      { tool: 'shell.run', origin: 'https://x.test', verdict: 'block' as const },
+      { tool: 'mcp.stripe.*', command: 'refund', verdict: 'block' as const },
+      { tool: 'not.loaded', destination: 'slack:*', verdict: 'ask' as const },
+    ],
+    agents: { ava: { rules: [{ tool: 'web.fetch', destination: 'slack:*', verdict: 'ask' as const }] } },
+  };
+  assert.deepEqual(describeUnmatchableRules(approvals, tools, ['ava']), [
+    'approvals.rules[1] (shell.run origin https://x.test: block) never matches shell.run, which is judged by a command',
+    'approvals.rules[2] (mcp.stripe.* command "refund": block) never matches mcp.stripe.refund, which names no command, origin or destination',
+    'approvals.agents.ava.rules[0] (web.fetch destination slack:*: ask) never matches web.fetch, which is judged by an origin',
+  ]);
+  // Nobody on review: rules are ignored anyway, and the line above says so.
+  assert.deepEqual(describeUnmatchableRules({ ...approvals, posture: 'open' as const }, tools, ['ava']), []);
 });
 
 test('the remote-mode line says what is parked for agents on the review posture', () => {

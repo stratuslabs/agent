@@ -14,7 +14,7 @@ import {
   type PrincipalsConfig,
   type ChannelCredentials,
 } from '@stratusagent/state';
-import { createPermissionPolicy, type ReviewSettings } from '@stratusagent/permissions';
+import { createPermissionPolicy, describeReviewRule, type ReviewRule, type ReviewSettings } from '@stratusagent/permissions';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { writeLine } from './io.ts';
 import { packageInstalled } from './loaders.ts';
@@ -322,6 +322,49 @@ export const describePosture = (
   return top === 'open'
     ? `posture open for every agent${except} (gated tools run without asking${externalGateNote(approvals, servedAgentIds)}; dangerous ones ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'still ask'})`
     : `posture guarded for every agent${except} (gated tools ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'ask, or are refused with nobody to ask'})`;
+};
+
+/** What a startup line calls a scope hook. */
+const MATCHER_WORDS = { command: 'a command', origin: 'an origin', destination: 'a destination' } as const;
+
+/**
+ * Rules that name a matcher a registered tool they cover doesn't offer:
+ * `shell.run` with an `origin`, say. Such a rule never matches, so the call
+ * goes on to the next step, which is not what whoever wrote a `block` meant.
+ * Named at startup, once the tools are registered (a tool not loaded yet is
+ * not judged). Only while some served agent is on the review posture.
+ */
+export const describeUnmatchableRules = (
+  approvals: ApprovalsConfig,
+  tools: ReadonlyArray<{ name: string; scopedBy?: 'command' | 'origin' | 'destination' }>,
+  servedAgentIds: readonly string[],
+): string[] => {
+  if (!servedAgentIds.some((agentId) => resolveAgentApprovals(approvals, agentId).posture === 'review')) {
+    return [];
+  }
+  const lists: Array<[string, readonly ReviewRule[]]> = [
+    ['approvals.rules', approvals.rules ?? []],
+    ...Object.entries(approvals.agents ?? {})
+      .filter(([agentId]) => servedAgentIds.includes(agentId))
+      .map(([agentId, agent]): [string, readonly ReviewRule[]] => [`approvals.agents.${agentId}.rules`, agent.rules ?? []]),
+  ];
+  const lines: string[] = [];
+  for (const [where, rules] of lists) {
+    rules.forEach((rule, index) => {
+      const matcher = rule.command !== undefined ? 'command' : rule.origin !== undefined ? 'origin' : rule.destination !== undefined ? 'destination' : undefined;
+      if (matcher === undefined) {
+        return;
+      }
+      for (const tool of tools) {
+        const covered = rule.tool.endsWith('.*') ? tool.name.startsWith(rule.tool.slice(0, -1)) : tool.name === rule.tool;
+        if (covered && tool.scopedBy !== matcher) {
+          lines.push(`${where}[${index}] (${describeReviewRule(rule)}) never matches ${tool.name}, which `
+            + (tool.scopedBy === undefined ? 'names no command, origin or destination' : `is judged by ${MATCHER_WORDS[tool.scopedBy]}`));
+        }
+      }
+    });
+  }
+  return lines;
 };
 
 /**
