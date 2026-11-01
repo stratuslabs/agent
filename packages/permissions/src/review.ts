@@ -187,7 +187,9 @@ const commandRuleMatches = (rule: ReviewRule, command: string): boolean => {
   const sequence = [words.scope.command, ...(words.scope.args ?? [])]
     .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('\\s+');
-  return new RegExp(`(?:^|[\\s;&|("'\`])${sequence}(?=$|[\\s;&|)"'\`])`).test(command);
+  // A program called by its path (`/usr/bin/git push`) is one the reader
+  // above refuses, so the backstop takes a path in front of the name.
+  return new RegExp(`(?:^|[\\s;&|("'\`])(?:[^\\s;&|()"'\`<>]*/)?${sequence}(?=$|[\\s;&|)"'\`])`).test(command);
 };
 
 const originRuleMatches = (pattern: string, origin: string): boolean => {
@@ -270,25 +272,15 @@ const INTERPRETERS = new Set([
 ]);
 const DOWNLOADERS = new Set(['curl', 'wget']);
 /**
- * Wrappers that run the program named after their own options, with the
- * options that take a separate value, so `sudo -u root sh` reads as `sh`.
+ * Programs that run another program named among their arguments
+ * (`sudo -u root sh`, `env -i bash`, `xargs sh`). Only their names: any
+ * later word naming an interpreter or a downloader counts, so an option no
+ * list could keep up with (`sudo -R / sh`) can't hide one.
  */
-const WRAPPERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-  ['sudo', new Set(['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U', '-T'])],
-  ['doas', new Set(['-u', '-C'])],
-  ['env', new Set(['-u', '-C', '--unset', '--chdir'])],
-  ['command', new Set<string>()],
-  ['exec', new Set(['-a'])],
-  ['nohup', new Set<string>()],
-  ['nice', new Set(['-n', '--adjustment'])],
-  ['time', new Set(['-f', '-o'])],
-  ['timeout', new Set(['-s', '-k', '--signal', '--kill-after'])],
-  ['stdbuf', new Set(['-i', '-o', '-e'])],
-  ['setsid', new Set<string>()],
-  ['xargs', new Set(['-I', '-n', '-P', '-L', '-s', '-d', '-E', '-a'])],
+const WRAPPER_NAMES = new Set([
+  'sudo', 'doas', 'su', 'runuser', 'env', 'command', 'builtin', 'exec', 'nohup', 'nice', 'ionice', 'time',
+  'timeout', 'stdbuf', 'setsid', 'xargs', 'chroot', 'taskset', 'unbuffer', 'busybox', 'parallel',
 ]);
-/** Wrappers whose first positional is theirs, not the program: `timeout 10 curl`. */
-const WRAPPER_POSITIONALS: ReadonlyMap<string, number> = new Map([['timeout', 1]]);
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 const strings = (value: JsonValue | undefined, out: string[] = []): string[] => {
@@ -306,50 +298,20 @@ const strings = (value: JsonValue | undefined, out: string[] = []): string[] => 
   return out;
 };
 
+const baseName = (word: string): string => word.split('/').pop() ?? word;
+
 /**
- * The program a command actually runs: past leading assignments
- * (`MODE=x curl`) and any wrappers with their options and values
- * (`sudo -u root`, `env -i PATH=/bin`, `timeout 10`, `nice -n 5 --`).
+ * Whether one stage of a pipeline runs one of `programs`: as its program
+ * (past leading assignments, by name or path), or anywhere after a wrapper.
  */
-const programOf = (analysis: CommandAnalysis): string | undefined => {
-  const { tokens } = analysis;
-  let index = 0;
-  while (index < tokens.length) {
-    const token = tokens[index] as string;
-    if (ASSIGNMENT.test(token)) {
-      index += 1;
-      continue;
-    }
-    const name = token.split('/').pop() as string;
-    const valued = WRAPPERS.get(name);
-    if (valued === undefined) {
-      return name;
-    }
-    index += 1;
-    let positionals = WRAPPER_POSITIONALS.get(name) ?? 0;
-    while (index < tokens.length) {
-      const next = tokens[index] as string;
-      if (next === '--') {
-        index += 1;
-        break;
-      }
-      if (ASSIGNMENT.test(next)) {
-        index += 1;
-        continue;
-      }
-      if (next.startsWith('-')) {
-        index += valued.has(next) ? 2 : 1;
-        continue;
-      }
-      if (positionals > 0) {
-        positionals -= 1;
-        index += 1;
-        continue;
-      }
-      break;
-    }
+const stageRuns = (words: readonly string[], programs: ReadonlySet<string>): boolean => {
+  const start = words.findIndex((word) => !ASSIGNMENT.test(word));
+  if (start < 0) {
+    return false;
   }
-  return undefined;
+  const program = baseName(words[start] as string);
+  return programs.has(program)
+    || (WRAPPER_NAMES.has(program) && words.slice(start + 1).some((word) => programs.has(baseName(word))));
 };
 
 const sendsOutside = (call: { toolName: string; command?: string }): boolean => {
@@ -373,19 +335,28 @@ const sendsOutside = (call: { toolName: string; command?: string }): boolean => 
   return commands.some((analysis) => analysis.tokens.some((token) => NETWORK_CLIENTS.has(token.split('/').pop() as string)));
 };
 
-const pipesDownloadIntoInterpreter = (command: string): boolean => {
+/**
+ * Each pipeline as its stages' words. A line the reader refuses (a program
+ * called by its path is one) is split as text instead: coarse on purpose,
+ * since this only decides whether to ask.
+ */
+const pipelinesOf = (command: string): string[][][] => {
   const compound = analyzeCompound(command);
-  const pipelines = compound.disqualifiedBy
-    ? (() => {
-        const single = analyzeCommand(command);
-        return single.pipeline ? [single.pipeline] : [];
-      })()
-    : compound.pipelines.map((pipeline) => pipeline.map((stage) => stage.analysis));
-  return pipelines.some((pipeline) => {
-    const first = pipeline.findIndex((analysis) => DOWNLOADERS.has(programOf(analysis) ?? ''));
-    return first >= 0 && pipeline.slice(first + 1).some((analysis) => INTERPRETERS.has(programOf(analysis) ?? ''));
-  });
+  if (!compound.disqualifiedBy) {
+    return compound.pipelines.map((pipeline) => pipeline.map((stage) => [...stage.analysis.tokens]));
+  }
+  return command
+    .split(/\|\||&&|[;\n]/)
+    .map((pipeline) => pipeline
+      .split(/\|&?/)
+      .map((stage) => stage.split(/[\s()`'"<>]+/).filter((word) => word.length > 0)));
 };
+
+const pipesDownloadIntoInterpreter = (command: string): boolean =>
+  pipelinesOf(command).some((pipeline) => {
+    const first = pipeline.findIndex((words) => stageRuns(words, DOWNLOADERS));
+    return first >= 0 && pipeline.slice(first + 1).some((words) => stageRuns(words, INTERPRETERS));
+  });
 
 /**
  * The built-in rules, in order: a cloud metadata address blocks, a token
