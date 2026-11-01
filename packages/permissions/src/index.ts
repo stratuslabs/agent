@@ -1213,7 +1213,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (reviewAsk === undefined) {
           const hit = builtInReviewRule(
             { toolName: call.toolName, input: call.input, ...(resolvedForReview.command === undefined ? {} : { command: resolvedForReview.command }) },
-            review?.secretsFor?.(session.agent.id) ?? [],
+            (await review?.secretsFor?.(session.agent.id)) ?? [],
           );
           if (hit !== undefined) {
             reviewNotes.set(context, { verdict: hit.verdict });

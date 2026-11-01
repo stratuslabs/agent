@@ -500,8 +500,12 @@ export interface ReviewOptions {
   settingsFor(agentId: string): ReviewSettings | undefined;
   /** Asks the reviewer. Omitted, every review fails, so every reviewed call is asked about. */
   reviewer?: Reviewer;
-  /** The stored credential values this agent's tools can use, for the built-in rule. */
-  secretsFor?(agentId: string): readonly string[];
+  /**
+   * The stored credential values this agent's tools can use, for the
+   * built-in rule. Asked only for a call that reaches that rule: a gated
+   * call in a conversation that has read outside content.
+   */
+  secretsFor?(agentId: string): readonly string[] | Promise<readonly string[]>;
 }
 
 const REVIEW_REASON_LIMIT = 300;

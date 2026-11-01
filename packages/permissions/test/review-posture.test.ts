@@ -86,7 +86,8 @@ const harness = (
             },
           }
         : {}),
-      secretsFor: () => ['stored-secret-value'],
+      // Read from disk by the host, so it may answer later.
+      secretsFor: async () => ['stored-secret-value'],
     },
     ...options,
   } as PermissionPolicyOptions);
