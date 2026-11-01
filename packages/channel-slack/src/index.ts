@@ -386,6 +386,15 @@ const EARLIER_MESSAGE_LIMIT = 40;
 const EARLIER_THREAD_PAGES = 20;
 
 /**
+ * How far above a team agent's mention its own files are looked for (card
+ * 1061). It bounds the read, one page of a thread's last hour, not which
+ * files count: that is the agent's run of messages just above the tag.
+ */
+const TAGGED_FILES_WINDOW_SECONDS = 3600;
+/** The most files a mention takes from its tagger's messages above it. */
+const TAGGED_FILES_LIMIT = 10;
+
+/**
  * The holder-record name for a bot this adapter does not serve: an agent on
  * another gateway, or any other app. The colon keeps it from ever equaling
  * an agent id, so the holder rule reads it as "somebody else's".
@@ -4726,6 +4735,70 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * The files a team agent posted just above the message where it tags
+   * this one (card 1061). A turn that makes a screenshot and then asks a
+   * colleague about it posts the file as a message of its own, above the
+   * tag, so the mention arrived with nothing attached: the colleague was
+   * asked to inspect something it was never handed, and in a session it
+   * already held it did not even hear the upload, since an agent's
+   * untagged message reaches nobody.
+   *
+   * The agent's own messages directly above the tag, with nobody else
+   * speaking between, are that turn's posts, or as near to them as a
+   * reader on another daemon can tell; the tag's own files come first and
+   * are not repeated. One read, of the hour before the mention. A thread
+   * with more than a page of replies in that hour gives nothing, rather
+   * than a run read from the middle of it, and a read that fails warns:
+   * either way the mention runs with what it carried, as before this.
+   */
+  const withFilesJustAbove = async (
+    connection: AgentConnection,
+    event: SlackInboundEvent & { thread_ts: string },
+    speaker: string,
+    name: string,
+  ): Promise<SlackInboundFile[]> => {
+    const own = event.files ?? [];
+    const replies = connection.web.conversations.replies;
+    if (!replies) {
+      return own;
+    }
+    // Whole seconds, so the arithmetic never touches the six digits after
+    // the point that make a Slack ts unique.
+    const [seconds = '0', fraction = '000000'] = event.ts.split('.');
+    const oldest = `${Math.max(0, Number(seconds) - TAGGED_FILES_WINDOW_SECONDS)}.${fraction}`;
+    let page: SlackHistoryPage;
+    try {
+      page = await replies.call(connection.web.conversations, {
+        channel: event.channel,
+        ts: event.thread_ts,
+        latest: event.ts,
+        oldest,
+        inclusive: false,
+        limit: 200,
+      });
+    } catch (error) {
+      warn(
+        `slack: ${connection.config.agentId} could not read above ${name}'s mention in ${event.channel}, so it gets only the files on the mention itself: `
+        + `${error instanceof Error ? error.message : String(error)} (the history scopes are channels:history, groups:history, and mpim:history)`,
+      );
+      return own;
+    }
+    if (page.response_metadata?.next_cursor) {
+      return own;
+    }
+    const above = (page.messages ?? [])
+      .filter((message) => message.ts !== undefined && Number(message.ts) < Number(event.ts))
+      .sort((a, b) => Number(a.ts) - Number(b.ts));
+    const posted: SlackInboundFile[] = [];
+    for (let index = above.length - 1; index >= 0 && above[index]!.user === speaker; index -= 1) {
+      posted.unshift(...(above[index]!.files ?? []));
+    }
+    const seen = new Set(own.map((file) => file.id).filter((id) => id !== undefined));
+    const added = posted.filter((file) => file.id === undefined || !seen.has(file.id)).slice(-TAGGED_FILES_LIMIT);
+    return [...own, ...added];
+  };
+
+  /**
    * What kind of room a conversation is and how many are in it, for the
    * turn's `conversation` metadata: an agent that did not know told
    * someone in a DM they were "talking on the terminal", and answers the same
@@ -8415,18 +8488,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // overheard message, and every provider shows the images after the
       // frame that marks it as somebody else's. Text files land inside the
       // message, so the frame quotes them with the rest of it.
+      // A team agent's tag inside a thread carries the files its turn posted
+      // just above it (card 1061), read as if they were attached to the tag.
+      const files = admitted.fromAgent !== undefined && !overhear && event.thread_ts !== undefined && event.thread_ts !== event.ts
+        ? await withFilesJustAbove(connection, { ...event, thread_ts: event.thread_ts }, userId, admitted.fromAgent)
+        : event.files ?? [];
       // Images and text files share the message's one download deadline.
       const deadline = AbortSignal.timeout(fileDownloadTimeoutMs);
       const reasons: UnreadReasons = new Map();
       if (overhear) {
-        for (const file of event.files ?? []) {
+        for (const file of files) {
           reasons.set(file, 'not-opened');
         }
       }
       const { images, unread: notImages, previews } = overhear
-        ? { images: [] as ImageAttachment[], unread: event.files ?? [], previews: [] as ImagePreview[] }
+        ? { images: [] as ImageAttachment[], unread: files, previews: [] as ImagePreview[] }
         : await readImageAttachments(
-          event.files ?? [],
+          files,
           connection.config.botToken,
           fetchFile,
           fileDownloadTimeoutMs,

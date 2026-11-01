@@ -14389,6 +14389,101 @@ test('a bot that is not on the team is ignored even with agent mentions on', asy
   assert.deepEqual(gateway.dispatches, []);
 });
 
+/**
+ * Ava, in a thread with Nova (a team agent on another daemon) and Dylan,
+ * already holding a session there. `thread` is what Slack has above each
+ * mention; `readFails` makes the receiver's look above the mention fail.
+ */
+const taggedFilesAdapter = (thread: Array<Record<string, unknown>>, options?: { readFails?: boolean }) => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const reads: Array<{ ts: string; latest?: string; oldest?: string }> = [];
+  web.conversations.replies = async (args: { ts: string; latest?: string; oldest?: string }) => {
+    reads.push({ ts: args.ts, ...(args.latest !== undefined ? { latest: args.latest } : {}), ...(args.oldest !== undefined ? { oldest: args.oldest } : {}) });
+    if (options?.readFails) {
+      throw new Error('ratelimited');
+    }
+    return {
+      messages: thread.filter((message) => (args.latest === undefined || Number(message.ts) < Number(args.latest))
+        && (args.oldest === undefined || Number(message.ts) > Number(args.oldest) || message.ts === args.ts)),
+      response_metadata: { next_cursor: '' },
+    };
+  };
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'on it'));
+  // Ava already has a session in the thread: no earlier-thread context.
+  gateway.sessionRouting = async (sessionId) => (sessionId.startsWith('slack:ava:') ? { agentId: 'ava', metadata: {} } : undefined);
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', agentMentions: { team: { nova: 'U-NOVA' } } }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+  return { socket, gateway, adapter, reads, warnings, fetched };
+};
+
+const novaFile = (name: string) => ({ id: `F-${name}`, name, mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: `https://files.slack.com/${name}` });
+
+test('an agent tagged right after its tagger posted a file gets that file with the mention (card 1061)', async () => {
+  const { socket, gateway, adapter, reads, fetched } = taggedFilesAdapter([
+    { ts: '1793500000.000100', user: 'U-DYLAN', text: 'can someone check the dashboard?' },
+    { ts: '1793500000.000200', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'looking' },
+    { ts: '1793500000.000300', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: 'old.png', files: [novaFile('old.png')] },
+    { ts: '1793500000.000400', user: 'U-DYLAN', text: 'and the sidebar' },
+    // Nova's turn: a screenshot, a line, then the tag. Only these are hers
+    // "just above": Dylan spoke after old.png.
+    { ts: '1793500000.000500', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: '', files: [novaFile('shot.png')] },
+    { ts: '1793500000.000600', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: 'taking a look' },
+  ]);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> inspect the attached screenshot', ts: '1793500000.000700', thread: '1793500000.000100' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [plainAgentLine(dispatch.userMessage), dispatch.images]), [
+    ['nova: inspect the attached screenshot', [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'shot.png' }]],
+  ]);
+  assert.deepEqual(fetched, ['https://files.slack.com/shot.png']);
+  // One bounded read: the thread, up to the mention, from an hour before it.
+  assert.deepEqual(reads, [{ ts: '1793500000.000100', latest: '1793500000.000700', oldest: '1793496400.000700' }]);
+});
+
+test('a tagged agent gets no file when its tagger posted none, and a person\'s or top-level mention reads nothing (card 1061)', async () => {
+  const { socket, gateway, adapter, reads } = taggedFilesAdapter([
+    { ts: '170.0', user: 'U-DYLAN', text: 'status?' },
+    { ts: '170.1', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: 'CI is green' },
+  ]);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> can you merge?', ts: '170.2', thread: '170.0' }));
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> thanks', ts: '170.3', thread: '170.0' }));
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> new topic', ts: '171.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [plainAgentLine(dispatch.userMessage), dispatch.images]), [
+    ['nova: can you merge?', undefined],
+    ['Dylan: thanks', undefined],
+    ['nova: new topic', undefined],
+  ]);
+  assert.deepEqual(reads.map((read) => read.latest), ['170.2']);
+});
+
+test('when the look above a tag fails, the tagged agent still answers the mention, and the failure is said (card 1061)', async () => {
+  const { socket, gateway, adapter, warnings } = taggedFilesAdapter([], { readFails: true });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> inspect the attached screenshot', ts: '180.2', thread: '180.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [plainAgentLine(dispatch.userMessage), dispatch.images]), [
+    ['nova: inspect the attached screenshot', undefined],
+  ]);
+  assert.ok(warnings.some((line) => line.includes('ava') && line.includes('nova') && line.includes('ratelimited')), warnings.join('\n'));
+});
+
 test('with a whitelist, only the listed team agents are answered', async () => {
   const { socketAva, gateway, adapter, logs } = agentMentionAdapter({ team: { nova: 'U-NOVA' }, only: ['bea'] });
   await adapter.start(gateway);
