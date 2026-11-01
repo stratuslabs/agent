@@ -239,7 +239,11 @@ export interface BuiltInReviewHit {
   reason: string;
 }
 
-const METADATA_ADDRESSES = /169\.254\.169\.254|fd00:ec2::254|metadata\.google\.internal/i;
+/**
+ * The whole address or host, with nothing of a longer name on either side:
+ * `169.254.169.254.example.com` is somebody else's site.
+ */
+const METADATA_ADDRESSES = /(?<![A-Za-z0-9.-])(?:169\.254\.169\.254|metadata\.google\.internal)\.?(?![A-Za-z0-9.-])|(?<![0-9A-Fa-f:])fd00:ec2::254(?![0-9A-Fa-f:])/i;
 
 /** Token shapes long enough to be a credential rather than a mention of its prefix. */
 const TOKEN_SHAPES: readonly RegExp[] = [
