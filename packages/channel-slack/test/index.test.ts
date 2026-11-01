@@ -186,6 +186,11 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
         return { ts, channel: args.channel, message: { ts, ...(threaded ? { thread_ts: args.thread_ts } : {}) } };
       },
       async update(args) {
+        // Slack's own cap for an edit: msg_too_long past 4,000 characters,
+        // and the message is left as it was.
+        if (args.text !== undefined && args.text.length > 4000) {
+          throw new Error('An API error occurred: msg_too_long');
+        }
         web.updates.push(args);
         return {};
       },
@@ -13086,6 +13091,207 @@ test('on texts, a reply that tags someone Slack cannot say is a bot or not goes 
   await adapter.stop();
 
   assert.deepEqual(web.posts.map((post) => post.text), ['<@U-WHO> can you check?\n\nDetails below.']);
+});
+
+// Card 1033: Slack's 4,000 characters is its advice for chat.postMessage,
+// not a cap — it truncates at 40,000 — and a reply cut at 4,000 reached the
+// agent it tagged as the tagged part only, since that agent admits only a
+// message that names it. chat.update IS capped at 4,000, so a placeholder
+// cannot take the whole of one.
+const longHandoff = `<@B-BEA> here is the report.\n\n${'a line of the report\n'.repeat(450)}The end.`;
+
+for (const replies of ['final', 'stream', 'texts'] as const) {
+  test(`on ${replies}, a reply over 4,000 characters that tags another agent goes out as one message, so that agent hears all of it`, async () => {
+    const socketAva = createFakeSocket();
+    const socketBea = createFakeSocket();
+    const webAva = createFakeWeb('B-AVA', 'T1');
+    const webBea = createFakeWeb('B-BEA', 'T1');
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, sessionId.startsWith('slack:ava:') ? longHandoff : 'tagged'));
+    const adapter = createAdapterAsShipped({
+      agents: [
+        { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies },
+        { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', agentMentions: {} },
+      ],
+      editIntervalMs: 0,
+      createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+      createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    });
+    await adapter.start(gateway);
+    await socketAva.deliver('app_mention', mention('<@B-AVA> report to bea', { ts: '970.1' }));
+    const said = webAva.posts.filter((post) => post.text !== '…');
+    assert.deepEqual(said.map((post) => post.text), [longHandoff]);
+    // A placeholder it posted could not take the reply, and was taken back.
+    assert.ok(webAva.updates.every((update) => update.text.length <= 4000));
+    const placeholders = webAva.posts.filter((post) => post.text === '…').length;
+    assert.equal(placeholders, replies === 'stream' ? 1 : 0);
+    assert.equal(webAva.deletes.length, placeholders);
+    await socketBea.deliver('message', botMention({ user: 'B-AVA', text: said[0]?.text ?? '', ts: '970.2', thread: '970.1', type: 'message' }));
+    await adapter.stop();
+
+    const beaTurns = gateway.dispatches.filter((dispatch) => dispatch.agentId === 'bea');
+    assert.equal(beaTurns.length, 1);
+    assert.match(beaTurns[0]?.userMessage ?? '', /The end\.$/);
+  });
+}
+
+test('a reply over 4,000 characters that tags only a person is split exactly as before', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const reply = `<@U-DYLAN> here is the report.\n\n${'a line of the report\n'.repeat(450)}The end.`;
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> report', { ts: '971.1' }));
+  await adapter.stop();
+
+  const said = [...web.updates.filter((update) => update.text !== '…').map((update) => update.text), ...web.posts.filter((post) => post.text !== '…').map((post) => post.text)];
+  assert.ok(said.length >= 3, JSON.stringify(said.map((text) => text.length)));
+  for (const text of said) {
+    assert.ok(text.length <= 4000, String(text.length));
+  }
+  assert.equal(said.join('\n').replaceAll('\n', ''), reply.replaceAll('\n', ''));
+  assert.deepEqual(web.deletes, []);
+});
+
+test('a long reply that tags another agent, whose placeholder Slack will not take back, is split as before rather than lost', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  web.chat.delete = async () => {
+    throw new Error('cant_delete_message');
+  };
+  const reply = longHandoff.replace('<@B-BEA>', '<@U-QUINN>');
+  const warnings: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> report to quinn', { ts: '972.1' }));
+  await adapter.stop();
+
+  const first = web.updates.at(-1)?.text ?? '';
+  assert.ok(first.startsWith('<@U-QUINN> here is the report.'), first.slice(0, 40));
+  const said = [first, ...web.posts.filter((post) => post.text !== '…').map((post) => post.text)];
+  for (const text of said) {
+    assert.ok(text.length <= 4000, String(text.length));
+  }
+  assert.equal(said.join('\n').replaceAll('\n', ''), reply.replaceAll('\n', ''));
+  assert.ok(warnings.some((line) => line.includes('cant_delete_message')), JSON.stringify(warnings));
+});
+
+test('a reply over 40,000 characters that tags another agent is cut at Slack\'s 40,000, not at 4,000', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const reply = `<@U-QUINN> the full log.\n\n${'a line of the log, long enough\n'.repeat(1600)}The end.`;
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> send quinn the log', { ts: '973.1' }));
+  await adapter.stop();
+
+  const said = web.posts.map((post) => post.text);
+  assert.equal(said.length, 2, JSON.stringify(said.map((text) => text.length)));
+  assert.ok((said[0]?.length ?? 0) > 39000 && (said[0]?.length ?? 0) <= 40000, String(said[0]?.length));
+  assert.equal(said.join('\n').replaceAll('\n', ''), reply.replaceAll('\n', ''));
+});
+
+test('the reply of a turn finished after a restart, over 4,000 characters and tagging another agent, is one message', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const reply = longHandoff.replace('<@B-BEA>', '<@U-QUINN>');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '974.0', conversation: { kind: 'channel' }, sessionTrust: 'user' },
+    reply,
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:974.0' });
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [[reply, '974.0']]);
+});
+
+test('a recovered reply over 4,000 characters that tags another agent is posted whole, not handed a placeholder an edit cannot fill', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const recovered = longHandoff.replace('<@B-BEA>', '<@U-QUINN>');
+  const warnings: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: recovered,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  assert.equal(web.posts.filter((entry) => entry.text === recovered).length, 1, 'the recovered reply is one message');
+  assert.ok(!warnings.some((line) => line.includes('msg_too_long')), JSON.stringify(warnings));
+  const said = [...web.updates.map((entry) => entry.text), ...web.posts.map((entry) => entry.text)];
+  assert.ok(said.includes('the message\'s own reply'), JSON.stringify(said.map((text) => text.slice(0, 30))));
+});
+
+test('message.send of over 4,000 characters that tags another agent is one message; one tagging only a person is split', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.botUsers = new Set(['U-QUINN']);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  const tagged = longHandoff.replace('<@B-BEA>', '<@U-QUINN>');
+  await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' })).post(tagged);
+  assert.deepEqual(web.posts.map((post) => post.text), [tagged]);
+  web.posts.length = 0;
+  await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' })).post(tagged.replace('<@U-QUINN>', '<@U-DYLAN>'));
+  await adapter.stop();
+  assert.ok(web.posts.length >= 3, String(web.posts.length));
+  for (const post of web.posts) {
+    assert.ok(post.text.length <= 4000, String(post.text.length));
+  }
 });
 
 test('on texts, words before a tool that tag another agent go out as one message', async () => {

@@ -76,6 +76,13 @@ import { textingParts } from './texts.ts';
 const MAX_DISPLAY_NAME_LENGTH = 80;
 
 const SLACK_MAX_MESSAGE_CHARS = 4000;
+/**
+ * Where Slack truncates a posted message. Its 4,000 is advice for
+ * chat.postMessage, and the cap only for chat.update. A message that tags
+ * another agent is cut here instead (card 1033): that agent admits only a
+ * message naming it, so a part cut off after the tag never reached it.
+ */
+const SLACK_MAX_POSTED_CHARS = 40_000;
 const DEFAULT_EDIT_INTERVAL_MS = 1000;
 const DEDUPE_CAPACITY = 2000;
 /**
@@ -2294,7 +2301,15 @@ class ReplyRenderer {
       return this.outcome(true, true);
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
-    const chunks = await this.chunksOf(text);
+    let chunks = await this.chunksOf(text);
+    // Kept whole for an agent it tags, the reply can be longer than an edit
+    // may be (chat.update stops at 4,000), so it goes out as a message of
+    // its own and the placeholder is taken back. One Slack will not let go
+    // takes the reply cut as before: the tagged agent hears the first part,
+    // and the thread still reads all of it.
+    if (this.ref && (chunks[0]?.length ?? 0) > SLACK_MAX_MESSAGE_CHARS && !(await this.retract())) {
+      chunks = messageChunks(text);
+    }
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
@@ -2348,12 +2363,12 @@ class ReplyRenderer {
 
   /**
    * This turn's text as the messages it is posted as, in this agent's reply
-   * mode: `texts` splits it a paragraph to a message unless it tags another
-   * agent.
+   * mode: `texts` splits it a paragraph to a message, and anything over
+   * Slack's advised length is cut — neither when it tags another agent
+   * (`deliveredChunks`).
    */
   private async chunksOf(text: string): Promise<string[]> {
-    const texts = this.texts && !(await this.tagsAnAgent?.(text));
-    return messageChunks(text, texts ? 'texts' : undefined);
+    return deliveredChunks(text, this.texts ? 'texts' : undefined, this.tagsAnAgent);
   }
 
   private placeText(ts: string | undefined): void {
@@ -2543,7 +2558,9 @@ class ReplyRenderer {
   ): Promise<'complete' | 'partial' | 'untaken'> {
     const [first, ...rest] = chunks;
     const given = this.ref;
-    if (first === undefined || this.finalized || !given) {
+    // Longer than an edit may be (a reply kept whole for an agent it tags):
+    // not handed over, and the caller posts it as a message of its own.
+    if (first === undefined || this.finalized || !given || first.length > SLACK_MAX_MESSAGE_CHARS) {
       return 'untaken';
     }
     await drained;
@@ -2619,9 +2636,9 @@ const pastCodePoint = (text: string, index: number): number => {
  * address and a stray `>`, and neither half is a link. Markup is one line,
  * so only the cut's own line is looked at.
  */
-const outsideSlackMarkup = (text: string, cut: number): number => {
+const outsideSlackMarkup = (text: string, cut: number, limit: number): number => {
   const open = text.lastIndexOf('<', cut - 1);
-  if (open <= SLACK_MAX_MESSAGE_CHARS / 2) {
+  if (open <= limit / 2) {
     return cut;
   }
   const closedBefore = text.lastIndexOf('>', cut - 1);
@@ -2651,25 +2668,25 @@ const truncateForSlack = (text: string): string =>
  * it when that still leaves a message worth sending, and otherwise closes
  * the run at the cut and reopens it in the next.
  */
-const splitForSlack = (text: string): string[] => {
-  if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
+const splitForSlack = (text: string, limit = SLACK_MAX_MESSAGE_CHARS): string[] => {
+  if (text.length <= limit) {
     return [text];
   }
   const chunks: string[] = [];
   let rest = text;
-  while (rest.length > SLACK_MAX_MESSAGE_CHARS) {
+  while (rest.length > limit) {
     // Prefer a newline break inside the window; fall back to a hard cut.
-    const window = rest.slice(0, SLACK_MAX_MESSAGE_CHARS);
+    const window = rest.slice(0, limit);
     const newline = window.lastIndexOf('\n');
-    const cut = newline > SLACK_MAX_MESSAGE_CHARS / 2 ? newline : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
+    const cut = newline > limit / 2 ? newline : safeCutIndex(rest, limit);
     // Scanned two messages deep, not to the end: rescanning the whole rest
     // for every chunk made a megabyte reply quadratic on the event loop. A
     // fence that closes past the window still reads as open to its end,
     // which is what it is here; an inline span that does is longer than a
     // message, and is cut as text either way.
-    const run = codeRunsOf(rest.slice(0, SLACK_MAX_MESSAGE_CHARS * 2))
+    const run = codeRunsOf(rest.slice(0, limit * 2))
       .find((candidate) => candidate.start < cut && cut < candidate.end);
-    if (run !== undefined && run.start > SLACK_MAX_MESSAGE_CHARS / 4) {
+    if (run !== undefined && run.start > limit / 4) {
       chunks.push(rest.slice(0, run.start).replace(/\n+$/, ''));
       rest = rest.slice(run.start);
       continue;
@@ -2679,9 +2696,9 @@ const splitForSlack = (text: string): string[] => {
     // continuation always makes progress. A continuation reopens with the
     // info string only while it is short: a two-thousand-character info
     // line repeated on every part would crowd out the code it labels.
-    const budget = SLACK_MAX_MESSAGE_CHARS - (run?.closer.length ?? 0);
+    const budget = limit - (run?.closer.length ?? 0);
     const floor = run === undefined ? 0 : run.start + run.opener.length;
-    const reopen = run === undefined || run.opener.length <= SLACK_MAX_MESSAGE_CHARS / 8
+    const reopen = run === undefined || run.opener.length <= limit / 8
       ? run?.opener
       : run.opener.endsWith('\n') ? `${run.closer.slice(1)}\n` : run.opener;
     // A delimiter too long to close and reopen inside one message — a fence
@@ -2694,14 +2711,14 @@ const splitForSlack = (text: string): string[] => {
     // `floor + 2`: the first cut past the opener has to fit a whole code
     // point, or the step that guarantees progress lands inside an emoji.
     const fence = run !== undefined && run.closer.startsWith('\n');
-    if (run === undefined || !fence || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor + 2 > budget) {
-      const at = run === undefined ? outsideSlackMarkup(rest, cut) : cut;
+    if (run === undefined || !fence || reopen === undefined || reopen.length + run.closer.length > limit / 4 || floor + 2 > budget) {
+      const at = run === undefined ? outsideSlackMarkup(rest, cut, limit) : cut;
       chunks.push(rest.slice(0, at));
       rest = rest.slice(at).replace(/^\n+/, '');
       continue;
     }
     const inner = rest.lastIndexOf('\n', budget - 1);
-    const within = inner > Math.max(floor, SLACK_MAX_MESSAGE_CHARS / 2) ? inner : Math.max(safeCutIndex(rest, budget), pastCodePoint(rest, floor + 1));
+    const within = inner > Math.max(floor, limit / 2) ? inner : Math.max(safeCutIndex(rest, budget), pastCodePoint(rest, floor + 1));
     chunks.push(`${rest.slice(0, within)}${run.closer}`);
     rest = `${reopen}${rest.slice(within).replace(/^\n/, '')}`;
   }
@@ -2730,8 +2747,27 @@ const messageText = (text: string): string => truncateForSlack(toSlackMrkdwn(tex
  * as, each then converted and sized on its own: the cuts never fall inside
  * code, and nothing else in the conversion crosses a line.
  */
-const messageChunks = (text: string, replies?: SlackReplyMode): string[] =>
-  (replies === 'texts' ? textingParts(text) : [text]).flatMap((part) => splitForSlack(toSlackMrkdwn(part)));
+const messageChunks = (text: string, replies?: SlackReplyMode, limit = SLACK_MAX_MESSAGE_CHARS): string[] =>
+  (replies === 'texts' ? textingParts(text) : [text]).flatMap((part) => splitForSlack(toSlackMrkdwn(part), limit));
+
+/**
+ * `messageChunks`, except that text which tags another agent stays one
+ * message up to Slack's own truncation limit: that agent admits only a
+ * message that names it, so a reply cut by paragraph (card 1014) or by
+ * length (card 1033) reached it as the tagged part alone. Slack is asked
+ * who is an agent only when the text would be cut at all.
+ */
+const deliveredChunks = async (
+  text: string,
+  replies: SlackReplyMode | undefined,
+  tagsAnAgent: ((text: string) => Promise<boolean>) | undefined,
+): Promise<string[]> => {
+  const chunks = messageChunks(text, replies);
+  if (chunks.length <= 1 || !(await tagsAnAgent?.(text))) {
+    return chunks;
+  }
+  return messageChunks(text, undefined, SLACK_MAX_POSTED_CHARS);
+};
 
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',
@@ -5474,7 +5510,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     };
     return {
       async post(text: string): Promise<OutboundMessageRef> {
-        const chunks = messageChunks(text.trim().length > 0 ? text : '(empty message)');
+        const chunks = await deliveredChunks(text.trim().length > 0 ? text : '(empty message)', undefined, (said) => tagsAnAgent(connection, said));
         // Heard in the thread's session (card 364): its place is claimed
         // now, before Slack shows anything, and filled once we know what
         // Slack accepted.
@@ -6714,10 +6750,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // last. `NO_REPLY_TEXT` is what a rendered turn with nothing to say
     // puts in its own message too. With nothing queued behind, there is no
     // order to keep and nothing to say, so the files go on their own.
-    const replies = connection.config.replies === 'texts' && routing.reply && await tagsAnAgent(connection, routing.reply)
-      ? 'final'
-      : connection.config.replies;
-    const chunks = routing.reply ? messageChunks(routing.reply, replies) : [];
+    const chunks = routing.reply
+      ? await deliveredChunks(routing.reply, connection.config.replies, (text) => tagsAnAgent(connection, text))
+      : [];
     const posting = chunks.length > 0 ? chunks : (behind && files.length > 0 ? [NO_REPLY_TEXT] : []);
     let landed: string[] = [];
     const uploads = async (): Promise<void> => {
