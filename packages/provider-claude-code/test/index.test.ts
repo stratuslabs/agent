@@ -1771,9 +1771,12 @@ const createSteeringQuery = (options: { lateFold?: boolean } = {}) => {
       const iterator = prompt[Symbol.asyncIterator]();
       const first = await iterator.next();
       sent.push(first.value as Record<string, unknown>);
-      // The SDK keeps reading its input while the CLI works.
+      // The SDK keeps reading its input while the CLI works, in its own
+      // time: a hosted call that returned without waiting for it would
+      // beat the message to the CLI.
       const reading = (async () => {
         for (;;) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
           const next = await iterator.next();
           if (next.done === true) {
             inputClosed = true;
@@ -1790,11 +1793,22 @@ const createSteeringQuery = (options: { lateFold?: boolean } = {}) => {
       if (options.lateFold === true) {
         yield { type: 'result', subtype: 'success', is_error: false, result: 'Built it.', session_id: 'sdk-958', user_message_uuids: [] } as ClaudeCodeStreamMessage;
         events.push('first result read');
+        // A CLI whose input has closed exits after this result: the turn
+        // it owed the late message never runs.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (inputClosed) {
+          return;
+        }
         yield { type: 'result', subtype: 'success', is_error: false, result: 'Skipped the tests.', session_id: 'sdk-958', user_message_uuids: later } as ClaudeCodeStreamMessage;
       } else {
         yield { type: 'result', subtype: 'success', is_error: false, result: 'Built it, tests skipped.', session_id: 'sdk-958', user_message_uuids: later } as ClaudeCodeStreamMessage;
       }
-      await reading;
+      // The CLI exits once its input closes; one left open is a turn that
+      // never ends, said here instead of hanging the test.
+      await Promise.race([reading, new Promise((resolve) => setTimeout(resolve, 200))]);
+      if (!inputClosed) {
+        events.push('input left open');
+      }
     })();
   };
   return { queryFn, events, sent, prompt: () => promptKind, inputClosed: () => inputClosed };
@@ -1871,4 +1885,32 @@ test('a steered message the CLI runs as a turn of its own keeps the input open u
   // Not closed after the first result, which did not carry the message.
   assert.deepEqual(fake.events, ['sent "Dylan: skip the tests"', 'tool result returned', 'first result read', 'input closed']);
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Built it.\n\nSkipped the tests.' }]);
+});
+
+test('a turn stopped while a steered message waits to be taken fails the call instead of waiting forever', async () => {
+  let handlerOutcome = 'pending';
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const tools = (params.options as { mcpServers?: Record<string, { instance?: { _registeredTools?: RegisteredTools } }> })
+      .mcpServers?.stratus?.instance?._registeredTools;
+    const prompt = params.prompt as AsyncIterable<unknown>;
+    return (async function* () {
+      // Takes the turn's message, then never reads the input again.
+      await prompt[Symbol.asyncIterator]().next();
+      await tools!.demo_echo!.handler({ text: 'build' }, {}).then(
+        () => { handlerOutcome = 'returned'; },
+        (error: Error) => { handlerOutcome = error.message; },
+      );
+      throw new Error('aborted');
+    })();
+  };
+  const controller = new AbortController();
+  const provider = createClaudeCodeProvider({ queryFn, executeTool: echoExecutor });
+  setTimeout(() => controller.abort(), 20);
+
+  await assert.rejects(provider.generate({
+    ...steeringRequest(async () => ({ userMessage: 'Dylan: skip the tests' })),
+    signal: controller.signal,
+  }));
+
+  assert.match(handlerOutcome, /ended before it took a message sent while it worked/);
 });
