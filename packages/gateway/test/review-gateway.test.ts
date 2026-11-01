@@ -280,5 +280,6 @@ test('a shutdown aborts a review still running once the turns have drained, and 
   assert.equal(stopped, false, 'stop() waits for the review that ignored its abort');
   release?.();
   await stopping;
-  await stuck;
+  // Its answer came after it was cancelled, so it is not a verdict.
+  assert.deepEqual(await stuck, { failed: 'cancelled' });
 });
