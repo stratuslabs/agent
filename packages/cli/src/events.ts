@@ -18,12 +18,14 @@ export const formatEvent = (event: StratusEvent): string | null => {
     case 'tool.denied':
       return `• tool.denied ${event.call.toolName}`;
     case 'permission.decided': {
-      // A shadow decision ran nothing differently, so it says what it would
-      // have done; the outcome before it is what actually happened.
+      // A shadow decision changed nothing: the call ran, and the real
+      // decision has its own line. So it says what it would have done,
+      // never that the call was refused.
+      const outcome = event.allowed ? 'allowed' : 'refused';
       const review = event.verdict === undefined
         ? ''
-        : `, ${event.shadow === true ? 'would ' : ''}${event.verdict}${event.reviewCode === undefined ? '' : `: ${event.reviewCode}`}`;
-      return `• permission.decided ${event.toolName} ${event.allowed ? 'allowed' : 'refused'} (${event.layer}${review})`;
+        : `, ${event.verdict}${event.reviewCode === undefined ? '' : `: ${event.reviewCode}`}`;
+      return `• permission.decided ${event.toolName} ${event.shadow === true ? `would be ${outcome}` : outcome} (${event.layer}${review})`;
     }
     case 'tool.approval-requested':
       return `• tool.approval-requested ${event.call.toolName} (${event.risk}) for ${event.agentId}`;

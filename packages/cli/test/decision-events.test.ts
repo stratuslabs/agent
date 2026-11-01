@@ -32,8 +32,14 @@ test('the structured log keeps one decision line per call with fixed fields, and
 test('the event line names the tool, the outcome and the check', () => {
   assert.equal(formatEvent(decided()), '• permission.decided shell.run refused (scope)');
   assert.equal(formatEvent(decided({ allowed: true, layer: 'grant' })), '• permission.decided shell.run allowed (grant)');
+  // A shadow decision reports what it would have done, a refusal included,
+  // while the call ran: the line never says it was refused.
   assert.equal(
-    formatEvent(decided({ allowed: true, layer: 'review', verdict: 'block', reviewCode: 'not-asked-for', shadow: true })),
-    '• permission.decided shell.run allowed (review, would block: not-asked-for)',
+    formatEvent(decided({ allowed: false, layer: 'review', verdict: 'block', reviewCode: 'not-asked-for', shadow: true })),
+    '• permission.decided shell.run would be refused (review, block: not-asked-for)',
+  );
+  assert.equal(
+    formatEvent(decided({ allowed: true, layer: 'risk', shadow: true })),
+    '• permission.decided shell.run would be allowed (risk)',
   );
 });
