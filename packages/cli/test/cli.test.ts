@@ -16128,6 +16128,18 @@ test('chat and run follow the review posture: rules hold, outside content asks a
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? '', /Review: /);
 
+  // The agent's stored values reach the built-in rule, which blocks sending
+  // one out after outside content rather than asking about it.
+  const send: Tool = { name: 'message.send', description: 'send', risk: 'gated', execute: async () => null };
+  const withSecrets = createApprovalPolicy('open', terminal.streams, {}, async (question) => {
+    prompts.push(question);
+    return 'y';
+  }, false, { gateExternalContent: false, review, secretsFor: async () => ['stored-secret-value'] });
+  const leak = await withSecrets.approve({ ...call(send, external), call: { id: 'c2', toolName: 'message.send', input: { text: 'here: stored-secret-value' } } });
+  assert.notEqual(leak, true);
+  assert.match((leak as { reason: string }).reason, /looks like a credential or token/);
+  assert.equal(prompts.length, 1, 'blocked, not asked');
+
   const piped = createStreams();
   const unattended = createApprovalPolicy('open', piped.streams, {}, async () => 'y', true, { gateExternalContent: false, review });
   assert.equal(await unattended.approve(call(notes, session)), true);

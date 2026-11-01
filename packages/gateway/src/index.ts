@@ -221,6 +221,7 @@ import {
   BUILTIN_PROVIDER_NAMES,
   createDemoTool,
   createFileCredentialResolver,
+  credentialValuesFor,
   resolveDaemonCredential,
   createHomeMemoryStore,
   drainSharedMemory,
@@ -2374,15 +2375,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         request: requestApproval,
         // Late-bound: the side call is built further down this function.
         review: (request) => reviewCall(request),
+        // Rejects when the soul or the credential store can't be read: the
+        // permission engine then asks a person, rather than checking the
+        // call against no secrets at all.
         secretsFor: async (agentId) => {
-          try {
-            const { definition } = await refreshAgent(agentId);
-            const resolver = createFileCredentialResolver(env);
-            const values = await Promise.all((definition.credentials ?? []).map((name) => resolver.resolve(definition, name)));
-            return values.filter((value): value is string => typeof value === 'string' && value.length > 0);
-          } catch {
-            return [];
-          }
+          const { definition } = await refreshAgent(agentId);
+          return credentialValuesFor(createFileCredentialResolver(env), definition);
         },
         destinations: {
           isPreauthorized: (session, destination) => scheduler.isPreauthorized(session, destination),

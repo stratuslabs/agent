@@ -95,7 +95,12 @@ export const createApprovalPolicy = (
    * conversation that has read external content asks again. `review`: the
    * agent is on the review posture, and these are its settings.
    */
-  openOptions: { gateExternalContent?: boolean; review?: ReviewSettings } = {},
+  openOptions: {
+    gateExternalContent?: boolean;
+    review?: ReviewSettings;
+    /** The agent's stored credential values, for the review posture's rule against sending one out. */
+    secretsFor?: (agentId: string) => Promise<readonly string[]>;
+  } = {},
 ): ApprovalPolicy => {
   if (mode === 'always') {
     if (!defaulted) {
@@ -132,7 +137,10 @@ export const createApprovalPolicy = (
       ...(defaulted
         ? { mode: 'headless' as const }
         : { mode: 'interactive' as const, ask: ask ?? promptOnce(streams, env) }),
-      review: { settingsFor: () => settings },
+      review: {
+        settingsFor: () => settings,
+        ...(openOptions.secretsFor !== undefined ? { secretsFor: openOptions.secretsFor } : {}),
+      },
       onDecision: (decision) => {
         if (defaulted && !decision.allowed && !noted) {
           noted = true;

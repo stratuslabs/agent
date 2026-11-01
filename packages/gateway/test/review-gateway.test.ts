@@ -77,7 +77,7 @@ const reviewGateway = async (reviewer: () => Response) => {
     log: () => undefined,
     warn: () => undefined,
   });
-  return { gateway, reviews, transport: () => transport as ApprovalTransport };
+  return { gateway, home, reviews, transport: () => transport as ApprovalTransport };
 };
 
 const ask = async (harness: Awaited<ReturnType<typeof reviewGateway>>, model?: string) => {
@@ -135,12 +135,16 @@ test('a reply that is not one JSON object, or a provider that fails, is a failed
   }
 });
 
-test('the built-in rule is handed the values of the credentials the soul lists, and nothing else', async () => {
+test('the built-in rule is handed the values of the credentials the soul lists, and nothing else, or the lookup fails', async () => {
   const harness = await reviewGateway(() => openAiText('{}'));
   await harness.gateway.start();
   try {
     assert.deepEqual(await harness.transport().secretsFor('ava'), ['ava-svc-value-123']);
-    assert.deepEqual(await harness.transport().secretsFor('nobody'), []);
+    // A lookup that can't run rejects, so the review asks a person rather
+    // than checking against no secrets at all.
+    await assert.rejects(harness.transport().secretsFor('nobody'), /Agent not found/);
+    await writeFile(path.join(harness.home, '.stratus', 'credentials.json'), '{ not json', { mode: 0o600 });
+    await assert.rejects(harness.transport().secretsFor('ava'));
   } finally {
     await harness.gateway.stop();
   }

@@ -207,6 +207,7 @@ export {
   namedCredentialSource,
   resolveDaemonCredential,
   createFileCredentialResolver,
+  credentialValuesFor,
   type CredentialEnvBindings,
   type CredentialEnvBinding,
   loadCredentialEnvBindings,

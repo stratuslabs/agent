@@ -37,6 +37,7 @@ import {
   BUILTIN_MEMORY_STORE_NAME,
   createDemoTool,
   createFileCredentialResolver,
+  credentialValuesFor,
   createHomeMemoryStore,
   createRuntimeProvider,
   defaultApiKeyEnvName,
@@ -410,7 +411,12 @@ export const createAgentRuntime = async (
           ? {
               gateExternalContent: await externalContentGated(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id),
               ...(options.approvalsPosture === 'review'
-                ? { review: await reviewSettingsIn(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id) ?? {} }
+                ? {
+                    review: await reviewSettingsIn(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id) ?? {},
+                    // Read per call, like the daemon's: a store that can't
+                    // be read rejects, and the call asks.
+                    secretsFor: () => credentialValuesFor(createFileCredentialResolver(runEnv), options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT),
+                  }
                 : {}),
             }
           : {},
