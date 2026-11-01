@@ -21,6 +21,9 @@ import {
 // this is in the state stamp and writes no soul.
 
 const MIGRATION = '0005-safe-tools-default';
+// The notice that follows 0005 runs on the same upgrade; it says nothing
+// here, because this home has no task notes.
+const NOTES_NOTICE = '0006-task-notes-expiry-notice';
 const BEFORE = ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'];
 
 const AVA = `---
@@ -48,12 +51,12 @@ test('an upgraded home records that it predates the safe default, and its souls 
   assert.equal(unlistedToolsFor(env), 'every', 'before 0005 has run, an older build\'s stamp already reads as every tool');
 
   const applied = await runStateMigrations(env);
-  assert.deepEqual(applied.map((migration) => migration.id), [MIGRATION]);
+  assert.deepEqual(applied.map((migration) => migration.id), [MIGRATION, NOTES_NOTICE]);
   assert.match(applied[0]?.detail ?? '', /souls with no tools: list keep every tool/);
 
   assert.equal(await readFile(soulPath, 'utf8'), AVA, 'the soul is byte-identical');
   const stamp = await readStateStamp(env);
-  assert.deepEqual(stamp.applied, [...BEFORE, MIGRATION]);
+  assert.deepEqual(stamp.applied, [...BEFORE, MIGRATION, NOTES_NOTICE]);
   assert.deepEqual(stamp.facts, [PREDATES_SAFE_TOOLS_FACT]);
   assert.equal(unlistedToolsFor(env), 'every');
 
