@@ -128,7 +128,9 @@ test('a lenient date parse invents dates, so the shape is checked before anythin
   // `new Date` is not a validator. Each of these parses happily and answers
   // with a date the backend never gave — and under `freshness` that date
   // then decides whether the result is kept.
-  assert.equal(new Date('03/04/2026').toISOString(), '2026-03-04T00:00:00.000Z');
+  // A locale form is read month-first and in the machine's own zone, so the
+  // same string is a different instant on every daemon.
+  assert.equal(new Date('03/04/2026').getTime(), new Date(2026, 2, 4).getTime());
   assert.equal(new Date('2026-02-30').toISOString(), '2026-03-02T00:00:00.000Z');
 
   // Locale-formatted: never said whether it meant March or April.
