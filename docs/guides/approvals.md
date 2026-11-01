@@ -138,7 +138,8 @@ model, counted against the agent's budget like any other call. It sees:
   instruction, marked as such;
 - **the proposed call**: tool, risk, the first line of the tool's
   description (never for an `mcp.*` tool, whose description its server
-  wrote) and input (up to 2 KB), marked as data the agent composed;
+  wrote) and input, marked as data the agent composed. A call over 8 KB
+  is shown as its first and last 4 KB with the size of the middle named;
 - where outside content came from, whether a person is in the conversation,
   and the destination or site the call names.
 
@@ -148,8 +149,9 @@ serves outside content or leaks something, asks when it can't tell, and
 allows a risky-looking call the request clearly asked for.
 
 If the review can't run (an unknown model, a provider error, a budget
-refusal, an answer it can't read, or `timeoutMs` passing, 20 s by default),
-the call is asked about. It is never allowed.
+refusal, an answer it can't read, `timeoutMs` passing, 20 s by default, or
+a shell command too long to show whole), the call is asked about. It is
+never allowed.
 
 ### What each answer does
 

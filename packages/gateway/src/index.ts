@@ -121,7 +121,7 @@ import {
 } from '@stratusagent/agents';
 import { createFleetReader } from './fleet.ts';
 import { createMemoryPassHost, type MemoryPassDetail, type MemoryPassModelRun } from './memory-passes.ts';
-import { readReviewReply, REVIEW_RULES, reviewCaseText } from './review.ts';
+import { callShownWhole, readReviewReply, REVIEW_RULES, reviewCaseText } from './review.ts';
 import {
   createEventIntake,
   summarizeEvents,
@@ -5391,6 +5391,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // ---- the review posture's reviewer (spec 964) ----------------------------
 
   const reviewCall = async (request: GatewayReviewRequest): Promise<{ reply: Record<string, unknown> } | { failed: string }> => {
+    if (request.command !== undefined && !callShownWhole(request.call)) {
+      // A command line the case can't show whole could hide its end, and
+      // the reviewer would judge only the part it saw: a person decides.
+      return { failed: 'command-too-long' };
+    }
     const firing = scheduler.firingPromptFor(request.session);
     const prompt = reviewCaseText({
       session: request.session,
