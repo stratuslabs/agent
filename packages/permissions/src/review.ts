@@ -453,10 +453,18 @@ const stageMatchesRule = (stage: readonly string[], program: string, args: reado
   return at.some((index) => inOrder(args, stage.slice(index + 1)));
 };
 
+/**
+ * Whether a stage runs one of `programs` itself, or in a command one of its
+ * words holds (`sh -c "curl …" | sh` downloads in its first stage).
+ */
+const stageRunsDeep = (words: readonly string[], programs: ReadonlySet<string>): boolean =>
+  stageRuns(words, programs)
+  || words.some((word) => /[\s;&|]/.test(word) && roughPipelines(word).flat().some((inner) => stageRuns(inner, programs)));
+
 const pipesDownloadIntoInterpreter = (command: string): boolean =>
   pipelinesOf(command).some((pipeline) => {
-    const first = pipeline.findIndex((words) => stageRuns(words, DOWNLOADERS));
-    return first >= 0 && pipeline.slice(first + 1).some((words) => stageRuns(words, INTERPRETERS));
+    const first = pipeline.findIndex((words) => stageRunsDeep(words, DOWNLOADERS));
+    return first >= 0 && pipeline.slice(first + 1).some((words) => stageRunsDeep(words, INTERPRETERS));
   });
 
 /**
