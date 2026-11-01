@@ -59,6 +59,8 @@ export interface CliEnvironment {
   serviceSleep?: (ms: number) => Promise<void>;
   /** Service-manager platform override (tests) — which unit format and manager commands apply. */
   servicePlatform?: NodeJS.Platform;
+  /** Whether systemd is running (tests). Default: probed on the real host; see `ServiceEnvironment.systemdBooted`. */
+  serviceSystemdBooted?: boolean;
   /** Reports whether an optional package is installed. Injected so tests do not assert on their own node_modules. */
   packageResolver?: PackageResolver;
   /** Installs optional packages. Injected so tests never run npm. */
