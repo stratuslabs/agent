@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { ApprovalContext, JsonObject, Session, Tool } from '@stratusagent/core';
 import { createPermissionPolicy, type PermissionDecision } from '@stratusagent/permissions';
 
-import { refusalLogLine } from '../src/commands/serve.ts';
+import { decisionLogLine, refusalLogLine } from '../src/commands/serve.ts';
 
 const shell: Tool = {
   name: 'shell.run',
@@ -46,4 +46,27 @@ test('a decision without a layer logs exactly as before', () => {
     layer: 'grant',
   } as PermissionDecision;
   assert.equal(refusalLogLine(older), 'ava: notes.write is gated and nobody is available to approve it (session sess-1)');
+});
+
+test('review decisions log their verdict and code; shadow ones are marked and never logged as refusals', () => {
+  const base = { mode: 'headless', risk: 'gated', toolName: 'notes.add', sessionId: 'sess-1', agentId: 'ava' } as const;
+  const blocked: PermissionDecision = { ...base, allowed: false, layer: 'review', verdict: 'block', reviewCode: 'not-asked-for', reason: 'notes.add was blocked by the reviewer (not-asked-for)' };
+  assert.deepEqual(decisionLogLine(blocked), {
+    level: 'warn',
+    line: 'ava: [review] notes.add was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for (session sess-1)',
+  });
+  const allowed: PermissionDecision = { ...base, allowed: true, layer: 'review', verdict: 'allow', reviewCode: 'asked-for', reason: 'notes.add was allowed by the reviewer (asked-for)' };
+  assert.deepEqual(decisionLogLine(allowed), {
+    level: 'log',
+    line: 'ava: [review] notes.add was allowed by the reviewer (asked-for) verdict=allow code=asked-for (session sess-1)',
+  });
+  const shadow: PermissionDecision = { ...blocked, shadow: true };
+  assert.deepEqual(decisionLogLine(shadow), {
+    level: 'log',
+    line: 'ava: shadow [review] notes.add was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for (session sess-1)',
+  });
+  const unreviewed: PermissionDecision = { ...base, allowed: true, layer: 'risk', shadow: true, reason: 'notes.add not reviewed: this conversation has read nothing from outside' };
+  assert.equal(decisionLogLine(unreviewed)?.line, 'ava: shadow [risk] notes.add not reviewed: this conversation has read nothing from outside (session sess-1)');
+  // An ordinary allowed call still logs nothing.
+  assert.equal(decisionLogLine({ ...base, allowed: true, layer: 'risk', reason: 'notes.add runs without asking (approvals.posture is open)' }), undefined);
 });
