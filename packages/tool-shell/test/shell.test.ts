@@ -223,7 +223,9 @@ test('headless: a safe scope and a safe pipeline run through a real pack, a cont
   // The chain is refused despite `pwd` being safe-listed: a chain runs
   // only when every command in it would, and `curl` is covered by nothing.
   assert.equal(results[1]?.toolResult?.ok, false);
-  assert.match(results[1]?.toolResult?.error ?? '', /denied by approval policy/);
+  // The agent is told what the log says: which check refused, not just
+  // that something did.
+  assert.equal(results[1]?.toolResult?.error, decisions[1]?.reason);
   assert.match(decisions[1]?.reason ?? '', /outside every approved scope/);
   // And a `git` subcommand outside the safe scopes, which listing the
   // executable would have covered.
