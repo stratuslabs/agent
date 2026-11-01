@@ -12421,15 +12421,26 @@ test('a judged turn posts only what it wrote after its last tool, or nothing, wh
     { name: 'its last message', reply: 'Found it.', posts: ['Found it.'] },
     { name: 'nothing after its last tool', reply: '', posts: [] },
     { name: 'its last words, from before its last tool', reply: 'Still looking.', posts: [] },
+    // What it streamed after its last tool is all of what it wrote there:
+    // a reply that is exactly that is its answer, even when it repeats
+    // words it held, so a provider that returns its last message only
+    // loses none of it (Codex on #573).
+    { name: 'joined, with an answer it streamed', after: 'Found it.', reply: 'Looking.\n\nStill looking.\n\nFound it.', posts: ['Found it.'] },
+    { name: 'its last message, starting with its first words', after: 'Looking.\n\nFound it.', reply: 'Looking.\n\nFound it.', posts: ['Looking.\n\nFound it.'], texts: ['Looking.', 'Found it.'] },
+    { name: 'its last message, the same as its last words before a tool', after: 'Still looking.', reply: 'Still looking.', posts: ['Still looking.'] },
   ];
   for (const replies of [undefined, 'texts'] as const) {
-    for (const { name, reply, posts } of cases) {
+    for (const { name, reply, posts: inFinal, after, texts } of cases) {
       const label = `${replies ?? 'final'}: ${name}`;
+      const posts = replies === 'texts' && texts ? texts : inFinal;
       const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
         await say(gateway, sessionId, 'Looking.');
         await runTool(gateway, sessionId, 'c1');
         await say(gateway, sessionId, 'Still looking.');
         await runTool(gateway, sessionId, 'c2');
+        if (after !== undefined) {
+          await say(gateway, sessionId, after);
+        }
         return sessionWithReply(sessionId, reply);
       });
       gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
@@ -12449,6 +12460,48 @@ test('a judged turn posts only what it wrote after its last tool, or nothing, wh
       }
     }
   }
+});
+
+test('the thread\'s other agents hear a judged turn\'s answer as posted, even where it repeats words it held (card 1060)', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    if (sessionId.split(':')[1] !== 'ava') {
+      return sessionWithReply(sessionId, '');
+    }
+    await say(gateway, sessionId, 'Looking.');
+    await runTool(gateway, sessionId, 'c1');
+    // Its last message alone, as a provider that returns only that does.
+    await say(gateway, sessionId, 'Looking.\n\nFound it.');
+    return sessionWithReply(sessionId, 'Looking.\n\nFound it.');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }, { id: 'bea', name: 'Bea', listens: 'mentions' }];
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:931.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:931.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'final' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', replies: 'final' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const message = channelMessage({ text: 'where is it?', ts: '931.1', thread: '931.0' });
+  await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false]);
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['Looking.\n\nFound it.']);
+  const heard = gateway.observes.filter((observed) => observed.agentId === 'bea').map((observed) => observed.message);
+  assert.deepEqual(heard.filter((line) => !line.startsWith('Dylan:')).map((line) => line.replace(/^[^:]+: /, '')), ['Looking.\n\nFound it.']);
 });
 
 test('the stream reply mode posts no interim messages: its placeholder already shows them', async () => {

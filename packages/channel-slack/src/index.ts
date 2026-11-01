@@ -1176,8 +1176,20 @@ class ReplyRenderer {
   private readonly held: string[] = [];
   /** Whether the last words this turn wrote before a tool were held rather than posted. */
   private lastWasHeld = false;
-  /** Held words posted as the reply, because the turn ended on them (see `finalizeInOrder`). */
-  private promotedReply: string | undefined;
+  /**
+   * The reply as posted, where that is not what `unsaid` leaves of it:
+   * held words posted as the reply because the turn ended on them, or a
+   * judged turn's answer kept whole although it repeats words it held
+   * (see `finalizeInOrder`).
+   */
+  private postedReply: string | undefined;
+  /**
+   * What the turn has streamed since its last tool, from text deltas only.
+   * Unlike `interim`, never filled from a `provider.response`, which on a
+   * provider that hosts its own loop is the whole joined reply. A reply
+   * that is exactly this is the turn's last message and nothing it held.
+   */
+  private streamedAfterTool = '';
   /** The lowest trust this turn's session was lowered to while it ran (`session.tainted`). */
   taintedTo: TrustLevel | undefined;
   private turnBreakPending = false;
@@ -1517,6 +1529,7 @@ class ReplyRenderer {
     }
     this.buffer = '';
     this.interim = '';
+    this.streamedAfterTool = '';
     this.activeTools.clear();
     this.toolLine = undefined;
     this.runningTool = undefined;
@@ -1562,6 +1575,7 @@ class ReplyRenderer {
       this.turnBreakPending = false;
       this.buffer += event.delta.text;
       this.interim += event.delta.text;
+      this.streamedAfterTool += event.delta.text;
       this.scheduleEdit();
       return;
     }
@@ -1571,6 +1585,7 @@ class ReplyRenderer {
       // attempts never fuse into one message.
       this.buffer = '';
       this.interim = '';
+      this.streamedAfterTool = '';
       this.turnBreakPending = false;
       this.scheduleEdit();
       return;
@@ -1725,6 +1740,7 @@ class ReplyRenderer {
   private flushInterim(ofThisTurn: boolean): Promise<boolean> | undefined {
     const text = this.interim.trim();
     this.interim = '';
+    this.streamedAfterTool = '';
     if (this.streaming || !this.turnStarted || !ofThisTurn || text.length === 0) {
       return undefined;
     }
@@ -1832,7 +1848,7 @@ class ReplyRenderer {
     if (reply.trim().length === 0) {
       return '';
     }
-    return this.promotedReply ?? this.unsaid(reply);
+    return this.postedReply ?? this.unsaid(reply);
   }
 
   /**
@@ -1998,8 +2014,16 @@ class ReplyRenderer {
     // silence is judged: a reply that is only that narration is the
     // decision to stay out, not something to post (card 1060). Nor are
     // held words ever promoted to its answer, as another turn's are below.
+    // A reply that is exactly what it streamed after its last tool is its
+    // last message alone, from a provider that returns only that: kept
+    // whole, even where it repeats words it held (Codex on #573).
     if (this.lazy && this.held.length > 0) {
-      reply = this.unsaid(reply);
+      const streamed = this.streamedAfterTool.trim();
+      if (streamed.length > 0 && reply.trim() === streamed) {
+        this.postedReply = streamed;
+      } else {
+        reply = this.unsaid(reply);
+      }
     }
     if (this.lazy && reply.trim().length === 0 && (!this.ref || await this.retract())) {
       // Silence, decided: nothing was posted and nothing is — or what was
@@ -2032,7 +2056,7 @@ class ReplyRenderer {
       const rest = this.unsaid(reply);
       const lastHeld = this.held.at(-1);
       if (rest.length === 0 && this.lastWasHeld && lastHeld !== undefined) {
-        this.promotedReply = lastHeld;
+        this.postedReply = lastHeld;
         reply = lastHeld;
       } else {
         reply = rest;
