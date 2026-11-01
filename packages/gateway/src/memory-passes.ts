@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { createMemoryPassTools, type MemoryPassWrite } from '@stratusagent/agents';
+import { createMemoryPassTools, isValidAgentId, type MemoryPassWrite } from '@stratusagent/agents';
 import {
   conversationContextFrom,
   HostRefusalError,
@@ -109,6 +109,17 @@ export interface MemoryPassHost {
   passes(agentId: string): Promise<MemoryPassSummary[]>;
   /** One pass and what it wrote; undefined when the ledger has no claim for it. */
   pass(agentId: string, passId: string): Promise<MemoryPassDetail | undefined>;
+  /**
+   * The daemon has loaded its agents and chosen its memory store. Plugins
+   * are set up before either, and the spec has the upkeep plugin call
+   * `start` from its setup, so until this a start takes any well-formed
+   * agent id, writes its start record, and leaves the claims a crash left
+   * open to be settled here: settling reads what a claim wrote, from the
+   * store this daemon uses, which is not chosen until now. A save pass asked
+   * for before this is skipped as `not-started`. Resolves once those
+   * settles are written; never rejects.
+   */
+  ready(): Promise<void>;
   /**
    * The daemon is stopping: refuse new passes, abort running ones (they are
    * low priority and do not hold the drain), settle them, then write a stop
@@ -234,6 +245,21 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
 
   /** `agentId\0mode` -> the start, written once per run. */
   const started = new Map<string, Promise<{ startedAt: string }>>();
+  /**
+   * `agentId\0mode` -> a start's settle of the claims a crash left open,
+   * for a start made before `ready`. A pass for that agent and mode waits
+   * for it, so it never reads a watermark the settle is about to move.
+   */
+  const settling = new Map<string, Promise<void>>();
+  let isReady = false;
+  let openReadiness!: (ready: boolean) => void;
+  /** True at `ready`; false when the daemon stops first, and nothing settles. */
+  const readiness = new Promise<boolean>((resolve) => {
+    openReadiness = resolve;
+  });
+  /** Before `ready` the roster is not loaded yet, so only the id's form can be checked. */
+  const knownAgent = (agentId: unknown): agentId is string =>
+    typeof agentId === 'string' && (isReady ? options.hasAgent(agentId) : isValidAgentId(agentId));
   /** Agents with a pass running: one at a time each. */
   const busy = new Set<string>();
   const running = new Set<Promise<unknown>>();
@@ -258,7 +284,7 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
   };
 
   const start: MemoryPassHandle['start'] = (agentId, mode) => {
-    if (typeof agentId !== 'string' || !options.hasAgent(agentId)) {
+    if (!knownAgent(agentId)) {
       return Promise.reject(new MalformedPassRequest(`memoryPasses.start: there is no agent ${String(agentId)}.`));
     }
     if (!MODES.includes(mode)) {
@@ -280,10 +306,30 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
       const open = memoryPassOpenClaims(await ledger.read(), mode);
       const startedAt = now();
       await ledger.append({ type: 'start', at: startedAt, run: options.run, mode });
-      for (const claim of open) {
-        await settle(agentId, mode, claim);
-        options.log(`memory pass ${claim.passId} (${agentId}, ${mode}) was cut off by the last stop and is settled`);
+      const settleOpen = async (): Promise<void> => {
+        for (const claim of open) {
+          await settle(agentId, mode, claim);
+          options.log(`memory pass ${claim.passId} (${agentId}, ${mode}) was cut off by the last stop and is settled`);
+        }
+      };
+      if (isReady) {
+        await settleOpen();
+        return { startedAt };
       }
+      // From a plugin's setup: settled at `ready`. One that fails there
+      // leaves its claims open, which reads as kept, so no slice is read
+      // twice; the next start tries again.
+      settling.set(key, readiness.then(async (ready) => {
+        if (!ready) {
+          return;
+        }
+        if (!options.hasAgent(agentId)) {
+          options.log(`memory passes were started for ${agentId}, which this daemon has no agent for; its passes will be refused`);
+        }
+        await settleOpen().catch((error: unknown) => {
+          options.log(`could not settle the memory passes a stop cut off for ${agentId} (${mode}): ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }));
       return { startedAt };
     })();
     started.set(key, begun);
@@ -329,7 +375,7 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     finish(agentId, mode, { passId, status: 'skipped', reason, saved: 0, superseded: 0, more: false }, kind);
 
   const validSave = (request: Extract<MemoryPassRequest, { kind: 'save' }>): { from: ConversationKind[]; mode: MemoryPassMode } => {
-    if (typeof request.agentId !== 'string' || !options.hasAgent(request.agentId)) {
+    if (!knownAgent(request.agentId)) {
       malformed(`memoryPasses.run: there is no agent ${String(request.agentId)}.`);
     }
     if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
@@ -391,7 +437,7 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
       return skipped(agentId, mode, passId, 'stopped');
     }
     const begun = started.get(`${agentId}\0${mode}`);
-    if (begun === undefined) {
+    if (begun === undefined || !isReady) {
       return skipped(agentId, mode, passId, 'not-started');
     }
     // A start still being written counts once it has landed, and one that
@@ -399,6 +445,7 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     if (!await begun.then(() => true, () => false)) {
       return skipped(agentId, mode, passId, 'not-started');
     }
+    await settling.get(`${agentId}\0${mode}`);
     if (options.memory === undefined) {
       return skipped(agentId, mode, passId, 'store-unsupported');
     }
@@ -545,7 +592,7 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     }
     if (request.kind === 'tidy') {
       const mode = request.mode ?? 'write';
-      if (typeof request.agentId !== 'string' || !options.hasAgent(request.agentId)) {
+      if (!knownAgent(request.agentId)) {
         throw new MalformedPassRequest(`memoryPasses.run: there is no agent ${String(request.agentId)}.`);
       }
       if (!MODES.includes(mode)) {
@@ -571,8 +618,11 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
       return;
     }
     closing = true;
+    // Never ready: the settles stay for the next start. Ready: the stop
+    // record comes after them.
+    openReadiness(false);
     stopAll.abort(new Error('The daemon is stopping.'));
-    await Promise.allSettled([...running]);
+    await Promise.allSettled([...running, ...settling.values()]);
     const at = now();
     for (const [key, begun] of started) {
       const outcome = await begun.then(() => true, () => false);
@@ -596,5 +646,13 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     return found === undefined ? undefined : { pass: found, entries: await writtenBy(agentId, found.mode, passId) };
   };
 
-  return { handle: { start, run }, passes, pass, close };
+  const ready = async (): Promise<void> => {
+    if (!closing) {
+      isReady = true;
+      openReadiness(true);
+    }
+    await Promise.allSettled([...settling.values()]);
+  };
+
+  return { handle: { start, run }, passes, pass, ready, close };
 };

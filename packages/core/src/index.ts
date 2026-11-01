@@ -1533,9 +1533,12 @@ export interface MemoryPassOutcome {
  */
 export interface MemoryPassHandle {
   /**
-   * Turns upkeep on for an agent and mode until the daemon stops. The first
-   * call in a run writes a start record and settles claims a crash left
-   * open; later calls return the same time and change nothing.
+   * Turns upkeep on for an agent and mode until the daemon stops. Call it
+   * from `setup`, so the first conversation after is read. The first call
+   * in a run writes a start record; claims a crash left open are settled
+   * once the daemon has loaded its agents, and a pass asked for before
+   * that is `skipped`, `not-started`. Later calls return the same time and
+   * change nothing.
    */
   start(agentId: string, mode: MemoryPassMode): Promise<{ startedAt: string }>;
   /**

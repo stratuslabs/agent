@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  createRoutedMemoryStore,
   HostRefusalError,
   MEMORY_SAVE_PASS_INSTRUCTION,
   MEMORY_SAVE_PASS_REQUEST,
@@ -70,7 +71,7 @@ const saves = (...facts: string[]): Script => async (_run, remember) => {
   }
 };
 
-const setup = async (t: test.TestContext, options: { clock?: () => Date } = {}) => {
+const setup = async (t: test.TestContext, options: { clock?: () => Date; ready?: boolean } = {}) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'memory-pass-host-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const memory: AgentMemoryStore = createFileMemoryStore(path.join(home, 'memory.jsonl'));
@@ -101,6 +102,10 @@ const setup = async (t: test.TestContext, options: { clock?: () => Date } = {}) 
     now: options.clock ?? (() => new Date(clock)),
     passId: () => `p${++ids}`,
   });
+  // The daemon says so once its agents are loaded and its store chosen.
+  if (options.ready !== false) {
+    await host.ready();
+  }
   const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(home, AGENT));
   return {
     home,
@@ -360,11 +365,93 @@ test('a claim a crash left open is settled by the next start, after its start re
     hasAgent: () => true, isSubAgentSession: () => false, defaultModel: async () => 'm',
     runModel: async () => {}, emit: () => {}, log: () => {}, now: () => new Date(at(30)),
   });
+  await host.ready();
   await host.handle.start(AGENT, 'write');
   const records = await ledger.read();
   assert.deepEqual(records.slice(3).map((record) => [record.type, record.run]), [['start', 'run-1'], ['end', 'run-1'], ['end', 'run-1']]);
   const ends = records.filter((record) => record.type === 'end') as Extract<MemoryPassRecord, { type: 'end' }>[];
   assert.deepEqual(ends.map((end) => [end.passId, end.status, end.released]), [['wrote', 'interrupted', false], ['empty', 'interrupted', true]]);
+});
+
+test('a start from a plugin\'s setup, before the agents load, is taken; a crashed claim settles at ready, from the store chosen by then', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'memory-pass-host-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(home, AGENT));
+  await ledger.append({ type: 'start', at: at(0), run: 'run-0', mode: 'write' });
+  await ledger.append({
+    type: 'claim', at: at(2), run: 'run-0', passId: 'wrote', kind: 'save', mode: 'write', model: 'm', sessionId: 's1', slice: { from: 'm1', to: 'm1', count: 1 },
+  });
+  // The daemon starts on the file store and switches to a plugin's after
+  // setup; the crashed pass wrote to the plugin's.
+  const chosen = createFileMemoryStore(path.join(home, 'chosen.jsonl'));
+  await chosen.append(AGENT, 'Ava prefers tea.', { metadata: { memoryPass: { id: 'wrote', kind: 'save' } } });
+  let selected: AgentMemoryStore = createFileMemoryStore(path.join(home, 'memory.jsonl'));
+  const agents = new Set<string>();
+  const lines: string[] = [];
+  const host = createMemoryPassHost({
+    stateDir: home, run: 'run-1', memory: createRoutedMemoryStore(() => selected), sessions: { get: async () => undefined }, chain: chainOf(),
+    hasAgent: (id) => agents.has(id), isSubAgentSession: () => false, defaultModel: async () => 'm',
+    runModel: async () => {}, emit: () => {}, log: (line) => lines.push(line), now: () => new Date(at(30)),
+  });
+
+  const begun = await host.handle.start(AGENT, 'write');
+  assert.equal(begun.startedAt, at(30));
+  await host.handle.start('ghost', 'write');
+  await assert.rejects(host.handle.start('../up', 'write'), /no agent/);
+  const before = await ledger.read();
+  assert.deepEqual(before.slice(2).map((record) => [record.type, record.run]), [['start', 'run-1']], 'nothing settled before ready');
+
+  selected = chosen;
+  agents.add(AGENT);
+  await host.ready();
+  const ends = (await ledger.read()).filter((record) => record.type === 'end') as Extract<MemoryPassRecord, { type: 'end' }>[];
+  assert.deepEqual(ends.map((end) => [end.passId, end.status, end.released]), [['wrote', 'interrupted', false]], 'kept: it wrote, to the store chosen');
+  assert.ok(lines.some((line) => line.includes('ghost')), 'a started agent the daemon does not have is named');
+  await assert.rejects(host.handle.start('nobody', 'write'), /no agent/, 'once ready, start checks the agent');
+});
+
+test('a pass asked for before the daemon is ready is skipped as not started; after, it runs', async (t) => {
+  const env = await setup(t, { ready: false });
+  env.sessions.set('s1', sessionOf('s1', [message('m1', at(1), 'Ava prefers tea.')]));
+  env.setScript(saves('Ava prefers tea.'));
+  env.tick(-60_000);
+  await env.host.handle.start(AGENT, 'write');
+  env.tick(60_000 * 5);
+  const early = await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet' });
+  assert.deepEqual([early.status, early.reason], ['skipped', 'not-started']);
+  assert.equal(env.runs.length, 0);
+  await env.host.ready();
+  const later = await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet' });
+  assert.deepEqual([later.status, later.saved], ['done', 1]);
+});
+
+test('a pass asked for while ready is settling waits for the settle, so a released slice is read again', async (t) => {
+  const env = await setup(t, { ready: false });
+  await env.ledger.append({ type: 'start', at: at(-10), run: 'run-0', mode: 'write' });
+  await env.ledger.append({
+    type: 'claim', at: at(2), run: 'run-0', passId: 'cut', kind: 'save', mode: 'write', model: 'm', sessionId: 's1', slice: { from: 'm1', to: 'm1', count: 1 },
+  });
+  env.sessions.set('s1', sessionOf('s1', [message('m1', at(1), 'Ava prefers tea.')]));
+  env.setScript(saves('Ava prefers tea.'));
+  env.tick(60_000 * 5);
+  await env.host.handle.start(AGENT, 'write');
+  const settled = env.host.ready();
+  const outcome = await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet' });
+  await settled;
+  assert.deepEqual([outcome.status, outcome.saved], ['done', 1], 'the cut-off pass wrote nothing, so its slice is read again');
+});
+
+test('a daemon that stops before it is ready writes its stop and leaves a crashed claim for the next start', async (t) => {
+  const env = await setup(t, { ready: false });
+  await env.ledger.append({ type: 'start', at: at(-10), run: 'run-0', mode: 'write' });
+  await env.ledger.append({
+    type: 'claim', at: at(-9), run: 'run-0', passId: 'cut', kind: 'save', mode: 'write', model: 'm', sessionId: 's1', slice: { from: 'm1', to: 'm1', count: 1 },
+  });
+  await env.host.handle.start(AGENT, 'write');
+  await env.host.close();
+  const records = await env.ledger.read();
+  assert.deepEqual(records.slice(2).map((record) => record.type), ['start', 'stop']);
+  assert.equal(records.some((record) => record.type === 'end'), false);
 });
 
 test('a shadow pass writes to the shadow file, never memory, and keeps its own watermark', async (t) => {

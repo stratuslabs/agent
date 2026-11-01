@@ -6097,6 +6097,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
     await loadRoster();
+    // Agents loaded and the memory store chosen: a plugin that turned memory
+    // passes on in its setup had neither, so the claims a crash left open
+    // are settled now, before any turn can end and ask for a pass.
+    await memoryPassHost.ready();
     intakeState = await readIntakeState(env, warn);
     if (intakeState.paused) {
       log(`intake is paused (since ${intakeState.since ?? 'unknown'}); new work will be refused until it resumes`);

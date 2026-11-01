@@ -292,9 +292,11 @@ A memory pass is a short model run, as the agent, that reads the newest
 messages of one conversation and saves the lasting facts in them, so a
 preference stated in passing is still there next week. Nothing in core
 decides when to run one. An operator-installed plugin asks for passes
-through `PluginContext.memoryPasses`: `start(agentId, mode)` turns upkeep
-on for an agent until the daemon stops, and `run(request)` runs one pass
-and resolves with how it ended. No tool starts a pass, so neither the agent
+through `PluginContext.memoryPasses`: `start(agentId, mode)`, called from
+the plugin's `setup`, turns upkeep on for an agent until the daemon stops,
+and `run(request)` runs one pass and resolves with how it ended. A pass
+asked for before the daemon has loaded its agents is skipped as
+`not-started`. No tool starts a pass, so neither the agent
 nor a chat message can. With no plugin asking, nothing runs and nothing
 changes. Only the daemon offers it: under `stratus run` a plugin gets no
 `memoryPasses`.

@@ -78,7 +78,7 @@ const readRequest = (init: RequestInit | undefined): SeenRequest => {
   };
 };
 
-const upkeepGateway = async (options: { config?: object; pass?: (request: SeenRequest) => Response } = {}) => {
+const upkeepGateway = async (options: { config?: object; pass?: (request: SeenRequest) => Response; startInSetup?: boolean } = {}) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-pass-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), SOUL);
@@ -96,8 +96,13 @@ const upkeepGateway = async (options: { config?: object; pass?: (request: SeenRe
   const module = {
     createPlugin: () => ({
       name: 'upkeep',
-      setup(context: { memoryPasses?: MemoryPassHandle }) {
+      async setup(context: { memoryPasses?: MemoryPassHandle }) {
         handle = context.memoryPasses;
+        // Where the spec has the upkeep plugin turn it on: in setup, before
+        // the daemon has loaded its agents.
+        if (options.startInSetup === true) {
+          await context.memoryPasses?.start('ava', 'write');
+        }
       },
     }),
   };
@@ -113,6 +118,7 @@ const upkeepGateway = async (options: { config?: object; pass?: (request: SeenRe
     },
   };
   const passRequests: SeenRequest[] = [];
+  const warnings: string[] = [];
   const fetchFake = (async (_url: string | URL | Request, init?: RequestInit) => {
     const request = readRequest(init);
     if (request.firstUser.startsWith(MEMORY_SAVE_PASS_REQUEST)) {
@@ -134,14 +140,16 @@ const upkeepGateway = async (options: { config?: object; pass?: (request: SeenRe
     pluginHost,
     approvals: new AllowAllApprovalPolicy(),
     log: () => undefined,
-    warn: () => undefined,
+    warn: (line: string) => {
+      warnings.push(line);
+    },
   });
   const events: StratusEvent[] = [];
   gateway.bus.subscribe((event: StratusEvent) => {
     events.push(event);
   });
   const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(stratusHomePath(env), 'ava'));
-  return { home, env, gateway, handle: () => handle, passRequests, events, ledger };
+  return { home, env, gateway, handle: () => handle, passRequests, events, ledger, warnings };
 };
 
 test('a plugin is handed memoryPasses, and a save pass runs as the agent with only recall and remember', async () => {
@@ -185,6 +193,24 @@ test('a plugin is handed memoryPasses, and a save pass runs as the agent with on
   const records = await harness.ledger.read();
   assert.equal(records[0]?.type, 'start');
   assert.equal(records.at(-1)?.type, 'stop', 'a stop writes the stop record');
+});
+
+test('a plugin that starts upkeep from its setup loads, and the first conversation after it is saved', async () => {
+  const harness = await upkeepGateway({ startInSetup: true });
+  await harness.gateway.start();
+  try {
+    assert.deepEqual(harness.warnings.filter((line) => /plugin/.test(line)), [], 'the plugin loaded');
+    const handle = harness.handle();
+    assert.ok(handle);
+    const turn = await harness.gateway.dispatch({ sessionId: 'cli-1', agentId: 'ava', userMessage: 'I always have tea in the morning.' });
+    assert.equal(turn.status, 'completed');
+    const outcome = await handle.run({ kind: 'save', agentId: 'ava', sessionId: 'cli-1', reason: 'quiet' });
+    assert.deepEqual([outcome.status, outcome.saved], ['done', 1]);
+  } finally {
+    await harness.gateway.stop();
+  }
+  const records = await harness.ledger.read();
+  assert.deepEqual([records[0]?.type, records.at(-1)?.type], ['start', 'stop']);
 });
 
 test('a pass never falls back: a failing model fails the pass and gives the slice back', async () => {
