@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in Stratus Agent doesn't work the way the docs say it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go through private reporting, not here. See [SECURITY.md](https://github.com/stratuslabs/agent/blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps that shows it. Include the command, the message you sent the agent, or the config involved.
+      placeholder: |
+        1. stratus serve
+        2. In Slack, ask Blair to ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Stratus version
+      description: Output of `stratus --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you run it
+      options:
+        - npm global install
+        - Docker
+        - System unit (systemd)
+        - Source checkout
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Node version
+      placeholder: macOS 15.3, Node 22.16.0
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      description: The provider package and model the agent runs on, if the bug involves a run.
+      placeholder: provider-anthropic, claude-opus-5-5
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: |
+        The relevant lines from `stratus logs --agent <id>` or `stratus doctor`. A failed run's log line can quote your request, so read it before pasting and replace any tokens or keys.
+      render: text

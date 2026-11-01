@@ -75,7 +75,9 @@ project and see the [configuration reference](../reference/config.md).
 
 ## From source
 
-To work on Stratus Agent itself you also need **pnpm 10**:
+To work on Stratus Agent itself you also need **pnpm 10**, through
+Corepack. Node 25 and later no longer ship Corepack, so on those run
+`npm install -g corepack` first.
 
 ```bash
 corepack enable && corepack prepare pnpm@10.18.3 --activate
