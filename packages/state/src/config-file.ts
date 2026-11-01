@@ -1,4 +1,6 @@
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { lookup as lookupHost } from 'node:dns/promises';
+import { BlockList, isIP } from 'node:net';
 import path from 'node:path';
 import {
   BUILTIN_EXECUTOR_NAME,
@@ -389,6 +391,43 @@ export const normalizePublicUrl = (value: unknown): string => {
     throw new Error('links are built by appending a path to it, so it can carry no query or fragment, not even an empty one.');
   }
   return parsed.href.replace(/\/+$/, '');
+};
+
+const LOOPBACK = new BlockList();
+LOOPBACK.addSubnet('127.0.0.0', 8, 'ipv4');
+LOOPBACK.addAddress('::1', 'ipv6');
+
+/**
+ * Whether an IP address, as `server.address()` or `dns.lookup` reports it, is
+ * on this machine only: 127.0.0.0/8 or `::1`, IPv4-mapped forms included. A
+ * wildcard (`0.0.0.0`, `::`) is not: it is every interface. A name is not an
+ * address and is never loopback here; `bindsLoopback` resolves one.
+ */
+export const isLoopbackAddress = (address: string): boolean => {
+  const family = isIP(address);
+  return family !== 0 && LOOPBACK.check(address, family === 4 ? 'ipv4' : 'ipv6');
+};
+
+/** Resolves a host the way `net.Server.listen` does; a parameter so tests can stand in for /etc/hosts. */
+export type HostLookup = (host: string) => Promise<{ address: string }>;
+
+/**
+ * Whether listening on `host` keeps the listener on this machine. The one
+ * rule for "is this exposed", shared by `serve`'s warning and `doctor`, so
+ * they cannot disagree about an address. (The control API decides from the
+ * address it actually bound, with `isLoopbackAddress`.)
+ *
+ * Decided by resolving the host the way `listen` does, not by reading its
+ * spelling: `127.1`, `localhost.` and an /etc/hosts alias such as
+ * `ip6-localhost` all bind loopback, and no spelling rule knows the aliases.
+ * A host that does not resolve cannot be bound either, so it is not loopback.
+ */
+export const bindsLoopback = async (host: string, lookup: HostLookup = lookupHost): Promise<boolean> => {
+  try {
+    return isLoopbackAddress((await lookup(host)).address);
+  } catch {
+    return false;
+  }
 };
 
 const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {

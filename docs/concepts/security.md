@@ -247,5 +247,8 @@ little a steered agent can do. For an agent that browses or searches:
 The control API binds `127.0.0.1` and exists only when its package is
 installed. Cookie-authenticated requests are origin-bound; bearer ones are
 not, because a browser never attaches a bearer token on a page's behalf.
+On loopback it answers only to loopback names and the host of `api.publicUrl`,
+so a page that points its own name at `127.0.0.1` (DNS rebinding) is refused
+before any route runs. Binding beyond loopback is warned about at every start.
 Reaching a machine from outside goes through a tunnel, not a public bind.
 ([Remote access](../guides/remote-access.md))

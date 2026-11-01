@@ -31,8 +31,8 @@ open port, so presence of this package is the operator's declaration — and
     "enabled": true,
     "host": "127.0.0.1",
     "port": 4123,
-    // Optional: where you reach this daemon from elsewhere. Credential
-    // links are built on it; see "Adding a credential from a link" below.
+    // Optional: where you reach this daemon from elsewhere. A tunnel needs
+    // it (see below), and credential links are built on it.
     "publicUrl": "https://mac-mini.example.ts.net"
   }
 }
@@ -97,7 +97,20 @@ token, so pass it with `--token` or `STRATUS_GATEWAY_TOKEN`.
 
 **Localhost is the posture.** To reach a machine at home, put it behind a
 tunnel (Tailscale is the pattern we recommend) rather than binding a public
-interface.
+interface, and **set `api.publicUrl` to the tunnel's address**, like
+`https://mac-mini.example.ts.net`. A daemon on loopback answers only to
+`localhost`, `127.0.0.1`, `[::1]` and that address, because a web page can
+point a name of its own at `127.0.0.1` (DNS rebinding) and reach the port that
+way. A tunnel passes its public name through the same way, so without
+`api.publicUrl` every request through it gets `403 host_not_allowed`, whose
+message names the setting. Then `stratus restart`.
+
+Binding anything other than loopback (`api.host` or `--api-host`, such as
+`0.0.0.0` or a LAN address) skips that check, since the daemon cannot know
+which names it is reached by. `stratus serve` warns about it at every start,
+and `stratus doctor` notes it under Daemon. The container image binds
+`0.0.0.0` inside the container on purpose and publishes the port on the
+host's `127.0.0.1`, so that warning is expected there.
 
 ## Adding a credential from a link
 

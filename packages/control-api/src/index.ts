@@ -9,9 +9,12 @@ import { gatewayInfoPath, normalizePublicUrl, type StateEnvironment } from '@str
 import { WebSocketServer } from 'ws';
 
 import {
+  allowedHostNames,
   allowedOrigins,
   createAuthenticator,
   ensureGatewayToken,
+  hostAllowed,
+  hostName,
   originAllowed,
   type Authenticator,
   type DashboardSession,
@@ -177,6 +180,24 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       throw new Error(`Invalid publicUrl for the control API: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  // On a loopback bind, the names a request may address it by; see
+  // `allowedHostNames` for why, and why a tunnel needs `publicUrl` for it.
+  // Set once `listen` has bound, from the address it bound: no request can
+  // arrive before that.
+  let hostNames: Set<string> | undefined;
+  const refuseForeignHost = (request: IncomingMessage): void => {
+    if (hostNames === undefined || hostAllowed(hostNames, request.headers.host)) {
+      return;
+    }
+    const asked = hostName(request.headers.host ?? '');
+    throw new ApiError(
+      403,
+      'host_not_allowed',
+      `This control API answers only to ${[...hostNames].join(', ')}, not to ${asked ?? 'the address this request named'}. `
+        + 'Reaching it through a tunnel or a proxy? Set api.publicUrl in the config to the address you use'
+        + `${asked !== undefined ? ` (like https://${asked})` : ''}, then run \`stratus restart\`.`,
+    );
+  };
 
   let server: Server | undefined;
   let wss: WebSocketServer | undefined;
@@ -285,6 +306,9 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> => {
+    // Before anything is answered, the route that needs no credential
+    // included: a rebinding page reaches every route a tunnel does.
+    refuseForeignHost(request);
     const requestUrl = new URL(request.url ?? '/', url ?? `http://${authority(host, 0)}`);
 
     if (requestUrl.pathname.startsWith('/api/')) {
@@ -317,6 +341,10 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   };
 
   const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    if (!hostAllowed(hostNames, request.headers.host)) {
+      refuseUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
     const requestUrl = new URL(request.url ?? '/', url ?? `http://${authority(host, 0)}`);
     if (requestUrl.pathname !== `${API_PREFIX}/events`) {
       refuseUpgrade(socket, 404, 'Not Found');
@@ -494,6 +522,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       if (!address || typeof address === 'string') {
         throw new Error('The control API could not determine the address it bound.');
       }
+      hostNames = allowedHostNames(address.address, host, publicUrl);
       url = `http://${authority(host, address.port)}`;
       origins = allowedOrigins(host, address.port);
       await writeGatewayInfo();

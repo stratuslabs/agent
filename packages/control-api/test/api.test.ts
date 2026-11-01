@@ -1726,7 +1726,8 @@ test('the version the API reports is the version it was published as', async () 
 });
 
 test('the sign-in link points where the caller reached the daemon', async () => {
-  const harness = await startApi();
+  // The tunnel's name is `api.publicUrl`'s, which a loopback daemon answers to.
+  const harness = await startApi({ options: { publicUrl: 'https://gateway.example' } });
   try {
     const port = Number(new URL(harness.url).port);
     // A caller arriving through a TLS-terminating tunnel, which is the
