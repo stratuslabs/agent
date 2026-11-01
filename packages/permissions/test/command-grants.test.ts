@@ -16,6 +16,7 @@ import {
   type CommandScope,
   type PermissionDecision,
 } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 const layout = async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-names-'));
@@ -106,7 +107,7 @@ test('one grep grant runs a chained, piped grep inside the workspace, and cd nev
     onDecision: (decision) => decisions.push(decision),
     commands: { grantRootFor: () => workspace, names: namesStore(['grep']) },
   });
-  const allowed = (command: string, cwd = workspace) => policy.approve(contextFor(cwd, command));
+  const allowed = async (command: string, cwd = workspace) => ran(await policy.approve(contextFor(cwd, command)));
 
   // The card's acceptance line.
   assert.equal(await allowed('cd app && grep -r export . | head'), true);
@@ -119,23 +120,23 @@ test('one grep grant runs a chained, piped grep inside the workspace, and cd nev
   // cd, pwd, echo, true and false need no grant at all.
   const bare = createPermissionPolicy({ mode: 'headless', commands: { grantRootFor: () => workspace } });
   for (const command of ['cd app', 'cd /', 'cd', 'cd app && pwd', 'echo hello world', 'true', 'false || true', 'cd .. && cd -']) {
-    assert.equal(await bare.approve(contextFor(repo, command)), true, command);
+    assert.equal(ran(await bare.approve(contextFor(repo, command))), true, command);
   }
   // Nor do the plain workspace readers, with autonomy off.
   for (const command of ['cat src/main.ts', 'head -5 src/main.ts', 'tail -n 2 src/main.ts', 'ls -la', 'cd src && cat main.ts | head -1']) {
-    assert.equal(await bare.approve(contextFor(repo, command)), true, command);
+    assert.equal(ran(await bare.approve(contextFor(repo, command))), true, command);
   }
   // But echo may not expand anything, and grep still needs its grant.
-  assert.equal(await bare.approve(contextFor(repo, 'echo $HOME')), false);
+  assert.equal(ran(await bare.approve(contextFor(repo, 'echo $HOME'))), false);
   // Double quotes don't stop `$`: `echo "$TOKEN"` prints the variable too.
   for (const command of ['echo "$HOME"', 'echo "token=$HOME"', 'cat "$HOME/x"', 'echo "$1"', 'echo "$$"', 'echo "$_x"']) {
-    assert.equal(await bare.approve(contextFor(repo, command)), false, command);
+    assert.equal(ran(await bare.approve(contextFor(repo, command))), false, command);
   }
   // An escaped `\$` and single quotes are text.
   for (const command of ['echo "cost \\$5"', "echo '$HOME'", 'echo "costs $ 5"', 'echo "end$"']) {
-    assert.equal(await bare.approve(contextFor(repo, command)), true, command);
+    assert.equal(ran(await bare.approve(contextFor(repo, command))), true, command);
   }
-  assert.equal(await bare.approve(contextFor(repo, 'cd src && grep -r x .')), false);
+  assert.equal(ran(await bare.approve(contextFor(repo, 'cd src && grep -r x .'))), false);
 });
 
 test('a granted command still asks when it points outside the workspace', async () => {
@@ -144,7 +145,7 @@ test('a granted command still asks when it points outside the workspace', async 
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['grep', 'cat', 'rm', 'cp', 'curl']) },
   });
-  const allowed = (command: string, cwd = repo) => policy.approve(contextFor(cwd, command));
+  const allowed = async (command: string, cwd = repo) => ran(await policy.approve(contextFor(cwd, command)));
 
   for (const command of [
     `grep token ${outside}`,
@@ -195,7 +196,7 @@ test('rmdir by name never takes --parents, which walks up past the path it was g
     mode: 'headless',
     commands: { grantRootFor: () => repo, names: namesStore(['rmdir']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   // `rmdir -p /in/root/empty` goes on to remove every empty ancestor,
   // including the grant root and directories above it.
   for (const command of [
@@ -215,7 +216,7 @@ test('redirections run inside the workspace and ask outside it', async () => {
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['grep']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
 
   for (const command of [
     'grep -r x src > hits.txt',
@@ -246,7 +247,7 @@ test('a chain runs only when every part would, and the risky commands are never 
     // Even when a hand-edited store says so.
     commands: { grantRootFor: () => workspace, names: namesStore(['grep', 'sudo', 'sh', 'git', 'xargs']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   assert.equal(await allowed('cd src && grep x main.ts && curl https://example.com'), false);
   assert.equal(await allowed('grep -l x src | xargs rm'), false);
   assert.equal(await allowed('sudo grep x src'), false);
@@ -261,10 +262,10 @@ test('a chain runs only when every part would, and the risky commands are never 
       workspace: { directoryFor: () => workspace },
     },
   });
-  assert.equal(await scoped.approve(contextFor(repo, 'cd src && git push origin main')), true);
-  assert.equal(await scoped.approve(contextFor(repo, 'cd src && git push --force origin main')), false);
+  assert.equal(ran(await scoped.approve(contextFor(repo, 'cd src && git push origin main'))), true);
+  assert.equal(ran(await scoped.approve(contextFor(repo, 'cd src && git push --force origin main'))), false);
   // And never as the end of a pipe from a workspace read.
-  assert.equal(await scoped.approve(contextFor(repo, 'cat src/main.ts | git push origin main')), false);
+  assert.equal(ran(await scoped.approve(contextFor(repo, 'cat src/main.ts | git push origin main'))), false);
 });
 
 test('a conversation that read external content loses its by-name grants', async () => {
@@ -274,10 +275,10 @@ test('a conversation that read external content loses its by-name grants', async
     gateExternalContent: () => true,
     commands: { grantRootFor: () => workspace, names: namesStore(['grep']) },
   });
-  assert.equal(await policy.approve(contextFor(repo, 'grep -r x src')), true);
-  assert.equal(await policy.approve(contextFor(repo, 'grep -r x src', sessionFor('nova', true))), false);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'grep -r x src'))), true);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'grep -r x src', sessionFor('nova', true)))), false);
   // cd and the workspace readers are not grants, so they survive it.
-  assert.equal(await policy.approve(contextFor(repo, 'cd src && cat main.ts', sessionFor('nova', true))), true);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'cd src && cat main.ts', sessionFor('nova', true)))), true);
 });
 
 test('always on a grep grants grep by name, and always on a chain grants what it was missing', async () => {
@@ -297,24 +298,24 @@ test('always on a grep grants grep by name, and always on a chain grants what it
       whitelist: { scopesFor: async () => [...scopes], remember: async (_agent, scope) => { scopes.push(scope); } },
     },
   });
-  assert.equal(await policy.approve(contextFor(repo, 'grep -rn TODO src')), true);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'grep -rn TODO src'))), true);
   assert.match(asked[0]!, /always grep for nova, inside its workspace, until revoked/);
   assert.deepEqual(names.grants.map((grant) => grant.command), ['grep']);
 
   // Now it runs, without the pattern it was approved with.
   const headless = createPermissionPolicy({ mode: 'headless', commands: { grantRootFor: () => workspace, names } });
-  assert.equal(await headless.approve(contextFor(repo, 'cd src && grep -r export . | head')), true);
+  assert.equal(ran(await headless.approve(contextFor(repo, 'cd src && grep -r export . | head'))), true);
 
-  assert.equal(await policy.approve(contextFor(repo, 'cd src && wc -c main.ts && git push origin nova/x')), true);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'cd src && wc -c main.ts && git push origin nova/x'))), true);
   assert.match(asked[1]!, /always wc, git push for nova, inside its workspace/);
   assert.deepEqual(names.grants.map((grant) => grant.command), ['grep', 'wc']);
   assert.deepEqual(scopes.map((scope) => [scope.command, ...(scope.args ?? [])]), [['git', 'push']]);
 
   // Nothing to remember when what blocked the line was not a command.
-  assert.equal(await policy.approve(contextFor(repo, 'grep x src > /tmp/elsewhere')), true);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'grep x src > /tmp/elsewhere'))), true);
   assert.match(asked[2]!, /not remembered/);
   // Nor for a command that can never be granted either way.
-  assert.equal(await policy.approve(contextFor(repo, 'grep x src | sh')), true);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'grep x src | sh'))), true);
   assert.match(asked[3]!, /not remembered/);
 });
 
@@ -335,9 +336,9 @@ test('by-name grants persist in their own key, list beside scopes, and revoke by
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: store, whitelist: store },
   });
-  assert.equal(await policy.approve(contextFor(repo, 'cd src && grep -r x .')), true);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'cd src && grep -r x .'))), true);
   assert.equal(await store.forgetScope('nova', 'grep'), true);
-  assert.equal(await policy.approve(contextFor(repo, 'cd src && grep -r x .')), false, 'a revoke is the next call\'s answer');
+  assert.equal(ran(await policy.approve(contextFor(repo, 'cd src && grep -r x .'))), false, 'a revoke is the next call\'s answer');
   assert.equal(await store.forgetScope('nova', 'grep'), false);
   assert.deepEqual((await store.grantsFor('nova')).scopes.map((scope) => scope.command), ['git'], 'the scope beside it is untouched');
 });
@@ -360,7 +361,7 @@ test('shell keywords are syntax, not commands: a line with them is never read or
   // Even a hand-edited store naming every keyword grants none of them.
   const names = namesStore(['if', 'then', 'fi', 'else', 'elif', 'do', 'done', 'for', 'while', 'until', 'case', 'esac', 'in', 'select', 'function', 'coproc']);
   const policy = createPermissionPolicy({ mode: 'headless', commands: { grantRootFor: () => workspace, names } });
-  assert.equal(await policy.approve(contextFor(repo, 'if true; then sh -c id; fi')), false);
+  assert.equal(ran(await policy.approve(contextFor(repo, 'if true; then sh -c id; fi'))), false);
   for (const keyword of ['if', 'then', 'fi', 'do', 'done', 'while', 'case', 'in']) {
     assert.equal(grantableByName(keyword), false, keyword);
   }
@@ -376,7 +377,7 @@ test('a by-name grant is only for commands that read and write paths, never ones
       names: namesStore(['tar', 'vitest', 'eslint', 'prettier', 'jest', 'tsc', 'pytest', 'curl', 'wget', 'patch', 'split', 'jq', 'rg', 'sort', 'wc', 'diff', 'md5sum', 'file', 'sha256sum']),
     },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   for (const command of [
     // Codex P1 4309037777: tar runs its checkpoint action.
     "tar -cf archive.tar --checkpoint=1 --checkpoint-action='exec=touch pwned' .",
@@ -423,7 +424,7 @@ test('a glob a by-name grant covers never expands into a flag, and nothing grant
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['rg', 'cat', 'printf']) },
   });
-  const allowed = (command: string, cwd = repo) => policy.approve(contextFor(cwd, command));
+  const allowed = async (command: string, cwd = repo) => ran(await policy.approve(contextFor(cwd, command)));
   assert.equal(await allowed('rg *'), false, 'rg * would expand to --pre=sh');
   assert.equal(await allowed('rg x -- *'), false, 'still a word the shell globs into a flag-shaped name');
   // A glob in a directory with no flag-shaped names still runs, and one
@@ -446,7 +447,7 @@ test('a by-name grant covers only the flags it lists, spelled out in full', asyn
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['grep', 'rg', 'sort', 'wc', 'cp', 'rm', 'mkdir', 'diff', 'test']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   for (const command of [
     // Codex P1 4309279991: GNU takes an unambiguous abbreviation of a long option.
     'sort --files0-f=src/list src/main.ts',
@@ -496,7 +497,7 @@ test('cp is never granted by name, since it writes destinations no operand names
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['cp']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   assert.equal(grantableByName('cp'), false);
   assert.equal(await allowed('cp source dest'), false);
   assert.equal(await allowed('cp -r src dest'), false);
@@ -516,7 +517,7 @@ test('diff is never granted by name, since comparing directories reads children 
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['diff']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   assert.equal(grantableByName('diff'), false);
   assert.equal(await allowed('diff a b'), false);
   assert.equal(await allowed('diff a b/f'), false);
@@ -533,7 +534,7 @@ test('file and shasum are never granted by name, since each reads code or data n
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['file', 'shasum']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   assert.equal(grantableByName('file'), false);
   assert.equal(grantableByName('shasum'), false);
   assert.equal(grantableByName('sha256sum'), true);
@@ -578,7 +579,7 @@ test('a path checked before the line runs is not trusted after a command that ca
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['rm', 'mv', 'cp', 'ln', 'cat', 'mkdir', 'grep']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   assert.equal(await allowed('rm -rf safe && mv staged safe && cat safe/link'), false);
   assert.equal(await allowed('mv staged safe; cat safe/link'), false);
   assert.equal(await allowed('cp -R staged safe2 && cat safe2/link'), false);
@@ -622,7 +623,7 @@ test('a command that changes the shell itself never runs in a line with others',
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['export']), whitelist: { scopesFor: async () => scopes, remember: async () => {} } },
   });
-  assert.equal(await headless.approve(contextFor(repo, 'export PATH=.; uname')), false);
+  assert.equal(ran(await headless.approve(contextFor(repo, 'export PATH=.; uname'))), false);
   const remembered: CommandScope[] = [];
   const asked: string[] = [];
   const interactive = createPermissionPolicy({
@@ -633,7 +634,7 @@ test('a command that changes the shell itself never runs in a line with others',
     },
     commands: { grantRootFor: () => workspace, names: namesStore(), whitelist: { scopesFor: async () => [], remember: async (_a, scope) => { remembered.push(scope); } } },
   });
-  assert.equal(await interactive.approve(contextFor(repo, 'export PATH=.; uname')), true);
+  assert.equal(ran(await interactive.approve(contextFor(repo, 'export PATH=.; uname'))), true);
   assert.match(asked[0]!, /not remembered/);
   assert.deepEqual(remembered, []);
 });
@@ -644,7 +645,7 @@ test('a by-name grant on rg covers only a search with every ignore file turned o
     mode: 'headless',
     commands: { grantRootFor: () => workspace, names: namesStore(['rg']) },
   });
-  const allowed = (command: string) => policy.approve(contextFor(repo, command));
+  const allowed = async (command: string) => ran(await policy.approve(contextFor(repo, command)));
   // Codex P1 4315569693: without --no-ignore, ripgrep opens .ignore,
   // .rgignore, .gitignore, parent and global ignore files and a linked
   // worktree's info/exclude, none of them an operand anyone checked.

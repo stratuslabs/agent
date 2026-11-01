@@ -187,6 +187,12 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px
 .bubble.assistant { align-self: flex-start; background: var(--surface-sunken); border: 1px solid var(--border); }
 .bubble.tool { align-self: flex-start; background: none; border: 1px dashed var(--border); color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .bubble.streaming::after { content: '▍'; opacity: 0.6; }
+/* The permission decision beside a call: what was decided and by which check. */
+.bubble.tool .decision { margin-left: 8px; padding: 0 6px; border-radius: 6px; border: 1px solid currentColor; font-size: 11px; }
+.bubble.tool .decision.ok { color: var(--muted); }
+.bubble.tool .decision.warn { color: var(--warn); }
+.bubble.tool .decision.bad { color: var(--danger); }
+.bubble.tool .decision-reason { margin-top: 4px; color: var(--text); white-space: normal; }
 .composer { display: flex; gap: 8px; margin-top: 14px; align-items: flex-end; }
 .composer textarea { min-height: 44px; max-height: 160px; }
 
