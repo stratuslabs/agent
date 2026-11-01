@@ -388,7 +388,8 @@ Soul files:
   A soul file is markdown with frontmatter (name, provider, model, tools, skills, credentials, delegates)
   followed by the agent's persona in prose. See examples/souls/blair.md.
   "tools" takes exact names or a whole toolset: tools: [fs.read, fs.search] or
-  tools: [fs.*]. Omitted means every registered tool.
+  tools: [fs.*], or tools: ["*"] for every tool. Omitted means only the safe tools (reads and memory),
+  or every tool on a home set up before 0.14.3.
   "delegates" lists the agent ids this agent may hand work to with agent.delegate,
   or ['*'] for anyone on the roster; omitted means nobody.
   "skills" is the same allowlist shape over installed skills (see stratus

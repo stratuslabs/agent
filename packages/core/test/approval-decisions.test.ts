@@ -49,7 +49,7 @@ const callWith = async (approvals: ApprovalPolicy): Promise<Outcome> => {
     outcome.events.push(event);
   });
   await runner.initialize();
-  const session = await runner.run({ sessionId: 's1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'go' });
+  const session = await runner.run({ sessionId: 's1', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go' });
   outcome.result = session.messages.find((message) => message.toolResult?.callId === 'c1')?.toolResult;
   return outcome;
 };

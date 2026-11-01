@@ -157,4 +157,4 @@ The reasoning:
 The full index: [docs](https://github.com/stratuslabs/agent/blob/main/docs/README.md).
 
 Part of [Stratus Agent](https://github.com/stratuslabs/agent) — a tiny
-TypeScript agent runtime, MIT licensed.
+TypeScript agent runtime, Apache 2.0 licensed.

@@ -66,25 +66,37 @@ tools: [fs.read, fs.search, web.fetch]
 
 `fs.*` grants a whole toolset, so an agent given "the filesystem" does not
 need editing every time the pack gains a tool. The prefix keeps its dot:
-`fs.*` never matches `fsx.read`. Omitting the key grants every registered
-tool, which is fine for a private agent and is not what you want once a
-shell is installed.
+`fs.*` never matches `fsx.read`. `tools: ["*"]` grants every registered
+tool, which is fine for a private agent and is what setup, `stratus agent
+new` and the dashboard write into a new soul, so you can see it and narrow
+it once a shell is installed.
 
-**Omitting `tools:` and writing `tools: []` are opposites.** No key grants
-everything; an empty list grants nothing. Because no key fails open, the
-daemon says so for every roster soul that has none, each time it loads
-the roster:
+**Omitting `tools:`, `tools: []` and `tools: ["*"]` are three different
+grants.** No key grants only the tools registered at risk `safe` (reads,
+search and memory, plus any tool an operator re-rated as safe); an empty
+list grants nothing; `"*"` grants everything. The daemon names every roster
+soul with no key each time it loads the roster, because an agent that
+cannot run a shell or send a message and does not say why is hard to
+diagnose:
 
 ```
-agent blair has no tools: list, so it may call every tool this daemon loads — add tools: [...] to ~/.stratus/agents/blair.md to say which
+agent blair has no tools: list, so it gets only safe tools (reads and memory) — add tools: [...] to ~/.stratus/agents/blair.md to give it more, or tools: ["*"] for every tool
 ```
+
+That is the rule on a home set up with 0.14.3 or later. Until 0.14.3 an
+omitted key meant every registered tool, and **on a home an older build
+already used it still does**, so upgrading changes nothing an existing
+agent can do. State migration `0005-safe-tools-default` records which kind
+of home this is; it writes no soul. On such a home the daemon's line keeps
+its old wording (`so it may call every tool this daemon loads`), and
+giving a soul a list narrows it the same way it always did.
  A bare `tools:` with nothing
 indented under it is the empty list — the shape you get by writing the key
 and not filling it, or by deleting the last entry — so that one is warned
 about too:
 
 ```
-agent blair has an empty tools: list, which grants nothing — remove the key to allow every registered tool, or list the ones it should have
+agent blair has an empty tools: list, which grants nothing — list the tools it should have, or write tools: ["*"] to allow every registered tool
 ```
 
 **An entry naming a tool nothing provides is inert, and says so.** A `fs.*`
@@ -124,7 +136,7 @@ nothing: the reader loads a skill's instructions, and the tools those
 instructions call for are still not there.
 
 **A daemon tool named in a local run is a right name in the wrong
-process.** `schedule.*`, `message.send`, `message.read`, `channel.create`, `channel.join`, `channel.invite`,
+process.** `schedule.*`, `message.send`, `message.say`, `message.read`, `channel.create`, `channel.join`, `channel.invite`,
 `channel.archive`, `agent.delegate`, and `credential.request` need the
 dispatcher, the store, and the channels, so only `stratus serve` registers
 them. A soul that uses them is correct; `stratus run` just cannot call it,
@@ -281,7 +293,10 @@ spawn every server you configured. Two consequences worth knowing:
   A registered tool may raise itself further, and `shell.run` and
   `browser.act` are then judged per call ([Shell commands](./shell.md),
   [Browser actions](./browser.md)), so `gated` there means "judged", not
-  "refused".
+  "refused". It is also why a soul with no `tools:` list, which gets only
+  the tools that register as safe, is named apart on a `safe` row with no
+  override: `fs.read  safe → blair; quiet if it registers as safe`. Only
+  the running daemon sees the risk the tool registers at.
 - **Where a gated call can be answered from is not only Slack.** The
   control API's `/approvals` endpoints list what is parked and settle it,
   so an agent with no Slack tokens is not necessarily unreachable. An agent
@@ -335,8 +350,8 @@ spawn every server you configured. Two consequences worth knowing:
   on, not a broken one.
 - **The built-in agent counts, and grants everything.** Unless a configured
   default soul takes the reserved `stratus` id over, the daemon registers
-  the built-in agent, and it has no `tools:` key — so it may call every
-  registered tool. On a fresh install it is the only agent there is, which
+  the built-in agent, which has no soul file and is given `tools: ["*"]` in
+  code — so it may call every registered tool. On a fresh install it is the only agent there is, which
   is why nothing there reads `granted to nobody`.
 - **The approvals line is about this machine, not just the mode.** `headless`
   refuses a gated call *last*, after the standing grants, the command scopes,

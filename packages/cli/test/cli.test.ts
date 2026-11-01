@@ -613,7 +613,7 @@ test('runCli skill add clones a git source — the transport skills.sh repos arr
   });
   await git('init', '--quiet');
   await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
-  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skills');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'skills');
 
   const { streams, output } = createStreams();
   const exitCode = await runCli({
@@ -645,7 +645,7 @@ test('runCli skill add of a repo whose root is a nameless skill refuses it, sugg
   });
   await git('init', '--quiet');
   await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
-  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skill');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'skill');
 
   const { streams, output } = createStreams();
   const exitCode = await runCli({
@@ -968,6 +968,56 @@ test('a soul listing only tools nothing provides is warned about, and still runs
   assert.equal(exitCode, 0);
   assert.match(output.stderr, /Warning: agent blair lists tools nothing registered provides: fs\.\*, memory\.rememberr/);
   assert.match(output.stderr, /Warning: agent blair has an allowlist that grants nothing/);
+});
+
+test('stratus run names a soul with no tools list, which gets only the safe tools', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const soulPath = path.join(home, 'souls', 'quiet.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(soulPath, '---\nname: Quiet\nid: quiet\n---\n\nYou are Quiet.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: soulPath })}\n`);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  // The daemon says this at roster load; a local run has to as well, or an
+  // agent that cannot run the shell here and does not say why is the result.
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Warning: agent quiet has no tools: list, so it gets only safe tools \(reads and memory\)/);
+});
+
+test('on a home an older build set up, stratus run keeps a soul with no tools list on every tool and leaves the soul alone', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const soulPath = path.join(home, 'souls', 'quiet.md');
+  const soul = '---\nname: Quiet\nid: quiet\n---\n\nYou are Quiet.\n';
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(soulPath, soul);
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: soulPath })}\n`);
+  // What 0.14.2 left behind.
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stderr, /state migration 0005-safe-tools-default: this home predates the safe-tools default, so its souls with no tools: list keep every tool/);
+  assert.doesNotMatch(output.stderr, /has no tools: list/);
+  assert.equal(await readFile(soulPath, 'utf8'), soul, 'no soul is rewritten');
 });
 
 test('the CLI never imports the gateway at module scope', async () => {
@@ -7662,11 +7712,11 @@ test('setup enables a plugin and writes the setting it is useless without', asyn
     '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes', '~/work'] },
   });
   // No soul files, so the roster is the built-in `stratus` agent — which
-  // has no `tools:` key and is therefore allowlisted for every registered
-  // tool. Enabling granted capability here and now, and the line has to
-  // say so: this is the commonest configuration there is, and claiming
-  // "no agent can call it yet" would understate what just happened.
-  assert.match(output.stdout, /Stratus \(stratus\) has no `tools:` list, which means every registered tool/);
+  // says `tools: ["*"]` in code and is therefore allowlisted for every
+  // registered tool. Enabling granted capability here and now, and the line
+  // has to say so: this is the commonest configuration there is, and
+  // claiming "no agent can call it yet" would understate what just happened.
+  assert.match(output.stdout, /Stratus \(stratus\) has `tools: \["\*"\]`, which means every registered tool/);
   // One agent, five tools: the verb follows neither count, because the
   // sentence names the agent as the one that calls.
   assert.match(output.stdout, /So the next time the daemon starts, that agent can call fs\.read, fs\.list, fs\.search, fs\.write, fs\.move\./);
@@ -7706,6 +7756,71 @@ test('setup says a plugin grants nothing yet when every soul has a tools list', 
   // with or without the roster check.
   assert.match(output.stdout, /No agent can call it yet — every soul in the roster has a `tools:` list/);
   assert.match(output.stdout, /tools: \[fs\.read\]/);
+});
+
+test('setup does not count a soul with no tools list as able to call a plugin, and says why', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Takes the reserved id over so the roster holds this soul alone.
+  const soul = path.join(agentsDir, 'ava.md');
+  await writeFile(soul, '---\nname: Ava\nid: stratus\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // An omitted list is the safe tools now, not every tool, so enabling
+  // tool-fs granted this agent nothing that writes. It did grant fs.read,
+  // which is safe, so "no agent can call it" would be false (Codex P2
+  // 4430483703).
+  assert.match(output.stdout, /No soul's `tools:` list names what it contributes\. Ava \(stratus\) has no list, so it gets only the ones registered as safe/);
+  assert.doesNotMatch(output.stdout, /No agent can call it yet/);
+  assert.doesNotMatch(output.stdout, /which means every registered tool/);
+});
+
+test('on a home an older build set up, setup counts a soul with no tools list as having every tool, as it always did', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  const soul = path.join(agentsDir, 'ava.md');
+  await writeFile(soul, '---\nname: Ava\nid: stratus\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Ava \(stratus\) has no `tools:` list, which means every registered tool\./);
+  assert.match(output.stdout, /Give a soul a `tools:` list to narrow that\./);
+  assert.doesNotMatch(output.stdout, /only the ones registered as safe|only the tools registered as safe/);
 });
 
 test('setup names the browser tool-browser needs but cannot install', async () => {
@@ -8255,10 +8370,10 @@ test('setup does not call a plugin callable by an agent its required setting mis
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
   // Ava has the roots; the built-in `stratus` agent is seeded into every
-  // roster and has neither a `tools:` list nor an override. Being
-  // allowlisted for every registered tool buys it nothing here — tool-fs
-  // resolves an empty roots list for it and throws on the first call.
-  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // roster with `tools: ["*"]` and no override. Being allowlisted for
+  // every registered tool buys it nothing here — tool-fs resolves an empty
+  // roots list for it and throws on the first call.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\ntools: ["*"]\n---\n\nYou are Ava.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'anthropic',
     plugins: {
@@ -8281,11 +8396,11 @@ test('setup does not call a plugin callable by an agent its required setting mis
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Ava \(ava\) has no `tools:` list/);
+  assert.match(output.stdout, /Ava \(ava\) has `tools: \["\*"\]`/);
   assert.match(output.stdout, /Stratus \(stratus\) is allowlisted too, but roots is not set for it/);
   // The claim the caveat replaces: naming stratus alongside ava as an
   // agent the filesystem tools are callable by.
-  assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have no `tools:` list/);
+  assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have `tools:/);
 });
 
 test('setup enables a plugin after the roots prompt repairs the value that was wrong', async () => {
@@ -14517,13 +14632,40 @@ test('the example template in this repository installs', async () => {
   await stat(path.join(home, '.stratus', 'skills', 'meeting-notes', 'SKILL.md'));
 });
 
-test('a soul with no tools list is reviewed as unrestricted, not as "no tools"', async () => {
+test('a soul with no tools list is reviewed as safe tools only, and one listing * as every tool', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const source = await writeTemplateDir({
     'template.json': EXAMPLE_MANIFEST,
-    // No `tools:` line at all. `executeToolCall` skips the allowlist check
-    // for an undefined list, so this agent may call every registered tool —
-    // the opposite of the empty list it looks like.
+    // No `tools:` line at all: the safe tools, not the nothing an empty
+    // list grants and not the everything it used to be.
+    'agents/wide.md': '---\nname: Wide\n---\n\nI have no tools list.\n',
+    // A template asking for everything has to say `*`, and the review says
+    // that in the loudest words it has.
+    'agents/star.md': '---\nname: Star\ntools: ["*"]\n---\n\nI asked for everything.\n',
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stdout, /Wide \(wide\) — only safe tools \(reads and memory\), because the soul has no tools: list/);
+  assert.match(output.stdout, /Star \(star\) — EVERY tool, because the soul lists tools: \["\*"\]/);
+  assert.doesNotMatch(output.stdout, /Wide \(wide\) — no tools/);
+});
+
+test('on a home an older build set up, a template soul with no tools list is reviewed as every tool', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
     'agents/wide.md': '---\nname: Wide\n---\n\nI have no tools list.\n',
   });
 
@@ -14535,8 +14677,7 @@ test('a soul with no tools list is reviewed as unrestricted, not as "no tools"',
   });
 
   assert.equal(code, 0, output.stderr);
-  assert.match(output.stdout, /EVERY tool, because the soul has no tools: list/);
-  assert.doesNotMatch(output.stdout, /Wide \(wide\) — no tools/);
+  assert.match(output.stdout, /Wide \(wide\) — EVERY tool, because the soul has no tools: list/);
 });
 
 test('a soul whose id is already claimed by another file is refused, --force included', async () => {
@@ -15429,6 +15570,92 @@ test('plugins lets a configured soul take the built-in id over rather than listi
   // built-in is. `blair` is the fixture's roster soul, which also lists it.
   assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair']);
   assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
+});
+
+test('plugins does not show a grant to a soul with no tools: list as certain while the tool could still register riskier', async () => {
+  // Card 1038, from Codex on #510: a soul with no `tools:` list gets only the
+  // tools that *register* as safe. The report reads the manifest, and a tool
+  // object may raise its own risk at registration, so a manifest-safe tool
+  // is only probably safe. Shown as a plain arrow, the grant could name an
+  // agent the runner then refuses.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+
+  const json = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams: json.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(json.output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  const read = tools.find((tool) => tool.name === 'fs.read');
+  // The listed souls are certain; the unlisted one depends on the risk the
+  // tool registers at, which only a running daemon sees.
+  assert.deepEqual(read?.grantedTo, ['stratus', 'blair']);
+  assert.deepEqual(read?.grantedIfSafe, ['quiet']);
+  // Gated already, and registration only ever raises a risk: no grant to
+  // an unlisted soul, and nothing uncertain about it.
+  const write = tools.find((tool) => tool.name === 'fs.write');
+  assert.deepEqual(write?.grantedTo, []);
+  assert.equal(write?.grantedIfSafe, undefined);
+
+  const text = createStreams();
+  await runCli({ argv: ['plugins'], streams: text.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.match(text.output.stdout, /fs\.read\s+safe → stratus, blair; quiet if it registers as safe\n/);
+  assert.match(text.output.stdout, /fs\.list\s+safe → quiet if it registers as safe\n/);
+  assert.match(text.output.stdout, /fs\.write\s+gated → nobody, until a soul’s tools: list names it\n/);
+});
+
+test('plugins shows a soul with no tools: list as granted a tool the operator rated safe', async () => {
+  // An operator's `toolRisks` word replaces the object's own claim at
+  // registration, so a tool rated safe there is safe for certain.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.plugins['@stratusagent/tool-fs'].toolRisks = { 'fs.read': 'safe' };
+  await writeFile(configPath, JSON.stringify(config));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair', 'quiet']);
+  assert.equal(tools.find((tool) => tool.name === 'fs.read')?.grantedIfSafe, undefined);
+  // fs.list has no override, so it stays uncertain beside it.
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.list')?.grantedIfSafe, ['quiet']);
+});
+
+test('plugins shows every tool as granted to a soul with no tools: list on a home an older build set up', async () => {
+  // There an unlisted soul keeps every tool whatever it registers at, so
+  // nothing about the grant waits on the risk.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+  // What 0.14.2 left behind.
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair', 'quiet']);
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, ['quiet']);
+  assert.ok(tools.every((tool) => tool.grantedIfSafe === undefined));
 });
 
 test('plugins does not offer a stale Slack token as an approver route', async () => {

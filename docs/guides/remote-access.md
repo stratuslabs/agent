@@ -109,8 +109,9 @@ approver, a private channel with no approver in it), or where the agent is
 asked for one with `via: "link"`, the control API issues a **one-time link**
 instead, and the agent is handed it to pass on. Every agent can ask through
 a form, but a link only goes to an agent whose soul lists
-`credential.request` under `tools:` (or has no `tools:` key), because the
-link is a bearer credential:
+`credential.request` under `tools:` (by name, a glob, or `"*"`), because
+the link is a bearer credential. A soul with no `tools:` key gets forms
+only, except on a home set up before 0.14.3, where it may still get a link:
 
 ```
 https://mac-mini.example.ts.net/api/v1/credential-links/<token>

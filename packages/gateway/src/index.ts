@@ -67,6 +67,7 @@ import {
   imagesWithinReplayBudget,
   type ObserveEntry,
   matchesToolAllowlist,
+  resolveToolRisk,
   type JsonObject,
   type MemoryStoreContribution,
   type ProviderCallGuard,
@@ -75,6 +76,7 @@ import {
   type SteeredMessage,
   type StratusEvent,
   type ToolRisk,
+  type UnlistedTools,
   type TrustLevel,
 } from '@stratusagent/core';
 import {
@@ -85,6 +87,7 @@ import {
   createForgetTool,
   createPinTool,
   createMessageSendTool,
+  createMessageSayTool,
   createMessageReadTool,
   createChannelArchiveTool,
   createChannelCreateTool,
@@ -253,6 +256,7 @@ import {
   runsOnHarness,
   applySoulPins,
   assertStateCompatible,
+  unlistedToolsFor,
   stratusHomePath,
   intakeStatePath,
   fleetDbIn,
@@ -424,6 +428,8 @@ export interface GatewayChannelAdapter {
   credentialReplaceForms?: boolean;
   /** See `ChannelAdapter.credentialEnvForms`. */
   credentialEnvForms?: boolean;
+  /** See `ChannelAdapter.say`. */
+  say?(request: { sessionId: string; agentId: string; text: string }): Promise<void>;
   /**
    * Issues a one-time link to a form for a credential request, for the
    * agent to pass on: what a request falls back to when its conversation
@@ -888,6 +894,13 @@ export interface GatewayOptions {
    * a host that omits this lets a plugin double up on a host adapter.
    */
   hostChannelClaims?: Array<{ kind: string; agents: readonly string[] }>;
+  /**
+   * What an agent whose soul has no `tools:` list may call; see
+   * `AgentRunnerOptions.unlistedTools`. Omitted, the gateway asks the home
+   * (`unlistedToolsFor`): every tool on one an older build set up, safe
+   * tools only on a new one.
+   */
+  unlistedTools?: UnlistedTools;
   /**
    * The policy, or a factory that builds one from the gateway's approval
    * transport. Pass a factory whenever the policy parks turns on a human
@@ -2429,17 +2442,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
   /**
-   * Said at load, because the allowlist fails open: `tools` omitted is
-   * every registered tool, the opposite of what `skills` and `credentials`
-   * do when omitted, and a soul that never wrote the key holds `shell.run`
-   * the moment that plugin is enabled. The built-in agent is exempt — it
-   * has no file to add the key to.
+   * Read from the home once, on first use, which is after the migrations
+   * `serve` runs before it starts the gateway. It changes only when 0005
+   * first records it, and that happens before a daemon of this build runs.
+   */
+  let unlistedToolsRead: UnlistedTools | undefined;
+  const unlistedTools = (): UnlistedTools => options.unlistedTools ?? (unlistedToolsRead ??= unlistedToolsFor(env));
+  /**
+   * Said at load, because an omitted `tools` list is a quiet downgrade on a
+   * home this build set up: it is only the tools registered as safe, so an
+   * agent whose soul never wrote the key cannot run a shell, write a file
+   * or send a message, and nothing else says why. On a home an older build
+   * set up it is every tool, as it always was there, and the line says so
+   * the way it always did. The built-in agent is exempt: it has no file,
+   * and says `tools: ["*"]` in code.
    */
   const warnNoToolsList = (agentId: string, soulPath: string): void => {
-    warn(
-      `agent ${agentId} has no tools: list, so it may call every tool this daemon loads — `
-      + `add tools: [...] to ${soulPath} to say which`,
-    );
+    warn(unlistedTools() === 'every'
+      ? `agent ${agentId} has no tools: list, so it may call every tool this daemon loads — `
+        + `add tools: [...] to ${soulPath} to say which`
+      : `agent ${agentId} has no tools: list, so it gets only safe tools (reads and memory) — `
+        + `add tools: [...] to ${soulPath} to give it more, or tools: ["*"] for every tool`);
   };
 
   const defaultAgentId = async (): Promise<string> => {
@@ -2902,6 +2925,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const ts = typeof posted === 'object' && posted !== null ? (posted as { ts?: unknown }).ts : undefined;
     return typeof ts === 'string' && ts.length > 0 ? { id: ts } : {};
   }, { defaultThread: (session, destination) => scheduler.reportThreadFor(session, destination) }));
+  // A mid-task message goes where the conversation is, through the channel
+  // carrying this agent there, and nowhere else (card 1009). A session no
+  // channel started (a terminal run, a schedule nobody watches) has nobody
+  // to say it to before the reply.
+  tools.register(createMessageSayTool(async ({ session, text }) => {
+    const agentId = session.agent.id;
+    const kind = session.metadata?.channel;
+    const { adapter } = typeof kind === 'string'
+      ? channelCarrying(kind, agentId, (candidate) => candidate.say !== undefined)
+      : { adapter: undefined };
+    if (!adapter?.say) {
+      throw new Error(typeof kind === 'string'
+        ? `This conversation's channel (${kind}) cannot take a mid-task message. Say it in your reply.`
+        : 'This conversation is not in a channel that can take a mid-task message. Say it in your reply.');
+    }
+    await adapter.say({ sessionId: session.id, agentId, text });
+  }));
   // The same carrying rule again: a channel is created by the asking
   // agent's own app, whose token never leaves the adapter, and so becomes
   // that app's to post in and read.
@@ -3216,7 +3256,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // bearer credential the model is handed, and whoever it reaches can
     // store a key and amend the soul. That is the operator's to allow.
     const allowlist = session.agent.tools ?? registry.get(agentId)?.tools;
-    const linkAllowed = allowlist === undefined || matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
+    // An omitted list grants the safe tools, this one among them, but a
+    // link is the operator's to allow by naming it, so only a list says yes.
+    // On a home an older build set up an omitted list is every tool, and
+    // has always allowed a link there.
+    const linkAllowed = allowlist === undefined
+      ? unlistedTools() === 'every'
+      : matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
     // Why no form went up, said to the agent beside the link that replaces
     // it, so it can tell the person why they are getting a link instead.
     let formUnavailable: string | undefined;
@@ -3632,7 +3678,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (!Array.isArray(requested) || requested.some((name) => typeof name !== 'string' || name.length === 0)) {
       return 'A sub-agent\'s tools are a list of tool names.';
     }
-    const allowlist = parent.agent.tools;
+    // Read the way the runner reads it for the parent's own calls: the
+    // session's copy, else the registered agent's.
+    const allowlist = parent.agent.tools ?? registry.get(parent.agent.id)?.tools;
     for (const name of requested as string[]) {
       if (/[*?]/.test(name)) {
         return `A sub-agent's tools are exact names, and ${name} is a pattern.`;
@@ -3640,12 +3688,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (subAgentNeverGets(name)) {
         return `${name} is never given to a sub-agent, even by an agent that holds it.`;
       }
-      if (!tools.get(name)) {
+      const tool = tools.get(name);
+      if (!tool) {
         return `There is no tool named ${name}.`;
       }
       // The parent's allowlist as its running turn holds it: a slice can
-      // only narrow what that turn may already do.
-      if (allowlist !== undefined && !matchesToolAllowlist(name, allowlist)) {
+      // only narrow what that turn may already do. With no list, that is
+      // the tools registered as safe (every tool on a home an older build
+      // set up), and the slice is held to the same rule: naming a gated
+      // tool must not hand it to the sub-agent.
+      if (allowlist === undefined) {
+        if (unlistedTools() !== 'every' && resolveToolRisk(tool) !== 'safe') {
+          return `${name} is not a safe tool, and ${parent.agent.id}'s soul has no tools: list, so it gets only safe tools and a sub-agent of it cannot have ${name}.`;
+        }
+      } else if (!matchesToolAllowlist(name, allowlist)) {
         return `${name} is not one of ${parent.agent.id}'s tools, so a sub-agent of it cannot have it.`;
       }
     }
@@ -3841,6 +3897,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Asking a person for a key is harmless to grant: they decide
       // everything after the question, so no soul has to list it.
       grantedToEveryAgent: subAgent ? [] : [CREDENTIAL_REQUEST_TOOL_NAME],
+      unlistedTools: unlistedTools(),
       ...(subAgent ? {} : { skills: skillCatalog, memory }),
       streaming: true,
       ...(maxTurns !== undefined ? { maxTurns } : {}),
@@ -4418,8 +4475,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     input: DispatchInput,
     absorbedKeys: readonly string[] = [],
     subAgent?: AgentDefinition,
-    /** See `RunInput.steer`; passed by `dispatch` for an opted-in caller. */
-    steer?: () => Promise<SteeredMessage | undefined>,
+    /**
+     * See `RunInput.steer`; passed by `dispatch` for an opted-in caller.
+     * Handed the turn's own signal — the one the runner was given, which
+     * the watchdog, `abortTurns` and a restart's window abort as well as
+     * the callers — so it takes nothing into a turn that is already
+     * stopping (card 959).
+     */
+    steer?: (turnSignal: AbortSignal) => Promise<SteeredMessage | undefined>,
   ): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
@@ -4559,7 +4622,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           ...(hostedLoop ? { hostedLoop } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
-          ...(steer !== undefined ? { steer } : {}),
+          ...(steer !== undefined ? { steer: () => steer(signal) } : {}),
           signal,
         });
       }
@@ -4577,7 +4640,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(input.earlier !== undefined && input.earlier.length > 0 ? { earlier: input.earlier } : {}),
         metadata,
         runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata, subAgent !== undefined),
-        ...(steer !== undefined ? { steer } : {}),
+        ...(steer !== undefined ? { steer: () => steer(signal) } : {}),
         signal,
       });
     }));
@@ -5701,9 +5764,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // the others' answer with it. A turn with a caller who cannot cancel
       // has no signal to join.
       const joint = turnInput.signal !== undefined ? joinableSignal([turnInput.signal]) : undefined;
+      // Admitted on the turn's own signal, not only the callers' joint one:
+      // the watchdog, `abortTurns` and a restart's window stop the turn
+      // without touching its callers, and a batch taken into a turn stopped
+      // while the store was read would share its failure instead of running
+      // next (card 959). The turn's signal follows the joint one, so this
+      // covers every caller giving up too.
       const steer = mergeable
-        ? (): Promise<SteeredMessage | undefined> => takeSteered(input.sessionId, input.agentId, steered, (parts) => {
-          if (joint?.signal.aborted === true) {
+        ? (turnSignal: AbortSignal): Promise<SteeredMessage | undefined> => takeSteered(input.sessionId, input.agentId, steered, (parts) => {
+          if (turnSignal.aborted) {
             return false;
           }
           for (const part of parts) {

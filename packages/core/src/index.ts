@@ -397,8 +397,9 @@ export interface AgentDefinition extends AgentDescriptor {
   avatar?: AvatarTheme;
   /**
    * What this agent may call: exact tool names (`fs.read`), toolset globs
-   * (`fs.*`), or `*`. Omitted = every registered tool. See
-   * `matchesToolAllowlist`, which is the only reading of these entries.
+   * (`fs.*`), or `*` for every registered tool. Omitted = only the tools
+   * registered at risk `safe` (reads and memory), or every tool where the
+   * host passes `unlistedTools: 'every'`; see `toolPermitted` in the runner. `matchesToolAllowlist` is the only reading of the entries.
    */
   tools?: string[];
   /**
@@ -838,6 +839,9 @@ export type ProviderDelta =
  */
 export type ToolRisk = 'safe' | 'gated' | 'dangerous';
 
+/** What an agent with no `tools:` list may call; see `AgentRunnerOptions.unlistedTools`. */
+export type UnlistedTools = 'safe' | 'every';
+
 export const DEFAULT_TOOL_RISK: ToolRisk = 'gated';
 
 /** The declared risk, or the fail-closed default for a tool that omits it. */
@@ -1014,9 +1018,10 @@ const trustBeforeCallOf = async (tool: Pick<Tool, 'trustBeforeCall'>, session: S
  * The prefix carries its dot deliberately: `fs.*` matches `fs.read` and
  * does **not** match `fsx.read`, so a namespace cannot be widened by a
  * package that named itself to look like a prefix of another. A bare `*`
- * is every registered tool, which is the same thing as omitting the
- * allowlist and is accepted because a soul saying so explicitly is
- * clearer than one saying nothing.
+ * is every registered tool. That is not what omitting the allowlist means
+ * (an omitted list is only the tools registered as safe, on a home this
+ * build set up), so `*` is how a soul grants everything, and new souls are
+ * written with it.
  *
  * Exported because both gates use it — the descriptors a provider is shown
  * and the check before execution — and because a second reading of `fs.*`
@@ -1066,8 +1071,10 @@ export const matchesSkillAllowlist = (skillId: string, allowlist: readonly strin
  *
  * Advisory by design: it feeds the load-time warning for an agent enabling
  * a skill without the tools the skill expects, never an enforcement
- * decision. An omitted allowlist is every registered tool, so it covers
- * anything; a glob requirement is covered by the glob itself, by `*`, or
+ * decision. An omitted allowlist is the tools registered as safe, which a
+ * requirement's name cannot tell apart, so it stays quiet rather than
+ * guess (the daemon already names every soul without a list at load); a
+ * glob requirement is covered by the glob itself, by `*`, or
  * by any entry naming something inside the namespace.
  */
 export const toolAllowlistCovers = (
@@ -1171,11 +1178,13 @@ export interface ToolAllowlistOptions {
 }
 
 /**
- * Undefined when there is nothing to say: an agent with no `tools:` key is
- * allowed every registered tool and cannot name one that does not exist.
+ * Undefined when there is nothing to say: an agent with no `tools:` key
+ * names no entry, so it cannot name one that does not exist. (It is
+ * allowed only the tools registered as safe, which the daemon says at
+ * load.)
  *
- * An *empty* list is not that agent. Omitting the key grants everything
- * while `tools: []` grants nothing, and the parser keeps them apart — a
+ * An *empty* list is not that agent. Omitting the key grants the safe
+ * tools while `tools: []` grants nothing, and the parser keeps them apart — a
  * bare `tools:` with nothing under it lands here too, which is the shape
  * someone gets by writing the key and not filling it, or by deleting the
  * last entry. There are no entries to name, so the finding carries none.
@@ -1272,7 +1281,7 @@ export const describeToolAllowlistFinding = (
     && finding.elsewhere.length === 0) {
     return [
       `agent ${agentId} has an empty tools: list, which grants nothing`
-        + ' — remove the key to allow every registered tool, or list the ones it should have',
+        + ' — list the tools it should have, or write tools: ["*"] to allow every registered tool',
     ];
   }
   if (finding.unmatched.length > 0) {
@@ -3454,6 +3463,20 @@ export interface ProviderRequest {
    */
   mayContinue?: () => boolean;
   /**
+   * For a provider that runs its own tool loop: ask, right after a hosted
+   * call's result is in (`executeHostedToolCall`), for what somebody has
+   * said since the turn started — the step `RunInput.steer` covers for the
+   * runner's own loop, which never sees a harness's steps (card 958). A
+   * message handed back is already in the transcript, a `steered` user
+   * message right after that result with its keys and its sender's trust,
+   * so the provider must get it to the model before the model's next step,
+   * or fail the turn. Hands back nothing unless the newest message is a
+   * tool result. Absent when the turn has no `steer`, on a turn that may
+   * stay quiet, and on the wrap-up; a provider that cannot deliver a
+   * message mid-loop must not call it.
+   */
+  steer?: () => Promise<SteeredMessage | undefined>;
+  /**
    * Abort signal for the turn. Adapters MUST cancel their underlying
    * operation (HTTP request, SDK query) when it fires — racing the promise
    * is not cancellation; the underlying work has to stop.
@@ -4319,11 +4342,16 @@ export const promptTextOf = (
   options: PromptTextOptions = {},
 ): string => {
   if (message.overheard !== true) {
-    // Said to the agent, as written; a reply-optional one is told, when it
-    // is the turn's, that it may need nothing back (card 601).
-    return message.replyOptional === true && options.latest === true
-      ? `${message.content}\n\n${REPLY_OPTIONAL_NOTE}`
+    // Said to the agent, as written, and marked so when an overheard
+    // message comes before it in the same run (card 1034); a reply-optional
+    // one is told, when it is the turn's, that it may need nothing back
+    // (card 601).
+    const said = options.afterOverheard === true
+      ? (message.content.length > 0 ? `${SAID_TO_YOU_MARK}\n${message.content}` : SAID_TO_YOU_MARK)
       : message.content;
+    return message.replyOptional === true && options.latest === true
+      ? `${said}\n\n${REPLY_OPTIONAL_NOTE}`
+      : said;
   }
   const quoted = message.content
     .split(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/)
@@ -4331,6 +4359,60 @@ export const promptTextOf = (
     .join('\n');
   const framed = `(overheard, not addressed to you)\n${quoted}`;
   return options.latest === true ? `${framed}\n\n${UNADDRESSED_TURN_NOTE}` : framed;
+};
+
+/**
+ * What a message said to the agent starts with when an overheard message
+ * comes before it in the same run of user messages
+ * (`PromptTextOptions.afterOverheard`, card 1034).
+ *
+ * Such a run reaches the model as one turn: the Anthropic API path merges
+ * consecutive user messages into one user turn of several blocks, and the
+ * harness renderers join them into one string. The overheard frame at the
+ * top of that turn was then read as covering all of it. On a live Fly check
+ * claude-haiku-4-5 answered a person's tagged "what is 2+2?" under one
+ * overheard thread line with "I'm not in this conversation—you're
+ * overhearing something else", and in 10 of 10 replays of that exact
+ * request. With this mark it answered 10 of 10, as did claude-sonnet-4-5
+ * (9 of 10 without it). A sentence in the system prompt explaining the
+ * frame made both models worse (0 of 10), so the mark sits on the message.
+ * Like the frame, it states the fact, not advice, and an overheard message
+ * cannot produce it: every line of one is quoted.
+ */
+export const SAID_TO_YOU_MARK = '(said to you)';
+
+/**
+ * The messages said to the agent that an overheard message comes before
+ * in their run of user messages: the ones `promptTextOf` renders with
+ * `afterOverheard` (card 1034).
+ *
+ * A run is what a prompt hands the model as one turn. A reply ends it, and
+ * so does a tool call or result; a system message and the empty reply a
+ * silent turn records do not, since no prompt carries either between the
+ * messages around them. Only messages after the overheard one are marked:
+ * what comes later never changes how an earlier message rendered, so a
+ * prompt's earlier text stays the same from turn to turn.
+ */
+export const messagesAfterOverheard = <M extends Pick<Message, 'role' | 'content' | 'overheard' | 'toolCalls'>>(
+  messages: readonly M[],
+): ReadonlySet<M> => {
+  const marked = new Set<M>();
+  let overheard = false;
+  for (const message of messages) {
+    if (message.role === 'user') {
+      if (message.overheard === true) {
+        overheard = true;
+      } else if (overheard) {
+        marked.add(message);
+      }
+      continue;
+    }
+    const silent = message.role === 'assistant' && message.content.length === 0 && (message.toolCalls?.length ?? 0) === 0;
+    if (message.role !== 'system' && !silent) {
+      overheard = false;
+    }
+  }
+  return marked;
 };
 
 /**
@@ -4439,6 +4521,14 @@ export interface PromptTextOptions {
    * carried has been made.
    */
   latest?: boolean;
+  /**
+   * Whether an overheard message comes before this one in its run of user
+   * messages (`messagesAfterOverheard`). A message said to the agent then
+   * starts with `SAID_TO_YOU_MARK`, so the frame of the overheard one
+   * before it is not read as its own (card 1034). Ignored on an overheard
+   * message.
+   */
+  afterOverheard?: boolean;
 }
 
 /**
@@ -6760,7 +6850,7 @@ export const renderReplySection = (language: string | undefined): string => {
       'Short never means incomplete. When you are asked for a draft, a plan, an explanation, a review, or a document, deliver all of it at the depth asked for the first time. Cut repetition, never what was asked for, and always say plainly what is blocking you or what you are unsure of.',
       'A long deliverable belongs somewhere the person can open it, such as a file or page you can actually share, and the reply is the takeaway plus its real link. Never invent a link, and never assume a path on your own machine is one they can open. When you cannot share it, put the deliverable itself in the reply: a file saved where they cannot reach it has not been delivered.',
       'When someone asks you to do something that will take more than one quick lookup, your first words, before your first tool call, are one line saying what you are about to do, so they know the work has started and what it is. Skip that line for a question you can answer straight away or with one quick lookup, and for a message that was not addressed to you.',
-      'After that, send a progress update only when something has changed, keep it to a line, and never split one long answer across several messages.',
+      'After that, message the person mid-task only when you need them or it is worth their time, never to narrate your steps; keep it to a line, and never split one long answer across several messages.',
       'Carry on with work you have already been asked to do instead of asking permission for each step. Ask only the questions you cannot go on without, all of them at once, and keep doing the parts that do not depend on the answers.',
       'Before sending, ask whether this would be annoying to read on a phone; if it would, cut it.',
     ].join(' '),
@@ -7280,11 +7370,13 @@ export interface RunInput {
    *
    * Never asked before the first provider call, after an answer, once the
    * turn is out of steps (the wrap-up can't act on it, so it waits and
-   * runs as its own turn), on a turn nobody asked for (`addressed:
-   * false`, whose answer may be silence), or by a provider that hosts its
-   * own tool loop, whose steps the runner never sees. A host that omits it
-   * gets turns that hear nothing until they end, as before; what is handed
-   * over is the host's to answer for, since the runner only records it.
+   * runs as its own turn), or on a turn nobody asked for (`addressed:
+   * false`, whose answer may be silence). A provider that hosts its own
+   * tool loop, whose steps the runner never sees, asks through
+   * `ProviderRequest.steer` after each hosted call instead, if it can
+   * deliver a message mid-loop. A host that omits it gets turns that hear
+   * nothing until they end, as before; what is handed over is the host's
+   * to answer for, since the runner only records it.
    */
   steer?: () => Promise<SteeredMessage | undefined>;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
@@ -7994,6 +8086,14 @@ export interface AgentRunnerOptions {
    * decision about what is harmless to grant, which is the host's to make.
    */
   grantedToEveryAgent?: readonly string[];
+  /**
+   * What an agent with no `tools:` list may call. `safe`, the default, is
+   * the tools registered at risk `safe`. `every` is every registered tool,
+   * which is what an omitted list meant before, and what a host passes for
+   * a home set up by an older build so an upgrade takes nothing away. An
+   * agent with a list is held to its list either way.
+   */
+  unlistedTools?: UnlistedTools;
   /**
    * The skill catalog. Passing one makes `skill.read` available — the
    * runner registers it if the host has not — to exactly the agents whose
@@ -8738,11 +8838,29 @@ export class AgentRunner {
    * Whether this session's agent may call `name` under its `tools:` list,
    * or because the host grants it to every agent. Not for `skill.read`,
    * which has its own gate keyed on `skills:`.
+   *
+   * An omitted list is the tools registered at risk `safe`, and nothing
+   * else. It used to be every registered tool, which failed open: a soul
+   * that never wrote the key held `shell.run` the moment that plugin was
+   * enabled. The risk is the one the registry holds, so an operator's
+   * per-tool risk override counts, and `tools: ["*"]` is how a soul says
+   * "everything". A host passes `unlistedTools: 'every'` for a home an
+   * older build set up, where an omitted list keeps its old meaning. A name
+   * nothing registered is let through here so the call is refused as not
+   * found, the same as for any other agent.
    */
   private toolPermitted(name: string, allowedTools: readonly string[] | undefined): boolean {
-    return allowedTools === undefined
-      || (this.options.grantedToEveryAgent ?? []).includes(name)
-      || matchesToolAllowlist(name, allowedTools);
+    if ((this.options.grantedToEveryAgent ?? []).includes(name)) {
+      return true;
+    }
+    if (allowedTools === undefined) {
+      if (this.options.unlistedTools === 'every') {
+        return true;
+      }
+      const registered = this.tools.get(name);
+      return registered === undefined || resolveToolRisk(registered) === 'safe';
+    }
+    return matchesToolAllowlist(name, allowedTools);
   }
 
   /** The `skills:` entries this session's agent is held to — same sourcing as `allowedToolsFor`. */
@@ -9039,6 +9157,25 @@ export class AgentRunner {
             await announcePending();
             await this.guardProviderCall(session, provider);
           };
+          // The step the loop above steers at, for a provider whose loop is
+          // its own: right after one of its hosted calls has a result, so a
+          // user message there splits no call from its answer. The same
+          // turns go without: the wrap-up, and one that may stay quiet.
+          const steered = session;
+          const hostedSteer = steer !== undefined && !wrappingUp && !isReplyOptionalTurn(steered)
+            ? async (): Promise<SteeredMessage | undefined> => {
+              if (steered.messages.at(-1)?.role !== 'tool') {
+                return undefined;
+              }
+              throwIfAborted(signal);
+              const message = await steer();
+              throwIfAborted(signal);
+              if (message !== undefined) {
+                await this.takeSteered(steered, message);
+              }
+              return message;
+            }
+            : undefined;
           // Inside the attempt loop, so a retry after an overflow is asked
           // about like any other call. Outside the try: a refusal is not an
           // overflow to trim and retry, and the call it refused spent nothing.
@@ -9070,6 +9207,7 @@ export class AgentRunner {
                   },
                 }
                 : {}),
+              ...(hostedSteer !== undefined ? { steer: hostedSteer } : {}),
               onUsage,
               guardCall,
               ...(signal ? { signal } : {}),
@@ -9688,7 +9826,9 @@ export class AgentRunner {
         return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName} (no skills enabled)`);
       }
     } else if (!this.toolPermitted(call.toolName, allowedTools)) {
-      return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
+      return rejected(allowedTools === undefined
+        ? `Tool not permitted for agent ${session.agent.id}: ${call.toolName} (the soul has no tools: list, so it gets only safe tools; add the tool to a tools: list in the soul to grant it)`
+        : `Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 
     // Resolved before the policy is asked, not after: a policy classifies
@@ -9978,6 +10118,7 @@ export {
   type AdmitPolicy,
   type ChannelAdapter,
   type ChannelCredentialRequest,
+  type ChannelSayRequest,
   type ChannelSessionKeyParts,
   type ConversationArchiveRequest,
   type ConversationArchiveResult,

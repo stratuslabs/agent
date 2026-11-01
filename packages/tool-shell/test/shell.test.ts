@@ -665,7 +665,7 @@ test('with the external-content gate on, a shell read of a tainted file closes t
     session('ava'),
   );
   assert.equal((await git('init -q')).ok, true);
-  assert.equal((await git('-c user.email=a@b -c user.name=a commit -q --allow-empty -m one')).ok, true);
+  assert.equal((await git('-c user.email=a@b -c user.name=a -c commit.gpgsign=false commit -q --allow-empty -m one')).ok, true);
 
   const decisions: PermissionDecision[] = [];
   const tools = await registryFor({}, undefined, workspaces);
@@ -882,7 +882,7 @@ test('with the external-content gate on, a tainted ledger closes grants before t
     session('ava'),
   );
   assert.equal((await git('init -q')).ok, true);
-  assert.equal((await git('-c user.email=a@b -c user.name=a commit -q --allow-empty -m one')).ok, true);
+  assert.equal((await git('-c user.email=a@b -c user.name=a -c commit.gpgsign=false commit -q --allow-empty -m one')).ok, true);
 
   const decisions: PermissionDecision[] = [];
   const tools = await registryFor({ sandbox: 'off' }, undefined, workspaces);
