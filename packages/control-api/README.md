@@ -643,7 +643,10 @@ allowed or refused, sent just before that call's `tool.called` or
 `grant`, `gate`, `approver`, `cancelled`) and a one-line `reason` with no
 tool input, plus `verdict`, `reviewCode` and `shadow` when a review step
 decided. Only a policy that reports its decisions sends it, which the
-daemon's does.)
+daemon's does. A call judged again because what it may read became less
+trusted during its approval can have more than one; the last stands, and
+it is the runner's own, with layer `trust`, when that happened twice and
+the call was refused.)
 The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own

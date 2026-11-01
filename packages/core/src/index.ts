@@ -4797,7 +4797,10 @@ export type StratusEvent =
    * Why a call was allowed or refused, when the approval policy reports it
    * (`ApprovalContext.decided`). By name, like the log: the call's id and
    * tool, never its input, so a surface can show the decision beside the
-   * `tool.called` or `tool.denied` with the same `callId`.
+   * `tool.called` or `tool.denied` with the same `callId`. A call judged
+   * again can have several; the last stands. The runner sends one itself,
+   * layer `trust`, when it refuses a call whose label dropped twice while
+   * it was being approved.
    */
   | {
       type: 'permission.decided';
@@ -9853,14 +9856,21 @@ export class AgentRunner {
     }
 
     if (movedTwice) {
+      const why = 'what it may read was marked less trusted twice while it was being approved';
+      // The policy reported its yeses; this "no" is the runner's, and it is
+      // the one that stands, so it goes out last, ahead of the denial.
+      await this.bus.emit(permissionDecidedEvent(session, call, risk, {
+        allowed: false,
+        layer: 'trust',
+        reason: `${call.toolName} did not run: ${why}`,
+      }));
       await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call });
       return {
         callId: call.id,
         toolName: call.toolName,
         ok: false,
         output: null,
-        error: `${call.toolName} did not run: what it may read was marked less trusted twice while it was being approved. `
-          + 'Call again to have it judged as things stand now.',
+        error: `${call.toolName} did not run: ${why}. Call again to have it judged as things stand now.`,
         trust: 'agent',
       };
     }
