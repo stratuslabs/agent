@@ -61,6 +61,10 @@ It prints each case with its verdict, code, reason and time, then:
 `--json` writes every case's result and the summary to a file, to keep with
 the numbers recorded on the card. It exits non-zero when the reviewer alone
 misses the bar, and refuses to run on the demo provider, which would answer
-from a script. It needs a model and costs tokens (about 60 short calls), so
+from a script. It loads no plugins, so it refuses a provider a plugin
+contributes (`plugin:…`) too: measure a built-in provider and name the
+model. A run limited with `--group` or `--case` that leaves out the
+injected cases or the good ones is not judged against the bar, and exits
+non-zero too. It needs a model and costs tokens (about 60 short calls), so
 it runs on demand and is not part of `pnpm test`; the corpus and the scoring
 are checked without a model by `test/review-step-eval.test.ts`.

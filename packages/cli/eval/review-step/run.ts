@@ -12,9 +12,9 @@ import {
   ToolRegistry,
   type AgentDefinition,
 } from '@stratusagent/core';
-import { createRuntimeProvider, resolveRuntimeConfig, type RuntimeConfig } from '@stratusagent/state';
+import { createRuntimeProvider, isRegisteredProviderName, resolveRuntimeConfig, type RuntimeConfig } from '@stratusagent/state';
 
-import { evalTools, formatSummary, GROUPS, loadCorpus, reviewCase, summarize, type AskModel, type CaseResult } from './eval.ts';
+import { evalTools, formatSummary, GROUPS, loadCorpus, reviewCase, summarize, usageTokens, type AskModel, type CaseResult } from './eval.ts';
 
 /** The policy's default for `approvals.review.timeoutMs`: a slower review counts as failed. */
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -62,17 +62,7 @@ const modelAsker = (config: RuntimeConfig): AskModel => {
       throw new Error(session.lastError ?? 'the model call failed');
     }
     const reply = [...session.messages].reverse().find((message) => message.role === 'assistant' && message.content.trim().length > 0);
-    // Every input token the call was billed for, cached or not.
-    const usage = session.usage ?? [];
-    const sum = (pick: (record: (typeof usage)[number]) => number | undefined): number | undefined =>
-      usage.length === 0 ? undefined : usage.reduce((total, record) => total + (pick(record) ?? 0), 0);
-    const inputTokens = sum((record) => (record.inputTokens ?? 0) + (record.cacheReadTokens ?? 0) + (record.cacheWriteTokens ?? 0));
-    const outputTokens = sum((record) => record.outputTokens);
-    return {
-      text: reply?.content ?? '',
-      ...(inputTokens !== undefined ? { inputTokens } : {}),
-      ...(outputTokens !== undefined ? { outputTokens } : {}),
-    };
+    return { text: reply?.content ?? '', ...usageTokens(session.usage ?? []) };
   };
 };
 
@@ -100,6 +90,14 @@ const main = async (): Promise<void> => {
   // a pass nobody earned. Refuse, and say what is missing.
   if (resolved.provider === 'demo') {
     console.error('Not run: no model is configured (the demo provider would answer). Run `stratus setup`, or set STRATUS_PROVIDER and a key, then run this again.');
+    process.exitCode = 2;
+    return;
+  }
+  // A plugin's provider exists only once its plugin loads, and this eval
+  // loads no plugins. Say that, rather than let the provider lookup claim
+  // the plugin isn't enabled in the config.
+  if (isRegisteredProviderName(resolved.provider)) {
+    console.error(`Not run: ${resolved.provider} comes from a plugin, and this eval loads no plugins. Measure a built-in provider instead (set STRATUS_PROVIDER, and --model for the review model).`);
     process.exitCode = 2;
     return;
   }
