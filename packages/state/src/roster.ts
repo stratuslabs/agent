@@ -45,7 +45,7 @@ import {
 } from './provider-names.ts';
 import { type SoulPinContext, applySoulPins } from './served.ts';
 import { signedInProviders } from './runtime.ts';
-import { DEFAULT_STRATUS_AGENT, resolveConfiguredSoul, loadRosterSouls } from './souls.ts';
+import { DEFAULT_STRATUS_AGENT, EVERY_TOOL, resolveConfiguredSoul, loadRosterSouls } from './souls.ts';
 
 // Unsouled runs used to remember facts under a per-provider default agent.
 // Stratus inherits all of them: reads for the built-in agent also return
@@ -650,7 +650,15 @@ export const claimSoulFile = async (
   // got past them.
   await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
   await mkdir(agentsDirPath(env), { recursive: true });
-  let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
+  // Every tool, said in the soul rather than left to a missing key: an
+  // omitted `tools:` list is safe tools only, and a new agent made through
+  // setup, `agent new` or the API should work the way one always has, in
+  // a line its operator can see and narrow.
+  let agent = defineAgent({
+    ...(input.name ? { name: input.name } : {}),
+    instructions: input.instructions,
+    tools: [...EVERY_TOOL],
+  });
   const baseId = agent.id;
   for (;;) {
     const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
@@ -670,6 +678,7 @@ export const claimSoulFile = async (
       id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
       ...(input.name ? { name: input.name } : { name: agent.name }),
       instructions: input.instructions,
+      tools: [...EVERY_TOOL],
     });
   }
 };

@@ -541,6 +541,25 @@ test('parseSoul treats a file without frontmatter as pure persona', () => {
   assert.equal(soul.agent.name, parseSoul('Other prose', { seed: 'haiku-soul' }).agent.name);
 });
 
+test('formatSoul keeps an empty tools list, because no list and an empty one grant different things', () => {
+  // Omitted is the safe tools; `tools: []` is nothing. The writer used to
+  // drop an empty list, so any field edit through it (the dashboard, a
+  // credential grant) widened an agent allowed nothing to one allowed the
+  // default.
+  const empty = parseSoul(`---\nname: Wren\ntools: []\n---\nQuiet.`);
+  assert.deepEqual(empty.agent.tools, []);
+  assert.deepEqual(parseSoul(formatSoul(empty)).agent.tools, []);
+
+  const omitted = parseSoul(`---\nname: Wren\n---\nQuiet.`);
+  assert.equal(parseSoul(formatSoul(omitted)).agent.tools, undefined);
+});
+
+test('a tools: ["*"] line round-trips as the one entry that grants every tool', () => {
+  const soul = parseSoul(`---\nname: Wren\ntools: ["*"]\n---\nQuiet.`);
+  assert.deepEqual(soul.agent.tools, ['*']);
+  assert.deepEqual(parseSoul(formatSoul(soul)).agent.tools, ['*']);
+});
+
 test('parseSoul supports inline lists, quotes, comments, and explicit ids', () => {
   const soul = parseSoul(`---
 # identity

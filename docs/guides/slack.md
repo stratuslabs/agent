@@ -417,7 +417,8 @@ conversation, with the `credential.request` tool. The daemon grants it to every 
 whatever its `tools:` says, because the form goes to an approver who
 decides everything after that. The one-time link it can fall back to is a
 bearer credential, so a link needs the soul to list `credential.request`
-(or have no `tools:` key):
+(by name, a glob, or `"*"`); a soul with no `tools:` key gets forms only,
+except on a home set up before 0.14.3:
 
 ```
 Kai is asking for a credential: github.token, for Kai only.
