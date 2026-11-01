@@ -21,6 +21,7 @@ import {
   isTrustLevel,
   memoryContentByteLength,
   memoryEntryFields,
+  memorySupersededIds,
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_READ_MAX_BYTES,
   memoryEntryTokens,
@@ -465,7 +466,10 @@ const rankedOrder = (
 // two agents legitimately produces the same successor id twice.
 // '6' keyed `usage` the same way, for the same reason, and '7' `reasserted`
 // — the last of the three id-keyed tables the same import makes ambiguous.
-const INDEX_SCHEMA_VERSION = '7';
+// '8' keyed `revisions` by (successor, target, agent): a merge is one
+// successor naming several targets, one row each. An index an older build
+// made also holds no row for a list it could not read, so it is rebuilt.
+const INDEX_SCHEMA_VERSION = '8';
 
 // Loaded on first `search`, never at module load: see the note at the top.
 type SqliteModule = typeof import('node:sqlite');
@@ -517,7 +521,7 @@ CREATE TABLE IF NOT EXISTS revisions (
   agent_id TEXT NOT NULL,
   valid_from_ms INTEGER,
   valid_until_ms INTEGER,
-  PRIMARY KEY (successor_id, agent_id)
+  PRIMARY KEY (successor_id, target_id, agent_id)
 );
 CREATE TABLE IF NOT EXISTS usage (
   id TEXT NOT NULL,
@@ -674,10 +678,10 @@ const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
       provenance.origin ? JSON.stringify(provenance.origin) : null,
       Object.keys(fields).length > 0 ? JSON.stringify(fields) : null,
     );
-    if (fields.supersedes !== undefined) {
+    for (const target of memorySupersededIds(fields)) {
       insertRevision.run(
         record.id,
-        fields.supersedes,
+        target,
         record.agentId,
         instantMs(fields.validFrom),
         instantMs(fields.validUntil),
@@ -889,13 +893,15 @@ export const createFileMemoryStore = (
       // Both tables whose *shape* has changed, not only the widest one: a
       // `revisions` keyed by successor alone silently collapses two agents'
       // revisions into one row, and no column is added or removed by the
-      // fix, so only the key tells them apart.
+      // fix, so only the key tells them apart. The same goes for a merge's
+      // targets, which a key without `target_id` collapses into one.
       const hasCurrentShape = (): boolean => {
         const columns = (name: string): Array<{ name: string; pk: number }> =>
           opened.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string; pk: number }>;
         return columns('memory_fts').some((column) => column.name === 'fields')
           && columns('reasserted').some((column) => column.name === 'recorded_at')
           && columns('revisions').some((column) => column.name === 'agent_id' && column.pk > 0)
+          && columns('revisions').some((column) => column.name === 'target_id' && column.pk > 0)
           && columns('usage').some((column) => column.name === 'agent_id' && column.pk > 0)
           && columns('reasserted').some((column) => column.name === 'agent_id' && column.pk > 0);
       };
@@ -1122,8 +1128,12 @@ export const createFileMemoryStore = (
       // check, agent A could retire agent B's memory by naming its id — gone
       // from B's list, its search, and its prompt, with B's own `forget`
       // never called.
-      if (appendOptions.supersedes !== undefined) {
-        assertSupersedableMemoryEntry(liveEntriesFor(await readRecords(), agentId, now()), appendOptions.supersedes);
+      const supersedes = memorySupersededIds(appendOptions);
+      if (supersedes.length > 0) {
+        const live = liveEntriesFor(await readRecords(), agentId, now());
+        for (const id of supersedes) {
+          assertSupersedableMemoryEntry(live, id);
+        }
       }
       const fields = memoryEntryFields(appendOptions);
       assertMemoryAboutWithinCap(fields.about ?? []);

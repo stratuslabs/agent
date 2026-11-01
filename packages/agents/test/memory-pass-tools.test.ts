@@ -126,3 +126,57 @@ test('a pass whose own recall read an outside fact writes at that lower label', 
   const saved = await remember.execute({ fact: 'The build host is mini-3.' }, session) as Remembered;
   assert.equal(saved.trust, 'external');
 });
+
+test('a pass merges duplicates its recall showed it into one fact, and the tally counts every fact retired', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const a = await store.append('ava', 'Ava prefers short replies.');
+  const b = await store.append('ava', 'Ava likes replies short.');
+  const c = await store.append('ava', 'Keep replies to Ava short.');
+  const { recall, remember, tally } = createMemoryPassTools(store, stateFor(), { supersedesMany: true });
+  await recall.execute({ query: 'Ava replies' }, passSession());
+
+  const saved = await remember.execute(
+    { fact: 'Ava prefers short replies.', kind: 'preference', supersedes: [a.id, b.id, c.id] },
+    passSession(),
+  ) as Remembered & { supersedes?: unknown };
+  assert.deepEqual(saved.supersedes, [a.id, b.id, c.id]);
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id), [saved.id]);
+  assert.deepEqual(tally(), { saved: 1, superseded: 3 });
+  // One forget of what the pass wrote brings all three back.
+  assert.equal(await store.forget('ava', saved.id), true);
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id), [a.id, b.id, c.id]);
+});
+
+test('a pass on a store that takes one id per fact refuses a merge of several and stores nothing', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const a = await store.append('ava', 'Ava prefers short replies.');
+  const b = await store.append('ava', 'Ava likes replies short.');
+  const { recall, remember, tally } = createMemoryPassTools(store, stateFor());
+  await recall.execute({ query: 'Ava replies' }, passSession());
+
+  await assert.rejects(
+    () => remember.execute({ fact: 'Ava prefers short replies.', supersedes: [a.id, b.id] }, passSession()),
+    /one fact at a time/,
+  );
+  assert.equal((await store.list('ava')).entries.length, 2);
+  // One id, in either form, still works on such a store.
+  await remember.execute({ fact: 'Ava prefers short replies, answer first.', supersedes: [a.id] }, passSession());
+  assert.deepEqual(tally(), { saved: 1, superseded: 1 });
+});
+
+test('a merge naming any fact the pass may not supersede stores nothing', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const a = await store.append('ava', 'Ava prefers short replies.');
+  const pinned = await store.append('ava', 'Ava likes replies short.');
+  await store.pin?.('ava', pinned.id);
+  const asserted = await store.append('ava', 'Keep replies to Ava short.', { provenance: { trust: 'user' } });
+  const unseen = await store.append('ava', 'The deploy runs on Tuesdays.');
+  const { recall, remember } = createMemoryPassTools(store, stateFor(), { supersedesMany: true });
+  await recall.execute({ query: 'Ava replies' }, passSession());
+
+  await assert.rejects(() => remember.execute({ fact: 'merged', supersedes: [a.id, unseen.id] }, passSession()), /shown/);
+  await assert.rejects(() => remember.execute({ fact: 'merged', supersedes: [a.id, pinned.id] }, passSession()), /pinned/);
+  await assert.rejects(() => remember.execute({ fact: 'merged', supersedes: [a.id, asserted.id] }, passSession()), /operator/);
+  await assert.rejects(() => remember.execute({ fact: 'merged', supersedes: [a.id, 7] }, passSession()), /supersedes/);
+  assert.equal((await store.list('ava')).entries.length, 4);
+});

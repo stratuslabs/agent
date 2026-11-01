@@ -4,6 +4,7 @@ import {
   BUILTIN_MEMORY_STORE_NAME,
   escapeControlCharacters,
   memoryEntryTrust,
+  memorySupersededIds,
   effectiveMemoryValidityAt,
   type MemoryAuditEntry,
   type MemoryEntry,
@@ -188,7 +189,9 @@ export const runMemory = async (
       ...(entry.forgottenAt !== undefined ? [`[forgotten ${escapeControlCharacters(entry.forgottenAt)}]`] : []),
       ...(entry.origin?.taintedBy ? [`(tainted by ${escapeControlCharacters(entry.origin.taintedBy)})`] : []),
       ...(unlabelled(entry) ? ['(no recorded origin)'] : []),
-      ...(entry.supersedes ? [`(replaces ${escapeControlCharacters(entry.supersedes)})`] : []),
+      ...(memorySupersededIds(entry).length > 0
+        ? [`(replaces ${memorySupersededIds(entry).map(escapeControlCharacters).join(', ')})`]
+        : []),
     ];
     // The id is escaped like everything else off the record. `import`
     // validates only that it is a string, so an untrusted corpus can carry
@@ -398,8 +401,8 @@ export const runMemory = async (
     }
     const replacedBy = new Map<string, string[]>();
     for (const entry of entries) {
-      if (entry.supersedes !== undefined) {
-        replacedBy.set(entry.supersedes, [...(replacedBy.get(entry.supersedes) ?? []), entry.id]);
+      for (const replaced of memorySupersededIds(entry)) {
+        replacedBy.set(replaced, [...(replacedBy.get(replaced) ?? []), entry.id]);
       }
     }
     for (const entry of entries) {

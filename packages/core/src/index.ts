@@ -1376,8 +1376,16 @@ export interface MemoryEntry {
    * dated from next Monday leaves its predecessor standing until then, and
    * an already-expired successor displaces nothing. See
    * `supersededMemoryIdsAt`.
+   *
+   * A list is a merge: one fact that replaces several, still one record,
+   * so one `forget` brings every fact it replaced back. One id is always
+   * written as a plain string, the form every reader understands; a reader
+   * older than lists drops a list (`memoryEntryFields`), which shows the
+   * merged fact beside the ones it replaced: duplicates, never a loss. Only
+   * a store that declares `supersedesMany` is handed a list. Read it with
+   * `memorySupersededIds`.
    */
-  supersedes?: string;
+  supersedes?: string | string[];
   metadata?: JsonObject;
   /**
    * Where the fact came from — the least trusted thing the writing session
@@ -1890,11 +1898,43 @@ export const isMemoryEntryCurrent = (
 export const supersededMemoryIdsAt = (entries: readonly MemoryEntry[], at: Date): Set<string> => {
   const retired = new Set<string>();
   for (const entry of entries) {
-    if (typeof entry.supersedes === 'string' && entry.supersedes.length > 0 && isMemoryEntryCurrent(entry, at)) {
-      retired.add(entry.supersedes);
+    const ids = memorySupersededIds(entry);
+    if (ids.length > 0 && isMemoryEntryCurrent(entry, at)) {
+      for (const id of ids) {
+        retired.add(id);
+      }
     }
   }
   return retired;
+};
+
+/**
+ * The ids a record supersedes, from either form, in order and once each.
+ * A list holding anything but non-empty strings is the wrong shape and
+ * reads as none: the facts it named stay live beside it, which is the
+ * duplicates-never-loss direction every other malformed field takes.
+ */
+export const memorySupersededIds = (entry: { supersedes?: unknown }): string[] => {
+  const raw = entry.supersedes;
+  if (typeof raw === 'string') {
+    return raw.length > 0 ? [raw] : [];
+  }
+  if (!Array.isArray(raw) || !raw.every((id) => typeof id === 'string' && id.length > 0)) {
+    return [];
+  }
+  return [...new Set(raw as string[])];
+};
+
+/**
+ * `supersedes` in the form it is written: absent for none, a plain string
+ * for one id, a list only for a merge of two or more.
+ */
+export const memorySupersedesField = (ids: readonly string[]): Pick<MemoryEntry, 'supersedes'> => {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) {
+    return {};
+  }
+  return { supersedes: unique.length === 1 ? unique[0]! : unique };
 };
 
 /**
@@ -2006,8 +2046,12 @@ export interface MemoryAppendOptions {
    * otherwise: the record lane is shared across agents, and a writer that
    * skipped the check would let one agent retire another's memory by
    * naming its id.
+   *
+   * A list retires every id in it with one record, and every id must
+   * resolve or nothing is stored. Hand a list only to a store whose
+   * contribution declares `supersedesMany`.
    */
-  supersedes?: string;
+  supersedes?: string | string[];
 }
 
 /** Clamp a caller-chosen search limit into the store's own bounds. */
@@ -2513,7 +2557,7 @@ export const memoryEntryFields = (
     ...(about.length > 0 ? { about } : {}),
     ...(typeof raw.validFrom === 'string' ? { validFrom: raw.validFrom } : {}),
     ...(typeof raw.validUntil === 'string' ? { validUntil: raw.validUntil } : {}),
-    ...(typeof raw.supersedes === 'string' && raw.supersedes.length > 0 ? { supersedes: raw.supersedes } : {}),
+    ...memorySupersedesField(memorySupersededIds(raw)),
   };
 };
 
@@ -2571,8 +2615,12 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     // Resolved against this agent's own live set before anything is
     // recorded: the per-agent boundary is the access model the whole store
     // rests on, and a successor naming a stranger's id would retire it.
-    if (options.supersedes !== undefined) {
-      assertSupersedableMemoryEntry(this.live(agentId, this.now()), options.supersedes);
+    const supersedes = memorySupersededIds(options);
+    if (supersedes.length > 0) {
+      const live = this.live(agentId, this.now());
+      for (const id of supersedes) {
+        assertSupersedableMemoryEntry(live, id);
+      }
     }
     const about = memoryEntryAbout(options);
     assertMemoryAboutWithinCap(about);
@@ -2591,7 +2639,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
       ...(about.length > 0 ? { about } : {}),
       ...(options.validFrom !== undefined ? { validFrom: options.validFrom } : {}),
       ...(options.validUntil !== undefined ? { validUntil: options.validUntil } : {}),
-      ...(options.supersedes !== undefined ? { supersedes: options.supersedes } : {}),
+      ...memorySupersedesField(supersedes),
       ...(options.metadata ? { metadata: options.metadata } : {}),
       ...(options.provenance ? { trust: options.provenance.trust } : {}),
       ...(options.provenance?.origin ? { origin: options.provenance.origin } : {}),
@@ -5077,6 +5125,15 @@ export interface MemoryStoreContribution {
    * traffic it will mishandle without saying so.
    */
   contract: typeof MEMORY_STORE_CONTRACT_VERSION;
+  /**
+   * The store accepts a list in `supersedes` (one record retiring several
+   * facts) and reads one back as retiring each. Without it, a store gets
+   * single ids only: a memory pass can still save and supersede one fact,
+   * but never merges several into one. Optional, so a store built before
+   * lists keeps loading under the same contract version. The built-in
+   * stores accept lists.
+   */
+  supersedesMany?: true;
 }
 
 /** An executor contributed by a plugin, selectable by name in a trusted config. */
