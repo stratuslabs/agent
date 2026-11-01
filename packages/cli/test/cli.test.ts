@@ -613,7 +613,7 @@ test('runCli skill add clones a git source — the transport skills.sh repos arr
   });
   await git('init', '--quiet');
   await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
-  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skills');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'skills');
 
   const { streams, output } = createStreams();
   const exitCode = await runCli({
@@ -645,7 +645,7 @@ test('runCli skill add of a repo whose root is a nameless skill refuses it, sugg
   });
   await git('init', '--quiet');
   await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
-  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skill');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'skill');
 
   const { streams, output } = createStreams();
   const exitCode = await runCli({
