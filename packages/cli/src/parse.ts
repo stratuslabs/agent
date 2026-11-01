@@ -440,6 +440,16 @@ const readOptionValue = (tokens: string[], index: number, flag: string): string 
   return value;
 };
 
+const readFormatValue = <T extends string>(tokens: string[], index: number, allowed: readonly T[]): T => {
+  const value = readOptionValue(tokens, index, '--format');
+  const format = allowed.find((candidate) => candidate === value);
+  if (format === undefined) {
+    const choices = `${allowed.slice(0, -1).join(', ')} or ${allowed.at(-1)}`;
+    throw new Error(`Unsupported --format: ${value}. Use ${choices}.`);
+  }
+  return format;
+};
+
 export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCommand => {
   const [command, ...rest] = argv;
 
@@ -664,11 +674,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         return { command: 'help' };
       }
       if (argument === '--format') {
-        const value = readOptionValue(agentsRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
+        format = readFormatValue(agentsRest, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -710,11 +716,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         return { command: 'help' };
       }
       if (token === '--format') {
-        const value = readOptionValue(tokens, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
+        format = readFormatValue(tokens, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -751,11 +753,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         return { command: 'help' };
       }
       if (token === '--format') {
-        const value = readOptionValue(rest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
+        format = readFormatValue(rest, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -867,11 +865,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         continue;
       }
       if (token === '--format') {
-        const value = readOptionValue(rest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
+        format = readFormatValue(rest, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -1128,11 +1122,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         return { command: 'help' };
       }
       if (token === '--format') {
-        const value = readOptionValue(pluginsRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Invalid value for --format: ${value}. Use text or json.`);
-        }
-        format = value;
+        format = readFormatValue(pluginsRest, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -1322,11 +1312,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         return { command: 'help' };
       }
       if (token === '--format') {
-        const value = readOptionValue(tokens, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        parsed.format = value;
+        parsed.format = readFormatValue(tokens, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -1439,11 +1425,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         continue;
       }
       if (token === '--format') {
-        const value = readOptionValue(memoryRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
+        format = readFormatValue(memoryRest, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -1572,11 +1554,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         continue;
       }
       if (token === '--format') {
-        const value = readOptionValue(sessionsRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        parsed.format = value;
+        parsed.format = readFormatValue(sessionsRest, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -1690,11 +1668,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         return { command: 'help' };
       }
       if (token === '--format') {
-        const value = readOptionValue(rest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        parsed.format = value;
+        parsed.format = readFormatValue(rest, index, ['text', 'json']);
         index += 1;
         continue;
       }
@@ -1745,11 +1719,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         continue;
       }
       if (token === '--format') {
-        const value = readOptionValue(agentRest, index, '--format');
-        if (value !== 'text' && value !== 'json' && value !== 'soul') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
+        format = readFormatValue(agentRest, index, ['text', 'json', 'soul']);
         index += 1;
         continue;
       }
@@ -1856,11 +1826,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
 
     if (token === '--format') {
-      const value = readOptionValue(rest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      format = value;
+      format = readFormatValue(rest, index, ['text', 'json']);
       index += 1;
       continue;
     }
