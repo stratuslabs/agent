@@ -13268,6 +13268,125 @@ test('the part after an upload waits for Slack to place it, so the thread reads 
   assert.deepEqual(web.timeline, [web.uploads[0]?.initial_comment, 'shared:F-1', web.posts[0]?.text]);
 });
 
+test('in stream mode, a reply that tags another agent is posted as a new message and its placeholder taken back, so that agent hears it (card 1054)', async () => {
+  // Slack sends an edit to the other agents as message_changed, which never
+  // starts a turn (the receiver drops edits), so a reply streamed into its
+  // placeholder never reached the agent it tagged.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const reply = '<@B-BEA> CI is green on main.';
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, sessionId.startsWith('slack:ava:') ? reply : 'on it'));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', agentMentions: {} },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', mention('<@B-AVA> tell bea', { ts: '974.1' }));
+  await socketAva.settled();
+
+  assert.deepEqual(webAva.timeline, ['…', reply]);
+  assert.equal(webAva.posts[1]?.thread_ts, '974.1');
+  assert.deepEqual(webAva.deletes.map((entry) => entry.ts), ['bot-ts-1']);
+  assert.equal(webAva.updates.some((entry) => entry.text?.includes('<@B-BEA>')), false, 'no edit carries the tag');
+
+  // What Bea's socket gets for a new message that names her.
+  await socketBea.deliver('app_mention', botMention({ user: 'B-AVA', text: reply, ts: 'bot-ts-2', thread: '974.1' }));
+  await socketBea.settled();
+  await adapter.stop();
+  const beaTurns = gateway.dispatches.filter((dispatch) => dispatch.agentId === 'bea');
+  assert.equal(beaTurns.length, 1);
+  assert.match(beaTurns[0]?.userMessage ?? '', /CI is green on main\.$/);
+});
+
+test('in stream mode, a reply in parts whose first part tags another agent posts every part, the tagged one carrying the whole reply (card 1054)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const reply = twoPartReply('<@U-NOVA>', 'first');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', agentMentions: { team: { nova: 'U-NOVA' } } }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hand it to nova', { ts: '975.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(web.deletes.map((entry) => entry.ts), ['bot-ts-1']);
+  assert.equal(web.updates.some((entry) => entry.text?.includes('<@U-NOVA>')), false, 'no edit carries the tag');
+  assert.equal(web.uploads.length, 1);
+  assert.equal(web.uploads[0]?.contents, reply);
+  assert.match(web.uploads[0]?.initial_comment ?? '', /^<@U-NOVA> can you tag the release\?/);
+  assert.equal(web.posts.length, 2);
+  assert.equal(web.posts[0]?.text, '…');
+  assert.equal(words(web.uploads[0]?.initial_comment, web.posts[1]?.text), words(reply));
+});
+
+test('a reply that tags another agent stays in its placeholder when Slack will not take the placeholder back (card 1054)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.chat.delete = async () => {
+    throw new Error('cant_delete_message');
+  };
+  const warnings: string[] = [];
+  const reply = '<@U-NOVA> CI is green on main.';
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', agentMentions: { team: { nova: 'U-NOVA' } } }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> tell nova', { ts: '976.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(web.timeline, ['…'], 'not posted twice');
+  assert.equal(web.updates.filter((entry) => entry.ts === 'bot-ts-1').at(-1)?.text, reply);
+  assert.ok(warnings.some((line) => line.includes('chat.delete failed') && line.includes('cant_delete_message')), warnings.join('\n'));
+});
+
+test('a recovered reply that tags another agent, handed a queued turn\'s placeholder, is posted as a new message above a fresh placeholder (card 1054)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: '<@U-NOVA> the approval went through.',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', agentMentions: { team: { nova: 'U-NOVA' } } }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  assert.deepEqual(web.timeline, ['…', '<@U-NOVA> the approval went through.', '…'], 'the recovered reply sits above the placeholder reopened below it');
+  assert.deepEqual(web.deletes.map((entry) => entry.ts), ['bot-ts-1']);
+  assert.equal(web.updates.some((entry) => entry.text?.includes('<@U-NOVA>')), false, 'no edit carries the tag');
+  assert.equal(web.updates.filter((entry) => entry.ts === 'bot-ts-3').at(-1)?.text, 'the message\'s own reply');
+});
+
 test('message.send in parts that tags another agent uploads the tagged part and answers with where Slack put it', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C-ENG', { is_member: true });

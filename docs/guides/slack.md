@@ -269,7 +269,11 @@ running turn is doing until its reply posts.
 If you would rather watch the reply being written, set `stream`: the agent
 posts a `…` placeholder at once, edits it as the reply arrives, shows
 `⚙ tool…` lines while tools run, and finalizes it — how every reply looked
-before `final` existed.
+before `final` existed. A reply that tags another agent is the exception:
+Slack passes an edit on to other agents as a change to an old message, and
+an agent starts only on a new one, so the placeholder is taken back and the
+reply posted as a new message at the bottom of the thread. If Slack won't delete the
+placeholder, the reply is edited in as before and the tagged agent misses it.
 
 To have an agent read more like someone texting, set `texts`: it works the
 way `final` does, but each paragraph of a reply is posted as a message of
@@ -296,8 +300,8 @@ reply rather than the part with its name in it. People still read every
 part in the thread. Posting one long message is no way around this: Slack
 splits it into parts on its own side. If Slack refuses the upload, the part
 is posted on its own, the log says so, and the tagged agent gets only that
-part. In `stream` mode the first part is the placeholder, edited in place,
-which this does not cover yet.
+part. In `stream` mode a reply whose first part tags another agent is
+posted the same way, not edited into the placeholder.
 
 ```jsonc
 // ~/.stratus/config.json — trusted configs only
