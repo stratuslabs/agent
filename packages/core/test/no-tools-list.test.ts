@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   InMemorySessionStore,
   ToolRegistry,
   type AgentDefinition,
@@ -63,6 +64,9 @@ const run = async (
     provider,
     tools,
     store: new InMemorySessionStore(),
+    // The allowlist is what is under test, so the approval step lets every
+    // call it reaches through (a runner without one runs only safe calls).
+    approvals: new AllowAllApprovalPolicy(),
     ...(options.granted !== undefined ? { grantedToEveryAgent: options.granted } : {}),
     ...(options.unlisted !== undefined ? { unlistedTools: options.unlisted } : {}),
   });

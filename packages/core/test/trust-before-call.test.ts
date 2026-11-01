@@ -153,7 +153,7 @@ test('a call refused for a label that dropped twice reports that refusal as its 
     }
   });
   await runner.initialize();
-  await runner.run({ sessionId: 'tbc-decided', agent: { id: 'ava', name: 'Ava' }, userMessage: 'go' });
+  await runner.run({ sessionId: 'tbc-decided', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go' });
   assert.deepEqual(events.map((event) => event.type), [
     'permission.decided',
     'permission.decided',
