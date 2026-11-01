@@ -431,10 +431,11 @@ export interface SchedulerRuntime {
    */
   approvalDestinationFor(session: Session): ScheduleDestination | undefined;
   /**
-   * A live firing's own prompt, for the review posture: the whole request
-   * of an unattended turn, which a firing's message mixes with the events
-   * it delivers. Bound exactly as `isPreauthorized` is, so metadata alone
-   * never names a prompt.
+   * A firing's own prompt, for the review posture: the whole request of an
+   * unattended turn, which a firing's message mixes with the events it
+   * delivers. Bound to the session the scheduler opened for that schedule
+   * (live, or resumed after a restart), so metadata alone never names a
+   * prompt.
    */
   firingPromptFor(session: Session): { kind: 'schedule' | 'trigger'; prompt: string } | undefined;
   /** All agents' schedules, for the operator surfaces. */
@@ -1282,11 +1283,16 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         : undefined;
     },
     firingPromptFor(session) {
-      if (!activeFirings.has(session.id)) {
-        return undefined;
-      }
       const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
       if (typeof scheduleId !== 'string') {
+        return undefined;
+      }
+      // A live firing, or one a restart resumed while it was parked on an
+      // approval, which this process never put in its live set. Either way
+      // its session id is under this schedule's id in the namespace only
+      // the scheduler dispatches into, so metadata alone never names a
+      // prompt, and a resumed firing is never judged against its message.
+      if (!activeFirings.has(session.id) && !session.id.startsWith(`${SCHEDULE_SESSION_ID_PREFIX}${scheduleId}:`)) {
         return undefined;
       }
       const record = store.get(scheduleId);

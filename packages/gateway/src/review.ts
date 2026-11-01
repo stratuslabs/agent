@@ -10,6 +10,8 @@
  */
 import { sessionTaintedBy, type Session, type Tool, type ToolCall, type ToolRisk } from '@stratusagent/core';
 
+import { isScheduleSessionId } from './schedules.ts';
+
 /** The reviewer's instructions. Fixed: not operator-editable in this phase. */
 export const REVIEW_RULES = [
   'You review one tool call an AI agent wants to make. Its conversation has read content from outside',
@@ -108,6 +110,11 @@ const requestOf = (input: ReviewCaseInput): { who: string; text: string } => {
       text: input.firing.prompt,
     };
   }
+  if (isScheduleSessionId(input.session.id)) {
+    // A firing whose schedule can't be read any more (cancelled while it
+    // was parked): its message carries the events, which never count.
+    return { who: 'a scheduled firing whose prompt could not be read; its events are not part of the request', text: '' };
+  }
   const turns = input.session.messages
     .filter((message) => message.role === 'user' && message.overheard !== true && message.observed !== true)
     .map((message) => message.content.trim())
@@ -125,7 +132,7 @@ export const reviewCaseText = (input: ReviewCaseInput): string => {
   const request = requestOf(input);
   const description = input.tool.description?.split('\n')[0]?.trim();
   const call = JSON.stringify({ tool: input.call.toolName, input: input.call.input }, null, 2);
-  const unattended = input.firing !== undefined || input.delegated === true;
+  const unattended = input.firing !== undefined || input.delegated === true || isScheduleSessionId(input.session.id);
   const context = [
     `outside content came from: ${sessionTaintedBy(input.session) ?? 'an unrecorded source'}`,
     `a person is in this conversation: ${unattended ? 'no' : 'yes'}`,
