@@ -150,7 +150,8 @@ model, counted against the agent's budget like any other call. It sees:
   is shown as its first and last 4 KB with the size of the middle named;
 - **what the call's inputs mean**: the first line of the tool's own
   description of each input the call sets, when it has one (never for an
-  `mcp.*` tool);
+  `mcp.*` tool), up to 200 characters a line and about 2,000 in all, with a
+  count of the inputs left out past that;
 - where outside content came from, whether a person is in the conversation,
   and the destination or site the call names.
 

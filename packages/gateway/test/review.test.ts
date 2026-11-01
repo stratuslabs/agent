@@ -182,6 +182,34 @@ test('the case says what each input the call sets means, from the tool\'s own pa
   assert.ok(!plain.includes('inputs mean'), 'no section when no input is documented');
 });
 
+test('the inputs section is bounded as a whole, however many documented inputs a call sets', () => {
+  const properties: Record<string, { type: string; description: string }> = {};
+  const input: Record<string, string> = {};
+  for (let index = 0; index < 60; index += 1) {
+    properties[`field${index}`] = { type: 'string', description: `Field ${index}: ${'y'.repeat(300)}` };
+    input[`field${index}`] = 'v';
+  }
+  const wide: Tool = {
+    name: 'crm.update',
+    description: 'Update a record.',
+    risk: 'gated',
+    parameters: { type: 'object', properties },
+    async execute() {
+      return null;
+    },
+  };
+  const text = reviewCaseText({
+    session: sessionWith([message('user', 'update the record')]),
+    call: { id: 'c', toolName: 'crm.update', input },
+    tool: wide,
+    risk: 'gated',
+  });
+  const inputs = /What the call's inputs mean[^\n]*\n((?:- .*\n?)*)/.exec(text)?.[1] ?? '';
+  assert.ok(inputs.length <= 2_100, `the section is bounded (${inputs.length})`);
+  assert.match(inputs, /^- field0: Field 0: /m, 'the first inputs are described');
+  assert.match(inputs, /^- \(\d+ more inputs? not described\)$/m, 'and it says how many it left out');
+});
+
 test('an MCP server\'s own tool description never reaches the case', () => {
   const tool: Tool = {
     name: 'mcp.notes.export',

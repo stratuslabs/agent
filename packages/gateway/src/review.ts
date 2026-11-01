@@ -105,6 +105,13 @@ const inert = (text: string): string => text.replace(/</g, '‹').replace(/>/g, 
 
 /** What one input's line may take, its name included. */
 const INPUT_LINE_LIMIT = 200;
+/**
+ * What the whole section may take: about ten full lines. A call that sets
+ * more documented inputs than fit gets the first ones and a count of the
+ * rest, so a wide schema can't grow the case past what the call itself
+ * is held to.
+ */
+const INPUT_SECTION_LIMIT = 2_000;
 
 /**
  * One line per input the call sets that the tool documents, from its own
@@ -118,6 +125,8 @@ const inputLines = (tool: Tool, call: ToolCall): string[] => {
   }
   const input = typeof call.input === 'object' && call.input !== null && !Array.isArray(call.input) ? call.input : {};
   const lines: string[] = [];
+  let used = 0;
+  let left = 0;
   for (const name of Object.keys(input)) {
     const property = (properties as Record<string, unknown>)[name];
     const description = typeof property === 'object' && property !== null && !Array.isArray(property)
@@ -129,7 +138,17 @@ const inputLines = (tool: Tool, call: ToolCall): string[] => {
     }
     const line = `- ${name}: ${first}`;
     const characters = [...line];
-    lines.push(inert(characters.length > INPUT_LINE_LIMIT ? `${characters.slice(0, INPUT_LINE_LIMIT - 1).join('')}…` : line));
+    const bounded = characters.length > INPUT_LINE_LIMIT ? `${characters.slice(0, INPUT_LINE_LIMIT - 1).join('')}…` : line;
+    const size = [...bounded].length + 1;
+    if (left > 0 || used + size > INPUT_SECTION_LIMIT) {
+      left += 1;
+      continue;
+    }
+    used += size;
+    lines.push(inert(bounded));
+  }
+  if (left > 0) {
+    lines.push(`- (${left} more input${left === 1 ? '' : 's'} not described)`);
   }
   return lines;
 };
