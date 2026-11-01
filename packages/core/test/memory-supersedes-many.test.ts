@@ -85,3 +85,16 @@ test('a list naming any id that is not a live entry of this agent stores nothing
   assert.deepEqual((await store.list('ava')).entries.map((found) => found.id), [mine.id]);
   assert.deepEqual((await store.list('bea')).entries.map((found) => found.id), [theirs.id]);
 });
+
+test('an append whose supersedes is malformed stores nothing, rather than a plain fact beside the ones it meant to replace', async () => {
+  const store = new InMemoryAgentMemoryStore({ now: () => AT });
+  const a = await store.append('ava', 'one');
+  for (const supersedes of ['', [], [a.id, ''], [a.id, 7]]) {
+    await assert.rejects(
+      () => store.append('ava', 'one, again', { supersedes } as unknown as Parameters<typeof store.append>[2]),
+      /supersedes/,
+      JSON.stringify(supersedes),
+    );
+  }
+  assert.deepEqual((await store.list('ava')).entries.map((found) => found.id), [a.id]);
+});
