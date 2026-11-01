@@ -4745,8 +4745,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    *
    * The agent's own messages directly above the tag, with nobody else
    * speaking between, are that turn's posts, or as near to them as a
-   * reader on another daemon can tell; the tag's own files come first and
-   * are not repeated. One read, of the hour before the mention. A thread
+   * reader on another daemon can tell. They come in the thread's order,
+   * the tag's own last and not repeated: images are kept from the last back
+   * (`readImageAttachments`), so the tag's own are kept first, and the
+   * caller hands the text reader, which spends from the front, the tag's
+   * own first. One read, of the hour before the mention. A thread
    * with more than a page of replies in that hour gives nothing, rather
    * than a run read from the middle of it, and a read that fails warns:
    * either way the mention runs with what it carried, as before this.
@@ -4795,7 +4798,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const seen = new Set(own.map((file) => file.id).filter((id) => id !== undefined));
     const added = posted.filter((file) => file.id === undefined || !seen.has(file.id)).slice(-TAGGED_FILES_LIMIT);
-    return [...own, ...added];
+    return [...added, ...own];
   };
 
   /**
@@ -8512,10 +8515,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           reasons,
           deadline,
         );
+      // Text is spent from the first file on, so the tag's own files lead:
+      // ones carried from above it (card 1061) must not crowd them out.
+      const ownFiles = new Set(event.files ?? []);
+      const ownFirst = [...notImages.filter((file) => ownFiles.has(file)), ...notImages.filter((file) => !ownFiles.has(file))];
       const { texts, saved, unread } = overhear
         ? { texts: [], saved: [] as SavedAttachment[], unread: notImages }
         : await readTextAttachments(
-          notImages,
+          ownFirst,
           connection.config.botToken,
           fetchFile,
           fileDownloadTimeoutMs,
