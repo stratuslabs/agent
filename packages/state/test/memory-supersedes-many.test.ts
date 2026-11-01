@@ -121,3 +121,24 @@ test('a merge of inherited facts is filed where they live, by the ids recall han
   assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'MySQL')).entries.map((entry) => entry.id), [merged.id]);
   assert.deepEqual((await store.list(DEFAULT_STRATUS_AGENT.id)).entries.map((entry) => entry.id), [merged.id]);
 });
+
+test('the upgrade to a revisions table keyed by target keeps the usage counters, which no rebuild can restore', async () => {
+  const filePath = await newFile();
+  const store = createFileMemoryStore(filePath, ticking());
+  const kept = await store.append('ava', 'the survey is quarterly');
+  assert.equal((await store.search('ava', 'survey')).entries[0]?.usage?.recallCount, 1);
+  assert.equal((await store.search('ava', 'survey')).entries[0]?.usage?.recallCount, 2);
+
+  const index = new DatabaseSync(`${filePath}.index`);
+  index.exec('DROP TABLE revisions;');
+  index.exec(`CREATE TABLE revisions (
+    successor_id TEXT NOT NULL, target_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+    valid_from_ms INTEGER, valid_until_ms INTEGER, PRIMARY KEY (successor_id, agent_id));`);
+  index.exec(`UPDATE meta SET value = '7' WHERE key = 'schema_version';`);
+  index.close();
+
+  const upgraded = createFileMemoryStore(filePath, ticking());
+  const [found] = (await upgraded.search('ava', 'survey')).entries;
+  assert.equal(found?.id, kept.id);
+  assert.equal(found?.usage?.recallCount, 3);
+});

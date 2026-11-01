@@ -893,18 +893,20 @@ export const createFileMemoryStore = (
       // Both tables whose *shape* has changed, not only the widest one: a
       // `revisions` keyed by successor alone silently collapses two agents'
       // revisions into one row, and no column is added or removed by the
-      // fix, so only the key tells them apart. The same goes for a merge's
-      // targets, which a key without `target_id` collapses into one.
+      // fix, so only the key tells them apart.
+      const columns = (name: string): Array<{ name: string; pk: number }> =>
+        opened.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string; pk: number }>;
       const hasCurrentShape = (): boolean => {
-        const columns = (name: string): Array<{ name: string; pk: number }> =>
-          opened.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string; pk: number }>;
         return columns('memory_fts').some((column) => column.name === 'fields')
           && columns('reasserted').some((column) => column.name === 'recorded_at')
           && columns('revisions').some((column) => column.name === 'agent_id' && column.pk > 0)
-          && columns('revisions').some((column) => column.name === 'target_id' && column.pk > 0)
           && columns('usage').some((column) => column.name === 'agent_id' && column.pk > 0)
           && columns('reasserted').some((column) => column.name === 'agent_id' && column.pk > 0);
       };
+      // A merge names several targets, one row each, which a key without
+      // `target_id` collapses into one (schema '8').
+      const revisionsKeyedByTarget = (): boolean =>
+        columns('revisions').some((column) => column.name === 'target_id' && column.pk > 0);
       if (!hasCurrentShape()) {
         // Under the same write lock catch-up takes, and re-checked once it
         // is held: the daemon and a `stratus run` opening an upgraded
@@ -931,6 +933,27 @@ export const createFileMemoryStore = (
           } catch {
             // The transaction may never have started; the original error
             // is the one worth reporting.
+          }
+          throw error;
+        }
+      } else if (!revisionsKeyedByTarget()) {
+        // Only `revisions` changed, so only it is replaced: `usage`, the one
+        // table a rebuild cannot restore, is kept. The stale stamp makes the
+        // next catch-up clear the derived rows and re-read the whole record,
+        // which fills the new table. Locked and re-checked like the drop above.
+        opened.exec('BEGIN IMMEDIATE;');
+        try {
+          if (!revisionsKeyedByTarget()) {
+            opened.exec('DROP TABLE revisions;');
+            opened.exec(INDEX_SCHEMA);
+            opened.exec(`UPDATE meta SET value = '0' WHERE key = 'schema_version';`);
+          }
+          opened.exec('COMMIT;');
+        } catch (error) {
+          try {
+            opened.exec('ROLLBACK;');
+          } catch {
+            // As above: the original error is the one worth reporting.
           }
           throw error;
         }
