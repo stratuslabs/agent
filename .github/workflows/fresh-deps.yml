@@ -38,6 +38,9 @@ jobs:
   test:
     name: Build and test with fresh dependencies
     runs-on: ubuntu-latest
+    # Same limit as CI's test job: a test that leaves a server open would
+    # otherwise hang the run for GitHub's 6 hours.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 

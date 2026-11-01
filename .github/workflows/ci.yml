@@ -15,6 +15,10 @@ jobs:
     # sandbox-exec, neither of which a Linux runner exercises.
     name: test (Node ${{ matrix.node }}${{ matrix.os == 'macos-latest' && ', macOS' || '' }})
     runs-on: ${{ matrix.os }}
+    # A normal run takes under 5 minutes, macOS the longest. A test that fails
+    # before closing a server it opened keeps node --test from exiting, and
+    # without a limit the job waits out GitHub's 6 hours holding its runner.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
