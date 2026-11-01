@@ -277,6 +277,14 @@ through `users:read`, which the app already has). A reply that tags only
 people is still split. Messages the agent sends with `message.send` and
 error notices are posted as written.
 
+In every mode, a reply longer than Slack advises for one message (4,000
+characters) is split across several. A message that tags another agent,
+by the same test, is the exception here too: it stays one message up to
+Slack's own limit of 40,000 characters, whether it is a reply or sent with
+`message.send`, so the tagged agent reads all of it. Slack cannot edit a
+message that long into the `stream` placeholder, so that placeholder is
+taken back and the reply is posted below it.
+
 ```jsonc
 // ~/.stratus/config.json — trusted configs only
 {
