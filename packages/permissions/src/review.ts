@@ -8,7 +8,7 @@
  * one. The reviewer and the shell sandbox are what actually protect, and
  * the approvals guide says so.
  */
-import type { ApprovalVerdict, JsonValue } from '@stratusagent/core';
+import type { ApprovalVerdict, JsonValue, Session, Tool, ToolCall, ToolRisk } from '@stratusagent/core';
 
 import {
   analyzeCommand,
@@ -361,4 +361,118 @@ export const builtInReviewRule = (
     };
   }
   return undefined;
+};
+
+/**
+ * The fixed codes a reviewer's answer is reported under. The reviewer's own
+ * line can echo the call's input, so the log and the event carry one of
+ * these instead, and the line goes only to the agent and the approver, who
+ * are shown the call anyway.
+ */
+export const REVIEW_CODES = [
+  'asked-for',
+  'not-asked-for',
+  'follows-outside-content',
+  'sends-secret',
+  'new-destination',
+  'unclear',
+  'review-failed',
+] as const;
+export type ReviewCode = (typeof REVIEW_CODES)[number];
+
+/** What the review posture needs from the host, per agent and per call. */
+export interface ReviewSettings {
+  /**
+   * The operator's rules for this agent, first match wins: the agent's own
+   * before the top-level ones, which is the host's to order.
+   */
+  rules?: readonly ReviewRule[];
+  /**
+   * Work the review out for every gated call without acting on it: calls
+   * run as they would under `open`, and each decision is reported marked
+   * `shadow`, off the call path.
+   */
+  shadow?: boolean;
+  /** How long one review may take before it counts as failed. Default 20 s. */
+  timeoutMs?: number;
+}
+
+/** One call put to the reviewer. The host builds the case from these. */
+export interface ReviewRequest {
+  session: Session;
+  call: ToolCall;
+  tool: Tool;
+  risk: ToolRisk;
+  /** What the call's scope hook named, when it names one. */
+  command?: string;
+  origin?: string;
+  destination?: string;
+  /**
+   * Fires when the turn is cancelled or the review runs out of time. A
+   * reviewer passes it to its provider call.
+   */
+  signal: AbortSignal;
+}
+
+/** The reviewer's answer. `reason` is one line for the agent and the approver, never logged. */
+export interface ReviewAnswer {
+  verdict: ApprovalVerdict;
+  code: ReviewCode;
+  reason: string;
+}
+
+export type Reviewer = (request: ReviewRequest) => Promise<ReviewAnswer>;
+
+/**
+ * A review that couldn't run, with the kind a person reads in the log
+ * (`provider-error`, `budget`, `unparseable`, `unknown-model`). Anything
+ * else a reviewer throws is reported as `error`. Either way the call is
+ * asked about, never allowed.
+ */
+export class ReviewFailure extends Error {
+  readonly kind: string;
+
+  constructor(kind: string, message?: string) {
+    super(message ?? `the review couldn't run: ${kind}`);
+    this.name = 'ReviewFailure';
+    this.kind = kind;
+  }
+}
+
+export interface ReviewOptions {
+  /** This agent's review settings, read per call, or undefined when it isn't on the review posture. */
+  settingsFor(agentId: string): ReviewSettings | undefined;
+  /** Asks the reviewer. Omitted, every review fails, so every reviewed call is asked about. */
+  reviewer?: Reviewer;
+  /** The stored credential values this agent's tools can use, for the built-in rule. */
+  secretsFor?(agentId: string): readonly string[];
+}
+
+const REVIEW_REASON_LIMIT = 300;
+
+/**
+ * The reviewer's answer if it has the right shape, with an unknown code
+ * read as `unclear` and the reason cut to one bounded line; undefined when
+ * the verdict or the reason is missing, which counts as a failed review.
+ */
+export const readReviewAnswer = (raw: unknown): ReviewAnswer | undefined => {
+  if (typeof raw !== 'object' || raw === null) {
+    return undefined;
+  }
+  const source = raw as Record<string, unknown>;
+  if (typeof source.verdict !== 'string' || !VERDICTS.includes(source.verdict)) {
+    return undefined;
+  }
+  if (typeof source.reason !== 'string' || source.reason.trim().length === 0) {
+    return undefined;
+  }
+  const line = source.reason.trim().split(/\r?\n/)[0] as string;
+  const code = typeof source.code === 'string' && (REVIEW_CODES as readonly string[]).includes(source.code) && source.code !== 'review-failed'
+    ? source.code as ReviewCode
+    : 'unclear';
+  return {
+    verdict: source.verdict as ApprovalVerdict,
+    code,
+    reason: line.length > REVIEW_REASON_LIMIT ? `${line.slice(0, REVIEW_REASON_LIMIT)}…` : line,
+  };
 };
