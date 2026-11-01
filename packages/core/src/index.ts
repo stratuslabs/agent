@@ -2052,7 +2052,48 @@ export interface MemoryAppendOptions {
    * contribution declares `supersedesMany`.
    */
   supersedes?: string | string[];
+  /**
+   * Refuse, storing nothing, when any fact `supersedes` names is pinned
+   * (any pin standing in the record) or labeled `user`, checked by the
+   * store in the same step as the append, so a pin or re-assertion made
+   * meanwhile is never overridden. What a memory pass writes with: an
+   * operator's pin or assertion outranks a merge. The built-in stores
+   * check it under a lock their own pin and re-assertion take too; a store
+   * built before this option ignores it, which is why a pass also checks
+   * first.
+   */
+  refuseProtected?: boolean;
 }
+
+/**
+ * Why a write that refuses protected facts stored nothing, in the words
+ * the memory pass's own check uses.
+ */
+export const memoryProtectedRefusal = (entryId: string, why: 'pinned' | 'user'): string =>
+  why === 'pinned'
+    ? `${entryId} is pinned, and a memory pass never supersedes a pinned fact. Nothing was stored.`
+    : `${entryId} is a fact the operator asserted, and a memory pass never supersedes one. Nothing was stored.`;
+
+/**
+ * The check `refuseProtected` asks for, shared by the stores: throws the
+ * refusal for the first id that is pinned or whose live entry is labeled
+ * `user`.
+ */
+export const assertUnprotectedMemoryTargets = (
+  ids: readonly string[],
+  live: readonly MemoryEntry[],
+  pinnedIds: ReadonlySet<string>,
+): void => {
+  for (const id of ids) {
+    if (pinnedIds.has(id)) {
+      throw new Error(memoryProtectedRefusal(id, 'pinned'));
+    }
+    const entry = live.find((candidate) => candidate.id === id);
+    if (entry !== undefined && memoryEntryTrust(entry) === 'user') {
+      throw new Error(memoryProtectedRefusal(id, 'user'));
+    }
+  }
+};
 
 /** Clamp a caller-chosen search limit into the store's own bounds. */
 export const clampMemoryRecallLimit = (limit?: number): number => {
@@ -2620,6 +2661,11 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
       const live = this.live(agentId, this.now());
       for (const id of supersedes) {
         assertSupersedableMemoryEntry(live, id);
+      }
+      // Synchronous from here to the push below, so nothing gets between
+      // the check and the write.
+      if (options.refuseProtected === true) {
+        assertUnprotectedMemoryTargets(supersedes, live, new Set(this.pins.get(agentId) ?? []));
       }
     }
     const about = memoryEntryAbout(options);

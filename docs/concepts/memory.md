@@ -126,8 +126,10 @@ pin that did not mean anything. Unpin something first.
 
 The budget is a **prefix** of the pins in the order they were made, so one
 pin that overruns the cap makes every pin recorded after it inert too,
-whatever its size. Two daemons pinning at once can produce that: each reads
-a total that does not yet include the other's write, and both append. The
+whatever its size. Pins take a write lock beside `memory.jsonl`, so two
+pins from this version never both read a stale total, but a build older
+than the lock pinning at the same moment can produce it: each reads a total
+that does not yet include the other's write, and both append. The
 replay resolves it the same way in every store rather than evicting either
 one — and a later pin then refuses **naming the pin that is blocking it**,
 because the effective set is under the cap in that state and unpinning from
@@ -319,7 +321,10 @@ What a pass may do is enforced by the runtime, not left to the prompt:
   `procedural`, or `preference` facts, never `episodic` task notes.
 - It may replace (`supersedes`) only facts it recalled in that same pass,
   and never a pinned fact or one labeled `user`. It may name several to
-  merge them into one, when the store takes lists.
+  merge them into one, when the store takes lists. The built-in store
+  checks the pin and the label in the same step as the write, under the
+  lock `stratus memory pin` and `reassert` take, so an operator who pins or
+  asserts a fact while a pass is merging it always wins.
 - It runs on exactly the model the request names, or the agent's own, with
   no fallback.
 - It writes at the conversation's trust label, so a conversation that read

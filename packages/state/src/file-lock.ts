@@ -248,19 +248,34 @@ export const grantReadSerializer = (env: StateEnvironment, options: { waitMs?: n
  * does: writing through is the race.
  */
 export const grantWriteSerializer = (env: StateEnvironment, options: { waitMs?: number } = {}) =>
-  <T>(write: () => Promise<T>): Promise<T> => {
-    const lockPath = grantsLockPath(env);
-    const run = async (): Promise<T> => {
-      const lock = claimFileLock(lockPath, { waitMs: options.waitMs ?? GRANTS_LOCK_WAIT_MS });
-      heldHere.add(lockPath);
-      try {
-        return await write();
-      } finally {
-        heldHere.delete(lockPath);
-        lock.release();
-      }
-    };
-    const queued = (writeQueues.get(lockPath) ?? Promise.resolve()).then(run, run);
-    writeQueues.set(lockPath, queued.then(() => undefined, () => undefined));
-    return queued;
+  <T>(write: () => Promise<T>): Promise<T> =>
+    serializeFileWrite(grantsLockPath(env), write, { waitMs: options.waitMs ?? GRANTS_LOCK_WAIT_MS });
+
+/**
+ * Run an async check-and-write under a file lock: queued behind every
+ * other write this process makes under the same lock path, so in-process
+ * writers take turns rather than block the thread on a lock this process
+ * holds, and held across the whole section, so another process waits for
+ * it (up to `waitMs`, then `FileLockHeldError` and nothing written). The
+ * queue is per lock path for the whole process, not per caller: two stores
+ * over one file share it.
+ */
+export const serializeFileWrite = <T>(
+  lockPath: string,
+  write: () => Promise<T>,
+  options: { waitMs?: number } = {},
+): Promise<T> => {
+  const run = async (): Promise<T> => {
+    const lock = claimFileLock(lockPath, { waitMs: options.waitMs ?? 0 });
+    heldHere.add(lockPath);
+    try {
+      return await write();
+    } finally {
+      heldHere.delete(lockPath);
+      lock.release();
+    }
   };
+  const queued = (writeQueues.get(lockPath) ?? Promise.resolve()).then(run, run);
+  writeQueues.set(lockPath, queued.then(() => undefined, () => undefined));
+  return queued;
+};

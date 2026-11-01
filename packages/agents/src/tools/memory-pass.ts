@@ -115,8 +115,9 @@ export const createMemoryPassTools = (
     (await store.pinned?.(agentId, { include: 'allocated' }) ?? []).some((entry) => entry.id === entryId);
   /**
    * The fact's label now, not at the recall: an operator may have asserted
-   * it since. Read right before the write, as the pin is. Still two store
-   * calls, not one atomic one; see the PR notes for card 986.
+   * it since. Read right before the write, as the pin is, for the early
+   * refusal; the store checks both again in the write itself
+   * (`refuseProtected`).
    */
   const labelNow = async (agentId: string, entryId: string, recalled: TrustLevel): Promise<TrustLevel> => {
     const found = (await store.audit(agentId)).find((entry) => entry.id === entryId);
@@ -193,6 +194,10 @@ export const createMemoryPassTools = (
         provenance: { trust: leastTrusted(state.trust, sessionWriteTrust(session)), origin },
         ...fields,
         ...supersedes,
+        // The checks above give a clear refusal early; this one is the
+        // store's, made in the same step as the write, so a pin or an
+        // assertion that lands after them still wins.
+        refuseProtected: true,
       });
       saved += 1;
       superseded += replaces?.length ?? 0;
