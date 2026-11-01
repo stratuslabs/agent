@@ -1213,20 +1213,35 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         if (reviewAsk === undefined && !resumed && sessionTrustOf(session) !== 'external') {
           return report(context, 'risk', true, `${call.toolName} not reviewed: this conversation has read nothing from outside`);
         }
-        // The stored values, for the rule against sending one out. A store
-        // that can't be read asks, like any other part of the review that
-        // couldn't run: never a failed turn, never an allow.
-        let secrets: readonly string[] | undefined;
+        // The stored values, for the rule against sending one out, read
+        // within the review's time and the turn. A store that can't be read
+        // (or doesn't answer) asks, like any other part of the review that
+        // couldn't run: never a failed turn, never an allow. The metadata
+        // and token rules need no stored value, so they still run first.
+        let secrets: readonly string[] = [];
+        let secretsUnreadable = false;
         if (reviewAsk === undefined) {
+          secretsUnreadable = true;
+          let timer: ReturnType<typeof setTimeout> | undefined;
           try {
-            secrets = (await review?.secretsFor?.(session.agent.id)) ?? [];
+            const lookup = Promise.resolve(review?.secretsFor?.(session.agent.id));
+            const timedOut = new Promise<typeof ABORTED>((resolve) => {
+              timer = setTimeout(() => resolve(ABORTED), reviewSettings.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS);
+            });
+            const read = await untilAborted(Promise.race([lookup, timedOut]), context.signal);
+            if (read !== ABORTED) {
+              secrets = read ?? [];
+              secretsUnreadable = false;
+            } else {
+              lookup.catch(() => undefined);
+            }
           } catch {
-            reviewNotes.set(context, { verdict: 'ask', reviewCode: 'review-failed' });
-            const reason = `${call.toolName} needs a person's yes because the review couldn't run: secrets-unreadable`;
-            reviewAsk = { layer: 'review', reason, told: reason, note: 'the review couldn\'t run: secrets-unreadable' };
+            // Unreadable: stays an ask below.
+          } finally {
+            clearTimeout(timer);
           }
         }
-        if (reviewAsk === undefined && secrets !== undefined) {
+        if (reviewAsk === undefined) {
           const hit = builtInReviewRule(
             { toolName: call.toolName, input: call.input, ...(resolvedForReview.command === undefined ? {} : { command: resolvedForReview.command }) },
             secrets,
@@ -1238,6 +1253,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             }
             reviewAsk = { layer: 'rule', reason: hit.reason, told: hit.reason, note: hit.reason };
           }
+        }
+        if (reviewAsk === undefined && secretsUnreadable) {
+          reviewNotes.set(context, { verdict: 'ask', reviewCode: 'review-failed' });
+          const reason = `${call.toolName} needs a person's yes because the review couldn't run: secrets-unreadable`;
+          reviewAsk = { layer: 'review', reason, told: reason, note: 'the review couldn\'t run: secrets-unreadable' };
         }
         if (reviewAsk === undefined && resumed) {
           reviewNotes.set(context, { verdict: 'ask' });
