@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -15,6 +15,7 @@ import {
   stateFilePath,
   stratusHomePath,
 } from '../src/index.ts';
+import { describeStateBackup, markMigrationBegun, settleFailedMigration } from '../src/state-backup.ts';
 
 /**
  * A home a 0.12-era build left one migration short: per-agent sessions and
@@ -232,6 +233,105 @@ test('a retry after the older build wrote more takes a fresh backup, so restorin
   assert.equal(unchanged?.reused, true);
   assert.equal(unchanged?.path, afterNewFile?.path);
   assert.equal((await readdir(backupsDirPath(env))).length, 4);
+});
+
+test('a retry after a migration that changed the state and did not finish keeps the copy from before it', async () => {
+  // The run took its backup, a migration got partway (it set a database
+  // aside and wrote a new one), and then failed. The stamp is still the
+  // old one, so the next start runs the same upgrade again. A copy of the
+  // state now holds neither the old layout nor the new one: an older build
+  // restored from it would not find its conversations.
+  const { home, stratus } = await seedHome();
+  const env = { homeDir: home };
+  const stamp = await readStateStamp(env);
+  const migrations = ['0004-per-agent-workspaces'];
+  const first = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:00:00Z'));
+  await markMigrationBegun(first!);
+  await rename(path.join(stratus, 'fleet.db'), path.join(stratus, 'fleet.db.migrated'));
+  const moved = new DatabaseSync(path.join(stratus, 'agents', 'ava', 'fleet.db'));
+  moved.exec("CREATE TABLE schedules (id TEXT PRIMARY KEY); INSERT INTO schedules VALUES ('daily')");
+  moved.close();
+  await settleFailedMigration(env, first!);
+
+  for (const at of ['2026-11-01T01:05:00Z', '2026-11-03T01:00:00Z']) {
+    const retry = await backUpStateBeforeMigrating(env, stamp, migrations, new Date(at));
+    assert.equal(retry?.reused, true);
+    assert.equal(retry?.changedSince, true);
+    assert.equal(retry?.path, first?.path);
+    assert.match(describeStateBackup(retry!), /before this upgrade first ran/);
+    assert.match(describeStateBackup(retry!), /not in it/);
+  }
+  assert.equal((await readdir(backupsDirPath(env))).length, 1);
+  assert.ok((await listFiles(path.join(first!.path, 'files'))).includes('fleet.db'));
+
+  // The same holds when the failed run never got to say how it ended (it
+  // was killed): a migration began, so the copy from before it is kept.
+  const killed = await seedHome();
+  const killedEnv = { homeDir: killed.home };
+  const before = await backUpStateBeforeMigrating(killedEnv, stamp, migrations, new Date('2026-11-01T01:00:00Z'));
+  await markMigrationBegun(before!);
+  await writeFile(path.join(killed.stratus, 'agents', 'ava', 'memory.jsonl'), '');
+  const afterKill = await backUpStateBeforeMigrating(killedEnv, stamp, migrations, new Date('2026-11-01T01:05:00Z'));
+  assert.equal(afterKill?.path, before?.path);
+  assert.equal(afterKill?.changedSince, true);
+});
+
+test('a migration that failed before changing anything leaves the copy free to be replaced once the older build writes more', async () => {
+  const { home, stratus } = await seedHome();
+  const env = { homeDir: home };
+  const stamp = await readStateStamp(env);
+  const migrations = ['0004-per-agent-workspaces'];
+  const first = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:00:00Z'));
+  await markMigrationBegun(first!);
+  await settleFailedMigration(env, first!);
+
+  // Nothing written since: the same copy, and not marked as changed.
+  const same = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:02:00Z'));
+  assert.equal(same?.path, first?.path);
+  assert.equal(same?.changedSince, false);
+
+  await writeFile(path.join(stratus, 'agents', 'ava', 'memory.jsonl'), '{"id":"m1","content":"ava likes tea"}\n{"id":"m2","content":"and biscuits"}\n');
+  const retry = await backUpStateBeforeMigrating(env, stamp, migrations, new Date('2026-11-01T01:05:00Z'));
+  assert.equal(retry?.reused, false);
+  assert.notEqual(retry?.path, first?.path);
+  assert.match(await readFile(path.join(retry!.path, 'files', 'agents', 'ava', 'memory.jsonl'), 'utf8'), /biscuits/);
+});
+
+test('the run marks its backup before migrating, so a run that dies partway leaves the copy kept', async () => {
+  // The run finished here, but it is the same mark a killed one leaves:
+  // asked again from the stamp it started at, the copy is kept as the one
+  // from before, though the state has moved on since.
+  const { home } = await seedHome();
+  const env = { homeDir: home };
+  const reported: StateBackup[] = [];
+  await runStateMigrations(env, { exclusive: true, onBackup: (backup) => reported.push(backup) });
+  assert.equal(reported.length, 1);
+  const { from } = JSON.parse(await readFile(path.join(reported[0]!.path, 'backup.json'), 'utf8'));
+  const again = await backUpStateBeforeMigrating(env, from, ['0004-per-agent-workspaces'], new Date(Date.parse(reported[0]!.createdAt) + 60_000));
+  assert.equal(again?.path, reported[0]!.path);
+  assert.equal(again?.changedSince, true);
+});
+
+test('a run whose migration failed before changing anything lets the next run copy what the older build wrote since', async () => {
+  const { home, stratus } = await seedHome();
+  const env = { homeDir: home };
+  const reported: StateBackup[] = [];
+  const onBackup = (backup: StateBackup): void => { reported.push(backup); };
+  // 0004 can't list the workspaces, so it fails before moving any of them.
+  await chmod(path.join(stratus, 'workspaces'), 0o000);
+  try {
+    await assert.rejects(runStateMigrations(env, { exclusive: true, onBackup }), { code: 'EACCES' });
+  } finally {
+    await chmod(path.join(stratus, 'workspaces'), 0o700);
+  }
+  assert.equal(reported.length, 1);
+
+  await writeFile(path.join(stratus, 'agents', 'ava', 'memory.jsonl'), '{"id":"m1","content":"ava likes tea"}\n{"id":"m2","content":"and biscuits"}\n');
+  await runStateMigrations(env, { exclusive: true, onBackup });
+  assert.equal(reported.length, 2);
+  assert.equal(reported[1]!.reused, false);
+  assert.notEqual(reported[1]!.path, reported[0]!.path);
+  assert.match(await readFile(path.join(reported[1]!.path, 'files', 'agents', 'ava', 'memory.jsonl'), 'utf8'), /biscuits/);
 });
 
 test('a backup that cannot be taken stops the upgrade before anything changes, and leaves no partial copy', async () => {

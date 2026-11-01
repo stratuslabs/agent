@@ -23,8 +23,16 @@ export interface StateBackup {
   /** What was copied, relative to `~/.stratus` and to `files/`. */
   files: string[];
   createdAt: string;
-  /** An earlier backup of this same state, taken in the last day with nothing written since, was kept instead. */
+  /** An earlier backup was kept instead of taking a new one: see `changedSince`. */
   reused: boolean;
+  /**
+   * The state changed after this copy, because a migration began on it and
+   * never finished. It is still the copy to go back to, since an older
+   * build can't run a half-migrated home, and what was written after it is
+   * not in it. False for a new copy, and for an earlier one of this same
+   * state, taken in the last day with nothing written since.
+   */
+  changedSince: boolean;
 }
 
 interface BackupManifest {
@@ -44,9 +52,19 @@ interface BackupManifest {
  * conversation each time would fill the disk. When anything was written in
  * between (the older daemon, started again after a failed upgrade, saved a
  * conversation), the old copy would drop it on restore, so a new one is
- * taken and the old one stays.
+ * taken and the old one stays. Unless what changed it was a migration that
+ * began on that copy: see `MIGRATION_BEGUN`.
  */
 const REUSE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Left in a backup's directory just before the first migration runs on the
+ * state it holds. While the stamp still reads as before (the run failed or
+ * was killed), the state may be half migrated, so a retry keeps this copy
+ * as the way back rather than copy a layout no older build can read. A run
+ * that failed with every state file as the copy found it takes it off.
+ */
+const MIGRATION_BEGUN = 'migration-begun';
 
 /**
  * `node:sqlite`, loaded only when a database is copied: every importer of
@@ -234,36 +252,89 @@ const sameInputs = (a: Record<string, string>, b: Record<string, string>): boole
   return keys.length === Object.keys(b).length && keys.every((key) => b[key] === a[key]);
 };
 
+const exists = async (filePath: string): Promise<boolean> => {
+  try {
+    await lstat(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+};
+
+/**
+ * The backup to keep instead of taking one: an earlier copy of exactly this
+ * state, or else the newest copy from this stamp that a migration began on,
+ * whatever has been written since. Neither: undefined, and a new copy.
+ */
 const recentBackupOf = async (
   env: StateEnvironment,
   stamp: StateStamp,
   inputs: Record<string, string>,
   now: Date,
 ): Promise<StateBackup | undefined> => {
+  let begun: StateBackup | undefined;
   for (const entry of await listDirectory(backupsDirPath(env))) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) {
       continue;
     }
     const directory = path.join(backupsDirPath(env), entry.name);
     const manifest = await readManifest(directory);
-    const age = manifest === undefined ? Number.NaN : now.getTime() - Date.parse(manifest.createdAt);
+    if (manifest === undefined || !sameStamp(manifest.from, stamp)) {
+      continue;
+    }
+    const kept = { path: directory, files: manifest.files, createdAt: manifest.createdAt, reused: true };
+    const age = now.getTime() - Date.parse(manifest.createdAt);
+    if (age >= 0 && age < REUSE_WINDOW_MS && sameInputs(manifest.inputs, inputs)) {
+      return { ...kept, changedSince: false };
+    }
     if (
-      manifest !== undefined
-      && sameStamp(manifest.from, stamp)
-      && age >= 0 && age < REUSE_WINDOW_MS
-      && sameInputs(manifest.inputs, inputs)
+      await exists(path.join(directory, MIGRATION_BEGUN))
+      && (begun === undefined || Date.parse(manifest.createdAt) > Date.parse(begun.createdAt))
     ) {
-      return { path: directory, files: manifest.files, createdAt: manifest.createdAt, reused: true };
+      begun = { ...kept, changedSince: true };
     }
   }
-  return undefined;
+  return begun;
+};
+
+/**
+ * Called by the migration run once it has its backup and before the first
+ * migration changes anything: see `MIGRATION_BEGUN`.
+ */
+export const markMigrationBegun = async (backup: StateBackup): Promise<void> => {
+  const marker = path.join(backup.path, MIGRATION_BEGUN);
+  if (await exists(marker)) {
+    return;
+  }
+  await writeFileSynced(marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
+  await syncDirectory(backup.path);
+};
+
+/**
+ * Called when a migration threw. If every state file is still as the
+ * backup copied it, nothing was half done: the mark comes off, and a retry
+ * after the older build writes more takes a fresh copy with those writes.
+ * Anything else keeps it. Best effort: keeping the mark is the safe side.
+ */
+export const settleFailedMigration = async (env: StateEnvironment, backup: StateBackup): Promise<void> => {
+  const manifest = await readManifest(backup.path);
+  if (manifest !== undefined && sameInputs(manifest.inputs, await stateInputs(env, await stateFiles(env)))) {
+    await rm(path.join(backup.path, MIGRATION_BEGUN), { force: true });
+  }
 };
 
 /** The line a command prints about the backup a migration run took or kept. */
 export const describeStateBackup = (backup: StateBackup): string =>
-  backup.reused
-    ? `state backup: ${backup.path} already holds this state as it was before this upgrade (taken ${backup.createdAt})`
-    : `state backup: copied ${backup.files.length} state files to ${backup.path} before migrating`;
+  backup.changedSince
+    ? `state backup: keeping ${backup.path}, the state as it was before this upgrade first ran (taken ${backup.createdAt}). `
+      + 'A migration that did not finish has changed the state since, so that copy is still the one to go back to; '
+      + 'what was written after it is not in it'
+    : backup.reused
+      ? `state backup: ${backup.path} already holds this state as it was before this upgrade (taken ${backup.createdAt})`
+      : `state backup: copied ${backup.files.length} state files to ${backup.path} before migrating`;
 
 /** `2026-11-01T01:30:00.000Z` as `20261101T013000Z`: sorts by time, and is a plain file name everywhere. */
 const directoryName = (now: Date): string =>
@@ -343,7 +414,7 @@ export const backUpStateBeforeMigrating = async (
       }
     }
     await syncDirectory(root);
-    return { path: path.join(root, name), files, createdAt, reused: false };
+    return { path: path.join(root, name), files, createdAt, reused: false, changedSince: false };
   } catch (error) {
     await rm(partial, { recursive: true, force: true });
     throw error;

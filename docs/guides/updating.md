@@ -306,9 +306,22 @@ A migration that leaves the data alone, like a stamp or a permission change,
 takes no backup, and neither does a home with no conversation or memory in
 it. A start that runs the same upgrade again within a day, such as a service
 restarting over a migration that keeps failing, reuses the backup it already
-took, but only if no state file changed since. If anything was written in
-between (the older version, started again after a failed upgrade, saved a
-conversation), it takes a new backup and keeps the earlier one. If the copy can't be made (a full disk, a file it can't read), no
+took, but only if no state file changed since. If the failed migration
+changed nothing and something else was written in between (the older
+version, started again after the failure, saved a conversation), it takes a
+new backup and keeps the earlier one.
+
+A migration that fails partway can leave the state half moved, which no
+version reads as its own. So once a migration has changed the state and
+not finished (or was stopped before it could check), every retry of that
+upgrade keeps the backup from before it, however old, and says so:
+
+    state backup: keeping /Users/you/.stratus/backups/20261101T013000Z, the state as it was before this upgrade first ran (taken 2026-11-01T01:30:00.000Z). A migration that did not finish has changed the state since, so that copy is still the one to go back to; what was written after it is not in it
+
+Restoring it brings back the state from before the upgrade, without what
+was written after it; `~/.stratus.upgraded` below still has that.
+
+If the copy can't be made (a full disk, a file it can't read), no
 migration runs and the command says why: the home is still as the older
 build left it, and that build still runs it.
 

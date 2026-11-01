@@ -37,7 +37,7 @@ import {
   gatewayInfoPath,
 } from './paths.ts';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
-import { type StateBackup, backUpStateBeforeMigrating } from './state-backup.ts';
+import { type StateBackup, backUpStateBeforeMigrating, markMigrationBegun, settleFailedMigration } from './state-backup.ts';
 
 // Memory used to live under the working directory. Fold any such file into
 // the agents' own stores the first time a run happens from that directory,
@@ -757,10 +757,13 @@ export const runStateMigrations = async (
   // migration at all if the copy fails: the upgrade is refused with the
   // home exactly as the older build left it, which that build still runs.
   const toApply = STATE_MIGRATIONS.filter((migration) => !applied.has(migration.id) && runnable.get(migration.id) === true);
+  let backup: StateBackup | undefined;
   if (toApply.some((migration) => migration.needsBackup !== false)) {
-    let backup: StateBackup | undefined;
     try {
       backup = await backUpStateBeforeMigrating(env, { schemaVersion: stamp.schemaVersion, applied: [...stamp.applied] }, toApply.map((migration) => migration.id));
+      if (backup !== undefined) {
+        await markMigrationBegun(backup);
+      }
     } catch (error) {
       throw new Error(
         `Backing up ${stratusHomePath(env)} before upgrading its state failed `
@@ -773,14 +776,24 @@ export const runStateMigrations = async (
       options.onBackup?.(backup);
     }
   }
-  for (const migration of STATE_MIGRATIONS) {
-    if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
-      continue;
+  try {
+    for (const migration of STATE_MIGRATIONS) {
+      if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
+        continue;
+      }
+      const detail = await migration.apply(env);
+      stamp.applied.push(migration.id);
+      applied.add(migration.id);
+      results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
     }
-    const detail = await migration.apply(env);
-    stamp.applied.push(migration.id);
-    applied.add(migration.id);
-    results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
+  } catch (error) {
+    // Whether a retry may copy the state again or must keep this backup as
+    // the way back (see `settleFailedMigration`). The migration's own error
+    // is the one to report.
+    if (backup !== undefined) {
+      await settleFailedMigration(env, backup).catch(() => undefined);
+    }
+    throw error;
   }
   // One write, at the end, and none at all from a run that deferred
   // something.
