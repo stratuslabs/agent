@@ -62,7 +62,7 @@ import { formatEvent } from './events.ts';
 import { writeLine, stringifyValue } from './io.ts';
 import { quoteShellArg } from './prompter.ts';
 import type { CliApprovalMode, ParsedRunCommand } from './parse.ts';
-import { externalContentGated, loadServePlugins, loadServeRuntimeSelection } from './trusted-config.ts';
+import { externalContentGated, loadServePlugins, loadServeRuntimeSelection, reviewSettingsIn } from './trusted-config.ts';
 
 /**
  * Kept with its historical CLI signature: a parsed run command is a
@@ -213,6 +213,8 @@ export const createAgentRuntime = async (
     approvals?: CliApprovalMode;
     /** The mode came from `defaultApprovalMode`, not from a flag. */
     approvalsDefaulted?: boolean;
+    /** Unflagged under the review posture: `open` with the review's rules (`unflaggedApprovals`). */
+    approvalsPosture?: 'review';
     maxTurns?: number;
     env?: CliEnvironment;
     /** The config this command was pinned to, for reading its `plugins` block. */
@@ -405,7 +407,12 @@ export const createAgentRuntime = async (
         options.askApproval,
         options.approvalsDefaulted ?? false,
         approvalMode === 'open'
-          ? { gateExternalContent: await externalContentGated(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id) }
+          ? {
+              gateExternalContent: await externalContentGated(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id),
+              ...(options.approvalsPosture === 'review'
+                ? { review: await reviewSettingsIn(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id) ?? {} }
+                : {}),
+            }
           : {},
       ),
       bus,
@@ -509,6 +516,8 @@ export const runSingleLoop = async (
     approvals?: CliApprovalMode;
     /** The mode came from `defaultApprovalMode`, not from a flag. */
     approvalsDefaulted?: boolean;
+    /** Unflagged under the review posture: `open` with the review's rules (`unflaggedApprovals`). */
+    approvalsPosture?: 'review';
     maxTurns?: number;
     env?: CliEnvironment;
     configPath?: string;

@@ -51,7 +51,7 @@ import {
   type EventsConfig,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
-import { describePrincipals, describePosture, describeRemoteMode, describeUnreachable } from '../approvals.ts';
+import { describePrincipals, describePosture, describeRemoteMode, describeReviewPosture, describeUnreachable } from '../approvals.ts';
 import { createOperatorCommands } from '../operator-commands.ts';
 import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
@@ -1000,6 +1000,9 @@ const serveHeldHome = async (
     // for an agent no longer served changes nothing the daemon does.
     const served = gateway.agents().map((agent) => agent.id);
     log(`approvals: ${describePosture(approvalsConfig, approvalMode, served)}`);
+    for (const line of describeReviewPosture(approvalsConfig, approvalMode, served)) {
+      log(`approvals: ${line}`);
+    }
     if (approvalMode === 'remote') {
       // Only agents whose channel actually came up can be asked: tokens on
       // disk with the Slack package missing means nothing renders the

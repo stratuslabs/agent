@@ -11,6 +11,7 @@ import {
 } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 import type { CliApprovalMode } from './parse.ts';
+import type { ReviewSettings } from '@stratusagent/permissions';
 
 /**
  * A credential that exists only in this shell cannot reach the daemon: a
@@ -77,7 +78,7 @@ export const defaultPosture = async (
   env: CliEnvironment,
   configPath: string | undefined,
   agentId: string,
-): Promise<'open' | 'guarded' | 'unreadable'> => {
+): Promise<'open' | 'guarded' | 'review' | 'unreadable'> => {
   let block = await readTrustedConfigBlock('approvals', env, configPath).catch(() => ({ status: 'unreadable' as const }));
   if (block.status === 'untrusted') {
     block = await readGlobalConfigBlock('approvals', env).catch(() => ({ status: 'unreadable' as const }));
@@ -85,7 +86,37 @@ export const defaultPosture = async (
   if (block.status === 'unreadable' || block.status === 'untrusted') {
     return 'unreadable';
   }
-  return resolveAgentApprovals(block.status === 'present' ? block.value : undefined, agentId).posture === 'guarded' ? 'guarded' : 'open';
+  const posture = resolveAgentApprovals(block.status === 'present' ? block.value : undefined, agentId).posture;
+  return posture === 'guarded' || posture === 'review' ? posture : 'open';
+};
+
+/**
+ * The review posture's settings for this agent in the trusted config, for
+ * `stratus chat`/`run`, or undefined when the agent isn't on it (or the
+ * config can't be read, where `defaultPosture` has already failed closed).
+ * Read under the same trust rule: a cloned repo's block is ignored.
+ */
+export const reviewSettingsIn = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  agentId: string,
+): Promise<ReviewSettings | undefined> => {
+  let block = await readTrustedConfigBlock('approvals', env, configPath).catch(() => ({ status: 'unreadable' as const }));
+  if (block.status === 'untrusted') {
+    block = await readGlobalConfigBlock('approvals', env).catch(() => ({ status: 'unreadable' as const }));
+  }
+  if (block.status !== 'present') {
+    return undefined;
+  }
+  const resolved = resolveAgentApprovals(block.value, agentId);
+  if (resolved.posture !== 'review') {
+    return undefined;
+  }
+  return {
+    ...(resolved.rules !== undefined ? { rules: resolved.rules } : {}),
+    ...(resolved.review?.shadow === true ? { shadow: true } : {}),
+    ...(resolved.review?.timeoutMs !== undefined ? { timeoutMs: resolved.review.timeoutMs } : {}),
+  };
 };
 
 /**
@@ -97,9 +128,18 @@ export const defaultPosture = async (
  * could not be read, more permissive than open.
  */
 export const unflaggedApprovals = (
-  posture: 'open' | 'guarded' | 'unreadable',
+  posture: 'open' | 'guarded' | 'review' | 'unreadable',
   fallback: CliApprovalMode,
-): { approvals: CliApprovalMode; approvalsDefaulted?: true } => {
+): { approvals: CliApprovalMode; approvalsDefaulted?: true; approvalsPosture?: 'review' } => {
+  if (posture === 'review') {
+    // Open at the terminal, with the review's rules on top: what the review
+    // would ask about asks here, and with nobody to ask it is refused.
+    // stratus chat/run have no reviewer model of their own, so a call that
+    // would reach it asks.
+    return fallback === 'always'
+      ? { approvals: 'open', approvalsDefaulted: true, approvalsPosture: 'review' }
+      : { approvals: 'open', approvalsPosture: 'review' };
+  }
   if (posture === 'open') {
     // With nobody to ask, open still runs gated calls but refuses what
     // would ask (dangerous, or gated after external content) rather than
