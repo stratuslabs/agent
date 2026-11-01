@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
-import { createMemoryPassTools, isValidAgentId, type MemoryPassWrite } from '@stratusagent/agents';
+import { createMemoryPassTools, isValidAgentId, type MemoryPassToolState, type MemoryPassWrite } from '@stratusagent/agents';
 import {
   assertMemoryAboutWithinCap,
   conversationContextFrom,
@@ -10,13 +10,20 @@ import {
   MEMORY_PASS_SLICE_MAX_BYTES,
   MEMORY_SAVE_PASS_INSTRUCTION,
   MEMORY_SAVE_PASS_REQUEST,
+  MEMORY_TIDY_CHUNK_MAX_BYTES,
+  MEMORY_TIDY_GROUP_MIN,
+  MEMORY_TIDY_PASS_INSTRUCTION,
+  MEMORY_TIDY_PASS_REQUEST,
+  memoryEntryAbout,
   memoryEntryFields,
+  memoryEntryTrust,
   memoryPassSessionId,
   sessionWriteTrust,
   transcriptEntry,
   type AgentMemoryStore,
   type ConversationKind,
   type MemoryAuditEntry,
+  type MemoryEntry,
   type MemoryPassHandle,
   type MemoryPassKind,
   type MemoryPassMode,
@@ -40,6 +47,7 @@ import {
   memoryPassOpenClaims,
   memoryPassSettleRecord,
   memoryPassSummaries,
+  memoryPassTidyClaimed,
   memoryPassWatermark,
   memoryShadowEntriesOf,
   type MemoryPassClaim,
@@ -217,6 +225,124 @@ export const takeSaveSlice = (
 /** The save pass's one message: the request, the conversation in tags, the instruction after it. */
 export const saveSlicePrompt = (entries: readonly string[]): string =>
   `${MEMORY_SAVE_PASS_REQUEST}\n\n<conversation>\n${entries.join('\n')}\n</conversation>\n\n${MEMORY_SAVE_PASS_INSTRUCTION}`;
+
+export interface TidyChunk {
+  /** `kind/label/about`, the about key folded: what the ledger names the group by. */
+  key: string;
+  /** The group's label: the pass starts at it, recalls only it, and writes it. */
+  trust: TrustLevel;
+  /** The facts handed over, oldest first. */
+  members: MemoryEntry[];
+  /** One JSON object a line, for the `<facts>` tags. */
+  lines: string[];
+  /** SHA-256 of the sorted member ids: what a later pass of the mode skips. */
+  hash: string;
+  /** Another chunk, of this group or another, waits after this one. */
+  more: boolean;
+}
+
+/**
+ * A fact as a tidy pass reads it: data, not prose. `<` is escaped so no
+ * fact's text can close the `<facts>` tag it is sent in; JSON reads it
+ * back the same.
+ */
+const tidyLine = (entry: MemoryEntry): string =>
+  JSON.stringify({
+    id: entry.id,
+    text: entry.content,
+    ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
+    created: entry.createdAt,
+    ...(entry.validFrom !== undefined ? { validFrom: entry.validFrom } : {}),
+    ...(entry.validUntil !== undefined ? { validUntil: entry.validUntil } : {}),
+  }).replace(/</g, '\\u003c');
+
+const chunkHash = (members: readonly MemoryEntry[]): string =>
+  createHash('sha256').update(members.map((entry) => entry.id).sort().join('\n')).digest('hex');
+
+/** A group's facts in chunks of about `maxBytes`; a fact alone over it (its JSON escapes can grow it) still goes, by itself. */
+const tidyChunks = (members: readonly MemoryEntry[], maxBytes: number): Array<{ members: MemoryEntry[]; lines: string[] }> => {
+  const chunks: Array<{ members: MemoryEntry[]; lines: string[] }> = [];
+  let current: { members: MemoryEntry[]; lines: string[] } = { members: [], lines: [] };
+  let bytes = 0;
+  for (const entry of members) {
+    const line = tidyLine(entry);
+    if (current.lines.length > 0 && bytes + 1 + utf8(line) > maxBytes) {
+      chunks.push(current);
+      current = { members: [], lines: [] };
+      bytes = 0;
+    }
+    bytes += utf8(line) + (current.lines.length > 0 ? 1 : 0);
+    current.members.push(entry);
+    current.lines.push(line);
+  }
+  if (current.lines.length > 0) {
+    chunks.push(current);
+  }
+  return chunks;
+};
+
+/**
+ * The chunk a tidy pass is handed next (spec 962). A group is at least
+ * `MEMORY_TIDY_GROUP_MIN` live facts sharing an about key, a kind and a
+ * label, leaving out episodic facts (#961 retires those), pinned ones and
+ * operator-asserted ones (no pass may supersede either). A fact with two
+ * about keys counts in both groups. The largest group goes first; a group
+ * over `MEMORY_TIDY_CHUNK_MAX_BYTES` goes in chunks, oldest facts first.
+ * A chunk whose member ids a pass of this mode already looked at
+ * (`claimed`) is passed over for the next, so a chunk that merges nothing
+ * still moves the tidy on, while a merge changes the members and so the
+ * chunks. Undefined when no chunk is left.
+ */
+export const takeTidyChunk = (
+  live: readonly MemoryEntry[],
+  pinned: ReadonlySet<string>,
+  claimed: ReadonlySet<string>,
+  maxBytes: number = MEMORY_TIDY_CHUNK_MAX_BYTES,
+): TidyChunk | undefined => {
+  const groups = new Map<string, { trust: TrustLevel; members: MemoryEntry[] }>();
+  for (const entry of live) {
+    const trust = memoryEntryTrust(entry);
+    if (entry.kind === 'episodic' || trust === 'user' || pinned.has(entry.id)) {
+      continue;
+    }
+    for (const about of memoryEntryAbout(entry)) {
+      const key = `${entry.kind ?? 'none'}/${trust}/${about.normalize('NFC').toLowerCase()}`;
+      const group = groups.get(key);
+      if (group === undefined) {
+        groups.set(key, { trust, members: [entry] });
+      } else {
+        group.members.push(entry);
+      }
+    }
+  }
+  const ordered = [...groups.entries()]
+    .filter(([, group]) => group.members.length >= MEMORY_TIDY_GROUP_MIN)
+    .sort(([a, x], [b, y]) => y.members.length - x.members.length || (a < b ? -1 : a > b ? 1 : 0));
+  let taken: TidyChunk | undefined;
+  for (const [key, group] of ordered) {
+    const oldestFirst = group.members
+      .map((entry, index) => ({ entry, index }))
+      .sort((a, b) => (a.entry.createdAt < b.entry.createdAt ? -1 : a.entry.createdAt > b.entry.createdAt ? 1 : a.index - b.index))
+      .map(({ entry }) => entry);
+    for (const chunk of tidyChunks(oldestFirst, maxBytes)) {
+      const hash = chunkHash(chunk.members);
+      if (claimed.has(hash)) {
+        continue;
+      }
+      if (taken === undefined) {
+        taken = { key, trust: group.trust, ...chunk, hash, more: false };
+      } else if (hash !== taken.hash) {
+        taken.more = true;
+        return taken;
+      }
+    }
+  }
+  return taken;
+};
+
+/** The tidy pass's one message: the request, the facts in tags, the instruction after them. */
+export const tidyChunkPrompt = (lines: readonly string[]): string =>
+  `${MEMORY_TIDY_PASS_REQUEST}\n\n<facts>\n${lines.join('\n')}\n</facts>\n\n${MEMORY_TIDY_PASS_INSTRUCTION}`;
 
 class MalformedPassRequest extends Error {}
 
@@ -441,6 +567,79 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     }
   };
 
+  /**
+   * A pass from its claim on: the one model run with only the pass's recall
+   * and remember, then its end record. Shared by save and tidy.
+   */
+  const runClaimed = async (pass: {
+    agentId: string;
+    mode: MemoryPassMode;
+    passId: string;
+    /** Resolved once, for the claim; '' when the agent's config named none. */
+    model: string;
+    claim: MemoryPassClaim;
+    prompt: string;
+    more: boolean;
+    tools: MemoryPassToolState;
+    memory: AgentMemoryStore;
+    signal?: AbortSignal;
+  }): Promise<MemoryPassOutcome> => {
+    const { agentId, mode, passId, model, claim, more } = pass;
+    const kind = pass.tools.kind;
+    const ledger = ledgerFor(agentId);
+    const tools = createMemoryPassTools(pass.memory, pass.tools, {
+      supersedesMany: options.supersedesMany?.() === true,
+      ...(mode === 'shadow' ? { write: shadowWrite(agentId) } : {}),
+    });
+    const signal = pass.signal !== undefined ? AbortSignal.any([stopAll.signal, pass.signal]) : stopAll.signal;
+    let failure: unknown;
+    try {
+      if (signal.aborted) {
+        throw signal.reason;
+      }
+      await options.runModel({
+        agentId,
+        passId,
+        sessionId: memoryPassSessionId(passId),
+        // The model the claim records, resolved once: the agent's config
+        // could change before this, and the ledger must name what ran.
+        model: model !== '' ? model : undefined,
+        prompt: pass.prompt,
+        trust: pass.tools.trust,
+        tools: [tools.recall, tools.remember],
+        signal,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    if (failure !== undefined && signal.aborted) {
+      // Cut off, by a stop or by the plugin's own signal: settled from
+      // what it wrote, as a crash is, never from a counter.
+      const reason: MemoryPassReason = stopAll.signal.aborted ? 'stopped' : 'cancelled';
+      const written = await writtenBy(agentId, mode, passId);
+      const end = memoryPassSettleRecord(claim, written, { at: now(), run: options.run });
+      await appendEnd(ledger, { ...end, reason, more });
+      return finish(agentId, mode, {
+        passId, status: 'interrupted', reason, saved: end.saved, superseded: end.superseded, more,
+      }, kind);
+    }
+    const { saved, superseded } = tools.tally();
+    if (failure !== undefined) {
+      const reason: MemoryPassReason = failure instanceof HostRefusalError ? 'budget' : 'model';
+      options.log(`memory pass ${passId} (${agentId}) failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+      // Wrote nothing: what it was handed is given back, so it is read again.
+      await appendEnd(ledger, {
+        type: 'end', at: now(), run: options.run, passId, status: 'failed', reason, saved, superseded,
+        more, released: saved === 0,
+      });
+      return finish(agentId, mode, { passId, status: 'failed', reason, saved, superseded, more }, kind);
+    }
+    await appendEnd(ledger, {
+      type: 'end', at: now(), run: options.run, passId, status: 'done', saved, superseded, more, released: false,
+    });
+    return finish(agentId, mode, { passId, status: 'done', saved, superseded, more }, kind);
+  };
+
   const runSave = async (request: Extract<MemoryPassRequest, { kind: 'save' }>): Promise<MemoryPassOutcome> => {
     const { from, mode } = validSave(request);
     const { agentId, sessionId } = request;
@@ -543,61 +742,106 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
       }
 
       // The chain is released: a turn may run while the model thinks.
-      const tools = createMemoryPassTools(
+      return await runClaimed({
+        agentId,
+        mode,
+        passId,
+        model,
+        claim: taken.claim,
+        prompt: taken.prompt,
+        more: taken.more,
+        tools: { passId, kind: 'save', sourceSessionId: sessionId, trust: taken.trust },
         memory,
-        { passId, kind: 'save', sourceSessionId: sessionId, trust: taken.trust },
-        {
-          supersedesMany: options.supersedesMany?.() === true,
-          ...(mode === 'shadow' ? { write: shadowWrite(agentId) } : {}),
-        },
-      );
-      const signal = request.signal !== undefined ? AbortSignal.any([stopAll.signal, request.signal]) : stopAll.signal;
-      let failure: unknown;
-      try {
-        if (signal.aborted) {
-          throw signal.reason;
-        }
-        await options.runModel({
-          agentId,
-          passId,
-          sessionId: memoryPassSessionId(passId),
-          // The model the claim records, resolved once: the agent's config
-          // could change before this, and the ledger must name what ran.
-          model: model !== '' ? model : undefined,
-          prompt: taken.prompt,
-          trust: taken.trust,
-          tools: [tools.recall, tools.remember],
-          signal,
-        });
-      } catch (error) {
-        failure = error;
-      }
-      if (failure !== undefined && signal.aborted) {
-        // Cut off, by a stop or by the plugin's own signal: settled from
-        // what it wrote, as a crash is, never from a counter.
-        const reason: MemoryPassReason = stopAll.signal.aborted ? 'stopped' : 'cancelled';
-        const written = await writtenBy(agentId, mode, passId);
-        const end = memoryPassSettleRecord(taken.claim, written, { at: now(), run: options.run });
-        await appendEnd(ledger, { ...end, reason, more: taken.more });
-        return finish(agentId, mode, {
-          passId, status: 'interrupted', reason, saved: end.saved, superseded: end.superseded, more: taken.more,
-        });
-      }
-      const { saved, superseded } = tools.tally();
-      if (failure !== undefined) {
-        const reason: MemoryPassReason = failure instanceof HostRefusalError ? 'budget' : 'model';
-        options.log(`memory pass ${passId} (${agentId}) failed: ${failure instanceof Error ? failure.message : String(failure)}`);
-        // Wrote nothing: the slice is given back, so it is read again.
-        await appendEnd(ledger, {
-          type: 'end', at: now(), run: options.run, passId, status: 'failed', reason, saved, superseded,
-          more: taken.more, released: saved === 0,
-        });
-        return finish(agentId, mode, { passId, status: 'failed', reason, saved, superseded, more: taken.more });
-      }
-      await appendEnd(ledger, {
-        type: 'end', at: now(), run: options.run, passId, status: 'done', saved, superseded, more: taken.more, released: false,
+        ...(request.signal !== undefined ? { signal: request.signal } : {}),
       });
-      return finish(agentId, mode, { passId, status: 'done', saved, superseded, more: taken.more });
+    } finally {
+      busy.delete(agentId);
+    }
+  };
+
+  const validTidy = (request: Extract<MemoryPassRequest, { kind: 'tidy' }>): { mode: MemoryPassMode } => {
+    if (!knownAgent(request.agentId)) {
+      malformed(`memoryPasses.run: there is no agent ${String(request.agentId)}.`);
+    }
+    if (request.model !== undefined && (typeof request.model !== 'string' || request.model.trim().length === 0)) {
+      malformed('memoryPasses.run: model, when given, must name one.');
+    }
+    const mode = request.mode ?? 'write';
+    if (!MODES.includes(mode)) {
+      malformed(`memoryPasses.run: mode must be "write" or "shadow" (got ${String(mode)}).`);
+    }
+    return { mode };
+  };
+
+  /**
+   * One tidy pass over one chunk of one group (spec 962). No session: it
+   * starts at its group's label, recalls only that label, and may supersede
+   * what it was handed or recalled, so a merge never moves a fact to
+   * another label.
+   */
+  const runTidy = async (request: Extract<MemoryPassRequest, { kind: 'tidy' }>): Promise<MemoryPassOutcome> => {
+    const { mode } = validTidy(request);
+    const { agentId } = request;
+    const passId = newPassId();
+    if (closing) {
+      return skipped(agentId, mode, passId, 'stopped', 'tidy');
+    }
+    const begun = started.get(`${agentId}\0${mode}`);
+    if (begun === undefined || !isReady || !await begun.then(() => true, () => false)) {
+      return skipped(agentId, mode, passId, 'not-started', 'tidy');
+    }
+    await settling.get(`${agentId}\0${mode}`);
+    // A merge is one fact superseding several, which only a store that
+    // takes a list can record as one undoable step.
+    if (options.memory === undefined || options.supersedesMany?.() !== true) {
+      return skipped(agentId, mode, passId, 'store-unsupported', 'tidy');
+    }
+    const model = request.model ?? await options.defaultModel(agentId).catch(() => undefined) ?? '';
+    if (busy.has(agentId)) {
+      return skipped(agentId, mode, passId, 'pass-running', 'tidy');
+    }
+    busy.add(agentId);
+    const memory = options.memory;
+    const ledger = ledgerFor(agentId);
+    try {
+      let chunk: TidyChunk | undefined;
+      let claim: MemoryPassClaim;
+      try {
+        const records = await ledger.read();
+        const live = (await memory.list(agentId)).entries;
+        const pinned = new Set((await memory.pinned?.(agentId, { include: 'allocated' }) ?? []).map((entry) => entry.id));
+        chunk = takeTidyChunk(live, pinned, memoryPassTidyClaimed(records, mode));
+        if (chunk === undefined) {
+          return finish(agentId, mode, { passId, status: 'nothing-new', saved: 0, superseded: 0, more: false }, 'tidy');
+        }
+        claim = {
+          type: 'claim', at: now(), run: options.run, passId, kind: 'tidy', mode, model,
+          group: { key: chunk.key, hash: chunk.hash },
+        };
+        await ledger.append(claim);
+      } catch (error) {
+        options.log(`memory pass ${passId} (${agentId}) could not take its chunk: ${error instanceof Error ? error.message : String(error)}`);
+        return finish(agentId, mode, { passId, status: 'failed', reason: 'state', saved: 0, superseded: 0, more: false }, 'tidy');
+      }
+      const trust = chunk.trust;
+      return await runClaimed({
+        agentId,
+        mode,
+        passId,
+        model,
+        claim,
+        prompt: tidyChunkPrompt(chunk.lines),
+        more: chunk.more,
+        tools: {
+          passId,
+          kind: 'tidy',
+          trust,
+          handed: chunk.members.map((entry) => ({ id: entry.id, trust })),
+          recallOnly: trust,
+        },
+        memory,
+        ...(request.signal !== undefined ? { signal: request.signal } : {}),
+      });
     } finally {
       busy.delete(agentId);
     }
@@ -607,21 +851,10 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     if (typeof request !== 'object' || request === null) {
       throw new MalformedPassRequest('memoryPasses.run needs a request.');
     }
-    if (request.kind === 'tidy') {
-      const mode = request.mode ?? 'write';
-      if (!knownAgent(request.agentId)) {
-        throw new MalformedPassRequest(`memoryPasses.run: there is no agent ${String(request.agentId)}.`);
-      }
-      if (!MODES.includes(mode)) {
-        throw new MalformedPassRequest(`memoryPasses.run: mode must be "write" or "shadow" (got ${String(mode)}).`);
-      }
-      // Not built yet: a tidy request is refused, never half run.
-      return skipped(request.agentId, mode, newPassId(), 'tidy-unsupported', 'tidy');
-    }
-    if (request.kind !== 'save') {
+    if (request.kind !== 'save' && request.kind !== 'tidy') {
       throw new MalformedPassRequest(`memoryPasses.run: kind must be "save" or "tidy" (got ${String((request as { kind?: unknown }).kind)}).`);
     }
-    const pass = runSave(request);
+    const pass = request.kind === 'tidy' ? runTidy(request) : runSave(request);
     running.add(pass);
     try {
       return await pass;

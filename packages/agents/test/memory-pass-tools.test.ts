@@ -180,3 +180,58 @@ test('a merge naming any fact the pass may not supersede stores nothing', async 
   await assert.rejects(() => remember.execute({ fact: 'merged', supersedes: [a.id, 7] }, passSession()), /supersedes/);
   assert.equal((await store.list('ava')).entries.length, 4);
 });
+
+test('a tidy pass may supersede what it was handed, and recalls only facts with its own label, so no recall lowers it', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const handed = await store.append('ava', 'the deploy runs on Postgres', { provenance: { trust: 'agent' } });
+  await store.append('ava', 'a page said the deploy runs on MySQL', { provenance: { trust: 'external' } });
+  const tools = createMemoryPassTools(store, {
+    passId: 'p1',
+    kind: 'tidy',
+    trust: 'agent',
+    handed: [{ id: handed.id, trust: 'agent' }],
+    recallOnly: 'agent',
+  }, { supersedesMany: true });
+  // The pass session starts at the group's label, as the host starts it.
+  const session = { ...passSession(), metadata: { sessionTrust: 'agent' } } as Session;
+  // Handed, so no recall is needed first.
+  const merged = await tools.remember.execute({ fact: 'The deploy database is Postgres.', supersedes: [handed.id] }, session) as { supersedes?: unknown; trust?: string };
+  assert.deepEqual([merged.supersedes, merged.trust], [handed.id, 'agent']);
+  const marked: string[] = [];
+  const result = await tools.recall.execute({ query: 'deploy' }, session, { markTrust: (trust: string) => marked.push(trust) } as never) as { results: Array<{ trust: string }> };
+  assert.deepEqual(result.results.map((found) => found.trust), ['agent']);
+  assert.deepEqual(marked, [], 'the external fact never reached the pass');
+});
+
+test('a tidy pass recalls only facts true now: one past its window is not shown, so it cannot be merged back to life', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const stale = await store.append('ava', 'the deploy ran on MySQL', { provenance: { trust: 'agent' }, validUntil: '2026-01-01T00:00:00.000Z' });
+  await store.append('ava', 'the deploy runs on Postgres', { provenance: { trust: 'agent' } });
+  const tools = createMemoryPassTools(store, { passId: 'p1', kind: 'tidy', trust: 'agent', recallOnly: 'agent' }, {
+    supersedesMany: true,
+    now: () => new Date('2026-11-01T00:00:00.000Z'),
+  });
+  const session = { ...passSession(), metadata: { sessionTrust: 'agent' } } as Session;
+  const result = await tools.recall.execute({ query: 'deploy' }, session) as { results: Array<{ id: string }> };
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results.some((found) => found.id === stale.id), false);
+  await assert.rejects(() => tools.remember.execute({ fact: 'merged', supersedes: [stale.id] }, session), /shown/);
+});
+
+test('a fact the operator lowers while a pass runs lowers the fact that replaces it', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const handed = await store.append('ava', 'the deploy runs on Postgres', { provenance: { trust: 'agent' } });
+  const other = await store.append('ava', 'deploys go to Postgres', { provenance: { trust: 'agent' } });
+  const tools = createMemoryPassTools(store, {
+    passId: 'p1',
+    kind: 'tidy',
+    trust: 'agent',
+    handed: [{ id: handed.id, trust: 'agent' }, { id: other.id, trust: 'agent' }],
+    recallOnly: 'agent',
+  }, { supersedesMany: true });
+  // After the chunk was taken, before the merge is written.
+  assert.equal(await store.reassertTrust('ava', other.id, 'external'), true);
+  const session = { ...passSession(), metadata: { sessionTrust: 'agent' } } as Session;
+  const merged = await tools.remember.execute({ fact: 'The deploy database is Postgres.', supersedes: [handed.id, other.id] }, session) as { trust: string };
+  assert.equal(merged.trust, 'external', 'never more trusted than a fact it replaces is now');
+});

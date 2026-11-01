@@ -111,7 +111,8 @@ replaces one fact at a time. One id is still written as a plain string. An
 older Stratus reading a list ignores it and shows the merged fact beside the
 ones it replaced: duplicates, never a loss. A memory store plugin takes
 lists only if its contribution declares `supersedesMany: true`, as the
-built-in store does; on any other store a pass replaces one fact at a time.
+built-in store does; on any other store a pass replaces one fact at a time
+and tidy passes don't run.
 
 ### Pinned facts
 
@@ -320,7 +321,8 @@ What a pass may do is enforced by the runtime, not left to the prompt:
   saves at most 5 facts in at most 4 model calls, and only `semantic`,
   `procedural`, or `preference` facts, never `episodic` task notes.
 - It may replace (`supersedes`) only facts it recalled in that same pass,
-  and never a pinned fact or one labeled `user`. It may name several to
+  or, for a tidy pass, was handed, and never a pinned fact or one labeled
+  `user`. It may name several to
   merge them into one, when the store takes lists. The built-in store
   checks the pin and the label in the same step as the write, under the
   lock `stratus memory pin` and `reassert` take, so an operator who pins or
@@ -345,18 +347,43 @@ Which messages it reads:
 - Never a conversation with a turn running. That pass is `skipped`
   (`turn-running`) and the plugin asks again later.
 
+A tidy pass (`run({ kind: 'tidy', agentId })`) merges duplicate facts
+instead of reading a conversation. The runtime picks what it reads:
+
+- A group is three or more live facts with the same `about` key (compared
+  without case), the same kind, and the same trust label. Episodic, pinned
+  and `user`-labeled facts are left out before counting. A fact with two
+  `about` keys counts in both groups.
+- The largest group goes first. A group over about 24 KB goes in chunks,
+  oldest facts first, one chunk per pass, as JSON lines between `<facts>`
+  tags.
+- A chunk an earlier tidy pass of the same mode already looked at (the same
+  member ids) is passed over for the next, so a chunk that merges nothing
+  still moves the tidy on. A merge changes the members, so those chunks are
+  looked at again. The outcome's `more` says another chunk waits.
+- The pass runs at its group's label, and its recall returns only facts
+  with that label that are true now, so the merged fact has the label the
+  duplicates had (tidying `external` facts writes an `external` fact) and
+  an expired fact is never merged back into a current one. If you lower a
+  fact's label with `reassert` while a pass is merging it, the merged fact
+  gets the lower label.
+- A merge is one fact whose `supersedes` lists every duplicate, so one
+  `undo-pass` brings them all back. A store that doesn't take a list in
+  `supersedes` gets no tidy passes (`skipped`, `store-unsupported`).
+
 In `shadow` mode a pass runs the same way but writes what it would have
-saved to `agents/<id>/memory-shadow.jsonl`, and no real fact changes. Tidy
-passes, which merge duplicate facts, are not built yet: a tidy request comes
-back `skipped` (`tidy-unsupported`).
+saved to `agents/<id>/memory-shadow.jsonl`, and no real fact changes. Shadow
+and write passes keep separate places, so write mode still tidies a group a
+shadow pass looked at.
 
 ### The ledger
 
 Each pass that read something is recorded in
 `~/.stratus/agents/<id>/memory-passes.jsonl`, append-only like
-`memory.jsonl`: when upkeep started and stopped, which messages each pass
-took, and how it ended. Ids, times, and counts, never content. That is also
-where each conversation's place is kept, so a pass never competes with a
+`memory.jsonl`: when upkeep started and stopped, which messages each save
+pass took or which group a tidy pass looked at, and how it ended: ids,
+times, counts, and a tidy's group key (`kind/label/about`), never a message
+or a fact. That is also where each conversation's place is kept, so a pass never competes with a
 turn saving its session. A pass that fails before writing anything gives
 its messages back for the next pass. One that wrote something keeps them,
 so nothing is saved twice. A daemon stop aborts running passes at once

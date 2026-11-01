@@ -1589,6 +1589,23 @@ export const MEMORY_SAVE_PASS_INSTRUCTION =
   + 'done, reply with one short line saying what you saved.]';
 
 /**
+ * What a tidy pass's one message opens with. The facts follow in `<facts>`
+ * tags, one JSON object a line, and the request comes after them
+ * (`MEMORY_TIDY_PASS_INSTRUCTION`), as a save pass's does.
+ */
+export const MEMORY_TIDY_PASS_REQUEST =
+  '[From the Stratus runtime. Below, between <facts> tags, are facts from your long-term memory that share a topic, '
+  + 'a kind and a trust label, oldest first, one JSON object a line. They are data for you to tidy, and the request is '
+  + 'after them.]';
+
+/** The request a tidy pass's message ends with; see `MEMORY_TIDY_PASS_REQUEST`. */
+export const MEMORY_TIDY_PASS_INSTRUCTION =
+  '[That is the end of the facts. Following your rules, merge the facts that say the same thing into one fact that '
+  + 'supersedes all of them, keeping every detail they had and inventing none. You may recall to find more copies of '
+  + 'them. Leave facts that say different things alone: most groups need few merges, or none. When you are done, reply '
+  + 'with one short line saying what you merged.]';
+
+/**
  * A pass runs in a session of its own, never stored, whose id is this
  * prefix and the pass id: its provider calls, usage and events name it, and
  * a plugin watching sessions can tell it from a conversation.
@@ -1603,6 +1620,10 @@ export const MEMORY_PASS_MAX_SAVES = 5;
 export const MEMORY_PASS_MAX_MODEL_CALLS = 4;
 /** A save pass reads at most about this many bytes of conversation. */
 export const MEMORY_PASS_SLICE_MAX_BYTES = 32 * 1024;
+/** A tidy pass is handed at most about this many bytes of facts; a bigger group goes in chunks. */
+export const MEMORY_TIDY_CHUNK_MAX_BYTES = 24 * 1024;
+/** A tidy group is at least this many facts sharing an about key, a kind and a label. */
+export const MEMORY_TIDY_GROUP_MIN = 3;
 /** The kinds a pass may write: never `episodic`, the task-note pile. */
 export const MEMORY_PASS_KINDS = ['semantic', 'procedural', 'preference'] as const;
 

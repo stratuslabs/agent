@@ -195,7 +195,7 @@ export const RECALL_TOOL_NAME = MEMORY_RECALL_TOOL_NAME;
  * good older ones. A store without ranking serves `recency` instead, and
  * the result's `strategy` says which one the agent got.
  */
-export const createRecallTool = (store: AgentMemoryStore, options: MemoryToolOptions = {}): Tool => {
+export const createRecallTool = (store: Pick<AgentMemoryStore, 'search'>, options: MemoryToolOptions = {}): Tool => {
   const now = clockOf(options);
   return {
     name: RECALL_TOOL_NAME,
