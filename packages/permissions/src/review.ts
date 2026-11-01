@@ -366,10 +366,11 @@ const sendsOutside = (call: { toolName: string; command?: string }): boolean => 
     // anywhere counts, by itself or as the last part of a path.
     return [...NETWORK_CLIENTS].some((client) => new RegExp(`(?:^|[\\s;&|(\`'"/])${client}(?=$|\\s)`).test(call.command as string));
   }
-  return commands.some((analysis) => {
-    const program = programOf(analysis);
-    return program !== undefined && NETWORK_CLIENTS.has(program);
-  });
+  // Any word that names a client, not only the program a wrapper runs: a
+  // wrapper option no table lists (`sudo -R / curl`) or a client fed by
+  // another stage (`| xargs curl`) can't hide one. Coarse on purpose, since
+  // this only decides whether a token in the call is being sent out.
+  return commands.some((analysis) => analysis.tokens.some((token) => NETWORK_CLIENTS.has(token.split('/').pop() as string)));
 };
 
 const pipesDownloadIntoInterpreter = (command: string): boolean => {

@@ -402,6 +402,15 @@ test('a call parked before a restart goes back to the person, whatever would all
   // Nor does a scope the gate leaves alone.
   const scoped = harness({}, allowing, { mode: 'remote', request: deny });
   assert.equal(ran((await scoped.decide(shell, sessionFor('ava', true), { command: 'pwd' }, parked)).answer), false);
+  // Shadow switched on since, or the open posture: the fast path that runs
+  // a gated call without asking doesn't take a call a person still owes an
+  // answer on.
+  const shadow = harness({ shadow: true }, allowing, { mode: 'remote', request: deny });
+  const shadowed = await shadow.decide(notes, sessionFor('ava'), {}, parked);
+  assert.equal(ran(shadowed.answer), false);
+  assert.equal(shadowed.reported.at(-1)?.layer, 'approver');
+  const open = harness(undefined, undefined, { mode: 'remote', request: deny, openFor: () => true });
+  assert.equal(ran((await open.decide(notes, sessionFor('ava'), {}, parked)).answer), false);
   // A block rule written since still blocks, without asking anyone.
   const requests: ApprovalRequest[] = [];
   const blockRule = harness({ rules: [rule({ tool: 'notes.*', verdict: 'block' })] }, allowing, {
