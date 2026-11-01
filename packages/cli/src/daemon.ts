@@ -20,7 +20,8 @@ export const EXPOSED_API_WARNING_PREFIX = 'the control API binds ';
 /** `serve`'s warning for an API bound to `host`, a non-loopback address. */
 export const exposedApiWarning = (host: string): string =>
   `${EXPOSED_API_WARNING_PREFIX}${host}, so other machines can reach it unless a firewall or a container's `
-  + 'port mapping stops them. Every request still needs the gateway token. To keep it on this machine, bind '
+  + 'port mapping stops them. Everything but the liveness check still needs the gateway token or a single-use link '
+  + 'the daemon issued, and no Host name is checked. To keep it on this machine, bind '
   + '127.0.0.1 and reach it from elsewhere through a tunnel, with api.publicUrl set to the tunnel\'s address.';
 import type { CliEnvironment } from './environment.ts';
 
