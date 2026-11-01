@@ -130,3 +130,52 @@ test('a side run\'s events never reach the stream, and the conversation\'s still
   ]);
   assert.deepEqual(forBo, []);
 });
+
+test('a memory pass\'s completion reaches its agent\'s subscribers, though they never saw its session', async () => {
+  const { bus, frames, sideRuns, stream } = harness();
+  const forAva: EventEnvelope[] = [];
+  const forBo: EventEnvelope[] = [];
+  for (const [agentId, into] of [['ava', forAva], ['bo', forBo]] as const) {
+    stream.attach({
+      readyState: 1,
+      OPEN: 1,
+      bufferedAmount: 0,
+      send: (data: string) => {
+        const frame = JSON.parse(data) as Record<string, unknown>;
+        if (frame.event !== undefined) {
+          into.push(frame as unknown as EventEnvelope);
+        }
+      },
+      on: () => undefined,
+      close: () => undefined,
+    } as unknown as WebSocket, { agentId });
+  }
+  const completed = (passId: string): StratusEvent => ({
+    type: 'memory.pass-completed',
+    sessionId: `memory-pass:${passId}`,
+    agentId: 'ava',
+    passId,
+    kind: 'save',
+    mode: 'write',
+    status: 'done',
+    saved: 2,
+    superseded: 0,
+  });
+  sideRuns.add('memory-pass:p1');
+  await bus.emit({ type: 'session.created', sessionId: 'memory-pass:p1', agentId: 'ava' });
+  await bus.emit({ type: 'session.completed', sessionId: 'memory-pass:p1' } as StratusEvent);
+  // The gateway emits the outcome after the run has left its side runs.
+  sideRuns.delete('memory-pass:p1');
+  await bus.emit(completed('p1'));
+  // A pass refused before it ran never had a session at all.
+  await bus.emit({ ...completed('p2'), status: 'skipped', reason: 'turn-running', saved: 0 } as StratusEvent);
+  assert.deepEqual(frames.map((frame) => `${frame.sessionId} ${frame.event.type}`), [
+    'memory-pass:p1 memory.pass-completed',
+    'memory-pass:p2 memory.pass-completed',
+  ]);
+  assert.deepEqual(forAva.map((frame) => `${frame.sessionId} ${frame.event.type}`), [
+    'memory-pass:p1 memory.pass-completed',
+    'memory-pass:p2 memory.pass-completed',
+  ]);
+  assert.deepEqual(forBo, []);
+});

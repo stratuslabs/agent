@@ -116,9 +116,12 @@ export const createEventStream = (gateway: Gateway) => {
       return false;
     }
     if (client.agentSessions && !client.agentSessions.has(event.sessionId)) {
-      // A usage record names its agent, so it reaches that agent's
-      // subscribers from a session they never saw created: a side run's.
-      return event.type === 'session.usage' && event.agentId === client.filter.agentId;
+      // A side run's usage and a memory pass's outcome name their agent, so
+      // they reach that agent's subscribers from a session they never saw
+      // created: its `session.created` stays off the stream, and a pass
+      // refused before it ran never had one.
+      return (event.type === 'session.usage' || event.type === 'memory.pass-completed')
+        && event.agentId === client.filter.agentId;
     }
     return true;
   };

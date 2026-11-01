@@ -654,7 +654,7 @@ calls the daemon makes for an agent, not conversations, so their
 reviewer's words never reach it. Their usage does, to unfiltered clients
 and to that agent's subscribers, so a client that meters counts them; it
 carries no `turnId`. `memory.pass-completed`, sent once a pass has ended,
-comes through as before.
+comes through as before, to that agent's subscribers too.
 The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
