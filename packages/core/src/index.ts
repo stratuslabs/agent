@@ -397,8 +397,9 @@ export interface AgentDefinition extends AgentDescriptor {
   avatar?: AvatarTheme;
   /**
    * What this agent may call: exact tool names (`fs.read`), toolset globs
-   * (`fs.*`), or `*`. Omitted = every registered tool. See
-   * `matchesToolAllowlist`, which is the only reading of these entries.
+   * (`fs.*`), or `*` for every registered tool. Omitted = only the tools
+   * registered at risk `safe` (reads and memory), or every tool where the
+   * host passes `unlistedTools: 'every'`; see `toolPermitted` in the runner. `matchesToolAllowlist` is the only reading of the entries.
    */
   tools?: string[];
   /**
@@ -838,6 +839,9 @@ export type ProviderDelta =
  */
 export type ToolRisk = 'safe' | 'gated' | 'dangerous';
 
+/** What an agent with no `tools:` list may call; see `AgentRunnerOptions.unlistedTools`. */
+export type UnlistedTools = 'safe' | 'every';
+
 export const DEFAULT_TOOL_RISK: ToolRisk = 'gated';
 
 /** The declared risk, or the fail-closed default for a tool that omits it. */
@@ -1014,9 +1018,10 @@ const trustBeforeCallOf = async (tool: Pick<Tool, 'trustBeforeCall'>, session: S
  * The prefix carries its dot deliberately: `fs.*` matches `fs.read` and
  * does **not** match `fsx.read`, so a namespace cannot be widened by a
  * package that named itself to look like a prefix of another. A bare `*`
- * is every registered tool, which is the same thing as omitting the
- * allowlist and is accepted because a soul saying so explicitly is
- * clearer than one saying nothing.
+ * is every registered tool. That is not what omitting the allowlist means
+ * (an omitted list is only the tools registered as safe, on a home this
+ * build set up), so `*` is how a soul grants everything, and new souls are
+ * written with it.
  *
  * Exported because both gates use it — the descriptors a provider is shown
  * and the check before execution — and because a second reading of `fs.*`
@@ -1066,8 +1071,10 @@ export const matchesSkillAllowlist = (skillId: string, allowlist: readonly strin
  *
  * Advisory by design: it feeds the load-time warning for an agent enabling
  * a skill without the tools the skill expects, never an enforcement
- * decision. An omitted allowlist is every registered tool, so it covers
- * anything; a glob requirement is covered by the glob itself, by `*`, or
+ * decision. An omitted allowlist is the tools registered as safe, which a
+ * requirement's name cannot tell apart, so it stays quiet rather than
+ * guess (the daemon already names every soul without a list at load); a
+ * glob requirement is covered by the glob itself, by `*`, or
  * by any entry naming something inside the namespace.
  */
 export const toolAllowlistCovers = (
@@ -1171,11 +1178,13 @@ export interface ToolAllowlistOptions {
 }
 
 /**
- * Undefined when there is nothing to say: an agent with no `tools:` key is
- * allowed every registered tool and cannot name one that does not exist.
+ * Undefined when there is nothing to say: an agent with no `tools:` key
+ * names no entry, so it cannot name one that does not exist. (It is
+ * allowed only the tools registered as safe, which the daemon says at
+ * load.)
  *
- * An *empty* list is not that agent. Omitting the key grants everything
- * while `tools: []` grants nothing, and the parser keeps them apart — a
+ * An *empty* list is not that agent. Omitting the key grants the safe
+ * tools while `tools: []` grants nothing, and the parser keeps them apart — a
  * bare `tools:` with nothing under it lands here too, which is the shape
  * someone gets by writing the key and not filling it, or by deleting the
  * last entry. There are no entries to name, so the finding carries none.
@@ -1272,7 +1281,7 @@ export const describeToolAllowlistFinding = (
     && finding.elsewhere.length === 0) {
     return [
       `agent ${agentId} has an empty tools: list, which grants nothing`
-        + ' — remove the key to allow every registered tool, or list the ones it should have',
+        + ' — list the tools it should have, or write tools: ["*"] to allow every registered tool',
     ];
   }
   if (finding.unmatched.length > 0) {
@@ -8078,6 +8087,14 @@ export interface AgentRunnerOptions {
    */
   grantedToEveryAgent?: readonly string[];
   /**
+   * What an agent with no `tools:` list may call. `safe`, the default, is
+   * the tools registered at risk `safe`. `every` is every registered tool,
+   * which is what an omitted list meant before, and what a host passes for
+   * a home set up by an older build so an upgrade takes nothing away. An
+   * agent with a list is held to its list either way.
+   */
+  unlistedTools?: UnlistedTools;
+  /**
    * The skill catalog. Passing one makes `skill.read` available — the
    * runner registers it if the host has not — to exactly the agents whose
    * soul enables any skill; see the two gates in `executeTurns` and
@@ -8821,11 +8838,29 @@ export class AgentRunner {
    * Whether this session's agent may call `name` under its `tools:` list,
    * or because the host grants it to every agent. Not for `skill.read`,
    * which has its own gate keyed on `skills:`.
+   *
+   * An omitted list is the tools registered at risk `safe`, and nothing
+   * else. It used to be every registered tool, which failed open: a soul
+   * that never wrote the key held `shell.run` the moment that plugin was
+   * enabled. The risk is the one the registry holds, so an operator's
+   * per-tool risk override counts, and `tools: ["*"]` is how a soul says
+   * "everything". A host passes `unlistedTools: 'every'` for a home an
+   * older build set up, where an omitted list keeps its old meaning. A name
+   * nothing registered is let through here so the call is refused as not
+   * found, the same as for any other agent.
    */
   private toolPermitted(name: string, allowedTools: readonly string[] | undefined): boolean {
-    return allowedTools === undefined
-      || (this.options.grantedToEveryAgent ?? []).includes(name)
-      || matchesToolAllowlist(name, allowedTools);
+    if ((this.options.grantedToEveryAgent ?? []).includes(name)) {
+      return true;
+    }
+    if (allowedTools === undefined) {
+      if (this.options.unlistedTools === 'every') {
+        return true;
+      }
+      const registered = this.tools.get(name);
+      return registered === undefined || resolveToolRisk(registered) === 'safe';
+    }
+    return matchesToolAllowlist(name, allowedTools);
   }
 
   /** The `skills:` entries this session's agent is held to — same sourcing as `allowedToolsFor`. */
@@ -9791,7 +9826,9 @@ export class AgentRunner {
         return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName} (no skills enabled)`);
       }
     } else if (!this.toolPermitted(call.toolName, allowedTools)) {
-      return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
+      return rejected(allowedTools === undefined
+        ? `Tool not permitted for agent ${session.agent.id}: ${call.toolName} (the soul has no tools: list, so it gets only safe tools; add the tool to a tools: list in the soul to grant it)`
+        : `Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 
     // Resolved before the policy is asked, not after: a policy classifies

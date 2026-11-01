@@ -57,7 +57,7 @@ const callAt = async (risk: ToolRisk | undefined, extra: Partial<AgentRunnerOpti
     }
   });
   await runner.initialize();
-  const session = await runner.run({ sessionId: `default-${risk ?? 'none'}`, agent: { id: 'ava', name: 'Ava' }, userMessage: 'go' });
+  const session = await runner.run({ sessionId: `default-${risk ?? 'none'}`, agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go' });
   const result = session.messages.find((message) => message.toolResult?.callId === 'c1')?.toolResult;
   outcome.ok = result?.ok;
   outcome.error = result?.error;

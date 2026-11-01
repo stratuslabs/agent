@@ -214,7 +214,10 @@ A soul's provider/model are hints:
 [plugin provider](../guides/extending.md#providers) registers.
 
 The `tools:` list is the per-identity gate over everything a plugin
-installs — see [Tools](../guides/tools.md) — and `skills:` opts into
+installs — see [Tools](../guides/tools.md). With no `tools:` key an agent
+gets only the tools registered as safe (every tool on a home set up before
+0.14.3); `tools: ["*"]`, which new souls are
+written with, gets every one. `skills:` opts into
 procedures the same way — see [Skills](../guides/skills.md). One tool sits
 outside it: under `stratus serve` every agent can call `credential.request`,
 even with `tools: []`, to ask through an approver's form. Its one-time
