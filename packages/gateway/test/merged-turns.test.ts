@@ -157,7 +157,9 @@ test('a message overheard after a batch opened closes it, so nothing said later 
   await Promise.all([first, leader, heard]);
   const session = await later;
   assert.deepEqual(absorbed, []);
-  assert.deepEqual(provider.prompts, ['first', 'second', 'third']);
+  // "third" follows the overheard message in one run, so it goes marked as
+  // said to the agent (card 1034); the stored message stays as written.
+  assert.deepEqual(provider.prompts, ['first', 'second', '(said to you)\nthird']);
   const users = session.messages.filter((message) => message.role === 'user').map((message) => message.content);
   assert.deepEqual(users, ['first', 'second', 'Bea: overheard', 'third']);
   await gateway.stop();

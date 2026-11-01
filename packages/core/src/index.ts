@@ -4333,11 +4333,16 @@ export const promptTextOf = (
   options: PromptTextOptions = {},
 ): string => {
   if (message.overheard !== true) {
-    // Said to the agent, as written; a reply-optional one is told, when it
-    // is the turn's, that it may need nothing back (card 601).
-    return message.replyOptional === true && options.latest === true
-      ? `${message.content}\n\n${REPLY_OPTIONAL_NOTE}`
+    // Said to the agent, as written, and marked so when an overheard
+    // message comes before it in the same run (card 1034); a reply-optional
+    // one is told, when it is the turn's, that it may need nothing back
+    // (card 601).
+    const said = options.afterOverheard === true
+      ? (message.content.length > 0 ? `${SAID_TO_YOU_MARK}\n${message.content}` : SAID_TO_YOU_MARK)
       : message.content;
+    return message.replyOptional === true && options.latest === true
+      ? `${said}\n\n${REPLY_OPTIONAL_NOTE}`
+      : said;
   }
   const quoted = message.content
     .split(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/)
@@ -4345,6 +4350,60 @@ export const promptTextOf = (
     .join('\n');
   const framed = `(overheard, not addressed to you)\n${quoted}`;
   return options.latest === true ? `${framed}\n\n${UNADDRESSED_TURN_NOTE}` : framed;
+};
+
+/**
+ * What a message said to the agent starts with when an overheard message
+ * comes before it in the same run of user messages
+ * (`PromptTextOptions.afterOverheard`, card 1034).
+ *
+ * Such a run reaches the model as one turn: the Anthropic API path merges
+ * consecutive user messages into one user turn of several blocks, and the
+ * harness renderers join them into one string. The overheard frame at the
+ * top of that turn was then read as covering all of it. On a live Fly check
+ * claude-haiku-4-5 answered a person's tagged "what is 2+2?" under one
+ * overheard thread line with "I'm not in this conversation—you're
+ * overhearing something else", and in 10 of 10 replays of that exact
+ * request. With this mark it answered 10 of 10, as did claude-sonnet-4-5
+ * (9 of 10 without it). A sentence in the system prompt explaining the
+ * frame made both models worse (0 of 10), so the mark sits on the message.
+ * Like the frame, it states the fact, not advice, and an overheard message
+ * cannot produce it: every line of one is quoted.
+ */
+export const SAID_TO_YOU_MARK = '(said to you)';
+
+/**
+ * The messages said to the agent that an overheard message comes before
+ * in their run of user messages: the ones `promptTextOf` renders with
+ * `afterOverheard` (card 1034).
+ *
+ * A run is what a prompt hands the model as one turn. A reply ends it, and
+ * so does a tool call or result; a system message and the empty reply a
+ * silent turn records do not, since no prompt carries either between the
+ * messages around them. Only messages after the overheard one are marked:
+ * what comes later never changes how an earlier message rendered, so a
+ * prompt's earlier text stays the same from turn to turn.
+ */
+export const messagesAfterOverheard = <M extends Pick<Message, 'role' | 'content' | 'overheard' | 'toolCalls'>>(
+  messages: readonly M[],
+): ReadonlySet<M> => {
+  const marked = new Set<M>();
+  let overheard = false;
+  for (const message of messages) {
+    if (message.role === 'user') {
+      if (message.overheard === true) {
+        overheard = true;
+      } else if (overheard) {
+        marked.add(message);
+      }
+      continue;
+    }
+    const silent = message.role === 'assistant' && message.content.length === 0 && (message.toolCalls?.length ?? 0) === 0;
+    if (message.role !== 'system' && !silent) {
+      overheard = false;
+    }
+  }
+  return marked;
 };
 
 /**
@@ -4453,6 +4512,14 @@ export interface PromptTextOptions {
    * carried has been made.
    */
   latest?: boolean;
+  /**
+   * Whether an overheard message comes before this one in its run of user
+   * messages (`messagesAfterOverheard`). A message said to the agent then
+   * starts with `SAID_TO_YOU_MARK`, so the frame of the overheard one
+   * before it is not read as its own (card 1034). Ignored on an overheard
+   * message.
+   */
+  afterOverheard?: boolean;
 }
 
 /**
