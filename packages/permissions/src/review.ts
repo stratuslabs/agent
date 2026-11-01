@@ -265,8 +265,27 @@ const INTERPRETERS = new Set([
   'sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'python', 'python3', 'perl', 'ruby', 'node', 'bun', 'deno',
 ]);
 const DOWNLOADERS = new Set(['curl', 'wget']);
-/** Wrappers whose next word is the program that actually runs. */
-const WRAPPERS = new Set(['sudo', 'env', 'command', 'exec', 'nohup']);
+/**
+ * Wrappers that run the program named after their own options, with the
+ * options that take a separate value, so `sudo -u root sh` reads as `sh`.
+ */
+const WRAPPERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['sudo', new Set(['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U', '-T'])],
+  ['doas', new Set(['-u', '-C'])],
+  ['env', new Set(['-u', '-C', '--unset', '--chdir'])],
+  ['command', new Set<string>()],
+  ['exec', new Set(['-a'])],
+  ['nohup', new Set<string>()],
+  ['nice', new Set(['-n', '--adjustment'])],
+  ['time', new Set(['-f', '-o'])],
+  ['timeout', new Set(['-s', '-k', '--signal', '--kill-after'])],
+  ['stdbuf', new Set(['-i', '-o', '-e'])],
+  ['setsid', new Set<string>()],
+  ['xargs', new Set(['-I', '-n', '-P', '-L', '-s', '-d', '-E', '-a'])],
+]);
+/** Wrappers whose first positional is theirs, not the program: `timeout 10 curl`. */
+const WRAPPER_POSITIONALS: ReadonlyMap<string, number> = new Map([['timeout', 1]]);
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 const strings = (value: JsonValue | undefined, out: string[] = []): string[] => {
   if (typeof value === 'string') {
@@ -283,13 +302,50 @@ const strings = (value: JsonValue | undefined, out: string[] = []): string[] => 
   return out;
 };
 
+/**
+ * The program a command actually runs: past leading assignments
+ * (`MODE=x curl`) and any wrappers with their options and values
+ * (`sudo -u root`, `env -i PATH=/bin`, `timeout 10`, `nice -n 5 --`).
+ */
 const programOf = (analysis: CommandAnalysis): string | undefined => {
+  const { tokens } = analysis;
   let index = 0;
-  while (index < analysis.tokens.length && WRAPPERS.has(analysis.tokens[index] as string)) {
+  while (index < tokens.length) {
+    const token = tokens[index] as string;
+    if (ASSIGNMENT.test(token)) {
+      index += 1;
+      continue;
+    }
+    const name = token.split('/').pop() as string;
+    const valued = WRAPPERS.get(name);
+    if (valued === undefined) {
+      return name;
+    }
     index += 1;
+    let positionals = WRAPPER_POSITIONALS.get(name) ?? 0;
+    while (index < tokens.length) {
+      const next = tokens[index] as string;
+      if (next === '--') {
+        index += 1;
+        break;
+      }
+      if (ASSIGNMENT.test(next)) {
+        index += 1;
+        continue;
+      }
+      if (next.startsWith('-')) {
+        index += valued.has(next) ? 2 : 1;
+        continue;
+      }
+      if (positionals > 0) {
+        positionals -= 1;
+        index += 1;
+        continue;
+      }
+      break;
+    }
   }
-  const program = analysis.tokens[index];
-  return program === undefined ? undefined : program.split('/').pop();
+  return undefined;
 };
 
 const sendsOutside = (call: { toolName: string; command?: string }): boolean => {
