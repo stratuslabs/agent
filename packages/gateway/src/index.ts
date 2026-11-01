@@ -85,6 +85,7 @@ import {
   createForgetTool,
   createPinTool,
   createMessageSendTool,
+  createMessageSayTool,
   createMessageReadTool,
   createChannelArchiveTool,
   createChannelCreateTool,
@@ -424,6 +425,8 @@ export interface GatewayChannelAdapter {
   credentialReplaceForms?: boolean;
   /** See `ChannelAdapter.credentialEnvForms`. */
   credentialEnvForms?: boolean;
+  /** See `ChannelAdapter.say`. */
+  say?(request: { sessionId: string; agentId: string; text: string }): Promise<void>;
   /**
    * Issues a one-time link to a form for a credential request, for the
    * agent to pass on: what a request falls back to when its conversation
@@ -2902,6 +2905,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const ts = typeof posted === 'object' && posted !== null ? (posted as { ts?: unknown }).ts : undefined;
     return typeof ts === 'string' && ts.length > 0 ? { id: ts } : {};
   }, { defaultThread: (session, destination) => scheduler.reportThreadFor(session, destination) }));
+  // A mid-task message goes where the conversation is, through the channel
+  // carrying this agent there, and nowhere else (card 1009). A session no
+  // channel started (a terminal run, a schedule nobody watches) has nobody
+  // to say it to before the reply.
+  tools.register(createMessageSayTool(async ({ session, text }) => {
+    const agentId = session.agent.id;
+    const kind = session.metadata?.channel;
+    const { adapter } = typeof kind === 'string'
+      ? channelCarrying(kind, agentId, (candidate) => candidate.say !== undefined)
+      : { adapter: undefined };
+    if (!adapter?.say) {
+      throw new Error(typeof kind === 'string'
+        ? `This conversation's channel (${kind}) cannot take a mid-task message. Say it in your reply.`
+        : 'This conversation is not in a channel that can take a mid-task message. Say it in your reply.');
+    }
+    await adapter.say({ sessionId: session.id, agentId, text });
+  }));
   // The same carrying rule again: a channel is created by the asking
   // agent's own app, whose token never leaves the adapter, and so becomes
   // that app's to post in and read.
