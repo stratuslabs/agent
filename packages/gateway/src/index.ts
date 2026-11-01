@@ -576,6 +576,8 @@ export interface GatewayApprovalRequest {
   oneShot?: boolean;
   /** What `always` would remember, when it would. Passed straight through. */
   always?: AlwaysMeans;
+  /** Why the review posture is asking. Passed straight through. */
+  reviewNote?: string;
   /**
    * When this call first parked, if a restart is re-asking it. The wait is
    * measured from here, so a request keeps the window it started with
@@ -616,6 +618,8 @@ export interface PendingApproval {
   oneShot?: boolean;
   /** What `always` would remember, when it would — see the event. */
   always?: AlwaysMeans;
+  /** Why the review posture is asking — see the event. */
+  reviewNote?: string;
   /** When this call parked, ISO-8601. */
   parkedAt: string;
   /**
@@ -2233,6 +2237,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(request.origin !== undefined ? { origin: request.origin } : {}),
         ...(oneShot ? { oneShot: true } : {}),
         ...(always !== undefined ? { always } : {}),
+        ...(request.reviewNote !== undefined ? { reviewNote: request.reviewNote } : {}),
         parkedAt: request.parkedAt ?? new Date().toISOString(),
         ...(expiresAt ? { expiresAt } : {}),
         ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
@@ -2287,6 +2292,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...(request.origin !== undefined ? { origin: request.origin } : {}),
       ...(oneShot ? { oneShot: true } : {}),
       ...(always !== undefined ? { always } : {}),
+      ...(request.reviewNote !== undefined ? { reviewNote: request.reviewNote } : {}),
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
       ...(delegatedFrom ? { delegatedFrom } : {}),
       ...(scheduleDestination ? { scheduleDestination } : {}),

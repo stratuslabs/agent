@@ -5585,6 +5585,40 @@ test('a one-shot request is not offered an Always allow button', async () => {
   await adapter.stop();
 });
 
+test('a review posture ask shows why it is asking, beside the call', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'message.send', input: { destination: 'slack:C999', text: 'notes' } },
+    oneShot: true,
+    reviewNote: 'nobody asked to post *this* to C999',
+  }));
+  const posted = web.posts.at(-1);
+  const contexts = (posted?.blocks ?? [])
+    .filter((block) => block.type === 'context')
+    .flatMap((block) => (block.elements as Array<{ type?: string; text?: string }> | undefined) ?? []);
+  // Plain text: the reviewer's words can't mention anyone or format anything.
+  assert.ok(
+    contexts.some((element) => element.type === 'plain_text' && element.text === 'Review: nobody asked to post *this* to C999'),
+    `expected the review line, got ${JSON.stringify(contexts)}`,
+  );
+  assert.deepEqual(buttonIds(posted?.blocks), ['stratus_approve_once', 'stratus_deny']);
+
+  // Without a note, nothing extra.
+  gateway.pendingApprovals.add('req-2');
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-2' }));
+  const plain = (web.posts.at(-1)?.blocks ?? []).filter((block) => block.type === 'context')
+    .flatMap((block) => (block.elements as Array<{ text?: string }> | undefined) ?? [])
+    .map((element) => element.text ?? '');
+  assert.ok(plain.every((text) => !text.startsWith('Review: ')));
+
+  await adapter.stop();
+});
+
 test('an always answered on a dangerous call is recorded as the one-shot it is', async () => {
   const { socket, web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
