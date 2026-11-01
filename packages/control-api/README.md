@@ -647,6 +647,14 @@ daemon's does. A call judged again because what it may read became less
 trusted during its approval can have more than one; the last stands, and
 it is the runner's own, with layer `trust`, when that happened twice and
 the call was refused.)
+A side run sends nothing but its `session.usage`: the review posture's
+reviewer call (`review:…`) and a memory pass (`memory-pass:…`) are model
+calls the daemon makes for an agent, not conversations, so their
+`session.created`, deltas and `session.completed` stay off the stream, and a
+reviewer's words never reach it. Their usage does, to unfiltered clients
+and to that agent's subscribers, so a client that meters counts them; it
+carries no `turnId`. `memory.pass-completed`, sent once a pass has ended,
+comes through as before.
 The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own

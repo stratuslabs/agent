@@ -116,7 +116,9 @@ export const createEventStream = (gateway: Gateway) => {
       return false;
     }
     if (client.agentSessions && !client.agentSessions.has(event.sessionId)) {
-      return false;
+      // A usage record names its agent, so it reaches that agent's
+      // subscribers from a session they never saw created: a side run's.
+      return event.type === 'session.usage' && event.agentId === client.filter.agentId;
     }
     return true;
   };
@@ -152,6 +154,14 @@ export const createEventStream = (gateway: Gateway) => {
    * shape this needs.
    */
   const unsubscribe = gateway.bus.subscribe((event: StratusEvent) => {
+    // A side run (a reviewer call, a memory pass) is not a conversation: no
+    // client can send to it or find it in the store, and its deltas are a
+    // reviewer's words about a call, which a permission decision leaves out
+    // on purpose. Only what it cost comes through, for a client that meters
+    // from `session.usage`: counts, never content.
+    if (gateway.isSideRun(event.sessionId) && event.type !== 'session.usage') {
+      return;
+    }
     if (event.type === 'session.created') {
       for (const client of clients) {
         if (client.filter.agentId === event.agentId) {

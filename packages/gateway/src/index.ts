@@ -1406,6 +1406,16 @@ export interface Gateway {
    */
   activeTurnId(sessionId: string): string | undefined;
   /**
+   * True while a side run is running under this session id: a reviewer
+   * call (`review:…`) or a memory pass (`memory-pass:…`). Its events reach
+   * `bus` like a turn's, so whatever counts provider calls there counts
+   * them, but it is not a conversation: nobody can send to it, it is never
+   * stored, and a surface that lists conversations leaves it out. Known by
+   * the run, not the id's shape, so a dispatched session whose id happens
+   * to start the same way is still a conversation.
+   */
+  isSideRun(sessionId: string): boolean;
+  /**
    * Aborts every turn running on a session right now, one recovered after a
    * restart included, the way the watchdog and a restart's window do: each
    * fails with `reason`, its session saved. Returns how many turns are on
@@ -4312,6 +4322,28 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const activeTurns = new Map<string, string>();
   /**
+   * The runtime each running turn resolved when it started, by session. A
+   * reviewer call for one of its calls runs on it (`reviewCall`), so a soul
+   * or config edited mid-turn can't send that turn's request to a provider
+   * that wasn't serving it. Exact for the same reason `activeTurns` is: one
+   * turn per session at a time, set and cleared inside the session chain.
+   */
+  const turnRuntimes = new Map<string, { source: AgentSource; config: RuntimeConfig }>();
+  const onTurnRuntime = async <T>(
+    sessionId: string,
+    runtime: { source: AgentSource; config: RuntimeConfig },
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    turnRuntimes.set(sessionId, runtime);
+    try {
+      return await work();
+    } finally {
+      if (turnRuntimes.get(sessionId) === runtime) {
+        turnRuntimes.delete(sessionId);
+      }
+    }
+  };
+  /**
    * Keyed dispatches not yet settled, by session and key — what a repeat
    * attaches to. In memory on purpose: it only has to cover the turns this
    * process is running, and the transcript covers the rest.
@@ -4553,7 +4585,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the fallback counts.
     const hostedLoop = input.idempotencyKey !== undefined && reachesHarness(config, switchedToFallback);
 
-    return settleLeftForNextStart(input, withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
+    return settleLeftForNextStart(input, onTurnRuntime(input.sessionId, { source, config }, () => withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
       // The preflight above (agent refresh, config resolution, session
       // load) awaited filesystem work; the entry check has long passed.
       // Recheck before the runner touches durable state, or a dispatch
@@ -4638,7 +4670,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(steer !== undefined ? { steer } : {}),
         signal,
       });
-    }));
+    })));
   };
 
   /**
@@ -4818,11 +4850,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         }
       }
       try {
-        await runner.recoverPendingApproval(sessionId, {
+        await onTurnRuntime(sessionId, { source, config: recoveredConfig }, () => runner.recoverPendingApproval(sessionId, {
           denyPending: expired,
           runtime: runtimeContextFor(source, recoveredConfig, session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true, session.metadata),
           signal: controller.signal,
-        });
+        }));
       } finally {
         untrackTurn(sessionId, controller);
         // A recovered firing's row outlived the process that would have
@@ -5037,11 +5069,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     session.agent = source.definition;
     await store.save(session);
     const runner = runnerFor(config, source.definition.id);
-    return withWatchdog(session.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
+    return onTurnRuntime(session.id, { source, config }, () => withWatchdog(session.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
       await runner.continueTurn(session.id, {
         runtime: runtimeContextFor(source, config, switchedToFallback, session.metadata),
         signal,
-      }) ?? session);
+      }) ?? session));
   };
 
   /**
@@ -5298,6 +5330,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   // ---- memory passes (spec 962) -------------------------------------------
 
+  /** The session ids of the side runs running now: reviewer calls and memory passes. */
+  const sideRuns = new Set<string>();
+
   /**
    * A pass's one model turn: the agent's provider and credentials, exactly
    * the model asked for and never the fallback (cost stays what the
@@ -5317,9 +5352,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     /** Tool steps before the wrap-up; 0 tools still needs 1 for the answer. */
     maxTurns: number;
     signal: AbortSignal;
+    /** A running turn's own runtime (`turnRuntimes`); the agent's current one when omitted. */
+    runtime?: { source: AgentSource; config: RuntimeConfig };
   }): Promise<Session> => {
-    const source = await refreshAgent(run.agentId);
-    const resolved = await runtimeForAgent(source);
+    const source = run.runtime?.source ?? await refreshAgent(run.agentId);
+    const resolved = run.runtime?.config ?? await runtimeForAgent(source);
     const { fallback: _fallback, ...primary } = resolved as RuntimeConfig & { fallback?: unknown };
     const config = (run.model !== undefined ? { ...primary, model: run.model } : primary) as RuntimeConfig;
     const tools = new ToolRegistry();
@@ -5358,17 +5395,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       delegates: [],
       ...(source.definition.credentials !== undefined ? { credentials: [...source.definition.credentials] } : {}),
     };
-    return passRunner.run({
-      sessionId: run.sessionId,
-      agent: definition,
-      userMessage: run.prompt,
-      metadata: {
-        provider: config.provider,
-        ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
-        [SENDER_TRUST_METADATA_KEY]: run.trust,
-      },
-      signal: run.signal,
-    });
+    // Its events go on the shared bus like a turn's, for what counts provider
+    // calls there (`session.usage`), and are known as a side run's for as
+    // long as it runs (`isSideRun`), so a surface that shows conversations
+    // can leave it out.
+    sideRuns.add(run.sessionId);
+    try {
+      return await passRunner.run({
+        sessionId: run.sessionId,
+        agent: definition,
+        userMessage: run.prompt,
+        metadata: {
+          provider: config.provider,
+          ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
+          [SENDER_TRUST_METADATA_KEY]: run.trust,
+        },
+        signal: run.signal,
+      });
+    } finally {
+      sideRuns.delete(run.sessionId);
+    }
   };
 
   const runMemoryPassModel = async (run: MemoryPassModelRun): Promise<void> => {
@@ -5390,6 +5436,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   // ---- the review posture's reviewer (spec 964) ----------------------------
 
+  /**
+   * Reviewer calls still running. A turn awaits its own, but a shadow
+   * review runs off the call path and can outlast its turn, and a provider
+   * that ignores its abort after the review's timeout keeps one going with
+   * nothing waiting on it. A shutdown aborts these once the turns have
+   * drained and waits for them, so none is still using a provider when the
+   * plugins are disposed.
+   */
+  const reviewsRunning = new Set<Promise<unknown>>();
+  const stopReviews = new AbortController();
+
   const reviewCall = async (request: GatewayReviewRequest): Promise<{ reply: Record<string, unknown> } | { failed: string }> => {
     if (request.command !== undefined && !callShownWhole(request.call)) {
       // A command line the case can't show whole could hide its end, and
@@ -5408,26 +5465,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...(firing !== undefined ? { firing } : {}),
       delegated: isSubAgentSession(request.session),
     });
+    if (stopReviews.signal.aborted) {
+      return { failed: 'cancelled' };
+    }
+    const signal = AbortSignal.any([request.signal, stopReviews.signal]);
+    // On the reviewed turn's own runtime while it runs. A review after it
+    // has ended (a shadow review can outlast its turn) takes the agent's
+    // current one, which is where the session's next turn sends the same
+    // conversation anyway.
+    const runtime = turnRuntimes.get(request.session.id);
+    const running = runSideModel({
+      agentId: request.session.agent.id,
+      sessionId: `review:${randomUUID()}`,
+      model: request.model,
+      instructions: REVIEW_RULES,
+      prompt,
+      // The case quotes a call an outside page may have shaped.
+      trust: 'external',
+      tools: [],
+      maxTurns: 1,
+      signal,
+      ...(runtime !== undefined ? { runtime } : {}),
+    });
+    reviewsRunning.add(running);
+    const untrack = (): void => {
+      reviewsRunning.delete(running);
+    };
+    running.then(untrack, untrack);
     let answered: Session;
     try {
-      answered = await runSideModel({
-        agentId: request.session.agent.id,
-        sessionId: `review:${randomUUID()}`,
-        model: request.model,
-        instructions: REVIEW_RULES,
-        prompt,
-        // The case quotes a call an outside page may have shaped.
-        trust: 'external',
-        tools: [],
-        maxTurns: 1,
-        signal: request.signal,
-      });
+      answered = await running;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return { failed: /budget/i.test(message) ? 'budget' : request.signal.aborted ? 'cancelled' : 'provider-error' };
+      return { failed: /budget/i.test(message) ? 'budget' : signal.aborted ? 'cancelled' : 'provider-error' };
     }
     if (answered.status === 'failed') {
-      return { failed: 'provider-error' };
+      return { failed: signal.aborted ? 'cancelled' : 'provider-error' };
     }
     const reply = [...answered.messages].reverse().find((message) => message.role === 'assistant' && message.content.trim().length > 0);
     const parsed = reply === undefined ? undefined : readReviewReply(reply.content);
@@ -6554,6 +6627,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       while (inflight.size > 0) {
         await Promise.allSettled([...inflight]);
       }
+      // Then the reviews no turn is waiting on: aborted rather than drained,
+      // since what they report is about turns already over, and waited for.
+      stopReviews.abort(new Error('The daemon is stopping.'));
+      while (reviewsRunning.size > 0) {
+        await Promise.allSettled([...reviewsRunning]);
+      }
       // Then the channels, whose stop awaits the rendering they still have
       // in flight: the outcomes of the turns that just finished.
       await stopChannels();
@@ -6583,6 +6662,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Before the loop, so a turn queued behind one aborted here, which
       // starts as soon as that one settles, is aborted the same way.
       abortingWith = kind === 'stop' ? STOPPING_TURN_ERROR : RESTARTING_TURN_ERROR;
+      stopReviews.abort(new Error('The daemon is stopping.'));
       for (const running of turnControllers.values()) {
         for (const controller of running) {
           controller.abort(shutdownAbort());
@@ -6924,6 +7004,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     activeTurnId(sessionId) {
       return activeTurns.get(sessionId);
+    },
+
+    isSideRun(sessionId) {
+      return sideRuns.has(sessionId);
     },
 
     abortTurns(sessionId, reason) {
