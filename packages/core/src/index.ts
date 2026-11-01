@@ -1451,6 +1451,27 @@ export interface MemoryAuditEntry extends MemoryEntry {
   forgottenAt?: string;
 }
 
+/**
+ * A memory pass (spec 962): a short model run, as the agent, that may only
+ * recall and remember. A `save` pass reads a quiet conversation's new
+ * messages; a `tidy` pass merges duplicate facts. In `shadow` mode what it
+ * would write goes to a separate file and no real fact changes.
+ */
+export type MemoryPassKind = 'save' | 'tidy';
+export type MemoryPassMode = 'write' | 'shadow';
+/**
+ * `done`: it ran, even if it saved nothing. `nothing-new`: there was nothing
+ * to read. `skipped`: refused before reading, with a reason. `failed`: it
+ * ran and failed. `interrupted`: a daemon stop or crash cut it off.
+ */
+export type MemoryPassStatus = 'done' | 'nothing-new' | 'skipped' | 'failed' | 'interrupted';
+
+/**
+ * What every entry a pass writes carries in `metadata.memoryPass`, so a
+ * person can tell it apart and `stratus memory undo-pass` can find it.
+ */
+export const MEMORY_PASS_METADATA_KEY = 'memoryPass';
+
 /** Per-entry write cap, in UTF-8 bytes. `append` refuses larger, never truncates. */
 export const MEMORY_ENTRY_MAX_BYTES = 4096;
 /**

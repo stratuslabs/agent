@@ -19,6 +19,27 @@ export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/
 export { syncDirectory, writeFileSynced } from './durable-write.ts';
 export { createFileMemoryStore, createShardedFileMemoryStore, type FileMemoryStoreOptions } from './memory.ts';
 export {
+  MEMORY_PASSES_FILENAME,
+  MEMORY_SHADOW_FILENAME,
+  agentMemoryPassesFileIn,
+  agentMemoryShadowFileIn,
+  createMemoryPassLedger,
+  memoryPassActivations,
+  memoryPassEntries,
+  memoryPassMessageCounts,
+  memoryPassOpenClaims,
+  memoryPassSettleRecord,
+  memoryPassWatermark,
+  undoMemoryPass,
+  type MemoryPassActivation,
+  type MemoryPassClaim,
+  type MemoryPassEnd,
+  type MemoryPassLedger,
+  type MemoryPassLedgerOptions,
+  type MemoryPassRecord,
+  type MemoryPassSlice,
+} from './memory-passes.ts';
+export {
   applyPerAgentWorkspaces,
   repairWorkspacesIfPending,
   surveyLegacyWorkspaces,
