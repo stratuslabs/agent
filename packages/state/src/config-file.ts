@@ -415,7 +415,8 @@ export const isLoopbackHost = (host: string): boolean => {
   if (parsed === null || parsed.port !== '') {
     return false;
   }
-  const name = parsed.hostname.toLowerCase();
+  // `localhost.` is the same name written absolute, and binds the same way.
+  const name = parsed.hostname.toLowerCase().replace(/\.$/, '');
   if (name === 'localhost' || name === '[::1]') {
     return true;
   }

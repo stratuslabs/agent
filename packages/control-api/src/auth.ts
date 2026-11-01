@@ -401,8 +401,11 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
 
 export type Authenticator = ReturnType<typeof createAuthenticator>;
 
+/** A host name compared as DNS does: case-blind, and `name.` the same as `name`. */
+const bareName = (hostname: string): string => hostname.toLowerCase().replace(/\.$/, '');
+
 /**
- * The name a `Host` header carries, without its port, lowercased; undefined
+ * The name a `Host` header carries, without its port, as `bareName`; undefined
  * when it names nothing a browser could have sent. A browser builds `Host`
  * from the URL it connected to, so a value with a user part, a path or
  * whitespace in it came from something else, and is not given the benefit
@@ -413,7 +416,8 @@ export const hostName = (header: string): string | undefined => {
     return undefined;
   }
   const parsed = URL.parse(`http://${header}`);
-  return parsed && parsed.hostname !== '' ? parsed.hostname.toLowerCase() : undefined;
+  const name = parsed === null ? '' : bareName(parsed.hostname);
+  return name !== '' ? name : undefined;
 };
 
 /**
@@ -441,7 +445,8 @@ export const allowedHostNames = (bindHost: string, publicUrl: string | undefined
   if (bound !== undefined) {
     names.add(bound);
   }
-  const named = publicUrl === undefined ? undefined : URL.parse(publicUrl)?.hostname.toLowerCase();
+  const parsed = publicUrl === undefined ? null : URL.parse(publicUrl);
+  const named = parsed === null ? undefined : bareName(parsed.hostname);
   if (named) {
     names.add(named);
   }

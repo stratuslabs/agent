@@ -141,3 +141,23 @@ test('a Host header a browser could not have sent is not read for the name insid
   // And a non-loopback bind checks nothing.
   assert.equal(allowedHostNames('0.0.0.0', 'https://gateway.example'), undefined);
 });
+
+test('a name written with the DNS root dot is the same name', async () => {
+  const { hostAllowed, allowedHostNames } = await import('../src/auth.ts');
+  // A bind to the absolute name is still a loopback bind, and checked.
+  const absolute = allowedHostNames('localhost.', undefined);
+  assert.notEqual(absolute, undefined);
+  assert.equal(hostAllowed(absolute, 'evil.example'), false);
+  assert.equal(hostAllowed(absolute, 'localhost:4123'), true);
+  // A browser that was given localhost. sends it as the Host.
+  const names = allowedHostNames('127.0.0.1', undefined);
+  assert.equal(hostAllowed(names, 'localhost.:4123'), true);
+  assert.equal(hostAllowed(names, 'evil.example.'), false);
+  assert.equal(hostAllowed(names, 'localhost..'), false);
+  // And api.publicUrl matches with or without the dot, either side.
+  for (const publicUrl of ['https://gateway.example/', 'https://gateway.example./']) {
+    const tunnel = allowedHostNames('127.0.0.1', publicUrl);
+    assert.equal(hostAllowed(tunnel, 'gateway.example'), true, publicUrl);
+    assert.equal(hostAllowed(tunnel, 'gateway.example.:443'), true, publicUrl);
+  }
+});

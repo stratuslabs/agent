@@ -21,3 +21,13 @@ test('isLoopbackHost: wildcards, LAN and tailnet addresses, and look-alike names
     assert.equal(isLoopbackHost(host), false, host);
   }
 });
+
+test('isLoopbackHost: the absolute name localhost. is loopback, with one root dot only', () => {
+  // Node binds `localhost.` to the loopback address, like `localhost`.
+  for (const host of ['localhost.', 'LOCALHOST.']) {
+    assert.equal(isLoopbackHost(host), true, host);
+  }
+  for (const host of ['localhost..', 'evil.example.', '.']) {
+    assert.equal(isLoopbackHost(host), false, host);
+  }
+});
