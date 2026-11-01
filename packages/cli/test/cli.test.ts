@@ -16147,6 +16147,18 @@ test('chat and run follow the review posture: rules hold, outside content asks a
   assert.notEqual(refused, true);
   assert.match((refused as { reason: string }).reason, /nobody is set up to approve this/);
   assert.match(piped.output.stderr, /Note: refusing notes\.add/);
+
+  // Shadow runs every call as open: what the review would have refused is
+  // not reported as a refusal (Codex P2 4434717561).
+  const shadowPiped = createStreams();
+  const shadow = createApprovalPolicy('open', shadowPiped.streams, {}, async () => 'y', true, {
+    gateExternalContent: false,
+    review: { ...review, shadow: true },
+  });
+  assert.equal(await shadow.approve(call(stripe, external)), true);
+  assert.equal(await shadow.approve(call(notes, external)), true);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.doesNotMatch(shadowPiped.output.stderr, /Note: refusing/);
 });
 
 test('an approvals block that cannot be trusted or read leaves the daemon guarded, never open', async () => {

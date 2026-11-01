@@ -142,7 +142,8 @@ export const createApprovalPolicy = (
         ...(openOptions.secretsFor !== undefined ? { secretsFor: openOptions.secretsFor } : {}),
       },
       onDecision: (decision) => {
-        if (defaulted && !decision.allowed && !noted) {
+        // A shadow decision is what the review would have done; the call ran.
+        if (defaulted && !decision.allowed && decision.shadow !== true && !noted) {
           noted = true;
           writeLine(
             streams.stderr,
