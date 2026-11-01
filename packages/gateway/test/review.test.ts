@@ -12,7 +12,8 @@ import {
 import { REVIEW_RULES, readReviewReply, reviewCaseText } from '../src/review.ts';
 
 const at = '2026-11-01T00:00:00.000Z';
-const message = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, createdAt: at, ...extra });
+let ids = 0;
+const message = (role: Message['role'], content: string, extra: Pick<Message, 'overheard' | 'toolResult'> = {}): Message => ({ id: `m${(ids += 1)}`, role, content, createdAt: at, ...extra });
 
 const sessionWith = (messages: Message[], metadata: Session['metadata'] = {}): Session => ({
   id: 'slack:ava:T1:C1:1',

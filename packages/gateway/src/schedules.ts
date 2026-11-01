@@ -430,6 +430,13 @@ export interface SchedulerRuntime {
    * is, so metadata alone never steers a prompt into a conversation.
    */
   approvalDestinationFor(session: Session): ScheduleDestination | undefined;
+  /**
+   * A live firing's own prompt, for the review posture: the whole request
+   * of an unattended turn, which a firing's message mixes with the events
+   * it delivers. Bound exactly as `isPreauthorized` is, so metadata alone
+   * never names a prompt.
+   */
+  firingPromptFor(session: Session): { kind: 'schedule' | 'trigger'; prompt: string } | undefined;
   /** All agents' schedules, for the operator surfaces. */
   list(): ScheduleRecord[];
   /** Cancel any agent's schedule — the operator's stop button. */
@@ -1273,6 +1280,20 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       return canonicalDestination(record.destination) === canonicalDestination(destination)
         ? record.destination.thread
         : undefined;
+    },
+    firingPromptFor(session) {
+      if (!activeFirings.has(session.id)) {
+        return undefined;
+      }
+      const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
+      if (typeof scheduleId !== 'string') {
+        return undefined;
+      }
+      const record = store.get(scheduleId);
+      if (record === undefined || record.agentId !== session.agent.id) {
+        return undefined;
+      }
+      return { kind: record.cadence.kind === 'event' ? 'trigger' : 'schedule', prompt: record.prompt };
     },
     approvalDestinationFor(session) {
       if (!activeFirings.has(session.id)) {

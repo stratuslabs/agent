@@ -72,6 +72,8 @@ import {
   type ProviderCallGuard,
   type ProviderContribution,
   type Session,
+  type Tool,
+  type ToolCall,
   type SteeredMessage,
   type StratusEvent,
   type ToolRisk,
@@ -119,6 +121,7 @@ import {
 } from '@stratusagent/agents';
 import { createFleetReader } from './fleet.ts';
 import { createMemoryPassHost, type MemoryPassDetail, type MemoryPassModelRun } from './memory-passes.ts';
+import { readReviewReply, REVIEW_RULES, reviewCaseText } from './review.ts';
 import {
   createEventIntake,
   summarizeEvents,
@@ -515,6 +518,32 @@ export interface ApprovalTransport {
      */
     conversationKindFor(agentId: string, destination: string): Promise<'channel' | 'direct' | undefined>;
   };
+  /**
+   * The review posture's reviewer (`@stratusagent/permissions`' `review`
+   * option wraps it): one bounded model call on the agent's own provider
+   * and credentials, exactly the model named (the agent's own when none is)
+   * with no fallback and no tools, counted by the provider-call guards like
+   * any other call. The case it is shown holds the people's own words and
+   * the call, never tool output (`review.ts`).
+   *
+   * Never rejects: a review that couldn't run answers `failed` with a kind
+   * a person reads in the log, and the policy asks about the call.
+   */
+  review(request: GatewayReviewRequest): Promise<{ reply: Record<string, unknown> } | { failed: string }>;
+}
+
+/** One call put to the reviewer. Mirrors `@stratusagent/permissions`' `ReviewRequest`. */
+export interface GatewayReviewRequest {
+  session: Session;
+  call: ToolCall;
+  tool: Tool;
+  risk: ToolRisk;
+  command?: string;
+  origin?: string;
+  destination?: string;
+  /** `approvals.review.model`; undefined for the agent's own model. */
+  model?: string;
+  signal: AbortSignal;
 }
 
 /**
@@ -2324,6 +2353,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const configuredApprovals = typeof options.approvals === 'function'
     ? options.approvals({
         request: requestApproval,
+        // Late-bound: the side call is built further down this function.
+        review: (request) => reviewCall(request),
         destinations: {
           isPreauthorized: (session, destination) => scheduler.isPreauthorized(session, destination),
           accountFor: (agentId, destination) => {
@@ -5248,7 +5279,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * go through the same provider-call guards as every turn, and its events
    * through the same bus, so a budget sees and counts them.
    */
-  const runMemoryPassModel = async (run: MemoryPassModelRun): Promise<void> => {
+  const runSideModel = async (run: {
+    agentId: string;
+    sessionId: string;
+    model: string | undefined;
+    instructions: string;
+    prompt: string;
+    trust: TrustLevel;
+    tools: readonly Tool[];
+    /** Tool steps before the wrap-up; 0 tools still needs 1 for the answer. */
+    maxTurns: number;
+    signal: AbortSignal;
+  }): Promise<Session> => {
     const source = await refreshAgent(run.agentId);
     const resolved = await runtimeForAgent(source);
     const { fallback: _fallback, ...primary } = resolved as RuntimeConfig & { fallback?: unknown };
@@ -5257,9 +5299,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     for (const tool of run.tools) {
       tools.register(tool);
     }
-    // A step budget of n is n tool steps and one wrap-up, so this is the
-    // pass's model-call cap.
-    const maxTurns = MEMORY_PASS_MAX_MODEL_CALLS - 1;
+    const { maxTurns } = run;
     let passRunner: AgentRunner | undefined;
     const provider = createRuntimeProvider(
       config,
@@ -5285,24 +5325,81 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const definition: AgentDefinition = {
       id: source.definition.id,
       name: source.definition.name,
-      instructions: MEMORY_PASS_RULES,
+      instructions: run.instructions,
       tools: run.tools.map((tool) => tool.name),
       skills: [],
       delegates: [],
       ...(source.definition.credentials !== undefined ? { credentials: [...source.definition.credentials] } : {}),
     };
-    await passRunner.run({
+    return passRunner.run({
       sessionId: run.sessionId,
       agent: definition,
       userMessage: run.prompt,
       metadata: {
         provider: config.provider,
         ...(config.provider !== 'demo' && config.model !== undefined ? { model: config.model } : {}),
-        // The slice's label: the pass reads at the conversation's trust.
         [SENDER_TRUST_METADATA_KEY]: run.trust,
       },
       signal: run.signal,
     });
+  };
+
+  const runMemoryPassModel = async (run: MemoryPassModelRun): Promise<void> => {
+    await runSideModel({
+      agentId: run.agentId,
+      sessionId: run.sessionId,
+      model: run.model,
+      instructions: MEMORY_PASS_RULES,
+      prompt: run.prompt,
+      // The slice's label: the pass reads at the conversation's trust.
+      trust: run.trust,
+      tools: run.tools,
+      // A step budget of n is n tool steps and one wrap-up, so this is the
+      // pass's model-call cap.
+      maxTurns: MEMORY_PASS_MAX_MODEL_CALLS - 1,
+      signal: run.signal,
+    });
+  };
+
+  // ---- the review posture's reviewer (spec 964) ----------------------------
+
+  const reviewCall = async (request: GatewayReviewRequest): Promise<{ reply: Record<string, unknown> } | { failed: string }> => {
+    const firing = scheduler.firingPromptFor(request.session);
+    const prompt = reviewCaseText({
+      session: request.session,
+      call: request.call,
+      tool: request.tool,
+      risk: request.risk,
+      ...(request.command !== undefined ? { command: request.command } : {}),
+      ...(request.origin !== undefined ? { origin: request.origin } : {}),
+      ...(request.destination !== undefined ? { destination: request.destination } : {}),
+      ...(firing !== undefined ? { firing } : {}),
+      delegated: isSubAgentSession(request.session),
+    });
+    let answered: Session;
+    try {
+      answered = await runSideModel({
+        agentId: request.session.agent.id,
+        sessionId: `review:${randomUUID()}`,
+        model: request.model,
+        instructions: REVIEW_RULES,
+        prompt,
+        // The case quotes a call an outside page may have shaped.
+        trust: 'external',
+        tools: [],
+        maxTurns: 1,
+        signal: request.signal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { failed: /budget/i.test(message) ? 'budget' : request.signal.aborted ? 'cancelled' : 'provider-error' };
+    }
+    if (answered.status === 'failed') {
+      return { failed: 'provider-error' };
+    }
+    const reply = [...answered.messages].reverse().find((message) => message.role === 'assistant' && message.content.trim().length > 0);
+    const parsed = reply === undefined ? undefined : readReviewReply(reply.content);
+    return parsed === undefined ? { failed: 'unparseable' } : { reply: parsed };
   };
 
   const memoryPassHost = createMemoryPassHost({
