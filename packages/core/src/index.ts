@@ -3454,6 +3454,20 @@ export interface ProviderRequest {
    */
   mayContinue?: () => boolean;
   /**
+   * For a provider that runs its own tool loop: ask, right after a hosted
+   * call's result is in (`executeHostedToolCall`), for what somebody has
+   * said since the turn started — the step `RunInput.steer` covers for the
+   * runner's own loop, which never sees a harness's steps (card 958). A
+   * message handed back is already in the transcript, a `steered` user
+   * message right after that result with its keys and its sender's trust,
+   * so the provider must get it to the model before the model's next step,
+   * or fail the turn. Hands back nothing unless the newest message is a
+   * tool result. Absent when the turn has no `steer`, on a turn that may
+   * stay quiet, and on the wrap-up; a provider that cannot deliver a
+   * message mid-loop must not call it.
+   */
+  steer?: () => Promise<SteeredMessage | undefined>;
+  /**
    * Abort signal for the turn. Adapters MUST cancel their underlying
    * operation (HTTP request, SDK query) when it fires — racing the promise
    * is not cancellation; the underlying work has to stop.
@@ -7280,11 +7294,13 @@ export interface RunInput {
    *
    * Never asked before the first provider call, after an answer, once the
    * turn is out of steps (the wrap-up can't act on it, so it waits and
-   * runs as its own turn), on a turn nobody asked for (`addressed:
-   * false`, whose answer may be silence), or by a provider that hosts its
-   * own tool loop, whose steps the runner never sees. A host that omits it
-   * gets turns that hear nothing until they end, as before; what is handed
-   * over is the host's to answer for, since the runner only records it.
+   * runs as its own turn), or on a turn nobody asked for (`addressed:
+   * false`, whose answer may be silence). A provider that hosts its own
+   * tool loop, whose steps the runner never sees, asks through
+   * `ProviderRequest.steer` after each hosted call instead, if it can
+   * deliver a message mid-loop. A host that omits it gets turns that hear
+   * nothing until they end, as before; what is handed over is the host's
+   * to answer for, since the runner only records it.
    */
   steer?: () => Promise<SteeredMessage | undefined>;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
@@ -9039,6 +9055,25 @@ export class AgentRunner {
             await announcePending();
             await this.guardProviderCall(session, provider);
           };
+          // The step the loop above steers at, for a provider whose loop is
+          // its own: right after one of its hosted calls has a result, so a
+          // user message there splits no call from its answer. The same
+          // turns go without: the wrap-up, and one that may stay quiet.
+          const steered = session;
+          const hostedSteer = steer !== undefined && !wrappingUp && !isReplyOptionalTurn(steered)
+            ? async (): Promise<SteeredMessage | undefined> => {
+              if (steered.messages.at(-1)?.role !== 'tool') {
+                return undefined;
+              }
+              throwIfAborted(signal);
+              const message = await steer();
+              throwIfAborted(signal);
+              if (message !== undefined) {
+                await this.takeSteered(steered, message);
+              }
+              return message;
+            }
+            : undefined;
           // Inside the attempt loop, so a retry after an overflow is asked
           // about like any other call. Outside the try: a refusal is not an
           // overflow to trim and retry, and the call it refused spent nothing.
@@ -9070,6 +9105,7 @@ export class AgentRunner {
                   },
                 }
                 : {}),
+              ...(hostedSteer !== undefined ? { steer: hostedSteer } : {}),
               onUsage,
               guardCall,
               ...(signal ? { signal } : {}),

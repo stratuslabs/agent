@@ -250,9 +250,10 @@ its final reply, or has used every step its message allows, they wait,
 and its next turn answers everything that queued in one reply. A message
 that lands mid-task shares the steps the task has left rather than adding
 more, so a busy thread can't keep one task running past the agent's
-[step limit](../reference/config.md#how-many-turns-one-message-may-spend). An agent on a provider that runs its own tool loop
-(Codex, or Claude through a subscription sign-in) doesn't take messages
-mid-task yet: they always wait for the next turn. In a DM each message
+[step limit](../reference/config.md#how-many-turns-one-message-may-spend).
+An agent on Claude through a subscription sign-in takes them the same way,
+with the result of the tool it was running; one on Codex doesn't take
+messages mid-task yet, and they wait for its next turn. In a DM each message
 shows the status as soon as you send it, so a second message never makes
 the agent look idle; in a channel thread the status keeps saying what the
 running turn is doing until its reply posts.
