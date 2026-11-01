@@ -1746,9 +1746,15 @@ export const runSetup = async (
     if (callable.length > 0) {
       if (permissive.length > 0) {
         writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${permissive.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+        // The agents are the subject, so no verb has to agree with the
+        // tool list: "web.fetch are callable" and "fs.read, … is callable"
+        // were both printed when the verb followed the agent count. The
+        // list goes last because one entry ends in its own descriptor
+        // (plugin-mcp's "…, discovered at connect").
+        const who = permissive.length === 1 ? 'that agent' : 'those agents';
         writeLine(streams.stdout, uncheckedReason(name) !== undefined
-          ? `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} what ${permissive.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
-          : `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+          ? `So at the next daemon start, ${who} would gain ${grants ?? 'what it contributes'} — subject to the caveat above, which setup did not check.`
+          : `So the next time the daemon starts, ${who} can call ${grants ?? 'what it contributes'}.`);
         writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
       }
       for (const entry of explicit) {
@@ -2866,6 +2872,13 @@ export const runSetup = async (
     // it for me" starts a daemon at login the user asked not to have, which
     // is no more a successful setup than one that will not come up at all.
     let serviceStepFailed = false;
+    // Channels whose secrets this save stored with no running daemon to
+    // pick them up, and whether the service step below leaves one running.
+    // Together they decide the finish screen's last line: the save line
+    // says "run `stratus serve`" too, but optional-package installs scroll
+    // it away, and the closing list is what a first run reads last.
+    const awaitingServe = new Set<string>();
+    let serviceRunning = false;
     // Typed as the file rather than as a bag of scalars: the carried blocks
     // below are objects, and a `Record<string, string | boolean>` was what
     // made dropping them the path of least resistance.
@@ -3002,6 +3015,9 @@ export const runSetup = async (
         writeLine(streams.stdout, answered !== undefined
           ? `${saved}. ${channelReloadLine(answered, 'slack')}`
           : connected > 0 ? `${saved} — run \`${serveCommand()}\` to bring them online.` : `${saved}.`);
+        if (answered === undefined && connected > 0) {
+          awaitingServe.add('slack');
+        }
       }
       if (state.pluginChannelEdits.length > 0) {
         const saved = `Saved your channel secrets to ${credentialsPath(env)}`;
@@ -3009,6 +3025,13 @@ export const runSetup = async (
         writeLine(streams.stdout, answered !== undefined
           ? `${saved}. ${kinds.map((kind) => channelReloadLine(answered, kind)).join(' ')}`
           : `${saved} — run \`${serveCommand()}\` to bring them online.`);
+        if (answered === undefined) {
+          for (const edit of state.pluginChannelEdits) {
+            if (edit.secrets !== undefined) {
+              awaitingServe.add(edit.kind);
+            }
+          }
+        }
       }
       if (reload !== undefined && 'warning' in reload) {
         writeLine(streams.stderr, `Warning: ${reload.warning}`);
@@ -3091,6 +3114,8 @@ export const runSetup = async (
       } else if (!running) {
         writeLine(streams.stderr, 'Setup is saved either way. Check `stratus service status` once you have looked at the logs.');
         serviceStepFailed = true;
+      } else {
+        serviceRunning = true;
       }
     }
     writeLine(streams.stdout);
@@ -3181,6 +3206,10 @@ export const runSetup = async (
     writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag}${shadowConfigFlag} "say hello"`);
     // Whether or not its packages are here: the command offers them itself.
     writeLine(streams.stdout, '  stratus dashboard');
+    if (awaitingServe.size > 0 && !serviceRunning) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `${awaitingServe.size === 1 && awaitingServe.has('slack') ? 'Slack answers' : 'Your channels answer'} only while stratusd runs — start it with \`${serveCommand()}\`.`);
+    }
     return !serviceStepFailed && !providerInstallFailed;
   };
 

@@ -201,6 +201,9 @@ digits to jump, Esc to go back.
 - **Save & finish** — writes everything, installs the package your
   agents' provider needs if it is missing, offers the Slack package if you
   connected Slack and it is missing, then installs the always-on service.
+  When nothing will run `stratusd` afterwards (Always on off or not
+  available) and you connected a channel, the closing lines end with the
+  `stratus serve` command that brings it online.
 
 ## What Save & finish offers
 
