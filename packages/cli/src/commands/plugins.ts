@@ -50,6 +50,14 @@ export interface PluginToolReport {
    * finding, not the absence of one: installing a plugin grants nothing.
    */
   grantedTo: string[];
+  /**
+   * Agent ids whose soul has no `tools:` list, on a home with the
+   * safe-tools default: they get this tool only if it registers as safe.
+   * `risk` reads safe, but with no override settling it that is a floor,
+   * and the tool object may raise itself at registration, where only a
+   * running daemon sees it. Absent when no grant waits on that.
+   */
+  grantedIfSafe?: string[];
 }
 
 export interface PluginReport {
@@ -155,16 +163,36 @@ export const collectPluginsReport = async (
   }
 
   /**
-   * Which agents a declared name reaches, at the risk it will register at.
-   * A soul with no `tools:` key grants the tools registered as safe, which
-   * is neither everything nor the nothing an empty list grants, so the risk
-   * shown on the row is what decides it for those souls. On a home an
-   * older build set up it grants every tool, as the daemon reads it there.
+   * Which agents a declared name reaches. A soul with no `tools:` key
+   * grants the tools registered as safe, which is neither everything nor
+   * the nothing an empty list grants, so the row's risk decides it for those
+   * souls. On a home an older build set up it grants every tool, as the
+   * daemon reads it there.
+   *
+   * `settled` is whether that risk is the one the tool will register at: an
+   * operator override replaces the object's own claim, and without one the
+   * object may still raise itself. Registration only ever raises, so the
+   * one grant that can be wrong is a safe-reading tool to a soul with no
+   * list, and that is reported apart rather than as certain.
    */
   const unlisted = unlistedToolsFor(env);
-  const grantedTo = (name: string, discovered: boolean, risk: ToolRisk): string[] => roster
-    .filter((entry) => soulGrantsTool(entry.soul.agent.tools, name, discovered, risk, unlisted))
-    .map((entry) => entry.soul.agent.id);
+  const grantsFor = (
+    name: string,
+    discovered: boolean,
+    risk: ToolRisk,
+    settled: boolean,
+  ): Pick<PluginToolReport, 'grantedTo' | 'grantedIfSafe'> => {
+    const grantedTo: string[] = [];
+    const grantedIfSafe: string[] = [];
+    for (const entry of roster) {
+      const tools = entry.soul.agent.tools;
+      if (!soulGrantsTool(tools, name, discovered, risk, unlisted)) {
+        continue;
+      }
+      (tools === undefined && unlisted === 'safe' && !settled ? grantedIfSafe : grantedTo).push(entry.soul.agent.id);
+    }
+    return { grantedTo, ...(grantedIfSafe.length > 0 ? { grantedIfSafe } : {}) };
+  };
 
   // Configured first, in the operator's own order, then the first-party
   // packages they have not configured — the second group is why an install
@@ -393,7 +421,7 @@ export const collectPluginsReport = async (
           name: tool.name,
           discovered: tool.discovered,
           risk,
-          grantedTo: grantedTo(tool.name, tool.discovered, risk),
+          ...grantsFor(tool.name, tool.discovered, risk, override !== undefined),
         };
       });
     } catch (error) {
@@ -494,11 +522,16 @@ export const runPlugins = async (
       writeLine(streams.stdout, `  ${`${label} ${names.join(', ')}`.padEnd(28)}${how}`);
     }
     for (const tool of plugin.tools) {
+      const ifSafe = tool.grantedIfSafe !== undefined
+        ? `${tool.grantedIfSafe.join(', ')} if it registers as safe`
+        : undefined;
       const granted = report.rosterUnreadable
         ? ''
         : tool.grantedTo.length > 0
-          ? ` → ${tool.grantedTo.join(', ')}`
-          : ' → nobody, until a soul’s tools: list names it';
+          ? ` → ${tool.grantedTo.join(', ')}${ifSafe !== undefined ? `; ${ifSafe}` : ''}`
+          : ifSafe !== undefined
+            ? ` → ${ifSafe}`
+            : ' → nobody, until a soul’s tools: list names it';
       const shape = tool.discovered ? ' (names arrive at connect)' : '';
       writeLine(streams.stdout, `  ${tool.name.padEnd(28)}${tool.risk}${shape}${granted}`);
     }
