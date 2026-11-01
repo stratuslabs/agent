@@ -12409,6 +12409,48 @@ test('a judged turn and a streaming turn post no first line of their own', async
   }
 });
 
+test('a judged turn posts only what it wrote after its last tool, or nothing, whatever its provider returns (card 1060)', async () => {
+  // A provider that hosts its own loop and joins every message (codex)
+  // returns the narration along with the answer; one that returns its last
+  // message may return words from before its last tool. Neither is the
+  // answer of a turn nobody asked for: its words between tools are held,
+  // and an empty answer is its decision to stay out.
+  const cases = [
+    { name: 'joined, with an answer', reply: 'Looking.\n\nStill looking.\n\nFound it.', posts: ['Found it.'] },
+    { name: 'joined, narration only', reply: 'Looking.\n\nStill looking.', posts: [] },
+    { name: 'its last message', reply: 'Found it.', posts: ['Found it.'] },
+    { name: 'nothing after its last tool', reply: '', posts: [] },
+    { name: 'its last words, from before its last tool', reply: 'Still looking.', posts: [] },
+  ];
+  for (const replies of [undefined, 'texts'] as const) {
+    for (const { name, reply, posts } of cases) {
+      const label = `${replies ?? 'final'}: ${name}`;
+      const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+        await say(gateway, sessionId, 'Looking.');
+        await runTool(gateway, sessionId, 'c1');
+        await say(gateway, sessionId, 'Still looking.');
+        await runTool(gateway, sessionId, 'c2');
+        return sessionWithReply(sessionId, reply);
+      });
+      gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+      gateway.sessionRouting = async () => ({ agentId: 'ava', metadata: {}, lastSpokeAt: new Date(990 * 1000).toISOString() });
+      const { socket, web, adapter } = quietAdapter(replies ? { replies } : {});
+      const statuses = recordStatuses(web);
+      await adapter.start(gateway);
+      await socket.deliver('message', channelMessage({ text: 'where is it?', ts: '990.1', thread: '990.0' }));
+      await adapter.stop();
+
+      assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false], label);
+      assert.deepEqual(web.posts.map((post) => post.text), posts, label);
+      assert.deepEqual(web.updates, [], label);
+      if (posts.length === 0) {
+        // It worked, so it showed a status; nothing posts to take it down.
+        assert.equal(statuses.at(-1)?.status, '', label);
+      }
+    }
+  }
+});
+
 test('the stream reply mode posts no interim messages: its placeholder already shows them', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

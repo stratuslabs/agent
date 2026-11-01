@@ -1167,9 +1167,11 @@ class ReplyRenderer {
   /** Whether a tool of this turn's has been called: words after one are held, with or without a first line. */
   private toolCalled = false;
   /**
-   * Words written between tools after the first line, in order. Never
+   * Words written between tools after the first line, in order — every
+   * word a lazy turn writes before a tool, first line included. Never
    * posted; kept only so a hosted-loop reply that repeats them is stripped
-   * of them, and so a turn that ends on them can post them as its reply.
+   * of them, and so a turn that ends on them can post them as its reply
+   * (never a lazy one: see `finalizeInOrder`).
    */
   private readonly held: string[] = [];
   /** Whether the last words this turn wrote before a tool were held rather than posted. */
@@ -1714,22 +1716,25 @@ class ReplyRenderer {
   /**
    * Post what the model said before the first tool it calls, in `final`
    * and `texts` mode only: a streaming turn already shows it in its
-   * placeholder, and a turn nobody asked for must not speak before it
-   * decides to. Behind the turn ahead and any handover, on the upload
+   * placeholder. Behind the turn ahead and any handover, on the upload
    * chain, so the first line, files, and the reply land in the order they
-   * happened. Words written after that are held, not posted (card 1009).
+   * happened. Words written after that are held, not posted (card 1009),
+   * and so are all of a lazy turn's: a turn nobody asked for must not
+   * speak before it decides to (card 1060).
    */
   private flushInterim(ofThisTurn: boolean): Promise<boolean> | undefined {
     const text = this.interim.trim();
     this.interim = '';
-    if (this.streaming || this.lazy || !this.turnStarted || !ofThisTurn || text.length === 0) {
+    if (this.streaming || !this.turnStarted || !ofThisTurn || text.length === 0) {
       return undefined;
     }
     // Only words before the turn's first tool are a message of their own:
     // after one, a step has run, and what follows is the model working,
     // whether or not the turn opened with a line. It is held: posted, it
     // is the running commentary a person has to scroll past (card 1009).
-    if (this.firstWordsSaid || this.toolCalled) {
+    // A lazy turn's are held from the start, so a hosted-loop reply that
+    // joins them in is stripped of them like any other turn's.
+    if (this.lazy || this.firstWordsSaid || this.toolCalled) {
       this.held.push(text);
       this.lastWasHeld = true;
       return undefined;
@@ -1987,6 +1992,15 @@ class ReplyRenderer {
     // reply as a message of its own beside a placeholder that then fills
     // with stale partial text.
     await this.editChain;
+    // A turn nobody asked for says only what it wrote after its last tool.
+    // What came before was held, and a provider that hosts its own loop
+    // (codex) joins it into the reply, so it is stripped here, before
+    // silence is judged: a reply that is only that narration is the
+    // decision to stay out, not something to post (card 1060). Nor are
+    // held words ever promoted to its answer, as another turn's are below.
+    if (this.lazy && this.held.length > 0) {
+      reply = this.unsaid(reply);
+    }
     if (this.lazy && reply.trim().length === 0 && (!this.ref || await this.retract())) {
       // Silence, decided: nothing was posted and nothing is — or what was
       // posted has been taken back. The uploads still land: a file the
@@ -2014,7 +2028,7 @@ class ReplyRenderer {
     // a reply-optional turn too (card 601): its words between tools were
     // held, so they are the only way an answer written before its last
     // tool call reaches the thread, and silence is judged after them.
-    if (!this.ref && (this.interimPosted || this.held.length > 0)) {
+    if (!this.lazy && !this.ref && (this.interimPosted || this.held.length > 0)) {
       const rest = this.unsaid(reply);
       const lastHeld = this.held.at(-1);
       if (rest.length === 0 && this.lastWasHeld && lastHeld !== undefined) {

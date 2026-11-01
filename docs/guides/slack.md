@@ -226,8 +226,11 @@ model talking to itself while it works, and a thread of step-by-step
 commentary is something you would have to scroll past. Nor is it added to
 the reply. The finished reply follows as its own message; when the
 agent's last words came before its last tool call, those words are the
-reply. A task that fails or is stopped says so where the reply would
-have gone.
+reply. A turn nobody asked for (an agent that
+[judges](#how-an-agent-listens)) posts none of its words before it
+decides, first ones included: its reply is only what it writes after its
+last tool, and nothing there means it stays out. A task that fails or is
+stopped says so where the reply would have gone.
 
 When an agent does need you before it finishes, it says so on purpose
 with `message.say`: one short message into the conversation it is
