@@ -36,7 +36,7 @@ jobs:
       matrix:
         language: [javascript-typescript, actions]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Neither language needs a build: CodeQL reads the TypeScript source and
       # the workflow files as they are, so nothing is installed or run here.
