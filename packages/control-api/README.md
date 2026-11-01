@@ -635,7 +635,15 @@ retry, a compaction, a message boundary — so a client draws nothing for it.
 `session.stopped-early` joined it with the stopped-early marker: the
 message ended in a wrap-up instead of finishing, sent just before its
 `session.completed`, with `reason` and `continuations` and no content. The
-session's `stoppedEarly` says the same until its next message starts.)
+session's `stoppedEarly` says the same until its next message starts.
+`permission.decided` joined it with decisions you can see: why a call was
+allowed or refused, sent just before that call's `tool.called` or
+`tool.denied` with the same `callId`: `toolName`, `risk`, `allowed`,
+`layer` (the check that decided: `risk`, `scope`, `parse`, `autonomy`,
+`grant`, `gate`, `approver`, `cancelled`) and a one-line `reason` with no
+tool input, plus `verdict`, `reviewCode` and `shadow` when a review step
+decided. Only a policy that reports its decisions sends it, which the
+daemon's does.)
 The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own

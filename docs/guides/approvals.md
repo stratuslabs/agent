@@ -77,6 +77,18 @@ read external content; see below), `risk` (a `dangerous` tool, which nothing
 can grant), `approver` (a person said no) or `cancelled` (the turn stopped
 while it waited).
 
+The agent is told the same sentence as the call's error, so it can pick a
+way that doesn't need the approval, or tell you what it would need,
+instead of trying the same call again. The sentence names the command's
+base and subcommand, a destination or a site, never the call's arguments.
+
+Every decision, allowed or refused, also goes out as a `permission.decided`
+event: the dashboard shows it beside the call in a conversation's live view
+(`allowed · scope`, `refused · grant`, with a refusal's reason under it),
+and the structured log keeps one line per decision with the tool, whether
+it ran and the check, without the reason. The dashboard shows decisions
+only while the turn runs; for an earlier conversation, read the log.
+
 That is the honest default (`headless`) behind a service manager. If
 somebody *is* reachable, `--approvals remote` asks them instead — see
 below. What somebody has already answered **Always allow** to still runs
