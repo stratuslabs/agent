@@ -312,14 +312,18 @@ version, started again after the failure, saved a conversation), it takes a
 new backup and keeps the earlier one.
 
 A migration that fails partway can leave the state half moved, which no
-version reads as its own. So once a migration has changed the state and
-not finished (or was stopped before it could check), every retry of that
-upgrade keeps the backup from before it, however old, and says so:
+version reads as its own. So once a migration that changes data has changed
+the state and not finished (or was stopped before it could check), every
+retry of that upgrade keeps the backup from before it, however old, and
+says so:
 
     state backup: keeping /Users/you/.stratus/backups/20261101T013000Z, the state as it was before this upgrade first ran (taken 2026-11-01T01:30:00.000Z). A migration that did not finish has changed the state since, so that copy is still the one to go back to; what was written after it is not in it
 
 Restoring it brings back the state from before the upgrade, without what
-was written after it; `~/.stratus.upgraded` below still has that.
+was written after it; `~/.stratus.upgraded` below still has that. A
+migration that only tightens file permissions doesn't count as changing
+the state: when the one after it fails before moving anything, a retry
+copies the state again.
 
 If the copy can't be made (a full disk, a file it can't read), no
 migration runs and the command says why: the home is still as the older
@@ -332,7 +336,9 @@ over what it leaves out, and install the version you had:
     mv ~/.stratus ~/.stratus.upgraded
     mkdir -m 700 ~/.stratus
     cp -Rp ~/.stratus.upgraded/backups/<time>/files/. ~/.stratus/
-    cp -p ~/.stratus.upgraded/credentials.json ~/.stratus/
+    for file in credentials.json gateway-token; do
+      if [ -e ~/.stratus.upgraded/$file ]; then cp -p ~/.stratus.upgraded/$file ~/.stratus/; fi
+    done
     for dir in skills plugins logs workspaces; do
       if [ -e ~/.stratus.upgraded/$dir ]; then cp -Rp ~/.stratus.upgraded/$dir ~/.stratus/; fi
     done

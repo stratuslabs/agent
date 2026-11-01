@@ -37,7 +37,13 @@ import {
   gatewayInfoPath,
 } from './paths.ts';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
-import { type StateBackup, backUpStateBeforeMigrating, markMigrationBegun, settleFailedMigration } from './state-backup.ts';
+import {
+  type MigrationMark,
+  type StateBackup,
+  backUpStateBeforeMigrating,
+  markMigrationBegun,
+  settleFailedMigration,
+} from './state-backup.ts';
 
 // Memory used to live under the working directory. Fold any such file into
 // the agents' own stores the first time a run happens from that directory,
@@ -761,9 +767,6 @@ export const runStateMigrations = async (
   if (toApply.some((migration) => migration.needsBackup !== false)) {
     try {
       backup = await backUpStateBeforeMigrating(env, { schemaVersion: stamp.schemaVersion, applied: [...stamp.applied] }, toApply.map((migration) => migration.id));
-      if (backup !== undefined) {
-        await markMigrationBegun(backup);
-      }
     } catch (error) {
       throw new Error(
         `Backing up ${stratusHomePath(env)} before upgrading its state failed `
@@ -776,10 +779,26 @@ export const runStateMigrations = async (
       options.onBackup?.(backup);
     }
   }
+  // Marked just before the first migration that changes data, so what an
+  // earlier one did (0001 tightening a file's mode) is not taken for a
+  // half-done move when a later one fails.
+  let mark: MigrationMark | undefined;
   try {
     for (const migration of STATE_MIGRATIONS) {
       if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
         continue;
+      }
+      if (backup !== undefined && mark === undefined && migration.needsBackup !== false) {
+        try {
+          mark = await markMigrationBegun(env, backup);
+        } catch (error) {
+          throw new Error(
+            `Backing up ${stratusHomePath(env)} before upgrading its state failed `
+            + `(${backup.path}: ${error instanceof Error ? error.message : String(error)}). No migration that changes data ran. `
+            + 'Free up space or fix that file and run the command again; until then the build you upgraded from still runs this home.',
+            { cause: error },
+          );
+        }
       }
       const detail = await migration.apply(env);
       stamp.applied.push(migration.id);
@@ -790,8 +809,8 @@ export const runStateMigrations = async (
     // Whether a retry may copy the state again or must keep this backup as
     // the way back (see `settleFailedMigration`). The migration's own error
     // is the one to report.
-    if (backup !== undefined) {
-      await settleFailedMigration(env, backup).catch(() => undefined);
+    if (mark !== undefined) {
+      await settleFailedMigration(env, mark).catch(() => undefined);
     }
     throw error;
   }

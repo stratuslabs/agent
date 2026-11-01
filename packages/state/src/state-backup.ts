@@ -58,11 +58,13 @@ interface BackupManifest {
 const REUSE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Left in a backup's directory just before the first migration runs on the
- * state it holds. While the stamp still reads as before (the run failed or
- * was killed), the state may be half migrated, so a retry keeps this copy
- * as the way back rather than copy a layout no older build can read. A run
- * that failed with every state file as the copy found it takes it off.
+ * Left in a backup's directory just before the first migration that changes
+ * data runs on the state it holds (one that only tightens permissions or
+ * stamps the schema doesn't count: an older build reads the state the same
+ * after it). While the stamp still reads as before (the run failed or was
+ * killed), the state may be half migrated, so a retry keeps this copy as
+ * the way back rather than copy a layout no older build can read. A run
+ * whose migration failed having changed no state file takes it off.
  */
 const MIGRATION_BEGUN = 'migration-begun';
 
@@ -300,29 +302,43 @@ const recentBackupOf = async (
   return begun;
 };
 
+/** A backup marked as the way back, with the state files as they were when it was. */
+export interface MigrationMark {
+  backup: StateBackup;
+  /** This run left the mark. False when an earlier run's was already there. */
+  placed: boolean;
+  /** Each state file just before the first migration that changes data: see `stateInputs`. */
+  inputs: Record<string, string>;
+}
+
 /**
- * Called by the migration run once it has its backup and before the first
- * migration changes anything: see `MIGRATION_BEGUN`.
+ * Called by the migration run just before the first migration that changes
+ * data, after any that only tighten permissions or stamp the schema: see
+ * `MIGRATION_BEGUN`.
  */
-export const markMigrationBegun = async (backup: StateBackup): Promise<void> => {
+export const markMigrationBegun = async (env: StateEnvironment, backup: StateBackup): Promise<MigrationMark> => {
+  const inputs = await stateInputs(env, await stateFiles(env));
   const marker = path.join(backup.path, MIGRATION_BEGUN);
   if (await exists(marker)) {
-    return;
+    return { backup, placed: false, inputs };
   }
   await writeFileSynced(marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
   await syncDirectory(backup.path);
+  return { backup, placed: true, inputs };
 };
 
 /**
- * Called when a migration threw. If every state file is still as the
- * backup copied it, nothing was half done: the mark comes off, and a retry
- * after the older build writes more takes a fresh copy with those writes.
- * Anything else keeps it. Best effort: keeping the mark is the safe side.
+ * Called when a migration threw after `markMigrationBegun`. If this run
+ * left the mark and every state file is still as the first migration that
+ * changes data found it, nothing was half done: the mark comes off, and a
+ * retry after the older build writes more takes a fresh copy with those
+ * writes. A mark an earlier run left stays, since that run may have changed
+ * the state, and so does one after anything changed. Best effort: keeping
+ * the mark is the safe side.
  */
-export const settleFailedMigration = async (env: StateEnvironment, backup: StateBackup): Promise<void> => {
-  const manifest = await readManifest(backup.path);
-  if (manifest !== undefined && sameInputs(manifest.inputs, await stateInputs(env, await stateFiles(env)))) {
-    await rm(path.join(backup.path, MIGRATION_BEGUN), { force: true });
+export const settleFailedMigration = async (env: StateEnvironment, mark: MigrationMark): Promise<void> => {
+  if (mark.placed && sameInputs(mark.inputs, await stateInputs(env, await stateFiles(env)))) {
+    await rm(path.join(mark.backup.path, MIGRATION_BEGUN), { force: true });
   }
 };
 
