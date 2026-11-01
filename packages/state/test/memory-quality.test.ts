@@ -319,21 +319,27 @@ test('two processes pinning at the cap produce one effective set, with the overf
 
   const left = createFileMemoryStore(filePath, frozen());
   const right = createFileMemoryStore(filePath, frozen());
-  // Started together, so both read the same total before either appends:
-  // the race the write-path check cannot see, since `O_APPEND` is the only
-  // coordination between two processes over one file.
+  // Started together. Each pin reads the total and appends under the memory
+  // write lock, so the second reads the first's record and refuses: the
+  // race needs a writer that takes no lock.
   const outcomes = await Promise.all([left.pin!('ava', first.id), right.pin!('ava', second.id)]);
-  assert.deepEqual(outcomes.map((outcome) => outcome.pinned), [true, true], 'the race did not happen');
+  assert.deepEqual(outcomes.map((outcome) => outcome.pinned).sort(), [false, true]);
+  const refused = outcomes.find((outcome) => !outcome.pinned);
+  assert.match(refused?.reason ?? '', /capped/);
 
-  // Which of the two won is whatever order the appends landed in, and that
-  // is the point: replay reads the file, so every reader agrees, and the
-  // winner is the record that arrived first rather than whoever read last.
+  // A build older than the lock is that writer: its pin lands after the
+  // winner's, read from the total before it. Appended directly, the only
+  // way to place it.
+  const winner = outcomes[0]!.pinned ? first.id : second.id;
+  const loser = winner === first.id ? second.id : first.id;
+  await appendFile(filePath, `${JSON.stringify({ pins: loser, agentId: 'ava', pinned: true, createdAt: AT.toISOString() })}\n`);
+
+  // Replay reads the file, so every reader agrees: the winner is the record
+  // that arrived first rather than whoever read last.
   const pinRecords = (await lines(filePath))
     .map((line) => JSON.parse(line) as { pins?: string })
     .filter((record): record is { pins: string } => typeof record.pins === 'string');
-  assert.deepEqual(pinRecords.map((record) => record.pins).sort(), [first.id, second.id].sort());
-  const winner = pinRecords[0]!.pins;
-
+  assert.deepEqual(pinRecords.map((record) => record.pins), [winner, loser]);
   const effective = await Promise.all(
     [left, right, createFileMemoryStore(filePath, frozen())].map(async (store) =>
       (await store.pinned!('ava')).map((pinned) => pinned.id)),
@@ -342,7 +348,7 @@ test('two processes pinning at the cap produce one effective set, with the overf
   // The overflow is recorded, not lost: its record is in the file and
   // unpinning it is a real operation.
   assert.equal((await lines(filePath)).length, 4);
-  assert.equal(await right.unpin!('ava', pinRecords[1]!.pins), true);
+  assert.equal(await right.unpin!('ava', loser), true);
 });
 
 test('a pin appended later with an earlier or tied timestamp does not displace an already-effective pin', async () => {

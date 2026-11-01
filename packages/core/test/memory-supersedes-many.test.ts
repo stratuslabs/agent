@@ -86,6 +86,29 @@ test('a list naming any id that is not a live entry of this agent stores nothing
   assert.deepEqual((await store.list('bea')).entries.map((found) => found.id), [theirs.id]);
 });
 
+test('an append that refuses protected facts stores nothing when any fact it supersedes is pinned or labeled user', async () => {
+  const store = new InMemoryAgentMemoryStore({ now: () => AT });
+  const plain = await store.append('ava', 'plain');
+  const pinned = await store.append('ava', 'pinned');
+  await store.pin('ava', pinned.id);
+  const asserted = await store.append('ava', 'asserted', { provenance: { trust: 'user' } });
+  const reasserted = await store.append('ava', 'reasserted', { provenance: { trust: 'agent' } });
+  assert.equal(await store.reassertTrust('ava', reasserted.id, 'user'), true);
+
+  for (const target of [pinned.id, asserted.id, reasserted.id]) {
+    await assert.rejects(
+      () => store.append('ava', 'merged', { supersedes: [plain.id, target], refuseProtected: true }),
+      new RegExp(`${target} is (pinned|a fact the operator asserted)`),
+    );
+  }
+  assert.equal((await store.list('ava')).entries.length, 4);
+  // Unprotected facts are superseded as before, and without the option the
+  // store applies no such rule.
+  await store.append('ava', 'plain, again', { supersedes: plain.id, refuseProtected: true });
+  await store.append('ava', 'pinned, again', { supersedes: pinned.id });
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content).sort(), ['asserted', 'pinned, again', 'plain, again', 'reasserted']);
+});
+
 test('an append whose supersedes is malformed stores nothing, rather than a plain fact beside the ones it meant to replace', async () => {
   const store = new InMemoryAgentMemoryStore({ now: () => AT });
   const a = await store.append('ava', 'one');

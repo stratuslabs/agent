@@ -23,6 +23,7 @@ import {
   memoryEntryFields,
   memorySupersededIds,
   memorySupersedesWriteIds,
+  assertUnprotectedMemoryTargets,
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_READ_MAX_BYTES,
   memoryEntryTokens,
@@ -46,6 +47,8 @@ import {
   type MemoryUsage,
   type TrustLevel,
 } from '@stratusagent/core';
+
+import { serializeFileWrite } from './file-lock.ts';
 
 // Agents keep the same memory across runs: every remembered fact lands in
 // ~/.stratus/memory.jsonl (keyed by agent id), so the Ava you talk to
@@ -724,7 +727,20 @@ export interface FileMemoryStoreOptions {
    * are Stratus's to insist are real — see `assertDerivedStatePath`.
    */
   stateHome?: string;
+  /**
+   * How long a guarded append, a pin or a re-assertion waits for another
+   * process holding the memory write lock before giving up and writing
+   * nothing. Default `MEMORY_WRITE_LOCK_WAIT_MS`.
+   */
+  lockWaitMs?: number;
 }
+
+/**
+ * The longest a memory write waits on another process's. Each holds the
+ * lock for one read of the file and one append, so anything longer is a
+ * stuck process, and the daemon's thread waits with it.
+ */
+export const MEMORY_WRITE_LOCK_WAIT_MS = 2_000;
 
 /**
  * Whether an append to `filePath` has to start with a newline of its own.
@@ -818,6 +834,20 @@ export const createFileMemoryStore = (
     }
   };
   let db: SqliteDatabase | undefined;
+
+  /**
+   * The memory write lock, beside the file: a guarded append, a pin and a
+   * re-assertion each read the record and append under it, so none of them
+   * decides from a record another is about to change. That is what lets a
+   * memory pass's merge and an operator's `stratus memory pin` (another
+   * process) land one wholly before the other. Ordinary appends and
+   * forgets don't take it: they change nothing these three check.
+   */
+  const lockPath = `${filePath}.lock`;
+  const underWriteLock = async <T>(work: () => Promise<T>): Promise<T> => {
+    await ensureDirectory();
+    return serializeFileWrite(lockPath, work, { waitMs: options.lockWaitMs ?? MEMORY_WRITE_LOCK_WAIT_MS });
+  };
 
   // The IMMEDIATE transaction serializes catch-up across processes, but not
   // across concurrent calls inside one process — those share a connection,
@@ -1143,6 +1173,42 @@ export const createFileMemoryStore = (
     }
   };
 
+  /** `pin`'s check and write, run under the memory write lock. */
+  const pinUnderLock = async (agentId: string, entryId: string): Promise<MemoryPinOutcome> => {
+    const records = await readRecords();
+    const { effective, inert, bytes, allocated } = pinBudgetFor(records, agentId);
+    // Pinnable means live — a superseded or forgotten entry is not the
+    // agent's to pin — while the *budget* above is allocated over the
+    // record, which is a different question.
+    const entry = liveEntriesFor(records, agentId, now()).find((candidate) => candidate.id === entryId);
+    if (!entry || !allocated.has(entryId)) {
+      throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
+    }
+    if (effective.includes(entryId)) {
+      return { pinned: true, bytes };
+    }
+    // The inert pin the race below can leave behind blocks everything
+    // after it, whatever its size, because the budget is a prefix. Tested
+    // before the byte total and not instead of it: the effective set is
+    // under the cap in exactly this case, so the total would wave a small
+    // pin through and `pinned` would drop it on the next read.
+    if (inert[0] !== undefined) {
+      return { pinned: false, reason: pinnedInertRefusal(inert[0]), bytes };
+    }
+    const size = memoryContentByteLength(entry.content);
+    // The write path refusing is the rule, and it is not the whole story:
+    // under the write lock two pins from this build cannot both read this
+    // total, but a build older than the lock takes none, and two processes
+    // at the limit could both append. `applyMemoryPinBudget` decides that
+    // race deterministically on replay, so the losing pin is recorded and
+    // inert rather than silently evicting one that was already effective.
+    if (bytes + size > MEMORY_PINNED_MAX_BYTES) {
+      return { pinned: false, reason: pinnedCapRefusal(bytes, size), bytes };
+    }
+    await appendRecord({ pins: entry.id, agentId: entry.agentId, pinned: true, createdAt: now().toISOString() });
+    return { pinned: true, bytes: bytes + size };
+  };
+
   return {
     async append(agentId: string, content: string, appendOptions: MemoryAppendOptions = {}) {
       assertMemoryContentWithinCap(content);
@@ -1153,26 +1219,33 @@ export const createFileMemoryStore = (
       // from B's list, its search, and its prompt, with B's own `forget`
       // never called.
       const supersedes = memorySupersedesWriteIds(appendOptions);
-      if (supersedes.length > 0) {
-        const live = liveEntriesFor(await readRecords(), agentId, now());
-        for (const id of supersedes) {
-          assertSupersedableMemoryEntry(live, id);
-        }
-      }
       const fields = memoryEntryFields(appendOptions);
       assertMemoryAboutWithinCap(fields.about ?? []);
-      const entry: MemoryEntry = {
-        id: `${agentId}:memory:${randomUUID()}`,
-        agentId,
-        content,
-        createdAt: now().toISOString(),
-        ...fields,
-        ...(appendOptions.metadata ? { metadata: appendOptions.metadata } : {}),
-        ...(appendOptions.provenance ? { trust: appendOptions.provenance.trust } : {}),
-        ...(appendOptions.provenance?.origin ? { origin: appendOptions.provenance.origin } : {}),
+      const write = async (): Promise<MemoryEntry> => {
+        if (supersedes.length > 0) {
+          const records = await readRecords();
+          const live = liveEntriesFor(records, agentId, now());
+          for (const id of supersedes) {
+            assertSupersedableMemoryEntry(live, id);
+          }
+          if (appendOptions.refuseProtected === true) {
+            assertUnprotectedMemoryTargets(supersedes, live, new Set(pinnedIdsFor(records, agentId)));
+          }
+        }
+        const entry: MemoryEntry = {
+          id: `${agentId}:memory:${randomUUID()}`,
+          agentId,
+          content,
+          createdAt: now().toISOString(),
+          ...fields,
+          ...(appendOptions.metadata ? { metadata: appendOptions.metadata } : {}),
+          ...(appendOptions.provenance ? { trust: appendOptions.provenance.trust } : {}),
+          ...(appendOptions.provenance?.origin ? { origin: appendOptions.provenance.origin } : {}),
+        };
+        await appendRecord(entry);
+        return entry;
       };
-      await appendRecord(entry);
-      return entry;
+      return appendOptions.refuseProtected === true && supersedes.length > 0 ? underWriteLock(write) : write();
     },
 
     async list(agentId: string, listOptions: MemoryListOptions = {}) {
@@ -1328,47 +1401,19 @@ export const createFileMemoryStore = (
       // Resolved from the caller's own live set first, like `forget`: the
       // record lane is shared, and a writer that skipped this would let one
       // agent's operator surface re-label another agent's memory by id.
-      const live = liveEntriesFor(await readRecords(), agentId, now());
-      const entry = live.find((candidate) => candidate.id === entryId);
-      if (!entry) {
-        return false;
-      }
-      await appendRecord({ reasserts: entry.id, agentId: entry.agentId, trust, createdAt: now().toISOString() });
-      return true;
+      return underWriteLock(async () => {
+        const live = liveEntriesFor(await readRecords(), agentId, now());
+        const entry = live.find((candidate) => candidate.id === entryId);
+        if (!entry) {
+          return false;
+        }
+        await appendRecord({ reasserts: entry.id, agentId: entry.agentId, trust, createdAt: now().toISOString() });
+        return true;
+      });
     },
 
-    async pin(agentId: string, entryId: string): Promise<MemoryPinOutcome> {
-      const records = await readRecords();
-      const { effective, inert, bytes, allocated } = pinBudgetFor(records, agentId);
-      // Pinnable means live — a superseded or forgotten entry is not the
-      // agent's to pin — while the *budget* above is allocated over the
-      // record, which is a different question.
-      const entry = liveEntriesFor(records, agentId, now()).find((candidate) => candidate.id === entryId);
-      if (!entry || !allocated.has(entryId)) {
-        throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
-      }
-      if (effective.includes(entryId)) {
-        return { pinned: true, bytes };
-      }
-      // The inert pin the race below can leave behind blocks everything
-      // after it, whatever its size, because the budget is a prefix. Tested
-      // before the byte total and not instead of it: the effective set is
-      // under the cap in exactly this case, so the total would wave a small
-      // pin through and `pinned` would drop it on the next read.
-      if (inert[0] !== undefined) {
-        return { pinned: false, reason: pinnedInertRefusal(inert[0]), bytes };
-      }
-      const size = memoryContentByteLength(entry.content);
-      // The write path refusing is the rule, and it is not the whole story:
-      // two processes at the limit can both read this total and both
-      // append. `applyMemoryPinBudget` decides that race deterministically
-      // on replay, so the losing pin is recorded and inert rather than
-      // silently evicting one that was already effective.
-      if (bytes + size > MEMORY_PINNED_MAX_BYTES) {
-        return { pinned: false, reason: pinnedCapRefusal(bytes, size), bytes };
-      }
-      await appendRecord({ pins: entry.id, agentId: entry.agentId, pinned: true, createdAt: now().toISOString() });
-      return { pinned: true, bytes: bytes + size };
+    pin(agentId: string, entryId: string): Promise<MemoryPinOutcome> {
+      return underWriteLock(() => pinUnderLock(agentId, entryId));
     },
 
     async unpin(agentId: string, entryId: string) {
