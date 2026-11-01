@@ -31,6 +31,17 @@ export interface MemoryPassToolState {
    * A recall that lowers the pass session's own label lowers it further.
    */
   trust: TrustLevel;
+  /**
+   * A tidy pass's chunk: the facts it was handed as input, which it may
+   * supersede without recalling them first.
+   */
+  handed?: ReadonlyArray<{ id: string; trust: TrustLevel }>;
+  /**
+   * A tidy pass recalls only live facts with this label (its group's), so
+   * no recall lowers its label and everything it writes carries the
+   * group's label, never another one.
+   */
+  recallOnly?: TrustLevel;
 }
 
 /**
@@ -94,12 +105,21 @@ export const createMemoryPassTools = (
     const entry = await store.append(agentId, content, appendOptions);
     return { id: entry.id, trust: memoryEntryTrust(entry) };
   });
-  /** Every fact a recall in this pass returned, with its label then. */
-  const shown = new Map<string, TrustLevel>();
+  /** Every fact this pass was handed or a recall in it returned, with its label then. */
+  const shown = new Map<string, TrustLevel>((state.handed ?? []).map((fact) => [fact.id, fact.trust]));
   let saved = 0;
   let superseded = 0;
 
-  const ownRecall = createRecallTool(store, options);
+  // Filtered before the recall tool sees the result, so a fact with another
+  // label never reaches the model or lowers the pass session's label.
+  const only = state.recallOnly;
+  const searched: Pick<AgentMemoryStore, 'search'> = only === undefined ? store : {
+    async search(agentId, query, searchOptions) {
+      const result = await store.search(agentId, query, searchOptions);
+      return { ...result, entries: result.entries.filter((entry) => memoryEntryTrust(entry) === only) };
+    },
+  };
+  const ownRecall = createRecallTool(searched, options);
   const recall: Tool = {
     ...ownRecall,
     async execute(input, session, context) {
@@ -174,7 +194,7 @@ export const createMemoryPassTools = (
       for (const replaced of replaces ?? []) {
         const label = shown.get(replaced);
         if (label === undefined) {
-          throw new Error(`${replaced} is not a fact memory.recall has shown in this pass, so it cannot be superseded. Nothing was stored.`);
+          throw new Error(`${replaced} is not a fact this pass was handed or memory.recall has shown in it, so it cannot be superseded. Nothing was stored.`);
         }
         if (label === 'user' || await labelNow(agentId, replaced, label) === 'user') {
           throw new Error(`${replaced} is a fact the operator asserted, and a memory pass never supersedes one. Nothing was stored.`);

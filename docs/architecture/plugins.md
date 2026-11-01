@@ -590,7 +590,8 @@ What each contribution is, and why it is not the bare interface:
   so the memory tools built before any plugin loaded still reach it. A
   store that accepts a list in `supersedes` (one record retiring several
   facts) says so with `supersedesMany: true`; without it, memory passes
-  hand it one id at a time and never merge.
+  hand it one id at a time and never merge, and a tidy pass is skipped
+  (`store-unsupported`).
 - **An executor is `{ name, executor }`**, selected by `executor` in a
   trusted config.
 

@@ -130,7 +130,11 @@ const isRecord = (value: unknown): value is MemoryPassRecord => {
         || !isString(slice.from) || !isString(slice.to) || !isCount(slice.count))) {
         return false;
       }
-      return record.kind !== 'save' || (isString(record.sessionId) && slice !== undefined);
+      if (record.kind === 'tidy') {
+        const group = record.group as Record<string, unknown> | undefined;
+        return typeof group === 'object' && group !== null && isString(group.key) && isString(group.hash);
+      }
+      return isString(record.sessionId) && slice !== undefined;
     }
     case 'end':
       return isString(record.passId) && STATUSES.includes(record.status as string)
@@ -371,6 +375,29 @@ export const memoryPassWatermark = (
     watermark = record.slice.to;
   }
   return watermark;
+};
+
+/**
+ * The chunks tidy passes of this mode have looked at, by the hash of their
+ * member ids: every tidy claim but one given back (`released`). A claim
+ * with no end yet counts, as an open save claim does, so a chunk is never
+ * handed to two passes.
+ */
+export const memoryPassTidyClaimed = (
+  records: readonly MemoryPassRecord[],
+  mode: MemoryPassMode,
+): Set<string> => {
+  const ends = endsByPass(records);
+  const hashes = new Set<string>();
+  for (const record of records) {
+    if (record.type !== 'claim' || record.mode !== mode || record.kind !== 'tidy' || record.group === undefined) {
+      continue;
+    }
+    if (ends.get(record.passId)?.released !== true) {
+      hashes.add(record.group.hash);
+    }
+  }
+  return hashes;
 };
 
 /** Claims of this mode with no end: a pass running now, or one a crash cut off. */

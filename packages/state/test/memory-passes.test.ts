@@ -18,6 +18,7 @@ import {
   memoryPassOpenClaims,
   memoryPassSettleRecord,
   memoryPassSummaries,
+  memoryPassTidyClaimed,
   memoryPassWatermark,
   memoryShadowEntriesOf,
   undoMemoryPass,
@@ -217,6 +218,31 @@ test('a ledger line that is JSON but not a record is skipped, never trusted', as
     '',
   ].join('\n'));
   assert.deepEqual(await createMemoryPassLedger(file).read(), [start('2026-11-01T01:00:00.000Z', 'r1')]);
+});
+
+test('a tidy claim names its group and chunk hash; one without them is skipped, never read as a chunk looked at', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'memory-passes-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const file = agentMemoryPassesFileIn(home, 'ava');
+  const tidy = (passId: string, hash: string, mode: 'write' | 'shadow' = 'write'): MemoryPassRecord => ({
+    type: 'claim', at: '2026-11-01T01:00:00.000Z', run: 'r1', passId, kind: 'tidy', mode, model: 'm',
+    group: { key: 'semantic/agent/deploy', hash },
+  });
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, [
+    JSON.stringify({ ...tidy('p0', 'h0'), group: undefined }),
+    JSON.stringify({ ...tidy('p0', 'h0'), group: { key: 'semantic/agent/deploy' } }),
+    JSON.stringify(tidy('p1', 'h1')),
+    JSON.stringify(tidy('p2', 'h2')),
+    JSON.stringify(end('2026-11-01T01:01:00.000Z', 'r1', 'p2', true)),
+    JSON.stringify(tidy('p3', 'h3', 'shadow')),
+    '',
+  ].join('\n'));
+  const records = await createMemoryPassLedger(file).read();
+  assert.deepEqual(records.filter((record) => record.type === 'claim').map((record) => (record as { passId: string }).passId), ['p1', 'p2', 'p3']);
+  // p2 gave its chunk back; p3 is the other mode's.
+  assert.deepEqual([...memoryPassTidyClaimed(records, 'write')], ['h1']);
+  assert.deepEqual([...memoryPassTidyClaimed(records, 'shadow')], ['h3']);
 });
 
 test('a shadow file keeps what a pass would have written, owner-only, and reads past a torn or foreign line', async (t) => {

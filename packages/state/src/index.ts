@@ -29,6 +29,7 @@ export {
   memoryPassEntries,
   memoryPassMessageCounts,
   memoryPassOpenClaims,
+  memoryPassTidyClaimed,
   memoryPassSettleRecord,
   memoryPassSummaries,
   memoryPassWatermark,
