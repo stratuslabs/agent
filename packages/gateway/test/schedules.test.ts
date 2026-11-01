@@ -860,7 +860,7 @@ test('an approved schedule fires headless and reports to its declared destinatio
   assert.equal(results.length, 2);
   assert.equal(results[0]?.ok, true);
   assert.equal(results[1]?.ok, false);
-  assert.match(results[1]?.error ?? '', /denied by approval policy/);
+  assert.equal(results[1]?.error, 'message.send is gated and nobody is available to approve it');
 });
 
 test('a firing\'s report thread is bound like its grant: live firing, its agent, its conversation', async () => {

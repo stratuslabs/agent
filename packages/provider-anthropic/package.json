@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/provider-anthropic",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,7 +11,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -b",
@@ -38,7 +39,7 @@
     "claude",
     "anthropic"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",

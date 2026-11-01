@@ -102,7 +102,7 @@ test('a malformed gated call is answered with the reason and never reaches the a
     approvals: { approve: async ({ call }) => { asked.push(call.id); return true; } },
   });
   await runner.initialize();
-  const session = await runner.run({ sessionId: 'v-1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'send it' });
+  const session = await runner.run({ sessionId: 'v-1', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'send it' });
 
   assert.deepEqual(asked, ['c2'], 'only the well-formed call was put to the policy');
   assert.equal(sent.length, 1);
@@ -150,7 +150,7 @@ test('a call its tool refuses up front is answered with the reason and never rea
     approvals: { approve: async ({ call }) => { asked.push(call.id); return true; } },
   });
   await runner.initialize();
-  const session = await runner.run({ sessionId: 'r-1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'read' });
+  const session = await runner.run({ sessionId: 'r-1', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'read' });
 
   // A hook that throws is no answer: that call is asked about as before.
   assert.deepEqual(asked, ['c-C1', 'c-boom']);

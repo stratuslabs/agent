@@ -58,12 +58,14 @@ import {
   type FallbackRuntime,
   type RuntimeConfig,
   type StoredCredential,
+  unlistedToolsFor,
 } from '@stratusagent/state';
 import {
   installService,
   readServiceStatus,
   servicePlatform,
   serviceUnitPath,
+  SYSTEMD_NOT_RUNNING,
   uninstallService,
 } from '../service.ts';
 import { type ApprovalReach, classifyApprovalReach, unattendedReachParts } from '../approvals.ts';
@@ -1342,8 +1344,11 @@ export const runSetup = async (
   };
 
   const serviceSummary = (): string => {
-    if (!servicePlatform(serviceEnvFor(env))) {
-      return `not available on ${env.processEnv?.OSTYPE ?? process.platform} — run \`stratus serve\` yourself`;
+    const serviceEnv = serviceEnvFor(env);
+    if (!servicePlatform(serviceEnv)) {
+      return (serviceEnv.platform ?? process.platform) === 'linux'
+        ? `not available (${SYSTEMD_NOT_RUNNING}) — run \`stratus serve\` yourself`
+        : `not available on ${env.processEnv?.OSTYPE ?? process.platform} — run \`stratus serve\` yourself`;
     }
     if (!state.service.install) {
       return 'off — start stratusd yourself with `stratus serve`';
@@ -1359,9 +1364,12 @@ export const runSetup = async (
    * every Slack app configured above is silent until stratusd runs.
    */
   const chooseService = async (): Promise<void> => {
-    if (!servicePlatform(serviceEnvFor(env))) {
+    const serviceEnv = serviceEnvFor(env);
+    if (!servicePlatform(serviceEnv)) {
       writeLine(streams.stdout);
-      writeLine(streams.stdout, `Stratus has no service integration for ${process.platform} yet — run \`stratus serve\` yourself, or supervise it however you prefer.`);
+      writeLine(streams.stdout, (serviceEnv.platform ?? process.platform) === 'linux'
+        ? `Always on runs stratusd as a systemd user service, and ${SYSTEMD_NOT_RUNNING} — run \`stratus serve\` yourself, or supervise it however you prefer.`
+        : `Stratus has no service integration for ${process.platform} yet — run \`stratus serve\` yourself, or supervise it however you prefer.`);
       await prompter.ask('Press Enter to return to the menu… ');
       return;
     }
@@ -1630,13 +1638,13 @@ export const runSetup = async (
     const first = grants?.split(',')[0]?.trim();
     writeLine(streams.stdout);
 
-    // A soul with no `tools:` key is allowlisted for *every* registered
-    // tool — `matchesToolAllowlist` treats an omitted list as permissive,
-    // and the built-in `stratus` agent has none, so a fresh install always
-    // has one. Enabling a plugin therefore can grant capability
-    // immediately, and saying "no agent can call it yet" would understate
-    // what just happened in the most common configuration there is. Read
-    // the roster and say which of the two it was.
+    // A soul with `tools: ["*"]` is allowlisted for *every* registered
+    // tool, and the built-in `stratus` agent says that in code, so a fresh
+    // install always has one. Enabling a plugin therefore can grant
+    // capability immediately, and saying "no agent can call it yet" would
+    // understate what just happened in the most common configuration there
+    // is. A soul with no `tools:` key gets only the tools registered as
+    // safe. Read the roster and say which it was.
     const { entries, loaded } = await channelRoster();
     if (!loaded) {
       // The roster refused to load, so `entries` is empty — which is not
@@ -1666,9 +1674,25 @@ export const runSetup = async (
     // soul granting the whole namespace. An entry says exactly what it
     // says, and a discovered namespace has no tool names to enumerate
     // until the bridge connects.
+    // On a home an older build set up, a soul with no list has every tool,
+    // as it always did there; the daemon reads it the same way.
+    const unlistedEvery = unlistedToolsFor(env) === 'every';
+    const grantsEvery = (entry: ChannelRosterEntry): boolean => (entry.soul.agent.tools === undefined
+      ? unlistedEvery
+      : entry.soul.agent.tools.includes('*'));
     const reached = (entry: ChannelRosterEntry): string[] => {
       const tools = entry.soul.agent.tools;
+      if (tools === undefined && unlistedEvery) {
+        return everyTool;
+      }
       if (tools === undefined) {
+        // Only the tools registered as safe, and which of these those are
+        // is the manifest and the operator's overrides, which `stratus
+        // plugins` reads. Not re-derived here: such a soul is named on its
+        // own line below instead of counted as reaching anything.
+        return [];
+      }
+      if (tools.includes('*')) {
         return everyTool;
       }
       if (contributed === undefined) {
@@ -1683,7 +1707,7 @@ export const runSetup = async (
     /** Concrete contributed tools no entry of this soul's reaches. */
     const missedTools = (entry: ChannelRosterEntry): string[] => {
       const tools = entry.soul.agent.tools;
-      if (tools === undefined || contributed === undefined) {
+      if (tools === undefined || tools.includes('*') || contributed === undefined) {
         return [];
       }
       // Only the concrete ones: a declared namespace registers its tools at
@@ -1703,8 +1727,19 @@ export const runSetup = async (
     const allowlisted = entries.filter((entry) => reached(entry).length > 0);
     const callable = allowlisted.filter(settingReaches);
     const unset = allowlisted.filter((entry) => !settingReaches(entry));
-    const permissive = callable.filter((entry) => entry.soul.agent.tools === undefined);
-    const explicit = callable.filter((entry) => entry.soul.agent.tools !== undefined);
+    const permissive = callable.filter(grantsEvery);
+    const explicit = callable.filter((entry) => !grantsEvery(entry));
+    // Souls with no list at all, on a home where that is the safe tools:
+    // not callable for anything this menu can vouch for, and the reason is
+    // not the one a narrow list has.
+    const unlisted = unlistedEvery ? [] : entries.filter((entry) => entry.soul.agent.tools === undefined);
+    const unlistedLine = (): void => {
+      if (unlisted.length === 0 || everyTool.length === 0) {
+        return;
+      }
+      const one = unlisted.length === 1;
+      writeLine(streams.stdout, `${label(unlisted)} ${one ? 'has' : 'have'} no \`tools:\` list, so ${one ? 'it gets' : 'they get'} only the tools registered as safe, which leaves out anything of ${name} that runs, writes or sends. Name ${grants ?? 'its tools'} in a \`tools:\` list to grant ${one ? 'it' : 'them'} the rest.`);
+    };
     // The key travels with the agents rather than beside them, so the
     // branches below cannot ask about one and read the other.
     const shortfall = needsKey !== undefined && unset.length > 0
@@ -1738,11 +1773,25 @@ export const runSetup = async (
 
     if (callable.length > 0) {
       if (permissive.length > 0) {
-        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${permissive.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+        const has = permissive.length === 1 ? 'has' : 'have';
+        const withoutList = permissive.filter((entry) => entry.soul.agent.tools === undefined).length;
+        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${withoutList === permissive.length
+          ? `${has} no \`tools:\` list, which means every registered tool.`
+          : withoutList === 0
+            ? `${has} \`tools: ["*"]\`, which means every registered tool.`
+            : `${permissive.length === 1 ? 'is' : 'are'} allowed every registered tool.`}`);
+        // The agents are the subject, so no verb has to agree with the
+        // tool list: "web.fetch are callable" and "fs.read, … is callable"
+        // were both printed when the verb followed the agent count. The
+        // list goes last because one entry ends in its own descriptor
+        // (plugin-mcp's "…, discovered at connect").
+        const who = permissive.length === 1 ? 'that agent' : 'those agents';
         writeLine(streams.stdout, uncheckedReason(name) !== undefined
-          ? `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} what ${permissive.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
-          : `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
-        writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
+          ? `So at the next daemon start, ${who} would gain ${grants ?? 'what it contributes'} — subject to the caveat above, which setup did not check.`
+          : `So the next time the daemon starts, ${who} can call ${grants ?? 'what it contributes'}.`);
+        writeLine(streams.stdout, withoutList > 0
+          ? 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.'
+          : 'Narrow that list to say which. `stratus plugins` shows who can call what.');
       }
       for (const entry of explicit) {
         // Per soul, and naming what its list *matched* — an allowlist can
@@ -1756,6 +1805,7 @@ export const runSetup = async (
       if (shortfall !== undefined) {
         writeLine(streams.stdout, `${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted too, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} — every call would fail until it is, under plugins["${name}"].agents.`);
       }
+      unlistedLine();
       skillLine();
       return;
     }
@@ -1764,8 +1814,11 @@ export const runSetup = async (
       // Allowlisted souls, every one of them short the setting: neither the
       // "callable by" line above nor the "no soul names it" one below is
       // true, and each would send the operator to fix the wrong gate.
-      writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — ${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted for it, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
+      // "No agent" only when every soul has a list: one without a list may
+      // reach a safe tool of this plugin, which this menu does not rate.
+      writeLine(streams.stdout, `${name} is enabled. ${unlisted.length > 0 ? 'No agent that lists it can call it yet' : 'No agent can call it yet'} — ${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted for it, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
       writeLine(streams.stdout, `Set ${shortfall.key} for ${shortfall.one ? 'it' : 'them'} under plugins["${name}"].agents, then run \`stratus plugins\` to see the whole chain.`);
+      unlistedLine();
       skillLine();
       return;
     }
@@ -1783,7 +1836,14 @@ export const runSetup = async (
       return;
     }
 
-    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list and none of them names what it contributes, and a soul grants tools by naming them:`);
+    // Not "no agent can call it" when a soul has no list: that soul gets
+    // whichever of these tools are registered as safe, and which ones those
+    // are is the manifest's risk under the operator's floors and overrides,
+    // which `stratus plugins` reads and this menu does not re-derive.
+    const one = unlisted.length === 1;
+    writeLine(streams.stdout, unlisted.length > 0
+      ? `${name} is enabled. No soul's \`tools:\` list names what it contributes. ${label(unlisted)} ${one ? 'has' : 'have'} no list, so ${one ? 'it gets' : 'they get'} only the ones registered as safe; \`stratus plugins\` shows which those are. A soul grants the rest by naming them:`
+      : `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list and none of them names what it contributes, and a soul grants tools by naming them:`);
     writeLine(streams.stdout, `  tools: [${everyTool[0] as string}]`);
     writeLine(streams.stdout, `Add it to the \`tools:\` list in ${state.soulPath ?? 'your agent\'s soul file'}, then run \`stratus plugins\` to see the whole chain and what it contributes.`);
     skillLine();
@@ -2510,6 +2570,25 @@ export const runSetup = async (
   };
 
   /**
+   * The plugin channels some agent is bound to, by stored secrets or by its
+   * plugin's config block, as the channel menu below counts a binding.
+   */
+  const boundPluginChannelKinds = async (): Promise<string[]> => {
+    const bound: string[] = [];
+    for (const { kind, plugins } of await pluginChannelKinds()) {
+      state.pluginChannelSecrets[kind] ??= await loadChannelTransportSecrets(env, kind);
+      const inConfig = plugins.some((plugin) => {
+        const configured = state.plugins?.[plugin]?.agents;
+        return typeof configured === 'object' && configured !== null && !Array.isArray(configured) && Object.keys(configured).length > 0;
+      });
+      if (inConfig || Object.keys(state.pluginChannelSecrets[kind]).length > 0) {
+        bound.push(kind);
+      }
+    }
+    return bound;
+  };
+
+  /**
    * Slack alone, as it always was, until a plugin declares a channel: then
    * the row asks which channel first. A setup with no channel plugin sees
    * exactly the screens it saw before there could be one.
@@ -2859,6 +2938,13 @@ export const runSetup = async (
     // it for me" starts a daemon at login the user asked not to have, which
     // is no more a successful setup than one that will not come up at all.
     let serviceStepFailed = false;
+    // Channels whose secrets this save stored with no running daemon to
+    // pick them up, and whether the service step below leaves one running.
+    // Together they decide the finish screen's last line: the save line
+    // says "run `stratus serve`" too, but optional-package installs scroll
+    // it away, and the closing list is what a first run reads last.
+    const awaitingServe = new Set<string>();
+    let serviceRunning = false;
     // Typed as the file rather than as a bag of scalars: the carried blocks
     // below are objects, and a `Record<string, string | boolean>` was what
     // made dropping them the path of least resistance.
@@ -2995,6 +3081,9 @@ export const runSetup = async (
         writeLine(streams.stdout, answered !== undefined
           ? `${saved}. ${channelReloadLine(answered, 'slack')}`
           : connected > 0 ? `${saved} — run \`${serveCommand()}\` to bring them online.` : `${saved}.`);
+        if (answered === undefined && connected > 0) {
+          awaitingServe.add('slack');
+        }
       }
       if (state.pluginChannelEdits.length > 0) {
         const saved = `Saved your channel secrets to ${credentialsPath(env)}`;
@@ -3002,6 +3091,16 @@ export const runSetup = async (
         writeLine(streams.stdout, answered !== undefined
           ? `${saved}. ${kinds.map((kind) => channelReloadLine(answered, kind)).join(' ')}`
           : `${saved} — run \`${serveCommand()}\` to bring them online.`);
+        if (answered === undefined) {
+          // From what the save leaves bound, not the edits: a store then a
+          // remove of the same binding leaves nothing to bring online.
+          const bound = await boundPluginChannelKinds();
+          for (const kind of kinds) {
+            if (bound.includes(kind)) {
+              awaitingServe.add(kind);
+            }
+          }
+        }
       }
       if (reload !== undefined && 'warning' in reload) {
         writeLine(streams.stderr, `Warning: ${reload.warning}`);
@@ -3052,6 +3151,15 @@ export const runSetup = async (
         }
         if (!removed.ok) {
           serviceStepFailed = true;
+        } else {
+          // That was the daemon answering every stored channel, edited in
+          // this run or not, so each one is silent from here on.
+          if (Object.keys(state.channels.slack ?? {}).length > 0) {
+            awaitingServe.add('slack');
+          }
+          for (const kind of await boundPluginChannelKinds()) {
+            awaitingServe.add(kind);
+          }
         }
       }
     } else if (state.service.install && servicePlatform(serviceEnvFor(env))) {
@@ -3084,6 +3192,8 @@ export const runSetup = async (
       } else if (!running) {
         writeLine(streams.stderr, 'Setup is saved either way. Check `stratus service status` once you have looked at the logs.');
         serviceStepFailed = true;
+      } else {
+        serviceRunning = true;
       }
     }
     writeLine(streams.stdout);
@@ -3174,6 +3284,10 @@ export const runSetup = async (
     writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag}${shadowConfigFlag} "say hello"`);
     // Whether or not its packages are here: the command offers them itself.
     writeLine(streams.stdout, '  stratus dashboard');
+    if (awaitingServe.size > 0 && !serviceRunning) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `${awaitingServe.size === 1 && awaitingServe.has('slack') ? 'Slack answers' : 'Your channels answer'} only while stratusd runs — start it with \`${serveCommand()}\`.`);
+    }
     return !serviceStepFailed && !providerInstallFailed;
   };
 

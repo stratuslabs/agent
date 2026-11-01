@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/provider-codex",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,7 +11,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -b",
@@ -22,7 +23,7 @@
     "node": ">=22.16 <23 || >=24"
   },
   "dependencies": {
-    "@openai/codex-sdk": "^0.151.0",
+    "@openai/codex-sdk": "^0.166.0",
     "@stratusagent/core": "workspace:*",
     "@stratusagent/providers": "workspace:*"
   },
@@ -40,7 +41,7 @@
     "chatgpt",
     "subscription"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",

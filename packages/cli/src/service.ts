@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -42,6 +43,14 @@ export interface ServiceEnvironment {
   uid?: number;
   /** The installing shell's PATH; `serviceEnvFor` reads it from the CLI's environment. */
   path?: string;
+  /**
+   * Whether systemd is this machine's running init, decided as sd_booted(3)
+   * does: `/run/systemd/system` exists. Containers, most Docker and Fly
+   * machines, and WSL without systemd have no user manager to install into.
+   * Probed on the real host; a test that sets `platform` gets systemd unless
+   * it says otherwise.
+   */
+  systemdBooted?: boolean;
   run?: ServiceRunner;
   /** Waits between asking the manager whether a start took. Injectable so tests do not wait. */
   sleep?: (ms: number) => Promise<void>;
@@ -53,9 +62,19 @@ export const servicePlatform = (env: ServiceEnvironment = {}): ServicePlatform |
     return 'launchd';
   }
   if (platform === 'linux') {
-    return 'systemd';
+    const booted = env.systemdBooted ?? (env.platform === undefined ? existsSync('/run/systemd/system') : true);
+    return booted ? 'systemd' : undefined;
   }
   return undefined;
+};
+
+/** Said wherever Always on is unavailable because Linux runs without systemd. */
+export const SYSTEMD_NOT_RUNNING = "systemd isn't running on this machine";
+
+/** The first sentence of every refusal for want of a service manager. */
+export const noServiceManager = (env: ServiceEnvironment = {}): string => {
+  const platform = env.platform ?? process.platform;
+  return platform === 'linux' ? `No service manager: ${SYSTEMD_NOT_RUNNING}.` : `No service manager for ${platform}.`;
 };
 
 const homeOf = (env: ServiceEnvironment): string => env.homeDir ?? os.homedir();
@@ -649,7 +668,7 @@ export const installService = async (
   if (!platform) {
     return {
       ok: false,
-      messages: [`No service manager for ${env.platform ?? process.platform}. Run \`stratus serve\` yourself, or supervise it however you prefer.`],
+      messages: [`${noServiceManager(env)} Run \`stratus serve\` yourself, or supervise it however you prefer.`],
     };
   }
   // Before anything is written, so a refusal leaves no unit behind either.
@@ -752,7 +771,7 @@ export const installService = async (
 export const uninstallService = async (env: ServiceEnvironment = {}): Promise<ServiceActionResult> => {
   const platform = servicePlatform(env);
   if (!platform) {
-    return { ok: false, messages: [`No service manager for ${env.platform ?? process.platform}.`] };
+    return { ok: false, messages: [noServiceManager(env)] };
   }
   const loaded = await loadedUnit(env, platform);
   if (loaded.from === 'elsewhere') {
@@ -793,7 +812,7 @@ const startedResult = async (env: ServiceEnvironment, platform: ServicePlatform)
 export const startService = async (env: ServiceEnvironment = {}): Promise<ServiceActionResult> => {
   const platform = servicePlatform(env);
   if (!platform) {
-    return { ok: false, messages: [`No service manager for ${env.platform ?? process.platform}.`] };
+    return { ok: false, messages: [noServiceManager(env)] };
   }
   const loaded = await loadedUnit(env, platform);
   if (loaded.from === 'elsewhere') {
@@ -841,7 +860,7 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
 export const stopService = async (env: ServiceEnvironment = {}): Promise<ServiceActionResult> => {
   const platform = servicePlatform(env);
   if (!platform) {
-    return { ok: false, messages: [`No service manager for ${env.platform ?? process.platform}.`] };
+    return { ok: false, messages: [noServiceManager(env)] };
   }
   const loaded = await loadedUnit(env, platform);
   if (loaded.from === 'elsewhere') {

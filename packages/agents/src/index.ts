@@ -88,8 +88,16 @@ export {
   createForgetTool,
   PIN_TOOL_NAME,
   createPinTool,
+  rememberInput,
   type MemoryToolOptions,
 } from './tools/memory.ts';
+
+export {
+  createMemoryPassTools,
+  type MemoryPassToolOptions,
+  type MemoryPassToolState,
+  type MemoryPassWrite,
+} from './tools/memory-pass.ts';
 
 export {
   DELEGATE_TOOL_NAME,
@@ -120,6 +128,10 @@ export {
   MESSAGE_SEND_TOOL_NAME,
   type OutboundMessenger,
   createMessageSendTool,
+  MESSAGE_SAY_TOOL_NAME,
+  MESSAGE_SAY_MAX_LENGTH,
+  type ConversationSayer,
+  createMessageSayTool,
   type DefaultThreadResolver,
   MESSAGE_READ_TOOL_NAME,
   MESSAGE_READ_MAX_LIMIT,

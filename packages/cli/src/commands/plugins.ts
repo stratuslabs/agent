@@ -12,7 +12,7 @@ import {
   readPluginManifest,
   riskFloorFor,
 } from '@stratusagent/plugins';
-import { loadRosterSouls } from '@stratusagent/state';
+import { loadRosterSouls, unlistedToolsFor } from '@stratusagent/state';
 import { describeUnattendedReach } from '../approvals.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -155,13 +155,15 @@ export const collectPluginsReport = async (
   }
 
   /**
-   * Which agents a declared name reaches. A soul with no `tools:` key
-   * grants every registered tool, which is the opposite of an empty list —
-   * so an absent allowlist matches everything here too, or this would
-   * report the most permissive agents as the least.
+   * Which agents a declared name reaches, at the risk it will register at.
+   * A soul with no `tools:` key grants the tools registered as safe, which
+   * is neither everything nor the nothing an empty list grants, so the risk
+   * shown on the row is what decides it for those souls. On a home an
+   * older build set up it grants every tool, as the daemon reads it there.
    */
-  const grantedTo = (name: string, discovered: boolean): string[] => roster
-    .filter((entry) => soulGrantsTool(entry.soul.agent.tools, name, discovered))
+  const unlisted = unlistedToolsFor(env);
+  const grantedTo = (name: string, discovered: boolean, risk: ToolRisk): string[] => roster
+    .filter((entry) => soulGrantsTool(entry.soul.agent.tools, name, discovered, risk, unlisted))
     .map((entry) => entry.soul.agent.id);
 
   // Configured first, in the operator's own order, then the first-party
@@ -384,13 +386,14 @@ export const collectPluginsReport = async (
         // changes no call, and showing the row at that risk would advertise
         // a re-rating the daemon will not honour.
         const override = tool.namespace ? undefined : overrides.get(tool.name);
+        const risk = override !== undefined
+          ? raiseRiskTo(override, floor)
+          : raiseRiskTo(tool.declared, floor);
         return {
           name: tool.name,
           discovered: tool.discovered,
-          risk: override !== undefined
-            ? raiseRiskTo(override, floor)
-            : raiseRiskTo(tool.declared, floor),
-          grantedTo: grantedTo(tool.name, tool.discovered),
+          risk,
+          grantedTo: grantedTo(tool.name, tool.discovered, risk),
         };
       });
     } catch (error) {

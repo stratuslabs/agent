@@ -1,5 +1,6 @@
 import { defineAgent, formatSoul, generateAgentName } from '@stratusagent/agents';
 import {
+  EVERY_TOOL,
   claimSoulFile,
   defaultModelFor,
   discoverActiveConfig,
@@ -182,9 +183,13 @@ export const runAgentNew = async (
     }
   }
 
+  // Every tool, written into the soul the way setup writes it: an omitted
+  // list is safe tools only, and a soul printed here and saved by hand
+  // should behave like one this command saved itself.
   const agent = defineAgent({
     ...(command.name ? { name: command.name } : {}),
     ...(command.instructions ? { instructions: command.instructions } : {}),
+    tools: [...EVERY_TOOL],
   });
 
   if (command.format === 'json') {

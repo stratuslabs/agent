@@ -69,9 +69,11 @@ document is checked the way `stratus run` would read it, so a template whose
 `config.json` would leave your config unreadable is refused before anything
 is copied.
 
-**Read the tool list.** A soul with no `tools:` line may call *every*
-registered tool, and the review says so in those words. An empty list and a
-missing one are opposites.
+**Read the tool list.** A soul with `tools: ["*"]` may call *every*
+registered tool, and the review says so in those words. A soul with no
+`tools:` line gets only the tools registered as safe (reads and memory),
+except on a home set up before 0.14.3, where it gets every tool and the
+review says that instead. An empty list gets nothing.
 
 **Read the credential line too.** A soul's `credentials:` list is a second
 gate, and it works the other way round: a name on it reaches the stored

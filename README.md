@@ -6,7 +6,7 @@
 
 [![npm](https://img.shields.io/npm/v/%40stratusagent%2Fcli?label=%40stratusagent%2Fcli)](https://www.npmjs.com/package/@stratusagent/cli)
 [![node](https://img.shields.io/badge/node-%E2%89%A522.16-brightgreen)](docs/start/installation.md)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 Stratus is a small, readable runtime for a team of persistent AI agents.
 Each agent has its own name, memory, tools, and Slack presence, and it
@@ -24,7 +24,8 @@ stratus setup     # sign in, create an agent, pick tools, connect Slack
 stratus chat      # talk; the conversation persists
 ```
 
-Needs Node 22.16+ or 24+ ([Installation](docs/start/installation.md)). No key yet?
+Needs Node 22.16+ or 24+ ([Installation](docs/start/installation.md), which also
+covers `EACCES` on Linux). No key yet?
 [Quickstart](docs/start/quickstart.md) has an offline demo.
 
 ## Why Stratus
@@ -112,4 +113,4 @@ Read [`CLAUDE.md`](CLAUDE.md) before opening a PR.
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE)

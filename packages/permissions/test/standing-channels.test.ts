@@ -20,6 +20,7 @@ import {
   type DestinationScopeOptions,
   type PermissionDecision,
 } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 const session = (id = 'sess-1', trust?: TrustLevel): Session => ({
   id,
@@ -98,23 +99,23 @@ test('a configured channel reads and posts without asking, in any session, with 
   // Interactive, scheduled, and delegated turns are all sessions of the
   // same agent; the authorization is the agent's, not one session's.
   for (const sessionId of ['slack:T1:C0C1YV12SLC:1792.1', 'schedule:abc:2026-10-17T23:05:00Z', 'delegate:xyz']) {
-    assert.equal(await policy.approve(call(read, 'C0C1YV12SLC', { sessionId })), true, `read in ${sessionId}`);
-    assert.equal(await policy.approve(call(send, 'C0C1YV12SLC', { sessionId })), true, `send in ${sessionId}`);
+    assert.equal(ran(await policy.approve(call(read, 'C0C1YV12SLC', { sessionId }))), true, `read in ${sessionId}`);
+    assert.equal(ran(await policy.approve(call(send, 'C0C1YV12SLC', { sessionId }))), true, `send in ${sessionId}`);
   }
   assert.equal(decisions[0]?.destination, 'slack:C0C1YV12SLC');
   assert.match(decisions[0]?.reason ?? '', /approvals\.channels/);
   // Never wider than the list: another channel still has nobody to say yes.
-  assert.equal(await policy.approve(call(read, 'C0OTHER')), false);
+  assert.equal(ran(await policy.approve(call(read, 'C0OTHER'))), false);
 });
 
 test('slack:* covers every channel, public or private, and never a DM or group DM', async () => {
   const { policy } = headless(destinations(() => ['slack:*']));
-  assert.equal(await policy.approve(call(send, 'C0OTHER')), true);
-  assert.equal(await policy.approve(call(read, 'G0PRIVATE')), true);
-  assert.equal(await policy.approve(call(send, 'D0DIRECT')), false);
+  assert.equal(ran(await policy.approve(call(send, 'C0OTHER'))), true);
+  assert.equal(ran(await policy.approve(call(read, 'G0PRIVATE'))), true);
+  assert.equal(ran(await policy.approve(call(send, 'D0DIRECT'))), false);
   // A G… id is a group DM here: the kind is the app's answer, not the prefix.
-  assert.equal(await policy.approve(call(send, 'G0GROUPDM')), false);
-  assert.equal(await policy.approve(call(read, 'G0GROUPDM')), false);
+  assert.equal(ran(await policy.approve(call(send, 'G0GROUPDM'))), false);
+  assert.equal(ran(await policy.approve(call(read, 'G0GROUPDM'))), false);
 });
 
 test('a DM named outright in the config still asks', async () => {
@@ -127,52 +128,52 @@ test('a DM named outright in the config still asks', async () => {
     },
     destinations: destinations(() => ['slack:T1/D0DIRECT']),
   });
-  assert.equal(await policy.approve(call(send, 'D0DIRECT')), false);
+  assert.equal(ran(await policy.approve(call(send, 'D0DIRECT'))), false);
   assert.equal(requests.length, 1, 'the approver was asked, as before');
 });
 
 test('a conversation the app cannot describe asks, and so does a host that cannot ask the app', async () => {
   const unknown = headless(destinations(() => ['slack:*'], () => undefined));
-  assert.equal(await unknown.policy.approve(call(send, 'C0C1YV12SLC')), false);
+  assert.equal(ran(await unknown.policy.approve(call(send, 'C0C1YV12SLC'))), false);
 
   const asyncUnknown = headless(destinations(() => ['slack:*'], async () => undefined));
-  assert.equal(await asyncUnknown.policy.approve(call(read, 'C0C1YV12SLC')), false);
+  assert.equal(ran(await asyncUnknown.policy.approve(call(read, 'C0C1YV12SLC'))), false);
 
   const noLookup = headless({ isPreauthorized: () => false, standingChannelsFor: () => ['slack:*'] });
-  assert.equal(await noLookup.policy.approve(call(read, 'C0C1YV12SLC')), false);
+  assert.equal(ran(await noLookup.policy.approve(call(read, 'C0C1YV12SLC'))), false);
 });
 
 test('removing the entry revokes it on the next call', async () => {
   let channels: string[] = ['slack:T1/C0C1YV12SLC'];
   const { policy } = headless(destinations(() => channels));
-  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), true);
+  assert.equal(ran(await policy.approve(call(send, 'C0C1YV12SLC'))), true);
   channels = [];
-  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), false);
+  assert.equal(ran(await policy.approve(call(send, 'C0C1YV12SLC'))), false);
 });
 
 test('only the kernel message tools: another tool, or a plugin tool of the same name, asks', async () => {
   const notify = messageTool('notify.send');
   const { policy } = headless(destinations(() => ['slack:*']));
-  assert.equal(await policy.approve(call(notify, 'C0C1YV12SLC')), false);
+  assert.equal(ran(await policy.approve(call(notify, 'C0C1YV12SLC'))), false);
 
   const plugin = headless(destinations(() => ['slack:*']), {
     grants: { contributorOf: () => '@someone/fake-message' },
   });
-  assert.equal(await plugin.policy.approve(call(send, 'C0C1YV12SLC')), false);
+  assert.equal(ran(await plugin.policy.approve(call(send, 'C0C1YV12SLC'))), false);
 });
 
 test('a dangerous call is never covered', async () => {
   const { policy } = headless(destinations(() => ['slack:*']));
-  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC', { risk: 'dangerous' })), false);
+  assert.equal(ran(await policy.approve(call(send, 'C0C1YV12SLC', { risk: 'dangerous' }))), false);
 });
 
 test('withdrawn under the external-content gate, like every standing yes', async () => {
   const gated = headless(destinations(() => ['slack:*']), { gateExternalContent: () => true });
-  assert.equal(await gated.policy.approve(call(send, 'C0C1YV12SLC', { trust: 'external' })), false);
+  assert.equal(ran(await gated.policy.approve(call(send, 'C0C1YV12SLC', { trust: 'external' }))), false);
   // The same agent's clean conversation, or a host without the gate, is unaffected.
-  assert.equal(await gated.policy.approve(call(send, 'C0C1YV12SLC')), true);
+  assert.equal(ran(await gated.policy.approve(call(send, 'C0C1YV12SLC'))), true);
   const ungated = headless(destinations(() => ['slack:*']));
-  assert.equal(await ungated.policy.approve(call(send, 'C0C1YV12SLC', { trust: 'external' })), true);
+  assert.equal(ran(await ungated.policy.approve(call(send, 'C0C1YV12SLC', { trust: 'external' }))), true);
 });
 
 test('matchesStandingChannel: an id only in its workspace, the workspace wildcard, or the kind wildcard', () => {
@@ -200,18 +201,18 @@ test('unboundStandingChannels names the bare ids and nothing else', () => {
 test('a channel id granted in one workspace is not covered once the app is in another', async () => {
   let account: string | undefined = 'T1';
   const { policy } = headless(destinations(() => ['slack:T1/C0C1YV12SLC'], undefined, () => account));
-  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), true);
+  assert.equal(ran(await policy.approve(call(send, 'C0C1YV12SLC'))), true);
   account = 'T2';
-  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), false, 'same id, another workspace');
+  assert.equal(ran(await policy.approve(call(send, 'C0C1YV12SLC'))), false, 'same id, another workspace');
   account = undefined;
-  assert.equal(await policy.approve(call(read, 'C0C1YV12SLC')), false, 'workspace not known');
+  assert.equal(ran(await policy.approve(call(read, 'C0C1YV12SLC'))), false, 'workspace not known');
   // slack:* is app-wide on purpose: whatever channels the app can reach.
   const wide = headless(destinations(() => ['slack:*'], undefined, () => 'T2'));
-  assert.equal(await wide.policy.approve(call(send, 'C0C1YV12SLC')), true);
+  assert.equal(ran(await wide.policy.approve(call(send, 'C0C1YV12SLC'))), true);
 });
 
 test('a bare channel id from an older config loads but covers nothing, so the call asks as before', async () => {
   const { policy } = headless(destinations(() => ['slack:C0C1YV12SLC']));
-  assert.equal(await policy.approve(call(send, 'C0C1YV12SLC')), false);
-  assert.equal(await policy.approve(call(read, 'C0C1YV12SLC')), false);
+  assert.equal(ran(await policy.approve(call(send, 'C0C1YV12SLC'))), false);
+  assert.equal(ran(await policy.approve(call(read, 'C0C1YV12SLC'))), false);
 });

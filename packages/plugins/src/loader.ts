@@ -14,6 +14,7 @@ import type {
   PluginStateDirectory,
   ProtectedPaths,
   ProviderCallGuard,
+  MemoryPassHandle,
   SubAgentHandle,
   Skill,
   SkillRegistry,
@@ -311,6 +312,8 @@ export interface LoadPluginsOptions {
   warn?: (message: string) => void;
   /** Handed to every plugin's `setup` as `PluginContext.subAgents`. */
   subAgents?: SubAgentHandle;
+  /** Handed to every plugin's `setup` as `PluginContext.memoryPasses`. */
+  memoryPasses?: MemoryPassHandle;
   /**
    * The fleet reader for each plugin, by package name, handed to its
    * `setup` as `PluginContext.fleet`. Asked per plugin so the host's read
@@ -708,6 +711,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
           ...(options.log !== undefined ? { log: options.log } : {}),
           ...(options.warn !== undefined ? { warn: options.warn } : {}),
           ...(options.subAgents !== undefined ? { subAgents: options.subAgents } : {}),
+          ...(options.memoryPasses !== undefined ? { memoryPasses: options.memoryPasses } : {}),
           ...(options.fleet !== undefined ? { fleet: options.fleet(manifest.packageName) } : {}),
           ...(providerCalls !== undefined ? { providerCalls } : {}),
           ...(events !== undefined ? { events } : {}),

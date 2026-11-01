@@ -38,12 +38,12 @@ const writeSoul = async (home: string, contents = SOUL): Promise<void> => {
   await writeFile(path.join(dir, 'ava.md'), contents);
 };
 
-const hostFor = async (module: unknown): Promise<OptionalModuleHost> => {
+const hostFor = async (module: unknown, packageName = 'stratus-plugin-fanout'): Promise<OptionalModuleHost> => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-sub-pkgs-'));
   const directory = path.join(root, 'fanout');
   await mkdir(path.join(directory, 'dist'), { recursive: true });
   await writeFile(path.join(directory, 'package.json'), JSON.stringify({
-    name: 'stratus-plugin-fanout',
+    name: packageName,
     stratus: {
       pluginVersion: 1,
       contributes: {
@@ -57,7 +57,7 @@ const hostFor = async (module: unknown): Promise<OptionalModuleHost> => {
   }));
   return {
     resolve(specifier) {
-      if (specifier !== 'stratus-plugin-fanout') {
+      if (specifier !== packageName) {
         throw new Error(`Cannot find package '${specifier}'`);
       }
       return pathToFileURL(path.join(directory, 'dist', 'index.js')).href;
@@ -127,9 +127,20 @@ const fanoutGateway = async (options: {
   primaryDown?: boolean;
   /** Replaces the fan-out tool's body, for a test that drives the handle itself. */
   fanout?: (handle: SubAgentHandle, session: Session, signal?: AbortSignal) => Promise<unknown>;
+  /**
+   * The fan-out package's name. The default is outside the trusted set, so
+   * every tool it declares is gated; a first-party name keeps the declared
+   * risks, `safe` included.
+   */
+  packageName?: string;
+  /** Stamp the home the way 0.14.2 left it: set up before the safe-tools default. */
+  olderHome?: boolean;
 }) => {
   const home = await newHome();
   await writeSoul(home, options.soul);
+  if (options.olderHome) {
+    await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({ schemaVersion: 4, applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'] }));
+  }
   const primaryCalls: string[] = [];
   if (options.primaryDown) {
     await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
@@ -241,8 +252,8 @@ const fanoutGateway = async (options: {
   const gateway = createGateway({
     env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test', ANTHROPIC_API_KEY: 'sk-a' }, fetch: fetchFake },
     idleTimeoutMs: 0,
-    plugins: { 'stratus-plugin-fanout': { enabled: true } },
-    pluginHost: await hostFor(module),
+    plugins: { [options.packageName ?? 'stratus-plugin-fanout']: { enabled: true } },
+    pluginHost: await hostFor(module, options.packageName),
     ...(options.subAgents ? { subAgents: options.subAgents } : {}),
     ...(options.approvals === 'remote'
       ? {
@@ -362,6 +373,55 @@ test('a slice is refused at the start, naming the tool, when it is not the paren
   assert.match(refusals[5] ?? '', /model/);
 });
 
+test('a parent whose soul has no tools: list can hand a sub-agent only the safe tools it may call itself', async () => {
+  // An omitted list is the safe tools and nothing else, and a slice only
+  // narrows what the parent's turn may do: it must not turn a gated tool
+  // the parent could not call into one its sub-agent holds by name.
+  const harness = await fanoutGateway({
+    soul: SOUL.replace('tools: [test.*, memory.*]\n', ''),
+    packageName: '@stratusagent/plugin-fanout-fixture',
+    tasks: [
+      { instruction: 'widen', tools: ['test.gated'] },
+      { instruction: 'look it up', tools: ['test.echo'] },
+    ],
+    subAgent: () => openAiText('looked'),
+  });
+  await harness.gateway.start();
+  try {
+    const parent = await harness.gateway.dispatch({ sessionId: 'parent-no-list', agentId: 'ava', userMessage: 'PARENT-TASK fan out' });
+    assert.equal(parent.status, 'completed');
+  } finally {
+    await harness.gateway.stop();
+  }
+  const seen = harness.outcomes.map((outcome) => ('refused' in outcome ? `refused: ${outcome.refused}` : `ran: ${outcome.status}`));
+  assert.equal(seen.length, 2, 'the fan-out tool never ran');
+  assert.match(seen[0] ?? '', /^refused: .*test\.gated.*safe/);
+  assert.equal(seen[1], 'ran: result');
+  assert.equal(harness.gatedRuns(), 0, 'a gated tool ran for a parent with no tools: list');
+});
+
+test('on a home an older build set up, a parent with no tools: list keeps every tool, for itself and its slices', async () => {
+  // Such a home read an omitted list as every tool before the safe-tools
+  // default, and keeps reading it that way. The fan-out tool comes from an
+  // untrusted package here, so it is gated: the parent calling it at all
+  // is the runner keeping every tool, and the gated slice is the gateway.
+  const harness = await fanoutGateway({
+    soul: SOUL.replace('tools: [test.*, memory.*]\n', ''),
+    olderHome: true,
+    tasks: [{ instruction: 'widen', tools: ['test.gated'] }],
+    subAgent: () => openAiText('widened'),
+  });
+  await harness.gateway.start();
+  try {
+    const parent = await harness.gateway.dispatch({ sessionId: 'parent-older-home', agentId: 'ava', userMessage: 'PARENT-TASK fan out' });
+    assert.equal(parent.status, 'completed');
+  } finally {
+    await harness.gateway.stop();
+  }
+  const seen = harness.outcomes.map((outcome) => ('refused' in outcome ? `refused: ${outcome.refused}` : `ran: ${outcome.status}`));
+  assert.deepEqual(seen, ['ran: result']);
+});
+
 test('a gated call inside a sub-agent fails there and asks no one', async () => {
   const harness = await fanoutGateway({
     approvals: 'remote',
@@ -388,7 +448,7 @@ test('a gated call inside a sub-agent fails there and asks no one', async () => 
   assert.equal(harness.asked.length, 1);
   const result = child?.messages.find((message) => message.toolResult)?.toolResult;
   assert.equal(result?.ok, false);
-  assert.match(result?.error ?? '', /denied/);
+  assert.equal(result?.error, 'test.gated was not approved');
 });
 
 test('a tool that rewrites its sub-agent session cannot turn a later gated call into a question', async () => {

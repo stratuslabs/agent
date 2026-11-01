@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { ApprovalContext, Session, Tool, ToolRisk } from '@stratusagent/core';
 import { createPermissionPolicy, type PermissionDecision } from '../src/index.ts';
+import { ran } from './answer.ts';
 
 const sessionWith = (metadata?: Session['metadata']): Session => {
   const now = new Date().toISOString();
@@ -48,7 +49,7 @@ test('headless allows a gated send to a pre-authorized destination — the sched
   });
 
   const tool = sendTool();
-  assert.equal(await policy.approve(contextFor(tool, 'slack:C-ENG')), true);
+  assert.equal(ran(await policy.approve(contextFor(tool, 'slack:C-ENG'))), true);
   assert.equal(decisions[0]?.allowed, true);
   assert.equal(decisions[0]?.destination, 'slack:C-ENG');
   assert.match(decisions[0]?.reason ?? '', /pre-authorized/);
@@ -59,12 +60,12 @@ test('headless still refuses a send anywhere the schedule did not declare', asyn
     mode: 'headless',
     destinations: { isPreauthorized: (_session, destination) => destination === 'slack:C-ENG' },
   });
-  assert.equal(await policy.approve(contextFor(sendTool(), 'slack:C-OTHER')), false);
+  assert.equal(ran(await policy.approve(contextFor(sendTool(), 'slack:C-OTHER'))), false);
 });
 
 test('without the destinations option every gated send needs a human, exactly as before', async () => {
   const policy = createPermissionPolicy({ mode: 'headless' });
-  assert.equal(await policy.approve(contextFor(sendTool(), 'slack:C-ENG')), false);
+  assert.equal(ran(await policy.approve(contextFor(sendTool(), 'slack:C-ENG'))), false);
 });
 
 test('a destination cannot launder a dangerous call', async () => {
@@ -79,7 +80,7 @@ test('a destination cannot launder a dangerous call', async () => {
     },
   });
   const tool = sendTool('dangerous');
-  assert.equal(await policy.approve(contextFor(tool, 'slack:C-ENG', 'dangerous')), false);
+  assert.equal(ran(await policy.approve(contextFor(tool, 'slack:C-ENG', 'dangerous'))), false);
   assert.equal(consulted, false, 'the carve-out must not even be asked about a dangerous call');
 });
 
@@ -90,8 +91,8 @@ test('the carve-out check may be async, and is consulted per call', async () => 
     destinations: { isPreauthorized: async () => allowed },
   });
   const tool = sendTool();
-  assert.equal(await policy.approve(contextFor(tool, 'slack:C-ENG')), true);
+  assert.equal(ran(await policy.approve(contextFor(tool, 'slack:C-ENG'))), true);
   // The schedule was cancelled between two sends: the very next call gates.
   allowed = false;
-  assert.equal(await policy.approve(contextFor(tool, 'slack:C-ENG')), false);
+  assert.equal(ran(await policy.approve(contextFor(tool, 'slack:C-ENG'))), false);
 });
