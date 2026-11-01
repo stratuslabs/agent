@@ -1,4 +1,6 @@
 import {
+  effectiveMemoryValidityAt,
+  isTaintedTrust,
   leastTrusted,
   MEMORY_PASS_KINDS,
   MEMORY_PASS_MAX_SAVES,
@@ -37,9 +39,10 @@ export interface MemoryPassToolState {
    */
   handed?: ReadonlyArray<{ id: string; trust: TrustLevel }>;
   /**
-   * A tidy pass recalls only live facts with this label (its group's), so
-   * no recall lowers its label and everything it writes carries the
-   * group's label, never another one.
+   * A tidy pass recalls only facts true now with this label (its group's),
+   * so no recall lowers its label and everything it writes carries the
+   * group's label, never another one, and no fact out of its window is
+   * merged back into a current one.
    */
   recallOnly?: TrustLevel;
 }
@@ -113,10 +116,16 @@ export const createMemoryPassTools = (
   // Filtered before the recall tool sees the result, so a fact with another
   // label never reaches the model or lowers the pass session's label.
   const only = state.recallOnly;
+  const now = options.now ?? (() => new Date());
   const searched: Pick<AgentMemoryStore, 'search'> = only === undefined ? store : {
     async search(agentId, query, searchOptions) {
       const result = await store.search(agentId, query, searchOptions);
-      return { ...result, entries: result.entries.filter((entry) => memoryEntryTrust(entry) === only) };
+      const at = now();
+      return {
+        ...result,
+        entries: result.entries.filter((entry) =>
+          memoryEntryTrust(entry) === only && effectiveMemoryValidityAt(entry, at) === 'current'),
+      };
     },
   };
   const ownRecall = createRecallTool(searched, options);
@@ -191,13 +200,21 @@ export const createMemoryPassTools = (
           + 'Name one id in supersedes. Nothing was stored.',
         );
       }
+      /** The tainted labels the facts it replaces have now: the new fact is never more trusted than one of them. */
+      const lowered: TrustLevel[] = [];
       for (const replaced of replaces ?? []) {
         const label = shown.get(replaced);
         if (label === undefined) {
           throw new Error(`${replaced} is not a fact this pass was handed or memory.recall has shown in it, so it cannot be superseded. Nothing was stored.`);
         }
-        if (label === 'user' || await labelNow(agentId, replaced, label) === 'user') {
+        const current = label === 'user' ? label : await labelNow(agentId, replaced, label);
+        if (current === 'user') {
           throw new Error(`${replaced} is a fact the operator asserted, and a memory pass never supersedes one. Nothing was stored.`);
+        }
+        // An operator may have lowered it since the pass was handed it or
+        // recalled it, which a recall's own mark could not see.
+        if (isTaintedTrust(current)) {
+          lowered.push(current);
         }
         if (await pinned(agentId, replaced)) {
           throw new Error(`${replaced} is pinned, and a memory pass never supersedes a pinned fact. Nothing was stored.`);
@@ -211,7 +228,7 @@ export const createMemoryPassTools = (
       };
       const written = await write(agentId, fact, {
         metadata: { [MEMORY_PASS_METADATA_KEY]: { id: state.passId, kind: state.kind } },
-        provenance: { trust: leastTrusted(state.trust, sessionWriteTrust(session)), origin },
+        provenance: { trust: leastTrusted(state.trust, sessionWriteTrust(session), ...lowered), origin },
         ...fields,
         ...supersedes,
         // The checks above give a clear refusal early; this one is the

@@ -362,8 +362,11 @@ instead of reading a conversation. The runtime picks what it reads:
   still moves the tidy on. A merge changes the members, so those chunks are
   looked at again. The outcome's `more` says another chunk waits.
 - The pass runs at its group's label, and its recall returns only facts
-  with that label, so the merged fact always has the label the duplicates
-  had: tidying `external` facts writes an `external` fact.
+  with that label that are true now, so the merged fact has the label the
+  duplicates had (tidying `external` facts writes an `external` fact) and
+  an expired fact is never merged back into a current one. If you lower a
+  fact's label with `reassert` while a pass is merging it, the merged fact
+  gets the lower label.
 - A merge is one fact whose `supersedes` lists every duplicate, so one
   `undo-pass` brings them all back. A store that doesn't take a list in
   `supersedes` gets no tidy passes (`skipped`, `store-unsupported`).
