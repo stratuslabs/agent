@@ -9,10 +9,11 @@ const get = (
   port: number,
   pathname: string,
   headers: Record<string, string>,
+  address = '127.0.0.1',
 ): Promise<{ status: number; body: string }> =>
   new Promise((resolve, reject) => {
     const request = httpRequest(
-      { host: '127.0.0.1', port, path: pathname, method: 'GET', headers },
+      { host: address, port, path: pathname, method: 'GET', headers },
       (response) => {
         let body = '';
         response.setEncoding('utf8');
@@ -123,9 +124,24 @@ test('a wildcard bind checks no host name, since it cannot know its own', async 
   }
 });
 
+test('a bind given as a name is checked by the address it bound, not by how it is spelled', async () => {
+  // `localhost` is a name, and the resolver decides whether it binds ::1 or
+  // 127.0.0.1; either way the API is on loopback, so the Host check is on.
+  const harness = await startApi({ options: { host: 'localhost' } });
+  try {
+    const port = Number(new URL(harness.url).port);
+    const refused = await get(port, '/api/v1/livez', { host: `evil.example:${port}` }, 'localhost');
+    assert.equal(refused.status, 403);
+    const answered = await get(port, '/api/v1/livez', { host: `localhost:${port}` }, 'localhost');
+    assert.equal(answered.status, 200);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a Host header a browser could not have sent is not read for the name inside it', async () => {
   const { hostAllowed, allowedHostNames } = await import('../src/auth.ts');
-  const names = allowedHostNames('127.0.0.1', undefined);
+  const names = allowedHostNames('127.0.0.1', '127.0.0.1', undefined);
   // URL parsing would read 127.0.0.1 out of each of these.
   for (const header of ['evil.example@127.0.0.1', 'evil.example:80@localhost', '127.0.0.1/evil', 'localhost\\evil', '127.0.0.1 evil', '127.0.0.1#x']) {
     assert.equal(hostAllowed(names, header), false, header);
@@ -133,30 +149,43 @@ test('a Host header a browser could not have sent is not read for the name insid
   // An HTTP/1.0 client that names no host is not a browser.
   assert.equal(hostAllowed(names, undefined), true);
   // A bind to another loopback address answers to that address too.
-  assert.equal(hostAllowed(allowedHostNames('127.0.0.2', undefined), '127.0.0.2:4123'), true);
-  // A short form of a loopback address is still a loopback bind, and checked.
-  const short = allowedHostNames('127.1', undefined);
-  assert.equal(hostAllowed(short, '127.0.0.1:4123'), true);
-  assert.equal(hostAllowed(short, 'evil.example'), false);
+  assert.equal(hostAllowed(allowedHostNames('127.0.0.2', '127.0.0.2', undefined), '127.0.0.2:4123'), true);
   // And a non-loopback bind checks nothing.
-  assert.equal(allowedHostNames('0.0.0.0', 'https://gateway.example'), undefined);
+  assert.equal(allowedHostNames('0.0.0.0', '0.0.0.0', 'https://gateway.example'), undefined);
+  assert.equal(allowedHostNames('::', '::', undefined), undefined);
+});
+
+test('the names come from the bound address and the configured host, whatever spelling bound it', async () => {
+  const { hostAllowed, allowedHostNames } = await import('../src/auth.ts');
+  // `127.1` binds 127.0.0.1; `localhost.` and an /etc/hosts alias such as
+  // ip6-localhost bind ::1. Each is a loopback bind, so each is checked, and
+  // each answers to the name it was given as well as the loopback names.
+  for (const [bound, configured, asked] of [
+    ['127.0.0.1', '127.1', '127.0.0.1:4123'],
+    ['::1', 'localhost.', 'localhost.:4123'],
+    ['::1', 'ip6-localhost', 'ip6-localhost:4123'],
+    ['::ffff:127.0.0.1', '::ffff:127.0.0.1', '[::ffff:127.0.0.1]:4123'],
+  ] as const) {
+    const names = allowedHostNames(bound, configured, undefined);
+    assert.notEqual(names, undefined, configured);
+    assert.equal(hostAllowed(names, 'evil.example'), false, configured);
+    assert.equal(hostAllowed(names, asked), true, configured);
+    assert.equal(hostAllowed(names, 'localhost:4123'), true, configured);
+  }
+  // A name that resolved beyond loopback checks nothing, however it reads.
+  assert.equal(allowedHostNames('192.168.1.2', 'localhost.example.com', undefined), undefined);
 });
 
 test('a name written with the DNS root dot is the same name', async () => {
   const { hostAllowed, allowedHostNames } = await import('../src/auth.ts');
-  // A bind to the absolute name is still a loopback bind, and checked.
-  const absolute = allowedHostNames('localhost.', undefined);
-  assert.notEqual(absolute, undefined);
-  assert.equal(hostAllowed(absolute, 'evil.example'), false);
-  assert.equal(hostAllowed(absolute, 'localhost:4123'), true);
   // A browser that was given localhost. sends it as the Host.
-  const names = allowedHostNames('127.0.0.1', undefined);
+  const names = allowedHostNames('127.0.0.1', '127.0.0.1', undefined);
   assert.equal(hostAllowed(names, 'localhost.:4123'), true);
   assert.equal(hostAllowed(names, 'evil.example.'), false);
   assert.equal(hostAllowed(names, 'localhost..'), false);
   // And api.publicUrl matches with or without the dot, either side.
   for (const publicUrl of ['https://gateway.example/', 'https://gateway.example./']) {
-    const tunnel = allowedHostNames('127.0.0.1', publicUrl);
+    const tunnel = allowedHostNames('127.0.0.1', '127.0.0.1', publicUrl);
     assert.equal(hostAllowed(tunnel, 'gateway.example'), true, publicUrl);
     assert.equal(hostAllowed(tunnel, 'gateway.example.:443'), true, publicUrl);
   }

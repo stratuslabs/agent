@@ -11,7 +11,7 @@ import {
   loadCredentials,
   loadRosterSouls,
   loadSoulFile,
-  isLoopbackHost,
+  bindsLoopback,
   isSignedInRuntime,
   parseProviderName,
   readNonEmptyString,
@@ -213,7 +213,7 @@ export interface DoctorReport {
 export type DoctorDaemon =
   | { state: 'no-api' }
   | { state: 'unreachable'; url: string }
-  | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string };
+  | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string; exposedOn?: string };
 
 /** Long enough for a busy daemon on loopback, short enough that doctor never hangs on a wedged one. */
 const DAEMON_TIMEOUT_MS = 3_000;
@@ -401,9 +401,14 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     }
   });
   const configPath = configs.find((file) => file.sha256 !== null)?.path;
+  // The host it published, resolved as `listen` resolved it (a URL brackets
+  // an IPv6 address; `listen` is given it bare).
+  const bound = URL.parse(url)?.hostname;
+  const exposedOn = bound !== undefined && !(await bindsLoopback(bound.replace(/^\[(.*)\]$/, '$1'))) ? bound : undefined;
   return {
     state: 'running',
     url,
+    ...(exposedOn !== undefined ? { exposedOn } : {}),
     ...(typeof health.version === 'string' ? { version: health.version } : {}),
     ...(typeof health.startedAt === 'string' ? { startedAt: health.startedAt } : {}),
     ...(configPath !== undefined ? { configPath } : {}),
@@ -1069,9 +1074,8 @@ export const runDoctor = async (
     if (daemon.configPath !== undefined) {
       writeLine(streams.stdout, `  ${''.padEnd(10)}loaded ${daemon.configPath}`);
     }
-    const bound = URL.parse(daemon.url)?.hostname;
-    if (bound !== undefined && !isLoopbackHost(bound)) {
-      writeLine(streams.stdout, `  ${''.padEnd(10)}API on ${bound}: other machines can reach it unless a firewall or port mapping stops them`);
+    if (daemon.exposedOn !== undefined) {
+      writeLine(streams.stdout, `  ${''.padEnd(10)}API on ${daemon.exposedOn}: other machines can reach it unless a firewall or port mapping stops them`);
     }
   }
 

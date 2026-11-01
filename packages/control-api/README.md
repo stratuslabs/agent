@@ -90,8 +90,11 @@ from the page making the request, and cannot be made to send another one —
 WebSockets alike. A page on another port, or another host, still fails.
 
 **Host names.** Bound to loopback (the default), the API answers only to
-`localhost`, `127.0.0.1`, `[::1]`, the address it bound, and the host of
-`api.publicUrl`. Any other `Host`, on any route and on the WebSocket upgrade,
+`localhost`, `127.0.0.1`, `[::1]`, the address it bound, the name `api.host`
+gave it, and the host of `api.publicUrl`. Whether it is on loopback is read
+from the address `listen` actually bound, not from how `api.host` is spelled,
+so a name that resolves to loopback (`localhost.`, or an `/etc/hosts` alias
+such as `ip6-localhost`) is checked like `127.0.0.1`. Any other `Host`, on any route and on the WebSocket upgrade,
 gets `403 host_not_allowed` before anything else is read. That is the DNS
 rebinding defence: a page on `evil.example` that re-resolves its name to
 `127.0.0.1` reaches this port as its own origin, sending `Host: evil.example`.

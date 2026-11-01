@@ -1,33 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLoopbackHost } from '../src/index.ts';
+import { bindsLoopback, isLoopbackAddress } from '../src/index.ts';
 
-test('isLoopbackHost: loopback names and 127.0.0.0/8 stay on this machine', () => {
-  for (const host of ['127.0.0.1', '127.5.5.5', 'localhost', 'LocalHost', ' localhost ', '::1', '[::1]', '0:0:0:0:0:0:0:1', '::ffff:127.0.0.1']) {
-    assert.equal(isLoopbackHost(host), true, host);
+test('isLoopbackAddress: 127.0.0.0/8 and ::1, in every form Node reports them', () => {
+  for (const address of ['127.0.0.1', '127.5.5.5', '127.255.255.255', '::1', '0:0:0:0:0:0:0:1', '::ffff:127.0.0.1', '::ffff:7f00:1']) {
+    assert.equal(isLoopbackAddress(address), true, address);
   }
 });
 
-test('isLoopbackHost: the short and numeric forms the resolver binds as loopback count too', () => {
-  // Node binds each of these to 127.0.0.1 or ::ffff:127.0.0.1.
-  for (const host of ['127.1', '0x7f.1', '2130706433', '::ffff:7f00:1', '[::ffff:127.5.5.5]']) {
-    assert.equal(isLoopbackHost(host), true, host);
+test('isLoopbackAddress: wildcards, LAN and tailnet addresses, and anything that is not an address', () => {
+  // Names are not addresses: what a name binds is the resolver's answer,
+  // which is `bindsLoopback`'s job.
+  for (const address of ['0.0.0.0', '::', '192.168.1.2', '100.64.0.1', '128.0.0.1', '::ffff:10.0.0.1', '::2', 'localhost', '127.1', '[::1]', '']) {
+    assert.equal(isLoopbackAddress(address), false, address);
   }
 });
 
-test('isLoopbackHost: wildcards, LAN and tailnet addresses, and look-alike names do not', () => {
-  for (const host of ['0.0.0.0', '::', '[::]', '192.168.1.2', '100.64.0.1', '::ffff:10.0.0.1', 'mac-mini.example.ts.net', '127.0.0.1.example.com', 'localhost.example.com', 'evil.example@127.0.0.1', '127.0.0.1/x', '127%2e0%2e0%2e1', 'localhost:4123', '']) {
-    assert.equal(isLoopbackHost(host), false, host);
-  }
+test('bindsLoopback: decided by what the name resolves to, the way listen binds it', async () => {
+  // An /etc/hosts alias no spelling rule can know: the resolver is the answer.
+  const hosts: Record<string, string> = { 'ip6-localhost': '::1', 'loopback.internal': '127.0.0.2', 'mac-mini.example.ts.net': '100.64.0.1' };
+  const lookup = async (host: string) => {
+    const address = hosts[host];
+    if (address === undefined) {
+      throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: 'ENOTFOUND' });
+    }
+    return { address };
+  };
+  assert.equal(await bindsLoopback('ip6-localhost', lookup), true);
+  assert.equal(await bindsLoopback('loopback.internal', lookup), true);
+  assert.equal(await bindsLoopback('mac-mini.example.ts.net', lookup), false);
+  // A name that does not resolve cannot be bound either; it is not loopback.
+  assert.equal(await bindsLoopback('nowhere.invalid', lookup), false);
 });
 
-test('isLoopbackHost: the absolute name localhost. is loopback, with one root dot only', () => {
-  // Node binds `localhost.` to the loopback address, like `localhost`.
-  for (const host of ['localhost.', 'LOCALHOST.']) {
-    assert.equal(isLoopbackHost(host), true, host);
+test('bindsLoopback: the real resolver, on names and addresses every platform has', async () => {
+  for (const host of ['localhost', '127.0.0.1', '127.0.0.2', '::1']) {
+    assert.equal(await bindsLoopback(host), true, host);
   }
-  for (const host of ['localhost..', 'evil.example.', '.']) {
-    assert.equal(isLoopbackHost(host), false, host);
+  for (const host of ['0.0.0.0', '::']) {
+    assert.equal(await bindsLoopback(host), false, host);
   }
 });

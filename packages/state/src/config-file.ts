@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { isIPv4, isIPv6 } from 'node:net';
+import { lookup as lookupHost } from 'node:dns/promises';
+import { BlockList, isIP } from 'node:net';
 import path from 'node:path';
 import {
   BUILTIN_EXECUTOR_NAME,
@@ -392,39 +393,41 @@ export const normalizePublicUrl = (value: unknown): string => {
   return parsed.href.replace(/\/+$/, '');
 };
 
+const LOOPBACK = new BlockList();
+LOOPBACK.addSubnet('127.0.0.0', 8, 'ipv4');
+LOOPBACK.addAddress('::1', 'ipv6');
+
 /**
- * Whether a bind address keeps a listener on this machine: `localhost`, the
- * IPv6 loopback, or anything in 127.0.0.0/8 (IPv4-mapped included). A
- * wildcard (`0.0.0.0`, `::`) is not: it is every interface. The one rule for
- * "is this exposed", shared by `serve`'s warning, `doctor`, and the control
- * API's Host check, so the three cannot disagree about an address.
- *
- * The address is read the way the resolver binds it: `127.1`, `0x7f.1` and
- * `2130706433` all listen on 127.0.0.1, so URL parsing (which follows the
- * same numeric rules) canonicalizes it first. Anything URL parsing would dig
- * a different name out of (a user part, a path, a percent escape, a port)
- * counts as not loopback: such a value fails to bind, so the answer only
- * decides a warning.
+ * Whether an IP address, as `server.address()` or `dns.lookup` reports it, is
+ * on this machine only: 127.0.0.0/8 or `::1`, IPv4-mapped forms included. A
+ * wildcard (`0.0.0.0`, `::`) is not: it is every interface. A name is not an
+ * address and is never loopback here; `bindsLoopback` resolves one.
  */
-export const isLoopbackHost = (host: string): boolean => {
-  const bare = host.trim().replace(/^\[(.*)\]$/, '$1');
-  if (bare === '' || /[@/\\?#%\s]/.test(bare)) {
+export const isLoopbackAddress = (address: string): boolean => {
+  const family = isIP(address);
+  return family !== 0 && LOOPBACK.check(address, family === 4 ? 'ipv4' : 'ipv6');
+};
+
+/** Resolves a host the way `net.Server.listen` does; a parameter so tests can stand in for /etc/hosts. */
+export type HostLookup = (host: string) => Promise<{ address: string }>;
+
+/**
+ * Whether listening on `host` keeps the listener on this machine. The one
+ * rule for "is this exposed", shared by `serve`'s warning and `doctor`, so
+ * they cannot disagree about an address. (The control API decides from the
+ * address it actually bound, with `isLoopbackAddress`.)
+ *
+ * Decided by resolving the host the way `listen` does, not by reading its
+ * spelling: `127.1`, `localhost.` and an /etc/hosts alias such as
+ * `ip6-localhost` all bind loopback, and no spelling rule knows the aliases.
+ * A host that does not resolve cannot be bound either, so it is not loopback.
+ */
+export const bindsLoopback = async (host: string, lookup: HostLookup = lookupHost): Promise<boolean> => {
+  try {
+    return isLoopbackAddress((await lookup(host)).address);
+  } catch {
     return false;
   }
-  const parsed = URL.parse(`http://${isIPv6(bare) ? `[${bare}]` : bare}`);
-  if (parsed === null || parsed.port !== '') {
-    return false;
-  }
-  // `localhost.` is the same name written absolute, and binds the same way.
-  const name = parsed.hostname.toLowerCase().replace(/\.$/, '');
-  if (name === 'localhost' || name === '[::1]') {
-    return true;
-  }
-  if (isIPv4(name)) {
-    return name.startsWith('127.');
-  }
-  // An IPv4-mapped address canonicalizes to hex: ::ffff:127.0.0.1 is [::ffff:7f00:1].
-  return /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(name);
 };
 
 const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {

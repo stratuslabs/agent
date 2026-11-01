@@ -182,7 +182,9 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   }
   // On a loopback bind, the names a request may address it by; see
   // `allowedHostNames` for why, and why a tunnel needs `publicUrl` for it.
-  const hostNames = allowedHostNames(host, publicUrl);
+  // Set once `listen` has bound, from the address it bound: no request can
+  // arrive before that.
+  let hostNames: Set<string> | undefined;
   const refuseForeignHost = (request: IncomingMessage): void => {
     if (hostNames === undefined || hostAllowed(hostNames, request.headers.host)) {
       return;
@@ -520,6 +522,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       if (!address || typeof address === 'string') {
         throw new Error('The control API could not determine the address it bound.');
       }
+      hostNames = allowedHostNames(address.address, host, publicUrl);
       url = `http://${authority(host, address.port)}`;
       origins = allowedOrigins(host, address.port);
       await writeGatewayInfo();

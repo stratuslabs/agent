@@ -41,7 +41,7 @@ import {
   servedRuntimes,
   describeRuntimeEffort,
   discoverIgnoredUntrustedConfig,
-  isLoopbackHost,
+  bindsLoopback,
   trustedConfigError,
   grantReadSerializer,
   grantWriteSerializer,
@@ -412,7 +412,7 @@ const serveHeldHome = async (
       controlApiChannels.push(api);
       // Said every start, flag or config alike: the default is loopback, so
       // this is always someone's choice, and the one place it is visible.
-      if (apiHost !== undefined && !isLoopbackHost(apiHost)) {
+      if (apiHost !== undefined && !(await bindsLoopback(apiHost))) {
         warn(exposedApiWarning(apiHost));
       }
     } else if (command.api === true || apiConfig.enabled === true) {

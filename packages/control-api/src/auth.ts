@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import {
   gatewayTokenPath,
-  isLoopbackHost,
+  isLoopbackAddress,
   readNonEmptyString,
   readProcessEnv,
   stratusHomePath,
@@ -433,17 +433,29 @@ export const hostName = (header: string): string | undefined => {
  * from that page by anything else it sends, so the public name is the one the
  * operator gives as `api.publicUrl`.
  *
+ * Whether the bind is loopback is read from `boundAddress`, the address
+ * `listen` actually bound, never from how `configuredHost` is spelled: `127.1`,
+ * `localhost.` and an /etc/hosts alias all bind loopback, and only the bound
+ * address says so for all of them. The configured name is still one a client
+ * may use, so it is answered to as well.
+ *
  * A wildcard or LAN bind checks nothing: it is reached on addresses it cannot
  * list, and binding it is the exposure `stratus serve` already warns about.
  */
-export const allowedHostNames = (bindHost: string, publicUrl: string | undefined): Set<string> | undefined => {
-  if (!isLoopbackHost(bindHost)) {
+export const allowedHostNames = (
+  boundAddress: string,
+  configuredHost: string,
+  publicUrl: string | undefined,
+): Set<string> | undefined => {
+  if (!isLoopbackAddress(boundAddress)) {
     return undefined;
   }
   const names = new Set(['localhost', '127.0.0.1', '[::1]']);
-  const bound = hostName(authority(bindHost, 1));
-  if (bound !== undefined) {
-    names.add(bound);
+  for (const host of [boundAddress, configuredHost]) {
+    const name = hostName(authority(host, 1));
+    if (name !== undefined) {
+      names.add(name);
+    }
   }
   const parsed = publicUrl === undefined ? null : URL.parse(publicUrl);
   const named = parsed === null ? undefined : bareName(parsed.hostname);
