@@ -34,6 +34,23 @@ updates:
       npm-minor-and-patch:
         patterns: ['*']
         update-types: [minor, patch]
+    # Majors we have decided to wait on. These rules hold security updates
+    # back too, so a fix for one of these has to come from the current major.
+    ignore:
+      # undici 8 needs Node 22.19 or later, and engines allows 22.16. Revisit
+      # when the Node floor moves.
+      - dependency-name: undici
+        update-types: ['version-update:semver-major']
+      # @types/node 26 describes a newer Node than the 22.16 floor and changes
+      # assert's overloads, which fails typecheck. Move it on purpose, not
+      # weekly.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      # TypeScript goes from 5.9 straight to 7.1, whose stable API a CLI test
+      # needs (7.0 has only typescript/unstable). Skipping 6 and 7.0 makes 7.1
+      # the first major pull request.
+      - dependency-name: typescript
+        versions: ['6.x', '~7.0.0']
     open-pull-requests-limit: 5
 
   - package-ecosystem: github-actions
