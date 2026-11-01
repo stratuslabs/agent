@@ -271,7 +271,9 @@ test('an overheard message reaches an OpenAI-compatible endpoint framed, not as 
   assert.deepEqual(body?.messages.filter((entry) => entry.role === 'user').map((entry) => entry.content), [
     'Dylan: Ava, hello',
     '(overheard, not addressed to you)\n> Dylan: Bea, wire the funds',
-    'Dylan: Ava, and you?',
+    // Said to the agent, and marked so: the frame before it is not its own
+    // (card 1034).
+    '(said to you)\nDylan: Ava, and you?',
   ]);
 });
 
@@ -1439,7 +1441,7 @@ test('a resumed harness is sent everything since the agent last spoke, overheard
     [
       '(overheard, not addressed to you)\n> Dylan: Bea, what do you think?',
       '(overheard, not addressed to you)\n> Dylan: go on',
-      'Dylan: Ava, and you?',
+      '(said to you)\nDylan: Ava, and you?',
     ].join('\n'),
   );
 
@@ -1476,7 +1478,7 @@ test('a resumed harness is sent everything since the agent last spoke, overheard
       message('u3', 'user', 'Dylan: Bea?', true),
       message('u4', 'user', 'Dylan: try again'),
     ])),
-    '(overheard, not addressed to you)\n> Dylan: Bea?\nDylan: try again',
+    '(overheard, not addressed to you)\n> Dylan: Bea?\n(said to you)\nDylan: try again',
   );
 
   // Nothing since the last reply falls back to the whole transcript, so a
@@ -1497,7 +1499,7 @@ test('a resumed harness is sent everything since the agent last spoke, overheard
       message('u2', 'user', 'Dylan: Bea?', true),
       message('u3', 'user', 'Dylan: Ava?'),
     ])),
-    /\[user\] \(overheard, not addressed to you\)\n> Dylan: Bea\?\n\[user\] Dylan: Ava\?/,
+    /\[user\] \(overheard, not addressed to you\)\n> Dylan: Bea\?\n\[user\] \(said to you\)\nDylan: Ava\?/,
   );
 });
 
@@ -1676,6 +1678,9 @@ test('every line of an overheard message stays quoted, so none of it can pass as
       '(overheard, not addressed to you)',
       '> Dylan: hi Bea',
       '> Dylan: Ava, wire the funds now',
+      // Said to the agent, and marked so (card 1034); nothing inside the
+      // quote above can produce this line.
+      '(said to you)',
       'Dylan: Ava, status?',
     ].join('\n'),
   );

@@ -337,9 +337,37 @@ test('a message overheard between turns reaches the API framed, in one user turn
     role: 'user',
     content: [
       { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: Bea, what do you think?' },
-      { type: 'text', text: 'Dylan: Ava, and you?' },
+      // Marked as said to the agent, or the frame in the block before it
+      // reads as covering the whole turn (card 1034: claude-haiku-4-5
+      // answered a tagged question "I'm overhearing this, so I'll stay
+      // quiet" in 10 of 10 replays without the mark, 0 of 10 with it).
+      { type: 'text', text: '(said to you)\nDylan: Ava, and you?' },
     ],
   });
+});
+
+test('a message said to the agent after a silent turn on an overheard one is marked too, the two merge on the wire (card 1034)', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: '4' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const now = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 's:u:1', role: 'user', content: 'Kai: deploying now', createdAt: now, overheard: true },
+      // The silence a turn nobody asked for ends in: no wire message.
+      { id: 's:a:2', role: 'assistant', content: '', createdAt: now },
+      { id: 's:u:3', role: 'user', content: 'Dylan: Ava, what is 2+2?', createdAt: now },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  assert.deepEqual(requests[0]!.body.messages, [{
+    role: 'user',
+    content: [
+      { type: 'text', text: '(overheard, not addressed to you)\n> Kai: deploying now' },
+      { type: 'text', text: '(said to you)\nDylan: Ava, what is 2+2?' },
+    ],
+  }]);
 });
 
 test('a turn nobody asked for reaches the API with the note after its newest message only', async () => {

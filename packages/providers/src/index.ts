@@ -25,6 +25,7 @@ import {
   type ToolDescriptor,
   type ToolResult,
   OVERHEARD_IMAGES_NOTE,
+  messagesAfterOverheard,
   promptTextOf,
 } from '@stratusagent/core';
 
@@ -826,6 +827,8 @@ const createOpenAICompatibleMessages = (
 
   const transcript = transcriptOf(request);
   const latest = latestUserMessageOf(transcript);
+  // Marked as said to the agent after an overheard message (card 1034).
+  const afterOverheard = messagesAfterOverheard(transcript);
   // Images tool calls returned, held until the run of tool messages ends:
   // a chat-completions tool message is text only, and every call of an
   // assistant turn has to be answered before any other message — so they
@@ -905,7 +908,9 @@ const createOpenAICompatibleMessages = (
     messages.push({
       role: message.role,
       content: message.role === 'user'
-        ? (vision ? userContentParts(message, replayed, message === latest) : userMessageText(message, message === latest))
+        ? (vision
+          ? userContentParts(message, replayed, message === latest, afterOverheard.has(message))
+          : userMessageText(message, message === latest, false, afterOverheard.has(message)))
         : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
@@ -919,8 +924,9 @@ const userContentParts = (
   message: Pick<Message, 'content' | 'overheard' | 'images'>,
   replayed: ReadonlySet<ImageAttachment>,
   latest: boolean,
+  afterOverheard = false,
 ): OpenAICompatibleUserContent => {
-  const text = promptTextOf(message, { latest });
+  const text = promptTextOf(message, { latest, afterOverheard });
   if (message.images === undefined || message.images.length === 0) {
     return text;
   }
@@ -1149,7 +1155,8 @@ const describeImageAttachments = (images: readonly ImageAttachment[] | undefined
 /**
  * A user message's text as a prompt carries it, with its images named after
  * it. `latest` marks the newest user message of the turn — the one an
- * unaddressed turn's note follows; see `PromptTextOptions`. An overheard
+ * unaddressed turn's note follows — and `afterOverheard` one said to the
+ * agent after an overheard message in its run; see `PromptTextOptions`. An overheard
  * message whose images travel beside the text ends on
  * `OVERHEARD_IMAGES_NOTE`, the label those images follow (card 625).
  */
@@ -1157,8 +1164,9 @@ const userMessageText = (
   message: Pick<Message, 'content' | 'overheard' | 'images'>,
   latest = false,
   imagesTravel = false,
+  afterOverheard = false,
 ): string => {
-  const text = `${promptTextOf(message, { latest })}${describeImageAttachments(imagesTravel ? message.images?.filter((image) => !travels(image)) : message.images)}`;
+  const text = `${promptTextOf(message, { latest, afterOverheard })}${describeImageAttachments(imagesTravel ? message.images?.filter((image) => !travels(image)) : message.images)}`;
   const labeled = imagesTravel && message.overheard === true && (message.images ?? []).some(travels);
   return labeled ? `${text}\n\n${OVERHEARD_IMAGES_NOTE}` : text;
 };
@@ -1194,6 +1202,7 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
   );
 
   const latest = latestUserMessageOf(conversational);
+  const afterOverheard = messagesAfterOverheard(conversational);
   const inline = options.inlineImages === true;
   if (conversational.length === 1 && conversational[0]?.role === 'user') {
     return userMessageText(conversational[0], true, inline);
@@ -1230,7 +1239,7 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
       // asked for ends in — neither is a line the model should read.
       continue;
     }
-    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message, message === latest, inline && message === latest) : message.content}`);
+    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message, message === latest, inline && message === latest, afterOverheard.has(message)) : message.content}`);
   }
   // A turn nobody asked for ends on an overheard message carrying its own
   // instruction, and "reply to the latest user message" would countermand
@@ -1281,5 +1290,8 @@ export const latestUserMessagePrompt = (request: ProviderRequest, options: Promp
     // (card 601); any other renders bare, as it always did.
     return userMessageText(newest, true, inline);
   }
-  return unheard.map((message) => userMessageText(message, message === newest, inline && message === newest)).join('\n');
+  // One string, so the overheard frames and the message said to the agent
+  // reach the model as one turn: that message is marked (card 1034).
+  const afterOverheard = messagesAfterOverheard(unheard);
+  return unheard.map((message) => userMessageText(message, message === newest, inline && message === newest, afterOverheard.has(message))).join('\n');
 };
