@@ -189,6 +189,10 @@ export {
   type RefusedEventDelivery,
 } from './events.ts';
 export { type MemoryPassDetail } from './memory-passes.ts';
+// The review posture's fixed prompt and case, for the review-step eval
+// (`packages/cli/eval/review-step`), which measures the prompt production
+// sends rather than a copy of it.
+export { REVIEW_RULES, readReviewReply, reviewCaseText, type ReviewCaseInput } from './review.ts';
 export {
   createEventIntake,
   mapGithubDelivery,
