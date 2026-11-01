@@ -2152,8 +2152,17 @@ class ReplyRenderer {
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
     const chunks = await this.chunksOf(text);
-    // No placeholder — a handover could not open a fresh one — and the
-    // reply is a message of its own rather than nothing at all.
+    // A first part that tags another agent would reach Slack as an edit of
+    // the placeholder, and an edit starts no agent's turn (Slack sends it
+    // as message_changed): it is posted as a message of its own instead,
+    // the placeholder taken back (card 1054). One Slack won't let go is
+    // edited, as before.
+    if (this.ref && await this.tagsAnAgent?.(chunks[0] ?? '')) {
+      await this.retract();
+    }
+    // No placeholder — a handover could not open a fresh one, or it was
+    // taken back above — and the reply is a message of its own rather than
+    // nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
     const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(false);
     let landed = await edited;
@@ -2399,13 +2408,19 @@ class ReplyRenderer {
       return 'untaken';
     }
     await drained;
-    try {
-      await this.web.chat.update({ channel: given.channel, ts: given.ts, text: first });
-    } catch (error) {
-      // Not handed over: the placeholder is still this turn's, and the
-      // caller posts the reply as messages of its own.
-      this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
-      return 'untaken';
+    // A first part that tags another agent is not edited in, since an edit
+    // starts no agent's turn (card 1054): the placeholder is taken back and
+    // every part posted, and the one reopened below keeps the order.
+    const posted = this.ref === given && await this.tagsAnAgent?.(first) === true && await this.retract();
+    if (!posted) {
+      try {
+        await this.web.chat.update({ channel: given.channel, ts: given.ts, text: first });
+      } catch (error) {
+        // Not handed over: the placeholder is still this turn's, and the
+        // caller posts the reply as messages of its own.
+        this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
+        return 'untaken';
+      }
     }
     let complete = true;
     // The placeholder is the earlier turn's now, and the reference goes
@@ -2414,7 +2429,7 @@ class ReplyRenderer {
     // it is dealt with by `beginTurn`, at the boundary that actually
     // separates the two turns' output.)
     this.ref = undefined;
-    for (const chunk of rest) {
+    for (const chunk of posted ? chunks : rest) {
       try {
         // A part that tags another agent carries the whole reply (card 1033).
         const full = whole !== undefined && await this.tagsAnAgent?.(chunk) ? whole : undefined;
