@@ -338,6 +338,49 @@ test('a secret store that cannot be read asks instead of failing the turn', asyn
   assert.equal(h.reviews.length, 0);
 });
 
+test('a secret store that cannot be read still lets the metadata and token rules block', async () => {
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    review: { settingsFor: () => ({}), reviewer: allowing, secretsFor: async () => { throw new Error('EACCES'); } },
+  });
+  const send = toolAt('message.send', 'gated');
+  const answer = await policy.approve({
+    call: { id: 'c', toolName: 'message.send', input: { text: `token ghp_${'a'.repeat(36)}` } },
+    tool: send,
+    risk: 'gated',
+    session: sessionFor('ava', true),
+  });
+  assert.equal(ran(answer), false);
+  assert.match((answer as { reason: string }).reason, /only the operator can change that/);
+});
+
+test('a secret store that never answers is bounded by the review timeout and the turn', async () => {
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    review: { settingsFor: () => ({ timeoutMs: 50 }), reviewer: allowing, secretsFor: () => new Promise<string[]>(() => {}) },
+  });
+  const started = Date.now();
+  const answer = await policy.approve({
+    call: { id: 'c', toolName: 'notes.add', input: {} },
+    tool: notes,
+    risk: 'gated',
+    session: sessionFor('ava', true),
+  });
+  assert.equal(ran(answer), false);
+  assert.match((answer as { reason: string }).reason, /secrets-unreadable/);
+  assert.ok(Date.now() - started < 2_000, 'bounded');
+  const controller = new AbortController();
+  const pending = policy.approve({
+    call: { id: 'c2', toolName: 'notes.add', input: {} },
+    tool: notes,
+    risk: 'gated',
+    session: sessionFor('ava', true),
+    signal: controller.signal,
+  });
+  controller.abort();
+  assert.equal(ran(await pending), false);
+});
+
 test('a reviewer allow on a page that moved during the review does not run there', async () => {
   let page = 'https://a.test/form';
   const act = toolAt('browser.act', 'gated', { originFor: () => page });
