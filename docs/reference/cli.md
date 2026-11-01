@@ -78,6 +78,9 @@ stratus memory export blair --file blair.jsonl          # move an agent's memory
 stratus memory import blair --file blair.jsonl          # lands external unless --preserve-trust
 stratus memory reassert blair --trust user --all-unknown  # re-label every fact with no recorded origin
 stratus memory reassert blair --trust agent <id>...
+stratus memory passes blair            # what memory passes did, newest first
+stratus memory list blair --pass <id>  # what one pass wrote
+stratus memory undo-pass blair <id>    # forget what that pass wrote
 stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
 stratus dashboard                      # local browser dashboard
 ```
@@ -106,6 +109,7 @@ stratus dashboard                      # local browser dashboard
 | `memory pin`, `memory unpin` | [Memory](../concepts/memory.md#pinned-facts) |
 | `memory export`, `memory import` | [Memory](../concepts/memory.md#moving-an-agents-memory) |
 | `memory reassert` | [Memory](../concepts/memory.md#where-a-fact-came-from) |
+| `memory passes`, `memory undo-pass` | [Memory](../concepts/memory.md#seeing-and-undoing-what-passes-did) |
 | `session rollover` | [Memory](../concepts/memory.md#the-label-is-yours-to-raise-and-only-yours), [Control API](../../packages/control-api/README.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |
 
@@ -140,7 +144,8 @@ stratus dashboard                      # local browser dashboard
 | `--tool`, `--scope`, `--origin` | `stratus grants revoke`: which grant goes — exactly one of them |
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
-| `--limit <n>` | `stratus memory search`: maximum hits. The store bounds the read either way. `stratus sessions`: how many to list, newest first (default 20) |
+| `--limit <n>` | `stratus memory search`: maximum hits. The store bounds the read either way. `stratus sessions`: how many to list, newest first (default 20). `stratus memory passes`: how many, newest first (default 20) |
+| `--pass <id>` | `stratus memory list`: only what this memory pass wrote, forgotten entries included |
 | `--status <status>` | `stratus sessions`: only sessions in this state — `idle`, `running`, `pending_approval`, `completed`, or `failed` — or `stopped-early`, the completed ones whose message ran out of steps (or repeated one failure) and wrapped up |
 | `--file <path>` | `stratus memory export` (omit for stdout) / `stratus memory import`: the JSONL |
 | `--preserve-trust` | `stratus memory import`: keep each entry's recorded trust label instead of landing it `external`. For a file you own and vouch for |

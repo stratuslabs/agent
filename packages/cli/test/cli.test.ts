@@ -72,6 +72,11 @@ import {
 } from '../src/index.ts';
 import {
   agentMemoryFilePath,
+  agentMemoryPassesFileIn,
+  agentMemoryShadowFileIn,
+  createHomeMemoryStore,
+  createMemoryPassLedger,
+  createMemoryShadowFile,
   fleetDbPath,
   loadChannelCredentials,
   loadChannelTransportSecrets,
@@ -82,6 +87,7 @@ import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
 import { SESSION_TRUST_METADATA_KEY } from '@stratusagent/core';
 import type { Session, Tool } from '@stratusagent/core';
 import { BUNDLED_PLUGIN_INDEX } from '../src/plugin-index.ts';
+import { memoryCommandWritesState } from '../src/parse.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 // Isolated HOME so tests never read or write the real ~/.stratus.
@@ -13435,6 +13441,21 @@ test('parseCommand reads the memory and session commands', () => {
   assert.throws(() => parseCommand(['memory', 'pin', 'ava']), /at least one entry id/);
   assert.throws(() => parseCommand(['memory', 'import', 'ava']), /--file/);
   assert.throws(() => parseCommand(['memory', 'compact', 'ava']), /Unknown memory subcommand/);
+  // Spec 962's three: the ledger, what one pass wrote, and taking it back.
+  assert.deepEqual(parseCommand(['memory', 'passes', 'ava', '--limit', '5', '--format', 'json']), {
+    command: 'memory', action: 'passes', agentId: 'ava', ids: [], allUnknown: false, limit: 5, preserveTrust: false, format: 'json',
+  });
+  assert.deepEqual(parseCommand(['memory', 'list', 'ava', '--pass', 'p1']), {
+    command: 'memory', action: 'list', agentId: 'ava', ids: [], allUnknown: false, pass: 'p1', preserveTrust: false, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'undo-pass', 'ava', 'p1']), {
+    command: 'memory', action: 'undo-pass', agentId: 'ava', ids: [], allUnknown: false, pass: 'p1', preserveTrust: false, format: 'text',
+  });
+  assert.throws(() => parseCommand(['memory', 'undo-pass', 'ava']), /pass id/);
+  assert.throws(() => parseCommand(['memory', 'undo-pass', 'ava', 'p1', 'p2']), /one pass/);
+  assert.throws(() => parseCommand(['memory', 'audit', 'ava', '--pass', 'p1']), /Unknown option: --pass/);
+  assert.equal(memoryCommandWritesState('passes'), false);
+  assert.equal(memoryCommandWritesState('undo-pass'), true);
 
   assert.deepEqual(parseCommand(['session', 'rollover', 'slack:ava:T1:D1']), {
     command: 'session', action: 'rollover', sessionId: 'slack:ava:T1:D1',
@@ -13444,6 +13465,81 @@ test('parseCommand reads the memory and session commands', () => {
   });
   assert.throws(() => parseCommand(['session', 'rollover']), /session id/);
   assert.throws(() => parseCommand(['session', 'archive', 's-1']), /Unknown session subcommand/);
+});
+
+test('stratus memory passes lists the ledger, list --pass shows what one pass wrote, and undo-pass takes it back', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-passes-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const stateDir = path.join(home, '.stratus');
+  const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(stateDir, 'ava'));
+  await ledger.append({ type: 'start', at: '2026-11-01T01:00:00.000Z', run: 'r1', mode: 'write' });
+  await ledger.append({
+    type: 'claim', at: '2026-11-01T01:10:00.000Z', run: 'r1', passId: 'p1', kind: 'save', mode: 'write', model: 'm',
+    sessionId: 'slack:ava:T1:C1', slice: { from: 'm1', to: 'm4', count: 4, cut: { messageId: 'm4', bytesOmitted: 900 } },
+  });
+  await ledger.append({ type: 'end', at: '2026-11-01T01:11:00.000Z', run: 'r1', passId: 'p1', status: 'done', saved: 1, superseded: 1, released: false });
+  // A hand-edited session id with a newline: escaped, never a forged line.
+  await ledger.append({
+    type: 'claim', at: '2026-11-01T01:20:00.000Z', run: 'r1', passId: 'p2', kind: 'save', mode: 'shadow', model: 'm',
+    sessionId: 's2\nforged  done', slice: { from: 'm9', to: 'm9', count: 1 },
+  });
+  await ledger.append({ type: 'end', at: '2026-11-01T01:21:00.000Z', run: 'r1', passId: 'p2', status: 'failed', reason: 'model', saved: 0, superseded: 0, released: true });
+  const store = createHomeMemoryStore(env);
+  const old = await store.append('ava', 'Ava prefers short replies.');
+  const merged = await store.append('ava', 'Ava prefers short replies, answer first.', {
+    supersedes: old.id, metadata: { memoryPass: { id: 'p1', kind: 'save' } },
+  });
+  const shadow = createMemoryShadowFile(agentMemoryShadowFileIn(stateDir, 'ava'));
+  await shadow.append({
+    id: 'shadow-1', agentId: 'ava', createdAt: '2026-11-01T01:20:30.000Z', content: 'Would have saved this.', trust: 'agent',
+    metadata: { memoryPass: { id: 'p2', kind: 'save' } },
+  });
+
+  const passes = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'ava'], streams: passes.streams, env }), 0);
+  const lines = passes.output.stdout.split('\n');
+  assert.match(lines[0]!, /^p2 {2}save shadow {2}failed \(model\) {2}saved 0, superseded 0 {2}2026-11-01T01:20:00\.000Z$/, 'newest first');
+  assert.match(passes.output.stdout, /session s2\\nforged {2}done: 1 message, m9/);
+  assert.match(passes.output.stdout, /^p1 {2}save write {2}done {2}saved 1, superseded 1/m);
+  assert.match(passes.output.stdout, /session slack:ava:T1:C1: 4 messages, m1 to m4; m4 was cut to fit, 900 bytes left out/);
+  const limited = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'ava', '--limit', '1', '--format', 'json'], streams: limited.streams, env }), 0);
+  const parsed = JSON.parse(limited.output.stdout) as { total: number; passes: Array<{ passId: string }> };
+  assert.equal(parsed.total, 2);
+  assert.deepEqual(parsed.passes.map((pass) => pass.passId), ['p2']);
+  const none = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'bea'], streams: none.streams, env }), 0);
+  assert.match(none.output.stdout, /bea has no memory passes/);
+
+  const wrote = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'p1'], streams: wrote.streams, env }), 0);
+  assert.match(wrote.output.stdout, /Ava prefers short replies, answer first\./);
+  assert.doesNotMatch(wrote.output.stdout, /Ava prefers short replies\.\n/, 'only what the pass wrote');
+  const wouldHave = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'p2'], streams: wouldHave.streams, env }), 0);
+  assert.match(wouldHave.output.stdout, /shadow mode/);
+  assert.match(wouldHave.output.stdout, /Would have saved this\./);
+  const unknownPass = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'nope'], streams: unknownPass.streams, env }), 1);
+  assert.match(unknownPass.output.stderr, /no pass nope/);
+
+  const undone = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'p1'], streams: undone.streams, env }), 0);
+  assert.match(undone.output.stdout, /Forgot 1 entry pass p1 wrote/);
+  const live = (await store.list('ava')).entries.map((entry) => entry.id);
+  assert.deepEqual(live, [old.id], 'what the pass replaced is live again');
+  const again = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'p1'], streams: again.streams, env }), 0);
+  assert.match(again.output.stdout, /p1 has no live entries left for ava; nothing was forgotten/);
+  const afterUndo = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--pass', 'p1'], streams: afterUndo.streams, env }), 0);
+  assert.match(afterUndo.output.stdout, new RegExp(`${merged.id}.*\\[forgotten `), 'list --pass still shows it, forgotten');
+  const shadowUndo = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'p2'], streams: shadowUndo.streams, env }), 0);
+  assert.match(shadowUndo.output.stdout, /shadow mode, so it wrote nothing to memory/);
+  const missingUndo = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'undo-pass', 'ava', 'nope'], streams: missingUndo.streams, env }), 1);
+  assert.match(missingUndo.output.stderr, /no pass nope/);
 });
 
 test('stratus memory list shows each entry’s label, and reassert moves the unlabelled ones as an operator', async () => {
@@ -13675,12 +13771,29 @@ test('stratus memory refuses when the fleet keeps its memories in a contributed 
 
   // Answering from the JSONL would report a store the agent does not use,
   // and pinning into it would write records nothing reads.
-  for (const argv of [['memory', 'list', 'ava'], ['memory', 'pin', 'ava', 'ava:memory:1'], ['memory', 'export', 'ava']]) {
+  for (const argv of [
+    ['memory', 'list', 'ava'],
+    ['memory', 'pin', 'ava', 'ava:memory:1'],
+    ['memory', 'export', 'ava'],
+    ['memory', 'list', 'ava', '--pass', 'p1'],
+    ['memory', 'undo-pass', 'ava', 'p1'],
+  ]) {
     const streams = createStreams();
     assert.equal(await runCli({ argv, streams: streams.streams, env }), 1, argv.join(' '));
     assert.match(streams.output.stderr, /selects memoryStore sqlite/);
     assert.doesNotMatch(streams.output.stdout, /Likes jazz/);
   }
+  // The pass ledger is the daemon's own record beside the agent's other
+  // state, whichever store holds the facts, so listing it still answers.
+  const ledger = createMemoryPassLedger(agentMemoryPassesFileIn(path.join(home, '.stratus'), 'ava'));
+  await ledger.append({ type: 'start', at: '2026-11-01T00:00:00.000Z', run: 'r1', mode: 'write' });
+  await ledger.append({
+    type: 'claim', at: '2026-11-01T00:01:00.000Z', run: 'r1', passId: 'p1', kind: 'save', mode: 'write', model: 'm', sessionId: 's1', slice: { from: 'm1', to: 'm1', count: 1 },
+  });
+  await ledger.append({ type: 'end', at: '2026-11-01T00:02:00.000Z', run: 'r1', passId: 'p1', status: 'done', saved: 1, superseded: 0, released: false });
+  const passes = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'passes', 'ava'], streams: passes.streams, env }), 0, passes.output.stderr);
+  assert.match(passes.output.stdout, /^p1 {2}save write {2}done {2}saved 1, superseded 0/m);
 
   // A project-local config cannot make that decision — where an agent keeps
   // its memories is not a call a cloned repository gets to make — so it is

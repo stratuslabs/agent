@@ -88,8 +88,16 @@ export {
   createForgetTool,
   PIN_TOOL_NAME,
   createPinTool,
+  rememberInput,
   type MemoryToolOptions,
 } from './tools/memory.ts';
+
+export {
+  createMemoryPassTools,
+  type MemoryPassToolOptions,
+  type MemoryPassToolState,
+  type MemoryPassWrite,
+} from './tools/memory-pass.ts';
 
 export {
   DELEGATE_TOOL_NAME,
