@@ -1557,8 +1557,10 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }
 
       // Which workspace this destination is in right now, for binding a
-      // grant to it (see `DestinationScopeOptions.accountFor`).
-      const account = destination !== undefined
+      // grant to it (see `DestinationScopeOptions.accountFor`). Only looked
+      // up when a grant could answer: a call an ask rule or the gate sends
+      // to a person doesn't wait on, or fail with, the lookup.
+      const account = destination !== undefined && !externalGate && grantsConsidered
         ? await destinations?.accountFor?.(session.agent.id, destination)
         : undefined;
       if (destination !== undefined && !externalGate && grantsConsidered) {
