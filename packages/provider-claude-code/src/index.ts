@@ -956,12 +956,16 @@ export const createClaudeCodeProvider = ({
           // The input closes on the result, which ends the query, unless a
           // message steered in is still unlisted: the CLI took it too late
           // to fold in and runs it as a turn of its own, whose result lists
-          // it. A CLI that lists nothing can't say, so it closes.
+          // it. A CLI that lists nothing can't say, so it closes. Out of
+          // turns is the same case: the CLI stopped before the call that
+          // would have folded the message in, and that result lists no
+          // uuids at all, so the turn on it is its answer.
           for (const uuid of message.user_message_uuids ?? []) {
             pending?.delete(uuid);
           }
-          const awaitingSteered = message.subtype === 'success' && !message.is_error
-            && message.user_message_uuids !== undefined && (pending?.size ?? 0) > 0;
+          const awaitingSteered = (pending?.size ?? 0) > 0
+            && ((message.subtype === 'success' && !message.is_error && message.user_message_uuids !== undefined)
+              || message.subtype === 'error_max_turns');
           if (!awaitingSteered) {
             input?.close();
           }

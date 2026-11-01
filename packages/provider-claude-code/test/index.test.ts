@@ -1753,7 +1753,7 @@ type RegisteredTools = Record<string, { handler: (a: unknown, b: unknown) => Pro
  * first. `foldInto` = how many results the fold takes: 1 is the usual
  * case, 2 is the CLI running a late message as its own turn.
  */
-const createSteeringQuery = (options: { lateFold?: boolean } = {}) => {
+const createSteeringQuery = (options: { lateFold?: boolean; outOfTurns?: boolean } = {}) => {
   const events: string[] = [];
   const sent: Array<Record<string, unknown>> = [];
   let promptKind = '';
@@ -1790,8 +1790,12 @@ const createSteeringQuery = (options: { lateFold?: boolean } = {}) => {
       await tools!.demo_echo!.handler({ text: 'build' }, {});
       events.push('tool result returned');
       const later = sent.slice(1).map((message) => message.uuid as string);
-      if (options.lateFold === true) {
-        yield { type: 'result', subtype: 'success', is_error: false, result: 'Built it.', session_id: 'sdk-958', user_message_uuids: [] } as ClaudeCodeStreamMessage;
+      if (options.lateFold === true || options.outOfTurns === true) {
+        // Out of turns, the CLI stops before the call that would fold the
+        // message in, and its result lists no uuids at all (SDK 0.3.316).
+        yield (options.outOfTurns === true
+          ? { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-958' }
+          : { type: 'result', subtype: 'success', is_error: false, result: 'Built it.', session_id: 'sdk-958', user_message_uuids: [] }) as ClaudeCodeStreamMessage;
         events.push('first result read');
         // A CLI whose input has closed exits after this result: the turn
         // it owed the late message never runs.
@@ -1885,6 +1889,23 @@ test('a steered message the CLI runs as a turn of its own keeps the input open u
   // Not closed after the first result, which did not carry the message.
   assert.deepEqual(fake.events, ['sent "Dylan: skip the tests"', 'tool result returned', 'first result read', 'input closed']);
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Built it.\n\nSkipped the tests.' }]);
+});
+
+test('a steered message waiting when the turn runs out of turns keeps the input open for the CLI\'s own turn on it, whose answer is the reply', async () => {
+  const fake = createSteeringQuery({ outOfTurns: true });
+  let asked = 0;
+  const steer = async () => {
+    asked += 1;
+    return asked === 1 ? { userMessage: 'Dylan: skip the tests' } : undefined;
+  };
+  const provider = createClaudeCodeProvider({ queryFn: fake.queryFn, executeTool: echoExecutor });
+
+  const response = await provider.generate(steeringRequest(steer));
+
+  // Not closed on the out-of-turns result, which never showed the model the
+  // message; no wrap-up either, since the CLI's turn on it answered.
+  assert.deepEqual(fake.events, ['sent "Dylan: skip the tests"', 'tool result returned', 'first result read', 'input closed']);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Skipped the tests.' }]);
 });
 
 test('a turn stopped while a steered message waits to be taken fails the call instead of waiting forever', async () => {
