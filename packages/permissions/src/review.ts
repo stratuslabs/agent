@@ -14,7 +14,6 @@ import {
   analyzeCommand,
   commandScopeFromPrefix,
   matchesScope,
-  type CommandAnalysis,
   type CommandScope,
 } from './commands.ts';
 import { analyzeCompound } from './compound.ts';
@@ -146,16 +145,6 @@ export interface ReviewedCall {
 const toolMatches = (pattern: string, toolName: string): boolean =>
   pattern.endsWith('.*') ? toolName.startsWith(pattern.slice(0, -1)) : pattern === toolName;
 
-/** Every command a line runs, or undefined when it can't be split into commands. */
-const commandsOf = (command: string): CommandAnalysis[] | undefined => {
-  const compound = analyzeCompound(command);
-  if (!compound.disqualifiedBy) {
-    return compound.pipelines.flat().map((stage) => stage.analysis);
-  }
-  const single = analyzeCommand(command);
-  return single.disqualifiedBy ? undefined : single.pipeline ?? [single];
-};
-
 const commandRuleMatches = (rule: ReviewRule, command: string): boolean => {
   if (rule.verdict === 'allow') {
     // All of it, through the same engine as an approved scope, and no
@@ -179,9 +168,8 @@ const commandRuleMatches = (rule: ReviewRule, command: string): boolean => {
   if ('reason' in words) {
     return false;
   }
-  const commands = commandsOf(command) ?? [];
-  if (commands.some((analysis) => analysis.base === words.scope.command
-    && (words.scope.args ?? []).every((arg, index) => analysis.tokens[index + 1] === arg))) {
+  const args = words.scope.args ?? [];
+  if (stagesOf(command).some((stage) => stageMatchesRule(stage, words.scope.command, args))) {
     return true;
   }
   // Other words of the same command may sit between the program and each
@@ -325,34 +313,144 @@ const sendsOutside = (call: { toolName: string; command?: string }): boolean => 
   if (call.command === undefined) {
     return false;
   }
-  const commands = commandsOf(call.command);
-  if (commands === undefined) {
-    // Unreadable (a path-qualified program is, too): a client named
-    // anywhere counts, by itself or as the last part of a path.
-    return [...NETWORK_CLIENTS].some((client) => new RegExp(`(?:^|[\\s;&|(\`'"/])${client}(?=$|[\\s;&|)\`'"])`).test(call.command as string));
-  }
   // Any word that names a client, not only the program a wrapper runs: a
-  // wrapper option no table lists (`sudo -R / curl`) or a client fed by
-  // another stage (`| xargs curl`) can't hide one. Coarse on purpose, since
-  // this only decides whether a token in the call is being sent out.
-  return commands.some((analysis) => analysis.tokens.some((token) => NETWORK_CLIENTS.has(token.split('/').pop() as string)));
+  // wrapper option no table lists (`sudo -R / curl`), a client fed by
+  // another stage (`| xargs curl`) or called by a quoted path can't hide
+  // one. Coarse on purpose, since this only decides whether a token in the
+  // call is being sent out.
+  return stagesOf(call.command).some((stage) => stage.some((word) => NETWORK_CLIENTS.has(baseName(word))));
 };
 
 /**
- * Each pipeline as its stages' words. A line the reader refuses (a program
- * called by its path is one) is split as text instead: coarse on purpose,
- * since this only decides whether to ask.
+ * A shell line split roughly: pipelines of stages of words, with quotes
+ * kept together and removed and separators counted only outside quotes.
+ * No expansions. For a line the analyzer refuses, and for a word that holds
+ * a command itself.
+ */
+const roughPipelines = (text: string): string[][][] => {
+  const pipelines: string[][][] = [];
+  let stages: string[][] = [];
+  let words: string[] = [];
+  let word = '';
+  let started = false;
+  let quote: string | undefined;
+  const endWord = (): void => {
+    if (started) {
+      words.push(word);
+    }
+    word = '';
+    started = false;
+  };
+  const endStage = (): void => {
+    endWord();
+    if (words.length > 0) {
+      stages.push(words);
+    }
+    words = [];
+  };
+  const endPipeline = (): void => {
+    endStage();
+    if (stages.length > 0) {
+      pipelines.push(stages);
+    }
+    stages = [];
+  };
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index] as string;
+    if (quote !== undefined) {
+      if (char === quote) {
+        quote = undefined;
+      } else if (char === '\\' && quote === '"' && index + 1 < text.length) {
+        index += 1;
+        word += text[index];
+      } else {
+        word += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+    } else if (char === '\\' && index + 1 < text.length) {
+      index += 1;
+      word += text[index];
+      started = true;
+    } else if (char === '\n' || char === ';') {
+      endPipeline();
+    } else if (/\s/.test(char)) {
+      endWord();
+    } else if (char === '&') {
+      if (text[index + 1] === '&') {
+        index += 1;
+      }
+      endPipeline();
+    } else if (char === '|') {
+      if (text[index + 1] === '|') {
+        index += 1;
+        endPipeline();
+      } else {
+        if (text[index + 1] === '&') {
+          index += 1;
+        }
+        endStage();
+      }
+    } else if ('()`<>'.includes(char)) {
+      endWord();
+    } else {
+      word += char;
+      started = true;
+    }
+  }
+  endPipeline();
+  return pipelines;
+};
+
+/**
+ * Each pipeline as its stages' words: the analyzer's when it reads the
+ * line, a rough split when it refuses it (a program called by its path is
+ * one), plus, one level down, the pipelines of any word that holds a
+ * command itself (`bash -c "git push"`). Coarse on purpose: these only
+ * decide whether a rule that asks or blocks applies.
  */
 const pipelinesOf = (command: string): string[][][] => {
   const compound = analyzeCompound(command);
-  if (!compound.disqualifiedBy) {
-    return compound.pipelines.map((pipeline) => pipeline.map((stage) => [...stage.analysis.tokens]));
+  const top = compound.disqualifiedBy
+    ? roughPipelines(command)
+    : compound.pipelines.map((pipeline) => pipeline.map((stage) => [...stage.analysis.tokens]));
+  const nested = top.flat(2).filter((word) => /[\s;&|]/.test(word)).flatMap((word) => roughPipelines(word));
+  return [...top, ...nested];
+};
+
+const stagesOf = (command: string): string[][] => pipelinesOf(command).flat();
+
+/** Whether `needle` appears in `words` in order, other words allowed between. */
+const inOrder = (needle: readonly string[], words: readonly string[]): boolean => {
+  let found = 0;
+  for (const word of words) {
+    if (found < needle.length && word === needle[found]) {
+      found += 1;
+    }
   }
-  return command
-    .split(/\|\||&&|[;\n]/)
-    .map((pipeline) => pipeline
-      .split(/\|&?/)
-      .map((stage) => stage.split(/[\s()`'"<>]+/).filter((word) => word.length > 0)));
+  return found === needle.length;
+};
+
+/**
+ * Whether a stage runs a rule's program (by name or path, as its program
+ * or after a wrapper) with the rule's words after it, in order: `git -C
+ * repo push` is a `git push`.
+ */
+const stageMatchesRule = (stage: readonly string[], program: string, args: readonly string[]): boolean => {
+  const start = stage.findIndex((word) => !ASSIGNMENT.test(word));
+  if (start < 0) {
+    return false;
+  }
+  const first = baseName(stage[start] as string);
+  const at = first === program
+    ? [start]
+    : WRAPPER_NAMES.has(first)
+      ? stage.flatMap((word, index) => (index > start && baseName(word) === program ? [index] : []))
+      : [];
+  return at.some((index) => inOrder(args, stage.slice(index + 1)));
 };
 
 const pipesDownloadIntoInterpreter = (command: string): boolean =>
