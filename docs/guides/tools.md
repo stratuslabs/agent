@@ -293,7 +293,10 @@ spawn every server you configured. Two consequences worth knowing:
   A registered tool may raise itself further, and `shell.run` and
   `browser.act` are then judged per call ([Shell commands](./shell.md),
   [Browser actions](./browser.md)), so `gated` there means "judged", not
-  "refused".
+  "refused". It is also why a soul with no `tools:` list, which gets only
+  the tools that register as safe, is named apart on a `safe` row with no
+  override: `fs.read  safe → blair; quiet if it registers as safe`. Only
+  the running daemon sees the risk the tool registers at.
 - **Where a gated call can be answered from is not only Slack.** The
   control API's `/approvals` endpoints list what is parked and settle it,
   so an agent with no Slack tokens is not necessarily unreachable. An agent

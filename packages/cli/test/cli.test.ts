@@ -15572,6 +15572,92 @@ test('plugins lets a configured soul take the built-in id over rather than listi
   assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
 });
 
+test('plugins does not show a grant to a soul with no tools: list as certain while the tool could still register riskier', async () => {
+  // Card 1038, from Codex on #510: a soul with no `tools:` list gets only the
+  // tools that *register* as safe. The report reads the manifest, and a tool
+  // object may raise its own risk at registration, so a manifest-safe tool
+  // is only probably safe. Shown as a plain arrow, the grant could name an
+  // agent the runner then refuses.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+
+  const json = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams: json.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(json.output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  const read = tools.find((tool) => tool.name === 'fs.read');
+  // The listed souls are certain; the unlisted one depends on the risk the
+  // tool registers at, which only a running daemon sees.
+  assert.deepEqual(read?.grantedTo, ['stratus', 'blair']);
+  assert.deepEqual(read?.grantedIfSafe, ['quiet']);
+  // Gated already, and registration only ever raises a risk: no grant to
+  // an unlisted soul, and nothing uncertain about it.
+  const write = tools.find((tool) => tool.name === 'fs.write');
+  assert.deepEqual(write?.grantedTo, []);
+  assert.equal(write?.grantedIfSafe, undefined);
+
+  const text = createStreams();
+  await runCli({ argv: ['plugins'], streams: text.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.match(text.output.stdout, /fs\.read\s+safe → stratus, blair; quiet if it registers as safe\n/);
+  assert.match(text.output.stdout, /fs\.list\s+safe → quiet if it registers as safe\n/);
+  assert.match(text.output.stdout, /fs\.write\s+gated → nobody, until a soul’s tools: list names it\n/);
+});
+
+test('plugins shows a soul with no tools: list as granted a tool the operator rated safe', async () => {
+  // An operator's `toolRisks` word replaces the object's own claim at
+  // registration, so a tool rated safe there is safe for certain.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.plugins['@stratusagent/tool-fs'].toolRisks = { 'fs.read': 'safe' };
+  await writeFile(configPath, JSON.stringify(config));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair', 'quiet']);
+  assert.equal(tools.find((tool) => tool.name === 'fs.read')?.grantedIfSafe, undefined);
+  // fs.list has no override, so it stays uncertain beside it.
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.list')?.grantedIfSafe, ['quiet']);
+});
+
+test('plugins shows every tool as granted to a soul with no tools: list on a home an older build set up', async () => {
+  // There an unlisted soul keeps every tool whatever it registers at, so
+  // nothing about the grant waits on the risk.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+  // What 0.14.2 left behind.
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair', 'quiet']);
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, ['quiet']);
+  assert.ok(tools.every((tool) => tool.grantedIfSafe === undefined));
+});
+
 test('plugins does not offer a stale Slack token as an approver route', async () => {
   const { home, cwd } = await writePluginFixture();
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
