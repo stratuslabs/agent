@@ -10,6 +10,7 @@ import {
   type AgentApprovalConfig,
   MAX_APPROVAL_TIMEOUT_MS,
   type ApprovalsConfig,
+  type ReviewApprovalConfig,
   type AgentPrincipalsConfig,
   type AgentSlackConfig,
   type PrincipalsConfig,
@@ -21,7 +22,7 @@ import {
   type PluginsConfig,
   type StratusConfigFile,
 } from './config.ts';
-import { normalizeTrustedDomain, trustedDomainProblem } from '@stratusagent/permissions';
+import { normalizeTrustedDomain, parseReviewRule, trustedDomainProblem, type ReviewRule } from '@stratusagent/permissions';
 
 import { REGISTERED_PROVIDER_NAME_PATTERN, parseProviderName } from './provider-names.ts';
 import { CREDENTIAL_NAME_PATTERN } from './credentials.ts';
@@ -572,12 +573,31 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     // Refused when misspelled: a typo that silently meant `open` would run
     // everything unasked, and one that meant `guarded` would look like the
     // setting did nothing.
-    if (source.posture !== 'open' && source.posture !== 'guarded') {
+    if (source.posture !== 'open' && source.posture !== 'guarded' && source.posture !== 'review') {
       throw new Error(
-        `Unsupported ${where}.posture in config ${configPath}: ${String(source.posture)}. Use open or guarded.`,
+        `Unsupported ${where}.posture in config ${configPath}: ${String(source.posture)}. Use open, guarded or review.`,
       );
     }
     route.posture = source.posture;
+  }
+  if (source.review !== undefined) {
+    route.review = parseReviewApprovals(source.review, configPath, `${where}.review`);
+  }
+  if (source.rules !== undefined) {
+    // Refused rule by rule, never dropped: a rule an operator wrote and the
+    // daemon skipped would leave them believing a block is in place.
+    if (!Array.isArray(source.rules)) {
+      throw new Error(
+        `Invalid ${where}.rules in config ${configPath}: expected a list like [{ "tool": "shell.run", "command": "git push", "verdict": "allow" }].`,
+      );
+    }
+    route.rules = source.rules.map((entry, index): ReviewRule => {
+      const parsed = parseReviewRule(entry);
+      if ('reason' in parsed) {
+        throw new Error(`Invalid ${where}.rules[${index}] in config ${configPath}: ${parsed.reason}.`);
+      }
+      return parsed.rule;
+    });
   }
   if (Array.isArray(source.slackApprovers)) {
     // Kept even when it filters down to nothing. An agent entry saying
@@ -685,6 +705,41 @@ const standingChannelEntryValid = (entry: string): boolean =>
   STANDING_CHANNEL_ENTRY.test(entry)
   && (!entry.startsWith('slack:') || SLACK_STANDING_CHANNEL_ENTRY.test(entry));
 
+/** The longest one review may take, in milliseconds: ten minutes. */
+const MAX_REVIEW_TIMEOUT_MS = 600_000;
+const REVIEW_KEYS = new Set(['model', 'shadow', 'timeoutMs']);
+
+const parseReviewApprovals = (raw: unknown, configPath: string, where: string): ReviewApprovalConfig => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid ${where} in config ${configPath}: expected an object like { "model": "claude-haiku-4-5", "shadow": true }.`);
+  }
+  const source = raw as Record<string, unknown>;
+  const unknownKey = Object.keys(source).find((key) => !REVIEW_KEYS.has(key));
+  if (unknownKey !== undefined) {
+    throw new Error(`Invalid ${where} in config ${configPath}: unknown key "${unknownKey}"; use model, shadow or timeoutMs.`);
+  }
+  const review: ReviewApprovalConfig = {};
+  if (source.model !== undefined) {
+    if (typeof source.model !== 'string' || source.model.trim().length === 0) {
+      throw new Error(`Invalid ${where}.model in config ${configPath}: expected a model name like "claude-haiku-4-5".`);
+    }
+    review.model = source.model.trim();
+  }
+  if (source.shadow !== undefined) {
+    if (typeof source.shadow !== 'boolean') {
+      throw new Error(`Invalid ${where}.shadow in config ${configPath}: expected true or false.`);
+    }
+    review.shadow = source.shadow;
+  }
+  if (source.timeoutMs !== undefined) {
+    if (typeof source.timeoutMs !== 'number' || !Number.isInteger(source.timeoutMs) || source.timeoutMs < 1 || source.timeoutMs > MAX_REVIEW_TIMEOUT_MS) {
+      throw new Error(`Invalid ${where}.timeoutMs in config ${configPath}: expected a whole number of milliseconds from 1 to ${MAX_REVIEW_TIMEOUT_MS}.`);
+    }
+    review.timeoutMs = source.timeoutMs;
+  }
+  return review;
+};
+
 const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
   const route = parseApprovalRoute(raw, configPath, 'approvals');
   if (!route) {
@@ -770,8 +825,23 @@ export const resolveAgentApprovals = (
   const branchPrefixes = agent?.branchPrefixes ?? approvals?.branchPrefixes;
   const trustedDomains = [...new Set([...(approvals?.trustedDomains ?? []), ...(agent?.trustedDomains ?? [])])];
   const channels = [...new Set([...(approvals?.channels ?? []), ...(agent?.channels ?? [])])];
+  // Per key, like the route: an agent that only turns shadow off keeps the
+  // shared model and timeout.
+  const reviewModel = agent?.review?.model ?? approvals?.review?.model;
+  const reviewShadow = agent?.review?.shadow ?? approvals?.review?.shadow;
+  const reviewTimeout = agent?.review?.timeoutMs ?? approvals?.review?.timeoutMs;
+  const review = {
+    ...(reviewModel !== undefined ? { model: reviewModel } : {}),
+    ...(reviewShadow !== undefined ? { shadow: reviewShadow } : {}),
+    ...(reviewTimeout !== undefined ? { timeoutMs: reviewTimeout } : {}),
+  };
+  // The agent's own rules first, then the shared ones: first match wins,
+  // so an agent's exception comes ahead of the fleet's default.
+  const rules = [...(agent?.rules ?? []), ...(approvals?.rules ?? [])];
   return {
     posture,
+    ...(Object.keys(review).length > 0 ? { review } : {}),
+    ...(rules.length > 0 ? { rules } : {}),
     ...(autonomy !== undefined ? { autonomy } : {}),
     ...(branchPrefixes !== undefined ? { branchPrefixes } : {}),
     ...(slackApprovers ? { slackApprovers } : {}),

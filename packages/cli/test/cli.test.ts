@@ -32,12 +32,15 @@ import {
   warnOnUntrustedConfig,
   describePrincipals,
   describePosture,
+  describeReviewPosture,
+  describeUnmatchableRules,
   describeRemoteMode,
   describeUnreachable,
   loadServeApprovals,
   defaultPosture,
   unflaggedApprovals,
   externalContentGated,
+  reviewSettingsIn,
   loadServePrincipals,
   loadServeSlack,
   currentLogPosition,
@@ -84,7 +87,7 @@ import {
   validateSkillDirectory,
 } from '@stratusagent/state';
 import { loadStratusSkill, STRATUS_SKILL_PATH } from '@stratusagent/agents';
-import { SESSION_TRUST_METADATA_KEY } from '@stratusagent/core';
+import { SESSION_TAINTED_BY_METADATA_KEY, SESSION_TRUST_METADATA_KEY } from '@stratusagent/core';
 import type { Session, Tool } from '@stratusagent/core';
 import { BUNDLED_PLUGIN_INDEX } from '../src/plugin-index.ts';
 import { memoryCommandWritesState } from '../src/parse.ts';
@@ -15964,6 +15967,73 @@ test('the startup posture line names the default and the agents that differ', ()
   );
 });
 
+test('the review posture is named at startup with its model, shadow, and what happens to an ask', () => {
+  assert.equal(
+    describePosture({ posture: 'review' }, 'remote'),
+    'posture review for every agent (gated tools run without asking until a conversation reads outside content; '
+      + 'then rules and a reviewer decide, and what they ask about is asked once in Slack)',
+  );
+  assert.match(describePosture({ posture: 'review' }, 'headless'), /what they ask about is refused, since headless asks nobody\)$/);
+  assert.match(describePosture({ agents: { ava: { posture: 'review' } } }, 'remote'), /^posture open for every agent except ava /);
+
+  const approvals = {
+    review: { model: 'claude-haiku-4-5' },
+    rules: [{ tool: 'mcp.stripe.*', verdict: 'block' as const }],
+    agents: {
+      atlas: { posture: 'review' as const, review: { shadow: true } },
+      blair: { posture: 'review' as const, review: { model: 'claude-sonnet-4-5' } },
+      cy: { posture: 'review' as const },
+    },
+  };
+  // Both on review, so nothing is ignored; Dee below is open, so the shared rules don't apply to it.
+  assert.deepEqual(describeReviewPosture({ ...approvals, review: {} }, 'remote', ['atlas', 'cy']), [
+    'posture review for atlas (the agent\'s own model, shadow: reviewed and logged, never enforced), cy (the agent\'s own model)',
+  ]);
+  assert.deepEqual(describeReviewPosture(approvals, 'headless', ['atlas', 'blair', 'dee']), [
+    'posture review for atlas (model claude-haiku-4-5, shadow: reviewed and logged, never enforced), blair (model claude-sonnet-4-5)',
+    'review asks are refused for blair: no approver (headless)',
+    'approvals.rules are ignored for dee: they apply only under posture review',
+  ]);
+  assert.deepEqual(describeReviewPosture({}, 'remote', ['ava']), []);
+});
+
+test('a review rule naming a matcher its tool does not offer is named at startup', () => {
+  const tools = [
+    { name: 'shell.run', risk: 'gated' as const, scopedBy: 'command' as const },
+    { name: 'web.fetch', risk: 'gated' as const, scopedBy: 'origin' as const },
+    { name: 'mcp.stripe.refund', risk: 'gated' as const },
+  ];
+  const approvals = {
+    posture: 'review' as const,
+    rules: [
+      { tool: 'shell.run', command: 'git push', verdict: 'allow' as const },
+      { tool: 'shell.run', origin: 'https://x.test', verdict: 'block' as const },
+      { tool: 'mcp.stripe.*', command: 'refund', verdict: 'block' as const },
+      { tool: 'not.loaded', destination: 'slack:*', verdict: 'ask' as const },
+    ],
+    agents: { ava: { rules: [{ tool: 'web.fetch', destination: 'slack:*', verdict: 'ask' as const }] } },
+  };
+  assert.deepEqual(describeUnmatchableRules(approvals, tools, ['ava']), [
+    'approvals.rules[1] (shell.run origin https://x.test: block) never matches shell.run, which is judged by a command',
+    'approvals.rules[2] (mcp.stripe.* command "refund": block) never matches mcp.stripe.refund, which names no command, origin or destination',
+    'approvals.agents.ava.rules[0] (web.fetch destination slack:*: ask) never matches web.fetch, which is judged by an origin',
+  ]);
+  // Nobody on review: rules are ignored anyway, and the line above says so.
+  assert.deepEqual(describeUnmatchableRules({ ...approvals, posture: 'open' as const }, tools, ['ava']), []);
+});
+
+test('the remote-mode line says what is parked for agents on the review posture', () => {
+  assert.match(
+    describeRemoteMode({ mode: 'remote', posture: 'review' }, ['ava']),
+    /^approvals: remote — calls the review asks about, and dangerous ones, are parked and asked in Slack, once each \(/,
+  );
+  assert.match(
+    describeRemoteMode({ mode: 'remote', agents: { ava: { posture: 'review' } } }, ['ava', 'bea'], ['ava', 'bea']),
+    /gated ones run without asking under the open posture; ava's calls the review asks about are parked too \(/,
+  );
+  assert.match(describeUnreachable({ mode: 'remote', posture: 'review' }, ['ava']), /their calls that would ask will wait/);
+});
+
 test('the startup posture lines leave out overrides for agents that are not served', () => {
   // Codex P2 4310622987: a stale override named a nonexistent agent as the exception.
   const approvals = { mode: 'remote' as const, posture: 'guarded' as const, agents: { ghost: { posture: 'open' as const } } };
@@ -16034,6 +16104,63 @@ test('an unflagged chat or run is never more permissive than open, whatever the 
   assert.deepEqual(unflaggedApprovals('guarded', 'gated'), { approvals: 'gated', approvalsDefaulted: true });
 });
 
+test('chat and run follow the review posture: rules hold, outside content asks at the terminal, nobody to ask refuses', async () => {
+  assert.deepEqual(unflaggedApprovals('review', 'gated'), { approvals: 'open', approvalsPosture: 'review' });
+  assert.deepEqual(unflaggedApprovals('review', 'always'), { approvals: 'open', approvalsDefaulted: true, approvalsPosture: 'review' });
+
+  const session = { id: 's1', agent: { id: 'stratus', name: 'Stratus' }, status: 'running', messages: [], createdAt: '', updatedAt: '' } as unknown as Session;
+  const external = { ...session, metadata: { [SESSION_TRUST_METADATA_KEY]: 'external', [SESSION_TAINTED_BY_METADATA_KEY]: 'web.fetch' } } as unknown as Session;
+  const notes: Tool = { name: 'notes.add', description: 'notes', risk: 'gated', execute: async () => null };
+  const stripe: Tool = { name: 'mcp.stripe.refund', description: 'refund', risk: 'gated', execute: async () => null };
+  const call = (tool: Tool, on: Session) => ({ session: on, call: { id: 'c', toolName: tool.name, input: {} }, tool, risk: 'gated' as const });
+  const review = { rules: [{ tool: 'mcp.stripe.*', verdict: 'block' as const }] };
+
+  const prompts: string[] = [];
+  const terminal = createStreams();
+  const policy = createApprovalPolicy('open', terminal.streams, {}, async (question) => {
+    prompts.push(question);
+    return 'y';
+  }, false, { gateExternalContent: false, review });
+  assert.equal(await policy.approve(call(notes, session)), true, 'nothing read from outside: runs');
+  assert.notEqual(await policy.approve(call(stripe, session)), true, 'an operator block holds in every session');
+  assert.equal(prompts.length, 0);
+  assert.equal(await policy.approve(call(notes, external)), true, 'after outside content it asks, and a yes runs it');
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0] ?? '', /Review: /);
+
+  // The agent's stored values reach the built-in rule, which blocks sending
+  // one out after outside content rather than asking about it.
+  const send: Tool = { name: 'message.send', description: 'send', risk: 'gated', execute: async () => null };
+  const withSecrets = createApprovalPolicy('open', terminal.streams, {}, async (question) => {
+    prompts.push(question);
+    return 'y';
+  }, false, { gateExternalContent: false, review, secretsFor: async () => ['stored-secret-value'] });
+  const leak = await withSecrets.approve({ ...call(send, external), call: { id: 'c2', toolName: 'message.send', input: { text: 'here: stored-secret-value' } } });
+  assert.notEqual(leak, true);
+  assert.match((leak as { reason: string }).reason, /looks like a credential or token/);
+  assert.equal(prompts.length, 1, 'blocked, not asked');
+
+  const piped = createStreams();
+  const unattended = createApprovalPolicy('open', piped.streams, {}, async () => 'y', true, { gateExternalContent: false, review });
+  assert.equal(await unattended.approve(call(notes, session)), true);
+  const refused = await unattended.approve(call(notes, external));
+  assert.notEqual(refused, true);
+  assert.match((refused as { reason: string }).reason, /nobody is set up to approve this/);
+  assert.match(piped.output.stderr, /Note: refusing notes\.add/);
+
+  // Shadow runs every call as open: what the review would have refused is
+  // not reported as a refusal (Codex P2 4434717561).
+  const shadowPiped = createStreams();
+  const shadow = createApprovalPolicy('open', shadowPiped.streams, {}, async () => 'y', true, {
+    gateExternalContent: false,
+    review: { ...review, shadow: true },
+  });
+  assert.equal(await shadow.approve(call(stripe, external)), true);
+  assert.equal(await shadow.approve(call(notes, external)), true);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.doesNotMatch(shadowPiped.output.stderr, /Note: refusing/);
+});
+
 test('an approvals block that cannot be trusted or read leaves the daemon guarded, never open', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -16059,6 +16186,15 @@ test('an approvals block that cannot be trusted or read leaves the daemon guarde
   assert.equal(await defaultPosture({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'open');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', approvals: { posture: 'guarded' } }));
   assert.equal(await defaultPosture({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'guarded');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'demo',
+    approvals: { posture: 'review', rules: [{ tool: 'mcp.*', verdict: 'block' }], review: { timeoutMs: 5000 } },
+  }));
+  assert.equal(await defaultPosture({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'), 'review');
+  assert.deepEqual(
+    await reviewSettingsIn({ cwd: project, homeDir: home, processEnv: {} }, undefined, 'stratus'),
+    { rules: [{ tool: 'mcp.*', verdict: 'block' }], timeoutMs: 5000 },
+  );
 
   await writeFile(path.join(home, '.stratus', 'config.json'), '{ not json');
   const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));

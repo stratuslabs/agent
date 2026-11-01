@@ -3646,6 +3646,8 @@ const approvalBlocks = (
   origin: string | undefined,
   oneShot: boolean,
   always: AlwaysMeans | undefined,
+  /** Why the review posture is asking: shown as plain text, so it can't mention or format. */
+  reviewNote?: string,
 ): SlackBlock[] => {
   const invocation = renderInvocation(input);
   const offer = oneShot ? undefined : alwaysOffer(always, agentName);
@@ -3673,6 +3675,12 @@ const approvalBlocks = (
       ? [{
           type: 'context',
           elements: [{ type: 'mrkdwn', text: ':warning: Arguments shown are truncated — the full call is longer than this.' }],
+        }]
+      : []),
+    ...(reviewNote !== undefined && reviewNote.trim().length > 0
+      ? [{
+          type: 'context',
+          elements: [{ type: 'plain_text', text: `Review: ${reviewNote.trim().slice(0, 300)}`, emoji: false }],
         }]
       : []),
     // Why there is no second button, when there is no second button — and
@@ -6349,6 +6357,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           event.origin,
           event.oneShot === true,
           event.always,
+          event.reviewNote,
         ),
       });
       post = posted.ts

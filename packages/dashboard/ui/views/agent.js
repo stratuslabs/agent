@@ -73,6 +73,13 @@ export const renderAgent = (agentId, initialSessionId) => {
      * that numbers its calls per response reuses ids within one turn.
      */
     decisions: new Map(),
+    /**
+     * Shadow decisions (the review posture's, worked out off the call
+     * path) waiting for their line, by call id, oldest first. Kept apart
+     * from `decisions`: a call has its real decision and may have a shadow
+     * one too, and the shadow one often arrives first.
+     */
+    shadows: new Map(),
     turnId: undefined,
     /**
      * Envelopes that arrived before the POST said which turn is ours.
@@ -174,10 +181,14 @@ export const renderAgent = (agentId, initialSessionId) => {
     }
     for (const line of state.toolLines) {
       const decision = line.decision;
+      const shadow = line.shadow;
       nodes.push(el('div', { class: 'bubble tool' },
         line.text,
         decision
           ? el('span', { class: `decision ${decisionTone(decision)}`, title: decision.reason }, decisionNote(decision))
+          : null,
+        shadow
+          ? el('span', { class: `decision shadow ${decisionTone(shadow)}`, title: shadow.reason }, decisionNote(shadow))
           : null,
         // A refusal's reason is what the agent was told, and the actionable
         // half for whoever is watching; an allowed call's reason stays in
@@ -227,6 +238,7 @@ export const renderAgent = (agentId, initialSessionId) => {
       state.streaming = '';
       state.toolLines = [];
       state.decisions = new Map();
+      state.shadows = new Map();
       paintTranscript();
       update();
       return;
@@ -252,6 +264,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.streaming = '';
     state.toolLines = [];
     state.decisions = new Map();
+    state.shadows = new Map();
     paintTranscript();
     update();
   };
@@ -307,6 +320,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.streaming = '';
     state.toolLines = [];
     state.decisions = new Map();
+    state.shadows = new Map();
     paintTranscript();
     update();
   };
@@ -340,6 +354,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.streaming = '';
     state.toolLines = [];
     state.decisions = new Map();
+    state.shadows = new Map();
     paintTranscript();
     update();
 
@@ -412,7 +427,12 @@ export const renderAgent = (agentId, initialSessionId) => {
     if (decision !== undefined) {
       state.decisions.delete(callId);
     }
-    state.toolLines = [...state.toolLines, { text, callId, decides, ...(decision ? { decision } : {}) }];
+    const waiting = decides ? state.shadows.get(callId) : undefined;
+    const shadow = waiting?.shift();
+    if (waiting !== undefined && waiting.length === 0) {
+      state.shadows.delete(callId);
+    }
+    state.toolLines = [...state.toolLines, { text, callId, decides, ...(decision ? { decision } : {}), ...(shadow ? { shadow } : {}) }];
     paintTranscript();
   };
 
@@ -449,9 +469,6 @@ export const renderAgent = (agentId, initialSessionId) => {
         }
         break;
       case 'permission.decided': {
-        // Usually ahead of its call, so it waits for the line; a decision
-        // made off the call path (shadow) comes after and joins the latest
-        // line for that call that has none yet.
         const decision = {
           allowed: event.allowed,
           layer: event.layer,
@@ -460,6 +477,22 @@ export const renderAgent = (agentId, initialSessionId) => {
           reviewCode: event.reviewCode,
           shadow: event.shadow,
         };
+        if (event.shadow === true) {
+          // Off the call path, so before or after its line. It joins the
+          // earliest line for that call still without one: reviews settle
+          // in the order their calls were made, near enough, which keeps a
+          // reused call id from taking a later call's shadow.
+          const index = state.toolLines.findIndex((line) => line.decides && line.callId === event.callId && line.shadow === undefined);
+          if (index >= 0) {
+            state.toolLines = state.toolLines.map((line, at) => (at === index ? { ...line, shadow: decision } : line));
+            paintTranscript();
+          } else {
+            state.shadows.set(event.callId, [...(state.shadows.get(event.callId) ?? []), decision]);
+          }
+          break;
+        }
+        // Usually ahead of its call, so it waits for the line; one made
+        // later joins the latest line for that call that has none yet.
         const index = state.toolLines.findLastIndex((line) => line.decides && line.callId === event.callId);
         if (index >= 0 && state.toolLines[index].decision === undefined) {
           state.toolLines = state.toolLines.map((line, at) => (at === index ? { ...line, decision } : line));
@@ -754,6 +787,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.streaming = '';
     state.toolLines = [];
     state.decisions = new Map();
+    state.shadows = new Map();
     void loadSessions();
     update();
   };

@@ -81,6 +81,25 @@ export const createEventStream = (gateway: Gateway) => {
    */
   const watchedTurns = new Map<string, { reported: boolean }>();
   const watchKey = (sessionId: string, turnId: string): string => `${sessionId}\u0000${turnId}`;
+  /**
+   * The turn each recent call ran in, for a decision about it that arrives
+   * later: the review posture's shadow mode works its decision out off the
+   * call path, and by then the session may be running another turn. Keyed
+   * by session and call id, the latest call winning (an endpoint that
+   * numbers its calls per response reuses ids), and bounded, oldest first.
+   */
+  const callTurns = new Map<string, string>();
+  const CALL_TURNS_LIMIT = 4096;
+  const rememberCallTurn = (key: string, turnId: string): void => {
+    callTurns.delete(key);
+    callTurns.set(key, turnId);
+    if (callTurns.size > CALL_TURNS_LIMIT) {
+      const oldest = callTurns.keys().next().value;
+      if (oldest !== undefined) {
+        callTurns.delete(oldest);
+      }
+    }
+  };
 
   const resolveAgentSessions = (agentId: string): Set<string> =>
     new Set(gateway.store.list(agentId).map((session) => session.id));
@@ -150,7 +169,13 @@ export const createEventStream = (gateway: Gateway) => {
     // first stamped that failure with the second turn's id — falsely killing
     // a turn that was fine while the client waiting on the first one never
     // heard anything.
-    const turnId = turnOverrides.get(event.sessionId) ?? gateway.activeTurnId(event.sessionId);
+    const current = turnOverrides.get(event.sessionId) ?? gateway.activeTurnId(event.sessionId);
+    const turnId = event.type === 'permission.decided' && event.shadow === true
+      ? callTurns.get(watchKey(event.sessionId, event.callId)) ?? current
+      : current;
+    if (current !== undefined && event.type === 'tool.called') {
+      rememberCallTurn(watchKey(event.sessionId, event.call.id), current);
+    }
     if (turnId !== undefined && (event.type === 'session.failed' || event.type === 'session.completed')) {
       // Noted before the no-clients shortcut below: whether a turn reported
       // its own outcome is not a question about who is watching.

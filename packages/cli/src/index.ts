@@ -114,8 +114,8 @@ export {
 
 export { formatEvent, eventDetail } from './events.ts';
 
-export { describeApprovalCall, createApprovalPolicy, describePrincipals, describePosture, describeRemoteMode, describeUnreachable } from './approvals.ts';
-export { loadServePrincipals, loadServeSlack, loadServeApprovals, defaultPosture, unflaggedApprovals, externalContentGated } from './trusted-config.ts';
+export { describeApprovalCall, createApprovalPolicy, describePrincipals, describePosture, describeRemoteMode, describeReviewPosture, describeUnmatchableRules, describeUnreachable } from './approvals.ts';
+export { loadServePrincipals, loadServeSlack, loadServeApprovals, defaultPosture, unflaggedApprovals, externalContentGated, reviewSettingsIn } from './trusted-config.ts';
 
 export {
   resolveRuntimeConfig,

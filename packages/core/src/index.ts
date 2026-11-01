@@ -4857,6 +4857,12 @@ export type StratusEvent =
        * same button, and only the request knows which it is.
        */
       always?: AlwaysMeans;
+      /**
+       * Why the review posture is asking, in one line: the reviewer's words
+       * or the rule that asked. A renderer shows it as plain text beside the
+       * call; it can echo the call's input, which this event carries anyway.
+       */
+      reviewNote?: string;
       metadata?: JsonObject;
       /**
        * Where the work was asked for, when this call is in a delegated

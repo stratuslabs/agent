@@ -616,6 +616,52 @@ test('the destination grant holds only inside a live firing, from the row a huma
   store.close();
 });
 
+test('a firing\'s prompt is known while it runs and after a restart resumes it, never from metadata alone', async () => {
+  // The review posture reads a firing's prompt as the whole request. A
+  // firing parked on approval and resumed after a restart is no longer in
+  // this process's live set, but its session id is still in the reserved
+  // namespace only the scheduler dispatches into, so the prompt stays bound
+  // to it rather than falling back to the message that carries the events.
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const sessionLike = (sessionId: string, agentId: string, scheduleId?: string): Session => {
+    const now = new Date().toISOString();
+    return {
+      id: sessionId,
+      agent: { id: agentId, name: agentId },
+      status: 'running',
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+      ...(scheduleId ? { metadata: { [SCHEDULE_ID_METADATA_KEY]: scheduleId } } : {}),
+    };
+  };
+  const during: unknown[] = [];
+  const fired = deferred<string>();
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      during.push(runtime.firingPromptFor(sessionLike(input.sessionId, 'ava', 'sched-1')));
+      fired.resolve(input.sessionId);
+    },
+  });
+  store.insert(record({ id: 'sched-1', prompt: 'summarize new PRs', nextFireAt: new Date(Date.now() - 5).toISOString() }));
+  store.insert(record({ id: 'sched-2', prompt: 'something else' }));
+  await runtime.start();
+  const firingSessionId = await fired.promise;
+  runtime.stop();
+  await runtime.drain();
+
+  assert.deepEqual(during, [{ kind: 'schedule', prompt: 'summarize new PRs', trust: 'unknown' }]);
+  // After the turn, as a recovered firing would be.
+  assert.deepEqual(runtime.firingPromptFor(sessionLike(firingSessionId, 'ava', 'sched-1')), { kind: 'schedule', prompt: 'summarize new PRs', trust: 'unknown' });
+  // Never for another agent, another schedule's id, or a session outside the namespace.
+  assert.equal(runtime.firingPromptFor(sessionLike(firingSessionId, 'bea', 'sched-1')), undefined);
+  assert.equal(runtime.firingPromptFor(sessionLike(firingSessionId, 'ava', 'sched-2')), undefined);
+  assert.equal(runtime.firingPromptFor(sessionLike('api-dispatched-session', 'ava', 'sched-1')), undefined);
+  assert.equal(runtime.firingPromptFor(sessionLike('schedule:sched-10:x', 'ava', 'sched-1')), undefined);
+  store.close();
+});
+
 test('metadata alone cannot borrow a schedule\'s grant — the session must be a scheduler-started firing', async () => {
   // The control API forwards caller-supplied metadata into new sessions,
   // so a dispatch stamped with a live schedule's id is exactly the forgery
