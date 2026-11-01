@@ -2523,6 +2523,25 @@ export const runSetup = async (
   };
 
   /**
+   * The plugin channels some agent is bound to, by stored secrets or by its
+   * plugin's config block, as the channel menu below counts a binding.
+   */
+  const boundPluginChannelKinds = async (): Promise<string[]> => {
+    const bound: string[] = [];
+    for (const { kind, plugins } of await pluginChannelKinds()) {
+      state.pluginChannelSecrets[kind] ??= await loadChannelTransportSecrets(env, kind);
+      const inConfig = plugins.some((plugin) => {
+        const configured = state.plugins?.[plugin]?.agents;
+        return typeof configured === 'object' && configured !== null && !Array.isArray(configured) && Object.keys(configured).length > 0;
+      });
+      if (inConfig || Object.keys(state.pluginChannelSecrets[kind]).length > 0) {
+        bound.push(kind);
+      }
+    }
+    return bound;
+  };
+
+  /**
    * Slack alone, as it always was, until a plugin declares a channel: then
    * the row asks which channel first. A setup with no channel plugin sees
    * exactly the screens it saw before there could be one.
@@ -3082,6 +3101,15 @@ export const runSetup = async (
         }
         if (!removed.ok) {
           serviceStepFailed = true;
+        } else {
+          // That was the daemon answering every stored channel, edited in
+          // this run or not, so each one is silent from here on.
+          if (Object.keys(state.channels.slack ?? {}).length > 0) {
+            awaitingServe.add('slack');
+          }
+          for (const kind of await boundPluginChannelKinds()) {
+            awaitingServe.add(kind);
+          }
         }
       }
     } else if (state.service.install && servicePlatform(serviceEnvFor(env))) {
