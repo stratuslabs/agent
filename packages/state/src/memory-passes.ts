@@ -368,6 +368,10 @@ export const memoryPassEntries = async (
  * `stratus memory undo-pass`: forget every live entry the pass wrote. A
  * forget is append-only, and supersession is computed from entries that
  * are not forgotten, so whatever a forgotten entry replaced is live again.
+ *
+ * Newest first, and again until a round forgets nothing: a store forgets
+ * only a live entry, so when the pass superseded its own earlier entry,
+ * that one can be forgotten only after its successor is.
  */
 export const undoMemoryPass = async (
   store: AgentMemoryStore,
@@ -375,10 +379,19 @@ export const undoMemoryPass = async (
   passId: string,
 ): Promise<{ forgotten: string[] }> => {
   const forgotten: string[] = [];
-  for (const entry of await memoryPassEntries(store, agentId, passId)) {
-    if (entry.forgottenAt === undefined && await store.forget(agentId, entry.id)) {
-      forgotten.push(entry.id);
+  for (;;) {
+    const remaining = (await memoryPassEntries(store, agentId, passId))
+      .filter((entry) => entry.forgottenAt === undefined)
+      .reverse();
+    let progressed = false;
+    for (const entry of remaining) {
+      if (await store.forget(agentId, entry.id)) {
+        forgotten.push(entry.id);
+        progressed = true;
+      }
+    }
+    if (!progressed) {
+      return { forgotten };
     }
   }
-  return { forgotten };
 };

@@ -194,3 +194,26 @@ test('undo forgets every live entry a pass wrote, and what it superseded is back
   assert.deepEqual(live.sort(), [old.id, other.id].sort());
   assert.deepEqual(await undoMemoryPass(store, 'ava', 'p1'), { forgotten: [] }, 'a second undo changes nothing');
 });
+
+test('undo also forgets a pass entry that a later entry from the same pass superseded', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'memory-passes-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  // A clock that ticks, so the audit lists the chain oldest first every run.
+  let tick = Date.parse('2026-11-01T00:00:00.000Z');
+  const store = createFileMemoryStore(path.join(home, 'memory.jsonl'), { now: () => new Date((tick += 1000)) });
+  const old = await store.append('ava', 'Ava prefers short replies.');
+  const pass = { memoryPass: { id: 'p1', kind: 'save' } };
+  const first = await store.append('ava', 'Ava prefers short replies, with the answer first.', {
+    supersedes: old.id,
+    metadata: pass,
+  });
+  const again = await store.append('ava', 'Ava prefers short replies, answer first, no headers.', {
+    supersedes: first.id,
+    metadata: pass,
+  });
+
+  const { forgotten } = await undoMemoryPass(store, 'ava', 'p1');
+  assert.deepEqual([...forgotten].sort(), [first.id, again.id].sort(), 'both links of the chain the pass wrote');
+  assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id), [old.id], 'the entry from before the pass is back');
+  assert.deepEqual(await undoMemoryPass(store, 'ava', 'p1'), { forgotten: [] }, 'a second undo changes nothing');
+});
