@@ -238,6 +238,8 @@ test('a review that fails asks, and headless refuses: error, timeout, an answer 
     ['timeout', (request) => new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('aborted')))), { timeoutMs: 20 }],
     ['unparseable', async () => ({ verdict: 'maybe', code: 'unclear', reason: 'x' }) as unknown as ReviewAnswer, {}],
     ['no reviewer', undefined, {}],
+    // A reviewer that throws before it returns a promise is a failure too, not a failed turn.
+    ['error', ((): never => { throw new Error('built the request wrong'); }) as unknown as (request: ReviewRequest) => Promise<ReviewAnswer>, {}],
   ];
   for (const [kind, answer, settings] of cases) {
     const h = harness(settings, answer);
@@ -334,4 +336,35 @@ test('an ask in a conversation that read nothing from outside is one-shot too, a
   assert.match(requests[0]?.reviewNote ?? '', /operator's rule/);
   assert.match(asked.reported.at(-1)?.reason ?? '', /nothing is remembered/);
   assert.deepEqual(remembered, []);
+});
+
+test('a call parked before a restart goes back to the person, whatever would allow it now; only a block stops it first', async () => {
+  const parked = { parkedAt: '2026-11-01T00:00:00Z' };
+  const deny = async (): Promise<'deny'> => 'deny';
+  // Parked by an ask rule that has since been removed: the conversation read
+  // nothing from outside, which would run it unreviewed, but it goes back.
+  const plain = harness({}, allowing, { mode: 'remote', request: deny });
+  const untainted = await plain.decide(notes, sessionFor('ava'), {}, parked);
+  assert.equal(ran(untainted.answer), false);
+  assert.equal(untainted.reported.at(-1)?.layer, 'approver');
+  // An allow rule written since doesn't run it either.
+  const allowRule = harness({ rules: [rule({ tool: 'notes.*', verdict: 'allow' })] }, allowing, { mode: 'remote', request: deny });
+  assert.equal(ran((await allowRule.decide(notes, sessionFor('ava', true), {}, parked)).answer), false);
+  // Nor does a scope the gate leaves alone.
+  const scoped = harness({}, allowing, { mode: 'remote', request: deny });
+  assert.equal(ran((await scoped.decide(shell, sessionFor('ava', true), { command: 'pwd' }, parked)).answer), false);
+  // A block rule written since still blocks, without asking anyone.
+  const requests: ApprovalRequest[] = [];
+  const blockRule = harness({ rules: [rule({ tool: 'notes.*', verdict: 'block' })] }, allowing, {
+    mode: 'remote',
+    request: async (request) => {
+      requests.push(request);
+      return 'once';
+    },
+  });
+  const blocked = await blockRule.decide(notes, sessionFor('ava'), {}, parked);
+  assert.equal(ran(blocked.answer), false);
+  assert.equal(blocked.reported.at(-1)?.layer, 'rule');
+  assert.equal(requests.length, 0);
+  assert.equal(plain.reviews.length + allowRule.reviews.length + scoped.reviews.length + blockRule.reviews.length, 0);
 });

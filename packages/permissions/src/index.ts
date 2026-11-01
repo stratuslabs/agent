@@ -1099,13 +1099,17 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }, timeoutMs);
     });
     try {
-      const asked = reviewer({
-        session: context.session,
-        call: context.call,
-        tool: context.tool,
-        risk: context.risk,
-        ...resolved,
-        signal: controller.signal,
+      // Inside a promise, so a reviewer that throws before it returns one
+      // is a failed review like any other, never a failed turn.
+      const asked = new Promise<unknown>((resolve) => {
+        resolve(reviewer({
+          session: context.session,
+          call: context.call,
+          tool: context.tool,
+          risk: context.risk,
+          ...resolved,
+          signal: controller.signal,
+        }));
       }).then(
         (raw) => {
           const answer = readReviewAnswer(raw);
@@ -1173,12 +1177,17 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       const resolvedForReview = Object.fromEntries(
         Object.entries(reviewed).filter(([, value]) => value !== undefined),
       ) as { command?: string; origin?: string; destination?: string };
+      // A call parked before a restart was waiting on a person, and goes
+      // back to one: nothing that would allow it now (a rule, the
+      // unreviewed path, a scope, the reviewer) may turn a pending ask into
+      // an allow. Only a block can still stop it first.
+      const resumed = reviewing && context.parkedAt !== undefined;
       if (reviewing) {
         const matched = matchReviewRule(reviewSettings.rules ?? [], { toolName: call.toolName, ...resolvedForReview });
         if (matched !== undefined) {
           reviewNotes.set(context, { verdict: matched.verdict });
           const named = `the operator's rule (${describeReviewRule(matched)}) in approvals.rules`;
-          if (matched.verdict === 'allow') {
+          if (matched.verdict === 'allow' && !resumed) {
             return report(context, 'rule', true, `${call.toolName} runs under ${named}`);
           }
           if (matched.verdict === 'block') {
@@ -1189,14 +1198,16 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               `${call.toolName} is blocked by ${named}; only the operator can change it, so a confirmation won't help`,
             );
           }
-          reviewAsk = {
-            layer: 'rule',
-            reason: `${call.toolName} is asked about by ${named}`,
-            told: `${call.toolName} is asked about by ${named}`,
-            note: `asked about by the operator's rule (${describeReviewRule(matched)})`,
-          };
+          if (matched.verdict === 'ask') {
+            reviewAsk = {
+              layer: 'rule',
+              reason: `${call.toolName} is asked about by ${named}`,
+              told: `${call.toolName} is asked about by ${named}`,
+              note: `asked about by the operator's rule (${describeReviewRule(matched)})`,
+            };
+          }
         }
-        if (reviewAsk === undefined && sessionTrustOf(session) !== 'external') {
+        if (reviewAsk === undefined && !resumed && sessionTrustOf(session) !== 'external') {
           return report(context, 'risk', true, `${call.toolName} not reviewed: this conversation has read nothing from outside`);
         }
         if (reviewAsk === undefined) {
@@ -1211,6 +1222,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             }
             reviewAsk = { layer: 'rule', reason: hit.reason, told: hit.reason, note: hit.reason };
           }
+        }
+        if (reviewAsk === undefined && resumed) {
+          reviewNotes.set(context, { verdict: 'ask' });
+          const reason = `${call.toolName} was waiting for a person before a restart, and goes back to them without another review`;
+          reviewAsk = { layer: 'review', reason, told: reason, note: 'waiting for you before a restart; not reviewed again' };
         }
       }
       // Nothing a grant or a scope could cover applies to a call a review
@@ -1633,47 +1649,40 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         }
       }
 
-      // Step 7: nothing above settled it, so the reviewer does. A call
-      // resumed after a restart already waited on a person, and goes back
-      // to one: a restart must not turn a pending ask into an allow.
+      // Step 7: nothing above settled it, so the reviewer does. (A resumed
+      // call never gets here: it was sent back to its person above.)
       if (reviewing && reviewAsk === undefined) {
-        if (context.parkedAt !== undefined) {
-          reviewNotes.set(context, { verdict: 'ask' });
-          const reason = `${call.toolName} was waiting for a person before a restart, and goes back to them without another review`;
-          reviewAsk = { layer: 'review', reason, told: reason, note: 'waiting for you before a restart; not reviewed again' };
+        const outcome = await runReview(context, reviewSettings.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS, resolvedForReview);
+        if (outcome === ABORTED) {
+          return report(context, 'cancelled', false, `${call.toolName} was cancelled while it was being reviewed`);
+        }
+        if ('failed' in outcome) {
+          reviewNotes.set(context, { verdict: 'ask', reviewCode: 'review-failed' });
+          const reason = `${call.toolName} needs a person's yes because the review couldn't run: ${outcome.failed}`;
+          reviewAsk = { layer: 'review', reason, told: reason, note: `the review couldn't run: ${outcome.failed}` };
         } else {
-          const outcome = await runReview(context, reviewSettings.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS, resolvedForReview);
-          if (outcome === ABORTED) {
-            return report(context, 'cancelled', false, `${call.toolName} was cancelled while it was being reviewed`);
+          const { answer } = outcome;
+          reviewNotes.set(context, { verdict: answer.verdict, reviewCode: answer.code });
+          if (answer.verdict === 'allow') {
+            return report(context, 'review', true, `${call.toolName} was allowed by the reviewer (${answer.code})`);
           }
-          if ('failed' in outcome) {
-            reviewNotes.set(context, { verdict: 'ask', reviewCode: 'review-failed' });
-            const reason = `${call.toolName} needs a person's yes because the review couldn't run: ${outcome.failed}`;
-            reviewAsk = { layer: 'review', reason, told: reason, note: `the review couldn't run: ${outcome.failed}` };
-          } else {
-            const { answer } = outcome;
-            reviewNotes.set(context, { verdict: answer.verdict, reviewCode: answer.code });
-            if (answer.verdict === 'allow') {
-              return report(context, 'review', true, `${call.toolName} was allowed by the reviewer (${answer.code})`);
-            }
-            if (answer.verdict === 'block') {
-              // No flag the agent can set to escalate: an injected page could
-              // tell it to set one. The person's confirmation in their next
-              // message is part of what the reviewer sees next time.
-              return refuse(
-                context,
-                'review',
-                `${call.toolName} was blocked by the reviewer (${answer.code})`,
-                `${call.toolName} was blocked: ${answer.reason.replace(/[.\s]+$/, '')}. If the person you're working for really wants this, tell them what it would do and ask them to confirm.`,
-              );
-            }
-            reviewAsk = {
-              layer: 'review',
-              reason: `${call.toolName} was asked about by the reviewer (${answer.code})`,
-              told: `${call.toolName} needs a person's yes: ${answer.reason.replace(/[.\s]+$/, '')}`,
-              note: answer.reason,
-            };
+          if (answer.verdict === 'block') {
+            // No flag the agent can set to escalate: an injected page could
+            // tell it to set one. The person's confirmation in their next
+            // message is part of what the reviewer sees next time.
+            return refuse(
+              context,
+              'review',
+              `${call.toolName} was blocked by the reviewer (${answer.code})`,
+              `${call.toolName} was blocked: ${answer.reason.replace(/[.\s]+$/, '')}. If the person you're working for really wants this, tell them what it would do and ask them to confirm.`,
+            );
           }
+          reviewAsk = {
+            layer: 'review',
+            reason: `${call.toolName} was asked about by the reviewer (${answer.code})`,
+            told: `${call.toolName} needs a person's yes: ${answer.reason.replace(/[.\s]+$/, '')}`,
+            note: answer.reason,
+          };
         }
       }
 
