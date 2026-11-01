@@ -17,11 +17,17 @@ updates:
     # inside the range updates pnpm-lock.yaml alone and leaves every
     # published range as it is.
     versioning-strategy: increase-if-necessary
-    # A new release waits a week before it is proposed. A bad or malicious
-    # publish is usually caught and pulled within days, and nothing here
-    # needs a release the day it lands.
+    # No cooldown for npm while this repo is on pnpm 10. Dependabot enforces a
+    # cooldown by passing it to pnpm as minimumReleaseAge, and pnpm 10 then
+    # re-resolves locked entries younger than the window, not only the one
+    # being updated. Where a range's floor is that young (provider-claude-code's
+    # ^0.3.314 was two days old when this landed), nothing satisfies it, and
+    # every npm update failed. Excluding every package, rather than leaving
+    # cooldown out, also covers Dependabot's 3-day default. Revisit after a
+    # move to pnpm 11. Update PRs still go through review, CI and the daily
+    # fresh-dependencies check before anything merges.
     cooldown:
-      default-days: 7
+      exclude: ['*']
     groups:
       # Minors and patches arrive as one pull request a week. A major gets its
       # own, because it can change behavior and needs its own review.
