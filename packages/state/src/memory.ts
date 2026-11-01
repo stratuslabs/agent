@@ -22,6 +22,7 @@ import {
   memoryContentByteLength,
   memoryEntryFields,
   memorySupersededIds,
+  memorySupersedesWriteIds,
   assertUnprotectedMemoryTargets,
   MEMORY_PINNED_MAX_BYTES,
   MEMORY_READ_MAX_BYTES,
@@ -1217,7 +1218,7 @@ export const createFileMemoryStore = (
       // check, agent A could retire agent B's memory by naming its id — gone
       // from B's list, its search, and its prompt, with B's own `forget`
       // never called.
-      const supersedes = memorySupersededIds(appendOptions);
+      const supersedes = memorySupersedesWriteIds(appendOptions);
       const fields = memoryEntryFields(appendOptions);
       assertMemoryAboutWithinCap(fields.about ?? []);
       const write = async (): Promise<MemoryEntry> => {

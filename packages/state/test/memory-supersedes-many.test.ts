@@ -142,3 +142,17 @@ test('the upgrade to a revisions table keyed by target keeps the usage counters,
   assert.equal(found?.id, kept.id);
   assert.equal(found?.usage?.recallCount, 3);
 });
+
+test('an append whose supersedes is malformed stores nothing', async () => {
+  const filePath = await newFile();
+  const store = createFileMemoryStore(filePath, ticking());
+  const a = await store.append('ava', 'one');
+  for (const supersedes of ['', [], [a.id, ''], [a.id, 7]]) {
+    await assert.rejects(
+      () => store.append('ava', 'one, again', { supersedes } as unknown as Parameters<typeof store.append>[2]),
+      /supersedes/,
+      JSON.stringify(supersedes),
+    );
+  }
+  assert.equal((await lines(filePath)).length, 1);
+});

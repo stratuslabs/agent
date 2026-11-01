@@ -1926,6 +1926,25 @@ export const memorySupersededIds = (entry: { supersedes?: unknown }): string[] =
 };
 
 /**
+ * The ids an append's `supersedes` names, checked as a write rather than
+ * read leniently as a record: absent is none, and anything else must be a
+ * non-empty id or a non-empty list of them. A malformed value throws
+ * rather than storing a plain fact beside the ones the caller meant to
+ * replace.
+ */
+export const memorySupersedesWriteIds = (options: { supersedes?: unknown }): string[] => {
+  const raw = options.supersedes;
+  if (raw === undefined) {
+    return [];
+  }
+  const ids = memorySupersededIds({ supersedes: raw });
+  if (ids.length === 0) {
+    throw new Error('"supersedes" must be the id of a fact, or a list of ids, each a non-empty string. Nothing was stored.');
+  }
+  return ids;
+};
+
+/**
  * `supersedes` in the form it is written: absent for none, a plain string
  * for one id, a list only for a merge of two or more.
  */
@@ -2656,7 +2675,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     // Resolved against this agent's own live set before anything is
     // recorded: the per-agent boundary is the access model the whole store
     // rests on, and a successor naming a stranger's id would retire it.
-    const supersedes = memorySupersededIds(options);
+    const supersedes = memorySupersedesWriteIds(options);
     if (supersedes.length > 0) {
       const live = this.live(agentId, this.now());
       for (const id of supersedes) {

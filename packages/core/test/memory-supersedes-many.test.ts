@@ -108,3 +108,16 @@ test('an append that refuses protected facts stores nothing when any fact it sup
   await store.append('ava', 'pinned, again', { supersedes: pinned.id });
   assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.content).sort(), ['asserted', 'pinned, again', 'plain, again', 'reasserted']);
 });
+
+test('an append whose supersedes is malformed stores nothing, rather than a plain fact beside the ones it meant to replace', async () => {
+  const store = new InMemoryAgentMemoryStore({ now: () => AT });
+  const a = await store.append('ava', 'one');
+  for (const supersedes of ['', [], [a.id, ''], [a.id, 7]]) {
+    await assert.rejects(
+      () => store.append('ava', 'one, again', { supersedes } as unknown as Parameters<typeof store.append>[2]),
+      /supersedes/,
+      JSON.stringify(supersedes),
+    );
+  }
+  assert.deepEqual((await store.list('ava')).entries.map((found) => found.id), [a.id]);
+});
