@@ -46,6 +46,8 @@ const reviewGateway = async (reviewer: () => Response) => {
     { mode: 0o600 },
   );
   const reviews: Seen[] = [];
+  let agentCall: (() => Promise<void>) | undefined;
+  let reviewCall: ((signal: AbortSignal | undefined) => Promise<Response>) | undefined;
   const fetchFake = (async (_url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? '{}')) as {
       model?: string;
@@ -62,8 +64,9 @@ const reviewGateway = async (reviewer: () => Response) => {
         user: messages.filter((message) => message.role === 'user').map((message) => text(message.content)).join('\n'),
         tools: (body.tools ?? []).length,
       });
-      return reviewer();
+      return reviewCall !== undefined ? reviewCall(init?.signal ?? undefined) : reviewer();
     }
+    await agentCall?.();
     return openAiText('Noted, AGENT-TEXT-MARKER.');
   }) as typeof fetch;
   let transport: ApprovalTransport | undefined;
@@ -77,7 +80,15 @@ const reviewGateway = async (reviewer: () => Response) => {
     log: () => undefined,
     warn: () => undefined,
   });
-  return { gateway, home, reviews, transport: () => transport as ApprovalTransport };
+  return {
+    gateway,
+    home,
+    reviews,
+    transport: () => transport as ApprovalTransport,
+    /** Runs inside the agent's own model call, so inside its turn. */
+    onAgentCall: (hook: (() => Promise<void>) | undefined) => { agentCall = hook; },
+    onReviewCall: (hook: (signal: AbortSignal | undefined) => Promise<Response>) => { reviewCall = hook; },
+  };
 };
 
 const ask = async (harness: Awaited<ReturnType<typeof reviewGateway>>, model?: string) => {
@@ -172,4 +183,103 @@ test('the built-in rule is handed the values of the credentials the soul lists, 
   } finally {
     await harness.gateway.stop();
   }
+});
+
+// Card 1041 (from #539's review): a reviewer call is a side run. It keeps
+// to the reviewed turn's runtime, stays off the conversation surfaces, and
+// is part of what a shutdown waits for.
+
+test('a review during a turn runs on that turn\'s runtime, not a soul edited since it started', async () => {
+  const harness = await reviewGateway(() => openAiText('{"verdict":"allow","code":"asked-for","reason":"fine"}'));
+  await harness.gateway.start();
+  try {
+    await harness.gateway.dispatch({ sessionId: 'cli-1', agentId: 'ava', userMessage: 'hello' });
+    let midTurn: Promise<unknown> | undefined;
+    harness.onAgentCall(async () => {
+      // The operator moves the agent to another model while its turn runs.
+      await writeFile(path.join(harness.home, '.stratus', 'agents', 'ava.md'), SOUL.replace('model: model-a', 'model: model-b'));
+      midTurn = ask(harness);
+      await midTurn;
+    });
+    await harness.gateway.dispatch({ sessionId: 'cli-1', agentId: 'ava', userMessage: 'post it' });
+    assert.ok(midTurn, 'the review ran inside the turn');
+    assert.equal(harness.reviews.at(-1)?.model, 'model-a', 'the turn\'s own model, not the one the soul names now');
+    harness.onAgentCall(undefined);
+    // Between turns there is no turn to keep to: the agent's current runtime,
+    // the one its next turn sends the conversation to anyway.
+    await ask(harness);
+    assert.equal(harness.reviews.at(-1)?.model, 'model-b');
+  } finally {
+    await harness.gateway.stop();
+  }
+});
+
+test('a review\'s side run is known as one while it runs, and its events stay on the bus', async () => {
+  const harness = await reviewGateway(() => openAiText('{"verdict":"allow","code":"asked-for","reason":"fine"}'));
+  await harness.gateway.start();
+  try {
+    await harness.gateway.dispatch({ sessionId: 'cli-1', agentId: 'ava', userMessage: 'hello' });
+    const seen: Array<{ sessionId: string; type: string; sideRun: boolean }> = [];
+    harness.gateway.bus.subscribe((event) => {
+      if ('sessionId' in event) {
+        seen.push({ sessionId: event.sessionId, type: event.type, sideRun: harness.gateway.isSideRun(event.sessionId) });
+      }
+    });
+    await ask(harness);
+    const review = seen.filter((event) => event.sessionId.startsWith('review:'));
+    assert.ok(review.some((event) => event.type === 'session.created'), 'the review\'s events still reach the bus, for accounting');
+    assert.ok(review.every((event) => event.sideRun), 'every one of them is from a side run');
+    assert.equal(harness.gateway.isSideRun(review[0]?.sessionId as string), false, 'not once it has ended');
+    assert.equal(harness.gateway.isSideRun('cli-1'), false);
+  } finally {
+    await harness.gateway.stop();
+  }
+});
+
+test('a shutdown aborts a review still running once the turns have drained, and waits for it to end', async () => {
+  let release: (() => void) | undefined;
+  let sawAbort = false;
+  let honorAbort = true;
+  const harness = await reviewGateway(() => openAiText('{"verdict":"allow","code":"asked-for","reason":"fine"}'));
+  harness.onReviewCall((signal) => new Promise<Response>((resolve, reject) => {
+    signal?.addEventListener('abort', () => {
+      sawAbort = true;
+      if (honorAbort) {
+        reject(signal.reason ?? new Error('aborted'));
+      }
+    }, { once: true });
+    release = () => resolve(openAiText('{"verdict":"allow","code":"asked-for","reason":"late"}'));
+  }));
+  await harness.gateway.start();
+  await harness.gateway.dispatch({ sessionId: 'cli-1', agentId: 'ava', userMessage: 'hello' });
+  // A shadow review: nothing awaits it, and its turn is over.
+  let settled: unknown;
+  const review = ask(harness).then((answer) => { settled = answer; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await harness.gateway.stop();
+  assert.equal(sawAbort, true, 'the shutdown aborted the review');
+  assert.deepEqual(settled, { failed: 'cancelled' }, 'and it had ended before stop() resolved');
+  await review;
+
+  // A provider that ignores the abort holds the drain until it ends.
+  const second = await reviewGateway(() => openAiText('{}'));
+  sawAbort = false;
+  honorAbort = false;
+  second.onReviewCall((signal) => new Promise<Response>((resolve) => {
+    signal?.addEventListener('abort', () => { sawAbort = true; }, { once: true });
+    release = () => resolve(openAiText('{"verdict":"allow","code":"asked-for","reason":"late"}'));
+  }));
+  await second.gateway.start();
+  await second.gateway.dispatch({ sessionId: 'cli-1', agentId: 'ava', userMessage: 'hello' });
+  const stuck = ask(second);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  let stopped = false;
+  const stopping = second.gateway.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(sawAbort, true);
+  assert.equal(stopped, false, 'stop() waits for the review that ignored its abort');
+  release?.();
+  await stopping;
+  // Its answer came after it was cancelled, so it is not a verdict.
+  assert.deepEqual(await stuck, { failed: 'cancelled' });
 });
