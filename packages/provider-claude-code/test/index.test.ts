@@ -1739,3 +1739,136 @@ test('effort reaches the SDK options on fresh and resumed queries, lowered per m
   const unset = await optionsOf(undefined, undefined, createSession());
   assert.equal('effort' in unset, false);
 });
+
+// Card 958: a message steered in after a hosted call reaches the Claude
+// Code CLI before that call's result does, so the CLI folds it into the
+// result in the same turn rather than running it as a turn of its own.
+
+type RegisteredTools = Record<string, { handler: (a: unknown, b: unknown) => Promise<unknown> }>;
+
+/**
+ * Stands in for the SDK and CLI: reads the prompt stream the way the SDK
+ * does, runs demo.echo once through the bridge, then answers with a result
+ * listing the uuids of the user messages the stream carried after the
+ * first. `foldInto` = how many results the fold takes: 1 is the usual
+ * case, 2 is the CLI running a late message as its own turn.
+ */
+const createSteeringQuery = (options: { lateFold?: boolean } = {}) => {
+  const events: string[] = [];
+  const sent: Array<Record<string, unknown>> = [];
+  let promptKind = '';
+  let inputClosed = false;
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const prompt = params.prompt;
+    promptKind = typeof prompt === 'string' ? 'string' : 'stream';
+    const tools = (params.options as { mcpServers?: Record<string, { instance?: { _registeredTools?: RegisteredTools } }> })
+      .mcpServers?.stratus?.instance?._registeredTools;
+    return (async function* () {
+      if (typeof prompt === 'string') {
+        yield { type: 'result', subtype: 'success', is_error: false, result: 'Plain.', session_id: 'sdk-958' } as ClaudeCodeStreamMessage;
+        return;
+      }
+      const iterator = prompt[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      sent.push(first.value as Record<string, unknown>);
+      // The SDK keeps reading its input while the CLI works.
+      const reading = (async () => {
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done === true) {
+            inputClosed = true;
+            events.push('input closed');
+            return;
+          }
+          sent.push(next.value as Record<string, unknown>);
+          events.push(`sent ${JSON.stringify((next.value as { message: { content: Array<{ text?: string }> } }).message.content[0]?.text)}`);
+        }
+      })();
+      await tools!.demo_echo!.handler({ text: 'build' }, {});
+      events.push('tool result returned');
+      const later = sent.slice(1).map((message) => message.uuid as string);
+      if (options.lateFold === true) {
+        yield { type: 'result', subtype: 'success', is_error: false, result: 'Built it.', session_id: 'sdk-958', user_message_uuids: [] } as ClaudeCodeStreamMessage;
+        events.push('first result read');
+        yield { type: 'result', subtype: 'success', is_error: false, result: 'Skipped the tests.', session_id: 'sdk-958', user_message_uuids: later } as ClaudeCodeStreamMessage;
+      } else {
+        yield { type: 'result', subtype: 'success', is_error: false, result: 'Built it, tests skipped.', session_id: 'sdk-958', user_message_uuids: later } as ClaudeCodeStreamMessage;
+      }
+      await reading;
+    })();
+  };
+  return { queryFn, events, sent, prompt: () => promptKind, inputClosed: () => inputClosed };
+};
+
+const echoExecutor = async (_session: Session, call: ToolCall): Promise<ToolResult> =>
+  ({ callId: call.id, toolName: call.toolName, ok: true, output: { echoed: true } });
+
+const steeringRequest = (steer: ProviderRequest['steer']): ProviderRequest => ({
+  session: createSession(),
+  tools: [{ name: 'demo.echo', parameters: { type: 'object', properties: { text: { type: 'string' } } } }],
+  ...(steer !== undefined ? { steer } : {}),
+});
+
+test('a message steered in after a hosted call goes into the prompt stream before that call returns, and the stream closes on the result', async () => {
+  const fake = createSteeringQuery();
+  let asked = 0;
+  const steer = async () => {
+    asked += 1;
+    return asked === 1 ? { userMessage: 'Dylan: skip the tests', images: [{ mediaType: 'image/png' as const, data: 'iVBORw0KGgo=' }] } : undefined;
+  };
+  const provider = createClaudeCodeProvider({ queryFn: fake.queryFn, executeTool: echoExecutor });
+
+  const response = await provider.generate(steeringRequest(steer));
+
+  assert.equal(fake.prompt(), 'stream');
+  assert.equal(asked, 1);
+  assert.deepEqual(fake.events, ['sent "Dylan: skip the tests"', 'tool result returned', 'input closed']);
+  const steered = fake.sent[1]!;
+  assert.equal(steered.type, 'user');
+  assert.equal(steered.parent_tool_use_id, null);
+  assert.equal(steered.priority, 'next');
+  assert.equal(steered.client_composed, true);
+  assert.match(String(steered.uuid), /^[0-9a-f-]{36}$/);
+  assert.deepEqual((steered.message as { content: unknown[] }).content, [
+    { type: 'text', text: 'Dylan: skip the tests' },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+  ]);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Built it, tests skipped.' }]);
+});
+
+test('a hosted call with nothing steered in leaves the stream with only the turn\'s message', async () => {
+  const fake = createSteeringQuery();
+  const provider = createClaudeCodeProvider({ queryFn: fake.queryFn, executeTool: echoExecutor });
+
+  const response = await provider.generate(steeringRequest(async () => undefined));
+
+  assert.equal(fake.sent.length, 1);
+  assert.deepEqual(fake.events, ['tool result returned', 'input closed']);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Built it, tests skipped.' }]);
+});
+
+test('without steer the prompt stays the plain string it always was', async () => {
+  const fake = createSteeringQuery();
+  const provider = createClaudeCodeProvider({ queryFn: fake.queryFn, executeTool: echoExecutor });
+
+  const response = await provider.generate(steeringRequest(undefined));
+
+  assert.equal(fake.prompt(), 'string');
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Plain.' }]);
+});
+
+test('a steered message the CLI runs as a turn of its own keeps the input open until its result, and the answer keeps both', async () => {
+  const fake = createSteeringQuery({ lateFold: true });
+  let asked = 0;
+  const steer = async () => {
+    asked += 1;
+    return asked === 1 ? { userMessage: 'Dylan: skip the tests' } : undefined;
+  };
+  const provider = createClaudeCodeProvider({ queryFn: fake.queryFn, executeTool: echoExecutor });
+
+  const response = await provider.generate(steeringRequest(steer));
+
+  // Not closed after the first result, which did not carry the message.
+  assert.deepEqual(fake.events, ['sent "Dylan: skip the tests"', 'tool result returned', 'first result read', 'input closed']);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Built it.\n\nSkipped the tests.' }]);
+});
