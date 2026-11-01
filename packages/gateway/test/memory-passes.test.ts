@@ -162,6 +162,7 @@ test('a save pass reads what was said after start, saves through its own remembe
 
   const [run] = env.runs;
   assert.equal(run!.sessionId, 'memory-pass:p1');
+  assert.equal(run!.model, 'model-a', 'it runs the model its claim records, resolved once');
   assert.deepEqual(run!.tools.map((tool) => tool.name), ['memory.recall', 'memory.remember']);
   assert.ok(run!.prompt.startsWith(MEMORY_SAVE_PASS_REQUEST), 'the runtime speaks first');
   assert.ok(run!.prompt.endsWith(MEMORY_SAVE_PASS_INSTRUCTION), 'the request comes after the conversation');
@@ -469,6 +470,23 @@ test('a shadow pass writes to the shadow file, never memory, and keeps its own w
   assert.deepEqual(lines[0].metadata.memoryPass, { id: 'p1', kind: 'save' });
   const write = await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet' });
   assert.equal(write.status, 'done', 'a shadow claim does not move the write watermark');
+});
+
+test('a shadow fact is held to the same about cap a real one is', async (t) => {
+  const env = await setup(t);
+  await env.host.handle.start(AGENT, 'shadow');
+  env.sessions.set('s1', sessionOf('s1', [message('m1', at(1), 'Ava prefers tea.')]));
+  const refusals: string[] = [];
+  env.setScript(async (_run, remember) => {
+    const about = Array.from({ length: 13 }, (_, index) => `topic-${index}`);
+    await remember({ fact: 'Ava prefers tea.', kind: 'preference', about }).catch((error: Error) => refusals.push(error.message));
+    await remember({ fact: 'Ava prefers green tea.', kind: 'preference', about: [' tea ', 'tea', 'Ava'] });
+  });
+  const shadow = await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet', mode: 'shadow' });
+  assert.deepEqual([shadow.status, shadow.saved], ['done', 1]);
+  assert.match(refusals[0] ?? '', /at most 12 entities/);
+  const lines = (await readFile(agentMemoryShadowFileIn(env.home, AGENT), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((line) => [line.content, line.about]), [['Ava prefers green tea.', ['tea', 'Ava']]], 'and stored as a real write would store it');
 });
 
 test('the reads list passes newest first and show what each wrote: real facts for write, would-be facts for shadow', async (t) => {

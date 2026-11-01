@@ -91,6 +91,17 @@ test('a pass never supersedes a pinned fact or one the operator asserted', async
   assert.equal((await store.list('ava')).entries.length, 2);
 });
 
+test('a fact the operator asserts after the recall is still never superseded: the label is read again at write time', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const fact = await store.append('ava', 'Ava works in New York.');
+  const { recall, remember } = createMemoryPassTools(store, stateFor());
+  await recall.execute({ query: 'Ava' }, passSession());
+  // Between the pass's recall and its write, an operator reasserts it.
+  assert.equal(await store.reassertTrust('ava', fact.id, 'user'), true);
+  await assert.rejects(() => remember.execute({ fact: 'Ava works in Boston.', supersedes: fact.id }, passSession()), /operator/);
+  assert.equal((await store.list('ava')).entries.length, 1);
+});
+
 test('a shadow pass writes through its own writer and leaves the store alone', async () => {
   const store = new InMemoryAgentMemoryStore();
   const written: { agentId: string; content: string; metadata: unknown }[] = [];

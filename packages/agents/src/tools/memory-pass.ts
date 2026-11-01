@@ -88,6 +88,15 @@ export const createMemoryPassTools = (
 
   const pinned = async (agentId: string, entryId: string): Promise<boolean> =>
     (await store.pinned?.(agentId, { include: 'allocated' }) ?? []).some((entry) => entry.id === entryId);
+  /**
+   * The fact's label now, not at the recall: an operator may have asserted
+   * it since. Read right before the write, as the pin is. Still two store
+   * calls, not one atomic one; see the PR notes for card 986.
+   */
+  const labelNow = async (agentId: string, entryId: string, recalled: TrustLevel): Promise<TrustLevel> => {
+    const found = (await store.audit(agentId)).find((entry) => entry.id === entryId);
+    return found !== undefined ? memoryEntryTrust(found) : recalled;
+  };
 
   const remember: Tool = {
     name: MEMORY_TOOL_NAME,
@@ -128,7 +137,7 @@ export const createMemoryPassTools = (
         if (label === undefined) {
           throw new Error(`${replaces} is not a fact memory.recall has shown in this pass, so it cannot be superseded. Nothing was stored.`);
         }
-        if (label === 'user') {
+        if (label === 'user' || await labelNow(agentId, replaces, label) === 'user') {
           throw new Error(`${replaces} is a fact the operator asserted, and a memory pass never supersedes one. Nothing was stored.`);
         }
         if (await pinned(agentId, replaces)) {

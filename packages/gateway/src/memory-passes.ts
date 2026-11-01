@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { createMemoryPassTools, isValidAgentId, type MemoryPassWrite } from '@stratusagent/agents';
 import {
+  assertMemoryAboutWithinCap,
   conversationContextFrom,
   HostRefusalError,
   isMemoryPassSessionId,
@@ -9,6 +10,7 @@ import {
   MEMORY_PASS_SLICE_MAX_BYTES,
   MEMORY_SAVE_PASS_INSTRUCTION,
   MEMORY_SAVE_PASS_REQUEST,
+  memoryEntryFields,
   memoryPassSessionId,
   sessionWriteTrust,
   transcriptEntry,
@@ -401,9 +403,13 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
     if (utf8(content) > MEMORY_ENTRY_MAX_BYTES) {
       throw new Error(`A fact is at most ${MEMORY_ENTRY_MAX_BYTES} bytes. Nothing was stored.`);
     }
+    // Normalized and capped the way the store's own append does it, so a
+    // shadow fact is one a real write would have stored.
+    const fields = memoryEntryFields(appendOptions);
+    assertMemoryAboutWithinCap(fields.about ?? []);
     const id = `${agentId}:shadow:${randomUUID()}`;
     const trust = appendOptions.provenance?.trust ?? 'agent';
-    const { provenance, metadata, ...fields } = appendOptions;
+    const { provenance, metadata } = appendOptions;
     await shadowFor(agentId).append({
       id,
       agentId,
@@ -546,7 +552,9 @@ export const createMemoryPassHost = (options: MemoryPassHostOptions): MemoryPass
           agentId,
           passId,
           sessionId: memoryPassSessionId(passId),
-          model: request.model,
+          // The model the claim records, resolved once: the agent's config
+          // could change before this, and the ledger must name what ran.
+          model: model !== '' ? model : undefined,
           prompt: taken.prompt,
           trust: taken.trust,
           tools: [tools.recall, tools.remember],
