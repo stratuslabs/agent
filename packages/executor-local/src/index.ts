@@ -19,6 +19,7 @@ import {
   type TrustLevel,
   createDirectExecutor,
   failureResult,
+  redactSecrets,
   successResult,
 } from '@stratusagent/core';
 
@@ -60,6 +61,16 @@ export interface LocalCommandInvocation {
    * the executor's own cap applies.
    */
   maxOutputBytes?: number;
+  /**
+   * Values the command's output must not carry back. Each is replaced by
+   * `[redacted]` in stdout and stderr before any result is built, the
+   * failed, timed-out and aborted ones included, so a tool that hands the
+   * child a secret (a credential in `env`) keeps a command that prints it
+   * from copying it into the transcript. Exact copies only, as core's
+   * `redactSecrets` matches them: a command that encodes or splits the
+   * value still shows what it printed.
+   */
+  redact?: readonly string[];
 }
 
 export interface LocalCommandExecution {
@@ -507,6 +518,39 @@ const createOutputSink = (maxBytes: number): { write: (chunk: Buffer) => void; e
   };
 };
 
+/** The fewest characters of a value, left at a cut, that are masked too. */
+const CUT_VALUE_MIN_CHARS = 4;
+
+/**
+ * One stream's text with every value in `redact` masked, as core's
+ * `redactSecrets` does it. A stream cut at its cap can end inside a printed
+ * value, and most of a key is as good as all of it, so when `truncated`
+ * the start of a value at the very end is masked as well. Three characters
+ * or fewer stay: that much says no more than a key's kind (`sk-`).
+ */
+const redactOutput = (text: string, redact: readonly string[] | undefined, truncated: boolean): string => {
+  // A tool is plain JavaScript to the executor; a value that isn't a string
+  // must not throw away the output of a command that has already run.
+  const values = (redact ?? []).filter((value): value is string => typeof value === 'string' && value !== '');
+  if (values.length === 0) {
+    return text;
+  }
+  const masked = redactSecrets(text, values);
+  if (!truncated) {
+    return masked;
+  }
+  let cut = 0;
+  for (const value of values) {
+    for (let length = Math.min(value.length - 1, masked.length); length >= CUT_VALUE_MIN_CHARS && length > cut; length -= 1) {
+      if (masked.endsWith(value.slice(0, length))) {
+        cut = length;
+        break;
+      }
+    }
+  }
+  return cut === 0 ? masked : `${masked.slice(0, -cut)}[redacted]`;
+};
+
 const runLocalCommand = async (
   invocation: LocalCommandInvocation,
   options: { spawn: LocalSpawn; timeoutMs: number; maxOutputBytes: number; signal?: AbortSignal },
@@ -634,8 +678,8 @@ const runLocalCommand = async (
       command: invocation.command,
       args: [...args],
       ...(invocation.cwd ? { cwd: invocation.cwd } : {}),
-      stdout: stdout.end(),
-      stderr: stderr.end(),
+      stdout: redactOutput(stdout.end(), invocation.redact, stdout.truncated()),
+      stderr: redactOutput(stderr.end(), invocation.redact, stderr.truncated()),
       stdoutTruncated: stdout.truncated(),
       stderrTruncated: stderr.truncated(),
       exitCode,
