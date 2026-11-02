@@ -386,6 +386,15 @@ const EARLIER_MESSAGE_LIMIT = 40;
 const EARLIER_THREAD_PAGES = 20;
 
 /**
+ * How far above a team agent's mention its own files are looked for (card
+ * 1061). It bounds the read, one page of a thread's last hour, not which
+ * files count: that is the agent's run of messages just above the tag.
+ */
+const TAGGED_FILES_WINDOW_SECONDS = 3600;
+/** The most files a mention takes from its tagger's messages above it. */
+const TAGGED_FILES_LIMIT = 10;
+
+/**
  * The holder-record name for a bot this adapter does not serve: an agent on
  * another gateway, or any other app. The colon keeps it from ever equaling
  * an agent id, so the holder rule reads it as "somebody else's".
@@ -1272,15 +1281,29 @@ class ReplyRenderer {
   /** Whether a tool of this turn's has been called: words after one are held, with or without a first line. */
   private toolCalled = false;
   /**
-   * Words written between tools after the first line, in order. Never
+   * Words written between tools after the first line, in order — every
+   * word a lazy turn writes before a tool, first line included. Never
    * posted; kept only so a hosted-loop reply that repeats them is stripped
-   * of them, and so a turn that ends on them can post them as its reply.
+   * of them, and so a turn that ends on them can post them as its reply
+   * (never a lazy one: see `finalizeInOrder`).
    */
   private readonly held: string[] = [];
   /** Whether the last words this turn wrote before a tool were held rather than posted. */
   private lastWasHeld = false;
-  /** Held words posted as the reply, because the turn ended on them (see `finalizeInOrder`). */
-  private promotedReply: string | undefined;
+  /**
+   * The reply as posted, where that is not what `unsaid` leaves of it:
+   * held words posted as the reply because the turn ended on them, or a
+   * judged turn's answer kept whole although it repeats words it held
+   * (see `finalizeInOrder`).
+   */
+  private postedReply: string | undefined;
+  /**
+   * What the turn has streamed since its last tool, from text deltas only.
+   * Unlike `interim`, never filled from a `provider.response`, which on a
+   * provider that hosts its own loop is the whole joined reply. A reply
+   * that is exactly this is the turn's last message and nothing it held.
+   */
+  private streamedAfterTool = '';
   /** The lowest trust this turn's session was lowered to while it ran (`session.tainted`). */
   taintedTo: TrustLevel | undefined;
   private turnBreakPending = false;
@@ -1620,6 +1643,7 @@ class ReplyRenderer {
     }
     this.buffer = '';
     this.interim = '';
+    this.streamedAfterTool = '';
     this.activeTools.clear();
     this.toolLine = undefined;
     this.runningTool = undefined;
@@ -1665,6 +1689,7 @@ class ReplyRenderer {
       this.turnBreakPending = false;
       this.buffer += event.delta.text;
       this.interim += event.delta.text;
+      this.streamedAfterTool += event.delta.text;
       this.scheduleEdit();
       return;
     }
@@ -1674,6 +1699,7 @@ class ReplyRenderer {
       // attempts never fuse into one message.
       this.buffer = '';
       this.interim = '';
+      this.streamedAfterTool = '';
       this.turnBreakPending = false;
       this.scheduleEdit();
       return;
@@ -1819,22 +1845,26 @@ class ReplyRenderer {
   /**
    * Post what the model said before the first tool it calls, in `final`
    * and `texts` mode only: a streaming turn already shows it in its
-   * placeholder, and a turn nobody asked for must not speak before it
-   * decides to. Behind the turn ahead and any handover, on the upload
+   * placeholder. Behind the turn ahead and any handover, on the upload
    * chain, so the first line, files, and the reply land in the order they
-   * happened. Words written after that are held, not posted (card 1009).
+   * happened. Words written after that are held, not posted (card 1009),
+   * and so are all of a lazy turn's: a turn nobody asked for must not
+   * speak before it decides to (card 1060).
    */
   private flushInterim(ofThisTurn: boolean): Promise<boolean> | undefined {
     const text = this.interim.trim();
     this.interim = '';
-    if (this.streaming || this.lazy || !this.turnStarted || !ofThisTurn || text.length === 0) {
+    this.streamedAfterTool = '';
+    if (this.streaming || !this.turnStarted || !ofThisTurn || text.length === 0) {
       return undefined;
     }
     // Only words before the turn's first tool are a message of their own:
     // after one, a step has run, and what follows is the model working,
     // whether or not the turn opened with a line. It is held: posted, it
     // is the running commentary a person has to scroll past (card 1009).
-    if (this.firstWordsSaid || this.toolCalled) {
+    // A lazy turn's are held from the start, so a hosted-loop reply that
+    // joins them in is stripped of them like any other turn's.
+    if (this.lazy || this.firstWordsSaid || this.toolCalled) {
       this.held.push(text);
       this.lastWasHeld = true;
       return undefined;
@@ -1930,7 +1960,7 @@ class ReplyRenderer {
     if (reply.trim().length === 0) {
       return '';
     }
-    return this.promotedReply ?? this.unsaid(reply);
+    return this.postedReply ?? this.unsaid(reply);
   }
 
   /**
@@ -2090,6 +2120,23 @@ class ReplyRenderer {
     // reply as a message of its own beside a placeholder that then fills
     // with stale partial text.
     await this.editChain;
+    // A turn nobody asked for says only what it wrote after its last tool.
+    // What came before was held, and a provider that hosts its own loop
+    // (codex) joins it into the reply, so it is stripped here, before
+    // silence is judged: a reply that is only that narration is the
+    // decision to stay out, not something to post (card 1060). Nor are
+    // held words ever promoted to its answer, as another turn's are below.
+    // A reply that is exactly what it streamed after its last tool is its
+    // last message alone, from a provider that returns only that: kept
+    // whole, even where it repeats words it held (Codex on #573).
+    if (this.lazy && this.held.length > 0) {
+      const streamed = this.streamedAfterTool.trim();
+      if (streamed.length > 0 && reply.trim() === streamed) {
+        this.postedReply = streamed;
+      } else {
+        reply = this.unsaid(reply);
+      }
+    }
     if (this.lazy && reply.trim().length === 0 && (!this.ref || await this.retract())) {
       // Silence, decided: nothing was posted and nothing is — or what was
       // posted has been taken back. The uploads still land: a file the
@@ -2117,11 +2164,11 @@ class ReplyRenderer {
     // a reply-optional turn too (card 601): its words between tools were
     // held, so they are the only way an answer written before its last
     // tool call reaches the thread, and silence is judged after them.
-    if (!this.ref && (this.interimPosted || this.held.length > 0)) {
+    if (!this.lazy && !this.ref && (this.interimPosted || this.held.length > 0)) {
       const rest = this.unsaid(reply);
       const lastHeld = this.held.at(-1);
       if (rest.length === 0 && this.lastWasHeld && lastHeld !== undefined) {
-        this.promotedReply = lastHeld;
+        this.postedReply = lastHeld;
         reply = lastHeld;
       } else {
         reply = rest;
@@ -4838,6 +4885,73 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
     }
     return entries;
+  };
+
+  /**
+   * The files a team agent posted just above the message where it tags
+   * this one (card 1061). A turn that makes a screenshot and then asks a
+   * colleague about it posts the file as a message of its own, above the
+   * tag, so the mention arrived with nothing attached: the colleague was
+   * asked to inspect something it was never handed, and in a session it
+   * already held it did not even hear the upload, since an agent's
+   * untagged message reaches nobody.
+   *
+   * The agent's own messages directly above the tag, with nobody else
+   * speaking between, are that turn's posts, or as near to them as a
+   * reader on another daemon can tell. They come in the thread's order,
+   * the tag's own last and not repeated: images are kept from the last back
+   * (`readImageAttachments`), so the tag's own are kept first, and the
+   * caller hands the text reader, which spends from the front, the tag's
+   * own first. One read, of the hour before the mention. A thread
+   * with more than a page of replies in that hour gives nothing, rather
+   * than a run read from the middle of it, and a read that fails warns:
+   * either way the mention runs with what it carried, as before this.
+   */
+  const withFilesJustAbove = async (
+    connection: AgentConnection,
+    event: SlackInboundEvent & { thread_ts: string },
+    speaker: string,
+    name: string,
+  ): Promise<SlackInboundFile[]> => {
+    const own = event.files ?? [];
+    const replies = connection.web.conversations.replies;
+    if (!replies) {
+      return own;
+    }
+    // Whole seconds, so the arithmetic never touches the six digits after
+    // the point that make a Slack ts unique.
+    const [seconds = '0', fraction = '000000'] = event.ts.split('.');
+    const oldest = `${Math.max(0, Number(seconds) - TAGGED_FILES_WINDOW_SECONDS)}.${fraction}`;
+    let page: SlackHistoryPage;
+    try {
+      page = await replies.call(connection.web.conversations, {
+        channel: event.channel,
+        ts: event.thread_ts,
+        latest: event.ts,
+        oldest,
+        inclusive: false,
+        limit: 200,
+      });
+    } catch (error) {
+      warn(
+        `slack: ${connection.config.agentId} could not read above ${name}'s mention in ${event.channel}, so it gets only the files on the mention itself: `
+        + `${error instanceof Error ? error.message : String(error)} (the history scopes are channels:history, groups:history, and mpim:history)`,
+      );
+      return own;
+    }
+    if (page.response_metadata?.next_cursor) {
+      return own;
+    }
+    const above = (page.messages ?? [])
+      .filter((message) => message.ts !== undefined && Number(message.ts) < Number(event.ts))
+      .sort((a, b) => Number(a.ts) - Number(b.ts));
+    const posted: SlackInboundFile[] = [];
+    for (let index = above.length - 1; index >= 0 && above[index]!.user === speaker; index -= 1) {
+      posted.unshift(...(above[index]!.files ?? []));
+    }
+    const seen = new Set(own.map((file) => file.id).filter((id) => id !== undefined));
+    const added = posted.filter((file) => file.id === undefined || !seen.has(file.id)).slice(-TAGGED_FILES_LIMIT);
+    return [...added, ...own];
   };
 
   /**
@@ -8531,18 +8645,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // overheard message, and every provider shows the images after the
       // frame that marks it as somebody else's. Text files land inside the
       // message, so the frame quotes them with the rest of it.
+      // A team agent's tag inside a thread carries the files its turn posted
+      // just above it (card 1061), read as if they were attached to the tag.
+      const files = admitted.fromAgent !== undefined && !overhear && event.thread_ts !== undefined && event.thread_ts !== event.ts
+        ? await withFilesJustAbove(connection, { ...event, thread_ts: event.thread_ts }, userId, admitted.fromAgent)
+        : event.files ?? [];
       // Images and text files share the message's one download deadline.
       const deadline = AbortSignal.timeout(fileDownloadTimeoutMs);
       const reasons: UnreadReasons = new Map();
       if (overhear) {
-        for (const file of event.files ?? []) {
+        for (const file of files) {
           reasons.set(file, 'not-opened');
         }
       }
       const { images, unread: notImages, previews } = overhear
-        ? { images: [] as ImageAttachment[], unread: event.files ?? [], previews: [] as ImagePreview[] }
+        ? { images: [] as ImageAttachment[], unread: files, previews: [] as ImagePreview[] }
         : await readImageAttachments(
-          event.files ?? [],
+          files,
           connection.config.botToken,
           fetchFile,
           fileDownloadTimeoutMs,
@@ -8550,10 +8669,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           reasons,
           deadline,
         );
+      // Text is spent from the first file on, so the tag's own files lead:
+      // ones carried from above it (card 1061) must not crowd them out.
+      const ownFiles = new Set(event.files ?? []);
+      const ownFirst = [...notImages.filter((file) => ownFiles.has(file)), ...notImages.filter((file) => !ownFiles.has(file))];
       const { texts, saved, unread } = overhear
         ? { texts: [], saved: [] as SavedAttachment[], unread: notImages }
         : await readTextAttachments(
-          notImages,
+          ownFirst,
           connection.config.botToken,
           fetchFile,
           fileDownloadTimeoutMs,

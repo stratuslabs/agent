@@ -84,6 +84,7 @@ export {
   stratusHomePath,
   globalConfigPath,
   logsDirPath,
+  backupsDirPath,
   credentialsPath,
   credentialAuditPath,
   agentsDirPath,
@@ -236,6 +237,8 @@ export {
   unlistedToolsFor,
 } from './migrations.ts';
 
+export { type StateBackup, backUpStateBeforeMigrating, describeStateBackup } from './state-backup.ts';
+
 export {
   drainSharedMemory,
   hasBracketedLegacyState,
@@ -249,6 +252,9 @@ export {
   type IgnoredConfigKey,
   ignoredConfigKeys,
   loadConfigFile,
+  bindsLoopback,
+  type HostLookup,
+  isLoopbackAddress,
   normalizePublicUrl,
   validateConfigFile,
   resolveAgentApprovals,

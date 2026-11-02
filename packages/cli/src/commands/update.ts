@@ -10,6 +10,8 @@ import {
   repairWorkspacesIfPending,
   surfaceAgentsHome,
   runStateMigrations,
+  describeStateBackup,
+  type StateBackup,
   STATE_SCHEMA_VERSION,
   type AppliedStateMigration,
 } from '@stratusagent/state';
@@ -561,7 +563,8 @@ const runUpdateSteps = async (
         + 'everything else still applied. Stop that daemon and run `stratus update` again to finish it.',
       );
     }
-    applied = await runStateMigrations(env, claim.held ? { exclusive: true } : {});
+    const onBackup = (backup: StateBackup): void => out(describeStateBackup(backup));
+    applied = await runStateMigrations(env, claim.held ? { exclusive: true, onBackup } : { onBackup });
     // And the workspace pass again, for the same reason `serve` runs it:
     // the schema stamp is not what makes that move safe, so a workspace an
     // older build left at the legacy path is folded whenever something

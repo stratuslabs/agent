@@ -248,9 +248,14 @@ whatever is bound:
   leaves the variable unset. A binding is for one agent, even on a shared key.
 - The value is read when the command starts, so a replaced key reaches the next
   command without a restart. It wins over the same name in `env` or `passEnv`.
-- A command can read the value: `echo $GH_TOKEN` prints it, and so does the
-  tool result. Map only narrowly scoped tokens (a repo-scoped GitHub token,
-  a project-scoped Vercel one).
+- A command can read the value, use it, and send it anywhere a command can.
+  Where it prints the value as is (`printenv`, a CLI's debug output), the tool
+  result shows `[redacted]` in its place, in stdout and stderr alike, so a
+  printed key doesn't end up in the conversation, the event stream or the
+  agent's memory. That guards against accidents and is no boundary: a command
+  that changes the value first (`base64`) shows what it printed. Values in
+  `env` aren't masked. Map only narrowly scoped tokens (a repo-scoped GitHub
+  token, a project-scoped Vercel one).
 - Variables that find or run programs (`PATH`, `HOME`, `BASH_ENV`,
   `GIT_DIR` and the rest of the filtered list) are refused, along with names
   that aren't valid variable names. A binding naming one (a hand-edited file)
