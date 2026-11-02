@@ -21,6 +21,7 @@ import { defaultUpdateContinuation } from '../src/commands/update.ts';
 import {
   AGENTS_FOLDER_RECORD,
   AGENTS_HOME_MARKER,
+  agentMemoryFilePath,
   agentsDirPath,
   agentWorkspacePath,
   credentialsPath,
@@ -416,6 +417,39 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
   assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/channel-slack/);
   const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner });
   assert.equal(rewritten?.execPath, process.execPath);
+});
+
+test('a home upgraded from 0.14.1 says once which agents lost task notes to the 14-day default', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home };
+  // What 0.14.1 leaves behind: every migration it knew, and an agent with a
+  // task note written a month ago, which this build no longer reads as
+  // current.
+  await mkdir(path.dirname(stateFilePath(env)), { recursive: true });
+  await writeFile(stateFilePath(env), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const memoryFile = agentMemoryFilePath(env, 'ava');
+  await mkdir(path.dirname(memoryFile), { recursive: true, mode: 0o700 });
+  await writeFile(memoryFile, `${JSON.stringify({
+    id: 'ava:memory:old',
+    agentId: 'ava',
+    content: 'PR 12 is waiting on review',
+    kind: 'episodic',
+    createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+  })}\n`);
+
+  const first = createStreams();
+  assert.equal(await runCli({ argv: ['agents'], streams: first.streams, env: { homeDir: home, cwd: home, processEnv: {} } }), 0);
+  assert.match(
+    first.output.stderr,
+    /state migration 0006-task-notes-expiry-notice: task notes over 14 days old no longer read as current: ava 1\. Nothing was deleted/,
+  );
+
+  const second = createStreams();
+  assert.equal(await runCli({ argv: ['agents'], streams: second.streams, env: { homeDir: home, cwd: home, processEnv: {} } }), 0);
+  assert.doesNotMatch(second.output.stderr, /task notes/);
 });
 
 test('every command migrates on first use of a newer build, and serve refuses newer state', async () => {
