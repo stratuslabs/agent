@@ -7,6 +7,12 @@
 # attestation. A version already on the registry is skipped, so a rerun
 # after a partial failure finishes the release instead of failing on it.
 #
+# A prerelease version (1.0.0-rc.1) goes out under the `next` dist-tag and
+# leaves `latest` on the last stable release, so `npm install` and
+# `stratus update` never pick up a release candidate unasked. Anything else
+# goes out under `latest`. npm 11 refuses a prerelease without a tag, so
+# before this an rc tag failed the release on its first package.
+#
 # DRY_RUN=1 packs and runs `npm publish --dry-run` without provenance, which
 # only a CI runner with an OIDC token can generate.
 set -euo pipefail
@@ -43,12 +49,18 @@ while IFS= read -r tarball; do
     skipped=$((skipped + 1))
     continue
   fi
+  # SemVer: a prerelease is a hyphen after the patch number, and build
+  # metadata after `+` may hold hyphens of its own, so it's cut off first.
+  case "${version%%+*}" in
+    *-*) dist_tag=next ;;
+    *) dist_tag=latest ;;
+  esac
   if [ "${DRY_RUN:-}" = "1" ]; then
-    npm publish "$tarball" --access public --dry-run >/dev/null
-    echo "dry-run $name@$version"
+    npm publish "$tarball" --access public --tag "$dist_tag" --dry-run >/dev/null
+    echo "dry-run $name@$version under $dist_tag"
   else
-    npm publish "$tarball" --access public --provenance
-    echo "published $name@$version"
+    npm publish "$tarball" --access public --tag "$dist_tag" --provenance
+    echo "published $name@$version under $dist_tag"
   fi
   published=$((published + 1))
 done < "$out/order"
