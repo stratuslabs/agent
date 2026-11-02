@@ -214,7 +214,8 @@ lets the agent keep saving facts but not search them, and with the prompt
 carrying only the pinned core, the topic index, and a short tail, its older
 memories are out of reach. Add `memory.recall`, `memory.forget`, and
 `memory.pin` — or just `memory.*`. A soul with no `tools:` list is
-unaffected; omitted means every registered tool.
+unaffected: the memory tools are registered as safe, and an omitted list
+grants the safe tools.
 
 ## Where a fact came from
 

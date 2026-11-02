@@ -237,6 +237,6 @@ export const defaultInstalledVersionReader: InstalledVersionReader = async (spec
   return installedPackageVersion(specifier, { resolve: (target) => import.meta.resolve(target) });
 };
 
-export const CLI_VERSION = '0.14.2';
+export const CLI_VERSION = '0.14.3';
 
 export const CLI_PACKAGE_NAME = '@stratusagent/cli';

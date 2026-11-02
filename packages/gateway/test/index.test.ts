@@ -559,7 +559,8 @@ test('an agent that cannot currently answer still hears, and has it once it can'
     assert.deepEqual(userContents.at(-1), [
       'Dylan: Ava, hello',
       '(overheard, not addressed to you)\n> Dylan: Bea, cover for her?',
-      'Dylan: Ava, back?',
+      // Said to Ava after an overheard message, so marked (card 1034).
+      '(said to you)\nDylan: Ava, back?',
     ]);
   } finally {
     await gateway.stop();
@@ -2128,9 +2129,9 @@ test('a demo daemon default never sheds the generic key from a pinned soul', asy
   assert.ok(apiKeys.some((key) => key === 'sk-generic'));
 });
 
-test('a roster soul with no tools: list is named at load, because the omitted key grants every tool', async () => {
+test('a roster soul with no tools: list is named at load, because the omitted key grants only the safe tools', async () => {
   const home = await newHome();
-  await writeSoul(home, 'open.md', '---\nname: Open\n---\n\nI have every tool.\n');
+  await writeSoul(home, 'open.md', '---\nname: Open\n---\n\nI have only the safe tools.\n');
   await writeSoul(home, 'narrow.md', '---\nname: Narrow\ntools:\n  - memory.*\n---\n\nI have memory.\n');
 
   const warnings: string[] = [];
@@ -2141,9 +2142,24 @@ test('a roster soul with no tools: list is named at load, because the omitted ke
 
   const named = warnings.filter((line) => line.includes('has no tools: list'));
   assert.equal(named.length, 1, `expected one warning, got ${JSON.stringify(warnings)}`);
-  assert.match(named[0] ?? '', /agent open has no tools: list, so it may call every tool this daemon loads — add tools: \[\.\.\.\] to .*open\.md to say which/);
-  // The built-in agent has no file to add the key to, so it is not named.
+  assert.match(named[0] ?? '', /agent open has no tools: list, so it gets only safe tools \(reads and memory\) — add tools: \[\.\.\.\] to .*open\.md to give it more, or tools: \["\*"\] for every tool/);
+  // The built-in agent has no file and says tools: ["*"] in code, so it is not named.
   assert.ok(!warnings.some((line) => line.includes('agent stratus has no tools')));
+});
+
+test('on a home an older build set up, a soul with no tools: list is named the way it always was: it may call every tool', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'open.md', '---\nname: Open\n---\n\nI have every tool.\n');
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({ schemaVersion: 4, applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'] }));
+
+  const warnings: string[] = [];
+  const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  await gateway.stop();
+
+  const named = warnings.filter((line) => line.includes('has no tools: list'));
+  assert.equal(named.length, 1, `expected one warning, got ${JSON.stringify(warnings)}`);
+  assert.match(named[0] ?? '', /agent open has no tools: list, so it may call every tool this daemon loads — add tools: \[\.\.\.\] to .*open\.md to say which/);
 });
 
 test('a config-only default soul with no tools: list is named too, and a roster-backed one only once', async () => {
@@ -2160,9 +2176,9 @@ test('a config-only default soul with no tools: list is named too, and a roster-
   await gateway.stop();
   const named = warnings.filter((line) => line.includes('has no tools: list'));
   assert.deepEqual(named.map((line) => line.replace(/ — add tools:.*$/, '')), [
-    'agent nova has no tools: list, so it may call every tool this daemon loads',
+    'agent nova has no tools: list, so it gets only safe tools (reads and memory)',
   ]);
-  assert.match(named[0] ?? '', /to .*nova\.md to say which/);
+  assert.match(named[0] ?? '', /to .*nova\.md to give it more/);
 
   // Every roster load, not only the first registration: the promise is a
   // notice each time the roster loads, and a reload re-reads the soul.

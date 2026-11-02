@@ -228,7 +228,7 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   const automatic = await runStateMigrations(env);
   assert.deepEqual(
     automatic.map((result) => result.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels'],
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0005-safe-tools-default'],
   );
   await stat(legacySessionDbPath(env));
   await stat(path.join(agentsDirPath(env), 'ava.whitelist.json'));
@@ -245,7 +245,7 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
   assert.deepEqual(
     (await pendingStateMigrations(env)).map((migration) => migration.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces', '0005-safe-tools-default'],
   );
 
   // The memories move anyway, because nothing about them needs the bracket
@@ -258,7 +258,7 @@ test('the sessions and grants wait for a caller that holds the home; the memory 
   const exclusive = await runStateMigrations(env, { exclusive: true });
   assert.deepEqual(
     exclusive.map((result) => result.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces', '0005-safe-tools-default'],
   );
   assert.deepEqual(sessionIdsIn(agentSessionDbPath(env, 'ava')), ['a-1', 'a-2']);
   // And now the stamp, once and whole.
@@ -348,7 +348,7 @@ test('a home with nothing shared to move still waits for a caller holding it', a
   // record the home as migrated while it fills with state nothing will
   // move, and 0003 — stamped — would never run again.
   const ordinary = await runStateMigrations(env);
-  assert.deepEqual(ordinary.map((result) => result.id), ['0001-owner-only-state-files', '0002-provenance-labels']);
+  assert.deepEqual(ordinary.map((result) => result.id), ['0001-owner-only-state-files', '0002-provenance-labels', '0005-safe-tools-default']);
   // Nothing recorded: see the deferral test above for why not even the
   // part it finished.
   assert.deepEqual(await readStateStamp(env), { schemaVersion: 0, applied: [] });
@@ -562,7 +562,7 @@ test('an empty database with no archive beside it still needs the bracket', asyn
   // So the ordinary path defers it, and the stamp stays back.
   assert.deepEqual(
     (await runStateMigrations(env)).map((result) => result.id),
-    ['0001-owner-only-state-files', '0002-provenance-labels'],
+    ['0001-owner-only-state-files', '0002-provenance-labels', '0005-safe-tools-default'],
   );
   await stat(legacySessionDbPath(env));
 });

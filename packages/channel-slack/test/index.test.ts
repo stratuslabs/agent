@@ -514,6 +514,44 @@ test('the loading status comes back once an approval asked mid-turn is answered'
   assert.deepEqual(statuses.slice(before).map((status) => status.status), ['is thinking…']);
 });
 
+test('a post sent into the thread of a working turn puts that turn\'s loading status back (card 1009)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C1', { is_member: true });
+  const statuses = recordStatuses(web);
+  let adapter!: ReturnType<typeof createAdapterAsShipped>;
+  let before = -1;
+  let after: RecordedStatus[] = [];
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+    await new Promise((resolve) => setImmediate(resolve));
+    before = statuses.length;
+    // Another of this app's sessions (a scheduled report, say) posts into
+    // the thread while this turn's tool is still running. Slack clears
+    // the thread's status on any post of the app's there. A post into
+    // another thread leaves this one's status alone.
+    await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C1', thread: '200.1' })).post('Elsewhere.');
+    await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C1', thread: '100.1' })).post('Nightly report.');
+    await new Promise((resolve) => setImmediate(resolve));
+    after = statuses.slice(before);
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+
+  adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> run the build'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Elsewhere.', '200.1'], ['Nightly report.', '100.1'], ['Done.', '100.1']]);
+  assert.deepEqual(after.map((status) => [status.status, status.thread_ts]), [['is running shell.run…', '100.1']]);
+});
+
 test('a final reply waiting on a slow upload is not overtaken by the turn queued behind it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
@@ -11946,19 +11984,22 @@ test('a final reply the model already said before its last tool call is not post
   assert.equal(statuses.at(-1)?.status, '');
 });
 
-// Card 949: a long task shows its first line, one progress message edited
-// in place from its real tool events, and its reply. What the model writes
-// between tools after the first line goes into that message, not posts of
-// its own.
+// Card 1009: a task posts its first line (card 950) and its reply, and
+// nothing between them. There is no progress message, and what the model
+// writes between tools after its first line is held: Slack's own status
+// line is what shows the turn is still working.
 
-/** A final-mode adapter for the progress-message tests, opening it after `progressAfterMs`. */
-const progressAdapter = (gateway: StubGateway, progressAfterMs?: number, overrides: Partial<SlackAdapterOptions['agents'][number]> = {}) => {
+/**
+ * A final-mode adapter for the card 1009 tests. `progressAfterMs: 0` is the
+ * setting that opened card 949's progress message at once; it is ignored now.
+ */
+const quietAdapter = (overrides: Partial<SlackAdapterOptions['agents'][number]> = {}) => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const adapter = createAdapterAsShipped({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', ...overrides }],
     editIntervalMs: 0,
-    ...(progressAfterMs === undefined ? {} : { progressAfterMs }),
+    progressAfterMs: 0,
     createSocketClient: () => socket,
     createWebClient: () => web,
   });
@@ -11974,187 +12015,202 @@ const runTool = async (gateway: StubGateway, sessionId: string, id: string, tool
 const say = (gateway: StubGateway, sessionId: string, text: string) =>
   gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text } });
 
-/** The edits made to one message, in order. */
-const editsOf = (web: FakeWeb, ts: string | undefined): string[] =>
-  web.updates.filter((update) => update.ts === ts).map((update) => update.text ?? '');
-
-test('a long task posts its first line, one progress message edited in place, and its reply', async () => {
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'On it, checking both PRs.');
-    await runTool(gateway, sessionId, 'c1');
-    await say(gateway, sessionId, 'PR 1 is green.');
-    await runTool(gateway, sessionId, 'c2');
-    await say(gateway, sessionId, 'Merging both.');
-    await runTool(gateway, sessionId, 'c3');
-    return sessionWithReply(sessionId, 'Merged both PRs.');
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> merge both'));
-  await adapter.stop();
-
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.equal(texts.length, 3, JSON.stringify(texts));
-  assert.equal(texts[0], 'On it, checking both PRs.');
-  assert.match(texts[1] ?? '', /^⚙ Working/);
-  assert.equal(texts[2], 'Merged both PRs.');
-  // Every edit is of that one message, and the last says how it ended,
-  // with everything the turn wrote along the way under it.
-  const progressTs = 'bot-ts-2';
-  assert.ok(web.updates.length > 0);
-  assert.ok(web.updates.every((update) => update.ts === progressTs), JSON.stringify(web.updates));
-  assert.equal(editsOf(web, progressTs).at(-1), '✓ Done · 3 steps\n\nPR 1 is green.\n\nMerging both.');
-});
-
-test('a quick task posts no progress message', async () => {
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Looking.');
-    await runTool(gateway, sessionId, 'c1');
-    await runTool(gateway, sessionId, 'c2');
-    return sessionWithReply(sessionId, 'Both are green.');
-  });
-  const { socket, web, adapter } = progressAdapter(gateway);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> are they green?'));
-  await adapter.stop();
-
-  assert.deepEqual(web.posts.map((post) => post.text), ['Looking.', 'Both are green.']);
-  assert.deepEqual(web.updates, []);
-});
-
-test('words written after the first line go into the progress message, not posts of their own', async () => {
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Looking.');
-    await runTool(gateway, sessionId, 'c1');
-    await say(gateway, sessionId, 'CI passed.');
-    await runTool(gateway, sessionId, 'c2');
-    await say(gateway, sessionId, 'Merged.');
-    await runTool(gateway, sessionId, 'c3');
-    return sessionWithReply(sessionId, 'Both PRs are merged.');
-  });
-  // The default wait: the progress message opens for the words, not the clock.
-  const { socket, web, adapter } = progressAdapter(gateway);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> merge them'));
-  await adapter.stop();
-
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.equal(texts.length, 3, JSON.stringify(texts));
-  assert.equal(texts[0], 'Looking.');
-  assert.match(texts[1] ?? '', /CI passed\./);
-  assert.equal(texts[2], 'Both PRs are merged.');
-  assert.ok(!texts.includes('Merged.'));
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 3 steps\n\nCI passed.\n\nMerged.');
-});
-
-test('a progress message opens once a task has worked for a while, saying what it is running', async () => {
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Running the suite.');
-    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
-    await until(() => web.posts.length === 2);
-    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
-    return sessionWithReply(sessionId, 'All 40 pass.');
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 30);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> run the tests'));
-  await adapter.stop();
-
-  assert.deepEqual(web.posts.map((post) => post.text), ['Running the suite.', '⚙ Working · step 1: `shell.run`', 'All 40 pass.']);
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 1 step');
-});
-
-test('words the turn ends on, written before its last tool call, are its reply, not a line in the progress message', async () => {
-  // A Claude Code turn's reply is its last text, which may have come before
-  // a final tool call; a Codex turn's reply is every message joined.
-  for (const reply of ['Summary: both green.', 'Looking.\n\nSummary: both green.']) {
+test('message.say posts a mid-task line after the first line, between the held words, and puts the status back (card 1009)', async () => {
+  for (const replies of ['final', 'texts'] as const) {
+    const { socket, web, adapter } = quietAdapter({ replies });
+    const statuses = recordStatuses(web);
+    let landedWhenResolved = false;
+    let statusesBefore = -1;
     const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-      await say(gateway, sessionId, 'Looking.');
+      await say(gateway, sessionId, 'On it, cleaning up the branches.');
       await runTool(gateway, sessionId, 'c1');
-      await say(gateway, sessionId, 'Summary: both green.');
-      await runTool(gateway, sessionId, 'c2', 'memory.remember');
-      return sessionWithReply(sessionId, reply);
+      await say(gateway, sessionId, 'Three are merged, one is not.');
+      await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c2', toolName: 'message.say', input: {} } });
+      statusesBefore = statuses.length;
+      await adapter.say!({ sessionId, agentId: 'ava', text: 'Need your OK to delete feature-x, it is not merged.' });
+      landedWhenResolved = web.posts.some((post) => post.text === 'Need your OK to delete feature-x, it is not merged.');
+      await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c2', toolName: 'message.say', ok: true, output: { sent: true } } });
+      return sessionWithReply(sessionId, 'Deleted three merged branches. feature-x waits on your OK.');
     });
-    const { socket, web, adapter } = progressAdapter(gateway, 0);
     await adapter.start(gateway);
-    await socket.deliver('app_mention', mention('<@B-AVA> are they green?'));
+    await socket.deliver('app_mention', mention('<@B-AVA> clean up the branches'));
     await adapter.stop();
 
-    const texts = web.posts.map((post) => post.text ?? '');
-    assert.equal(texts.length, 3, JSON.stringify(texts));
-    assert.equal(texts[2], 'Summary: both green.', JSON.stringify(reply));
-    assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps', JSON.stringify(reply));
+    assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [
+      ['On it, cleaning up the branches.', '100.1'],
+      ['Need your OK to delete feature-x, it is not merged.', '100.1'],
+      ['Deleted three merged branches. feature-x waits on your OK.', '100.1'],
+    ], replies);
+    assert.ok(landedWhenResolved, 'the call returns once Slack has the message');
+    assert.ok(statuses.slice(statusesBefore).some((status) => status.status !== ''), 'the status is put back after the post');
   }
 });
 
-test('words promoted to the reply stay in the progress message when Slack refuses the reply', async () => {
+test('message.say refuses past three a turn, on a streaming turn, and with no turn running, and posts nothing for them', async () => {
+  const { socket, web, adapter } = quietAdapter();
+  const refusals: string[] = [];
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Looking.');
-    await runTool(gateway, sessionId, 'c1');
-    await say(gateway, sessionId, 'Summary: both green.');
-    await runTool(gateway, sessionId, 'c2', 'memory.remember');
-    return sessionWithReply(sessionId, 'Summary: both green.');
+    for (const n of [1, 2, 3, 4]) {
+      await adapter.say!({ sessionId, agentId: 'ava', text: `note ${n}` }).catch((error: Error) => refusals.push(error.message));
+    }
+    // Another agent's app does not post into this agent's turn.
+    await adapter.say!({ sessionId, agentId: 'bob', text: 'not mine' }).catch((error: Error) => refusals.push(error.message));
+    return sessionWithReply(sessionId, 'Done.');
   });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await assert.rejects(() => adapter.say!({ sessionId: 'no-such-session', agentId: 'ava', text: 'late' }), /no turn of yours running.*reply/);
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['note 1', 'note 2', 'note 3', 'Done.']);
+  assert.equal(refusals.length, 2);
+  assert.match(refusals[0] ?? '', /already sent 3 mid-task messages.*reply/);
+  assert.match(refusals[1] ?? '', /no turn of yours running/);
+
+  const streamed = quietAdapter({ replies: 'stream' });
+  let streamRefusal = '';
+  const streaming: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await streamed.adapter.say!({ sessionId, agentId: 'ava', text: 'hello' }).catch((error: Error) => {
+      streamRefusal = error.message;
+    });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  await streamed.adapter.start(streaming);
+  await streamed.socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await streamed.adapter.stop();
+  assert.match(streamRefusal, /shows your words as you write them/);
+  assert.ok(!streamed.web.posts.some((post) => post.text === 'hello'));
+});
+
+test('message.say goes to the turn running now, never a Slack message queued behind it (Codex on #513)', async () => {
+  // A recovered turn is running on the session while a newer message's
+  // renderer waits at the head of the queue. The recovery did not come from
+  // that message: its line must not post in that turn's place, or use up
+  // the newer turn's three.
+  const { socket, web, adapter } = quietAdapter();
+  const refusals: string[] = [];
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    for (const n of [1, 2, 3]) {
+      await adapter.say!({ sessionId, agentId: 'ava', text: `note ${n}` }).catch((error: Error) => refusals.push(error.message));
+    }
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    const stubActiveTurn = gateway.activeTurnId!;
+    gateway.activeTurnId = () => 'recovered-turn';
+    await adapter.say!({ sessionId: input.sessionId, agentId: 'ava', text: 'from the recovery' })
+      .catch((error: Error) => refusals.push(error.message));
+    gateway.activeTurnId = stubActiveTurn;
+    return stubDispatch.call(gateway, input);
+  };
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['note 1', 'note 2', 'note 3', 'Done.']);
+  assert.equal(refusals.length, 1);
+  assert.match(refusals[0] ?? '', /no turn of yours running/);
+});
+
+test('a message.say Slack refuses does not count toward the three (Codex round 2 on #513)', async () => {
+  const { socket, web, adapter } = quietAdapter();
   const post = web.chat.postMessage.bind(web.chat);
   web.chat.postMessage = async (args) => {
-    if (args.text === 'Summary: both green.') {
+    if (args.text === 'refused') {
       throw new Error('ratelimited');
     }
     return post(args);
   };
+  const refusals: string[] = [];
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    for (const text of ['refused', 'refused', 'refused', 'note 1', 'note 2', 'note 3', 'note 4']) {
+      await adapter.say!({ sessionId, agentId: 'ava', text }).catch((error: Error) => refusals.push(error.message));
+    }
+    return sessionWithReply(sessionId, 'Done.');
+  });
   await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> are they green?'));
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
   await adapter.stop();
-
-  // The answer is still in the thread, where it already was.
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps\n\nSummary: both green.');
+  assert.deepEqual(web.posts.map((post) => post.text), ['note 1', 'note 2', 'note 3', 'Done.']);
+  assert.equal(refusals.length, 4);
+  assert.ok(refusals.slice(0, 3).every((message) => /Slack did not take the message/.test(message)));
+  assert.match(refusals[3] ?? '', /already sent 3 mid-task messages/);
 });
 
-test('a task with no first line keeps its words in the progress message once it has opened', async () => {
+test('message.say is one message in texts mode, whatever its text (Codex on #513)', async () => {
+  // `texts` splits a reply a paragraph to a message; a mid-task line is one
+  // post, so three calls are never more than three messages.
+  const { socket, web, adapter } = quietAdapter({ replies: 'texts' });
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await adapter.say!({ sessionId, agentId: 'ava', text: 'Need your OK.\n\nIt deletes feature-x.' });
+    return sessionWithReply(sessionId, 'Done.');
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go'));
+  await adapter.stop();
+  assert.deepEqual(web.posts.map((post) => post.text), ['Need your OK.\n\nIt deletes feature-x.', 'Done.']);
+});
+
+test('a long task posts its first line and its reply, and nothing between them', async () => {
+  for (const replies of ['final', 'texts'] as const) {
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      await say(gateway, sessionId, 'On it, checking both PRs.');
+      await runTool(gateway, sessionId, 'c1');
+      await say(gateway, sessionId, 'PR 1 is green.');
+      await runTool(gateway, sessionId, 'c2');
+      await say(gateway, sessionId, 'Merging both.');
+      await runTool(gateway, sessionId, 'c3');
+      return sessionWithReply(sessionId, 'Merged both PRs.');
+    });
+    const { socket, web, adapter } = quietAdapter({ replies });
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> merge both'));
+    await adapter.stop();
+
+    assert.deepEqual(web.posts.map((post) => post.text), ['On it, checking both PRs.', 'Merged both PRs.'], replies);
+    assert.deepEqual(web.updates, [], replies);
+  }
+});
+
+test('words too long for one message are held like any others', async () => {
+  const analysis = `Findings:\n\n${Array.from({ length: 90 }, (_, index) => `- item ${index}: ${'y'.repeat(40)}`).join('\n')}`;
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await say(gateway, sessionId, 'Looking.');
     await runTool(gateway, sessionId, 'c1');
-    await until(() => web.posts.length === 1);
-    await say(gateway, sessionId, 'Halfway there.');
+    await say(gateway, sessionId, analysis);
     await runTool(gateway, sessionId, 'c2');
-    return sessionWithReply(sessionId, 'Finished.');
+    return sessionWithReply(sessionId, 'The audit is saved.');
   });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  const { socket, web, adapter } = quietAdapter();
   await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> do it'));
+  await socket.deliver('app_mention', mention('<@B-AVA> audit it'));
   await adapter.stop();
 
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.deepEqual(texts.slice(1), ['Finished.'], JSON.stringify(texts));
-  assert.equal(editsOf(web, 'bot-ts-1').at(-1), '✓ Done · 2 steps\n\nHalfway there.');
+  assert.deepEqual(web.posts.map((post) => post.text), ['Looking.', 'The audit is saved.']);
 });
 
-test('a task that starts with a tool keeps the words it writes after it in the progress message', async () => {
-  // Only words before the first tool are a message of their own. Written
-  // after a quick step, before the progress message has opened on the
-  // clock, they open it rather than becoming the task's first post.
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await runTool(gateway, sessionId, 'c1', 'fs.read');
-    await say(gateway, sessionId, 'Found the config, checking the log.');
-    await runTool(gateway, sessionId, 'c2');
-    await say(gateway, sessionId, 'The log is clean.');
-    await runTool(gateway, sessionId, 'c3');
-    return sessionWithReply(sessionId, 'Nothing is wrong.');
-  });
-  // The default wait: nothing opens it on the clock in a test this quick.
-  const { socket, web, adapter } = progressAdapter(gateway);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> is it broken?'));
-  await adapter.stop();
+test('words the turn ends on, written before its last tool call, are its reply', async () => {
+  // A Claude Code turn's reply is its last text, which may have come before
+  // a final tool call; a Codex turn's reply is every message joined.
+  for (const reply of ['Summary: both green.', 'Looking.\n\nSummary: both green.', 'Looking.\n\nPR 1 is green.\n\nSummary: both green.']) {
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      await say(gateway, sessionId, 'Looking.');
+      await runTool(gateway, sessionId, 'c1');
+      await say(gateway, sessionId, 'PR 1 is green.');
+      await runTool(gateway, sessionId, 'c2');
+      await say(gateway, sessionId, 'Summary: both green.');
+      await runTool(gateway, sessionId, 'c3', 'memory.remember');
+      return sessionWithReply(sessionId, reply);
+    });
+    const { socket, web, adapter } = quietAdapter();
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> are they green?'));
+    await adapter.stop();
 
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.equal(texts.length, 2, JSON.stringify(texts));
-  assert.match(texts[0] ?? '', /^⚙ Working/);
-  assert.equal(texts[1], 'Nothing is wrong.');
-  assert.equal(editsOf(web, 'bot-ts-1').at(-1), '✓ Done · 3 steps\n\nFound the config, checking the log.\n\nThe log is clean.');
+    assert.deepEqual(web.posts.map((post) => post.text), ['Looking.', 'Summary: both green.'], JSON.stringify(reply));
+  }
 });
 
-test('a hosted-loop reply that joins the whole task posts only its answer, not the notes again', async () => {
+test('a hosted-loop reply that joins the whole task posts only its answer', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await say(gateway, sessionId, 'Looking.');
     await runTool(gateway, sessionId, 'c1');
@@ -12164,228 +12220,66 @@ test('a hosted-loop reply that joins the whole task posts only its answer, not t
     await runTool(gateway, sessionId, 'c3');
     return sessionWithReply(sessionId, 'Looking.\n\nOne is red.\n\nRerunning it.\n\nAll green now.');
   });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  const { socket, web, adapter } = quietAdapter();
   await adapter.start(gateway);
   await socket.deliver('app_mention', mention('<@B-AVA> check CI'));
   await adapter.stop();
 
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.equal(texts.length, 3, JSON.stringify(texts));
-  assert.equal(texts[2], 'All green now.');
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 3 steps\n\nOne is red.\n\nRerunning it.');
+  assert.deepEqual(web.posts.map((post) => post.text), ['Looking.', 'All green now.']);
 });
 
-test('a progress message keeps its newest notes when they outgrow one message', async () => {
-  const notes = Array.from({ length: 12 }, (_, index) => `Note ${index}: ${'x'.repeat(490)}`);
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Starting.');
-    for (const [index, note] of notes.entries()) {
-      await runTool(gateway, sessionId, `c${index}`);
-      await say(gateway, sessionId, note);
-    }
-    await runTool(gateway, sessionId, 'last');
-    return sessionWithReply(sessionId, 'Done with all twelve.');
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> go'));
-  await adapter.stop();
+test('a task that starts with a tool posts no first line, holds the words after it, and can end on them', async () => {
+  // Only words before the first tool are a message of their own.
+  for (const [reply, expected] of [
+    ['Nothing is wrong.', 'Nothing is wrong.'],
+    ['The log is clean.', 'The log is clean.'],
+    ['Found the config, checking the log.\n\nThe log is clean.', 'The log is clean.'],
+  ] as const) {
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      await runTool(gateway, sessionId, 'c1', 'fs.read');
+      await say(gateway, sessionId, 'Found the config, checking the log.');
+      await runTool(gateway, sessionId, 'c2');
+      await say(gateway, sessionId, 'The log is clean.');
+      await runTool(gateway, sessionId, 'c3', 'memory.remember');
+      return sessionWithReply(sessionId, reply);
+    });
+    const { socket, web, adapter } = quietAdapter();
+    await adapter.start(gateway);
+    await socket.deliver('app_mention', mention('<@B-AVA> is it broken?'));
+    await adapter.stop();
 
-  const last = editsOf(web, 'bot-ts-2').at(-1) ?? '';
-  assert.ok(last.length <= 4000, String(last.length));
-  assert.ok(last.startsWith('✓ Done · 13 steps\n\n…\n\n'), last.slice(0, 40));
-  assert.ok(last.endsWith(notes[11] ?? ''));
-  assert.ok(!last.includes('Note 0:'));
-  assert.equal(web.posts.at(-1)?.text, 'Done with all twelve.');
-});
-
-test('a note trimmed before the progress message ever showed it is not taken out of the reply', async () => {
-  // Slack is slow, so the first note's write waits behind the first line
-  // while later notes push it out of the message. Nobody saw it, so a
-  // hosted-loop reply that repeats the task keeps it.
-  const early = ['Note A: found it.', 'Note B: checking it.'];
-  const late = Array.from({ length: 4 }, (_, index) => `Note ${index}: ${'x'.repeat(1200)}`);
-  let release!: () => void;
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Starting.');
-    await runTool(gateway, sessionId, 'c0');
-    for (const [index, note] of [...early, ...late].entries()) {
-      await say(gateway, sessionId, note);
-      await runTool(gateway, sessionId, `c${index + 1}`);
-    }
-    release();
-    return sessionWithReply(sessionId, ['Starting.', ...early, ...late, 'All done.'].join('\n\n'));
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
-  web.postGate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> go'));
-  await adapter.stop();
-
-  const seen = [...web.posts, ...web.updates].map((message) => message.text ?? '').join('\n');
-  for (const note of early) {
-    assert.ok(seen.includes(note), `${note} never reached Slack: ${JSON.stringify(web.posts.map((post) => (post.text ?? '').slice(0, 60)))}`);
+    assert.deepEqual(web.posts.map((post) => post.text), [expected], JSON.stringify(reply));
+    assert.deepEqual(web.updates, [], JSON.stringify(reply));
   }
-  assert.ok(web.posts.at(-1)?.text?.endsWith('All done.'));
 });
 
-test('a note an earlier write already showed stays said when its own write is refused', async () => {
-  // The progress message's opening write waits behind the first line and
-  // lands holding the note; the note's own edit after it is refused. The
-  // reader saw it, so it stays in the message and is not posted again.
-  let release!: () => void;
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Starting.');
-    await runTool(gateway, sessionId, 'c1');
-    await say(gateway, sessionId, 'Note A: found it.');
-    await runTool(gateway, sessionId, 'c2');
-    release();
-    return sessionWithReply(sessionId, 'Starting.\n\nNote A: found it.\n\nAll done.');
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
-  web.postGate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const update = web.chat.update.bind(web.chat);
-  let refused = false;
-  web.chat.update = async (args) => {
-    if (!refused) {
-      refused = true;
-      web.updates.push(args);
-      throw new Error('ratelimited');
-    }
-    return update(args);
-  };
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> go'));
-  await adapter.stop();
-
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.ok(refused);
-  assert.match(texts[1] ?? '', /Note A: found it\./);
-  assert.equal(texts.at(-1), 'All done.', JSON.stringify(texts));
-  assert.match(editsOf(web, 'bot-ts-2').at(-1) ?? '', /^✓ Done · 2 steps\n\nNote A: found it\.$/);
-});
-
-test('a note Slack never showed leaves the progress message and stays in the reply', async () => {
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Starting.');
-    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
-    await until(() => web.posts.length === 2);
-    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
-    await say(gateway, sessionId, 'Note A: found it.');
-    await runTool(gateway, sessionId, 'c2');
-    return sessionWithReply(sessionId, 'Starting.\n\nNote A: found it.\n\nAll done.');
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
-  // Slack refuses every edit that holds the note, so no reader ever sees it.
-  const update = web.chat.update.bind(web.chat);
-  web.chat.update = async (args) => {
-    if ((args.text ?? '').includes('Note A')) {
-      throw new Error('msg_too_long');
-    }
-    return update(args);
-  };
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> go'));
-  await adapter.stop();
-
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps');
-  assert.equal(web.posts.at(-1)?.text, 'Note A: found it.\n\nAll done.');
-});
-
-test('words too long for the progress message are posted whole as messages of their own, and not again as the reply', async () => {
-  const analysis = `Findings:\n\n${Array.from({ length: 90 }, (_, index) => `- item ${index}: ${'y'.repeat(40)}`).join('\n')}`;
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Looking.');
-    await runTool(gateway, sessionId, 'c1');
-    await say(gateway, sessionId, 'Two files to read.');
-    await runTool(gateway, sessionId, 'c2');
-    await say(gateway, sessionId, analysis);
-    await runTool(gateway, sessionId, 'c3', 'memory.remember');
-    // A Claude Code turn's reply is its last text, written before that call.
-    return sessionWithReply(sessionId, analysis);
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> audit it'));
-  await adapter.stop();
-
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.equal(texts[0], 'Looking.');
-  assert.match(texts[1] ?? '', /^⚙ Working/);
-  // Split only where Slack's limit makes it, every item said once.
-  const rest = texts.slice(2);
-  assert.ok(rest.length >= 2, JSON.stringify(rest.map((text) => text.length)));
-  assert.ok(rest.every((text) => !text.includes('Working')));
-  assert.equal(rest.join('\n').match(/item 89:/g)?.length, 1);
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 3 steps\n\nTwo files to read.');
-});
-
-test('the progress message names a tool still running when another finishes beside it', async () => {
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Reading both.');
-    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'a', toolName: 'fs.read', input: {} } });
-    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'b', toolName: 'web.fetch', input: {} } });
-    await until(() => web.posts.length === 2);
-    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'b', toolName: 'web.fetch', ok: true, output: null } });
-    await until(() => editsOf(web, 'bot-ts-2').length > 0);
-    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'a', toolName: 'fs.read', ok: true, output: null } });
-    return sessionWithReply(sessionId, 'Both read.');
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> read both'));
-  await adapter.stop();
-
-  assert.equal(editsOf(web, 'bot-ts-2')[0], '⚙ Working · step 2: `fs.read`');
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps');
-});
-
-test('a tool name cannot ping anyone through the progress message', async () => {
-  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
-    await say(gateway, sessionId, 'Calling it.');
-    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'evil.<!channel>`x', input: {} } });
-    await until(() => web.posts.length === 2);
-    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'evil.<!channel>`x', ok: true, output: null } });
-    return sessionWithReply(sessionId, 'Done.');
-  });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
-  await adapter.start(gateway);
-  await socket.deliver('app_mention', mention('<@B-AVA> go'));
-  await adapter.stop();
-
-  assert.equal(web.posts[1]?.text, '⚙ Working · step 1: `evil.&lt;!channel&gt;x`');
-});
-
-test('a task that fails marks its progress message failed, and the failure posts below it', async () => {
+test('a task that fails posts its first line and the failure, nothing between', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await say(gateway, sessionId, 'Deploying.');
     await runTool(gateway, sessionId, 'c1');
+    await say(gateway, sessionId, 'Built it, pushing now.');
     await runTool(gateway, sessionId, 'c2');
     throw new Error('provider exploded');
   });
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  const { socket, web, adapter } = quietAdapter();
   await adapter.start(gateway);
   await socket.deliver('app_mention', mention('<@B-AVA> deploy'));
   await adapter.stop();
 
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.equal(texts.length, 3, JSON.stringify(texts));
-  assert.equal(texts[2], 'Something went wrong: provider exploded');
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✗ Failed after 2 steps');
+  assert.deepEqual(web.posts.map((post) => post.text), ['Deploying.', 'Something went wrong: provider exploded']);
+  assert.deepEqual(web.updates, []);
 });
 
-test('a task an approver stops marks its progress message stopped', async () => {
+test('a task an approver stops posts its first line and who stopped it, nothing between', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   let signal: AbortSignal | undefined;
   let running = false;
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await say(gateway, sessionId, 'Starting the migration.');
-    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
+    await runTool(gateway, sessionId, 'c1', 'fs.read');
+    await say(gateway, sessionId, 'Schema read, migrating.');
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c2', toolName: 'shell.run', input: {} } });
     running = true;
     await new Promise<void>((_resolve, reject) => {
       signal?.addEventListener('abort', () => reject(signal?.reason), { once: true });
@@ -12406,48 +12300,85 @@ test('a task an approver stops marks its progress message stopped', async () => 
   });
   await adapter.start(gateway);
   void socket.deliver('app_mention', mention('<@B-AVA> migrate'));
-  await until(() => running && web.posts.length === 2);
+  await until(() => running && web.posts.length === 1);
   await socket.deliver('message', channelMessage({ text: 'stop', ts: '100.3', thread: '100.1' }));
   await socket.settled();
   await adapter.stop();
 
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.equal(texts.at(-1), 'Stopped by <@U-DYLAN>.', JSON.stringify(texts));
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '■ Stopped after 1 step');
+  assert.deepEqual(web.posts.map((post) => post.text), ['Starting the migration.', 'Stopped by <@U-DYLAN>.']);
+  assert.deepEqual(web.updates, []);
 });
 
-test('while a task waits on an approval its progress message says so, and the prompt posts below it', async () => {
+test('while a task waits on an approval the prompt posts below its first line, and held words stay held', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await say(gateway, sessionId, 'Cleaning up.');
     await runTool(gateway, sessionId, 'c1', 'fs.read');
-    // A model call sits between one tool and the next: the first line and
-    // the progress message are in the thread by the time the next asks.
-    await until(() => web.posts.length === 2);
+    await until(() => web.posts.length === 1);
+    await say(gateway, sessionId, 'Three stale caches, removing them.');
     const call = { id: 'call-1', toolName: 'shell.run', input: { command: 'ls' } };
     gateway.pendingApprovals.add('req-1');
     await gateway.bus.emit(approvalRequest({ sessionId, call }));
-    await until(() => web.posts.length === 3);
-    await until(() => editsOf(web, 'bot-ts-2').some((text) => text.startsWith('⏸ Waiting for approval to run `shell.run`')));
+    await until(() => web.posts.length === 2);
     await gateway.bus.emit({ type: 'tool.approval-resolved', sessionId, requestId: 'req-1', answer: 'once', reason: 'decided' });
     await gateway.bus.emit({ type: 'tool.called', sessionId, call });
     await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'call-1', toolName: 'shell.run', ok: true, output: null } });
     return sessionWithReply(sessionId, 'Cleaned up.');
   });
-  const { socket, web, adapter } = progressAdapter(gateway, 0, { approvers: ['U-DYLAN'] });
+  const { socket, web, adapter } = quietAdapter({ approvers: ['U-DYLAN'] });
   await adapter.start(gateway);
   await socket.deliver('app_mention', mention('<@B-AVA> clean up'));
   await adapter.stop();
 
   const texts = web.posts.map((post) => post.text ?? '');
+  assert.equal(texts.length, 3, JSON.stringify(texts));
   assert.equal(texts[0], 'Cleaning up.');
-  assert.match(texts[1] ?? '', /^⚙ Working/);
-  assert.equal(texts.at(-1), 'Cleaned up.');
-  // The prompt sits below the progress message, above the reply.
-  assert.equal(texts.length, 4, JSON.stringify(texts));
-  assert.equal(editsOf(web, 'bot-ts-2').at(-1), '✓ Done · 2 steps');
+  assert.match(texts[1] ?? '', /shell\.run/);
+  assert.equal(texts[2], 'Cleaned up.');
+  assert.ok(!texts.some((text) => text.includes('stale caches')), JSON.stringify(texts));
 });
 
-test('a judged turn and a streaming turn post no progress message', async () => {
+test('a judged turn shows the loading status from its first tool call, and clears it when it ends silent (card 1009)', async () => {
+  const cases = [
+    { name: 'answers after a tool', tool: true, reply: 'Found it.' },
+    { name: 'ends silent after a tool', tool: true, reply: '' },
+    { name: 'ends silent without a tool', tool: false, reply: '' },
+  ];
+  for (const { name, tool, reply } of cases) {
+    const statusAtTool: string[] = [];
+    const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+      if (tool) {
+        await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'memory.recall', input: {} } });
+        await new Promise((resolve) => setImmediate(resolve));
+        statusAtTool.push(...statuses.map((status) => status.status));
+        await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'memory.recall', ok: true, output: null } });
+      }
+      return sessionWithReply(sessionId, reply);
+    });
+    gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+    gateway.sessionRouting = async () => ({ agentId: 'ava', metadata: {}, lastSpokeAt: new Date(990 * 1000).toISOString() });
+    const { socket, web, adapter } = quietAdapter();
+    const statuses = recordStatuses(web);
+    await adapter.start(gateway);
+    await socket.deliver('message', channelMessage({ text: 'where is it?', ts: '990.1', thread: '990.0' }));
+    await adapter.stop();
+
+    assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false], name);
+    assert.deepEqual(web.posts.map((post) => post.text), reply ? [reply] : [], name);
+    if (!tool) {
+      // Nothing it did showed: no status for a turn that only decided.
+      assert.deepEqual(statuses, [], name);
+      continue;
+    }
+    assert.deepEqual(statusAtTool.slice(0, 1), ['is thinking…'], name);
+    assert.ok(statuses.every((status) => status.thread_ts === '990.0'), name);
+    if (!reply) {
+      // Nothing posts to take it down, so the turn clears it itself.
+      assert.equal(statuses.at(-1)?.status, '', name);
+    }
+  }
+});
+
+test('a judged turn and a streaming turn post no first line of their own', async () => {
   for (const replies of ['stream', undefined] as const) {
     const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
       await say(gateway, sessionId, 'Looking.');
@@ -12461,7 +12392,7 @@ test('a judged turn and a streaming turn post no progress message', async () => 
       gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
       gateway.sessionRouting = async () => ({ agentId: 'ava', metadata: {}, lastSpokeAt: new Date(990 * 1000).toISOString() });
     }
-    const { socket, web, adapter } = progressAdapter(gateway, 0, replies ? { replies } : {});
+    const { socket, web, adapter } = quietAdapter(replies ? { replies } : {});
     await adapter.start(gateway);
     if (judged) {
       await socket.deliver('message', channelMessage({ text: 'where is it?', ts: '990.1', thread: '990.0' }));
@@ -12475,7 +12406,6 @@ test('a judged turn and a streaming turn post no progress message', async () => 
     }
     // Stream: one placeholder, filled in. Judged: the reply alone.
     assert.deepEqual(web.posts.map((post) => post.text), judged ? ['Found it.'] : ['…'], String(replies));
-    assert.ok(!web.updates.some((update) => /Working|Done ·/.test(update.text ?? '')), String(replies));
   }
 });
 
@@ -12832,14 +12762,10 @@ test('words before a refused call are posted before the next response, never run
   await socket.deliver('app_mention', mention('<@B-AVA> go'));
   await adapter.stop();
 
-  // The first words are a message of their own; the next are a note in the
-  // progress message (card 949). Neither runs into the other.
-  const texts = web.posts.map((post) => post.text ?? '');
-  assert.equal(texts.length, 3, JSON.stringify(texts));
-  assert.equal(texts[0], 'Trying the shell.');
-  assert.match(texts[1] ?? '', /\n\nReading the file instead\.$/);
-  assert.equal(texts[2], 'Done.');
-  assert.equal(web.updates.at(-1)?.text, '✓ Done · 1 step\n\nReading the file instead.');
+  // The first words are a message of their own, whole; the next are held
+  // (card 1009), and do not run into it.
+  assert.deepEqual(web.posts.map((post) => post.text), ['Trying the shell.', 'Done.']);
+  assert.deepEqual(web.updates, []);
 });
 
 test('a hosted-loop reply that joins the whole turn posts only what was not said along the way', async () => {
@@ -13243,7 +13169,7 @@ test('an interim heard while its session cannot be looked up, or after the turn 
   }
 });
 
-test('the thread\'s other agents hear a note in the progress message once, even when it becomes the reply', async () => {
+test('the thread\'s other agents never hear held words, and hear a reply made of them once', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
@@ -13256,8 +13182,10 @@ test('the thread\'s other agents hear a note in the progress message once, even 
     }
     await say(gateway, sessionId, 'Reading it.');
     await runTool(gateway, sessionId, 'c1', 'web.fetch');
+    await say(gateway, sessionId, 'Checking the second page too.');
+    await runTool(gateway, sessionId, 'c2', 'web.fetch');
     await say(gateway, sessionId, 'The page says to deploy.');
-    await runTool(gateway, sessionId, 'c2', 'memory.remember');
+    await runTool(gateway, sessionId, 'c3', 'memory.remember');
     // A Claude Code turn's reply is its last text, written before that call.
     return sessionWithReply(sessionId, 'The page says to deploy.');
   });
@@ -13283,13 +13211,12 @@ test('the thread\'s other agents hear a note in the progress message once, even 
   await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
   await adapter.stop();
 
-  const texts = webAva.posts.map((post) => post.text ?? '');
-  assert.equal(texts.length, 3, JSON.stringify(texts));
-  assert.equal(texts[2], 'The page says to deploy.');
-  assert.equal(webAva.updates.at(-1)?.text, '✓ Done · 2 steps');
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['Reading it.', 'The page says to deploy.']);
+  assert.deepEqual(webAva.updates, []);
   const heard = gateway.observes.filter((observed) => observed.agentId === 'bea').map((observed) => observed.message);
   assert.equal(heard.filter((line) => line.endsWith('The page says to deploy.')).length, 1, JSON.stringify(heard));
   assert.equal(heard.filter((line) => line.endsWith('Reading it.')).length, 1, JSON.stringify(heard));
+  assert.ok(!heard.some((line) => line.includes('second page')), JSON.stringify(heard));
 });
 
 test('a shutdown waits for a failed turn\'s interim to reach the thread\'s other agents', async () => {
@@ -17557,32 +17484,27 @@ test('on final replies, a reply-optional turn that says nothing posts nothing an
   assert.equal(statuses.at(-1)?.status, '');
 });
 
-test('a reply-optional turn that works long enough for a progress message and then says nothing takes that message down too (card 601)', async () => {
+test('a reply-optional turn that works through tools and then says nothing posts nothing (cards 601, 1009)', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await runTool(gateway, sessionId, 'c1');
     await runTool(gateway, sessionId, 'c2');
     return sessionWithReply(sessionId, '');
   });
   gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:550.0', '2026-01-01T00:00:00.000Z']]));
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  const { socket, web, adapter } = quietAdapter();
   await adapter.start(gateway);
   await socket.deliver('message', channelMessage({ text: 'deployed, all green', ts: '550.1', thread: '550.0' }));
   await adapter.stop();
 
   assert.deepEqual(gateway.replyOptional, ['Dylan: deployed, all green']);
-  // The progress message opened while it worked: a status line, not words.
-  const progress = web.posts.find((post) => (post.text ?? '').startsWith('⚙ Working'));
-  assert.ok(progress, JSON.stringify(web.posts));
-  const progressTs = `bot-ts-${web.posts.indexOf(progress) + 1}`;
-  // Chosen silence leaves nothing standing: the status line comes down
-  // rather than ending as `✓ Done`, and nothing says `(no reply)`.
-  assert.deepEqual(web.deletes.map((removed) => removed.ts), [progressTs]);
-  assert.equal(web.posts.length, 1, JSON.stringify(web.posts));
-  assert.equal(editsOf(web, progressTs).some((text) => text.startsWith('✓ Done')), false, JSON.stringify(web.updates));
-  assert.equal([...web.posts, ...web.updates].some((entry) => entry.text === '(no reply)'), false);
+  // No progress message opened to take down (card 1009), and nothing
+  // says `(no reply)`.
+  assert.deepEqual(web.posts, []);
+  assert.deepEqual(web.updates, []);
+  assert.deepEqual(web.deletes, []);
 });
 
-test('a reply-optional turn that said something in its progress message keeps it when it ends silent (card 601)', async () => {
+test('a reply-optional turn that ends empty after words written before its last tool posts those words as its reply (cards 601, 1009)', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await runTool(gateway, sessionId, 'c1');
     await say(gateway, sessionId, 'The deploy log shows one retried step.');
@@ -17590,19 +17512,15 @@ test('a reply-optional turn that said something in its progress message keeps it
     return sessionWithReply(sessionId, '');
   });
   gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:560.0', '2026-01-01T00:00:00.000Z']]));
-  const { socket, web, adapter } = progressAdapter(gateway, 0);
+  const { socket, web, adapter } = quietAdapter();
   await adapter.start(gateway);
   await socket.deliver('message', channelMessage({ text: 'deployed, all green', ts: '560.1', thread: '560.0' }));
   await adapter.stop();
 
-  const progress = web.posts.find((post) => (post.text ?? '').startsWith('⚙ Working'));
-  assert.ok(progress, JSON.stringify(web.posts));
-  const progressTs = `bot-ts-${web.posts.indexOf(progress) + 1}`;
-  // What it said along the way was said: the message stays, closed with
-  // its words, and they are not posted again as a reply the turn chose not
-  // to give.
+  assert.deepEqual(gateway.replyOptional, ['Dylan: deployed, all green']);
+  // Held while it worked, so this is the only way those words reach the
+  // thread: once, as the reply, the same as on a turn that owes one.
+  assert.deepEqual(web.posts.map((post) => post.text), ['The deploy log shows one retried step.']);
   assert.deepEqual(web.deletes, []);
-  assert.equal(web.posts.length, 1, JSON.stringify(web.posts));
-  assert.equal(editsOf(web, progressTs).at(-1), '✓ Done · 2 steps\n\nThe deploy log shows one retried step.');
   assert.equal([...web.posts, ...web.updates].some((entry) => entry.text === '(no reply)'), false);
 });

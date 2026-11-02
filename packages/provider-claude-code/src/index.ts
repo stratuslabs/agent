@@ -28,6 +28,7 @@ import {
   type ToolDescriptor,
   type ExecutionContext,
   type ImageAttachment,
+  type SteeredMessage,
 } from '@stratusagent/core';
 import {
   bridgedToolNames,
@@ -261,6 +262,14 @@ export interface ClaudeCodeStreamMessage {
    */
   session_id?: string;
   /**
+   * On a `result` message: the client uuids of every user message the turn
+   * took in, a message folded into it between tool rounds included. How a
+   * message steered in mid-loop (`ProviderRequest.steer`) is known to have
+   * reached the model in this turn rather than been left for the next.
+   * Absent from older CLIs.
+   */
+  user_message_uuids?: string[];
+  /**
    * On a `stream_event` message, the raw Anthropic stream event the SDK
    * saw. Same shape the Messages API emits, so it maps to kernel deltas
    * the same way the API provider maps its own — deliberately typed
@@ -297,25 +306,120 @@ const runPrompt = (text: string, images: readonly ImageAttachment[]): string | A
   if (images.length === 0) {
     return text;
   }
-  const message: SDKUserMessage = {
-    type: 'user',
-    parent_tool_use_id: null,
-    message: {
-      role: 'user',
-      content: [
-        // A screenshot sent with no words leaves the text empty, and the API
-        // refuses an empty text block — the direct provider omits it too.
-        ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
-        ...images.map((image) => ({
-          type: 'image' as const,
-          source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },
-        })),
-      ],
-    },
-  };
+  const message = promptMessage(text, images);
   return (async function* () {
     yield message;
   })();
+};
+
+/** One user message as the SDK's stream input carries it, images as blocks. */
+const promptMessage = (text: string, images: readonly ImageAttachment[]): SDKUserMessage => ({
+  type: 'user',
+  parent_tool_use_id: null,
+  message: {
+    role: 'user',
+    content: [
+      // A screenshot sent with no words leaves the text empty, and the API
+      // refuses an empty text block — the direct provider omits it too.
+      ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
+      ...images.map((image) => ({
+        type: 'image' as const,
+        source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },
+      })),
+    ],
+  },
+});
+
+/**
+ * A message steered into the running turn (`ProviderRequest.steer`), as
+ * the CLI takes one mid-turn: priority `next` folds it into the result of
+ * the tool still running, in this turn, where `later` would queue a turn
+ * of its own and `now` would abort the tool. Its uuid comes back on the
+ * result that took it in (`user_message_uuids`). `client_composed`, so
+ * the CLI delivers the words as written: what somebody typed in a chat is
+ * never a slash command or an `@path` mention to the harness.
+ */
+const steeredPromptMessage = (steered: SteeredMessage): SDKUserMessage => ({
+  ...promptMessage(steered.userMessage, (steered.images ?? []).filter((image) => image.omitted !== true && image.data.length > 0)),
+  uuid: randomUUID(),
+  priority: 'next',
+  client_composed: true,
+});
+
+/**
+ * A prompt the provider can add to while the query runs: the turn's own
+ * message first, then each message steered in after a hosted call, until
+ * `close`. The SDK reads its input as it goes, so `push` resolves once the
+ * SDK has taken the message off the stream, which is after it has written
+ * it to the CLI. A hosted call returns its result only after that, so the
+ * CLI always has the message queued before the result it folds it into.
+ */
+interface SteerableInput {
+  stream: AsyncIterable<SDKUserMessage>;
+  push(message: SDKUserMessage): Promise<void>;
+  close(): void;
+}
+
+const STEER_UNTAKEN = 'The Claude Code run ended before it took a message sent while it worked.';
+
+const createSteerableInput = (first: SDKUserMessage, signal: AbortSignal): SteerableInput => {
+  type Entry = { message: SDKUserMessage; taken: () => void; refused: (error: Error) => void };
+  const queue: Entry[] = [];
+  // The message the SDK has been handed and not yet moved past: it counts
+  // as taken only once the SDK asks for the next one.
+  let handedOver: Entry | undefined;
+  let wake: (() => void) | undefined;
+  let closed = false;
+  // Closing refuses whatever is still queued, and the message handed over
+  // if the SDK never came back for another: the query stopped or the turn
+  // ended, and a hosted call waiting on a message nobody will take must
+  // not wait forever.
+  const close = (): void => {
+    closed = true;
+    const unsettled = [...(handedOver !== undefined ? [handedOver] : []), ...queue.splice(0)];
+    handedOver = undefined;
+    for (const entry of unsettled) {
+      entry.refused(new Error(STEER_UNTAKEN));
+    }
+    wake?.();
+  };
+  signal.addEventListener('abort', close, { once: true });
+  return {
+    stream: (async function* () {
+      try {
+        yield first;
+        for (;;) {
+          const entry = queue.shift();
+          if (entry !== undefined) {
+            handedOver = entry;
+            yield entry.message;
+            handedOver = undefined;
+            entry.taken();
+            continue;
+          }
+          if (closed) {
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+          wake = undefined;
+        }
+      } finally {
+        close();
+        signal.removeEventListener('abort', close);
+      }
+    })(),
+    push: (message) => new Promise<void>((taken, refused) => {
+      if (closed) {
+        refused(new Error(STEER_UNTAKEN));
+        return;
+      }
+      queue.push({ message, taken, refused });
+      wake?.();
+    }),
+    close,
+  };
 };
 
 /**
@@ -611,6 +715,10 @@ export const createClaudeCodeProvider = ({
     // is answered with a refusal and nothing runs — the same shape codex
     // gives a call past its budget.
     let refuseTools = false;
+    // The running attempt's input, when this turn can be steered: the
+    // stream messages steered in go into, and the uuids of those no result
+    // has listed yet.
+    let steering: { input: SteerableInput; pending: Set<string> } | undefined;
     const countedExecute: ClaudeCodeToolExecutor | undefined = executeTool
       ? async (session, call, context) => {
           if (refuseTools) {
@@ -625,12 +733,31 @@ export const createClaudeCodeProvider = ({
           hostedToolRuns += 1;
           activeHostedTools += 1;
           suspendIdleTimer();
+          let result: Awaited<ReturnType<ClaudeCodeToolExecutor>>;
           try {
-            return await executeTool(session, call, context);
+            result = await executeTool(session, call, context);
           } finally {
             activeHostedTools -= 1;
             resetIdleTimer();
           }
+          // What somebody said since the turn started, which the runner
+          // records right after this result, reaches the CLI before the
+          // result does, so the CLI folds it into this result in the same
+          // turn (card 958). Asked only while an attempt can deliver it, and
+          // after the tool's own time: waiting on the SDK to take a message
+          // is the SDK's progress, so the idle watchdog covers it, and an
+          // SDK that stops reading fails the turn as stalled (its abort
+          // closes the input, which refuses the message) instead of hanging.
+          const current = steering;
+          if (current !== undefined && request.steer !== undefined) {
+            const steered = await request.steer();
+            if (steered !== undefined) {
+              const message = steeredPromptMessage(steered);
+              current.pending.add(message.uuid!);
+              await current.input.push(message);
+            }
+          }
+          return result;
         }
       : undefined;
     const markIfSideEffects = <T>(error: T): T => (hostedToolRuns > 0 ? markHostedToolSideEffects(error) : error);
@@ -772,9 +899,32 @@ export const createClaudeCodeProvider = ({
     // carry state of its own between turns.
     const fingerprint = authFingerprintOf(authToken);
     const resumeId = readSdkSessionId(request.session, fingerprint, authOwner !== undefined);
+    // A turn somebody may write into while it works: its prompt is a stream
+    // kept open until the result, so a message steered in after a hosted
+    // call can follow the first (`ProviderRequest.steer`). Without tools
+    // there is no step to steer at, and without `steer` nothing to take.
+    const steerable = request.steer !== undefined && bridgedTools !== undefined;
     const attempt = async (resume: string | undefined, carryOn = false): Promise<void> => {
       const attemptOptions: Options = { ...options, ...(resume ? { resume } : {}) };
       resetIdleTimer();
+      const promptText = carryOn
+        // A fresh budget on the same SDK session: the runtime's note,
+        // not the person's message again.
+        ? CONTINUE_NOTE
+        : resume
+          ? latestUserMessagePrompt(request, { inlineImages: true })
+          : renderTranscriptPrompt(request, { inlineImages: true });
+      const promptImages = carryOn ? [] : promptImagesOf(request);
+      // Per attempt: a message steered into an attempt that ended went with
+      // that CLI, and the next one never lists it.
+      steering = steerable
+        ? { input: createSteerableInput(promptMessage(promptText, promptImages), controller.signal), pending: new Set() }
+        : undefined;
+      const input = steering?.input;
+      const pending = steering?.pending;
+      // Set when a result left a steered message for a turn of its own:
+      // that turn's answer follows this one's rather than replacing it.
+      let answersSteered = false;
       // The LATEST result's totals, not a sum across results: the SDK
       // documents `modelUsage` as the running total for the query() call, so
       // adding two results together would double-count the first.
@@ -783,16 +933,7 @@ export const createClaudeCodeProvider = ({
       let ranOutOfTurns = false;
       try {
         for await (const message of queryFn({
-          prompt: carryOn
-            // A fresh budget on the same SDK session: the runtime's note,
-            // not the person's message again.
-            ? CONTINUE_NOTE
-            : runPrompt(
-              resume
-                ? latestUserMessagePrompt(request, { inlineImages: true })
-                : renderTranscriptPrompt(request, { inlineImages: true }),
-              promptImagesOf(request),
-            ),
+          prompt: input?.stream ?? (carryOn ? promptText : runPrompt(promptText, promptImages)),
           options: attemptOptions,
         })) {
           resetIdleTimer();
@@ -826,9 +967,28 @@ export const createClaudeCodeProvider = ({
           if (message.modelUsage) {
             attemptUsage = message.modelUsage;
           }
+          // The input closes on the result, which ends the query, unless a
+          // message steered in is still unlisted: the CLI took it too late
+          // to fold in and runs it as a turn of its own, whose result lists
+          // it. A CLI that lists nothing can't say, so it closes. Out of
+          // turns is the same case: the CLI stopped before the call that
+          // would have folded the message in, and that result lists no
+          // uuids at all, so the turn on it is its answer.
+          for (const uuid of message.user_message_uuids ?? []) {
+            pending?.delete(uuid);
+          }
+          const awaitingSteered = (pending?.size ?? 0) > 0
+            && ((message.subtype === 'success' && !message.is_error && message.user_message_uuids !== undefined)
+              || message.subtype === 'error_max_turns');
+          if (!awaitingSteered) {
+            input?.close();
+          }
           if (message.subtype === 'success' && !message.is_error) {
             completed = true;
-            resultText = message.result;
+            resultText = answersSteered
+              ? [resultText, message.result].filter((text) => text !== undefined && text.length > 0).join('\n\n')
+              : message.result;
+            answersSteered = awaitingSteered;
             continue;
           }
           // Out of turns is where a long task checks in, not a failure —
@@ -856,6 +1016,8 @@ export const createClaudeCodeProvider = ({
         }
         throw error;
       } finally {
+        input?.close();
+        steering = undefined;
         // In a finally so a thrown attempt still reports: the SDK put the
         // counts on the error result, and a failed harness turn that
         // reported nothing would leave the run unreconcilable against

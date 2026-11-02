@@ -229,8 +229,11 @@ export {
   assertStateCompatible,
   pendingStateMigrations,
   type StateMigrationRunOptions,
+  type StateMigrationOutcome,
   type AppliedStateMigration,
   runStateMigrations,
+  PREDATES_SAFE_TOOLS_FACT,
+  unlistedToolsFor,
 } from './migrations.ts';
 
 export {
@@ -266,6 +269,7 @@ export {
 
 export {
   DEFAULT_STRATUS_AGENT,
+  EVERY_TOOL,
   resolveSoulPath,
   resolveSoul,
   resolveConfiguredSoul,

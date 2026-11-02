@@ -207,8 +207,9 @@ budget. The `codex` runtime is not covered yet and wraps up as before. With
 
 **A message sent mid-task shares the budget.** On Slack, a message sent
 while the agent works [joins the running turn](../guides/slack.md#how-replies-appear) at its
-next step (not under the `codex` and `claude-code` runtimes, where it waits
-for the next turn). It gets the steps the turn has left and adds none: the budget,
+next step: under the `claude-code` runtime, with the result of the tool it
+was running; not under the `codex` runtime, where it waits for the next
+turn. It gets the steps the turn has left and adds none: the budget,
 the auto-continue cap and the repeated-failure count below carry on as
 they were, so a conversation that writes at every step can't keep one turn
 going past its ceiling. A message that arrives once the turn is out of

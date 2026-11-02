@@ -1276,6 +1276,36 @@ test('a soul effort survives every field edit', async () => {
   }
 });
 
+test('an agent allowed no tools stays that way through a field edit, and through being given the empty list', async () => {
+  // `tools: []` grants nothing; no list grants the safe tools. The writer
+  // used to drop an empty list, so any field edit turned "nothing" into the
+  // default, and an edit setting `tools: []` wrote no list at all.
+  const home = await newHome();
+  const soulFile = path.join(home, '.stratus', 'agents', 'ava.md');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\ntools: []\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nid: bea\n---\n\nYou are Bea.\n');
+  const harness = await startApi({ home });
+  try {
+    const renamed = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Ava B' }),
+    });
+    assert.equal(renamed.status, 200);
+    assert.match(await readFile(soulFile, 'utf8'), /^tools: \[\]$/m);
+
+    const emptied = await harness.call('/api/v1/agents/bea', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tools: [] }),
+    });
+    assert.equal(emptied.status, 200);
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'bea.md'), 'utf8'), /^tools: \[\]$/m);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a malformed allowlist edit is refused rather than silently ignored', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');

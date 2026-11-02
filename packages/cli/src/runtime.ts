@@ -41,6 +41,7 @@ import {
   createRuntimeProvider,
   defaultApiKeyEnvName,
   DEFAULT_STRATUS_AGENT,
+  unlistedToolsFor,
   isSignedInRuntime,
   loadCredentials,
   loadOperatorSkills,
@@ -394,6 +395,9 @@ export const createAgentRuntime = async (
     );
 
     const approvalMode = options.approvals ?? 'always';
+    // What a soul with no `tools:` list may call, read from the home the
+    // way the daemon reads it: every tool on one an older build set up.
+    const unlistedTools = unlistedToolsFor(runEnv);
     const runner = new AgentRunner({
       provider: runtimeProvider,
       tools,
@@ -413,6 +417,7 @@ export const createAgentRuntime = async (
       memory,
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
       providerCallGuards,
+      unlistedTools,
     });
 
     hostedRunner = runner;
@@ -430,6 +435,20 @@ export const createAgentRuntime = async (
       writeLine(
         streams.stderr,
         `Warning: agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`,
+      );
+    }
+
+    // A soul with no `tools:` list gets only the tools registered as safe,
+    // on a home this build set up. Said here as the daemon says it at
+    // roster load, because an agent that cannot run a shell or write a
+    // file, and is never told so, looks broken rather than restricted. The
+    // built-in agent has `tools: ["*"]`, and on a home an older build set
+    // up an omitted list is every tool, as it always was there.
+    if (agent.tools === undefined && unlistedTools === 'safe') {
+      writeLine(
+        streams.stderr,
+        `Warning: agent ${agent.id} has no tools: list, so it gets only safe tools (reads and memory)`
+          + ' — add tools: [...] to its soul to give it more, or tools: ["*"] for every tool',
       );
     }
 
