@@ -563,6 +563,8 @@ const staleTaskNoteCounts = async (env: StateEnvironment, at: Date): Promise<Arr
 const TASK_NOTES_EXPIRY_NOTICE: StateMigration = {
   id: TASK_NOTES_EXPIRY_NOTICE_ID,
   description: `count the task notes past the ${MEMORY_EPISODIC_DEFAULT_TTL_DAYS}-day default, to say why they left the prompt`,
+  /** It reads memories and says how many left the prompt; it writes nothing but the stamp. */
+  needsBackup: false,
   /**
    * Only while the per-agent moves (0003, 0004) are still pending, so it
    * runs with them. A run that defers those records nothing, so a notice
