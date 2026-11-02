@@ -84,6 +84,7 @@ export {
   stratusHomePath,
   globalConfigPath,
   logsDirPath,
+  backupsDirPath,
   credentialsPath,
   credentialAuditPath,
   agentsDirPath,
@@ -235,6 +236,8 @@ export {
   PREDATES_SAFE_TOOLS_FACT,
   unlistedToolsFor,
 } from './migrations.ts';
+
+export { type StateBackup, backUpStateBeforeMigrating, describeStateBackup } from './state-backup.ts';
 
 export {
   drainSharedMemory,
