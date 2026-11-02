@@ -89,6 +89,25 @@ from the page making the request, and cannot be made to send another one —
 `Host` is a forbidden header name for `fetch`, `XMLHttpRequest`, forms, and
 WebSockets alike. A page on another port, or another host, still fails.
 
+**Host names.** Bound to loopback (the default), the API answers only to
+`localhost`, `127.0.0.1`, `[::1]`, the address it bound, the name `api.host`
+gave it, and the host of `api.publicUrl`. Whether it is on loopback is read
+from the address `listen` actually bound, not from how `api.host` is spelled,
+so a name that resolves to loopback (`localhost.`, or an `/etc/hosts` alias
+such as `ip6-localhost`) is checked like `127.0.0.1`. Any other `Host`, on any route and on the WebSocket upgrade,
+gets `403 host_not_allowed` before anything else is read. That is the DNS
+rebinding defence: a page on `evil.example` that re-resolves its name to
+`127.0.0.1` reaches this port as its own origin, sending `Host: evil.example`.
+It carries no cookie (the cookie belongs to the name it was set on) and no
+token, so every authenticated route refuses it anyway; the name check is what
+holds for the routes that authenticate themselves, and for any added later.
+A tunnel passes its public name as `Host` too (Tailscale Serve, Cloudflare
+Tunnel and ngrok all do by default), so **a tunnel to a loopback daemon needs
+`api.publicUrl` set to the tunnel's address**. A wildcard or LAN bind checks
+no names, since it is reached on addresses it cannot list; `stratus serve`
+warns at every start that it is bound beyond this machine, and `stratus
+doctor` shows it as a note under Daemon.
+
 Localhost binding is the posture. Remote access is the operator's tunnel
 decision — Tailscale is the pattern we recommend for reaching a machine at
 home. There are no user accounts; that belongs to a hosted deployment.
@@ -687,7 +706,7 @@ reason to send comes near either.
     "enabled": true,        // false, or `stratus serve --no-api`, to turn it off
     "host": "127.0.0.1",
     "port": 4123,
-    "publicUrl": "https://mac-mini.example.ts.net"  // optional: what credential links are built on
+    "publicUrl": "https://mac-mini.example.ts.net"  // optional: your tunnel's address; credential links are built on it, and a loopback bind answers to its host
   }
 }
 ```

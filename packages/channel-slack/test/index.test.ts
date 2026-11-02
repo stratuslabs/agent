@@ -112,7 +112,15 @@ interface FakeWeb extends SlackWebLike {
   ephemerals: Array<{ channel: string; user: string; text: string }>;
   /** Forms opened with views.open, in order. */
   views_opened: Array<{ trigger_id: string; view: SlackBlock }>;
-  uploads: Array<{ channel_id: string; filename?: string; contents: string; wasBuffer: boolean }>;
+  uploads: Array<{ channel_id: string; filename?: string; contents: string; wasBuffer: boolean; initial_comment?: string; thread_ts?: string }>;
+  /** Posts and uploads in the order they reached Slack, by their text (an upload by its comment, else its file name). */
+  timeline: string[];
+  /** files.info calls before a file shows its share; 0, the default, shows it on the first. */
+  shareAfterPolls?: number;
+  /** Every file files.info was asked about, in order. */
+  infoAsked: string[];
+  /** Thrown by files.uploadV2, as a missing scope or an outage would. */
+  uploadFails?: Error;
   userInfoDelayMs?: (callIndex: number) => number;
   /** Profile names to answer with, by user id, ahead of the default `name-<id>`. */
   displayNames?: Map<string, string>;
@@ -148,9 +156,13 @@ interface FakeWeb extends SlackWebLike {
 
 const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
   let counter = 0;
+  let fileCounter = 0;
+  const shares = new Map<string, { channel: string; thread?: string; polls: number; ts?: string }>();
   let userInfoCalls = 0;
   const web: FakeWeb = {
     userInfoAsked: [],
+    timeline: [],
+    infoAsked: [],
     posts: [],
     updates: [],
     deletes: [],
@@ -176,6 +188,7 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
     chat: {
       async postMessage(args) {
         web.posts.push(args);
+        web.timeline.push(args.text);
         counter += 1;
         const ts = web.stamp ? web.stamp() : `bot-ts-${counter}`;
         web.onPostEnter?.();
@@ -200,16 +213,46 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
     },
     files: {
       async uploadV2(args) {
+        if (web.uploadFails) {
+          throw web.uploadFails;
+        }
         // The real SDK takes file contents; a path string would fail there.
         web.uploads.push({
           channel_id: args.channel_id,
           ...(args.filename ? { filename: args.filename } : {}),
           contents: Buffer.isBuffer(args.file) ? args.file.toString('utf8') : String(args.file),
           wasBuffer: Buffer.isBuffer(args.file),
+          // A comment's upload is a reply part (card 1033), so where it went is recorded too.
+          ...(args.initial_comment !== undefined ? { initial_comment: args.initial_comment, ...(args.thread_ts !== undefined ? { thread_ts: args.thread_ts } : {}) } : {}),
         });
+        web.timeline.push(args.initial_comment ?? args.filename ?? '');
+        fileCounter += 1;
+        const id = `F-${fileCounter}`;
+        // A comment's upload answers as Slack does (live, Nov 1 2026): the
+        // file, nested, with no share yet; files.info says where it landed.
+        if (args.initial_comment !== undefined) {
+          shares.set(id, { channel: args.channel_id, ...(args.thread_ts !== undefined ? { thread: args.thread_ts } : {}), polls: 0 });
+          return { files: [{ files: [{ id }] }] };
+        }
         // Slack answers with the file's shares — the ts of the message it
         // became — which a test ordering messages asks for through `stamp`.
         return web.stamp ? { files: [{ shares: { public: { [args.channel_id]: [{ ts: web.stamp() }] } } }] } : {};
+      },
+      async info({ file }) {
+        web.infoAsked.push(file);
+        const share = shares.get(file);
+        if (!share) {
+          throw new Error('file_not_found');
+        }
+        share.polls += 1;
+        if (share.polls <= (web.shareAfterPolls ?? 0)) {
+          return { file: { id: file, shares: {} } };
+        }
+        if (share.ts === undefined) {
+          share.ts = web.stamp ? web.stamp() : `upload-ts-${file}`;
+          web.timeline.push(`shared:${file}`);
+        }
+        return { file: { id: file, shares: { public: { [share.channel]: [{ ts: share.ts, ...(share.thread !== undefined ? { thread_ts: share.thread } : {}) }] } } } };
       },
     },
     knownConversations: new Map(),
@@ -12409,6 +12452,101 @@ test('a judged turn and a streaming turn post no first line of their own', async
   }
 });
 
+test('a judged turn posts only what it wrote after its last tool, or nothing, whatever its provider returns (card 1060)', async () => {
+  // A provider that hosts its own loop and joins every message (codex)
+  // returns the narration along with the answer; one that returns its last
+  // message may return words from before its last tool. Neither is the
+  // answer of a turn nobody asked for: its words between tools are held,
+  // and an empty answer is its decision to stay out.
+  const cases = [
+    { name: 'joined, with an answer', reply: 'Looking.\n\nStill looking.\n\nFound it.', posts: ['Found it.'] },
+    { name: 'joined, narration only', reply: 'Looking.\n\nStill looking.', posts: [] },
+    { name: 'its last message', reply: 'Found it.', posts: ['Found it.'] },
+    { name: 'nothing after its last tool', reply: '', posts: [] },
+    { name: 'its last words, from before its last tool', reply: 'Still looking.', posts: [] },
+    // What it streamed after its last tool is all of what it wrote there:
+    // a reply that is exactly that is its answer, even when it repeats
+    // words it held, so a provider that returns its last message only
+    // loses none of it (Codex on #573).
+    { name: 'joined, with an answer it streamed', after: 'Found it.', reply: 'Looking.\n\nStill looking.\n\nFound it.', posts: ['Found it.'] },
+    { name: 'its last message, starting with its first words', after: 'Looking.\n\nFound it.', reply: 'Looking.\n\nFound it.', posts: ['Looking.\n\nFound it.'], texts: ['Looking.', 'Found it.'] },
+    { name: 'its last message, the same as its last words before a tool', after: 'Still looking.', reply: 'Still looking.', posts: ['Still looking.'] },
+  ];
+  for (const replies of [undefined, 'texts'] as const) {
+    for (const { name, reply, posts: inFinal, after, texts } of cases) {
+      const label = `${replies ?? 'final'}: ${name}`;
+      const posts = replies === 'texts' && texts ? texts : inFinal;
+      const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+        await say(gateway, sessionId, 'Looking.');
+        await runTool(gateway, sessionId, 'c1');
+        await say(gateway, sessionId, 'Still looking.');
+        await runTool(gateway, sessionId, 'c2');
+        if (after !== undefined) {
+          await say(gateway, sessionId, after);
+        }
+        return sessionWithReply(sessionId, reply);
+      });
+      gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+      gateway.sessionRouting = async () => ({ agentId: 'ava', metadata: {}, lastSpokeAt: new Date(990 * 1000).toISOString() });
+      const { socket, web, adapter } = quietAdapter(replies ? { replies } : {});
+      const statuses = recordStatuses(web);
+      await adapter.start(gateway);
+      await socket.deliver('message', channelMessage({ text: 'where is it?', ts: '990.1', thread: '990.0' }));
+      await adapter.stop();
+
+      assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false], label);
+      assert.deepEqual(web.posts.map((post) => post.text), posts, label);
+      assert.deepEqual(web.updates, [], label);
+      if (posts.length === 0) {
+        // It worked, so it showed a status; nothing posts to take it down.
+        assert.equal(statuses.at(-1)?.status, '', label);
+      }
+    }
+  }
+});
+
+test('the thread\'s other agents hear a judged turn\'s answer as posted, even where it repeats words it held (card 1060)', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  webAva.knownConversations.set('C1', { is_member: true });
+  webBea.knownConversations.set('C1', { is_member: true });
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    if (sessionId.split(':')[1] !== 'ava') {
+      return sessionWithReply(sessionId, '');
+    }
+    await say(gateway, sessionId, 'Looking.');
+    await runTool(gateway, sessionId, 'c1');
+    // Its last message alone, as a provider that returns only that does.
+    await say(gateway, sessionId, 'Looking.\n\nFound it.');
+    return sessionWithReply(sessionId, 'Looking.\n\nFound it.');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }, { id: 'bea', name: 'Bea', listens: 'mentions' }];
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:931.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:931.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', replies: 'final' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', replies: 'final' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+  const message = channelMessage({ text: 'where is it?', ts: '931.1', thread: '931.0' });
+  await Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.addressed), [false]);
+  assert.deepEqual(webAva.posts.map((post) => post.text), ['Looking.\n\nFound it.']);
+  const heard = gateway.observes.filter((observed) => observed.agentId === 'bea').map((observed) => observed.message);
+  assert.deepEqual(heard.filter((line) => !line.startsWith('Dylan:')).map((line) => line.replace(/^[^:]+: /, '')), ['Looking.\n\nFound it.']);
+});
+
 test('the stream reply mode posts no interim messages: its placeholder already shows them', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
@@ -13059,6 +13197,291 @@ test('on texts, the reply of a turn finished after a restart that tags another a
   await adapter.stop();
 
   assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Back up.\n\n<@U-QUINN> the approval went through.', '967.0']]);
+});
+
+/**
+ * A reply Slack shows in two parts (card 1033), with the tag in its first
+ * paragraph or its last. Plain prose, so the parts read as written.
+ */
+const twoPartReply = (tag: string, where: 'first' | 'last'): string => {
+  const paragraphs = Array.from({ length: 14 }, (_, index) => `Paragraph ${index + 1}. ${'The build log says nothing new here. '.repeat(10).trim()}`);
+  const line = `${tag} can you tag the release?`;
+  return [...(where === 'first' ? [line] : []), ...paragraphs, ...(where === 'last' ? [line] : []), 'The end.'].join('\n\n');
+};
+
+/** The words of a text, for comparing a reply with the parts it went out in, wherever the cut fell. */
+const words = (...texts: Array<string | undefined>): string => texts.join(' ').replace(/\s+/g, ' ').trim();
+
+test('a reply in parts that tags another agent attaches all of it to the tagged part, so that agent hears the whole reply', async () => {
+  // Card 1033: Slack splits a post over about 4,000 characters on its own
+  // side (live, Nov 1 2026), and the tagged agent admits only the part that
+  // names it. The tagged part goes up as an upload instead, the part as its
+  // comment and the whole reply as a text file, which the receiver reads in.
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const reply = twoPartReply('<@B-BEA>', 'first');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, sessionId.startsWith('slack:ava:') ? reply : 'on it'));
+  const adapter = createAdapterAsShipped({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', agentMentions: {} },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    fetchFile: async () => ({ status: 200, contentType: 'text/plain', body: Buffer.from(webAva.uploads[0]?.contents ?? '') }),
+  });
+  await adapter.start(gateway);
+  await socketAva.deliver('app_mention', mention('<@B-AVA> status?', { ts: '970.1' }));
+  await socketAva.settled();
+
+  assert.equal(webAva.uploads.length, 1);
+  const upload = webAva.uploads[0];
+  assert.equal(upload?.filename, 'full-reply.md');
+  assert.equal(upload?.contents, reply);
+  assert.equal(upload?.thread_ts, '970.1');
+  assert.match(upload?.initial_comment ?? '', /^<@B-BEA> can you tag the release\?/);
+  assert.ok((upload?.initial_comment?.length ?? 0) <= 4000);
+  // The rest is posted as before, after Slack has placed the tagged part.
+  assert.equal(webAva.posts.length, 1);
+  assert.match(webAva.posts[0]?.text ?? '', /The end\.$/);
+  assert.equal(webAva.posts[0]?.thread_ts, '970.1');
+  assert.deepEqual(webAva.timeline, [upload?.initial_comment, 'shared:F-1', webAva.posts[0]?.text]);
+  assert.equal(words(upload?.initial_comment, webAva.posts[0]?.text), words(reply));
+
+  // What Bea's socket gets for the upload: one message naming it, the file on it.
+  const delivered = botMention({ user: 'B-AVA', text: upload?.initial_comment ?? '', ts: '970.2', thread: '970.1', type: 'message', subtype: 'file_share' });
+  await socketBea.deliver('message', {
+    ...delivered,
+    event: { ...delivered.event, files: [{ id: 'F-1', name: 'full-reply.md', mimetype: 'text/plain', size: reply.length, url_private_download: 'https://files.slack.com/F-1/download' }] },
+  });
+  await socketBea.settled();
+  await adapter.stop();
+
+  const beaTurns = gateway.dispatches.filter((dispatch) => dispatch.agentId === 'bea');
+  assert.equal(beaTurns.length, 1);
+  assert.ok(beaTurns[0]?.userMessage.includes(`[Attached: full-reply.md. Its contents follow.]\n${reply}\n[End of full-reply.md]`), beaTurns[0]?.userMessage.slice(-200));
+});
+
+test('on texts, a reply in parts whose last part tags another agent uploads only that part', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const reply = twoPartReply('<@U-QUINN>', 'last');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', replies: 'texts' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hand it off', { ts: '971.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.equal(web.posts.length, 1);
+  assert.match(web.posts[0]?.text ?? '', /^Paragraph 1\./);
+  assert.equal(web.uploads.length, 1);
+  assert.match(web.uploads[0]?.initial_comment ?? '', /<@U-QUINN> can you tag the release\?\n\nThe end\.$/);
+  assert.equal(web.uploads[0]?.contents, reply);
+  assert.deepEqual(web.timeline, [web.posts[0]?.text, web.uploads[0]?.initial_comment, 'shared:F-1']);
+});
+
+test('a reply in parts that tags only a person, and a short reply that tags an agent, post as before with no upload', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const long = twoPartReply('<@U-DYLAN>', 'first');
+  const replies = [long, '<@U-QUINN> over to you.'];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, replies.shift() ?? 'none'));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> tell Dylan', { ts: '972.1' }));
+  await socket.settled();
+  await socket.deliver('app_mention', mention('<@B-AVA> tell Quinn', { ts: '973.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(web.uploads, []);
+  assert.equal(web.posts.length, 3);
+  assert.equal(words(web.posts[0]?.text, web.posts[1]?.text), words(long));
+  assert.equal(web.posts[2]?.text, '<@U-QUINN> over to you.');
+});
+
+test('a tagged part Slack will not take as an upload is posted on its own, and the reply still reads whole', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  web.uploadFails = new Error('missing_scope');
+  const warnings: string[] = [];
+  const reply = twoPartReply('<@U-QUINN>', 'first');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hand it off', { ts: '974.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.equal(web.posts.length, 2);
+  assert.equal(words(web.posts[0]?.text, web.posts[1]?.text), words(reply));
+  assert.ok(warnings.some((line) => /full reply/.test(line) && /missing_scope/.test(line)), JSON.stringify(warnings));
+});
+
+test('the part after an upload waits for Slack to place it, so the thread reads in order', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  web.shareAfterPolls = 2;
+  const reply = twoPartReply('<@U-QUINN>', 'first');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hand it off', { ts: '975.1' }));
+  await socket.settled();
+  await adapter.stop();
+
+  assert.deepEqual(web.infoAsked, ['F-1', 'F-1', 'F-1']);
+  assert.deepEqual(web.timeline, [web.uploads[0]?.initial_comment, 'shared:F-1', web.posts[0]?.text]);
+});
+
+test('message.send in parts that tags another agent uploads the tagged part and answers with where Slack put it', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  web.botUsers = new Set(['U-QUINN']);
+  const adapter = await startedAdapterWith(web);
+  const text = twoPartReply('<@U-QUINN>', 'first');
+
+  const ref = await (await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG', thread: '976.0' })).post(text);
+  await adapter.stop();
+
+  assert.equal(web.uploads.length, 1);
+  assert.equal(web.uploads[0]?.contents, text);
+  assert.equal(web.uploads[0]?.thread_ts, '976.0');
+  assert.equal(web.posts.length, 1);
+  assert.equal(words(web.uploads[0]?.initial_comment, web.posts[0]?.text), words(text));
+  assert.deepEqual(ref, { channel: 'C-ENG', ts: 'upload-ts-F-1' });
+  assert.deepEqual(web.deletes, []);
+});
+
+test('the reply of a turn finished after a restart, in parts and tagging another agent, uploads the tagged part', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const reply = twoPartReply('<@U-QUINN>', 'first');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '977.0', conversation: { kind: 'channel' }, sessionTrust: 'user' },
+    reply,
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:977.0' });
+  await adapter.stop();
+
+  assert.equal(web.uploads.length, 1);
+  assert.equal(web.uploads[0]?.contents, reply);
+  assert.equal(web.uploads[0]?.thread_ts, '977.0');
+  assert.deepEqual(web.posts.map((post) => post.thread_ts), ['977.0']);
+  assert.deepEqual(web.timeline, [web.uploads[0]?.initial_comment, 'shared:F-1', web.posts[0]?.text]);
+});
+
+test('words before a tool that Slack shows in parts and tag another agent attach all of them to the tagged part', async () => {
+  // Card 1033, Codex on #565: a turn that writes more than one message's
+  // worth before its first tool posts those words as interim messages, and
+  // the reply later leaves them out. The tagged part is an upload carrying
+  // all of the interim words, as a reply's is.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const interim = twoPartReply('<@U-QUINN>', 'last');
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    const call = { id: 'c1', toolName: 'shell.run', input: {} };
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: interim } });
+    await gateway.bus.emit({ type: 'tool.called', sessionId, call });
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'shell.run', ok: true, output: null } });
+    return sessionWithReply(sessionId, `${interim}\n\nAll 40 pass.`);
+  });
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> go', { ts: '978.1' }));
+  await adapter.stop();
+
+  assert.equal(web.uploads.length, 1);
+  assert.equal(web.uploads[0]?.contents, interim);
+  assert.equal(web.uploads[0]?.thread_ts, '978.1');
+  assert.match(web.uploads[0]?.initial_comment ?? '', /<@U-QUINN> can you tag the release\?/);
+  // The untagged first part is a plain post, ahead of the upload.
+  assert.equal(words(web.posts[0]?.text, web.uploads[0]?.initial_comment), words(interim));
+  assert.deepEqual(web.timeline.slice(0, 3), [web.posts[0]?.text, web.uploads[0]?.initial_comment, 'shared:F-1']);
+});
+
+test('a recovered reply handed to a queued placeholder, whose overflow part tags another agent, uploads that part', async () => {
+  // Card 1033, Codex on #565: a turn finished after a restart, with a newer
+  // turn's placeholder queued in the thread, edits the placeholder to its
+  // first part and posts the rest. A later part that tags another agent
+  // carries the whole reply there too.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.botUsers = new Set(['U-QUINN']);
+  const recovered = twoPartReply('<@U-QUINN>', 'last');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: recovered,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  // Handed over: the placeholder took the first part.
+  const edited = web.updates.find((entry) => entry.ts === 'bot-ts-1')?.text;
+  assert.ok(edited !== undefined && edited !== '…' && !/<@U-QUINN>/.test(edited), 'the placeholder was edited to the untagged first part');
+  assert.equal(web.uploads.length, 1);
+  assert.equal(web.uploads[0]?.contents, recovered);
+  assert.match(web.uploads[0]?.initial_comment ?? '', /<@U-QUINN> can you tag the release\?/);
+  assert.equal(web.posts.filter((post) => /<@U-QUINN>/.test(post.text)).length, 0, 'the tagged part was not also posted plainly');
 });
 
 test('what an agent said before its turn failed is still heard by the thread\'s other agents, and the error note is not', async () => {
@@ -14387,6 +14810,145 @@ test('a bot that is not on the team is ignored even with agent mentions on', asy
   await socketAva.deliver('app_mention', botMention({ user: 'U-GITHUB', text: '<@B-AVA> please merge', ts: '120.1' }));
   await adapter.stop();
   assert.deepEqual(gateway.dispatches, []);
+});
+
+/**
+ * Ava, in a thread with Nova (a team agent on another daemon) and Dylan,
+ * already holding a session there. `thread` is what Slack has above each
+ * mention; `readFails` makes the receiver's look above the mention fail.
+ */
+const taggedFilesAdapter = (
+  thread: Array<Record<string, unknown>>,
+  options?: { readFails?: boolean; fetch?: (url: string) => { contentType: string; body: Buffer } },
+) => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const reads: Array<{ ts: string; latest?: string; oldest?: string }> = [];
+  web.conversations.replies = async (args: { ts: string; latest?: string; oldest?: string }) => {
+    reads.push({ ts: args.ts, ...(args.latest !== undefined ? { latest: args.latest } : {}), ...(args.oldest !== undefined ? { oldest: args.oldest } : {}) });
+    if (options?.readFails) {
+      throw new Error('ratelimited');
+    }
+    return {
+      messages: thread.filter((message) => (args.latest === undefined || Number(message.ts) < Number(args.latest))
+        && (args.oldest === undefined || Number(message.ts) > Number(args.oldest) || message.ts === args.ts)),
+      response_metadata: { next_cursor: '' },
+    };
+  };
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'on it'));
+  // Ava already has a session in the thread: no earlier-thread context.
+  gateway.sessionRouting = async (sessionId) => (sessionId.startsWith('slack:ava:') ? { agentId: 'ava', metadata: {} } : undefined);
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', agentMentions: { team: { nova: 'U-NOVA' } } }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, ...(options?.fetch?.(url) ?? { contentType: 'image/png', body: PNG_BYTES }) };
+    },
+  });
+  return { socket, gateway, adapter, reads, warnings, fetched };
+};
+
+const novaFile = (name: string) => ({ id: `F-${name}`, name, mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: `https://files.slack.com/${name}` });
+
+test('an agent tagged right after its tagger posted a file gets that file with the mention (card 1061)', async () => {
+  const { socket, gateway, adapter, reads, fetched } = taggedFilesAdapter([
+    { ts: '1793500000.000100', user: 'U-DYLAN', text: 'can someone check the dashboard?' },
+    { ts: '1793500000.000200', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'looking' },
+    { ts: '1793500000.000300', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: 'old.png', files: [novaFile('old.png')] },
+    { ts: '1793500000.000400', user: 'U-DYLAN', text: 'and the sidebar' },
+    // Nova's turn: a screenshot, a line, then the tag. Only these are hers
+    // "just above": Dylan spoke after old.png.
+    { ts: '1793500000.000500', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: '', files: [novaFile('shot.png')] },
+    { ts: '1793500000.000600', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: 'taking a look' },
+  ]);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> inspect the attached screenshot', ts: '1793500000.000700', thread: '1793500000.000100' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [plainAgentLine(dispatch.userMessage), dispatch.images]), [
+    ['nova: inspect the attached screenshot', [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'shot.png' }]],
+  ]);
+  assert.deepEqual(fetched, ['https://files.slack.com/shot.png']);
+  // One bounded read: the thread, up to the mention, from an hour before it.
+  assert.deepEqual(reads, [{ ts: '1793500000.000100', latest: '1793500000.000700', oldest: '1793496400.000700' }]);
+});
+
+test('a tagged agent gets no file when its tagger posted none, and a person\'s or top-level mention reads nothing (card 1061)', async () => {
+  const { socket, gateway, adapter, reads } = taggedFilesAdapter([
+    { ts: '170.0', user: 'U-DYLAN', text: 'status?' },
+    { ts: '170.1', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: 'CI is green' },
+  ]);
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> can you merge?', ts: '170.2', thread: '170.0' }));
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> thanks', ts: '170.3', thread: '170.0' }));
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> new topic', ts: '171.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [plainAgentLine(dispatch.userMessage), dispatch.images]), [
+    ['nova: can you merge?', undefined],
+    ['Dylan: thanks', undefined],
+    ['nova: new topic', undefined],
+  ]);
+  assert.deepEqual(reads.map((read) => read.latest), ['170.2']);
+});
+
+test('when the look above a tag fails, the tagged agent still answers the mention, and the failure is said (card 1061)', async () => {
+  const { socket, gateway, adapter, warnings } = taggedFilesAdapter([], { readFails: true });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> inspect the attached screenshot', ts: '180.2', thread: '180.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [plainAgentLine(dispatch.userMessage), dispatch.images]), [
+    ['nova: inspect the attached screenshot', undefined],
+  ]);
+  assert.ok(warnings.some((line) => line.includes('ava') && line.includes('nova') && line.includes('ratelimited')), warnings.join('\n'));
+});
+
+/** Nova's tag, carrying files of its own. */
+const novaTagWith = (text: string, ts: string, thread: string, files: Array<Record<string, unknown>>) => {
+  const mention = botMention({ user: 'U-NOVA', text, ts, thread });
+  return { ...mention, event: { ...mention.event, subtype: 'file_share', files } };
+};
+
+test('when the files above a tag would fill the image budget, the tag\'s own image is the one kept (card 1061)', async () => {
+  // Four just under the per-image cap fill what one message's images can
+  // carry; the tag's own small image has to win, and the oldest above lose.
+  const nearCap = 5 * 1024 * 1024 - 1;
+  const big = (name: string) => ({ ...novaFile(name), size: nearCap });
+  const { socket, gateway, adapter } = taggedFilesAdapter([
+    { ts: '190.0', user: 'U-DYLAN', text: 'screens?' },
+    { ts: '190.1', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: '', files: [big('a.png'), big('b.png')] },
+    { ts: '190.2', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: '', files: [big('c.png'), big('d.png')] },
+  ], { fetch: (url) => ({ contentType: 'image/png', body: url.endsWith('/mine.png') ? PNG_BYTES : pngOfLength(nearCap) }) });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', novaTagWith('<@B-AVA> compare with this one', '190.3', '190.0', [novaFile('mine.png')]));
+  await adapter.stop();
+
+  // In the thread's own order: the files above, then the tag's.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.images?.map((image) => image.name)), [['b.png', 'c.png', 'd.png', 'mine.png']]);
+});
+
+test('when the files above a tag would fill the text budget, the tag\'s own text file is the one read (card 1061)', async () => {
+  const full = 100 * 1024;
+  const log = (name: string, size: number) => ({ id: `F-${name}`, name, mimetype: 'text/plain', size, url_private_download: `https://files.slack.com/${name}` });
+  const { socket, gateway, adapter } = taggedFilesAdapter([
+    { ts: '191.0', user: 'U-DYLAN', text: 'logs?' },
+    { ts: '191.1', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: '', files: [log('a.log', full), log('b.log', full)] },
+  ], { fetch: (url) => ({ contentType: 'text/plain', body: Buffer.from(url.endsWith('/mine.txt') ? 'the one I mean' : 'x'.repeat(full)) }) });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', novaTagWith('<@B-AVA> which line fails?', '191.2', '191.0', [log('mine.txt', 14)]));
+  await adapter.stop();
+
+  const message = gateway.dispatches[0]?.userMessage ?? '';
+  assert.match(message, /\[Attached: mine\.txt\. Its contents follow\.\]\nthe one I mean\n\[End of mine\.txt\]/);
+  assert.match(message, /\[Attached: a\.log\. Its contents follow\.\]/);
+  assert.doesNotMatch(message, /\[Attached: b\.log\. Its contents follow\.\]/);
 });
 
 test('with a whitelist, only the listed team agents are answered', async () => {

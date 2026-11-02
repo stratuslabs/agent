@@ -314,8 +314,9 @@ test('a TLS-terminating tunnel is not locked out of its own dashboard', async ()
   // TLS in front of a loopback daemon: the browser's origin is
   // `https://gateway.example` while this server speaks plain HTTP, so an
   // origin set that can only say `http://` loads the page and then refuses
-  // every write and the whole event stream.
-  const harness = await startApi();
+  // every write and the whole event stream. The tunnel's name is the one
+  // the operator gave as `api.publicUrl`, which a loopback daemon answers to.
+  const harness = await startApi({ options: { publicUrl: 'https://gateway.example' } });
   try {
     const cookie = await signIn(harness);
     const port = Number(new URL(harness.url).port);
@@ -386,7 +387,7 @@ test('a fresh claim publishes a complete file, never an empty one', async () => 
 });
 
 test('a session minted through TLS is Secure; a loopback one is not', async () => {
-  const harness = await startApi();
+  const harness = await startApi({ options: { publicUrl: 'https://gateway.example' } });
   try {
     const port = Number(new URL(harness.url).port);
     const minted = await rawPost(port, '/api/v1/auth/ott', { authorization: `Bearer ${harness.token}` });

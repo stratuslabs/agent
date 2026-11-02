@@ -38,9 +38,11 @@ import {
   repairWorkspacesIfPending,
   surfaceAgentsHome,
   runStateMigrations,
+  describeStateBackup,
   servedRuntimes,
   describeRuntimeEffort,
   discoverIgnoredUntrustedConfig,
+  bindsLoopback,
   trustedConfigError,
   grantReadSerializer,
   grantWriteSerializer,
@@ -49,7 +51,7 @@ import {
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
 import { describePrincipals, describePosture, describeRemoteMode, describeUnreachable } from '../approvals.ts';
 import { createOperatorCommands } from '../operator-commands.ts';
-import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
+import { HomeHeldError, legacyDaemonServing, describeHeldHome, exposedApiWarning } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
 import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
@@ -268,7 +270,7 @@ const serveHeldHome = async (
   // so for an install that is never updated through `stratus update` this
   // is where the move actually happens: before the stores are opened, so
   // nothing here reads a path the migration is still populating.
-  for (const migration of await runStateMigrations(env, { exclusive: true })) {
+  for (const migration of await runStateMigrations(env, { exclusive: true, onBackup: (backup) => log(describeStateBackup(backup)) })) {
     log(`state migration ${migration.id}: ${migration.detail ?? migration.description}`);
   }
 
@@ -409,6 +411,11 @@ const serveHeldHome = async (
       });
       boundApi = api;
       controlApiChannels.push(api);
+      // Said every start, flag or config alike: the default is loopback, so
+      // this is always someone's choice, and the one place it is visible.
+      if (apiHost !== undefined && !(await bindsLoopback(apiHost))) {
+        warn(exposedApiWarning(apiHost));
+      }
     } else if (command.api === true || apiConfig.enabled === true) {
       // Only when someone asked for it explicitly. A daemon that was never
       // told to serve an API should not complain about not having one.

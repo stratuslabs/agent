@@ -5750,6 +5750,62 @@ test('doctor against a real daemon: what it warned at start stays a problem afte
   }
 });
 
+/**
+ * A real daemon on a runnable home, bound where `apiHost` says (or left to
+ * the default), with what `serve` printed and what `doctor` then said.
+ */
+const serveThenDoctor = async (apiHost: string | undefined) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-bind-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' }), { mode: 0o600 });
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }), { mode: 0o600 });
+  const controller = new AbortController();
+  const served = createStreams();
+  const serving = runCli({
+    argv: ['serve', '--no-events', ...(apiHost !== undefined ? ['--api-host', apiHost] : []), '--api-port', '0'],
+    streams: served.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+  try {
+    for (let tries = 0; ; tries += 1) {
+      try {
+        await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8');
+        break;
+      } catch {
+        if (tries > 100) throw new Error(`daemon never published gateway.json: ${served.output.stdout}${served.output.stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    const checked = createStreams();
+    const code = await runCli({ argv: ['doctor'], streams: checked.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    return { code, served: served.output.stderr, doctor: checked.output.stdout };
+  } finally {
+    controller.abort();
+    await serving;
+  }
+};
+
+test('serve warns when the control API binds beyond loopback, and doctor notes it without failing', async () => {
+  // The container image binds 0.0.0.0 on purpose, so this must not make
+  // doctor exit 1 there; it is a note under Daemon.
+  const { code, served, doctor } = await serveThenDoctor('0.0.0.0');
+  assert.match(served, /Warning: the control API binds 0\.0\.0\.0, so other machines can reach it/);
+  assert.match(served, /api\.publicUrl/);
+  assert.equal(code, 0, doctor);
+  assert.match(doctor, /API on 0\.0\.0\.0: other machines can reach it/);
+  assert.doesNotMatch(doctor, /warned at start/);
+  assert.match(doctor, /No problems found\./);
+});
+
+test('a loopback control API gets no exposure warning and no doctor note', async () => {
+  for (const apiHost of [undefined, '127.0.0.1', 'localhost']) {
+    const { code, served, doctor } = await serveThenDoctor(apiHost);
+    assert.doesNotMatch(served, /the control API binds/, String(apiHost));
+    assert.equal(code, 0, doctor);
+    assert.doesNotMatch(doctor, /API on /, String(apiHost));
+  }
+});
+
 test('doctor against a real daemon: an intake warning is a problem while paused and gone once intake resumes', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-intake-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
@@ -15570,6 +15626,92 @@ test('plugins lets a configured soul take the built-in id over rather than listi
   // built-in is. `blair` is the fixture's roster soul, which also lists it.
   assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair']);
   assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
+});
+
+test('plugins does not show a grant to a soul with no tools: list as certain while the tool could still register riskier', async () => {
+  // Card 1038, from Codex on #510: a soul with no `tools:` list gets only the
+  // tools that *register* as safe. The report reads the manifest, and a tool
+  // object may raise its own risk at registration, so a manifest-safe tool
+  // is only probably safe. Shown as a plain arrow, the grant could name an
+  // agent the runner then refuses.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+
+  const json = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams: json.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(json.output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  const read = tools.find((tool) => tool.name === 'fs.read');
+  // The listed souls are certain; the unlisted one depends on the risk the
+  // tool registers at, which only a running daemon sees.
+  assert.deepEqual(read?.grantedTo, ['stratus', 'blair']);
+  assert.deepEqual(read?.grantedIfSafe, ['quiet']);
+  // Gated already, and registration only ever raises a risk: no grant to
+  // an unlisted soul, and nothing uncertain about it.
+  const write = tools.find((tool) => tool.name === 'fs.write');
+  assert.deepEqual(write?.grantedTo, []);
+  assert.equal(write?.grantedIfSafe, undefined);
+
+  const text = createStreams();
+  await runCli({ argv: ['plugins'], streams: text.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.match(text.output.stdout, /fs\.read\s+safe → stratus, blair; quiet if it registers as safe\n/);
+  assert.match(text.output.stdout, /fs\.list\s+safe → quiet if it registers as safe\n/);
+  assert.match(text.output.stdout, /fs\.write\s+gated → nobody, until a soul’s tools: list names it\n/);
+});
+
+test('plugins shows a soul with no tools: list as granted a tool the operator rated safe', async () => {
+  // An operator's `toolRisks` word replaces the object's own claim at
+  // registration, so a tool rated safe there is safe for certain.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.plugins['@stratusagent/tool-fs'].toolRisks = { 'fs.read': 'safe' };
+  await writeFile(configPath, JSON.stringify(config));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair', 'quiet']);
+  assert.equal(tools.find((tool) => tool.name === 'fs.read')?.grantedIfSafe, undefined);
+  // fs.list has no override, so it stays uncertain beside it.
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.list')?.grantedIfSafe, ['quiet']);
+});
+
+test('plugins shows every tool as granted to a soul with no tools: list on a home an older build set up', async () => {
+  // There an unlisted soul keeps every tool whatever it registers at, so
+  // nothing about the grant waits on the risk.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+  // What 0.14.2 left behind.
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair', 'quiet']);
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, ['quiet']);
+  assert.ok(tools.every((tool) => tool.grantedIfSafe === undefined));
 });
 
 test('plugins does not offer a stale Slack token as an approver route', async () => {
