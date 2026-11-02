@@ -299,8 +299,7 @@ const loadSkillEnablement = async (
  * the built-in stratus skill (when it loaded) and one per installed skill,
  * each with the agents that enable it. `enabledBy` is `"every agent"` for
  * the built-in, an array of agent names for an installed skill, or `null`
- * when the roster could not be read — the same withholding the text output
- * does, carried as data so a script can tell the cases apart.
+ * when the roster could not be read — the same withholding the text output does.
  */
 const skillsJsonReport = (
   builtin: Skill | undefined,
@@ -352,17 +351,12 @@ export const runSkills = async (
     writeLine(streams.stderr, `Warning: ${line}`);
   });
 
-  // JSON: one document on stdout with every skill and its enablement, so a
-  // script can read what `stratus skills` prints. Warnings stay on stderr,
-  // so stdout is always valid JSON — the same contract the other --format
-  // json commands hold.
   if (command.format === 'json') {
     const { roster, rosterUnreadable } = await loadSkillEnablement(env, streams);
     writeLine(streams.stdout, JSON.stringify(skillsJsonReport(builtinSkill, skills, roster, rosterUnreadable), null, 2));
     return 0;
   }
 
-  // Text: the built-in skill first, then what is installed and who enables it.
   if (builtinSkill !== undefined) {
     writeLine(streams.stdout, `${STRATUS_SKILL_ID.padEnd(24)}How Stratus itself works and how to set it up — built in, enabled for every agent (${STRATUS_SKILL_PATH})`);
   }

@@ -877,12 +877,10 @@ test('runCli skills --format json reports each skill and who enables it as data'
   const report = JSON.parse(output.stdout) as {
     skills: Array<{ id: string; description: string; builtIn: boolean; enabledBy: string | string[] | null }>;
   };
-  // The built-in stratus skill is first, enabled for every agent.
   const builtin = report.skills.find((entry) => entry.id === 'stratus');
   assert.ok(builtin, 'the built-in stratus skill is listed');
   assert.equal(builtin.builtIn, true);
   assert.equal(builtin.enabledBy, 'every agent');
-  // An installed skill reports its description and the agents that enable it.
   const installed = report.skills.find((entry) => entry.id === 'site-audit');
   assert.ok(installed, 'the installed skill is listed');
   assert.equal(installed.builtIn, false);
@@ -922,9 +920,7 @@ test('runCli skills --format json sets enabledBy null for every skill when the r
     skills: Array<{ id: string; builtIn: boolean; enabledBy: string | string[] | null }>;
   };
   // The built-in stays "every agent" — a roster failure withholds
-  // enablement for installed skills, not for the one every agent has
-  // regardless. So a script can tell the roster-failed case apart from
-  // the nobody-enables-it one by the null on the installed skill.
+  // enablement for installed skills, not for the one every agent has regardless.
   const builtin = report.skills.find((entry) => entry.builtIn);
   assert.equal(builtin?.enabledBy, 'every agent');
   for (const skill of report.skills) {
