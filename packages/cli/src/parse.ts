@@ -105,6 +105,7 @@ export interface ParsedPluginsCommand {
 
 export interface ParsedSkillsCommand {
   command: 'skills';
+  format: 'text' | 'json';
 }
 
 // The rule lives in `@stratusagent/state` now that the control API checks the
@@ -1148,13 +1149,24 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
   if (command === 'skills' || (command === 'skill' && rest[0] === 'list')) {
     const skillsRest = command === 'skills' ? rest : rest.slice(1);
-    for (const token of skillsRest) {
+    let format: 'text' | 'json' = 'text';
+    for (let index = 0; index < skillsRest.length; index += 1) {
+      const token = skillsRest[index] as string;
       if (token === '--help' || token === '-h') {
         return { command: 'help' };
       }
+      if (token === '--format') {
+        const value = readOptionValue(skillsRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Invalid value for --format: ${value}. Use text or json.`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
       throw new Error(`Unknown option: ${token}`);
     }
-    return { command: 'skills' };
+    return { command: 'skills', format };
   }
 
   if (command === 'template') {

@@ -202,7 +202,7 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
     }
 
     if (command.command === 'skills') {
-      return await runSkills(streams, resolvedEnv);
+      return await runSkills(command, streams, resolvedEnv);
     }
 
     if (command.command === 'plugins') {
