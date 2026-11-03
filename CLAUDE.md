@@ -186,6 +186,12 @@ hand and by review:
   object literals (`const provider: ModelProvider = { … }`), named
   `create*`/`fake*`/`stub*` at the top of the test file; reach for
   `t.mock` only to fake timers.
+- **A cli test never reaches the real `~/.stratus`.** Every file in
+  `packages/cli/test/` imports `./home-guard.ts` first. It points `HOME` at a
+  decoy whose `.stratus` is a regular file, so a command that falls back to
+  `os.homedir()` fails instead of running migrations on the contributor's own
+  home. Give such a test a home of its own (`env.homeDir` for `runCli`, `HOME`
+  for a spawned bin). `home-guard.test.ts` fails when a file skips the import.
 - New behavior needs a test that fails without the change. Verify that it
   does; a test that passes both ways is worse than none, because it reads
   as covered.
