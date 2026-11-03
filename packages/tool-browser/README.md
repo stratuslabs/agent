@@ -184,7 +184,7 @@ version of all of this.
 | `idleMs` | `300000` | Close a conversation's context after this much quiet. |
 | `maxContexts` | `4` | Contexts at once; the least recently used goes first. |
 | `maxTextBytes` | `100000` | Cap on `browser.read`, then a `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
-| `navigationTimeoutMs` | `30000` | Per navigation, per action, and on reading a page — one whose script never yields is given up on, its context closed, and the next call opens a fresh page. |
+| `navigationTimeoutMs` | `30000` | Per navigation, per action, and on reading a page — one whose script never yields is given up on, its context closed, and the next call opens a fresh page. Opening a page is bounded too: a browser that doesn't open one in time is closed, and the next call launches a fresh one. A browser that crashes or is killed is replaced the same way, at once. |
 | `workspaceRoot` | the host's answer | Where screenshots go. Under the daemon the host answers per agent, so they land in `~/.stratus/agents/<id>/workspace/screenshots/`. Set here, it means one directory per agent under the root you name (`<root>/<agent-id>/screenshots`) — which is also how a host wiring this plugin by hand supplies one. |
 
 Address settings apply per agent under `agents`, and they are enforced —

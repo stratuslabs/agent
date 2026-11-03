@@ -1,3 +1,4 @@
+import './home-guard.ts';
 import { writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
@@ -536,7 +537,12 @@ test('runCli prints help text', async () => {
 
 test('runCli executes the demo tool loop', async () => {
   const { streams, output } = createStreams();
-  const exitCode = await runCli({ argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool'], streams });
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
+  const exitCode = await runCli({
+    argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool'],
+    streams,
+    env: { homeDir: home, processEnv: {} },
+  });
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Starting Stratus Agent local loop with provider=demo/);
@@ -1100,9 +1106,11 @@ test('a daemon soul run locally is told the names are right and the process is n
 
 test('runCli denies tool calls when approvals are set to never', async () => {
   const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const exitCode = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'never'],
     streams,
+    env: { homeDir: home, processEnv: {} },
   });
 
   assert.equal(exitCode, 0);
@@ -1113,11 +1121,12 @@ test('runCli denies tool calls when approvals are set to never', async () => {
 });
 
 test('runCli prompts for approval in ask mode and honors the answer', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const approved = createStreams();
   const approvedExit = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
     streams: approved.streams,
-    env: { approvalInput: Readable.from(['y\n']) },
+    env: { approvalInput: Readable.from(['y\n']), homeDir: home, processEnv: {} },
   });
 
   assert.equal(approvedExit, 0);
@@ -1130,7 +1139,7 @@ test('runCli prompts for approval in ask mode and honors the answer', async () =
   const deniedExit = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
     streams: denied.streams,
-    env: { approvalInput: Readable.from(['n\n']) },
+    env: { approvalInput: Readable.from(['n\n']), homeDir: home, processEnv: {} },
   });
 
   assert.equal(deniedExit, 0);
@@ -1140,10 +1149,11 @@ test('runCli prompts for approval in ask mode and honors the answer', async () =
 
 test('runCli keeps stdout parseable when combining json format with ask approvals', async () => {
   const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const exitCode = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--format', 'json', '--approvals', 'ask'],
     streams,
-    env: { approvalInput: Readable.from(['y\n']) },
+    env: { approvalInput: Readable.from(['y\n']), homeDir: home, processEnv: {} },
   });
 
   assert.equal(exitCode, 0);
@@ -1161,9 +1171,11 @@ test('runCli keeps stdout parseable when combining json format with ask approval
 
 test('runCli can render machine-readable json output', async () => {
   const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const exitCode = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--format', 'json'],
     streams,
+    env: { homeDir: home, processEnv: {} },
   });
 
   assert.equal(exitCode, 0);
@@ -1185,6 +1197,7 @@ test('resolveRuntimeConfig loads openai settings from renamed env vars', async (
     format: 'text',
     events: true,
   }, {
+    homeDir: tempHome,
     processEnv: {
       OPENAI_API_KEY: 'env-key',
       STRATUS_MODEL: 'gpt-4.1-mini',
@@ -1219,6 +1232,7 @@ test('resolveRuntimeConfig loads openai settings from config file', async () => 
     events: true,
     configPath,
   }, {
+    homeDir: tempHome,
     processEnv: {
       CUSTOM_OPENAI_KEY: 'config-key',
     },
@@ -1460,7 +1474,12 @@ test('runCli reports missing api key errors for real providers', async () => {
 test('runCli reads stdin from an injected stdin stream', async () => {
   const { streams, output } = createStreams();
   const stdinStream = Readable.from(['inspect this tool\n']);
-  const exitCode = await runCli({ argv: ['run', '--provider', 'demo', '--stdin'], streams, env: { stdinStream } });
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
+  const exitCode = await runCli({
+    argv: ['run', '--provider', 'demo', '--stdin'],
+    streams,
+    env: { stdinStream, homeDir: home, processEnv: {} },
+  });
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /inspect this tool/);
@@ -1468,8 +1487,10 @@ test('runCli reads stdin from an injected stdin stream', async () => {
 });
 
 test('source bin script works with piped stdin', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const child = spawn(process.execPath, ['--experimental-strip-types', './src/bin.ts', 'run', '--provider', 'demo', '--stdin'], {
     cwd: packageDir,
+    env: { ...process.env, HOME: home },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -1602,7 +1623,7 @@ Be warm and concise.
       format: 'text',
       events: true,
       soul: path.join(tempDir, 'missing.md'),
-    }, { cwd: tempDir, processEnv: {} }),
+    }, { cwd: tempDir, homeDir: tempHome, processEnv: {} }),
     /Soul file not found/,
   );
 });
@@ -1750,6 +1771,7 @@ test("resolveRuntimeConfig ignores another provider's config file settings", asy
     events: true,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: {
       ANTHROPIC_API_KEY: 'anthropic-key',
       CUSTOM_OPENAI_KEY: 'openai-key',
@@ -2620,7 +2642,11 @@ test('setup offers the Slack package its own choices imply, and nothing for the 
   // The dashboard is offered by `stratus dashboard` when someone runs it
   // (card 308), never by setup.
   assert.doesNotMatch(output.stdout, /control-api|@stratusagent\/dashboard/);
-  assert.deepEqual(installed, [['@stratusagent/channel-slack']]);
+  // At this CLI's own version, as the providers are: the packages ship in
+  // lockstep, so an unpinned install on an older CLI pulls a newer adapter
+  // than the core it loads into (card 1173).
+  assert.deepEqual(installed, [[`@stratusagent/channel-slack@${CLI_VERSION}`]]);
+  assert.match(output.stdout, new RegExp(`Running: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
 });
 
 test('setup never offers the dashboard, and still points at the command that does', async () => {
@@ -2778,7 +2804,38 @@ test('declining the offer prints the command instead of running it', async () =>
 
   assert.match(
     output.stdout,
-    /Skipped\. Install it yourself with: npm install -g @stratusagent\/channel-slack$/m,
+    new RegExp(`Skipped\\. Install it yourself with: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'),
+  );
+});
+
+test('a failed Slack package install names the same pinned command to run by hand', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => false,
+      packageInstaller: async () => ({ ok: false, message: 'EACCES' }),
+      // Save & finish, then "Install it now".
+      setupInput: Readable.from(['9\n', '1\n']),
+    },
+  });
+
+  assert.match(output.stderr, /Could not install: EACCES/);
+  assert.match(
+    output.stderr,
+    new RegExp(`run \`npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\` yourself`),
   );
 });
 
@@ -16341,10 +16398,11 @@ test('gated runs a safe tool without asking and asks about the rest; a defaulted
 
 test('runCli with no --approvals runs a safe tool at a terminal without a prompt', async () => {
   const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const exitCode = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool'],
     streams,
-    env: { terminal: true },
+    env: { terminal: true, homeDir: home, processEnv: {} },
   });
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /tool.called demo\.echo/);

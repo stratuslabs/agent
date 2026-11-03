@@ -745,7 +745,7 @@ export const collectDoctorReport = async (
   if (slackAgents.length > 0 && !slackPackageInstalled) {
     problems.push(
       `Slack tokens are stored for ${slackAgents.length} agent(s) but @stratusagent/channel-slack is not installed, so \`stratus serve\` skips them. `
-      + 'Install it with: npm install -g @stratusagent/channel-slack',
+      + `Install it with: npm install -g @stratusagent/channel-slack@${CLI_VERSION}`,
     );
   }
 

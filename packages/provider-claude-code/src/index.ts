@@ -361,6 +361,7 @@ interface SteerableInput {
 }
 
 const STEER_UNTAKEN = 'The Claude Code run ended before it took a message sent while it worked.';
+const STEER_UNANSWERED = 'The Claude Code run ended before it answered a message sent while it worked. Send that message again.';
 
 const createSteerableInput = (first: SDKUserMessage, signal: AbortSignal): SteerableInput => {
   type Entry = { message: SDKUserMessage; taken: () => void; refused: (error: Error) => void };
@@ -1000,6 +1001,14 @@ export const createClaudeCodeProvider = ({
             continue;
           }
           throw new Error(`Claude Code run failed${resultFailure(message)}`);
+        }
+        // The last result left a steered message for a turn of its own,
+        // and the stream ended without that turn. The message is already
+        // in the session right after its tool's result, so returning the
+        // first answer would read as an answer to both when the model
+        // never saw it: fail instead (card 1056).
+        if (answersSteered && (pending?.size ?? 0) > 0) {
+          throw new Error(STEER_UNANSWERED);
         }
       } catch (error) {
         // The SDK does not stop at the out-of-turns result: the CLI then

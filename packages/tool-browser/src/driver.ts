@@ -46,6 +46,12 @@ export interface BrowserLike {
     proxy?: { server: string; bypass: string };
   }): Promise<BrowserContextLike>;
   close(): Promise<void>;
+  /**
+   * Playwright's `disconnected`: Chromium is gone, crashed, killed or
+   * closed. Optional so a stub need not have it; a browser without it is
+   * still bounded by the pool's open timeout.
+   */
+  on?(event: 'disconnected', listener: () => void): unknown;
 }
 
 export interface LaunchOptions {
