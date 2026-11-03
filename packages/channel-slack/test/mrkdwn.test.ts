@@ -681,6 +681,19 @@ test('a table with a Slack mention in it keeps the mention live', () => {
   }
 });
 
+// Card 1090: the mention check above ran in quadratic time on a cell of
+// repeated `<a:` or `<!`, 2-3 s for one 40,000-character reply. The whole
+// conversion is timed, which takes tens of milliseconds on its own.
+test('a table cell of crafted Slack markup is read in linear time', () => {
+  for (const cell of ['<a:'.repeat(13_000), '<!'.repeat(20_000), '<@'.repeat(20_000)]) {
+    const reply = ['| Who | N |', '| --- | --- |', `| ${cell} | 1 |`].join('\n');
+    const started = performance.now();
+    toSlackMrkdwn(reply);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1_000, `${JSON.stringify(cell.slice(0, 6))}… took ${Math.round(elapsed)} ms`);
+  }
+});
+
 test('a table inside a block quote is recognized and rendered in list form', () => {
   const input = ['> | A | B |', '> | --- | --- |', '> | 1 | 2 |'].join('\n');
   assert.equal(toSlackMrkdwn(input), '> *A*: 1 · *B*: 2');
