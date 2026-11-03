@@ -642,7 +642,10 @@ export const createBrowserPlugin = (
       // chosen when Chromium launches, so an agent whose config narrows the
       // address policy needs a browser launched under that policy rather
       // than a context inside somebody else's.
-      const page = await pool.pageFor(session.id, Date.now(), settings.policy);
+      // Opening the page is bounded like everything else the page is asked:
+      // a browser that never opens one is closed, and the call says so,
+      // rather than holding this call and every call queued behind it.
+      const page = await pool.pageFor(session.id, Date.now(), settings.policy, settings.navigationTimeoutMs);
       // Routed once per page. A page created for this session gets the
       // scheme guard before anything is asked of it.
       if (!(page as PageLike & { __stratusGuarded?: boolean }).__stratusGuarded) {
