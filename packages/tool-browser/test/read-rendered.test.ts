@@ -8,6 +8,9 @@ import path from 'node:path';
 
 import { ToolRegistry, type JsonObject, type Session, type Tool } from '@stratusagent/core';
 
+import type { OptionalModuleHost } from '@stratusagent/plugins';
+
+import { macSandboxRefusal } from '../src/driver.ts';
 import { createBrowserPlugin } from '../src/index.ts';
 
 /**
@@ -29,15 +32,17 @@ const installedChromiums = async (): Promise<JsonObject[]> => {
 };
 
 /**
- * The one test here that runs a real browser, because what it checks —
- * which text is rendered — exists only in a layout engine; a fake page's
- * `evaluate` returns whatever the fake says. It uses the Chromium
- * Playwright finds, one installed beside it, or the Chrome a CI runner
- * ships with, and skips with a reason only when there is none of them.
+ * The tests here run a real browser, because what they check — which text
+ * is rendered, and whether Chromium starts sandboxed — exists only in a
+ * real one; a fake page's `evaluate` returns whatever the fake says. They
+ * use a browser named by `CHROME_PATH`, the Chromium Playwright finds, one
+ * installed beside it, or the Chrome a CI runner ships with, and skip with
+ * a reason only when there is none of them.
  */
 const launchable = async (): Promise<JsonObject | undefined> => {
   const { chromium } = await import('playwright-core');
-  for (const settings of [{}, ...await installedChromiums(), { channel: 'chrome' }]) {
+  const named = process.env.CHROME_PATH ? [{ executablePath: process.env.CHROME_PATH }] : [];
+  for (const settings of [...named, {}, ...await installedChromiums(), { channel: 'chrome' }]) {
     try {
       const browser = await chromium.launch({ headless: true, ...settings });
       await browser.close();
@@ -48,6 +53,14 @@ const launchable = async (): Promise<JsonObject | undefined> => {
   }
   return undefined;
 };
+
+/**
+ * The rendering tests launch the way the probe above does, without
+ * Chromium's own sandbox: they check what a page renders, on hosts (a CI
+ * container, an agent's sandboxed shell) that may not allow the sandbox.
+ * The sandbox has its own test, at the end.
+ */
+const RENDER_ONLY = { chromiumSandbox: false };
 
 const session: Session = {
   id: 'read-rendered',
@@ -87,7 +100,7 @@ test('browser.read returns what the page renders, not its hidden text', async (t
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const port = (server.address() as AddressInfo).port;
 
-  const plugin = createBrowserPlugin({ ...settings, allowedHosts: ['localhost'] });
+  const plugin = createBrowserPlugin({ ...settings, ...RENDER_ONLY, allowedHosts: ['localhost'] });
   t.after(() => plugin.dispose());
   const tools = new ToolRegistry();
   await plugin.setup({
@@ -154,7 +167,7 @@ test('browser.read hides the furniture under a CSP that forbids inline styles, a
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const port = (server.address() as AddressInfo).port;
 
-  const plugin = createBrowserPlugin({ ...settings, allowedHosts: ['localhost'] });
+  const plugin = createBrowserPlugin({ ...settings, ...RENDER_ONLY, allowedHosts: ['localhost'] });
   t.after(() => plugin.dispose());
   const tools = new ToolRegistry();
   await plugin.setup({
@@ -209,7 +222,7 @@ test('browser.read leaves the page as it found it, style attributes byte for byt
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const port = (server.address() as AddressInfo).port;
 
-  const plugin = createBrowserPlugin({ ...settings, allowedHosts: ['localhost'] });
+  const plugin = createBrowserPlugin({ ...settings, ...RENDER_ONLY, allowedHosts: ['localhost'] });
   t.after(() => plugin.dispose());
   const tools = new ToolRegistry();
   await plugin.setup({
@@ -254,7 +267,7 @@ test('browser.read reads a display: contents article, and a hidden body\'s visib
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const port = (server.address() as AddressInfo).port;
 
-  const plugin = createBrowserPlugin({ ...settings, allowedHosts: ['localhost'] });
+  const plugin = createBrowserPlugin({ ...settings, ...RENDER_ONLY, allowedHosts: ['localhost'] });
   t.after(() => plugin.dispose());
   const tools = new ToolRegistry();
   await plugin.setup({
@@ -276,4 +289,81 @@ test('browser.read reads a display: contents article, and a hidden body\'s visib
   const boxless = await textOf('/boxless');
   assert.match(boxless, /REAL_ARTICLE/);
   assert.doesNotMatch(boxless, /BOXLESS_ARTICLE/);
+});
+
+test("a real Chromium starts with its own sandbox by default, or the launch says why it can't and how to opt out", async (t) => {
+  const settings = await launchable();
+  if (settings === undefined) {
+    t.skip('no Chromium or Chrome to launch');
+    return;
+  }
+
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><p>SANDBOX_PAGE</p>');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const url = `http://localhost:${(server.address() as AddressInfo).port}/`;
+
+  // The real playwright-core, with what the plugin hands chromium.launch
+  // written down on the way through.
+  const launched: Array<Record<string, unknown>> = [];
+  const moduleHost: OptionalModuleHost = {
+    resolve: (specifier) => import.meta.resolve(specifier),
+    async import(specifier) {
+      const real = await import(specifier) as { chromium: { launch(options: Record<string, unknown>): Promise<unknown> } };
+      return {
+        chromium: {
+          launch(options: Record<string, unknown>) {
+            launched.push(options);
+            return real.chromium.launch(options);
+          },
+        },
+      };
+    },
+  };
+  const readWith = async (config: JsonObject): Promise<{ text?: string; error?: string }> => {
+    const plugin = createBrowserPlugin({ ...settings, ...config, allowedHosts: ['localhost'] }, { moduleHost });
+    t.after(() => plugin.dispose());
+    const tools = new ToolRegistry();
+    await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+    // Bounded, so a page that never opens fails here instead of hanging the
+    // suite: that hang is the failure the macOS check exists to prevent.
+    return Promise.race([
+      (tools.get('browser.read') as Tool).execute({ url }, session).then(
+        (result) => ({ text: String((result as JsonObject).text) }),
+        (error: Error) => ({ error: error.message }),
+      ),
+      new Promise<{ error: string }>((resolve) => setTimeout(() => resolve({ error: 'no answer within 30s' }), 30_000)),
+    ]);
+  };
+
+  const refusal = process.platform === 'darwin' ? await macSandboxRefusal() : undefined;
+  const sandboxed = await readWith({});
+  if (refusal !== undefined) {
+    // An agent's own shell on macOS, inside sandbox-exec: Chromium is never
+    // started, and the error says why and what to set.
+    assert.match(String(sandboxed.error), /Chromium's sandbox can't start here/);
+    assert.match(String(sandboxed.error), /"chromiumSandbox": false/);
+    assert.equal(launched.length, 0);
+    t.diagnostic(`this host refuses a nested sandbox (${refusal}); checked the error`);
+  } else if (sandboxed.error !== undefined) {
+    // The one failure allowed: a Linux host without unprivileged user
+    // namespaces. A Mac outside a sandbox must start it.
+    assert.notEqual(process.platform, 'darwin', sandboxed.error);
+    assert.match(sandboxed.error, /Chromium sandboxing failed|No usable sandbox/);
+    assert.match(sandboxed.error, /"chromiumSandbox": false/);
+    t.diagnostic("Chromium refused its sandbox on this host; checked the error");
+  } else {
+    assert.match(String(sandboxed.text), /SANDBOX_PAGE/);
+    assert.equal(launched.at(-1)?.chromiumSandbox, true);
+    t.diagnostic("rendered with Chromium's sandbox on");
+  }
+
+  // The opt-out works wherever the browser does.
+  const unsandboxed = await readWith({ chromiumSandbox: false });
+  assert.equal(unsandboxed.error, undefined);
+  assert.match(String(unsandboxed.text), /SANDBOX_PAGE/);
+  assert.equal(launched.at(-1)?.chromiumSandbox, false);
 });

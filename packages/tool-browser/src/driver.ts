@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 import { loadOptionalModule } from '@stratusagent/plugins';
 
@@ -49,6 +51,13 @@ export interface BrowserLike {
 export interface LaunchOptions {
   headless: boolean;
   proxy: { server: string; bypass: string };
+  /**
+   * Chromium's own sandbox, which keeps a compromised renderer away from
+   * the daemon's files and credentials. On unless this is `false`:
+   * Playwright's default is off (`--no-sandbox`), so leaving it out is
+   * not neutral.
+   */
+  chromiumSandbox?: boolean;
   executablePath?: string;
   channel?: string;
 }
@@ -56,6 +65,52 @@ export interface LaunchOptions {
 export interface BrowserDriver {
   launch(options: LaunchOptions): Promise<BrowserLike>;
 }
+
+const OPT_OUT = 'set `"chromiumSandbox": false` in the @stratusagent/tool-browser plugin config, which runs '
+  + "pages without Chromium's own sandbox";
+
+/**
+ * Whether this process may start a macOS sandbox, or why not.
+ *
+ * Chromium's sandbox on macOS is a Seatbelt profile, and macOS refuses to
+ * apply one inside a process that already runs under one: a daemon started
+ * through `sandbox-exec` gets a Chromium that launches, loses its GPU and
+ * network helpers to "sandbox initialization failed", and exits, while the
+ * first `newPage` never settles. Nothing reaches the launch call to catch.
+ * So the same question is put to the OS first, with an allow-everything
+ * profile, and a refusal becomes an error that names the fix. Asked once
+ * per process: whether this process is sandboxed does not change.
+ */
+let macSandboxAnswer: Promise<string | undefined> | undefined;
+export const macSandboxRefusal = (): Promise<string | undefined> => {
+  macSandboxAnswer ??= new Promise((resolve) => {
+    execFile('/usr/bin/sandbox-exec', ['-p', '(version 1)(allow default)', '/usr/bin/true'], { timeout: 5_000 }, (error, _stdout, stderr) => {
+      // Only the refusal counts. No sandbox-exec, a timeout or anything
+      // else unexpected says nothing about the sandbox, so the launch goes
+      // ahead and reports whatever Chromium does.
+      const said = String(stderr).trim();
+      resolve(error && /Operation not permitted/.test(said) ? said : undefined);
+    });
+  });
+  return macSandboxAnswer;
+};
+
+export interface PlaywrightDriverOptions {
+  /**
+   * Asked before a sandboxed launch: a reason this host cannot start
+   * Chromium's sandbox, or undefined when it can. Defaults to the macOS
+   * check above, and to nothing elsewhere, where Chromium fails the launch
+   * itself. Tests replace it.
+   */
+  sandboxRefusal?: () => Promise<string | undefined>;
+}
+
+/**
+ * Playwright's own words for Chromium's "No usable sandbox!", and that line
+ * itself in case a version stops rewriting it.
+ */
+const sandboxFailed = (message: string): boolean =>
+  message.includes('Chromium sandboxing failed') || message.includes('No usable sandbox');
 
 /**
  * Playwright, loaded only when a browser tool is actually called.
@@ -67,7 +122,10 @@ export interface BrowserDriver {
  * `executablePath` they name, or a Chromium they installed with
  * `npx playwright install chromium`.
  */
-export const createPlaywrightDriver = (host: OptionalModuleHost): BrowserDriver => ({
+export const createPlaywrightDriver = (
+  host: OptionalModuleHost,
+  driverOptions: PlaywrightDriverOptions = {},
+): BrowserDriver => ({
   async launch(options) {
     const playwright = await loadOptionalModule<{
       chromium: { launch(options: Record<string, unknown>): Promise<BrowserLike> };
@@ -79,15 +137,37 @@ export const createPlaywrightDriver = (host: OptionalModuleHost): BrowserDriver 
       );
     }
 
+    const chromiumSandbox = options.chromiumSandbox !== false;
+    if (chromiumSandbox) {
+      const refusal = await (driverOptions.sandboxRefusal
+        ?? (process.platform === 'darwin' ? macSandboxRefusal : async () => undefined))();
+      if (refusal) {
+        throw new Error(
+          "Could not start a browser: Chromium's sandbox can't start here. This process already runs inside a "
+          + `macOS sandbox, and macOS won't start one inside another (${refusal}).\n`
+          + `Run the daemon outside that sandbox, or ${OPT_OUT}.`,
+        );
+      }
+    }
+
     try {
       return await playwright.chromium.launch({
         headless: options.headless,
         proxy: options.proxy,
+        chromiumSandbox,
         ...(options.executablePath ? { executablePath: options.executablePath } : {}),
         ...(options.channel ? { channel: options.channel } : {}),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (chromiumSandbox && sandboxFailed(message)) {
+        throw new Error(
+          `Could not start a browser: ${message}\n`
+          + "Chromium's sandbox needs unprivileged user namespaces, and this host refuses them. The usual reasons "
+          + "are a container under Docker's default seccomp profile and Ubuntu 24.04's AppArmor restriction. "
+          + `Allow them for the daemon, or ${OPT_OUT}.`,
+        );
+      }
       // The overwhelmingly common failure, and one an operator can fix in a
       // line — worth saying rather than passing Playwright's paragraph on.
       throw new Error(

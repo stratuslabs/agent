@@ -97,6 +97,9 @@
         "headless": {
           "type": "boolean"
         },
+        "chromiumSandbox": {
+          "type": "boolean"
+        },
         "executablePath": {
           "type": "string"
         },

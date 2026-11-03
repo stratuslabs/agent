@@ -24,6 +24,7 @@ export {
   type BrowserLike,
   type LaunchOptions,
   type PageLike,
+  type PlaywrightDriverOptions,
   type RouteLike,
 } from './driver.ts';
 export { BrowserSessionPool, type SessionPoolOptions } from './sessions.ts';
@@ -36,6 +37,12 @@ export interface BrowserPluginConfig extends JsonObject {
   allowedHosts?: string[];
   onlyHosts?: string[];
   headless?: boolean;
+  /**
+   * Chromium's own sandbox, on by default. `false` is for a host that
+   * cannot start it (a daemon inside sandbox-exec, a container without
+   * user namespaces), and runs pages without it.
+   */
+  chromiumSandbox?: boolean;
   executablePath?: string;
   channel?: string;
   idleMs?: number;
@@ -608,6 +615,7 @@ export const createBrowserPlugin = (
       },
     ),
     ...(resolved.headless === false ? { headless: false } : {}),
+    ...(resolved.chromiumSandbox === false ? { chromiumSandbox: false } : {}),
     ...(typeof resolved.executablePath === 'string' ? { executablePath: resolved.executablePath } : {}),
     ...(typeof resolved.channel === 'string' ? { channel: resolved.channel } : {}),
     ...(typeof resolved.idleMs === 'number' ? { idleMs: resolved.idleMs } : {}),
