@@ -1142,7 +1142,12 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       if (reviewSettings?.shadow === true && !shadowRun && context.parkedAt === undefined) {
         const shadowContext: ApprovalContext = { ...context };
         shadowContexts.add(shadowContext);
-        void policy.approve(shadowContext).catch(() => undefined);
+        const task = policy.approve(shadowContext).catch(() => undefined);
+        try {
+          review?.offPath?.(task);
+        } catch {
+          // The host's bookkeeping failed; the call this review shadows still runs.
+        }
       }
 
       // A call parked before a restart is owed a person's answer: the fast

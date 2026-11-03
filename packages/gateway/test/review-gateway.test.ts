@@ -294,3 +294,28 @@ test('a shutdown aborts a review still running once the turns have drained, and 
   // Its answer came after it was cancelled, so it is not a verdict.
   assert.deepEqual(await stuck, { failed: 'cancelled' });
 });
+
+test('a shutdown waits for work the policy runs off the call path, like a shadow review still reading credentials', async () => {
+  const harness = await reviewGateway(() => openAiText('{}'));
+  await harness.gateway.start();
+  await harness.gateway.dispatch({ sessionId: 'cli-1', agentId: 'ava', userMessage: 'hello' });
+  // Handed over before it reaches the reviewer, which is all the review
+  // set tracks: its turn is over and nothing else waits on it.
+  let finish: () => void = () => {};
+  let stopping: Promise<void> | undefined;
+  try {
+    harness.transport().offPath(new Promise<void>((resolve) => { finish = resolve; }));
+    // One that fails is waited for too, and never fails the shutdown.
+    harness.transport().offPath(Promise.reject(new Error('the shadow review broke')));
+    let stopped = false;
+    stopping = harness.gateway.stop().then(() => { stopped = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(stopped, false, 'stop() holds while the off-path work runs');
+    finish();
+    await stopping;
+    assert.equal(stopped, true);
+  } finally {
+    finish();
+    await (stopping ?? harness.gateway.stop());
+  }
+});

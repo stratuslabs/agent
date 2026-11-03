@@ -544,6 +544,13 @@ export interface ApprovalTransport {
    * Never logged; an unreadable store answers nothing.
    */
   secretsFor(agentId: string): Promise<string[]>;
+  /**
+   * Work the policy runs off the call path, such as a shadow review
+   * (`@stratusagent/permissions`' `review.offPath`), from its start: its
+   * credential read as well as its reviewer call. A shutdown waits for it
+   * after the turns have drained, so what it reports isn't lost.
+   */
+  offPath(task: Promise<unknown>): void;
 }
 
 /** One call put to the reviewer. Mirrors `@stratusagent/permissions`' `ReviewRequest`. */
@@ -2405,6 +2412,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           const { definition } = await refreshAgent(agentId);
           return credentialValuesFor(createFileCredentialResolver(env), definition);
         },
+        // Late-bound like `review`: the set is declared with the side call.
+        offPath: (task) => keepUntilStopped(task),
         destinations: {
           isPreauthorized: (session, destination) => scheduler.isPreauthorized(session, destination),
           accountFor: (agentId, destination) => {
@@ -5500,15 +5509,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // ---- the review posture's reviewer (spec 964) ----------------------------
 
   /**
-   * Reviewer calls still running. A turn awaits its own, but a shadow
-   * review runs off the call path and can outlast its turn, and a provider
+   * Reviewer calls still running, and the shadow reviews the policy hands
+   * over whole (`ApprovalTransport.offPath`). A turn awaits its own, but a
+   * shadow review runs off the call path and can outlast its turn, still
+   * reading credentials before its reviewer call starts, and a provider
    * that ignores its abort after the review's timeout keeps one going with
    * nothing waiting on it. A shutdown aborts these once the turns have
    * drained and waits for them, so none is still using a provider when the
-   * plugins are disposed.
+   * plugins are disposed, and no decision they report is lost.
    */
   const reviewsRunning = new Set<Promise<unknown>>();
   const stopReviews = new AbortController();
+  const keepUntilStopped = (task: Promise<unknown>): void => {
+    reviewsRunning.add(task);
+    const untrack = (): void => {
+      reviewsRunning.delete(task);
+    };
+    task.then(untrack, untrack);
+  };
 
   const reviewCall = async (request: GatewayReviewRequest): Promise<{ reply: Record<string, unknown> } | { failed: string }> => {
     if (request.command !== undefined && !callShownWhole(request.call)) {
@@ -5550,11 +5568,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       signal,
       ...(runtime !== undefined ? { runtime } : {}),
     });
-    reviewsRunning.add(running);
-    const untrack = (): void => {
-      reviewsRunning.delete(running);
-    };
-    running.then(untrack, untrack);
+    keepUntilStopped(running);
     let answered: Session;
     try {
       answered = await running;
