@@ -54,10 +54,10 @@ error that says why and names the setting below:
   fail its launch there (its helper processes die and the first page never
   opens), so the plugin checks first, once per process.
 - **Linux without unprivileged user namespaces.** Chromium's sandbox needs
-  them. Docker's default seccomp profile refuses them, so the Docker
-  `browser` image can't start it, and so does Ubuntu 24.04's AppArmor
-  restriction (`kernel.apparmor_restrict_unprivileged_userns=1`) for
-  Playwright's Chromium.
+  them. Docker's default seccomp profile refuses them, so a container
+  can't start it, and so does Ubuntu 24.04's AppArmor restriction
+  (`kernel.apparmor_restrict_unprivileged_userns=1`) for Playwright's
+  Chromium.
 
 On a host like that, turn it off:
 
@@ -67,6 +67,14 @@ On a host like that, turn it off:
   "chromiumSandbox": false
 }
 ```
+
+When the config doesn't set `chromiumSandbox`, the default comes from the
+`STRATUS_BROWSER_CHROMIUM_SANDBOX` environment variable: `false` or `0`
+turns the sandbox off, `true`, `1` or unset leaves it on, and any other
+value stops the plugin from loading, with an error naming the variable.
+The [Docker `browser` image](../../docs/guides/deployment.md#first-run-docker)
+sets it to `false`, because the config lives in the volume and an image
+can't write it. A key in the config outranks the variable either way.
 
 Pages then run without Chromium's sandbox. The address policy and the proxy
 below still apply, and whatever contains the daemon (the container, the
@@ -169,7 +177,7 @@ version of all of this.
 | `channel` | none | Use an installed browser: `chrome`, `msedge`. |
 | `executablePath` | none | Use the browser at this path. |
 | `headless` | `true` | Set `false` to watch it work. |
-| `chromiumSandbox` | `true` | Chromium's own sandbox. Set `false` only where it can't start; see [Chromium's sandbox](#chromiums-sandbox). |
+| `chromiumSandbox` | `true` (`false` in the Docker `browser` image) | Chromium's own sandbox. Set `false` only where it can't start; see [Chromium's sandbox](#chromiums-sandbox). Unset, `STRATUS_BROWSER_CHROMIUM_SANDBOX` decides. |
 | `allowedHosts` | none | Hosts exempt from the address check. |
 | `onlyHosts` | unset (every public host) | The only hosts the browser may reach — every navigation **and every subresource**, so a page's CDNs, fonts, and APIs need entries too (`*.example.com` covers subdomains, not the apex). A refused name is never looked up. `allowedHosts` entries stay reachable. `["*"]` under `agents` lifts an inherited list. See [`tool-web`](../tool-web/README.md#settings) for why. |
 | `allowPrivateAddresses` | `false` | Reach non-global addresses. The trusted-workstation posture. |

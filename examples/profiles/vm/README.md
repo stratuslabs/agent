@@ -72,10 +72,12 @@ account's cache, or point the plugin at an installed Chrome with
 `"channel": "chrome"`. Without one the daemon still runs, and a `browser.*`
 call fails with a message naming the fix.
 
-Chromium's own sandbox is on by default, and it can't start in the Docker
-image (Docker's seccomp profile refuses the user namespaces it needs) or on
-Ubuntu 24.04 (AppArmor's user-namespace restriction applies to Playwright's
-Chromium, under the system unit too). On those, the first `browser.*` call
+Chromium's own sandbox is on by default. It can't start in a Docker
+container (Docker's seccomp profile refuses the user namespaces it needs),
+so the Docker `browser` image turns it off for you with
+`STRATUS_BROWSER_CHROMIUM_SANDBOX=false`. It can't start on Ubuntu 24.04
+either (AppArmor's user-namespace restriction applies to Playwright's
+Chromium, under the system unit too). There the first `browser.*` call
 fails and names the fix: add `"chromiumSandbox": false` to the
 `@stratusagent/tool-browser` block in `config.json`. See
 [Chromium's sandbox](../../../packages/tool-browser/README.md#chromiums-sandbox).

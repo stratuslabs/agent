@@ -163,15 +163,30 @@ const recordingDriver = (launches: LaunchOptions[]): BrowserDriver => ({
   },
 });
 
-for (const [config, expected] of [
-  [{}, true],
-  [{ chromiumSandbox: true }, true],
-  [{ chromiumSandbox: false }, false],
+const VARIABLE = 'STRATUS_BROWSER_CHROMIUM_SANDBOX';
+
+for (const [config, env, expected] of [
+  [{}, {}, true],
+  [{ chromiumSandbox: true }, {}, true],
+  [{ chromiumSandbox: false }, {}, false],
+  // The Docker browser image sets the variable: the config lives in the
+  // volume, so the image can't put the key there.
+  [{}, { [VARIABLE]: 'false' }, false],
+  [{}, { [VARIABLE]: '0' }, false],
+  [{}, { [VARIABLE]: 'true' }, true],
+  [{}, { [VARIABLE]: '1' }, true],
+  [{}, { [VARIABLE]: '' }, true],
+  // A key in the config is the operator saying so, and wins either way.
+  [{ chromiumSandbox: true }, { [VARIABLE]: 'false' }, true],
+  [{ chromiumSandbox: false }, { [VARIABLE]: 'true' }, false],
 ] as const) {
-  test(`plugin config ${JSON.stringify(config)} launches with chromiumSandbox ${expected}`, async (t) => {
+  test(`plugin config ${JSON.stringify(config)} with env ${JSON.stringify(env)} launches with chromiumSandbox ${expected}`, async (t) => {
     const launches: LaunchOptions[] = [];
     const tools = new ToolRegistry();
-    const plugin = createBrowserPlugin({ allowedHosts: ['example.com'], ...config }, { driver: recordingDriver(launches) });
+    const plugin = createBrowserPlugin(
+      { allowedHosts: ['example.com'], ...config },
+      { driver: recordingDriver(launches), env },
+    );
     await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
     t.after(() => plugin.dispose());
 
@@ -191,4 +206,20 @@ test("the plugin's config schema accepts chromiumSandbox, and only as a boolean"
   validatePluginConfig(manifest, { enabled: true, chromiumSandbox: false });
   validatePluginConfig(manifest, { enabled: true, chromiumSandbox: true });
   assert.throws(() => validatePluginConfig(manifest, { enabled: true, chromiumSandbox: 'off' }), /chromiumSandbox/);
+});
+
+test(`a ${VARIABLE} that is not true, false, 1 or 0 refuses the plugin, naming the variable`, () => {
+  // Read as "on" it would look like the image's opt-out applied when it
+  // didn't; read as "off" a typo would drop the sandbox. Neither is a guess
+  // to make quietly.
+  for (const value of ['off', 'no', 'FALSE ', 'disabled']) {
+    assert.throws(
+      () => createBrowserPlugin({}, { driver: recordingDriver([]), env: { [VARIABLE]: value } }),
+      (error: Error) => {
+        assert.match(error.message, new RegExp(VARIABLE));
+        assert.match(error.message, new RegExp(JSON.stringify(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        return true;
+      },
+    );
+  }
 });

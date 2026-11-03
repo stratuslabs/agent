@@ -40,7 +40,9 @@ export interface BrowserPluginConfig extends JsonObject {
   /**
    * Chromium's own sandbox, on by default. `false` is for a host that
    * cannot start it (a daemon inside sandbox-exec, a container without
-   * user namespaces), and runs pages without it.
+   * user namespaces), and runs pages without it. Unset, the default comes
+   * from `STRATUS_BROWSER_CHROMIUM_SANDBOX`, which the Docker `browser`
+   * image sets to `false`.
    */
   chromiumSandbox?: boolean;
   executablePath?: string;
@@ -589,7 +591,39 @@ export interface BrowserPluginOptions {
   driver?: BrowserDriver;
   /** How this host resolves and imports optional packages. */
   moduleHost?: OptionalModuleHost;
+  /**
+   * Where `STRATUS_BROWSER_CHROMIUM_SANDBOX` is read from. Defaults to
+   * `process.env`; tests replace it.
+   */
+  env?: Readonly<Record<string, string | undefined>>;
 }
+
+const CHROMIUM_SANDBOX_ENV = 'STRATUS_BROWSER_CHROMIUM_SANDBOX';
+
+/**
+ * The default for `chromiumSandbox` when the config doesn't set it.
+ *
+ * An image can't write the config: it lives in the home, which is a volume.
+ * So the Docker `browser` image, where Docker's seccomp profile refuses the
+ * sandbox, says `false` here instead, and a config that names the key wins
+ * over it (on a VM that runs the image, `"chromiumSandbox": true` turns it
+ * back on). A value that isn't one of the four refuses the plugin rather than
+ * being guessed at: read as on, the opt-out would look applied when it
+ * wasn't; read as off, a typo would drop the sandbox.
+ */
+const chromiumSandboxDefault = (env: Readonly<Record<string, string | undefined>>): boolean => {
+  const value = env[CHROMIUM_SANDBOX_ENV];
+  if (value === undefined || value === '' || value === 'true' || value === '1') {
+    return true;
+  }
+  if (value === 'false' || value === '0') {
+    return false;
+  }
+  throw new Error(
+    `${CHROMIUM_SANDBOX_ENV}=${JSON.stringify(value)} is not true, false, 1 or 0. `
+    + 'Set it to false (or 0) to start Chromium without its own sandbox, or unset it.',
+  );
+};
 
 /**
  * The `browser` toolset.
@@ -607,6 +641,9 @@ export const createBrowserPlugin = (
   const blocked = new Map<string, string[]>();
   const reportedOrigins = new Map<string, string | null>();
   const resolved = config;
+  const chromiumSandbox = typeof resolved.chromiumSandbox === 'boolean'
+    ? resolved.chromiumSandbox
+    : chromiumSandboxDefault(options.env ?? process.env);
   const pool = new BrowserSessionPool({
     driver: options.driver ?? createPlaywrightDriver(
       options.moduleHost ?? {
@@ -615,7 +652,7 @@ export const createBrowserPlugin = (
       },
     ),
     ...(resolved.headless === false ? { headless: false } : {}),
-    ...(resolved.chromiumSandbox === false ? { chromiumSandbox: false } : {}),
+    ...(chromiumSandbox ? {} : { chromiumSandbox: false }),
     ...(typeof resolved.executablePath === 'string' ? { executablePath: resolved.executablePath } : {}),
     ...(typeof resolved.channel === 'string' ? { channel: resolved.channel } : {}),
     ...(typeof resolved.idleMs === 'number' ? { idleMs: resolved.idleMs } : {}),
