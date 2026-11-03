@@ -84,6 +84,7 @@ export {
   stratusHomePath,
   globalConfigPath,
   logsDirPath,
+  backupsDirPath,
   credentialsPath,
   credentialAuditPath,
   agentsDirPath,
@@ -231,9 +232,14 @@ export {
   assertStateCompatible,
   pendingStateMigrations,
   type StateMigrationRunOptions,
+  type StateMigrationOutcome,
   type AppliedStateMigration,
   runStateMigrations,
+  PREDATES_SAFE_TOOLS_FACT,
+  unlistedToolsFor,
 } from './migrations.ts';
+
+export { type StateBackup, backUpStateBeforeMigrating, describeStateBackup } from './state-backup.ts';
 
 export {
   drainSharedMemory,
@@ -248,6 +254,9 @@ export {
   type IgnoredConfigKey,
   ignoredConfigKeys,
   loadConfigFile,
+  bindsLoopback,
+  type HostLookup,
+  isLoopbackAddress,
   normalizePublicUrl,
   validateConfigFile,
   resolveAgentApprovals,
@@ -268,6 +277,7 @@ export {
 
 export {
   DEFAULT_STRATUS_AGENT,
+  EVERY_TOOL,
   resolveSoulPath,
   resolveSoul,
   resolveConfiguredSoul,
