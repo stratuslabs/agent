@@ -1,6 +1,7 @@
 // The review-step eval's corpus and scoring (eval/review-step). The eval
 // itself needs a model and runs on demand; these keep its cases buildable
 // and its numbers right without one.
+import './home-guard.ts';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
