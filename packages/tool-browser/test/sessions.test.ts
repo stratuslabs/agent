@@ -339,3 +339,202 @@ test('releasing an unresponsive page neither waits for another conversation\'s a
   assert.equal(pool.browserCount, 0);
   assert.equal(closedBrowsers, 1);
 });
+
+/**
+ * A browser the test can kill. `die()` does what Playwright's `Browser`
+ * does when Chromium goes away: it emits `disconnected`. `hangPages`
+ * makes `newPage` never settle, which is what a Chromium that died during
+ * page creation did under a nested macOS sandbox.
+ */
+interface KillableBrowser {
+  die(): void;
+  closes: number;
+  pagesAsked: number;
+}
+
+const killableDriver = (options: { hangPages?: (launch: number) => boolean; disconnects?: boolean } = {}) => {
+  const browsers: KillableBrowser[] = [];
+  let pageAsked: () => void = () => {};
+  const driver: BrowserDriver = {
+    async launch() {
+      const launch = browsers.length + 1;
+      const listeners: Array<() => void> = [];
+      const handle: KillableBrowser = {
+        die: () => {
+          for (const listener of listeners) {
+            listener();
+          }
+        },
+        closes: 0,
+        pagesAsked: 0,
+      };
+      browsers.push(handle);
+      return {
+        async newContext() {
+          const context: BrowserContextLike = {
+            newPage() {
+              handle.pagesAsked += 1;
+              pageAsked();
+              return options.hangPages?.(launch) ? new Promise<PageLike>(() => {}) : Promise.resolve(stubPage());
+            },
+            async close() {},
+          };
+          return context;
+        },
+        async close() {
+          handle.closes += 1;
+        },
+        ...(options.disconnects === false
+          ? {}
+          : {
+            on(event: 'disconnected', listener: () => void) {
+              if (event === 'disconnected') {
+                listeners.push(listener);
+              }
+            },
+          }),
+      };
+    },
+  };
+  /** Resolves the next time any browser is asked for a page. */
+  const nextPageAsked = (): Promise<void> => new Promise((resolve) => { pageAsked = resolve; });
+  return { driver, browsers, nextPageAsked };
+};
+
+test('a browser that dies while a page is being opened fails that call, and the next call launches a fresh one', { timeout: 5_000 }, async (t) => {
+  const { driver, browsers, nextPageAsked } = killableDriver({ hangPages: (launch) => launch === 1 });
+  const pool = new BrowserSessionPool({ driver });
+  t.after(() => pool.close());
+
+  const asked = nextPageAsked();
+  const opening = pool.pageFor('a', 1);
+  await asked;
+  browsers[0]!.die();
+  await assert.rejects(opening, /browser quit while this page was opening.*next browser call starts a fresh one/i);
+  assert.equal(pool.browserCount, 0, 'the dead browser is out of the pool');
+
+  // The admission queue moved on, and the dead browser is not handed out again.
+  await pool.pageFor('a', 2);
+  assert.equal(browsers.length, 2);
+  assert.equal(pool.browserCount, 1);
+  assert.equal(pool.size, 1);
+});
+
+test('a browser that dies takes its conversations\' pages with it, and their next call opens a fresh browser', { timeout: 5_000 }, async (t) => {
+  const { driver, browsers } = killableDriver();
+  const evicted: Array<{ sessionId: string; reason: string }> = [];
+  const pool = new BrowserSessionPool({ driver, onEvicted: (event) => evicted.push(event) });
+  t.after(() => pool.close());
+
+  const before = await pool.pageFor('a', 1);
+  await pool.pageFor('b', 1);
+  assert.equal(pool.size, 2);
+
+  browsers[0]!.die();
+  assert.equal(pool.size, 0, 'no conversation is left holding a page in a browser that is gone');
+  assert.equal(pool.browserCount, 0);
+  assert.deepEqual(evicted.map((event) => `${event.sessionId}:${event.reason}`).sort(), ['a:disconnected', 'b:disconnected']);
+
+  const after = await pool.pageFor('a', 2);
+  assert.notEqual(after, before);
+  assert.equal(browsers.length, 2, 'the next call launched a fresh browser');
+  assert.equal(pool.browserCount, 1);
+});
+
+test('a browser that disconnects after it was closed on purpose leaves its replacement alone', { timeout: 5_000 }, async (t) => {
+  // Playwright emits `disconnected` for a browser the pool closed itself,
+  // and that close can settle after the conversation has a fresh browser
+  // under the same policy.
+  const { driver, browsers } = killableDriver();
+  const evicted: string[] = [];
+  const pool = new BrowserSessionPool({ driver, onEvicted: ({ sessionId }) => evicted.push(sessionId) });
+  t.after(() => pool.close());
+
+  await pool.pageFor('a', 1);
+  assert.equal(await pool.release('a'), true);
+  await pool.pageFor('a', 2);
+  assert.equal(browsers.length, 2);
+  evicted.length = 0;
+
+  browsers[0]!.die();
+  assert.equal(pool.size, 1);
+  assert.equal(pool.browserCount, 1);
+  assert.deepEqual(evicted, []);
+  assert.equal(browsers[1]!.closes, 0);
+});
+
+test('a browser that dies as it hands over a page does not leave that page with the conversation', { timeout: 5_000 }, async (t) => {
+  // The page and the disconnect arrive together: the open has already won
+  // its race by the time the browser is known to be gone.
+  const browsers: KillableBrowser[] = [];
+  const base = killableDriver();
+  const driver: BrowserDriver = {
+    async launch(options) {
+      const browser = await base.driver.launch(options);
+      const handle = base.browsers[base.browsers.length - 1]!;
+      browsers.push(handle);
+      if (browsers.length > 1) {
+        return browser;
+      }
+      return {
+        ...browser,
+        async newContext(contextOptions) {
+          const context = await browser.newContext(contextOptions);
+          return {
+            ...context,
+            newPage() {
+              const page = context.newPage();
+              handle.die();
+              return page;
+            },
+          };
+        },
+      };
+    },
+  };
+  const pool = new BrowserSessionPool({ driver });
+  t.after(() => pool.close());
+
+  await assert.rejects(pool.pageFor('a', 1), /browser quit while this page was opening/i);
+  assert.equal(pool.size, 0, 'the page from the dead browser was not kept');
+  await pool.pageFor('a', 2);
+  assert.equal(browsers.length, 2);
+  assert.equal(pool.size, 1);
+});
+
+test('a page that never opens fails within the timeout, and the browser is replaced for every call after it', { timeout: 5_000 }, async (t) => {
+  // No `disconnected` to go on: the browser is wedged rather than gone.
+  const { driver, browsers, nextPageAsked } = killableDriver({ hangPages: (launch) => launch === 1, disconnects: false });
+  const pool = new BrowserSessionPool({ driver });
+  t.after(() => pool.close());
+
+  const asked = nextPageAsked();
+  const startedAt = Date.now();
+  const opening = pool.pageFor('a', 1, {}, 50);
+  // Queued behind the wedged admission, from another conversation.
+  const queued = pool.pageFor('b', 1, {}, 2_000);
+  await asked;
+  await assert.rejects(opening, /did not open a page within 50ms.*closed.*next browser call starts a fresh one/i);
+  assert.ok(Date.now() - startedAt < 1_000, 'the call came back near its timeout');
+  assert.equal(browsers[0]!.closes, 1, 'the wedged browser was closed');
+
+  await queued;
+  assert.equal(browsers.length, 2, 'the call queued behind it got a fresh browser');
+  await pool.pageFor('a', 2, {}, 50);
+  assert.equal(pool.size, 2);
+  assert.equal(pool.browserCount, 1);
+});
+
+test('a page that opens within the timeout keeps its browser', { timeout: 5_000 }, async (t) => {
+  const { driver, browsers } = killableDriver({ disconnects: false });
+  const pool = new BrowserSessionPool({ driver });
+  t.after(() => pool.close());
+
+  await pool.pageFor('a', 1, {}, 50);
+  // Past the bound: a timer left running would close a healthy browser.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(browsers[0]!.closes, 0);
+  assert.equal(pool.browserCount, 1);
+  await pool.pageFor('b', 2, {}, 50);
+  assert.equal(browsers.length, 1);
+});
