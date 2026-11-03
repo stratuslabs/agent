@@ -2624,7 +2624,7 @@ test('setup offers the Slack package its own choices imply, and nothing for the 
   // lockstep, so an unpinned install on an older CLI pulls a newer adapter
   // than the core it loads into (card 1173).
   assert.deepEqual(installed, [[`@stratusagent/channel-slack@${CLI_VERSION}`]]);
-  assert.match(output.stdout, new RegExp(`Running: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/\./g, '\\.')}$`, 'm'));
+  assert.match(output.stdout, new RegExp(`Running: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
 });
 
 test('setup never offers the dashboard, and still points at the command that does', async () => {
@@ -2782,7 +2782,7 @@ test('declining the offer prints the command instead of running it', async () =>
 
   assert.match(
     output.stdout,
-    new RegExp(`Skipped\\. Install it yourself with: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/\./g, '\\.')}$`, 'm'),
+    new RegExp(`Skipped\\. Install it yourself with: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'),
   );
 });
 
@@ -2813,7 +2813,7 @@ test('a failed Slack package install names the same pinned command to run by han
   assert.match(output.stderr, /Could not install: EACCES/);
   assert.match(
     output.stderr,
-    new RegExp(`run \`npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/\./g, '\\.')}\` yourself`),
+    new RegExp(`run \`npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\` yourself`),
   );
 });
 
