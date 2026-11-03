@@ -770,6 +770,8 @@ const serveHeldHome = async (
         return outcome.reply as unknown as ReviewAnswer;
       },
       secretsFor: (agentId) => transport.secretsFor(agentId),
+      // A shadow review, so the daemon's shutdown waits for it.
+      offPath: (task) => transport.offPath(task),
     };
     // The standing-grant engine, in the same file again — and the tool's
     // contributor from the gateway, so a grant records which package's
