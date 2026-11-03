@@ -71,6 +71,12 @@ For [`tool-browser`](./browser.md), set `target: browser` in
 `image:` tag) and build again: the `browser` target adds Playwright's
 Chromium and its system libraries to the slim image. Without it the daemon
 runs normally and a `browser.*` call fails with a message naming the fix.
+Chromium's own sandbox can't start in the container, because Docker's
+default seccomp profile refuses the user namespaces it needs, so also set
+`"chromiumSandbox": false` in the plugin's config. The container is then
+what contains the browser. The
+[`tool-browser` README](../../packages/tool-browser/README.md#chromiums-sandbox)
+has the details.
 
 Then give it the [VM profile](../../examples/profiles/vm) — every tool
 plugin, remote approvals, named operators — as a template. The image's

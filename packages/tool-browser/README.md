@@ -38,6 +38,44 @@ Nothing here is loaded until a `browser.*` tool is actually called, so a
 daemon with the plugin enabled and no browser installed runs normally and
 fails that one call with a message naming the fix.
 
+## Chromium's sandbox
+
+The plugin starts Chromium with its own sandbox on. Playwright's default is
+off (`--no-sandbox`), and the sandbox is what keeps a page that breaks the
+renderer away from the daemon's files and credentials, so leave it on
+wherever it starts.
+
+Some hosts can't start it. There the first `browser.*` call fails with an
+error that says why and names the setting below:
+
+- **macOS, inside another sandbox.** macOS won't start one sandbox inside
+  another, so a daemon running under `sandbox-exec` can't start Chromium's.
+  A daemon started by `launchd` or from a terminal can. Chromium doesn't
+  fail its launch there (its helper processes die and the first page never
+  opens), so the plugin checks first, once per process.
+- **Linux without unprivileged user namespaces.** Chromium's sandbox needs
+  them. Docker's default seccomp profile refuses them, so the Docker
+  `browser` image can't start it, and so does Ubuntu 24.04's AppArmor
+  restriction (`kernel.apparmor_restrict_unprivileged_userns=1`) for
+  Playwright's Chromium.
+
+On a host like that, turn it off:
+
+```jsonc
+"@stratusagent/tool-browser": {
+  "enabled": true,
+  "chromiumSandbox": false
+}
+```
+
+Pages then run without Chromium's sandbox. The address policy and the proxy
+below still apply, and whatever contains the daemon (the container, the
+outer sandbox) is what contains the browser.
+
+This is about the browser the plugin starts inside the daemon. A Playwright
+script an agent runs through `shell.run` launches its own browser, inside
+the shell's sandbox, and makes this choice itself.
+
 ## Risk model
 
 Under the default `approvals.posture: "open"` a `gated` call runs without asking; the column below is what each mode does with a call that still needs approval, which under `"guarded"` is every uncovered `gated` call.
@@ -131,6 +169,7 @@ version of all of this.
 | `channel` | none | Use an installed browser: `chrome`, `msedge`. |
 | `executablePath` | none | Use the browser at this path. |
 | `headless` | `true` | Set `false` to watch it work. |
+| `chromiumSandbox` | `true` | Chromium's own sandbox. Set `false` only where it can't start; see [Chromium's sandbox](#chromiums-sandbox). |
 | `allowedHosts` | none | Hosts exempt from the address check. |
 | `onlyHosts` | unset (every public host) | The only hosts the browser may reach — every navigation **and every subresource**, so a page's CDNs, fonts, and APIs need entries too (`*.example.com` covers subdomains, not the apex). A refused name is never looked up. `allowedHosts` entries stay reachable. `["*"]` under `agents` lifts an inherited list. See [`tool-web`](../tool-web/README.md#settings) for why. |
 | `allowPrivateAddresses` | `false` | Reach non-global addresses. The trusted-workstation posture. |

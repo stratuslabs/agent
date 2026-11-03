@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 import { ToolRegistry, type Session, type Tool } from '@stratusagent/core';
-import type { OptionalModuleHost } from '@stratusagent/plugins';
+import { parsePluginManifest, validatePluginConfig, type OptionalModuleHost } from '@stratusagent/plugins';
 
 import {
   createBrowserPlugin,
@@ -182,11 +182,13 @@ for (const [config, expected] of [
   });
 }
 
-test("the plugin manifest's config schema accepts chromiumSandbox", async () => {
-  // The schema has additionalProperties: false, so a key missing here is a
-  // config the daemon refuses to load, opt-out included.
-  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
-    stratus: { config: { properties: Record<string, { type: string }> } };
-  };
-  assert.deepEqual(manifest.stratus.config.properties.chromiumSandbox, { type: 'boolean' });
+test("the plugin's config schema accepts chromiumSandbox, and only as a boolean", async () => {
+  // The schema refuses keys it doesn't name, so without an entry the
+  // daemon would refuse a config carrying the opt-out.
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const manifest = parsePluginManifest(packageJson, '@stratusagent/tool-browser');
+
+  validatePluginConfig(manifest, { enabled: true, chromiumSandbox: false });
+  validatePluginConfig(manifest, { enabled: true, chromiumSandbox: true });
+  assert.throws(() => validatePluginConfig(manifest, { enabled: true, chromiumSandbox: 'off' }), /chromiumSandbox/);
 });
