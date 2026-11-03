@@ -87,7 +87,7 @@ const runWith = async (tools: Tool[], responses: ToolCall[][], approvals: Approv
     store: new InMemorySessionStore(),
     approvals,
   });
-  return runner.run({ sessionId: 'session-967', agent: { id: 'ava', name: 'Ava' }, userMessage: 'go' });
+  return runner.run({ sessionId: 'session-967', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go' });
 };
 
 test('a clean session judges the call at its declared risk', async () => {
@@ -190,7 +190,7 @@ test('with no approvals policy, the raised call is refused with an error that sa
     tools: registry,
     store: new InMemorySessionStore(),
   });
-  const session = await runner.run({ sessionId: 'no-policy', agent: { id: 'ava', name: 'Ava' }, userMessage: 'go' });
+  const session = await runner.run({ sessionId: 'no-policy', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go' });
   const result = session.messages.find((message) => message.toolResult?.callId === 'h1')?.toolResult;
   assert.equal(result?.ok, false);
   assert.match(result?.error ?? '', /^hand\.off did not run: it counts as a gated tool once a conversation has read external content, /);

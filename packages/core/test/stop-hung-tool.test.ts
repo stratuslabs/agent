@@ -91,7 +91,7 @@ test('a tool that ignores the turn\'s abort is left behind after a short grace, 
   const controller = new AbortController();
   const run = runner.run({
     sessionId: 'hung-1',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'wait',
     signal: controller.signal,
   });
@@ -156,7 +156,7 @@ test('a tool that stops when asked keeps its own result', async (t) => {
   const controller = new AbortController();
   const run = runner.run({
     sessionId: 'polite-1',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'sleep',
     signal: controller.signal,
   });
@@ -183,7 +183,7 @@ test('a hosted call (a harness\'s bridged tool) is left behind the same way', as
   await runner.initialize();
   const session: Session = {
     id: 'hosted-hang',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     status: 'running',
     messages: [],
     createdAt: new Date().toISOString(),
@@ -226,7 +226,7 @@ test('a tool that runs without a stop is waited for as long as it takes', async 
 
   // No abort: a slow tool is not a stuck one, and no clock gives up on it.
   const controller = new AbortController();
-  const run = runner.run({ sessionId: 'slow-1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'go', signal: controller.signal });
+  const run = runner.run({ sessionId: 'slow-1', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go', signal: controller.signal });
   await hung.entered;
   t.mock.timers.tick(600_000);
   assert.equal(await settledYet(run), false);
@@ -261,7 +261,7 @@ test('an executor whose late answer is a rejection does not take the process dow
   t.after(() => { process.off('unhandledRejection', onUnhandled); });
 
   const controller = new AbortController();
-  const run = runner.run({ sessionId: 'remote-1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'go', signal: controller.signal });
+  const run = runner.run({ sessionId: 'remote-1', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go', signal: controller.signal });
   await entered;
   controller.abort();
   t.mock.timers.tick(5_000);
@@ -294,7 +294,7 @@ test('a call that answers in time leaves nothing waiting on the turn\'s signal',
   // at the abort for a call that answered long ago.
   const controller = new AbortController();
   const before = getEventListeners(controller.signal, 'abort').length;
-  const session = await runner.run({ sessionId: 'many-1', agent: { id: 'ava', name: 'Ava' }, userMessage: 'go', signal: controller.signal });
+  const session = await runner.run({ sessionId: 'many-1', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'go', signal: controller.signal });
   assert.equal(session.status, 'completed');
   assert.equal(getEventListeners(controller.signal, 'abort').length, before);
 });

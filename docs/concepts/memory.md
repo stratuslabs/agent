@@ -69,6 +69,18 @@ Nothing in the file changes. The default is read off `kind` and
 note given a `validUntil` keeps that date instead, longer or shorter. Facts
 of every other kind, and lines with no `kind`, have no default.
 
+Because those older notes all left the prompt at once, the first command
+of an upgraded build says so once, naming each agent and how many it lost:
+
+```
+state migration 0006-task-notes-expiry-notice: task notes over 14 days old no longer read as current: ava 12, blair 3. Nothing was deleted: `stratus memory list <agent>` marks them [expired], and memory.recall still finds them.
+```
+
+It counts the built-in store's files, and leaves out pinned notes and notes
+whose own `validUntil` had already passed. A home that has not yet had the
+per-agent move gets it from the `stratus serve` or `stratus update` that
+makes the move.
+
 Two things do not follow from a note going stale. A **pinned** note stays
 in the pinned core, because pinning is how an agent says a note is still
 current. And a note that **superseded** a fact keeps that fact retired: a
@@ -214,7 +226,8 @@ lets the agent keep saving facts but not search them, and with the prompt
 carrying only the pinned core, the topic index, and a short tail, its older
 memories are out of reach. Add `memory.recall`, `memory.forget`, and
 `memory.pin` — or just `memory.*`. A soul with no `tools:` list is
-unaffected; omitted means every registered tool.
+unaffected: the memory tools are registered as safe, and an omitted list
+grants the safe tools.
 
 ## Where a fact came from
 

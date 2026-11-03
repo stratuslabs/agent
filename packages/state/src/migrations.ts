@@ -14,11 +14,17 @@ import {
   
 } from 'node:fs/promises';
 import path from 'node:path';
-import type { MemoryEntry } from '@stratusagent/core';
+import {
+  type MemoryEntry,
+  MEMORY_EPISODIC_DEFAULT_TTL_DAYS,
+  effectiveMemoryValidityAt,
+  escapeControlCharacters,
+  memoryValidityAt,
+} from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
 import { linkedDerivedComponent } from '@stratusagent/permissions';
 import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
-import { memoryAppendNeedsNewline } from './memory.ts';
+import { createFileMemoryStore, memoryAppendNeedsNewline } from './memory.ts';
 import {
   applyPerAgentLayout,
   createStateDirectoryNames,
@@ -32,11 +38,19 @@ import {
   logsDirPath,
   credentialsPath,
   agentMemoryFilePath,
+  agentsDirPath,
   legacyMemoryFilePath,
   gatewayTokenPath,
   gatewayInfoPath,
 } from './paths.ts';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
+import {
+  type MigrationMark,
+  type StateBackup,
+  backUpStateBeforeMigrating,
+  markMigrationBegun,
+  settleFailedMigration,
+} from './state-backup.ts';
 
 // Memory used to live under the working directory. Fold any such file into
 // the agents' own stores the first time a run happens from that directory,
@@ -231,6 +245,30 @@ export interface StateStamp {
   schemaVersion: number;
   /** Ids of migrations that have run to completion, in application order. */
   applied: string[];
+  /**
+   * What a migration found out about this home's history and a later run
+   * reads, such as `PREDATES_SAFE_TOOLS_FACT`. Absent when there are none,
+   * so a home with nothing to record keeps the stamp older builds wrote.
+   * Only ever added to, like `applied`. An older build keeps the key only
+   * while it writes no stamp, which it does not on a home this build has
+   * finished migrating: it has nothing left to apply.
+   */
+  facts?: string[];
+}
+
+/**
+ * Recorded by 0005 on a home an older build had already used: there, a soul
+ * with no `tools:` list has always meant every tool, so it still does. See
+ * `unlistedToolsFor`.
+ */
+export const PREDATES_SAFE_TOOLS_FACT = 'predates-safe-tools-default';
+
+/** What a migration's run produced, when it has a fact to record. */
+export interface StateMigrationOutcome {
+  /** A line describing what changed, as a plain string return is. */
+  detail?: string;
+  /** Facts to add to the stamp along with this migration's id. */
+  facts?: readonly string[];
 }
 
 export interface StateMigration {
@@ -264,12 +302,22 @@ export interface StateMigration {
    */
   requiresExclusive?(env: StateEnvironment): Promise<boolean>;
   /**
+   * Whether the run copies the state files to `~/.stratus/backups/` before
+   * applying it (see `backUpStateBeforeMigrating`). Default true: a
+   * migration that moves or rewrites sessions, memories, grants or
+   * schedules is the one an operator may need to undo. `false` only for one
+   * that leaves their contents alone — a permission change, a stamp that
+   * exists to be refused, a notice.
+   */
+  needsBackup?: boolean;
+  /**
    * Idempotent: applying twice must equal applying once, because two
    * processes can race the stamp and a crash can lose the record of a
    * completed run. Returns a line describing what actually changed, or
-   * undefined when there was nothing to do.
+   * undefined when there was nothing to do, or an outcome that also names
+   * facts for the stamp. Facts land in the same single write as the id.
    */
-  apply(env: StateEnvironment): Promise<string | undefined>;
+  apply(env: StateEnvironment): Promise<string | StateMigrationOutcome | undefined>;
 }
 
 /**
@@ -281,6 +329,7 @@ export interface StateMigration {
 const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
   id: '0001-owner-only-state-files',
   description: 'tighten pre-existing state files to owner-only permissions',
+  needsBackup: false,
   async apply(env) {
     const tightened: string[] = [];
     const tightenFile = async (filePath: string): Promise<void> => {
@@ -332,6 +381,7 @@ const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
 const PROVENANCE_LABELS_MIGRATION: StateMigration = {
   id: '0002-provenance-labels',
   description: 'stamp the state as carrying provenance labels, so an older build refuses it rather than ignoring them',
+  needsBackup: false,
   async apply() {
     return undefined;
   },
@@ -402,11 +452,152 @@ const PER_AGENT_WORKSPACES_MIGRATION: StateMigration = {
   apply: applyPerAgentWorkspaces,
 };
 
+const SAFE_TOOLS_DEFAULT_MIGRATION_ID = '0005-safe-tools-default';
+
+/**
+ * A soul with no `tools:` list gets only the tools registered as safe on a
+ * home this build sets up. On a home an older build already used it keeps
+ * meaning every tool, as it always did there, so the upgrade changes
+ * nothing an agent can do. This records which of the two a home is. It
+ * writes no soul: which souls a home has, and who else is writing them,
+ * is not something one run can know, and the rule needs neither.
+ *
+ * "Already used" is a stamp on disk that records a migration and not this
+ * one (only this build and later write 0005).
+ * A fresh install reads as schema 0 until its first `stratus serve` or
+ * `stratus update`, and that run applies this with the stamp still empty
+ * on disk. The one home this misreads is one no build since the stamp
+ * arrived (0.11) has ever touched; its agents get safe tools, and the
+ * daemon names each soul with no list at start.
+ *
+ * Not exclusive and no schema bump: an older build reads an omitted list
+ * as every tool, which is what this home keeps.
+ */
+const SAFE_TOOLS_DEFAULT_MIGRATION: StateMigration = {
+  id: SAFE_TOOLS_DEFAULT_MIGRATION_ID,
+  description: 'record whether this home predates the safe-tools default, so its souls with no tools: list keep every tool',
+  /** It records a fact in the stamp and writes nothing else. */
+  needsBackup: false,
+  async apply(env) {
+    // Read at apply time, not from the run's snapshot: earlier migrations
+    // in this run are not on disk yet. A stamp that already has 0005 was
+    // written by another run of this build, which judged the home already;
+    // the merge keeps what it recorded, so this run adds nothing. Without
+    // that, a command racing a fresh install's first `serve` would read
+    // serve's stamp as an older build's and mark the home as upgraded.
+    const onDisk = await readStateStamp(env);
+    if (onDisk.applied.length === 0 || onDisk.applied.includes(SAFE_TOOLS_DEFAULT_MIGRATION_ID)) {
+      return undefined;
+    }
+    return {
+      detail: 'this home predates the safe-tools default, so its souls with no tools: list keep every tool (no soul was changed)',
+      facts: [PREDATES_SAFE_TOOLS_FACT],
+    };
+  },
+};
+
+const TASK_NOTES_EXPIRY_NOTICE_ID = '0006-task-notes-expiry-notice';
+
+/**
+ * Per agent, how many task notes left the prompt only because of the
+ * episodic default: current by their own window, past it by
+ * `effectiveMemoryValidityAt`, and not pinned (a pin keeps a note in the
+ * pinned core whatever its age). Agents with none are left out.
+ *
+ * Each `agents/<id>/` directory's own file, read through the built-in
+ * store, which is the store that applies the default; the legacy-alias
+ * merge is skipped so no file is counted twice. Read-only, and best
+ * effort: a file that cannot be read leaves its agent out of the line
+ * rather than failing the command that is migrating the home.
+ */
+const staleTaskNoteCounts = async (env: StateEnvironment, at: Date): Promise<Array<[string, number]>> => {
+  let directories;
+  try {
+    directories = await readdir(agentsDirPath(env), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const counts: Array<[string, number]> = [];
+  const names = directories
+    .filter((entry) => entry.isDirectory() && isValidAgentId(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+  for (const agentId of names) {
+    try {
+      const store = createFileMemoryStore(agentMemoryFilePath(env, agentId), { now: () => at, stateHome: stratusHomePath(env) });
+      const pinned = new Set((store.pinned ? await store.pinned(agentId) : []).map((entry) => entry.id));
+      const stale = (await store.list(agentId, { validity: 'all' })).entries.filter((entry) =>
+        !pinned.has(entry.id)
+        && memoryValidityAt(entry, at) === 'current'
+        && effectiveMemoryValidityAt(entry, at) === 'expired').length;
+      if (stale > 0) {
+        counts.push([agentId, stale]);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return counts;
+};
+
+/**
+ * Says once why an upgraded agent stopped mentioning its older task notes.
+ *
+ * An `episodic` fact with no `validUntil` now stops being current
+ * `MEMORY_EPISODIC_DEFAULT_TTL_DAYS` after it was written. Nothing in the
+ * file changes, so on the first run of a build with that default every
+ * older note left the prompt at once, with nothing saying so. This names
+ * each agent that lost some and how many, and where they still are.
+ *
+ * A notice, not a change: it writes nothing and bumps no schema. A stamp
+ * that already records it means another run of this build said it, so
+ * this one stays quiet.
+ *
+ * "Once" means the first run. Two commands started at the same moment on
+ * that run can both print it, because neither has written the stamp yet,
+ * and a crash between printing and the stamp write repeats it. Both runs
+ * merge the stamp to the same bytes, so the home ends up the same. A claim
+ * file would rule that out, at the cost of a permanent artifact in every
+ * home for one informational line.
+ */
+const TASK_NOTES_EXPIRY_NOTICE: StateMigration = {
+  id: TASK_NOTES_EXPIRY_NOTICE_ID,
+  description: `count the task notes past the ${MEMORY_EPISODIC_DEFAULT_TTL_DAYS}-day default, to say why they left the prompt`,
+  /** It reads memories and says how many left the prompt; it writes nothing but the stamp. */
+  needsBackup: false,
+  /**
+   * Only while the per-agent moves (0003, 0004) are still pending, so it
+   * runs with them. A run that defers those records nothing, so a notice
+   * it ran would come back on every command until the home is served, and
+   * before 0003 an agent's memories may still be in the shared file this
+   * does not read. On a home that has had both, which is any home a build
+   * since 0.11.5 has served, the first command says it.
+   */
+  requiresExclusive: async (env) => {
+    const applied = (await readStateStamp(env)).applied;
+    return !applied.includes(PER_AGENT_LAYOUT_MIGRATION.id) || !applied.includes(PER_AGENT_WORKSPACES_MIGRATION.id);
+  },
+  async apply(env) {
+    if ((await readStateStamp(env)).applied.includes(TASK_NOTES_EXPIRY_NOTICE_ID)) {
+      return undefined;
+    }
+    const counts = await staleTaskNoteCounts(env, new Date());
+    if (counts.length === 0) {
+      return undefined;
+    }
+    const perAgent = counts.map(([agentId, count]) => `${escapeControlCharacters(agentId)} ${count}`).join(', ');
+    return `task notes over ${MEMORY_EPISODIC_DEFAULT_TTL_DAYS} days old no longer read as current: ${perAgent}. `
+      + 'Nothing was deleted: `stratus memory list <agent>` marks them [expired], and memory.recall still finds them.';
+  },
+};
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   OWNER_ONLY_STATE_FILES_MIGRATION,
   PROVENANCE_LABELS_MIGRATION,
   PER_AGENT_LAYOUT_MIGRATION,
   PER_AGENT_WORKSPACES_MIGRATION,
+  SAFE_TOOLS_DEFAULT_MIGRATION,
+  TASK_NOTES_EXPIRY_NOTICE,
 ];
 
 const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });
@@ -426,9 +617,11 @@ const parseStateStamp = (raw: string): StateStamp => {
   try {
     const parsed = JSON.parse(raw) as Partial<StateStamp> | null;
     if (typeof parsed === 'object' && parsed !== null && typeof parsed.schemaVersion === 'number') {
+      const facts = Array.isArray(parsed.facts) ? parsed.facts.filter((fact): fact is string => typeof fact === 'string') : [];
       return {
         schemaVersion: parsed.schemaVersion,
         applied: Array.isArray(parsed.applied) ? parsed.applied.filter((id): id is string => typeof id === 'string') : [],
+        ...(facts.length > 0 ? { facts } : {}),
       };
     }
   } catch {
@@ -508,10 +701,17 @@ export const mergeStateStamp = (latest: StateStamp, next: StateStamp): StateStam
       applied.push(id);
     }
   }
+  const facts = [...(latest.facts ?? [])];
+  for (const fact of next.facts ?? []) {
+    if (!facts.includes(fact)) {
+      facts.push(fact);
+    }
+  }
   const complete = STATE_MIGRATIONS.every((migration) => applied.includes(migration.id));
   return {
     schemaVersion: Math.max(latest.schemaVersion, complete ? STATE_SCHEMA_VERSION : next.schemaVersion),
     applied,
+    ...(facts.length > 0 ? { facts } : {}),
   };
 };
 
@@ -649,6 +849,31 @@ export const assertStateCompatible = (env: StateEnvironment): void => {
 };
 
 /**
+ * What a soul with no `tools:` list may call on this home: `every` tool on
+ * one an older build already used, `safe` tools only on one this build set
+ * up. Read once by whatever builds a runner, after this run's migrations.
+ *
+ * Every tool when 0005 recorded `PREDATES_SAFE_TOOLS_FACT`, and also when
+ * an older build's stamp records migrations but not 0005 yet: a run that
+ * defers an exclusive migration writes no stamp, and that home is still
+ * the old one. A missing or unreadable stamp is a fresh home, which fails
+ * closed to safe tools, and the daemon names each soul that has no list.
+ * Synchronous for the reason `readStateStampSync` gives.
+ */
+export const unlistedToolsFor = (env: StateEnvironment): 'safe' | 'every' => {
+  let stamp: StateStamp;
+  try {
+    stamp = readStateStampSync(env);
+  } catch {
+    return 'safe';
+  }
+  if (stamp.facts?.includes(PREDATES_SAFE_TOOLS_FACT) === true) {
+    return 'every';
+  }
+  return stamp.applied.length > 0 && !stamp.applied.includes(SAFE_TOOLS_DEFAULT_MIGRATION_ID) ? 'every' : 'safe';
+};
+
+/**
  * Who is asking to migrate, which decides whether the exclusive ones run.
  *
  * `exclusive: true` is a claim about the caller, not a preference: it says
@@ -659,6 +884,8 @@ export const assertStateCompatible = (env: StateEnvironment): void => {
  */
 export interface StateMigrationRunOptions {
   exclusive?: boolean;
+  /** Told about the backup taken (or reused) before this run's migrations, to say where it is. */
+  onBackup?(backup: StateBackup): void;
 }
 
 const runnableNow = async (migration: StateMigration, env: StateEnvironment, options: StateMigrationRunOptions): Promise<boolean> =>
@@ -730,6 +957,7 @@ export const runStateMigrations = async (
   await assertStampWritable(env);
   const results: AppliedStateMigration[] = [];
   const applied = new Set(stamp.applied);
+  const facts = [...(stamp.facts ?? [])];
   // Asked once, before anything runs, rather than per migration inside the
   // loop: `requiresExclusive` is a filesystem question, and 0003 is the
   // migration that changes its own answer — asking after it has run would
@@ -739,14 +967,66 @@ export const runStateMigrations = async (
     runnable.set(migration.id, applied.has(migration.id) || await runnableNow(migration, env, options));
   }
   const deferring = STATE_MIGRATIONS.some((migration) => runnable.get(migration.id) !== true);
-  for (const migration of STATE_MIGRATIONS) {
-    if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
-      continue;
+  // A copy of the state before the first migration that changes it, and no
+  // migration at all if the copy fails: the upgrade is refused with the
+  // home exactly as the older build left it, which that build still runs.
+  const toApply = STATE_MIGRATIONS.filter((migration) => !applied.has(migration.id) && runnable.get(migration.id) === true);
+  let backup: StateBackup | undefined;
+  if (toApply.some((migration) => migration.needsBackup !== false)) {
+    try {
+      backup = await backUpStateBeforeMigrating(env, { schemaVersion: stamp.schemaVersion, applied: [...stamp.applied] }, toApply.map((migration) => migration.id));
+    } catch (error) {
+      throw new Error(
+        `Backing up ${stratusHomePath(env)} before upgrading its state failed `
+        + `(${error instanceof Error ? error.message : String(error)}). Nothing was changed: no migration ran. `
+        + 'Free up space or fix that file and run the command again; until then the build you upgraded from still runs this home.',
+        { cause: error },
+      );
     }
-    const detail = await migration.apply(env);
-    stamp.applied.push(migration.id);
-    applied.add(migration.id);
-    results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
+    if (backup !== undefined) {
+      options.onBackup?.(backup);
+    }
+  }
+  // Marked just before the first migration that changes data, so what an
+  // earlier one did (0001 tightening a file's mode) is not taken for a
+  // half-done move when a later one fails.
+  let mark: MigrationMark | undefined;
+  try {
+    for (const migration of STATE_MIGRATIONS) {
+      if (applied.has(migration.id) || runnable.get(migration.id) !== true) {
+        continue;
+      }
+      if (backup !== undefined && mark === undefined && migration.needsBackup !== false) {
+        try {
+          mark = await markMigrationBegun(env, backup);
+        } catch (error) {
+          throw new Error(
+            `Backing up ${stratusHomePath(env)} before upgrading its state failed `
+            + `(${backup.path}: ${error instanceof Error ? error.message : String(error)}). No migration that changes data ran. `
+            + 'Free up space or fix that file and run the command again; until then the build you upgraded from still runs this home.',
+            { cause: error },
+          );
+        }
+      }
+      const outcome = await migration.apply(env);
+      const detail = typeof outcome === 'object' ? outcome.detail : outcome;
+      for (const fact of typeof outcome === 'object' ? outcome.facts ?? [] : []) {
+        if (!facts.includes(fact)) {
+          facts.push(fact);
+        }
+      }
+      stamp.applied.push(migration.id);
+      applied.add(migration.id);
+      results.push({ id: migration.id, description: migration.description, ...(detail !== undefined ? { detail } : {}) });
+    }
+  } catch (error) {
+    // Whether a retry may copy the state again or must keep this backup as
+    // the way back (see `settleFailedMigration`). The migration's own error
+    // is the one to report.
+    if (mark !== undefined) {
+      await settleFailedMigration(env, mark).catch(() => undefined);
+    }
+    throw error;
   }
   // One write, at the end, and none at all from a run that deferred
   // something.
@@ -774,7 +1054,11 @@ export const runStateMigrations = async (
   // keeps the part that matters without writing anything, and runs at the
   // top of this function rather than here.
   if (!deferring && (results.length > 0 || stamp.schemaVersion !== STATE_SCHEMA_VERSION)) {
-    await writeStateStamp(env, { schemaVersion: STATE_SCHEMA_VERSION, applied: stamp.applied });
+    await writeStateStamp(env, {
+      schemaVersion: STATE_SCHEMA_VERSION,
+      applied: stamp.applied,
+      ...(facts.length > 0 ? { facts } : {}),
+    });
   }
   return results;
 };

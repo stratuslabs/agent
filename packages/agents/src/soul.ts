@@ -171,6 +171,11 @@ export const formatSoul = (soul: ParsedSoul): string => {
       for (const value of values) {
         lines.push(`  - ${writeScalar(value)}`);
       }
+    } else if (key === 'tools' && values !== undefined) {
+      // Kept, unlike the other lists: an omitted `tools:` is the safe
+      // tools, and an empty one is nothing. Dropping it here widened every
+      // agent allowed nothing whose soul went through a field edit.
+      lines.push('tools: []');
     }
   }
 
