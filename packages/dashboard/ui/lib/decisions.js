@@ -78,10 +78,13 @@ export const settledLines = (messages, lines) => {
  * that turn runs ends with its stored results, and the old lines, matched
  * from the end, would land beside them whenever it reused an id on the same
  * tool. The settled turn's own envelopes (a shadow decision that outlived
- * it) and ones that belong to no turn keep them.
+ * it) and ones that belong to no turn keep them. So does any shadow
+ * decision: it is about a call that already ran, so it starts no turn, and
+ * one from an older turn's review can arrive after a newer turn settled.
  */
 export const endsSettled = (settled, envelope) =>
   settled !== undefined
   && envelope.sessionId === settled.sessionId
   && envelope.turnId !== undefined
-  && envelope.turnId !== settled.turnId;
+  && envelope.turnId !== settled.turnId
+  && !(envelope.event?.type === 'permission.decided' && envelope.event.shadow === true);

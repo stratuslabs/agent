@@ -31,5 +31,5 @@ export const settledLines: (
 /** True when an envelope from another turn in the settled turn's conversation ends its lines. */
 export const endsSettled: (
   settled: { sessionId: string; turnId?: string } | undefined,
-  envelope: { sessionId: string; turnId?: string },
+  envelope: { sessionId: string; turnId?: string; event?: { type: string; shadow?: boolean } },
 ) => boolean;

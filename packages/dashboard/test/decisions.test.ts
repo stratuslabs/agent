@@ -123,3 +123,14 @@ test("the first envelope of another turn ends a finished turn's lines, so a re-r
   // Nothing settled, nothing to end.
   assert.equal(endsSettled(undefined, envelope('turn-B')), false);
 });
+
+test("a late shadow decision from an older turn leaves the newer turn's lines alone", () => {
+  // Turn B has settled while a shadow review from turn A is still running.
+  // A's decision is about a call that already ran, so it starts no turn.
+  const settled = { sessionId: 's1', turnId: 'turn-B', lines: [line('tool-call-1', 'shell.run')] };
+  const late = { sessionId: 's1', turnId: 'turn-A', event: { type: 'permission.decided', shadow: true } };
+  assert.equal(endsSettled(settled, late), false);
+  // A decision on the call path is the turn's own and still ends them.
+  const inline = { sessionId: 's1', turnId: 'turn-C', event: { type: 'permission.decided', shadow: false } };
+  assert.equal(endsSettled(settled, inline), true);
+});
