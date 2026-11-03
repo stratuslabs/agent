@@ -557,6 +557,13 @@ export interface ConversationArchiveResult {
   alreadyArchived: boolean;
 }
 
+/** What `ChannelAdapter.say` is handed. */
+export interface ChannelSayRequest {
+  sessionId: string;
+  agentId: string;
+  text: string;
+}
+
 /**
  * A credential an agent asked for, handed to the channel its conversation
  * is in so a person there can be shown a form. Everything the answer needs
@@ -637,6 +644,18 @@ export interface ChannelAdapter {
    * the agent without saying so.
    */
   credentialEnvForms?: boolean;
+  /**
+   * Posts one message from the agent into the conversation `sessionId` is
+   * replying in, while its turn is still running: what `message.say` asks
+   * for when the agent needs the person, or has news for them, before it
+   * finishes (card 1009). Optional: a channel without it, or a session it
+   * has no live turn for, leaves the agent to say it in its reply.
+   *
+   * Resolves once the message has landed, in order after anything the turn
+   * already posted, and MUST reject otherwise, with a sentence for the
+   * agent (no live turn here, a per-turn limit, Slack refused it).
+   */
+  say?(request: ChannelSayRequest): Promise<void>;
   /**
    * The read side of an addressable conversation — what `message.read`
    * resolves. Optional, like `resolveOutbound`: a transport with no

@@ -446,7 +446,9 @@ What the recipe sets, and what it leaves to you.
   the unit uses the config's `api.host`, which the VM profile sets to
   `127.0.0.1`. Reach it from elsewhere through a tunnel — Tailscale, or
   `ssh -L 4123:127.0.0.1:4123` — never by publishing it on a public
-  interface. See [Remote access](./remote-access.md).
+  interface. A tunnel that passes its own name (Tailscale Serve does) needs
+  `api.publicUrl` set to that address; an `ssh -L` forward arrives as
+  `127.0.0.1` and needs nothing. See [Remote access](./remote-access.md).
 - [ ] **Remote approvals, a named approver, named operators.** The
   [VM profile](../../examples/profiles/vm) sets `approvals.mode: remote`,
   `slackApprovers`, and `principals.admit: principals`. Replace its

@@ -86,6 +86,23 @@ test('claimSoulFile creates the agents directory it writes into', async () => {
   assert.match(await readFile(claimed.soulPath, 'utf8'), /Ava/);
 });
 
+test('a soul claimSoulFile writes lists tools: ["*"], so a new agent starts with every tool in a line it can narrow', async () => {
+  // Setup, `stratus agent new` and POST /agents all create souls here. An
+  // omitted tools: list is safe tools only now, so a new agent says what
+  // it has instead of inheriting it from a missing key.
+  const home = await newHome();
+  const claimed = await claimSoulFile(
+    { homeDir: home, cwd: home, processEnv: {} },
+    { name: 'Ava', instructions: 'You are Ava.' },
+    (agent) => formatSoul({ agent }),
+    () => {},
+  );
+
+  assert.deepEqual(claimed.agent.tools, ['*']);
+  const [entry] = await loadRosterSouls({ homeDir: home });
+  assert.deepEqual(entry?.soul.agent.tools, ['*']);
+});
+
 test('claimSoulFile refuses a symlinked agents/ rather than writing a soul through it', async () => {
   const home = await newHome();
   // Every agent's state lives under agents/, so the stores refuse a link

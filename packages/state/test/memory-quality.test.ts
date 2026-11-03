@@ -251,26 +251,74 @@ test('a supersession dated from next week leaves the old fact live until then, a
   assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id), [standing.id]);
 });
 
-test('two processes superseding the same entry retire it once and leave both successors live', async () => {
+test('two processes superseding the same entry at once retire it once, and each successor is either live or refused having stored nothing', async () => {
   const filePath = await newFile();
   const seed = createFileMemoryStore(filePath, frozen());
   const old = await seed.append('ava', 'the deploy runs on MySQL');
 
   // Separate stores over one file is the concurrency model: `O_APPEND` and
-  // nothing else. Both read the same live set and both append.
+  // nothing else. Nothing orders one store's guard read against the other's
+  // append, so either order can happen here: both read the old fact live and
+  // both land, or one lands first and the other finds it already retired.
+  // The two tests below pin each order down; this one holds whichever the
+  // scheduler picked to the invariants both share.
   const first = createFileMemoryStore(filePath, frozen());
   const second = createFileMemoryStore(filePath, frozen());
-  const [a, b] = await Promise.all([
+  const outcomes = await Promise.allSettled([
     first.append('ava', 'the deploy runs on Postgres', { supersedes: old.id }),
     second.append('ava', 'the deploy runs on CockroachDB', { supersedes: old.id }),
   ]);
-
+  const landed = outcomes.flatMap((outcome) => (outcome.status === 'fulfilled' ? [outcome.value.id] : []));
+  for (const outcome of outcomes) {
+    if (outcome.status === 'rejected') {
+      assert.match(String(outcome.reason), /No live memory entry with id .* belongs to this agent/);
+    }
+  }
+  assert.ok(landed.length >= 1, 'a supersession of a live entry must land when nothing else retired it first');
+  // One line per write that landed: a refusal stores nothing.
+  assert.equal((await lines(filePath)).length, 1 + landed.length);
   for (const store of [first, second, createFileMemoryStore(filePath, frozen())]) {
-    const live = (await store.list('ava')).entries.map((entry) => entry.id).sort();
+    assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id).sort(), [...landed].sort());
+  }
+});
+
+test('two processes that both read an entry live before either supersedes it leave both successors live', async () => {
+  const filePath = await newFile();
+  const store = createFileMemoryStore(filePath, frozen());
+  const old = await store.append('ava', 'the deploy runs on MySQL');
+  const a = await store.append('ava', 'the deploy runs on Postgres', { supersedes: old.id });
+
+  // The other process passed its guard before `a` landed, so its record
+  // arrives after `a` unchecked. Appended directly, the only way to place
+  // that order: the store's own record for `a`, under a new id.
+  const record = JSON.parse((await lines(filePath)).at(-1)!) as MemoryEntry;
+  const b = { ...record, id: 'ava:memory:other-process', content: 'the deploy runs on CockroachDB' };
+  await appendFile(filePath, `${JSON.stringify(b)}\n`);
+
+  for (const reader of [store, createFileMemoryStore(filePath, frozen())]) {
     // The invariant is the retirement, not a unique replacement: a test
     // expecting one successor would assert a guarantee this design
     // deliberately does not make.
-    assert.deepEqual(live, [a.id, b.id].sort());
+    assert.deepEqual((await reader.list('ava')).entries.map((entry) => entry.id).sort(), [a.id, b.id].sort());
+  }
+});
+
+test('a supersession that arrives after another process retired the entry is refused and stores nothing', async () => {
+  const filePath = await newFile();
+  const seed = createFileMemoryStore(filePath, frozen());
+  const old = await seed.append('ava', 'the deploy runs on MySQL');
+  const first = createFileMemoryStore(filePath, frozen());
+  const second = createFileMemoryStore(filePath, frozen());
+
+  const a = await first.append('ava', 'the deploy runs on Postgres', { supersedes: old.id });
+  const before = await lines(filePath);
+  await assert.rejects(
+    () => second.append('ava', 'the deploy runs on CockroachDB', { supersedes: old.id }),
+    /No live memory entry with id .* belongs to this agent/,
+  );
+  assert.deepEqual(await lines(filePath), before);
+  for (const store of [first, second, createFileMemoryStore(filePath, frozen())]) {
+    assert.deepEqual((await store.list('ava')).entries.map((entry) => entry.id), [a.id]);
   }
 });
 

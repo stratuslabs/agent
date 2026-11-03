@@ -31,6 +31,7 @@ import {
   type ToolCall,
   type ToolDescriptor,
   OVERHEARD_IMAGES_NOTE,
+  messagesAfterOverheard,
   promptTextOf,
   disabledThinkingEffortCeiling,
 } from '@stratusagent/core';
@@ -509,6 +510,9 @@ const createAnthropicMessages = (
   // The newest user message is the one the turn ends on; an unaddressed
   // turn's note follows it and no other — see `PromptTextOptions`.
   const latest = messages.findLast((message) => message.role === 'user');
+  // Said to the agent after an overheard message in the same API turn:
+  // marked, so the frame before it is not read as its own (card 1034).
+  const afterOverheard = messagesAfterOverheard(messages);
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (!message || message.role === 'system') {
@@ -579,9 +583,10 @@ const createAnthropicMessages = (
     // rendered as something said to somebody else, on this path as on the
     // harness ones. Consecutive user turns merge above, so a message
     // overheard between turns and the one that followed it reach the API
-    // as one user turn of two blocks. Its images, if any, ride ahead of an
-    // addressed message and behind an overheard one's frame.
-    push('user', userBlocks(promptTextOf(message, { latest: message === latest }), message.images, replayed, imageOf, message.overheard === true));
+    // as one user turn of two blocks, the second marked as said to the
+    // agent. Its images, if any, ride ahead of an addressed message and
+    // behind an overheard one's frame.
+    push('user', userBlocks(promptTextOf(message, { latest: message === latest, afterOverheard: afterOverheard.has(message) }), message.images, replayed, imageOf, message.overheard === true));
   }
 
   const imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }> = [];
