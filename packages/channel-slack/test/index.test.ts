@@ -14206,6 +14206,29 @@ test('isStopRequest: the word stop, alone or with this agent named, in any case'
   }
 });
 
+// Card 1090: anyone who can post where the agent reads can send 40,000
+// characters of crafted markup, and every agent on the daemon waits while
+// one message is read. Each of these took 1-5 s when the patterns were
+// quadratic.
+test('isStopRequest reads a 40,000-character crafted message in linear time', () => {
+  const crafted = ['<@'.repeat(20_000), '<@=|'.repeat(10_000), `stop${'.'.repeat(39_995)}a`];
+  for (const text of crafted) {
+    const started = performance.now();
+    assert.equal(isStopRequest(text, 'B-AVA'), false);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 200, `${JSON.stringify(text.slice(0, 8))}… took ${Math.round(elapsed)} ms`);
+  }
+});
+
+test('isStopRequest: punctuation after spaces, and a mention after the word', () => {
+  for (const text of ['stop !!', 'Stop  .', '<@B-AVA> stop <@B-AVA>.', '<@B-AVA|ava>\nstop!']) {
+    assert.equal(isStopRequest(text, 'B-AVA'), true, text);
+  }
+  for (const text of ['stop. !', 'stop!?', '! stop', 'stop <@B-BEA>.']) {
+    assert.equal(isStopRequest(text, 'B-AVA'), false, text);
+  }
+});
+
 /** A stub gateway whose turns run until their signal aborts, or `finish` ends them. */
 const stoppableGateway = () => {
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
