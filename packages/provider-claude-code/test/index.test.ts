@@ -1753,7 +1753,7 @@ type RegisteredTools = Record<string, { handler: (a: unknown, b: unknown) => Pro
  * first. `foldInto` = how many results the fold takes: 1 is the usual
  * case, 2 is the CLI running a late message as its own turn.
  */
-const createSteeringQuery = (options: { lateFold?: boolean; outOfTurns?: boolean } = {}) => {
+const createSteeringQuery = (options: { lateFold?: boolean; outOfTurns?: boolean; endsEarly?: boolean; listsNoUuids?: boolean } = {}) => {
   const events: string[] = [];
   const sent: Array<Record<string, unknown>> = [];
   let promptKind = '';
@@ -1797,6 +1797,11 @@ const createSteeringQuery = (options: { lateFold?: boolean; outOfTurns?: boolean
           ? { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'sdk-958' }
           : { type: 'result', subtype: 'success', is_error: false, result: 'Built it.', session_id: 'sdk-958', user_message_uuids: [] }) as ClaudeCodeStreamMessage;
         events.push('first result read');
+        // A CLI that ends its stream here, input open or not: the turn it
+        // owed the late message never runs (card 1056).
+        if (options.endsEarly === true) {
+          return;
+        }
         // A CLI whose input has closed exits after this result: the turn
         // it owed the late message never runs.
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1805,7 +1810,15 @@ const createSteeringQuery = (options: { lateFold?: boolean; outOfTurns?: boolean
         }
         yield { type: 'result', subtype: 'success', is_error: false, result: 'Skipped the tests.', session_id: 'sdk-958', user_message_uuids: later } as ClaudeCodeStreamMessage;
       } else {
-        yield { type: 'result', subtype: 'success', is_error: false, result: 'Built it, tests skipped.', session_id: 'sdk-958', user_message_uuids: later } as ClaudeCodeStreamMessage;
+        yield {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Built it, tests skipped.',
+          session_id: 'sdk-958',
+          // An older CLI lists no uuids at all.
+          ...(options.listsNoUuids === true ? {} : { user_message_uuids: later }),
+        } as ClaudeCodeStreamMessage;
       }
       // The CLI exits once its input closes; one left open is a turn that
       // never ends, said here instead of hanging the test.
@@ -1906,6 +1919,46 @@ test('a steered message waiting when the turn runs out of turns keeps the input 
   // message; no wrap-up either, since the CLI's turn on it answered.
   assert.deepEqual(fake.events, ['sent "Dylan: skip the tests"', 'tool result returned', 'first result read', 'input closed']);
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Skipped the tests.' }]);
+});
+
+// Card 1056: the CLI's result left a steered message for a turn of its
+// own, and then the stream ended without that turn.
+test('a stream that ends while a steered message still waits for its own turn fails the turn instead of passing the first answer off as both', async () => {
+  const fake = createSteeringQuery({ lateFold: true, endsEarly: true });
+  let asked = 0;
+  const steer = async () => {
+    asked += 1;
+    return asked === 1 ? { userMessage: 'Dylan: skip the tests' } : undefined;
+  };
+  const provider = createClaudeCodeProvider({ queryFn: fake.queryFn, executeTool: echoExecutor });
+
+  const error = await provider.generate(steeringRequest(steer)).then(
+    () => undefined,
+    (failure: unknown) => failure,
+  );
+
+  assert.ok(error instanceof Error, 'the turn fails');
+  assert.match(error.message, /ended before it answered a message sent while it worked/);
+  // A hosted call ran and the CLI has the prompt: the kernel must neither
+  // replay the turn nor send its message again.
+  assert.equal(hasHostedToolSideEffects(error), true);
+  assert.equal(promptWasDelivered(error), true);
+  assert.equal(fake.inputClosed(), true);
+});
+
+test('a CLI that lists no uuids closes the input on its result, and that answer stands', async () => {
+  const fake = createSteeringQuery({ listsNoUuids: true });
+  let asked = 0;
+  const steer = async () => {
+    asked += 1;
+    return asked === 1 ? { userMessage: 'Dylan: skip the tests' } : undefined;
+  };
+  const provider = createClaudeCodeProvider({ queryFn: fake.queryFn, executeTool: echoExecutor });
+
+  const response = await provider.generate(steeringRequest(steer));
+
+  assert.deepEqual(fake.events, ['sent "Dylan: skip the tests"', 'tool result returned', 'input closed']);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Built it, tests skipped.' }]);
 });
 
 test('a steered message the SDK took off the stream and then stopped reading after fails the call instead of waiting forever', async () => {
