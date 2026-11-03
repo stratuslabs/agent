@@ -28,3 +28,8 @@ export const settledLines: (
   messages: readonly { role: string; toolResult?: { callId: string; toolName: string } }[],
   lines: readonly CallLine[],
 ) => Map<number, CallLine>;
+/** True when an envelope from another turn in the settled turn's conversation ends its lines. */
+export const endsSettled: (
+  settled: { sessionId: string; turnId?: string } | undefined,
+  envelope: { sessionId: string; turnId?: string },
+) => boolean;

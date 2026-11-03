@@ -1,7 +1,7 @@
 import { ago, el } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
-import { decisionNote, decisionTone, settledLines, shadowLineIndex } from '../lib/decisions.js';
+import { decisionNote, decisionTone, endsSettled, settledLines, shadowLineIndex } from '../lib/decisions.js';
 import { onEnvelope, refreshCore, store } from '../app.js';
 
 /** A conversation started from this page, distinguishable from a Slack thread. */
@@ -512,6 +512,12 @@ export const renderAgent = (agentId, initialSessionId) => {
         state.settled = undefined;
         void loadTranscript();
         void loadSessions();
+      } else if (endsSettled(state.settled, envelope)) {
+        // Another turn has started here, from another tab or channel. The
+        // re-read this page's own completion started can land while it
+        // runs, so its lines go now rather than at its end.
+        state.settled = undefined;
+        paintTranscript();
       }
       return;
     }

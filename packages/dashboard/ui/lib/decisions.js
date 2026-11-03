@@ -70,3 +70,18 @@ export const settledLines = (messages, lines) => {
   }
   return matched;
 };
+
+/**
+ * Whether an envelope from a turn this page is not running ends a finished
+ * turn's lines (`settled`). Any envelope of another turn in the same
+ * conversation does, its first one included: a transcript re-read while
+ * that turn runs ends with its stored results, and the old lines, matched
+ * from the end, would land beside them whenever it reused an id on the same
+ * tool. The settled turn's own envelopes (a shadow decision that outlived
+ * it) and ones that belong to no turn keep them.
+ */
+export const endsSettled = (settled, envelope) =>
+  settled !== undefined
+  && envelope.sessionId === settled.sessionId
+  && envelope.turnId !== undefined
+  && envelope.turnId !== settled.turnId;

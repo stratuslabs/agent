@@ -94,6 +94,22 @@ test('a shadow decision that arrives after its turn is stamped with the turn its
   }
 });
 
+test('a shadow decision about a call the real path refused is stamped with the turn it was refused in', async () => {
+  // A gated call can be refused on the real path (the external-content gate
+  // in headless mode, an approval that says no) while its shadow review is
+  // still out. The runner emits tool.denied, not tool.called, for it.
+  const { bus, frames, turn, stream } = harness();
+  try {
+    turn('turn-A');
+    await bus.emit({ type: 'tool.denied', sessionId: 's1', call: { id: 'call-2', toolName: 'notes.add', input: {} } });
+    turn('turn-B');
+    await bus.emit(decided('call-2', true));
+    assert.equal(frames.at(-1)?.turnId, 'turn-A', 'the late shadow decision belongs to the turn that refused the call');
+  } finally {
+    stream.close();
+  }
+});
+
 test('a side run\'s events never reach the stream, and the conversation\'s still do', async () => {
   const { bus, frames, sideRuns, stream } = harness();
   const forAva: EventEnvelope[] = [];

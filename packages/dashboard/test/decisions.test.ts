@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decisionNote, decisionTone, settledLines, shadowLineIndex } from '../ui/lib/decisions.js';
+import { decisionNote, decisionTone, endsSettled, settledLines, shadowLineIndex } from '../ui/lib/decisions.js';
 
 const base = { allowed: true, layer: 'grant', reason: 'shell.run ran under a standing grant' };
 
@@ -103,4 +103,23 @@ test("a finished turn's lines are matched to its stored results, and never to an
   // Before the reload lands, the transcript still ends with the message
   // that started the turn: nothing is matched yet.
   assert.deepEqual([...settledLines([...messages.slice(0, 4), user('now')], [first]).entries()], []);
+});
+
+test("the first envelope of another turn ends a finished turn's lines, so a re-read transcript can't pair them with its results", () => {
+  const settled = { sessionId: 's1', turnId: 'turn-A', lines: [line('tool-call-1', 'shell.run')] };
+  const envelope = (turnId: string | undefined, sessionId = 's1') => ({
+    sessionId,
+    ...(turnId === undefined ? {} : { turnId }),
+    event: { type: 'provider.delta' },
+  });
+  // Another client's turn starting here: its first envelope, not only its end.
+  assert.equal(endsSettled(settled, envelope('turn-B')), true);
+  // The settled turn's own envelopes (a shadow decision that outlived it) keep them.
+  assert.equal(endsSettled(settled, envelope('turn-A')), false);
+  // An envelope that belongs to no turn says nothing about a newer one.
+  assert.equal(endsSettled(settled, envelope(undefined)), false);
+  // Another conversation's turn is not this one's.
+  assert.equal(endsSettled(settled, envelope('turn-B', 's2')), false);
+  // Nothing settled, nothing to end.
+  assert.equal(endsSettled(undefined, envelope('turn-B')), false);
 });

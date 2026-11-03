@@ -192,7 +192,10 @@ export const createEventStream = (gateway: Gateway) => {
     const turnId = event.type === 'permission.decided' && event.shadow === true
       ? callTurns.get(callKey(event.sessionId, event.callId, event.toolName)) ?? current
       : current;
-    if (current !== undefined && event.type === 'tool.called') {
+    // A refused call is bound too: its shadow review can still be out when
+    // the real path says no, and the runner emits tool.denied, not
+    // tool.called, for it.
+    if (current !== undefined && (event.type === 'tool.called' || event.type === 'tool.denied')) {
       rememberCallTurn(callKey(event.sessionId, event.call.id, event.call.toolName), current);
     }
     if (turnId !== undefined && (event.type === 'session.failed' || event.type === 'session.completed')) {
