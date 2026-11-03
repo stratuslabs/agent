@@ -10,13 +10,18 @@ import { runCli } from '../src/index.ts';
 const testDir = import.meta.dirname;
 
 test('every cli test file imports the home guard before anything else', () => {
-  const unguarded = readdirSync(testDir)
+  // Recursive, like the test script's ./test/**/*.test.ts: a file in a
+  // subdirectory runs too, and imports the guard by a longer path.
+  const unguarded = readdirSync(testDir, { recursive: true, encoding: 'utf8' })
     .filter((name) => name.endsWith('.test.ts'))
     .filter((name) => {
-      const firstImport = readFileSync(path.join(testDir, name), 'utf8')
+      const file = path.join(testDir, name);
+      const relative = path.relative(path.dirname(file), path.join(testDir, 'home-guard.ts')).split(path.sep).join('/');
+      const specifier = relative.startsWith('.') ? relative : `./${relative}`;
+      const firstImport = readFileSync(file, 'utf8')
         .split('\n')
         .find((line) => line.startsWith('import '));
-      return firstImport !== "import './home-guard.ts';" && firstImport !== "import { decoyHome } from './home-guard.ts';";
+      return firstImport !== `import '${specifier}';` && firstImport !== `import { decoyHome } from '${specifier}';`;
     });
   assert.deepEqual(unguarded, []);
 });
