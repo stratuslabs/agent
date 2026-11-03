@@ -153,6 +153,45 @@ test('a page whose script never yields is given up on within the timeout, and th
   assert.equal(recorder.contexts, 2, 'the second call ran in a fresh context');
 });
 
+test('a browser that never opens a page fails the call within the timeout, and the next call launches a fresh one', async (t) => {
+  // The first browser launches and then never produces a page, the way a
+  // Chromium that died during page creation left `newPage` pending.
+  const recorder = emptyRecorder();
+  const base = fakeDriver(recorder);
+  const driver: BrowserDriver = {
+    async launch(options) {
+      const browser = await base.launch(options);
+      if (recorder.launches > 1) {
+        return browser;
+      }
+      return {
+        ...browser,
+        async newContext(contextOptions) {
+          const context = await browser.newContext(contextOptions);
+          return { ...context, newPage: () => new Promise<PageLike>(() => {}) };
+        },
+      };
+    },
+  };
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin({ allowedHosts: ['example.com'], navigationTimeoutMs: 50 }, { driver });
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose?.());
+  const read = tools.get('browser.read') as Tool;
+  const session = sessionFor('wedged');
+
+  const outcome = await Promise.race([
+    read.execute({ url: 'https://example.com/' }, session).then(() => 'answered', (error: Error) => error.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
+  ]);
+  assert.match(outcome, /did not open a page within 50ms.*next browser call starts a fresh one/);
+  assert.equal(recorder.closedBrowsers, 1, 'the wedged browser was closed');
+
+  const again = await read.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.equal(again.text, 'On kettles\nThe kettle is in the cupboard.');
+  assert.equal(recorder.launches, 2, 'the second call ran in a fresh browser');
+});
+
 test('giving up on a page is itself bounded, when even closing its context hangs', async (t) => {
   // A transport wedged enough that the first `context.close()` never
   // settles either. The call still comes back within the timeout with the

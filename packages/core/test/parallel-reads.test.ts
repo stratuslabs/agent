@@ -80,7 +80,7 @@ const toolResultIds = (session: Session | undefined): string[] =>
 const runAs = (runner: AgentRunner, sessionId: string, signal?: AbortSignal): Promise<Session> =>
   runner.run({
     sessionId,
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     userMessage: 'look around',
     ...(signal ? { signal } : {}),
   });

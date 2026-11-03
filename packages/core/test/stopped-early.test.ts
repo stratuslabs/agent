@@ -47,7 +47,7 @@ test('a message that runs out of steps is marked stopped early, and says so just
   const runner = new AgentRunner({ provider, tools: createStepTools(), maxTurns: 2 });
   const events = recordEvents(runner);
 
-  const session = await runner.run({ sessionId: 'out-of-steps', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Do it all' });
+  const session = await runner.run({ sessionId: 'out-of-steps', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Do it all' });
 
   // Still completed: the wrap-up answered. The marker is what tells this
   // run apart from one that finished.
@@ -76,7 +76,7 @@ test('a message that finishes inside its budget carries no marker and no event',
   const runner = new AgentRunner({ provider, maxTurns: 2 });
   const events = recordEvents(runner);
 
-  const session = await runner.run({ sessionId: 'quick', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Hi' });
+  const session = await runner.run({ sessionId: 'quick', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Hi' });
 
   assert.equal(session.status, 'completed');
   assert.equal(session.stoppedEarly, undefined);
@@ -88,7 +88,7 @@ test('a message stopped at the auto-continue cap counts the budgets it was given
   const runner = new AgentRunner({ provider, tools: createStepTools(), maxTurns: 2, autoContinue: 2 });
   const events = recordEvents(runner);
 
-  const session = await runner.run({ sessionId: 'capped', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+  const session = await runner.run({ sessionId: 'capped', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Go' });
 
   assert.deepEqual(
     { reason: session.stoppedEarly?.reason, continuations: session.stoppedEarly?.continuations },
@@ -111,7 +111,7 @@ test('a message stopped for repeating one failure is marked with that reason', a
   };
   const runner = new AgentRunner({ provider, tools });
 
-  const session = await runner.run({ sessionId: 'stuck', agent: { id: 'ava', name: 'Ava' }, userMessage: 'List' });
+  const session = await runner.run({ sessionId: 'stuck', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'List' });
 
   assert.equal(session.stoppedEarly?.reason, 'repeated-failure');
 });
@@ -136,7 +136,7 @@ test('the next message in the same session clears the marker', async () => {
   const runner = new AgentRunner({ provider, tools: createStepTools(), maxTurns: 1 });
   const events = recordEvents(runner);
 
-  const first = await runner.run({ sessionId: 'thread', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Start' });
+  const first = await runner.run({ sessionId: 'thread', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Start' });
   assert.equal(first.stoppedEarly?.reason, 'turn-limit');
 
   const second = await runner.resume({ sessionId: 'thread', userMessage: 'Thanks' });
@@ -158,7 +158,7 @@ test('a provider running its own loop reports its wrap-up, and the runner marks 
   });
   const marked = new AgentRunner({ provider: response('turn-limit'), maxTurns: 3, autoContinue: true });
   const events = recordEvents(marked);
-  const session = await marked.run({ sessionId: 'harness', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+  const session = await marked.run({ sessionId: 'harness', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Go' });
   assert.deepEqual(
     { reason: session.stoppedEarly?.reason, continuations: session.stoppedEarly?.continuations },
     { reason: 'turn-limit', continuations: 1 },
@@ -168,7 +168,7 @@ test('a provider running its own loop reports its wrap-up, and the runner marks 
   // A value core does not know is no marker: a plugin's typo must not
   // invent a reason nothing downstream can read.
   const unknown = new AgentRunner({ provider: response('ran-out'), maxTurns: 3 });
-  const plain = await unknown.run({ sessionId: 'harness-unknown', agent: { id: 'ava', name: 'Ava' }, userMessage: 'Go' });
+  const plain = await unknown.run({ sessionId: 'harness-unknown', agent: { id: 'ava', name: 'Ava', tools: ['*'] }, userMessage: 'Go' });
   assert.equal(plain.stoppedEarly, undefined);
 });
 
@@ -179,7 +179,7 @@ test('a wrap-up saved before a crash is still announced as stopped early when th
   // answer and before the save marking the turn completed.
   await store.create({
     id: 'crashed',
-    agent: { id: 'ava', name: 'Ava' },
+    agent: { id: 'ava', name: 'Ava', tools: ['*'] },
     status: 'running',
     messages: [
       { id: 'crashed:user:1', role: 'user', content: 'Go', createdAt: now },

@@ -197,6 +197,11 @@ machines, turn on `agentMentions`:
   in it.
 - The reply goes in the thread the other agent posted in. Each daemon's own
   Slack app hears the mention, so this works across machines.
+- A tag carries the files its sender posted just above it. An agent that
+  posts a screenshot and then asks another agent about it sends them as two
+  messages, so the tagged agent also gets the files on the sender's own
+  messages directly above the tag, with nobody else speaking between and
+  within the hour before it, read as if they were attached to the tag.
 - A tagged message from another agent may need no answer: a report, a
   thanks. The agent is told it can stay quiet then, and posts nothing.
   A question or a request still gets one.
@@ -221,26 +226,37 @@ rewritten in front of you. Whatever it writes before its first tool is
 posted as that tool starts — "On it, checking the three PRs" reaches the
 thread at once, not an hour later.
 
-After that, a task keeps one progress message up to date instead of
-posting each step. Its first line comes from the tools the agent actually
-called, not from what it says about them: "⚙ Working · step 3: `shell.run`",
-"⏸ Waiting for approval to run `shell.run`", and at the end "✓ Done ·
-7 steps", "■ Stopped after 3 steps" or "✗ Failed after 3 steps". Anything
-else the agent writes between tools goes under that line, newest last;
-a passage too long to fit there is posted whole as a message of its own.
-The progress message opens once a task has worked for ten seconds, or as
-soon as the agent writes something more between tools, so a quick answer
-is just the answer. The finished reply follows as its own message; when
-the agent's last words came before its last tool call, those words are
-the reply rather than a line in the progress message.
+After that, what it writes between tools is not posted. That is the
+model talking to itself while it works, and a thread of step-by-step
+commentary is something you would have to scroll past. Nor is it added to
+the reply. The finished reply follows as its own message; when the
+agent's last words came before its last tool call, those words are the
+reply. A turn nobody asked for (an agent that
+[judges](#how-an-agent-listens)) posts none of its words before it
+decides, first ones included: its reply is only what it writes after its
+last tool, and nothing there means it stays out. A task that fails or is
+stopped says so where the reply would have gone.
+
+When an agent does need you before it finishes, it says so on purpose
+with `message.say`: one short message into the conversation it is
+replying in, such as "Need your OK to delete feature-x, it isn't merged."
+The default prompt tells it to do that only when it needs you or the news
+is worth your time, never to narrate its steps. The tool reaches only that
+conversation, so it is `safe` and never waits on an approval. A turn can
+send at most three, each one line of at most 500 characters and posted
+as one message in every reply mode. In `stream` mode the
+words already show as they are written, so the tool refuses there.
 
 While it works, Slack shows its own loading status under the
 agent's name: "is thinking…", or "is running shell.run…" while a tool runs.
 The same step also goes out as Slack's loading message ("Running
 shell.run…"), for Slack's newer agent sessions, which replace the status
 line with their own text ("Finding answers…"). A turn nobody asked for (an agent that
-[judges](#how-an-agent-listens)) shows no status, since it may decide to
-say nothing.
+[judges](#how-an-agent-listens)) shows the status only once it calls its
+first tool, since it may decide to say nothing; one that then stays
+silent clears it. Slack takes the status down whenever the agent's app posts
+in the thread, so the agent puts it back after its own posts, uploads,
+answered approvals, and a `message.send` from another of its sessions.
 
 Messages you send while it is still working reach it at its next step:
 once the tool it is running finishes, it reads them before it decides what
@@ -250,9 +266,10 @@ its final reply, or has used every step its message allows, they wait,
 and its next turn answers everything that queued in one reply. A message
 that lands mid-task shares the steps the task has left rather than adding
 more, so a busy thread can't keep one task running past the agent's
-[step limit](../reference/config.md#how-many-turns-one-message-may-spend). An agent on a provider that runs its own tool loop
-(Codex, or Claude through a subscription sign-in) doesn't take messages
-mid-task yet: they always wait for the next turn. In a DM each message
+[step limit](../reference/config.md#how-many-turns-one-message-may-spend).
+An agent on Claude through a subscription sign-in takes them the same way,
+with the result of the tool it was running; one on Codex doesn't take
+messages mid-task yet, and they wait for its next turn. In a DM each message
 shows the status as soon as you send it, so a second message never makes
 the agent look idle; in a channel thread the status keeps saying what the
 running turn is doing until its reply posts.
@@ -260,7 +277,11 @@ running turn is doing until its reply posts.
 If you would rather watch the reply being written, set `stream`: the agent
 posts a `…` placeholder at once, edits it as the reply arrives, shows
 `⚙ tool…` lines while tools run, and finalizes it — how every reply looked
-before `final` existed.
+before `final` existed. A reply that tags another agent is the exception:
+Slack passes an edit on to other agents as a change to an old message, and
+an agent starts only on a new one, so the placeholder is taken back and the
+reply posted as a new message at the bottom of the thread. If Slack won't delete the
+placeholder, the reply is edited in as before and the tagged agent misses it.
 
 To have an agent read more like someone texting, set `texts`: it works the
 way `final` does, but each paragraph of a reply is posted as a message of
@@ -276,6 +297,19 @@ alone. Another agent here means an agent on this daemon, one on the agent's
 through `users:read`, which the app already has). A reply that tags only
 people is still split. Messages the agent sends with `message.send` and
 error notices are posted as written.
+
+Slack shows about 4,000 characters in one message, so a longer reply is
+posted in parts, in every mode, and so is a longer `message.send`. When a
+part tags another agent, it goes up as a file upload instead: the part is
+the message, as it would have been, and the whole reply is attached as
+`full-reply.md`. The tagged agent reads only the message that names it, and
+reads a text file on that message as part of it, so it gets all of the
+reply rather than the part with its name in it. People still read every
+part in the thread. Posting one long message is no way around this: Slack
+splits it into parts on its own side. If Slack refuses the upload, the part
+is posted on its own, the log says so, and the tagged agent gets only that
+part. In `stream` mode a reply whose first part tags another agent is
+posted the same way, not edited into the placeholder.
 
 ```jsonc
 // ~/.stratus/config.json — trusted configs only
@@ -408,7 +442,8 @@ conversation, with the `credential.request` tool. The daemon grants it to every 
 whatever its `tools:` says, because the form goes to an approver who
 decides everything after that. The one-time link it can fall back to is a
 bearer credential, so a link needs the soul to list `credential.request`
-(or have no `tools:` key):
+(by name, a glob, or `"*"`); a soul with no `tools:` key gets forms only,
+except on a home set up before 0.14.3:
 
 ```
 Kai is asking for a credential: github.token, for Kai only.

@@ -1,27 +1,17 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import {
-  filePathsOf,
   isLatestTurn,
   latestTurnReply,
   NO_REPLY_MARKER,
-  MAX_IDEMPOTENCY_KEY_LENGTH,
   turnFailureFor,
   turnFilesFor,
   turnReplyFor,
   CONVERSATION_METADATA_KEY,
   SENDER_TRUST_METADATA_KEY,
   sessionWriteTrust,
-  imageDimensions,
-  isImageAttachmentMediaType,
-  IMAGE_ATTACHMENT_MAX_BYTES,
-  IMAGE_ATTACHMENT_MAX_DIMENSION,
-  IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT,
-  IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   escapeControlCharacters,
   HostRefusalError,
   RunAbortedError,
@@ -29,17 +19,14 @@ import {
   type CredentialScope,
   type ApprovalAnswer,
   type ImageAttachment,
-  type ImageAttachmentMediaType,
   type JsonObject,
   leastTrusted,
   sessionTrustOf,
   SESSION_TRUST_METADATA_KEY,
   type AgentWorkspaces,
   type ListensMode,
-  type ProviderPart,
   type Session,
   type StratusEvent,
-  type ToolResult,
   type TrustLevel,
   admitsSender,
   channelSessionKey,
@@ -63,11 +50,35 @@ import {
   type OutboundAddress,
   type OutboundConnection,
   type OutboundMessageRef,
-  type SessionRouting,
 } from '@stratusagent/core';
 
-import { codeRunsOf, toSlackMrkdwn } from './mrkdwn.ts';
-import { textingParts } from './texts.ts';
+import {
+  collectFilePaths,
+  dispatchKeyFor,
+  type HandoverClaim,
+  messageChunks,
+  messageText,
+  NO_REPLY_TEXT,
+  NOTHING_REPORTED,
+  postPart,
+  type ReplyOutcome,
+  ReplyRenderer,
+  type ReportedOutcome,
+} from './reply.ts';
+import {
+  attachmentNote,
+  createAttachmentSaver,
+  historyImageCap,
+  type ImagePreview,
+  previewNote,
+  readHistoryImages,
+  readImageAttachments,
+  readTextAttachments,
+  type SavedAttachment,
+  savedAttachmentBlocks,
+  textAttachmentBlocks,
+  type UnreadReasons,
+} from './attachments.ts';
 
 /**
  * The longest display name the model is shown. Slack caps profile names
@@ -75,7 +86,6 @@ import { textingParts } from './texts.ts';
  */
 const MAX_DISPLAY_NAME_LENGTH = 80;
 
-const SLACK_MAX_MESSAGE_CHARS = 4000;
 const DEFAULT_EDIT_INTERVAL_MS = 1000;
 const DEDUPE_CAPACITY = 2000;
 /**
@@ -148,30 +158,6 @@ export const AGENT_MENTION_HOP_LIMIT = 4;
  */
 const MAX_UNRENDERED_FILES = 20;
 
-const PLACEHOLDER_TEXT = '…';
-
-/** What the loading status says while a turn works, and while it runs a tool. */
-const THINKING_STATUS = 'is thinking…';
-const toolStatus = (toolName: string): string => `is running ${toolName}…`;
-/**
- * The same step as a line of its own, for Slack's `loading_messages`
- * ("is running shell.run…" -> "Running shell.run…"). Slack's agent sessions
- * show their own generic text ("Finding answers…") in place of `status`,
- * and rotate these instead. None for the clear: Slack wants one to ten,
- * and the empty status alone takes the indicator down.
- */
-const loadingMessage = (status: string): string | undefined => {
-  const step = status.replace(/^is /, '');
-  return step === '' ? undefined : step.charAt(0).toUpperCase() + step.slice(1);
-};
-
-/**
- * How often a loading status is set again while its turn runs. Slack drops
- * one after two minutes with no message, and a long turn — a tool, an
- * approval wait — is exactly the one whose status must not vanish.
- */
-const STATUS_REFRESH_MS = 60_000;
-
 /**
  * A 5 MB image over a slow link is seconds, not minutes. Past this the
  * downloads are abandoned and the turn runs with the attachments named as
@@ -196,67 +182,6 @@ const DEFAULT_STOP_WAIT_MS = 10_000;
  */
 const DEFAULT_APPROVAL_PROMPT_WAIT_MS = 5_000;
 
-/**
- * How long a task works before its progress message opens (card 949): long
- * enough that a quick answer, a lookup or two, is just its reply; short
- * enough that a task taking minutes shows what it is doing while it does.
- */
-const DEFAULT_PROGRESS_AFTER_MS = 10_000;
-
-/** Room kept for a progress message's first line and its `…` when its notes are trimmed. */
-const PROGRESS_HEADER_ROOM = 200;
-
-/**
- * The most a progress message holds under its first line. Words longer than
- * this are content, not a step — an analysis written before a tool call —
- * and are posted whole as messages of their own, as before card 949, rather
- * than cut to fit and lost.
- */
-const PROGRESS_NOTE_ROOM = SLACK_MAX_MESSAGE_CHARS - PROGRESS_HEADER_ROOM;
-
-/** How a turn with a progress message ended, for that message's last edit. */
-type ProgressEnd = 'done' | 'stopped' | 'failed';
-
-/** What a progress message's first line is made of: the turn's own tool events, never its words. */
-interface ProgressState {
-  steps: number;
-  /** Calls started and not yet settled, by call id: more than one when tools run side by side. */
-  running: Map<string, string>;
-  waitingOn: string | undefined;
-  end: ProgressEnd | undefined;
-}
-
-const stepCount = (steps: number): string => `${steps} ${steps === 1 ? 'step' : 'steps'}`;
-
-/** A tool's name as code, which no backtick of its own can close early. */
-const toolCode = (toolName: string): string => `\`${escapeSlackText(toolName.replace(/`/g, ''))}\``;
-
-/**
- * The first line of a progress message: what the turn is doing, from the
- * tool calls it made and is making. Words the model wrote are under it, as
- * notes; this line is the part that cannot claim more than happened.
- */
-const progressHeader = (state: ProgressState): string => {
-  switch (state.end) {
-    case 'done':
-      return `✓ Done · ${stepCount(state.steps)}`;
-    case 'stopped':
-      return `■ Stopped after ${stepCount(state.steps)}`;
-    case 'failed':
-      return `✗ Failed after ${stepCount(state.steps)}`;
-    default:
-      break;
-  }
-  if (state.waitingOn !== undefined) {
-    return `⏸ Waiting for approval to run ${toolCode(state.waitingOn)}`;
-  }
-  const latest = [...state.running.values()].at(-1);
-  if (latest !== undefined) {
-    return `⚙ Working · step ${state.steps}: ${toolCode(latest)}`;
-  }
-  return `⚙ Working · ${stepCount(state.steps)} done`;
-};
-
 /** Resolves when `work` settles or after `ms`, whichever is first; never rejects. */
 const settledWithin = (work: Promise<unknown>, ms: number): Promise<void> => new Promise<void>((resolve) => {
   const timer = setTimeout(resolve, ms);
@@ -267,8 +192,6 @@ const settledWithin = (work: Promise<unknown>, ms: number): Promise<void> => new
   };
   work.then(done, done);
 });
-/** What a turn that produced no text puts in its message, wherever it is posted from. */
-const NO_REPLY_TEXT = '(no reply)';
 
 /** How an agent's replies appear in Slack; see `SlackAgentConfig.replies`. */
 export type SlackReplyMode = 'final' | 'stream' | 'texts';
@@ -441,6 +364,15 @@ const EARLIER_MESSAGE_LIMIT = 40;
 const EARLIER_THREAD_PAGES = 20;
 
 /**
+ * How far above a team agent's mention its own files are looked for (card
+ * 1061). It bounds the read, one page of a thread's last hour, not which
+ * files count: that is the agent's run of messages just above the tag.
+ */
+const TAGGED_FILES_WINDOW_SECONDS = 3600;
+/** The most files a mention takes from its tagger's messages above it. */
+const TAGGED_FILES_LIMIT = 10;
+
+/**
  * The holder-record name for a bot this adapter does not serve: an agent on
  * another gateway, or any other app. The colon keeps it from ever equaling
  * an agent id, so the holder rule reads it as "somebody else's".
@@ -538,12 +470,21 @@ export interface SlackSocketLike {
  * and a reader without one falls back (see `ReplyRenderer.queueUpload`).
  */
 export interface SlackUploadResult {
-  files?: Array<{
-    shares?: {
-      public?: Record<string, Array<{ ts?: string }>>;
-      private?: Record<string, Array<{ ts?: string }>>;
-    };
-  }>;
+  files?: SlackUploadedFile[];
+}
+
+/**
+ * One file in an upload's answer, or in `files.info`'s. The SDK's
+ * `uploadV2` nests the files Slack completed under each part it uploaded,
+ * so a file may carry `files` of its own.
+ */
+export interface SlackUploadedFile {
+  id?: string;
+  files?: SlackUploadedFile[];
+  shares?: {
+    public?: Record<string, Array<{ ts?: string; thread_ts?: string }>>;
+    private?: Record<string, Array<{ ts?: string; thread_ts?: string }>>;
+  };
 }
 
 export interface SlackHistoryArgs {
@@ -614,7 +555,13 @@ export interface SlackWebLike {
   files: {
     // The real SDK takes file DATA (a buffer or stream), never a path
     // string — typing it that way here keeps fakes honest too.
-    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string }): Promise<SlackUploadResult>;
+    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string; initial_comment?: string }): Promise<SlackUploadResult>;
+    /**
+     * Where an upload landed, once Slack has shared it: the upload's own
+     * answer does not say (card 1033). Optional: an older fake without it
+     * leaves a part posted as an upload with no ts, never unposted.
+     */
+    info?(args: { file: string }): Promise<{ file?: SlackUploadedFile }>;
   };
   conversations: {
     /**
@@ -771,9 +718,9 @@ export interface SlackAdapterOptions {
    */
   approvalPromptWaitMs?: number;
   /**
-   * How long a task works before its progress message opens (card 949).
-   * Words the model writes after its first line open it at once. Defaults
-   * to `DEFAULT_PROGRESS_AFTER_MS`.
+   * @deprecated Ignored. Slack no longer gets a progress message (card
+   * 1009); Slack's own status line shows a turn is working. Accepted so a
+   * caller that set it still compiles.
    */
   progressAfterMs?: number;
   /**
@@ -1014,1725 +961,6 @@ const onlySlackFileHost = (fetchFile: SlackFileFetcher): SlackFileFetcher => (ur
   return fetchFile(url, botToken, signal, maxBytes);
 };
 
-/**
- * A hold on a queued renderer's placeholder, taken the moment an earlier
- * turn's outcome arrives and before anything about that outcome is looked
- * up. Reading the routing of a turn nobody rendered is a store round trip,
- * and the turn queued behind it can finish inside that window: without a
- * hold it would finalize its own placeholder away, and the earlier turn's
- * reply and attachments would land below the newer turn's answer — exactly
- * the order the handover exists to prevent. `finalize` waits on the hold,
- * so the placeholder is still there when the lookup comes back.
- *
- * Both methods are idempotent, and one of them must be called: a hold that
- * is neither taken nor released stalls the queued turn's reply.
- */
-interface HandoverClaim {
-  /**
-   * Spend the hold: hand the placeholder to `chunks`, run `between` while
-   * this renderer still has no placeholder of its own, and reopen one
-   * below. `untaken` when there is nothing to hand over — no placeholder,
-   * or the renderer finished before the hold was taken — and the caller
-   * posts the chunks itself; `partial` when the placeholder took the first
-   * chunk and Slack refused one of the rest.
-   */
-  take(chunks: readonly string[], between?: () => Promise<void>): Promise<'complete' | 'partial' | 'untaken'>;
-  /** Give the hold back unspent, letting the queued turn finish. */
-  release(): void;
-}
-
-/**
- * What became of a turn's reply. `published`: whether ALL of its text was
- * — the edit taken and every overflow message posted. `spoke`: whether
- * ANYTHING of the turn's landed, a chunk or a file. `spokeAt`: where in
- * the thread what landed sits — the ts of the lowest message of the
- * turn's that Slack took — present exactly when `spoke` is. `refused`:
- * there was text to say and Slack refused some of it, unlike a turn that
- * decided to say nothing, which is unpublished but not refused.
- */
-interface ReplyOutcome {
-  published: boolean;
-  spoke: boolean;
-  spokeAt?: string;
-  refused?: true;
-}
-
-/**
- * The dispatch's idempotency key for a message's dedupe key: the key itself
- * when it fits the gateway's bound, and a digest of it when it does not —
- * an agent id is not length-bounded (overlong ids that predate validation
- * are kept), and a key over the bound would refuse every message for that
- * agent. Deterministic, so a redelivery after a restart maps to the same.
- */
-const dispatchKeyFor = (eventKey: string): string =>
-  eventKey.length <= MAX_IDEMPOTENCY_KEY_LENGTH ? eventKey : `slack-sha256:${createHash('sha256').update(eventKey).digest('hex')}`;
-
-/**
- * What the report of a turn nobody was rendering got into the thread, part
- * by part: whether its text was said in full (or there was none to say),
- * and which of its files landed. A redelivery waiting behind the report
- * posts only what is missing from it.
- */
-interface ReportedOutcome {
-  said: boolean;
-  landed: readonly string[];
-}
-
-const NOTHING_REPORTED: ReportedOutcome = { said: false, landed: [] };
-
-/**
- * How far a file's change time may run past the record of the tool result
- * naming it: the rest of the millisecond the record was stamped in, since
- * the record is whole milliseconds and the file time is finer. No more,
- * because any window is one an overwrite fits inside — two seconds was, in
- * review. A filesystem that rounds file times up, coarser than that, fails
- * closed: the file is warned about and not uploaded, which a repeat can
- * afford and a wrong attachment cannot.
- */
-const PRODUCED_AT_SLACK_MS = 1;
-
-/**
- * A file a finished turn produced, read for a repeat of it — refused unless
- * it is provably the file the turn left there. The transcript keeps a path,
- * not the bytes, and a repeat can come after a later turn or another
- * process has written the same path; uploading what is there now would
- * answer the old message with a different file, or a sensitive one.
- *
- * The change time, not the modification time, is what is compared: it
- * moves on every write, on a rename into the path, and on `utimes` itself,
- * so neither an older file renamed in nor a backdated one passes. Then the
- * path has to name the same file before and after it is opened — the open
- * handle's file, when it is not a link — and the handle has to be unchanged
- * after the read, so a swap or a write landing between the checks and the
- * read is caught rather than uploaded.
- */
-const readUnchangedSince = async (filePath: string, producedAt: number): Promise<Buffer> => {
-  // Exclusive: a change time at or past it was a change after the record.
-  const writtenBefore = producedAt + PRODUCED_AT_SLACK_MS;
-  const changed = (): Error =>
-    new Error('it was changed after the turn that produced it, so it may hold another file now; it was not uploaded.');
-  const named = await lstat(filePath);
-  if (named.ctimeMs >= writtenBefore) {
-    throw changed();
-  }
-  const handle = await open(filePath, 'r');
-  try {
-    const opened = await handle.stat();
-    const stillNamed = await lstat(filePath);
-    const samePath = stillNamed.ino === named.ino && stillNamed.dev === named.dev && stillNamed.ctimeMs === named.ctimeMs;
-    const sameFile = named.isSymbolicLink() || (opened.ino === named.ino && opened.dev === named.dev);
-    if (!samePath || !sameFile || opened.ctimeMs >= writtenBefore) {
-      throw changed();
-    }
-    const data = await handle.readFile();
-    const after = await handle.stat();
-    if (after.ctimeMs !== opened.ctimeMs || after.size !== data.length) {
-      throw changed();
-    }
-    return data;
-  } finally {
-    await handle.close();
-  }
-};
-
-/**
- * A clock reading as a Slack timestamp, for a file whose upload answered
- * with no share ts. Slack timestamps are epoch seconds with six decimals,
- * so the clock's reading compares with them as long as the two agree to
- * within the gap between one message and the next.
- */
-const slackTs = (ms: number): string => (ms / 1000).toFixed(6);
-
-/**
- * Where an upload sits in the thread: the ts of the message it became in
- * `channel`, from the shares the upload answers with. Undefined when the
- * answer carries none.
- */
-const uploadPlace = (result: SlackUploadResult, channel: string): string | undefined => {
-  for (const file of result.files ?? []) {
-    for (const scope of [file.shares?.public, file.shares?.private]) {
-      for (const share of scope?.[channel] ?? []) {
-        if (share.ts !== undefined) {
-          return share.ts;
-        }
-      }
-    }
-  }
-  return undefined;
-};
-
-/**
- * Renders one turn's reply into Slack, one of two ways. Streaming (the
- * `stream` reply mode): post `…` immediately, fold streaming deltas and
- * tool status lines into throttled edits, and finalize with the
- * authoritative reply. Otherwise (`final`, the default): no placeholder —
- * Slack's loading status says the agent is working, and the finished reply
- * is posted once, so the notification carries the answer rather than a
- * `…`. Either way a reply that outgrows one message is split.
- */
-class ReplyRenderer {
-  /**
-   * Whether the gateway has begun the turn this renderer was opened for.
-   * A renderer is queued at intake, before the gateway starts its turn,
-   * so until the session reports `running` again the turn at the head of
-   * the session's chain may be somebody else's — a recovery still parked
-   * on a human — and its completion is not this renderer's to swallow.
-   */
-  turnStarted = false;
-  /**
-   * The id this renderer's turn is dispatched under. A gateway that reports
-   * its active turn (`activeTurnId`) lets the adapter match an outcome to
-   * this renderer exactly, rather than to whichever turn reported `running`
-   * next — which, for a session another surface can also dispatch to, may
-   * not be this one.
-   */
-  readonly turnId: string = randomUUID();
-  /**
-   * What a Slack stop aborts (card 337): the signal this renderer's dispatch
-   * runs under, so a stop cancels this turn whether it is running or still
-   * queued behind another.
-   */
-  readonly controller = new AbortController();
-  /** The Slack user who stopped this turn, once someone has. */
-  stoppedBy: string | undefined;
-  private buffer = '';
-  /**
-   * In `final` mode, what the model has said since its last tool call. A
-   * turn that writes "On it, checking the PRs" and then works for an hour
-   * should not leave the thread showing only a loading status: text the
-   * model wrote before calling a tool is posted when the call starts, as a
-   * message of its own, and the finished reply follows it.
-   */
-  private interim = '';
-  /** The last interim message posted, so a reply that repeats it is not posted twice. */
-  private lastInterim: string | undefined;
-  /** Whether any interim message landed — something said, whatever the reply's fate. */
-  private interimPosted = false;
-  /** Every interim message that landed whole, in order: what a hosted-loop reply is stripped of. */
-  private readonly interimSaid: string[] = [];
-  /**
-   * Told of each interim message as it is queued — before the reply, and
-   * before anything typed while its tool runs — with what of it landed,
-   * once that is known, so the thread's other agents hear it in its place.
-   */
-  private readonly onInterim: ((heard: () => string, landed: Promise<boolean>) => void) | undefined;
-  /**
-   * Card 949, `final` mode: a task says what it is about to do in a
-   * message of its own (its first words before a tool), then keeps ONE
-   * progress message up to date — a first line built from its tool events,
-   * and under it whatever else it wrote between tools — and posts its reply
-   * as a message of its own. Narration that used to be a post per step is
-   * an edit, so a long task is three messages, not twenty.
-   *
-   * Whether this turn's first words have gone out, so later words are notes.
-   */
-  private firstWordsSaid = false;
-  /** Whether the progress message has been asked for; it may not have landed yet. */
-  private progressOpen = false;
-  /** The progress message, once Slack took it. */
-  private progressRef: OutboundMessageRef | undefined;
-  /** What the first line says, from this turn's own tool events only. */
-  private readonly progress: ProgressState = { steps: 0, running: new Map(), waitingOn: undefined, end: undefined };
-  /**
-   * The notes under that line, as sent: converted, oldest dropped past one
-   * message's room. `shown` once a write that held the note has landed: a
-   * note trimmed while its write was still queued never reached anyone.
-   */
-  private progressNotes: Array<{ text: string; shown?: boolean }> = [];
-  /** Whether older notes were dropped for room, so the message says so. */
-  private progressNotesCut = false;
-  /** Whether the last thing this turn said is a note rather than a message of its own. */
-  private lastSaidWasNote = false;
-  private progressTimer: NodeJS.Timeout | undefined;
-  private progressOpenTimer: NodeJS.Timeout | undefined;
-  private lastProgressAt = 0;
-  private turnStartedAt = 0;
-  /** How the turn ended, for the progress message: a stop or a failure says so before it finalizes. */
-  private ending: ProgressEnd = 'done';
-  private readonly progressAfterMs: number;
-  /** The lowest trust this turn's session was lowered to while it ran (`session.tainted`). */
-  taintedTo: TrustLevel | undefined;
-  private turnBreakPending = false;
-  private toolLine: string | undefined;
-  private ref: OutboundMessageRef | undefined;
-  private lastEditAt = 0;
-  private pendingEdit: NodeJS.Timeout | undefined;
-  private editChain: Promise<void> = Promise.resolve();
-  private uploadChain: Promise<void> = Promise.resolve();
-  /**
-   * A handover in progress (`yieldTo`): edits and the finalize wait for it,
-   * so a turn that finishes while its placeholder is being given away
-   * writes into the fresh one rather than over the reply it was given to.
-   */
-  private handover: Promise<void> = Promise.resolve();
-  /**
-   * The report of a turn nobody was rendering, made ahead of this renderer
-   * while it waited — through its placeholder or as messages of their own
-   * — resolving to what of that outcome reached the thread. Set when the
-   * report is claimed, before the turn it reports lets this renderer's
-   * dispatch go, so a repeat resolving after it can tell its own turn was
-   * that one, and post only what the report did not.
-   */
-  outcomeReportedAhead: Promise<ReportedOutcome> | undefined;
-  /**
-   * Bumped by a handover. An edit scheduled before it carries the text of
-   * the turn that was handed over — the recovery's stream, routed to this
-   * renderer while it was at the head of the queue — and must not land in
-   * the placeholder opened for this turn.
-   */
-  private generation = 0;
-  private finalized = false;
-  /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
-  private uploaded = false;
-  /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
-  private edited = false;
-  /**
-   * Where in the thread this turn's words stand: the ts of the lowest
-   * message Slack took them in — the placeholder an edit landed in, or an
-   * overflow chunk posted — and, separately, where a file of its landed
-   * (the share ts the upload answers with, or the clock — see `queueUpload`).
-   * What the thread rule orders by: an untagged reply is for whoever's
-   * reply sits lowest in the thread, the one a reader sees last, which is
-   * not the turn that finished last — a placeholder posted at intake and
-   * filled in slowly sits above a reply posted while it was being written.
-   */
-  private textAt: string | undefined;
-  private uploadedAt: string | undefined;
-  /**
-   * A turn nobody asked for: the placeholder is not posted at intake but
-   * on the first TEXT the turn streams, and a turn that ends having said
-   * nothing leaves the thread untouched — no placeholder, no `(no reply)`,
-   * no edit. Text and not a tool line, though the spec sketched either: a
-   * placeholder posted for a tool the turn ran on the way to deciding it
-   * had nothing to add is a message the decision cannot take back.
-   */
-  readonly lazy: boolean;
-  /**
-   * A reply-optional turn (card 601): said to the agent, so it shows what
-   * any turn shows while it works — status, placeholder, words along the
-   * way — but one that ends with nothing to say posts nothing: no
-   * `(no reply)`, its placeholder taken back, its status cleared. Unlike a
-   * lazy turn, a failure or a stop still says so.
-   */
-  readonly mayStaySilent: boolean;
-  /**
-   * Whether this turn streams into a placeholder. When it does not, there
-   * is never a placeholder: `finalize` finds none and posts the reply as
-   * messages of its own, and a handover has nothing to hand over and says
-   * so (`untaken`), so the recovery's reply is posted ahead of this one
-   * the ordinary way — both already the paths for a placeholder that
-   * could not be opened.
-   */
-  readonly streaming: boolean;
-  /**
-   * Whether the reply, and what the turn says before a tool, are posted a
-   * paragraph to a message (`texts` mode). Never with `streaming`: there
-   * is one placeholder to stream into.
-   */
-  private readonly texts: boolean;
-  /**
-   * Whether a text tags another agent, which `texts` mode then posts as
-   * one message (card 1014): the tagged agent admits only a message that
-   * names it, so a split reply reached it as the tagged part alone.
-   */
-  private readonly tagsAnAgent: ((text: string) => Promise<boolean>) | undefined;
-  /**
-   * The thread the loading status belongs to: the reply's thread, or the
-   * message itself in a DM, whose reply has no thread to key one on.
-   */
-  readonly statusThread: string | undefined;
-  /** Shared by a connection's renderers, so a status Slack refuses is said once, not per message. */
-  private readonly statusWarned: { value: boolean };
-  private loading = false;
-  /**
-   * Status calls, in order, so the last one Slack applies is the last one
-   * sent — and so `finalize` can wait for them: a status that reached
-   * Slack after the reply would stand over a finished turn until Slack's
-   * own timeout, since the post that clears it came first.
-   */
-  private statusChain: Promise<void> = Promise.resolve();
-  /**
-   * The turn this one was queued behind has posted everything it will
-   * (see `posted`). A streaming turn holds its place with the placeholder
-   * it opened at intake; a `final` one has no placeholder, so it waits for
-   * this before putting text or files in the thread — or a quick answer
-   * would land above the slow one ahead of it.
-   */
-  private readonly after: Promise<unknown>;
-  private settle!: () => void;
-  /** Resolves once this turn has put in the thread everything it will. */
-  readonly posted: Promise<void> = new Promise<void>((resolve) => {
-    this.settle = resolve;
-  });
-  private statusText: string | undefined;
-  private statusTimer: NodeJS.Timeout | undefined;
-  /** The tool the turn is running, for the status line; the streamed `toolLine` is the other mode's. */
-  private runningTool: string | undefined;
-  /**
-   * Calls started and not yet settled, by call id, oldest first. Core runs
-   * a response's read-only calls together, so one can settle while another
-   * still runs: both lines name the newest call still running, and clear
-   * only once none is.
-   */
-  private readonly activeTools = new Map<string, string>();
-  private readonly web: SlackWebLike;
-  /**
-   * The one person in the conversation when this turn is a DM: whoever sent
-   * the message. Undefined in a channel, where who can see a thread is
-   * Slack's membership to answer, not this turn's.
-   */
-  readonly dmWith: string | undefined;
-  /** The conversation, and the thread in it, this turn replies into. */
-  readonly channel: string;
-  readonly threadTs: string | undefined;
-  private readonly editIntervalMs: number;
-  private readonly warn: (line: string) => void;
-  private readonly now: () => number;
-
-  constructor(
-    web: SlackWebLike,
-    channel: string,
-    threadTs: string | undefined,
-    editIntervalMs: number,
-    warn: (line: string) => void,
-    options: {
-      lazy?: boolean;
-      mayStaySilent?: boolean;
-      now?: () => number;
-      streaming?: boolean;
-      texts?: boolean;
-      tagsAnAgent?: (text: string) => Promise<boolean>;
-      statusThread?: string;
-      statusWarned?: { value: boolean };
-      after?: Promise<unknown>;
-      dmWith?: string;
-      onInterim?: (heard: () => string, landed: Promise<boolean>) => void;
-      progressAfterMs?: number;
-    } = {},
-  ) {
-    this.web = web;
-    this.channel = channel;
-    this.threadTs = threadTs;
-    this.editIntervalMs = editIntervalMs;
-    this.warn = warn;
-    this.lazy = options.lazy ?? false;
-    this.mayStaySilent = options.mayStaySilent ?? false;
-    this.now = options.now ?? Date.now;
-    this.streaming = options.streaming ?? true;
-    this.texts = !this.streaming && options.texts === true;
-    this.tagsAnAgent = options.tagsAnAgent;
-    this.statusThread = options.statusThread ?? threadTs;
-    this.statusWarned = options.statusWarned ?? { value: false };
-    this.after = options.after ?? Promise.resolve();
-    this.dmWith = options.dmWith;
-    this.onInterim = options.onInterim;
-    this.progressAfterMs = options.progressAfterMs ?? DEFAULT_PROGRESS_AFTER_MS;
-  }
-
-  /**
-   * Show Slack's loading status for this turn, and keep it up until the
-   * turn is finalized. Not for a streaming turn, which has its placeholder,
-   * nor for one nobody asked for: "is thinking…" over a turn that may
-   * decide to say nothing is the interruption silence exists to avoid.
-   */
-  showLoading(head: boolean): void {
-    if (this.streaming || this.lazy || this.loading || this.finalized) {
-      return;
-    }
-    this.loading = true;
-    // A thread has one status per app, so a turn queued behind another in
-    // the same thread must not publish its own: it would overwrite what the
-    // running turn says it is doing. It publishes when it reaches the head
-    // (`beginTurn`, or `refreshLoading` once the turn ahead has posted).
-    // The caller passes `head` for a queued turn whose status lives on a
-    // key of its own — every DM message is — since it overwrites nothing.
-    if (head) {
-      this.publishLoading();
-    }
-  }
-
-  private publishLoading(): void {
-    if (this.statusTimer || this.finalized) {
-      return;
-    }
-    this.setStatus(this.statusText ?? THINKING_STATUS);
-    this.statusTimer = setInterval(() => this.refreshLoading(), STATUS_REFRESH_MS);
-    this.statusTimer.unref?.();
-  }
-
-  /**
-   * Set the status again. Slack clears a thread's status whenever the app
-   * posts in it, so a reply or file from the turn ahead of this one — or
-   * this turn's own upload — takes it down while this turn is still
-   * working; the adapter calls this once that post has landed.
-   */
-  refreshLoading(): void {
-    if (!this.loading || this.finalized) {
-      return;
-    }
-    if (!this.statusTimer) {
-      // Queued until now: this is the renderer at the head at last.
-      this.publishLoading();
-      return;
-    }
-    this.setStatus(this.statusText ?? THINKING_STATUS);
-  }
-
-  private stopLoading(): void {
-    if (this.statusTimer) {
-      clearInterval(this.statusTimer);
-      this.statusTimer = undefined;
-    }
-    this.loading = false;
-  }
-
-  private setStatus(text: string): void {
-    const setStatus = this.web.assistant?.threads.setStatus;
-    if (!setStatus || this.statusThread === undefined) {
-      return;
-    }
-    this.statusText = text;
-    const thread = this.statusThread;
-    const loading = loadingMessage(text);
-    // Not awaited by the caller: the turn never waits on a status. Only
-    // `finalize` does, for the ordering reason on `statusChain`. A refusal
-    // — a workspace or plan without it, a token Slack will not honour for
-    // it — is said once and then left alone; the reply still arrives,
-    // just without the status ahead of it.
-    this.statusChain = this.statusChain
-      .then(() => setStatus.call(this.web.assistant?.threads, {
-        channel_id: this.channel,
-        thread_ts: thread,
-        status: text,
-        ...(loading ? { loading_messages: [loading] } : {}),
-      }))
-      .then(() => undefined, (error: unknown) => {
-        if (!this.statusWarned.value) {
-          this.statusWarned.value = true;
-          this.warn(
-            `slack: could not show a loading status (${error instanceof Error ? error.message : String(error)}); `
-            + 'replies still post when they are ready, without one',
-          );
-        }
-      });
-  }
-
-  /**
-   * The gateway has begun this renderer's turn. Whatever was streamed here
-   * before now belonged to the turn ahead of it on the session chain — a
-   * recovery's stream, routed to this renderer because it was at the head
-   * of the queue — and is dropped, edits already scheduled for it
-   * included, so this turn's placeholder starts empty.
-   */
-  beginTurn(): void {
-    if (!this.turnStarted) {
-      this.turnStartedAt = Date.now();
-    }
-    this.turnStarted = true;
-    if (this.pendingEdit) {
-      clearTimeout(this.pendingEdit);
-      this.pendingEdit = undefined;
-    }
-    this.buffer = '';
-    this.interim = '';
-    this.activeTools.clear();
-    this.toolLine = undefined;
-    this.runningTool = undefined;
-    this.turnBreakPending = false;
-    this.generation += 1;
-    // Queued until now, this turn publishes its status as it starts; one
-    // already showing may be showing a tool the turn ahead of it ran.
-    if (this.loading && !this.statusTimer) {
-      this.publishLoading();
-    } else if (this.loading && this.statusText !== THINKING_STATUS) {
-      this.setStatus(THINKING_STATUS);
-    }
-  }
-
-  async open(): Promise<void> {
-    const posted = await this.web.chat.postMessage({
-      channel: this.channel,
-      text: PLACEHOLDER_TEXT,
-      ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-    });
-    if (posted.ts) {
-      this.ref = { channel: posted.channel ?? this.channel, ts: posted.ts };
-    }
-  }
-
-  onEvent(event: StratusEvent, ofThisTurn = true): void {
-    if (this.finalized) {
-      return;
-    }
-    if (event.type === 'session.tainted') {
-      if (ofThisTurn && this.turnStarted) {
-        this.taintedTo = this.taintedTo === undefined ? event.trust : leastTrusted(this.taintedTo, event.trust);
-      }
-      return;
-    }
-    if (event.type === 'provider.delta' && event.delta.type === 'text') {
-      // Text from a new provider turn (after tools ran) must not fuse
-      // with the previous turn's — "I'll check.The result is…" reads as
-      // one garbled sentence for the whole duration of the final stream.
-      if (this.turnBreakPending && this.buffer.trim().length > 0) {
-        this.buffer += '\n\n';
-      }
-      this.turnBreakPending = false;
-      this.buffer += event.delta.text;
-      this.interim += event.delta.text;
-      this.scheduleEdit();
-      return;
-    }
-    if (event.type === 'provider.delta' && event.delta.type === 'reset') {
-      // The provider abandoned its partial attempt (e.g. fallback after a
-      // mid-stream failure): discard everything streamed so far so two
-      // attempts never fuse into one message.
-      this.buffer = '';
-      this.interim = '';
-      this.turnBreakPending = false;
-      this.scheduleEdit();
-      return;
-    }
-    if (event.type === 'provider.response') {
-      this.turnBreakPending = true;
-      // A provider that answers in one piece streams no deltas: the
-      // response is the only place its words before a tool call appear.
-      // One that streamed them has them already, and is not given them twice.
-      if (this.interim.trim().length === 0) {
-        this.interim = event.parts
-          .filter((part): part is Extract<ProviderPart, { type: 'text' }> => part.type === 'text')
-          .map((part) => part.text)
-          .join('');
-      }
-      return;
-    }
-    if (event.type === 'tool.called') {
-      // Also a turn boundary. On the kernel path `provider.response` has
-      // already marked one, and marking it twice costs nothing; on a
-      // provider that hosts its own loop there is no provider.response at
-      // all, so this is the only thing between the text before a tool and
-      // the text after it — without it they fuse in the live message.
-      this.turnBreakPending = true;
-      this.activeTools.set(event.call.id, event.call.toolName);
-      this.showActiveTool();
-      this.flushInterim(ofThisTurn);
-      if (ofThisTurn && this.mayShowProgress()) {
-        this.progress.steps += 1;
-        this.progress.running.set(event.call.id, event.call.toolName);
-        this.progress.waitingOn = undefined;
-        this.openProgressInTime();
-        this.scheduleProgress();
-      }
-      this.scheduleEdit();
-      return;
-    }
-    if (event.type === 'tool.denied') {
-      // Denial settles a call that never reached tool.called, so nothing
-      // else clears the status line or marks the boundary for it — the
-      // message would keep claiming a refused tool is running, and the
-      // model's follow-up would fuse with the text before the attempt.
-      this.activeTools.delete(event.call.id);
-      this.showActiveTool();
-      this.turnBreakPending = true;
-      // Words written before a call that was refused were still said
-      // before a tool, and must not run into the next response's.
-      this.flushInterim(ofThisTurn);
-      if (ofThisTurn) {
-        this.settleProgressStep(event.call.id);
-      }
-      this.scheduleEdit();
-      return;
-    }
-    if (event.type === 'tool.completed') {
-      this.activeTools.delete(event.result.callId);
-      this.showActiveTool();
-      // Settled here too for a call rejected before it ran, which never
-      // reached `tool.called`; after one that did, this is empty.
-      this.flushInterim(ofThisTurn);
-      if (ofThisTurn) {
-        this.settleProgressStep(event.result.callId);
-      }
-      // Also a boundary, and not only for symmetry: a call rejected before
-      // execution settles as tool.completed without ever having emitted
-      // tool.called, so this is the only mark that attempt leaves.
-      this.turnBreakPending = true;
-      // Clear the visible status promptly: the next provider turn may be
-      // non-streaming or slow to its first delta, and the message must not
-      // claim a finished tool is still running that whole time.
-      this.scheduleEdit();
-      // Only this turn's files: a result the caller knows belongs to the
-      // turn ahead of this one on the session chain — a recovery's
-      // screenshot — would otherwise be uploaded in this turn's place in
-      // the thread. The adapter holds it for the turn that produced it.
-      if (event.result.ok && ofThisTurn) {
-        for (const filePath of collectFilePaths(event.result)) {
-          this.queueUpload(filePath);
-        }
-      }
-    }
-  }
-
-  /**
-   * Upload files a turn produced that no event delivered: a repeat of a
-   * finished turn has only the session to read them from (`turnFilesFor`),
-   * and a path written since then is refused (see `readUnchangedSince`).
-   */
-  queueFiles(files: ReadonlyArray<{ path: string; producedAt: string }>): void {
-    for (const file of files) {
-      this.queueUpload(file.path, Date.parse(file.producedAt));
-    }
-  }
-
-  // Tool results that reference local output files (a screenshot, a
-  // generated report) become real attachments in the conversation — the
-  // channel contract's upload operation. Uploads chain so they land in
-  // order and finalize() waits for them.
-  private queueUpload(filePath: string, producedAt?: number): void {
-    // Behind a handover in progress, for the same reason edits and the
-    // finalize are: the turn being handed the placeholder has its own
-    // attachments to put in the thread first, and an upload is a message
-    // of its own — one sent now would sit above them and read as this
-    // turn's answer arriving first. Captured at queue time, not read when
-    // the chain runs: a handover that begins after this upload waits for
-    // it, and an upload that then waited for that handover would be a
-    // cycle nothing breaks (see `queueEdit`).
-    const handover = this.handover;
-    const after = this.streaming ? undefined : this.after;
-    this.uploadChain = this.uploadChain
-      .then(() => handover)
-      .then(() => after)
-      // Read as file DATA inside the chain: the Web API takes contents,
-      // not a path, and a missing file surfaces as this upload's own
-      // failure instead of an unhandled stream error.
-      .then(async () => {
-        const data = producedAt === undefined ? await readFile(filePath) : await readUnchangedSince(filePath, producedAt);
-        // Where the file will sit is Slack's to say — the ts of the
-        // message it becomes, in the shares the upload answers with. When
-        // the answer carries none, the clock stands in, read BEFORE the
-        // call: the file is posted somewhere inside it, and a colleague's
-        // placeholder posted while the answer was on its way back sits
-        // below the file. Read after, the file would be placed below that
-        // placeholder and take a thread the colleague holds; read before,
-        // the error runs the other way, toward the colleague — the fault
-        // an @ fixes.
-        const before = slackTs(this.now());
-        const result = await this.web.files.uploadV2({
-          channel_id: this.channel,
-          file: data,
-          filename: path.basename(filePath),
-          ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-        });
-        this.uploaded = true;
-        // The upload is a post of the app's in this thread, which takes
-        // the status down with it while the turn is still working.
-        this.refreshLoading();
-        const placed = uploadPlace(result, this.channel) ?? before;
-        if (this.uploadedAt === undefined || placed > this.uploadedAt) {
-          this.uploadedAt = placed;
-        }
-      })
-      .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
-  }
-
-  /**
-   * Post what the model said before the tool it is now calling, in `final`
-   * mode only: a streaming turn already shows it in its placeholder, and a
-   * turn nobody asked for must not speak before it decides to. Behind the
-   * turn ahead and any handover, on the upload chain, so interim text,
-   * files, and the reply land in the order they happened.
-   */
-  private flushInterim(ofThisTurn: boolean): Promise<boolean> | undefined {
-    const text = this.interim.trim();
-    this.interim = '';
-    if (this.streaming || this.lazy || !this.turnStarted || !ofThisTurn || text.length === 0) {
-      return undefined;
-    }
-    // Only words before the turn's first tool are a message of their own:
-    // after one, a step has run, and what follows is progress whether or
-    // not the turn opened with a line.
-    if (this.firstWordsSaid || this.progressOpen || this.progress.steps > 0) {
-      const note = toSlackMrkdwn(text);
-      if (note.length <= PROGRESS_NOTE_ROOM) {
-        return this.noteProgress(text, note);
-      }
-    }
-    this.firstWordsSaid = true;
-    const handover = this.handover;
-    const after = this.after;
-    let heard = '';
-    let settleLanded!: (landed: boolean) => void;
-    const landedNow = new Promise<boolean>((resolve) => {
-      settleLanded = resolve;
-    });
-    this.onInterim?.(() => heard, landedNow);
-    this.uploadChain = this.uploadChain
-      .then(() => handover)
-      .then(() => after)
-      .then(async () => {
-        const landed: string[] = [];
-        let chunks: string[] = [];
-        try {
-          chunks = await this.chunksOf(text);
-          for (const chunk of chunks) {
-            const posted = await this.web.chat.postMessage({
-              channel: this.channel,
-              text: chunk,
-              ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-            });
-            this.placeText(posted.ts);
-            landed.push(chunk);
-          }
-        } finally {
-          // Whatever landed was said, whole or not: it counts as speaking,
-          // and the others hear it. Only a message that landed whole is
-          // stripped from a hosted-loop reply; part of one is left in the
-          // reply, where repeating a few lines beats losing the rest.
-          if (landed.length > 0) {
-            this.interimPosted = true;
-            heard = landed.length === chunks.length ? text : landed.join('\n\n');
-          }
-          settleLanded(landed.length > 0);
-        }
-        this.lastInterim = text;
-        this.interimSaid.push(text);
-        this.lastSaidWasNote = false;
-        // A post of the app's in this thread takes the status down while
-        // the turn is still working; put it back.
-        this.refreshLoading();
-      })
-      .catch((error) => this.warn(`chat.postMessage failed for an interim message: ${error instanceof Error ? error.message : String(error)}`))
-      // Settled whatever happened above, or the other agents' intake would
-      // wait on it for good. A second settle is a no-op.
-      .finally(() => settleLanded(false));
-    return landedNow;
-  }
-
-  /**
-   * Whether this turn keeps a progress message (card 949): `final` mode,
-   * a turn somebody asked for, and its own — the same turns that post
-   * their words before a tool. A streaming turn's placeholder already
-   * shows its tool lines, and a turn nobody asked for must not speak
-   * before it decides to.
-   */
-  private mayShowProgress(): boolean {
-    return !this.streaming && !this.lazy && this.turnStarted && !this.finalized;
-  }
-
-  /**
-   * Words the turn wrote between tools after its first line: a note in the
-   * progress message, opening it if need be, rather than a post of their
-   * own. Heard by the thread's other agents and stripped from a reply that
-   * repeats them, as a message of their own would be. A note Slack refused
-   * is taken out again, so a later edit never shows words nobody heard.
-   */
-  private noteProgress(text: string, converted: string): Promise<boolean> {
-    this.progressOpen = true;
-    this.clearProgressOpenTimer();
-    const note: { text: string; shown?: boolean } = { text: converted };
-    this.progressNotes.push(note);
-    this.trimProgressNotes();
-    let heard = '';
-    let settleLanded!: (landed: boolean) => void;
-    const landedNow = new Promise<boolean>((resolve) => {
-      settleLanded = resolve;
-    });
-    this.onInterim?.(() => heard, landedNow);
-    // Said once a write that held it has landed, whichever write that was,
-    // and only then. Its own write can land after a slow Slack let later
-    // notes trim it out unseen, or be refused after an earlier write showed
-    // it. Unseen, it is not said: the others do not hear it, and a reply
-    // that repeats it keeps it.
-    const settle = () => {
-      if (!note.shown) {
-        this.progressNotes = this.progressNotes.filter((kept) => kept !== note);
-        settleLanded(false);
-        return;
-      }
-      this.interimPosted = true;
-      heard = text;
-      this.lastInterim = text;
-      this.interimSaid.push(text);
-      this.lastSaidWasNote = true;
-      settleLanded(true);
-    };
-    this.queueProgressWrite(settle, settle);
-    return landedNow;
-  }
-
-  /**
-   * Keep the notes to what one message holds with its first line: the
-   * newest, since the oldest are what a reader has already seen. Past
-   * that the message opens with `…`, and memory stays bounded however
-   * long the task runs.
-   */
-  private trimProgressNotes(): void {
-    let size = this.progressNotes.reduce((total, note) => total + note.text.length + 2, 0);
-    while (size > PROGRESS_NOTE_ROOM && this.progressNotes.length > 1) {
-      size -= (this.progressNotes.shift()?.text.length ?? 0) + 2;
-      this.progressNotesCut = true;
-    }
-  }
-
-  private progressText(omitLast = false): string {
-    const notes = omitLast ? this.progressNotes.slice(0, -1) : this.progressNotes;
-    const parts = [progressHeader(this.progress), ...(this.progressNotesCut ? ['…'] : []), ...notes.map((note) => note.text)];
-    return truncateForSlack(parts.join('\n\n'));
-  }
-
-  /**
-   * Put the progress message as it stands now into the thread: posted the
-   * first time, edited after. On the upload chain, behind the turn ahead
-   * and any handover, so it lands below this turn's first line and above
-   * its files and reply, and reads its state when it runs, not when asked.
-   */
-  private queueProgressWrite(landed?: () => void, refused?: () => void): void {
-    const handover = this.handover;
-    const after = this.after;
-    this.uploadChain = this.uploadChain
-      .then(() => handover)
-      .then(() => after)
-      .then(async () => {
-        this.lastProgressAt = Date.now();
-        const held = [...this.progressNotes];
-        await this.writeProgress(this.progressText());
-        for (const note of held) {
-          note.shown = true;
-        }
-        landed?.();
-      })
-      .catch((error) => {
-        refused?.();
-        this.warn(`could not update the progress message: ${error instanceof Error ? error.message : String(error)}`);
-      });
-  }
-
-  private async writeProgress(text: string): Promise<void> {
-    const ref = this.progressRef;
-    if (ref) {
-      await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text });
-      return;
-    }
-    const posted = await this.web.chat.postMessage({
-      channel: this.channel,
-      text,
-      ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-    });
-    if (posted.ts) {
-      this.progressRef = { channel: posted.channel ?? this.channel, ts: posted.ts };
-    }
-    this.placeText(posted.ts);
-    // A post of the app's in this thread takes the status down while the
-    // turn is still working; put it back.
-    this.refreshLoading();
-  }
-
-  /** Edit the progress message for a step that started or settled, at most once per edit interval. */
-  private scheduleProgress(): void {
-    if (!this.progressOpen || this.finalized || this.progressTimer) {
-      return;
-    }
-    const delay = Math.max(0, this.editIntervalMs - (Date.now() - this.lastProgressAt));
-    this.progressTimer = setTimeout(() => {
-      this.progressTimer = undefined;
-      if (!this.finalized) {
-        this.queueProgressWrite();
-      }
-    }, delay);
-    this.progressTimer.unref?.();
-  }
-
-  /**
-   * Open the progress message once the turn has worked `progressAfterMs`:
-   * now, if it has, or when it will have. Asked on a tool call, so there
-   * is always a step to show; a quick answer ends first and opens none.
-   */
-  private openProgressInTime(): void {
-    if (this.progressOpen || this.progressOpenTimer) {
-      return;
-    }
-    const open = () => {
-      this.progressOpen = true;
-      this.queueProgressWrite();
-    };
-    const wait = this.progressAfterMs - (Date.now() - this.turnStartedAt);
-    if (wait <= 0) {
-      open();
-      return;
-    }
-    this.progressOpenTimer = setTimeout(() => {
-      this.progressOpenTimer = undefined;
-      if (!this.finalized && !this.progressOpen) {
-        open();
-      }
-    }, wait);
-    this.progressOpenTimer.unref?.();
-  }
-
-  /** A step of this turn's finished or was refused. */
-  private settleProgressStep(callId: string): void {
-    if (!this.mayShowProgress()) {
-      return;
-    }
-    this.progress.running.delete(callId);
-    this.progress.waitingOn = undefined;
-    this.scheduleProgress();
-  }
-
-  /**
-   * A call of this turn's is waiting on a person: the progress message says
-   * so until the call runs or is refused. The prompt itself is a message
-   * of its own, below it.
-   */
-  awaitingApproval(toolName: string, ofThisTurn: boolean): void {
-    if (!ofThisTurn || !this.mayShowProgress()) {
-      return;
-    }
-    this.progress.waitingOn = toolName;
-    this.scheduleProgress();
-  }
-
-  private clearProgressOpenTimer(): void {
-    if (this.progressOpenTimer) {
-      clearTimeout(this.progressOpenTimer);
-      this.progressOpenTimer = undefined;
-    }
-  }
-
-  private clearProgressTimers(): void {
-    this.clearProgressOpenTimer();
-    if (this.progressTimer) {
-      clearTimeout(this.progressTimer);
-      this.progressTimer = undefined;
-    }
-  }
-
-  /**
-   * The progress message's last edit: how the task ended, and every note
-   * but one that became the reply. Resolves once Slack has answered; a
-   * refusal leaves the last state that landed, and is logged.
-   */
-  private async closeProgress(omitLast: boolean): Promise<void> {
-    this.clearProgressTimers();
-    const ref = this.progressRef;
-    if (!ref) {
-      return;
-    }
-    this.progress.end = this.ending;
-    try {
-      await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text: this.progressText(omitLast) });
-    } catch (error) {
-      this.warn(`could not finish the progress message: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  /**
-   * Take down a progress message that holds no words, for a reply-optional
-   * turn that ended silent (card 601). A delete Slack refuses closes it the
-   * ordinary way instead, so it never stands at `⚙ Working`.
-   */
-  private async retractProgress(): Promise<void> {
-    this.clearProgressTimers();
-    const ref = this.progressRef;
-    if (!ref) {
-      return;
-    }
-    try {
-      await this.web.chat.delete({ channel: ref.channel, ts: ref.ts });
-      this.progressRef = undefined;
-    } catch (error) {
-      this.warn(`could not take down the progress message: ${error instanceof Error ? error.message : String(error)}`);
-      await this.closeProgress(false);
-    }
-  }
-
-  /**
-   * Post what the model said before a call that is about to ask for
-   * approval, and resolve once it has landed (or could not), or at once
-   * when there is nothing to post (card 950).
-   *
-   * The prompt is posted before the call starts, so waiting for
-   * `tool.called` put the question above the line saying what the agent
-   * set out to do, and the approver answered without it. The same flush
-   * `tool.called` would have done, only earlier: what it posts is stripped
-   * from the reply as before, and the flush at `tool.called` finds nothing.
-   */
-  sayBeforeAsking(ofThisTurn: boolean): Promise<boolean> | undefined {
-    if (this.finalized) {
-      return undefined;
-    }
-    return this.flushInterim(ofThisTurn);
-  }
-
-  /**
-   * Everything this turn said in the thread, for its other agents to hear:
-   * the interim messages that landed, then the reply unless it only
-   * repeats the last of them. Read once the turn's posts have landed.
-   */
-  spokenText(reply: string): string {
-    return this.unsaid(reply);
-  }
-
-  /**
-   * The part of a reply not already posted as interim messages. A provider
-   * that hosts its own loop (codex) returns every message of the turn
-   * joined into one reply, so the interim messages are stripped from its
-   * front in order; one whose last words came before its final tool call
-   * returns just those words, which were posted already.
-   */
-  private unsaid(reply: string): string {
-    let rest = reply.trim();
-    // Whole messages only, at the separator the codex provider joins them
-    // with: a reply of its own that merely begins with the same words
-    // ("Sure" then "Sure, the build passes.") is not cut.
-    for (const said of this.interimSaid) {
-      if (rest === said) {
-        rest = '';
-      } else if (rest.startsWith(`${said}\n\n`)) {
-        rest = rest.slice(said.length + 2).trimStart();
-      } else {
-        break;
-      }
-    }
-    return rest === this.lastInterim ? '' : rest;
-  }
-
-  /** Point both status lines at the newest call still running, or clear them. */
-  private showActiveTool(): void {
-    const running = [...this.activeTools.values()].at(-1);
-    this.runningTool = running;
-    this.toolLine = running === undefined ? undefined : `⚙ ${running}…`;
-  }
-
-  private currentText(): string {
-    const parts = [this.buffer.trim(), this.toolLine].filter((part): part is string => Boolean(part && part.length > 0));
-    return parts.length > 0 ? parts.join('\n\n') : PLACEHOLDER_TEXT;
-  }
-
-  private scheduleEdit(): void {
-    if (!this.streaming) {
-      // Nothing to edit: what the turn is doing goes into the status line,
-      // and only once the turn is this renderer's own (see `beginTurn`).
-      const status = this.runningTool !== undefined ? toolStatus(this.runningTool) : THINKING_STATUS;
-      if (this.loading && this.statusTimer && this.turnStarted && !this.finalized && status !== this.statusText) {
-        this.setStatus(status);
-      }
-      return;
-    }
-    // Not gated on having a placeholder: during a handover there is none
-    // for a moment, and the edit reads the fresh one when its turn comes.
-    if (this.pendingEdit) {
-      return;
-    }
-    const elapsed = Date.now() - this.lastEditAt;
-    const delay = Math.max(0, this.editIntervalMs - elapsed);
-    this.pendingEdit = setTimeout(() => {
-      this.pendingEdit = undefined;
-      if (this.finalized) {
-        return;
-      }
-      // Nothing said yet: a lazy turn has no placeholder to edit, and a
-      // tool line alone does not earn one (see `lazy`). Nor does text
-      // streamed here before this turn began — a recovery's, routed to
-      // the head of the queue — which `beginTurn` drops.
-      if (this.lazy && !this.ref && (!this.turnStarted || this.buffer.trim().length === 0)) {
-        return;
-      }
-      this.lastEditAt = Date.now();
-      void this.queueEdit(messageText(this.currentText()));
-    }, delay);
-    this.pendingEdit.unref?.();
-  }
-
-  /**
-   * Queue one edit of the placeholder. Resolves to whether Slack took it —
-   * false when there was no placeholder to edit, the text belonged to a
-   * turn handed over meanwhile, or the update was refused — which is what
-   * lets `finalize` say whether the reply was ever published.
-   */
-  private queueEdit(text: string): Promise<boolean> {
-    const generation = this.generation;
-    // The handover as it stands when the edit is queued, not when it runs:
-    // a handover that begins after this edit waits for this edit, and an
-    // edit that then waited for that handover would be a cycle nothing
-    // could break.
-    const handover = this.handover;
-    const edit = this.editChain
-      .then(() => handover)
-      .then(async () => {
-        if (this.lazy && !this.ref && this.turnStarted && generation === this.generation) {
-          // The first text of a turn nobody asked for: this is where its
-          // placeholder is posted, and the edit below fills it. A post
-          // that fails leaves the turn without one, and its reply is a
-          // message of its own when it comes (see `finalize`).
-          try {
-            await this.open();
-          } catch (error) {
-            this.warn(`could not open a placeholder: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-        // Read after the handover, not before: the placeholder may have
-        // changed hands while this edit waited its turn — and the text
-        // may belong to the turn that was handed over.
-        const ref = this.ref;
-        if (!ref || generation !== this.generation) {
-          return false;
-        }
-        await this.web.chat.update({ channel: ref.channel, ts: ref.ts, text });
-        this.edited = true;
-        this.placeText(ref.ts);
-        return true;
-      })
-      .catch((error) => {
-        this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
-        return false;
-      });
-    this.editChain = edit.then(() => undefined);
-    return edit;
-  }
-
-  /**
-   * Replace the placeholder with the final reply, splitting if oversized.
-   * Resolves to a `ReplyOutcome`. A reply Slack refused any part of was
-   * not said in the thread as written, and nothing downstream may treat it
-   * as if it had been: a colleague hearing the whole of a reply the thread
-   * saw half of is reasoning from text nobody read. But a file beside a
-   * refused sentence is still the last thing said, for the thread rule.
-   */
-  async finalize(reply: string): Promise<ReplyOutcome> {
-    try {
-      return await this.finalizeInOrder(reply);
-    } finally {
-      this.settle();
-    }
-  }
-
-  private async finalizeInOrder(reply: string): Promise<ReplyOutcome> {
-    await this.handover;
-    // Shown, not merely wanted: a turn still queued behind another never
-    // published one, and a clear from it would take down the running
-    // turn's status instead.
-    const hadStatus = this.statusTimer !== undefined;
-    this.stopLoading();
-    this.finalized = true;
-    this.clearProgressTimers();
-    if (!this.streaming) {
-      await this.after;
-      await this.statusChain;
-    }
-    if (this.pendingEdit) {
-      clearTimeout(this.pendingEdit);
-      this.pendingEdit = undefined;
-    }
-    // Let the edits already queued land before deciding anything from
-    // `ref`: a lazy turn's first text may be opening its placeholder in
-    // that chain right now, and reading `ref` ahead of it would post the
-    // reply as a message of its own beside a placeholder that then fills
-    // with stale partial text.
-    await this.editChain;
-    if (this.lazy && reply.trim().length === 0 && (!this.ref || await this.retract())) {
-      // Silence, decided: nothing was posted and nothing is — or what was
-      // posted has been taken back. The uploads still land: a file the
-      // turn produced is not nothing to say, and a turn that posted one
-      // has spoken, for the thread rule.
-      await this.editChain;
-      await this.uploadChain;
-      return this.outcome(false, this.uploaded);
-    }
-    // Interim messages land before the reply is judged: one that already
-    // said what the reply says (the model's last words came before a
-    // tool call) is not posted again, and a turn that said things along
-    // the way is not followed by `(no reply)`.
-    await this.uploadChain;
-    // Words the turn ended on, written before its last tool call, are its
-    // answer (card 949): a reply that only repeats them, or an empty one,
-    // posts them as the reply, and the progress message lets them go. Left
-    // as its last note, the answer would sit in the message that says how
-    // the work went, above where anyone looks for it.
-    // A reply-optional turn that chose to say nothing (card 601) has no
-    // answer for its last words to stand in for.
-    const silent = this.mayStaySilent && reply.trim().length === 0;
-    let promoted = false;
-    if (this.interimPosted && !this.ref && !silent) {
-      const rest = this.unsaid(reply);
-      promoted = rest.length === 0 && this.lastSaidWasNote && this.lastInterim !== undefined;
-      reply = promoted && this.lastInterim !== undefined ? this.lastInterim : rest;
-    }
-    // Alongside the reply rather than ahead of it: an edit keeps its place,
-    // and the answer should not wait on a round trip for a status line.
-    // Words promoted to the reply are the exception: they leave the
-    // progress message only once the reply holding them has landed, so a
-    // reply Slack refuses does not take the answer out of the thread.
-    // Chosen silence takes down a progress message that only ever said how
-    // the work went: left as `✓ Done`, it would be the post the turn chose
-    // not to make. One holding words the turn said along the way stays.
-    const closed = promoted
-      ? undefined
-      : silent && this.progressNotes.length === 0 && !this.progressNotesCut
-        ? this.retractProgress()
-        : this.closeProgress(false);
-    if (silent && (!this.ref || await this.retract())) {
-      // A reply-optional turn that decided to say nothing (card 601): no
-      // `(no reply)`, and a placeholder it opened is taken back. What it
-      // said along the way, and the files it posted, stay: they were said.
-      await (closed ?? Promise.resolve());
-      await this.uploadChain;
-      // Nothing posts after this to take the status down, so it is cleared.
-      if (hadStatus) {
-        this.setStatus('');
-        await this.statusChain;
-      }
-      const spoke = this.interimPosted || this.uploaded;
-      return this.outcome(this.interimPosted, spoke);
-    }
-    if (!this.ref && this.interimPosted && reply.trim().length === 0) {
-      await (closed ?? this.closeProgress(false));
-      // Nothing posts after this to take the status down, so it is cleared.
-      if (hadStatus) {
-        this.setStatus('');
-        await this.statusChain;
-      }
-      return this.outcome(true, true);
-    }
-    const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
-    const chunks = await this.chunksOf(text);
-    // No placeholder — a handover could not open a fresh one — and the
-    // reply is a message of its own rather than nothing at all.
-    const rest = this.ref ? chunks.slice(1) : chunks;
-    const edited = this.ref ? this.queueEdit(chunks[0] ?? NO_REPLY_TEXT) : Promise.resolve(false);
-    let landed = await edited;
-    let published = this.ref ? landed : true;
-    await this.editChain;
-    await this.uploadChain;
-    for (const chunk of rest) {
-      try {
-        const posted = await this.web.chat.postMessage({
-          channel: this.channel,
-          text: chunk,
-          ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-        });
-        landed = true;
-        this.placeText(posted.ts);
-      } catch (error) {
-        published = false;
-        this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    // A placeholder that opened for a turn nobody asked for and never
-    // took a word of it — every edit refused — is a `…` standing alone
-    // under the agent's name, the interruption a judged turn exists to
-    // avoid, so it is taken back like an abandoned attempt's. One Slack
-    // will not let go stands, and a message the thread can see is the
-    // last thing said whatever it says.
-    await (closed ?? this.closeProgress(published));
-    let stranded = false;
-    if (this.lazy && this.ref !== undefined && !landed && !this.edited) {
-      stranded = !(await this.retract());
-      if (stranded) {
-        this.placeText(this.ref?.ts);
-      }
-    }
-    // A reply posted into the status's thread clears the status itself;
-    // one Slack refused would leave "is thinking…" standing over a turn
-    // that has ended. So would one posted anywhere else: a top-level DM
-    // reply keys its status to the message it answers (`statusThread`),
-    // but posts beside it rather than under it, and Slack never clears it.
-    if (hadStatus && (!landed || this.threadTs !== this.statusThread)) {
-      this.setStatus('');
-      // Awaited: the turn queued behind this one re-shows its own status
-      // once this renderer is done, and a clear that reached Slack after
-      // that would take the next turn's status down with it.
-      await this.statusChain;
-    }
-    return this.outcome(published, landed || this.edited || this.uploaded || stranded, !published);
-  }
-
-  /**
-   * This turn's text as the messages it is posted as, in this agent's reply
-   * mode: `texts` splits it a paragraph to a message unless it tags another
-   * agent.
-   */
-  private async chunksOf(text: string): Promise<string[]> {
-    const texts = this.texts && !(await this.tagsAnAgent?.(text));
-    return messageChunks(text, texts ? 'texts' : undefined);
-  }
-
-  private placeText(ts: string | undefined): void {
-    if (ts !== undefined && (this.textAt === undefined || ts > this.textAt)) {
-      this.textAt = ts;
-    }
-  }
-
-  private outcome(published: boolean, spoke: boolean, refused = false): ReplyOutcome {
-    const spokeAt = [this.textAt, this.uploadedAt]
-      .filter((ts): ts is string => ts !== undefined)
-      .sort()
-      .at(-1);
-    return { published, spoke, ...(spoke && spokeAt !== undefined ? { spokeAt } : {}), ...(refused ? { refused: true as const } : {}) };
-  }
-
-  /**
-   * Take back the placeholder a turn nobody asked for opened and then had
-   * nothing to put in: the line that opened it was an attempt the provider
-   * abandoned (`reset` — a fallback after a mid-stream failure), and the
-   * attempt that stood answered with nothing. Editing that placeholder to
-   * `(no reply)` would leave exactly the interruption a silent turn exists
-   * to avoid, and would count as speaking. Resolves to whether Slack let
-   * the message go: a delete refused leaves the abandoned line standing,
-   * and the turn finishes the ordinary way, since a message the thread
-   * can still see is the last thing said whatever it says.
-   */
-  private async retract(): Promise<boolean> {
-    const ref = this.ref;
-    if (!ref) {
-      return true;
-    }
-    try {
-      await this.web.chat.delete({ channel: ref.channel, ts: ref.ts });
-    } catch (error) {
-      this.warn(`chat.delete failed: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
-    }
-    this.ref = undefined;
-    // The line the placeholder took is gone with it: nothing of this
-    // turn's stands in the thread unless a file does.
-    this.edited = false;
-    this.textAt = undefined;
-    return true;
-  }
-
-  /**
-   * Stand down without saying anything: the message this renderer was
-   * opened for repeated one whose turn another delivery in this process
-   * is still waiting on, and that delivery posts the answer. Whatever this
-   * renderer put up — a placeholder, a loading status — comes down, so a
-   * redelivery leaves no trace.
-   */
-  async withdraw(): Promise<void> {
-    try {
-      await this.handover;
-      const hadStatus = this.statusTimer !== undefined;
-      this.stopLoading();
-      this.finalized = true;
-      this.clearProgressTimers();
-      // The barrier `finalizeInOrder` takes, for the same reason: the turn
-      // queued behind this one waits on `posted`, and settling it before
-      // the reply ahead has posted would let that turn's reply overtake it.
-      if (!this.streaming) {
-        await this.after;
-        await this.statusChain;
-      }
-      if (this.pendingEdit) {
-        clearTimeout(this.pendingEdit);
-        this.pendingEdit = undefined;
-      }
-      await this.editChain;
-      // A repeat can queue files the report ahead of it could not post
-      // and then stand down: they land before it settles.
-      await this.uploadChain;
-      await this.retract();
-      if (hadStatus) {
-        this.setStatus('');
-        await this.statusChain;
-      }
-    } finally {
-      this.settle();
-    }
-  }
-
-  /**
-   * Ends a turn an approver stopped from Slack: says who stopped it where
-   * the reply would have gone. A turn nobody asked for that had said
-   * nothing stays silent, as its failure would.
-   */
-  async stopped(by: string): Promise<ReplyOutcome> {
-    await this.editChain;
-    if (this.lazy && !this.ref && this.buffer.trim().length === 0) {
-      return this.finalize('');
-    }
-    this.ending = 'stopped';
-    return this.finalize(`Stopped by <@${by}>.`);
-  }
-
-  /**
-   * `refused` is a turn the host stopped on purpose (`HostRefusalError`), a
-   * spent budget, whose message is already a sentence for the person
-   * reading it. Framed as something having gone wrong, it would read as a
-   * fault to report when it is a limit working.
-   */
-  async fail(message: string, refused = false): Promise<ReplyOutcome> {
-    // The same wait `finalize` takes, for the same reason: a lazy turn's
-    // first text may be opening its placeholder right now, and a failure
-    // read as "before saying anything" would leave that placeholder saying
-    // `(no reply)` where the failure belongs.
-    await this.editChain;
-    // "Before saying anything" is no placeholder AND nothing buffered: a
-    // first text whose zero-delay edit has not fired yet has still been
-    // said, and its failure is reported — as a message of its own, since
-    // there is no placeholder to edit — rather than swallowed with it.
-    if (this.lazy && !this.ref && this.buffer.trim().length === 0) {
-      // A turn nobody asked for that failed before saying anything: the
-      // failure is in the daemon log, and an error note would be the
-      // interruption the turn existed to avoid.
-      this.warn(`a turn nobody asked for failed before saying anything: ${message}`);
-      return this.finalize('');
-    }
-    // A spent budget is a limit working, not a fault: the task stopped.
-    this.ending = refused ? 'stopped' : 'failed';
-    return this.finalize(refused ? message : `Something went wrong: ${message}`);
-  }
-
-  /**
-   * Claim the placeholder for a turn that finished ahead of this one — the
-   * recovery this renderer was queued behind — without yet knowing what
-   * that turn has to say. Slack keeps a message's place when it is edited,
-   * so the earlier turn's reply lands above this turn's, in the order the
-   * conversation happened; posted as a new message instead, it would sit
-   * below a placeholder that was posted first.
-   *
-   * The claim is made synchronously, so it is in place before the caller
-   * awaits anything (see `HandoverClaim`).
-   */
-  reserveHandover(): HandoverClaim {
-    // One handover at a time: two turns ahead of this one finishing close
-    // together would otherwise both take the placeholder as they found it,
-    // and the second would write over the first's reply. Each waits for
-    // the one before it and takes the placeholder that reopen left.
-    // The edits to let through first are the ones queued before this
-    // handover existed; those queued after it wait for it (see `queueEdit`),
-    // so waiting on the live chain here would wait on them in return.
-    const drained = this.editChain;
-    const previous = this.handover;
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.handover = previous.then(() => held);
-    let spent = false;
-    const settle = (): void => {
-      if (!spent) {
-        spent = true;
-        release();
-      }
-    };
-    return {
-      take: async (chunks, between) => {
-        if (spent) {
-          return 'untaken';
-        }
-        try {
-          await previous;
-          return await this.handoverTo(chunks, drained, between);
-        } finally {
-          settle();
-        }
-      },
-      release: settle,
-    };
-  }
-
-  /**
-   * The body of a handover, running with the placeholder already claimed:
-   * edit it to the earlier turn's first chunk, post the rest, run whatever
-   * else that turn has to put in the thread, and reopen a placeholder for
-   * this turn below it all.
-   */
-  private async handoverTo(
-    chunks: readonly string[],
-    drained: Promise<void>,
-    between: (() => Promise<void>) | undefined,
-  ): Promise<'complete' | 'partial' | 'untaken'> {
-    const [first, ...rest] = chunks;
-    const given = this.ref;
-    if (first === undefined || this.finalized || !given) {
-      return 'untaken';
-    }
-    await drained;
-    try {
-      await this.web.chat.update({ channel: given.channel, ts: given.ts, text: first });
-    } catch (error) {
-      // Not handed over: the placeholder is still this turn's, and the
-      // caller posts the reply as messages of its own.
-      this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
-      return 'untaken';
-    }
-    let complete = true;
-    // The placeholder is the earlier turn's now, and the reference goes
-    // before the reopen, so a reopen that fails cannot leave this turn
-    // writing over the reply just handed over. (What was streamed into
-    // it is dealt with by `beginTurn`, at the boundary that actually
-    // separates the two turns' output.)
-    this.ref = undefined;
-    for (const chunk of rest) {
-      try {
-        await this.web.chat.postMessage({
-          channel: this.channel,
-          text: chunk,
-          ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-        });
-      } catch (error) {
-        complete = false;
-        this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    // Anything else the earlier turn has to put in the thread goes here,
-    // while this renderer still has no placeholder of its own: a message
-    // posted after the reopen would sit below this turn's answer, which
-    // is the order the handover exists to keep.
-    if (between) {
-      await between();
-    }
-    try {
-      await this.open();
-    } catch (error) {
-      // No placeholder for this turn, then: its reply is posted as a
-      // message of its own when it comes (see `finalize`).
-      this.warn(`could not reopen a placeholder: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return complete ? 'complete' : 'partial';
-  }
-}
-
-// The file-bearing result convention is the kernel's (`filePathsOf`), so
-// the gateway counts a turn that produced a file as having spoken by the
-// same rule this adapter uploads it by.
-const collectFilePaths = (result: ToolResult): string[] => filePathsOf(result);
-
-// A hard cut must never land between the halves of a UTF-16 surrogate
-// pair — an emoji on the boundary would reach Slack as two replacement
-// characters. Backs the index off the pair's high half when it would.
-const safeCutIndex = (text: string, index: number): number => {
-  const code = text.charCodeAt(index - 1);
-  return code >= 0xd800 && code <= 0xdbff ? index - 1 : index;
-};
-
-/** `index` moved forward, never back, off the middle of a surrogate pair. */
-const pastCodePoint = (text: string, index: number): number => {
-  const code = text.charCodeAt(index - 1);
-  return code >= 0xd800 && code <= 0xdbff ? index + 1 : index;
-};
-
-/**
- * `cut` moved in front of any Slack markup it would land inside — a link
- * `<https://…>` or `<https://…|label>`, a mention `<@U…>` — when that still
- * leaves half a message. Cut through, the first message ends on an
- * unterminated `<https://…` and the next starts with the rest of the
- * address and a stray `>`, and neither half is a link. Markup is one line,
- * so only the cut's own line is looked at.
- */
-const outsideSlackMarkup = (text: string, cut: number): number => {
-  const open = text.lastIndexOf('<', cut - 1);
-  if (open <= SLACK_MAX_MESSAGE_CHARS / 2) {
-    return cut;
-  }
-  const closedBefore = text.lastIndexOf('>', cut - 1);
-  const lineBreak = text.lastIndexOf('\n', cut - 1);
-  if (closedBefore > open || lineBreak > open) {
-    return cut;
-  }
-  const close = text.indexOf('>', cut);
-  const nextLine = text.indexOf('\n', cut);
-  if (close === -1 || (nextLine !== -1 && nextLine < close)) {
-    return cut;
-  }
-  return open;
-};
-
-const truncateForSlack = (text: string): string =>
-  text.length <= SLACK_MAX_MESSAGE_CHARS
-    ? text
-    : `${text.slice(0, safeCutIndex(text, SLACK_MAX_MESSAGE_CHARS - 1))}…`;
-
-/**
- * Text as however many messages Slack's limit makes it, never leaving a
- * code block broken across the cut. A cut blind to fences ended one
- * message on an unterminated block and started the next mid-block, where
- * Slack read the rest of somebody's log as prose — every `*` and `_` in it
- * formatting. So a cut that would land inside a code run moves in front of
- * it when that still leaves a message worth sending, and otherwise closes
- * the run at the cut and reopens it in the next.
- */
-const splitForSlack = (text: string): string[] => {
-  if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
-    return [text];
-  }
-  const chunks: string[] = [];
-  let rest = text;
-  while (rest.length > SLACK_MAX_MESSAGE_CHARS) {
-    // Prefer a newline break inside the window; fall back to a hard cut.
-    const window = rest.slice(0, SLACK_MAX_MESSAGE_CHARS);
-    const newline = window.lastIndexOf('\n');
-    const cut = newline > SLACK_MAX_MESSAGE_CHARS / 2 ? newline : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
-    // Scanned two messages deep, not to the end: rescanning the whole rest
-    // for every chunk made a megabyte reply quadratic on the event loop. A
-    // fence that closes past the window still reads as open to its end,
-    // which is what it is here; an inline span that does is longer than a
-    // message, and is cut as text either way.
-    const run = codeRunsOf(rest.slice(0, SLACK_MAX_MESSAGE_CHARS * 2))
-      .find((candidate) => candidate.start < cut && cut < candidate.end);
-    if (run !== undefined && run.start > SLACK_MAX_MESSAGE_CHARS / 4) {
-      chunks.push(rest.slice(0, run.start).replace(/\n+$/, ''));
-      rest = rest.slice(run.start);
-      continue;
-    }
-    // The run is most of the message, so it is cut itself — at its last
-    // newline that leaves room for the closer, and past its opener so the
-    // continuation always makes progress. A continuation reopens with the
-    // info string only while it is short: a two-thousand-character info
-    // line repeated on every part would crowd out the code it labels.
-    const budget = SLACK_MAX_MESSAGE_CHARS - (run?.closer.length ?? 0);
-    const floor = run === undefined ? 0 : run.start + run.opener.length;
-    const reopen = run === undefined || run.opener.length <= SLACK_MAX_MESSAGE_CHARS / 8
-      ? run?.opener
-      : run.opener.endsWith('\n') ? `${run.closer.slice(1)}\n` : run.opener;
-    // A delimiter too long to close and reopen inside one message — a fence
-    // of a thousand backticks, an opening line that fills the window — is
-    // cut raw, as before this existed. Reopening it would send a message
-    // over the limit, and consume a character a message after that.
-    // Only a fence is reopened. Its closer and opener sit on lines of their
-    // own, so they can never run into a backtick of the code; an inline
-    // span's would, and `x` + `` would read as a different delimiter.
-    // `floor + 2`: the first cut past the opener has to fit a whole code
-    // point, or the step that guarantees progress lands inside an emoji.
-    const fence = run !== undefined && run.closer.startsWith('\n');
-    if (run === undefined || !fence || reopen === undefined || reopen.length + run.closer.length > SLACK_MAX_MESSAGE_CHARS / 4 || floor + 2 > budget) {
-      const at = run === undefined ? outsideSlackMarkup(rest, cut) : cut;
-      chunks.push(rest.slice(0, at));
-      rest = rest.slice(at).replace(/^\n+/, '');
-      continue;
-    }
-    const inner = rest.lastIndexOf('\n', budget - 1);
-    const within = inner > Math.max(floor, SLACK_MAX_MESSAGE_CHARS / 2) ? inner : Math.max(safeCutIndex(rest, budget), pastCodePoint(rest, floor + 1));
-    chunks.push(`${rest.slice(0, within)}${run.closer}`);
-    rest = `${reopen}${rest.slice(within).replace(/^\n/, '')}`;
-  }
-  if (rest.length > 0) {
-    chunks.push(rest);
-  }
-  return chunks;
-};
-
-/**
- * Agent text as one Slack message: converted, then sized.
- *
- * These two are the only ways anything an agent wrote reaches Slack, so
- * mrkdwn is a property of the send path rather than something each call
- * site has to remember — the reason the streamed placeholder and the final
- * reply cannot end up in different markup.
- */
-const messageText = (text: string): string => truncateForSlack(toSlackMrkdwn(text));
-
-/**
- * Agent text as however many Slack messages it takes. Converted before it
- * is split, so a chunk is measured at the length it will be sent at, and so
- * no rewrite is ever asked to span a boundary.
- *
- * In `texts` mode a reply is first cut into the few messages it is texted
- * as, each then converted and sized on its own: the cuts never fall inside
- * code, and nothing else in the conversion crosses a line.
- */
-const messageChunks = (text: string, replies?: SlackReplyMode): string[] =>
-  (replies === 'texts' ? textingParts(text) : [text]).flatMap((part) => splitForSlack(toSlackMrkdwn(part)));
-
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',
   stratus_approve_always: 'always',
@@ -2843,738 +1071,6 @@ const AGENT_SPEECH_SUBTYPES = new Set(['bot_message', 'file_share', 'thread_broa
 const isPersonSpeaking = (event: SlackInboundEvent): boolean =>
   event.subtype === undefined || HUMAN_MESSAGE_SUBTYPES.has(event.subtype);
 
-/** At most this many attachment names are listed; the rest are counted. */
-const MAX_LISTED_ATTACHMENTS = 5;
-
-/**
- * Why an attachment reached the turn as a name only. The note says which,
- * per file, because "cannot be read here" for every one of them read the
- * same for a PDF nothing here opens, a log over the size cap, and a
- * download Slack refused, and an agent asked why guessed at the cause.
- */
-type UnreadReason = 'unsupported' | 'too-large' | 'failed' | 'timed-out' | 'unreadable' | 'not-opened';
-type UnreadReasons = Map<SlackInboundFile, UnreadReason>;
-
-const UNREAD_REASON_TEXT: Record<UnreadReason, string> = {
-  unsupported: 'not a kind of file that can be read here',
-  'too-large': 'too large to read here',
-  failed: 'could not be downloaded',
-  'timed-out': 'not downloaded in time',
-  unreadable: 'not readable as text or as an image',
-  'not-opened': 'not opened, since this message was not addressed to you',
-};
-
-/**
- * What a message's attachments are called, and why each was not read, for
- * a turn that cannot open them. Without this the agent is handed "here's
- * the log" and no log, and answers as though it had read something; the
- * note is what lets it say the true thing instead. Images the model was
- * actually shown are not listed here: they travel on the dispatch, name
- * included. A file with no recorded reason is one no reader was handed,
- * which is `unsupported`.
- */
-const attachmentNote = (files: readonly SlackInboundFile[], reasons: UnreadReasons): string => {
-  if (files.length === 0) {
-    return '';
-  }
-  const listed = files.slice(0, MAX_LISTED_ATTACHMENTS);
-  const groups = new Map<UnreadReason, string[]>();
-  for (const file of listed) {
-    const reason = reasons.get(file) ?? 'unsupported';
-    groups.set(reason, [...(groups.get(reason) ?? []), file.name ?? file.title ?? 'an unnamed file']);
-  }
-  const parts = [...groups].map(([reason, names]) => `${names.join(', ')} (${UNREAD_REASON_TEXT[reason]})`);
-  const rest = files.length - listed.length;
-  const all = rest > 0 ? `${parts.join('; ')}; and ${rest} more` : parts.join('; ');
-  return `\n[Attached, name only: ${all}. You have only the names, so say so rather than guessing at what is in them.]`;
-};
-
-/** What Slack calls a file, in a warning about it. */
-const fileLabel = (file: SlackInboundFile): string => file.name ?? file.title ?? file.id ?? 'an unnamed file';
-
-/**
- * Slack's scaled copies of an image, largest first. Slack makes these for
- * every image it hosts — a 14 MB, 2600×1800 PNG came back with thumbnails
- * from 64 to 1024 pixels a side, each a PNG under 3 MB — so an image too
- * big for the model still has a copy it can take, with no image library
- * here to make one. Smaller than 360 is too small to read anything in.
- */
-const SLACK_PREVIEW_KEYS = ['thumb_1024', 'thumb_960', 'thumb_800', 'thumb_720', 'thumb_480', 'thumb_360'] as const;
-
-/** The largest preview Slack lists for a file, if it lists one. */
-const slackPreviewUrl = (file: SlackInboundFile): string | undefined =>
-  SLACK_PREVIEW_KEYS.map((key) => file[key]).find((url) => typeof url === 'string' && url.length > 0);
-
-/**
- * What an image's own bytes say it is. A preview's type is not in Slack's
- * metadata — only the original's is — so it is read from the file itself,
- * and anything that is none of the four the API takes is not an image here.
- */
-const imageMediaTypeOf = (bytes: Buffer): ImageAttachmentMediaType | undefined => {
-  const ascii = (at: number, length: number): string => bytes.subarray(at, at + length).toString('latin1');
-  if (bytes.length >= 8 && bytes[0] === 0x89 && ascii(1, 3) === 'PNG') {
-    return 'image/png';
-  }
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return 'image/jpeg';
-  }
-  if (ascii(0, 4) === 'GIF8') {
-    return 'image/gif';
-  }
-  if (ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WEBP') {
-    return 'image/webp';
-  }
-  return undefined;
-};
-
-/** An image the model is shown as Slack's preview of it, and why. */
-interface ImagePreview {
-  name: string;
-  width: number;
-  height: number;
-  /** Ends "because the original …": what made the original too big. */
-  original: string;
-}
-
-const MIB = 1024 * 1024;
-
-/**
- * Says which images the model sees scaled down. Without it the agent reads
- * a 1024-pixel preview of a 14 MB screenshot as the screenshot, and states
- * what the small text says when it could only guess at it.
- */
-const previewNote = (previews: readonly ImagePreview[]): string =>
-  previews.map((preview) => `\n[${previewSentence(preview)}]`).join('');
-
-/** One preview, said the same way to a turn and to a read of history. */
-const previewSentence = ({ name, width, height, original }: ImagePreview): string =>
-  `${name} is shown as Slack's ${width}×${height} preview, because the original ${original}. Small text in it may not be legible: ask for a crop rather than guessing at it.`;
-
-/** An image downloaded, checked, and measured. */
-interface DownloadedImage {
-  body: Buffer;
-  mediaType: ImageAttachmentMediaType;
-  width: number;
-  height: number;
-}
-
-/**
- * An image left out, why, and the warning that says so. `oversized` is set
- * only for the per-image limits — the refusal a smaller copy of the same
- * image can get past — with the clause a warning about the preview reuses
- * and what the turn is told made the original too big.
- */
-interface RefusedImage {
-  reason: UnreadReason;
-  warning: string;
-  oversized?: { why: string; original: string };
-}
-
-/**
- * A message's attachments, sorted into the images the model will be shown
- * and everything else. An image is fetched only when Slack's own metadata
- * says it is one the API accepts and small enough to send; that keeps a
- * 40 MB PNG from being downloaded just to be dropped, and a PDF from being
- * fetched at all. An image over the per-image limits — 5 MB, or 8000
- * pixels a side — is sent as Slack's own largest preview of it instead,
- * when Slack made one, and the turn is told it is a preview. What comes
- * back is checked as well: without `files:read`
- * Slack serves a sign-in page with a 200, and sending that to the model as
- * an image would fail the turn with an error naming nothing the person can
- * fix — the warning here names the scope instead, and the file falls back
- * to the by-name note like any other attachment the turn cannot open.
- */
-const readImageAttachments = async (
-  files: readonly SlackInboundFile[],
-  botToken: string,
-  fetchFile: SlackFileFetcher,
-  timeoutMs: number,
-  warn: (line: string) => void,
-  reasons: UnreadReasons,
-  deadline: AbortSignal = AbortSignal.timeout(timeoutMs),
-): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[]; previews: ImagePreview[] }> => {
-  // Decided from the last file back, the way the replay window is spent:
-  // when a message's images do not all fit, the ones kept are the ones it
-  // listed last, so intake and replay agree about which survive. Delivered
-  // in the message's own order, because that is how the person sees them.
-  const kept = new Map<number, ImageAttachment>();
-  const previewed = new Map<number, ImagePreview>();
-  const dropped = new Set<number>();
-  // Recorded beside the drop, so the note says why and never guesses. A
-  // non-image goes on to the text reader with no reason: it decides.
-  const drop = (position: number, reason: UnreadReason): void => {
-    dropped.add(position);
-    reasons.set(files[position]!, reason);
-  };
-  // Decoded bytes accepted so far. Checked against Slack's reported size
-  // before a download and the real length after it, because the message
-  // as a whole has a budget the per-image cap alone cannot keep.
-  let total = 0;
-  // Once an image that fits on its own does not fit what is left of the
-  // message's budget, nothing listed before it is taken either: the window
-  // is contiguous, as the replay window is, and a smaller older image must
-  // not slip in past a larger newer one that was left out.
-  let windowClosed = false;
-  // Why an image is being left out, or nothing when it fits. One place for
-  // both limits so the warning and the fallback cannot disagree. Over the
-  // per-image cap, the image can still be sent as Slack's preview; over
-  // what is left of the message's budget, it is not sent at all.
-  const overLimit = (label: string, bytes: number): RefusedImage | undefined => {
-    if (bytes > IMAGE_ATTACHMENT_MAX_BYTES) {
-      const why = `${label} is ${bytes} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at`;
-      return {
-        reason: 'too-large',
-        warning: `slack: ${why}; the turn is told it cannot be read.`,
-        oversized: { why, original: `is ${(bytes / MIB).toFixed(1)} MB, over the ${IMAGE_ATTACHMENT_MAX_BYTES / MIB} MB a model can be sent` },
-      };
-    }
-    if (total + bytes > IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES) {
-      windowClosed = true;
-      return { reason: 'too-large', warning: `slack: ${label} would take this message's images past the ${IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES} bytes one request can carry; the turn is told it cannot be read. Send it in a message of its own.` };
-    }
-    return undefined;
-  };
-  // One download, checked the same way for an original and for a preview:
-  // the image and its size, or why not. `oversized` marks a refusal for the
-  // per-image limits alone — the only kind a smaller copy can get past.
-  // `mediaType` is Slack's word for an original; a preview's is read from
-  // its own bytes, since Slack's metadata describes only the original.
-  const download = async (url: string, label: string, mediaType: ImageAttachmentMediaType | undefined): Promise<DownloadedImage | RefusedImage> => {
-    // What this image may weigh: the per-image cap, or what is left of the
-    // message's budget if that is less. Handed to the fetcher so an
-    // oversized response is abandoned mid-body rather than buffered whole.
-    const maxBytes = Math.min(IMAGE_ATTACHMENT_MAX_BYTES, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES - total);
-    if (deadline.aborted) {
-      return { reason: 'timed-out', warning: `slack: ${label} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.` };
-    }
-    let fetched: SlackFileDownload;
-    try {
-      fetched = await fetchFile(url, botToken, deadline, maxBytes);
-    } catch (error) {
-      const timedOut = error instanceof Error && error.name === 'TimeoutError';
-      const cause = timedOut
-        ? `this message's downloads took longer than ${timeoutMs}ms`
-        : (error instanceof Error ? error.message : String(error));
-      return { reason: timedOut ? 'timed-out' : 'failed', warning: `slack: could not download ${label}: ${cause}. The turn is told it cannot be read.` };
-    }
-    // Refused on what Slack sends when it will not serve the file — a
-    // non-200, or a 200 whose body is a page — rather than on the label of
-    // what it does serve: a download URL may be typed as the image or as
-    // a plain octet stream, and either is the bytes Slack said it was.
-    const contentType = fetched.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
-    if (fetched.status !== 200 || contentType.startsWith('text/')) {
-      return { reason: 'failed', warning: `slack: ${label} came back as ${contentType || 'no content type'} (HTTP ${fetched.status}) rather than an image. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.` };
-    }
-    if (fetched.truncated === true) {
-      const why = `${label} is larger than the ${maxBytes} bytes this message could still take for an image; the download was abandoned`;
-      // Cut off at what was left of the message's budget, rather than at
-      // the per-image cap: the same overflow the size check closes the
-      // window on, learned from the bytes instead of the metadata.
-      if (maxBytes < IMAGE_ATTACHMENT_MAX_BYTES) {
-        windowClosed = true;
-        return { reason: 'too-large', warning: `slack: ${why} and the turn is told it cannot be read.` };
-      }
-      return {
-        reason: 'too-large',
-        warning: `slack: ${why} and the turn is told it cannot be read.`,
-        oversized: { why, original: `is over the ${IMAGE_ATTACHMENT_MAX_BYTES / MIB} MB a model can be sent` },
-      };
-    }
-    const tooBig = overLimit(label, fetched.body.length);
-    if (tooBig !== undefined) {
-      return tooBig;
-    }
-    // Read from the bytes, not from Slack's metadata: an image the model
-    // API refuses fails the turn it arrives on and, once stored, every turn
-    // after — so what is stored has to be what the API takes.
-    const type = mediaType ?? imageMediaTypeOf(fetched.body);
-    const dimensions = type === undefined ? undefined : imageDimensions(fetched.body, type);
-    if (type === undefined || dimensions === undefined) {
-      return { reason: 'unreadable', warning: `slack: ${label} is not a complete ${type ?? 'image'} — its header or trailer is missing; the turn is told it cannot be read.` };
-    }
-    if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
-      const why = `${label} is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take`;
-      return {
-        reason: 'too-large',
-        warning: `slack: ${why}; the turn is told it cannot be read.`,
-        oversized: { why, original: `is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION} pixels a side a model can be sent` },
-      };
-    }
-    return { body: fetched.body, mediaType: type, ...dimensions };
-  };
-  for (let position = files.length - 1; position >= 0; position -= 1) {
-    const file = files[position]!;
-    const url = file.url_private_download ?? file.url_private;
-    if (!isImageAttachmentMediaType(file.mimetype)) {
-      dropped.add(position);
-      continue;
-    }
-    if (url === undefined) {
-      drop(position, 'failed');
-      continue;
-    }
-    if (windowClosed) {
-      warn(`slack: ${fileLabel(file)} was not taken: an image listed after it already filled what this message's images can carry; the turn is told it cannot be read.`);
-      drop(position, 'too-large');
-      continue;
-    }
-    // Slack's own size is trusted before any bytes move: an original it
-    // says is too big is never fetched — only, when that is the per-image
-    // cap, its preview.
-    let result = (file.size === undefined ? undefined : overLimit(fileLabel(file), file.size))
-      ?? await download(url, fileLabel(file), file.mimetype);
-    const previewUrl = 'reason' in result && result.oversized !== undefined ? slackPreviewUrl(file) : undefined;
-    if ('reason' in result && result.oversized !== undefined && previewUrl !== undefined) {
-      const { why, original } = result.oversized;
-      const preview = await download(previewUrl, `Slack's preview of ${fileLabel(file)}`, undefined);
-      if ('reason' in preview) {
-        warn(`slack: ${why}. Slack's smaller preview of it could not be used either: ${preview.warning.replace(/^slack: /, '')}`);
-        drop(position, result.reason);
-        continue;
-      }
-      warn(`slack: ${why}; sent Slack's ${preview.width}×${preview.height} preview of it instead, and the turn is told it is a preview.`);
-      previewed.set(position, { name: fileLabel(file), width: preview.width, height: preview.height, original });
-      result = preview;
-    }
-    if ('reason' in result) {
-      warn(result.warning);
-      drop(position, result.reason);
-      continue;
-    }
-    total += result.body.length;
-    const name = file.name ?? file.title;
-    kept.set(position, {
-      mediaType: result.mediaType,
-      data: result.body.toString('base64'),
-      ...(name !== undefined ? { name } : {}),
-    });
-  }
-  const images: ImageAttachment[] = [];
-  const unread: SlackInboundFile[] = [];
-  const previews: ImagePreview[] = [];
-  files.forEach((file, position) => {
-    const image = kept.get(position);
-    if (image !== undefined) {
-      images.push(image);
-      const preview = previewed.get(position);
-      if (preview !== undefined) {
-        previews.push(preview);
-      }
-    } else if (dropped.has(position)) {
-      unread.push(file);
-    }
-  });
-  return { images, unread, previews };
-};
-
-/** A read's byte cap, said in the unit it was most likely set in. */
-const readCapLabel = (bytes: number): string => (bytes % MIB === 0 ? `${bytes / MIB} MB` : `${bytes} bytes`);
-
-/**
- * The image cap a read asked for, held to what one request can carry, or
- * undefined when it asked for none: then files come back by name only.
- */
-const historyImageCap = (images: ConversationReadRequest['images']): { count: number; bytes: number } | undefined => {
-  if (images === undefined || !Number.isInteger(images.count) || images.count <= 0 || !Number.isFinite(images.bytes) || images.bytes < 1) {
-    return undefined;
-  }
-  return {
-    count: Math.min(images.count, IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT),
-    bytes: Math.min(Math.floor(images.bytes), IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES),
-  };
-};
-
-/** What a read is told about an image it tried to fetch and could not show. */
-const unshownImageNote = (label: string, reason: UnreadReason | undefined): string => {
-  switch (reason) {
-    case 'too-large':
-      return `${label} is not shown: it is over the ${IMAGE_ATTACHMENT_MAX_BYTES / MIB} MB or ${IMAGE_ATTACHMENT_MAX_DIMENSION} pixels a side a model can be sent, and Slack had no smaller preview of it that could be.`;
-    case 'timed-out':
-      return `${label} is not shown: it was not downloaded in time.`;
-    case 'unreadable':
-      return `${label} is not shown: its bytes are not a complete image.`;
-    default:
-      return `${label} is not shown: it could not be downloaded.`;
-  }
-};
-
-/**
- * The images on the messages a read returns, fetched for a read that asks
- * (`ConversationReadRequest.images`) and set on each message with a note
- * for every image file it does not show. Each image goes through the same
- * reader a turn's attachments do — Slack's metadata first, the bytes
- * checked, Slack's preview for one over the per-image limits, and only
- * from Slack's own file host — one file at a time, in the order the
- * messages are returned. The read's cap is spent in that order, and once
- * an image does not fit, none after it is taken, so what is shown is one
- * unbroken stretch of the read rather than whichever small ones squeezed
- * in. One deadline covers every download in the read.
- */
-const readHistoryImages = async (
-  sources: ReadonlyArray<{ message: ConversationMessage; files: readonly SlackInboundFile[] }>,
-  cap: { count: number; bytes: number },
-  botToken: string,
-  fetchFile: SlackFileFetcher,
-  timeoutMs: number,
-  warn: (line: string) => void,
-): Promise<void> => {
-  const deadline = AbortSignal.timeout(timeoutMs);
-  const pastBytes = `past this read's cap of ${readCapLabel(cap.bytes)} of images`;
-  let count = 0;
-  let remaining = cap.bytes;
-  let full: string | undefined;
-  for (const { message, files } of sources) {
-    const images: ImageAttachment[] = [];
-    const notes: string[] = [];
-    for (const file of files) {
-      const label = fileLabel(file);
-      if (!isImageAttachmentMediaType(file.mimetype)) {
-        if (file.mimetype?.startsWith('image/') === true) {
-          notes.push(`${label} is not shown: it is ${file.mimetype}, a kind of image a model cannot be shown.`);
-        }
-        continue;
-      }
-      if (full === undefined && count >= cap.count) {
-        full = `past this read's cap of ${cap.count} images`;
-      }
-      // Slack's own size, trusted before any bytes move. An original over
-      // the per-image limit may still go as its preview, whose size only
-      // its bytes can say.
-      if (full === undefined && file.size !== undefined && file.size <= IMAGE_ATTACHMENT_MAX_BYTES && file.size > remaining) {
-        full = pastBytes;
-      }
-      if (full !== undefined) {
-        notes.push(`${label} is not shown: ${full}.`);
-        continue;
-      }
-      const reasons: UnreadReasons = new Map();
-      const read = await readImageAttachments([file], botToken, fetchFile, timeoutMs, warn, reasons, deadline);
-      const image = read.images[0];
-      if (image === undefined) {
-        notes.push(unshownImageNote(label, reasons.get(file)));
-        continue;
-      }
-      const size = Buffer.byteLength(image.data, 'base64');
-      if (size > remaining) {
-        full = pastBytes;
-        notes.push(`${label} is not shown: ${full}.`);
-        continue;
-      }
-      remaining -= size;
-      count += 1;
-      images.push(image);
-      notes.push(...read.previews.map(previewSentence));
-    }
-    if (images.length > 0) {
-      message.images = images;
-    }
-    if (notes.length > 0) {
-      message.imageNotes = notes;
-    }
-  }
-};
-
-/** The most one text attachment may weigh to be read into the message. */
-const TEXT_ATTACHMENT_MAX_BYTES = 100 * 1024;
-/**
- * The most one message's text attachments may weigh together. Read text
- * joins the transcript and is sent again on every later turn, so the cap
- * is a cost decision as much as a context one.
- */
-const TEXT_ATTACHMENTS_MAX_TOTAL_BYTES = 200 * 1024;
-/**
- * The most a text attachment may weigh to be saved to the agent's
- * workspace when it is too large to read into the message. A 251 KB
- * Markdown spec reached an agent as a filename and it had no way to open
- * it; saved, the agent reads it with its file tools, in parts.
- */
-const TEXT_ATTACHMENT_SAVE_MAX_BYTES = 10 * 1024 * 1024;
-/** The default bound on one agent's saved attachments, all together. */
-const SAVED_ATTACHMENTS_MAX_BYTES = 256 * 1024 * 1024;
-/**
- * The most saved attachments one agent keeps, whatever they weigh. A file
- * crowded out of a full message is saved however small it is, and each save
- * is a ledger record, so the count is bounded as well as the bytes.
- */
-const SAVED_ATTACHMENTS_MAX_FILES = 1_000;
-/** Under the agent's workspace, where saved attachments go. */
-const SAVED_ATTACHMENTS_DIR = path.join('attachments', 'slack');
-
-/** Saves a downloaded attachment's bytes and answers the path it is at. */
-type AttachmentSaver = (file: SlackInboundFile, body: Buffer) => Promise<string>;
-
-/**
- * A file name safe to join under a directory: Slack's name is whatever the
- * uploader's client sent, so separators, `..`, and control characters are
- * replaced rather than trusted. Stamped, so the same file shared twice is
- * two saves rather than a name already taken.
- */
-const savedAttachmentName = (file: SlackInboundFile, now: number): string => {
-  const base = ((file.name ?? file.title ?? '').split(/[\\/]/).pop() ?? '').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._]+/, '').slice(0, 120);
-  const id = (file.id ?? '').replace(/[^A-Za-z0-9]+/g, '').slice(0, 32);
-  return [now.toString(36), ...(id.length > 0 ? [id] : []), base.length > 0 ? base : 'attachment'].join('-');
-};
-
-/**
- * Refuses a save that would take the directory's regular files past
- * `maxBytes` together, or its entries past `SAVED_ATTACHMENTS_MAX_FILES`. Refused rather than making room: deleting on a
- * Slack member's say is a worse failure than a full directory, and with
- * nothing removed every ledger record still names a file that exists.
- */
-const ensureRoom = async (dir: string, incoming: number, maxBytes: number): Promise<void> => {
-  let total = 0;
-  const names = await readdir(dir);
-  for (const name of names) {
-    const info = await lstat(path.join(dir, name)).catch(() => undefined);
-    total += info?.isFile() ? info.size : 0;
-  }
-  if (names.length >= SAVED_ATTACHMENTS_MAX_FILES) {
-    throw new Error(`${dir} already holds ${SAVED_ATTACHMENTS_MAX_FILES} saved attachments; remove files there to save more`);
-  }
-  if (total + incoming > maxBytes) {
-    throw new Error(`saved attachments in ${dir} would pass their ${maxBytes}-byte bound; remove files there to save more`);
-  }
-};
-
-/**
- * One save at a time per directory, across messages and sessions: two
- * concurrent saves would each measure the same free space and both write.
- */
-const saveChains = new Map<string, Promise<unknown>>();
-const serialized = <T>(key: string, run: () => Promise<T>): Promise<T> => {
-  const previous = saveChains.get(key) ?? Promise.resolve();
-  const next = previous.catch(() => undefined).then(run);
-  const settled = next.catch(() => undefined);
-  saveChains.set(key, settled);
-  void settled.then(() => {
-    if (saveChains.get(key) === settled) {
-      saveChains.delete(key);
-    }
-  });
-  return next;
-};
-
-/**
- * The saver for one agent and one sender. The directory is canonical
- * because the ledger is keyed the way `fs.read` looks a path up, through
- * `realpath`. The path is recorded before the bytes land, so a crash
- * between the two leaves a labelled path with no file, never a file with
- * no label; and the file is created exclusively, so a link planted at the
- * name fails the save rather than carrying the bytes somewhere the ledger
- * never saw.
- */
-const createAttachmentSaver = (
-  store: NonNullable<SlackAdapterOptions['attachmentStore']>,
-  agentId: string,
-  trust: TrustLevel,
-  now: () => number,
-): AttachmentSaver => async (file, body) => {
-  const workspace = store.workspaces.prepare(agentId);
-  const lexical = path.join(workspace, SAVED_ATTACHMENTS_DIR);
-  // One component at a time, never through a link: a recursive mkdir would
-  // follow a link planted at `attachments` and create `slack` wherever it
-  // points before the check below could refuse it.
-  await mkdir(workspace, { recursive: true, mode: 0o700 });
-  let at = workspace;
-  for (const part of SAVED_ATTACHMENTS_DIR.split(path.sep)) {
-    at = path.join(at, part);
-    await mkdir(at, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'EEXIST') {
-        throw error;
-      }
-    });
-    const info = await lstat(at);
-    if (!info.isDirectory()) {
-      throw new Error(`${at} is not a directory of the workspace's own`);
-    }
-  }
-  // The directory must be exactly where the workspace says, through no link
-  // of its own: one already planted at `attachments` or `attachments/slack`
-  // would put the file outside the workspace, where the agent's file tools
-  // cannot read it and nothing should be written on a Slack member's say.
-  const dir = await realpath(lexical);
-  if (dir !== path.join(await realpath(workspace), SAVED_ATTACHMENTS_DIR)) {
-    throw new Error(`${lexical} is a link, not the workspace's own directory`);
-  }
-  return serialized(dir, async () => {
-    await ensureRoom(dir, body.length, store.maxBytes ?? SAVED_ATTACHMENTS_MAX_BYTES);
-    const target = path.join(dir, savedAttachmentName(file, now()));
-    await store.ledger.recordWrite(agentId, target, trust);
-    // O_EXCL and O_NOFOLLOW guard only the last component. A directory on the
-    // way swapped for a link after the record would send the create somewhere
-    // else, so the open file is checked against the recorded name before a
-    // byte is written (the same check as the plugins package's
-    // `nameIdentifiesHandle`). A refused save leaves the empty file rather
-    // than unlinking through a name that just proved it can move.
-    const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-    try {
-      const [canonical, atName, held] = await Promise.all([
-        realpath(target).catch(() => undefined),
-        lstat(target).catch(() => undefined),
-        handle.stat(),
-      ]);
-      if (canonical !== target || atName === undefined || atName.dev !== held.dev || atName.ino !== held.ino) {
-        throw new Error(`${target} moved between its provenance record and its write`);
-      }
-      await handle.writeFile(body);
-    } finally {
-      await handle.close();
-    }
-    return target;
-  });
-};
-
-const TEXT_APPLICATION_TYPES = new Set([
-  'application/json',
-  'application/xml',
-  'application/yaml',
-  'application/x-yaml',
-  'application/toml',
-  'application/javascript',
-  'application/x-sh',
-  'application/sql',
-]);
-const TEXT_EXTENSIONS = /\.(md|markdown|txt|text|csv|tsv|json|ya?ml|toml|xml|log|ini|conf)$/i;
-
-/**
- * Whether a file is text the model can be handed as it is. Slack's
- * mimetype comes from the uploader's client and a Markdown file can arrive
- * as `text/markdown`, `text/plain`, or an octet stream, so an unhelpful
- * type falls back to the name. HTML is left out: a sign-in page is HTML
- * too, and a file of it could not be told apart from Slack refusing one.
- */
-const isTextAttachment = (file: SlackInboundFile): boolean => {
-  const mimetype = file.mimetype?.toLowerCase();
-  if (mimetype === 'text/html') {
-    return false;
-  }
-  if (mimetype !== undefined && (mimetype.startsWith('text/') || TEXT_APPLICATION_TYPES.has(mimetype))) {
-    return true;
-  }
-  const name = file.name ?? file.title;
-  return (mimetype === undefined || mimetype === 'application/octet-stream') && name !== undefined && TEXT_EXTENSIONS.test(name);
-};
-
-/**
- * The text files among a message's attachments, read so the turn gets
- * their contents rather than their names. A Markdown plan attached in a
- * DM reached the agent as a filename, and it told the person it had no
- * way to read Slack at all. Anything that is not UTF-8 text, is over the
- * caps, or comes back as a page stays in `unread` and is named in the
- * note, exactly as before; the warning says why.
- */
-const readTextAttachments = async (
-  files: readonly SlackInboundFile[],
-  botToken: string,
-  fetchFile: SlackFileFetcher,
-  timeoutMs: number,
-  deadline: AbortSignal,
-  warn: (line: string) => void,
-  reasons: UnreadReasons,
-  save?: AttachmentSaver,
-): Promise<{ texts: Array<{ name: string; text: string }>; saved: SavedAttachment[]; unread: SlackInboundFile[] }> => {
-  const texts: Array<{ name: string; text: string }> = [];
-  const saved: SavedAttachment[] = [];
-  const unread: SlackInboundFile[] = [];
-  const skip = (file: SlackInboundFile, reason: UnreadReason): void => {
-    unread.push(file);
-    reasons.set(file, reason);
-  };
-  let total = 0;
-  for (const file of files) {
-    const url = file.url_private_download ?? file.url_private;
-    if (!isTextAttachment(file)) {
-      // An image the image reader already refused keeps its own reason.
-      unread.push(file);
-      if (!reasons.has(file)) {
-        reasons.set(file, 'unsupported');
-      }
-      continue;
-    }
-    if (url === undefined) {
-      skip(file, 'failed');
-      continue;
-    }
-    const maxBytes = Math.min(TEXT_ATTACHMENT_MAX_BYTES, TEXT_ATTACHMENTS_MAX_TOTAL_BYTES - total);
-    // Over the inline cap, a file is still downloaded when it can be saved
-    // to the workspace instead; only over that cap too is it a name.
-    const limit = save === undefined ? maxBytes : Math.max(maxBytes, TEXT_ATTACHMENT_SAVE_MAX_BYTES);
-    if (file.size !== undefined && file.size > limit) {
-      warn(save === undefined
-        ? `slack: ${fileLabel(file)} is ${file.size} bytes, over the ${maxBytes} bytes of text this message could still take; the turn is told it cannot be read. Paste the part that matters, or split the file.`
-        : `slack: ${fileLabel(file)} is ${file.size} bytes, over the ${limit} bytes a text attachment may be saved at; the turn is told it cannot be read. Paste the part that matters, or split the file.`);
-      skip(file, 'too-large');
-      continue;
-    }
-    if (deadline.aborted) {
-      warn(`slack: ${fileLabel(file)} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.`);
-      skip(file, 'timed-out');
-      continue;
-    }
-    let download: SlackFileDownload;
-    try {
-      download = await fetchFile(url, botToken, deadline, limit);
-    } catch (error) {
-      const reason = error instanceof Error && error.name === 'TimeoutError'
-        ? `this message's downloads took longer than ${timeoutMs}ms`
-        : (error instanceof Error ? error.message : String(error));
-      warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
-      skip(file, error instanceof Error && error.name === 'TimeoutError' ? 'timed-out' : 'failed');
-      continue;
-    }
-    // HTML is never a file read here (see isTextAttachment), so an HTML
-    // body is Slack's sign-in page: what a token without files:read gets.
-    const contentType = download.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
-    const head = download.body.subarray(0, 64).toString('utf8').trimStart().toLowerCase();
-    if (download.status !== 200 || contentType === 'text/html' || head.startsWith('<!doctype html') || head.startsWith('<html')) {
-      warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than the file. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
-      skip(file, 'failed');
-      continue;
-    }
-    if (download.truncated === true || download.body.length > limit) {
-      warn(`slack: ${fileLabel(file)} is larger than the ${limit} bytes ${save === undefined ? 'of text this message could still take' : 'a text attachment may be saved at'}; the download was abandoned and the turn is told it cannot be read.`);
-      skip(file, 'too-large');
-      continue;
-    }
-    let text: string;
-    try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(download.body);
-    } catch {
-      warn(`slack: ${fileLabel(file)} is not UTF-8 text; the turn is told it cannot be read.`);
-      skip(file, 'unreadable');
-      continue;
-    }
-    if (download.body.length > maxBytes) {
-      // Only reachable with a saver: `limit` is `maxBytes` without one.
-      try {
-        saved.push({ name: fileLabel(file), path: await save!(file, download.body), bytes: download.body.length });
-      } catch (error) {
-        warn(`slack: could not save ${fileLabel(file)} to the agent's workspace: ${error instanceof Error ? error.message : String(error)}. The turn is told it cannot be read.`);
-        skip(file, 'too-large');
-      }
-      continue;
-    }
-    total += download.body.length;
-    texts.push({ name: fileLabel(file), text });
-  }
-  return { texts, saved, unread };
-};
-
-/** A text attachment too large for the message, saved for the agent's file tools. */
-interface SavedAttachment {
-  name: string;
-  path: string;
-  bytes: number;
-}
-
-/** Saved attachments, named with where each is, after what was said. */
-const savedAttachmentBlocks = (saved: readonly SavedAttachment[]): string =>
-  saved.map(({ name, path: at, bytes }) => `\n[Attached: ${name}, ${Math.ceil(bytes / 1024)} KB, too large to include here. It is saved in full at ${at}. Read it with your file tools, in parts if it is long.]`).join('');
-
-/** Read text attachments, set into the message after what was said. */
-const textAttachmentBlocks = (texts: ReadonlyArray<{ name: string; text: string }>): string =>
-  texts.map(({ name, text }) => `\n[Attached: ${name}. Its contents follow.]\n${text.replace(/\s+$/, '')}\n[End of ${name}]`).join('');
-
 /**
  * Whether `text` addresses a bot user by name. Slack writes a mention as
  * `<@U123>` markup whoever typed it, so this is the same question for an
@@ -3585,18 +1081,28 @@ const mentions = (text: string, botUserId: string): boolean =>
   botUserId.length > 0 && text.includes(`<@${botUserId}>`);
 
 /**
+ * The users a message's `<@U123>` and `<@U123|name>` mentions name, in
+ * order. The classes leave out `<` so that reading crafted text such as
+ * `<@<@<@…` stays linear (card 1090). Slack escapes `<` in message text,
+ * so a real mention never has one inside it.
+ */
+const mentionedUsers = (text: string): string[] =>
+  [...text.matchAll(/<@([^|<>]+)(?:\|[^<>]*)?>/g)].map((match) => match[1] as string);
+
+/**
  * Whether a message asks this agent to stop (card 337): the word "stop"
  * and nothing else but mentions and closing punctuation, in any case. A
  * message that mentions someone and not this agent is for them. Exported
  * for tests.
  */
 export const isStopRequest = (text: string, botUserId: string): boolean => {
-  const mentioned = [...text.matchAll(/<@([^>|]+)(?:\|[^>]*)?>/g)].map((match) => match[1]);
+  const mentioned = mentionedUsers(text);
   if (mentioned.length > 0 && !mentioned.includes(botUserId)) {
     return false;
   }
-  const words = text.replace(/<@[^>|]+(?:\|[^>]*)?>/g, ' ').trim().replace(/[.!]+$/, '').trim();
-  return words.toLowerCase() === 'stop';
+  // Anchored at the start, so the engine tries one position rather than
+  // rescanning a long run of `.` from every one of them (card 1090).
+  return /^stop\s*[.!]*$/i.test(text.replace(/<@[^|<>]+(?:\|[^<>]*)?>/g, ' ').trim());
 };
 
 /**
@@ -4066,7 +1572,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
   const stopWaitMs = options.stopWaitMs ?? DEFAULT_STOP_WAIT_MS;
   const approvalPromptWaitMs = options.approvalPromptWaitMs ?? DEFAULT_APPROVAL_PROMPT_WAIT_MS;
-  const progressAfterMs = options.progressAfterMs ?? DEFAULT_PROGRESS_AFTER_MS;
   const now = options.now ?? Date.now;
 
   const connections: AgentConnection[] = [];
@@ -4711,7 +2216,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * split reply loses everything after the tag.
    */
   const tagsAnAgent = async (connection: AgentConnection, text: string): Promise<boolean> => {
-    const tagged = new Set([...text.matchAll(/<@([^>|]+)(?:\|[^>]*)?>/g)].map((match) => match[1] as string));
+    const tagged = new Set(mentionedUsers(text));
     tagged.delete(connection.botUserId);
     const team = Object.values(connection.config.agentMentions?.team ?? {});
     for (const user of tagged) {
@@ -4982,6 +2487,73 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
     }
     return entries;
+  };
+
+  /**
+   * The files a team agent posted just above the message where it tags
+   * this one (card 1061). A turn that makes a screenshot and then asks a
+   * colleague about it posts the file as a message of its own, above the
+   * tag, so the mention arrived with nothing attached: the colleague was
+   * asked to inspect something it was never handed, and in a session it
+   * already held it did not even hear the upload, since an agent's
+   * untagged message reaches nobody.
+   *
+   * The agent's own messages directly above the tag, with nobody else
+   * speaking between, are that turn's posts, or as near to them as a
+   * reader on another daemon can tell. They come in the thread's order,
+   * the tag's own last and not repeated: images are kept from the last back
+   * (`readImageAttachments`), so the tag's own are kept first, and the
+   * caller hands the text reader, which spends from the front, the tag's
+   * own first. One read, of the hour before the mention. A thread
+   * with more than a page of replies in that hour gives nothing, rather
+   * than a run read from the middle of it, and a read that fails warns:
+   * either way the mention runs with what it carried, as before this.
+   */
+  const withFilesJustAbove = async (
+    connection: AgentConnection,
+    event: SlackInboundEvent & { thread_ts: string },
+    speaker: string,
+    name: string,
+  ): Promise<SlackInboundFile[]> => {
+    const own = event.files ?? [];
+    const replies = connection.web.conversations.replies;
+    if (!replies) {
+      return own;
+    }
+    // Whole seconds, so the arithmetic never touches the six digits after
+    // the point that make a Slack ts unique.
+    const [seconds = '0', fraction = '000000'] = event.ts.split('.');
+    const oldest = `${Math.max(0, Number(seconds) - TAGGED_FILES_WINDOW_SECONDS)}.${fraction}`;
+    let page: SlackHistoryPage;
+    try {
+      page = await replies.call(connection.web.conversations, {
+        channel: event.channel,
+        ts: event.thread_ts,
+        latest: event.ts,
+        oldest,
+        inclusive: false,
+        limit: 200,
+      });
+    } catch (error) {
+      warn(
+        `slack: ${connection.config.agentId} could not read above ${name}'s mention in ${event.channel}, so it gets only the files on the mention itself: `
+        + `${error instanceof Error ? error.message : String(error)} (the history scopes are channels:history, groups:history, and mpim:history)`,
+      );
+      return own;
+    }
+    if (page.response_metadata?.next_cursor) {
+      return own;
+    }
+    const above = (page.messages ?? [])
+      .filter((message) => message.ts !== undefined && Number(message.ts) < Number(event.ts))
+      .sort((a, b) => Number(a.ts) - Number(b.ts));
+    const posted: SlackInboundFile[] = [];
+    for (let index = above.length - 1; index >= 0 && above[index]!.user === speaker; index -= 1) {
+      posted.unshift(...(above[index]!.files ?? []));
+    }
+    const seen = new Set(own.map((file) => file.id).filter((id) => id !== undefined));
+    const added = posted.filter((file) => file.id === undefined || !seen.has(file.id)).slice(-TAGGED_FILES_LIMIT);
+    return [...added, ...own];
   };
 
   /**
@@ -5494,7 +3066,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         let sent = 0;
         try {
           for (const chunk of chunks) {
-            const posted = await web.chat.postMessage({ channel: channelId, text: chunk, ...(thread ? { thread_ts: thread } : {}) });
+            // A part that tags another agent carries the whole text (card 1033).
+            const whole = chunks.length > 1 && await tagsAnAgent(connection, chunk) ? text : undefined;
+            const posted = await postPart(web, { channel: channelId, thread, text: chunk, whole }, warn);
             if (thread && sent === 0 && posted.message !== undefined && !posted.message.thread_ts) {
               await refuseMisplaced(posted.channel ?? channelId, posted.ts ?? posted.message.ts);
             }
@@ -5505,6 +3079,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           }
         } finally {
           accepted(sent === chunks.length ? text : sent > 0 ? chunks.slice(0, sent).join('\n') : undefined);
+          if (thread && sent > 0) {
+            // The post took down the status of any turn of this app's
+            // working in that thread; the turn at each session's head puts
+            // its own back.
+            for (const queue of renderers.values()) {
+              queue[0]?.appPosted(web, channelId, thread);
+            }
+          }
         }
         return first ?? { channel: channelId, ts: '' };
       },
@@ -6538,8 +4120,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     thread: string | undefined,
     chunks: readonly string[],
     between?: () => Promise<void>,
+    whole?: string,
   ): Promise<boolean> => {
-    const taken = behind ? await behind.take(chunks, between) : 'untaken';
+    const taken = behind ? await behind.take(chunks, between, chunks.length > 1 ? whole : undefined) : 'untaken';
     if (taken !== 'untaken') {
       return taken === 'complete';
     }
@@ -6548,11 +4131,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     let published = true;
     for (const chunk of chunks) {
       try {
-        await connection.web.chat.postMessage({
-          channel,
-          text: chunk,
-          ...(thread ? { thread_ts: thread } : {}),
-        });
+        // A part that tags another agent carries the whole reply (card 1033).
+        const full = whole !== undefined && chunks.length > 1 && await tagsAnAgent(connection, chunk) ? whole : undefined;
+        await postPart(connection.web, { channel, thread, text: chunk, whole: full }, warn);
       } catch (error) {
         published = false;
         warn(`slack: could not post part of a turn's outcome: ${error instanceof Error ? error.message : String(error)}`);
@@ -6742,7 +4323,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // A reply the thread's other agents hear like any other, taking their
     // place for it before the post, as `handleInbound` does. A DM thread
     // has nobody else in it to hear, as on the live path.
-    const published = postAheadOf(behind, connection, channel, thread, posting, uploads);
+    const published = postAheadOf(behind, connection, channel, thread, posting, uploads, routing.reply);
     const conversation = metadata[CONVERSATION_METADATA_KEY];
     const isDm = typeof conversation === 'object' && conversation !== null && !Array.isArray(conversation)
       && (conversation as JsonObject).kind === 'direct';
@@ -8667,18 +6248,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // overheard message, and every provider shows the images after the
       // frame that marks it as somebody else's. Text files land inside the
       // message, so the frame quotes them with the rest of it.
+      // A team agent's tag inside a thread carries the files its turn posted
+      // just above it (card 1061), read as if they were attached to the tag.
+      const files = admitted.fromAgent !== undefined && !overhear && event.thread_ts !== undefined && event.thread_ts !== event.ts
+        ? await withFilesJustAbove(connection, { ...event, thread_ts: event.thread_ts }, userId, admitted.fromAgent)
+        : event.files ?? [];
       // Images and text files share the message's one download deadline.
       const deadline = AbortSignal.timeout(fileDownloadTimeoutMs);
       const reasons: UnreadReasons = new Map();
       if (overhear) {
-        for (const file of event.files ?? []) {
+        for (const file of files) {
           reasons.set(file, 'not-opened');
         }
       }
       const { images, unread: notImages, previews } = overhear
-        ? { images: [] as ImageAttachment[], unread: event.files ?? [], previews: [] as ImagePreview[] }
+        ? { images: [] as ImageAttachment[], unread: files, previews: [] as ImagePreview[] }
         : await readImageAttachments(
-          event.files ?? [],
+          files,
           connection.config.botToken,
           fetchFile,
           fileDownloadTimeoutMs,
@@ -8686,10 +6272,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           reasons,
           deadline,
         );
+      // Text is spent from the first file on, so the tag's own files lead:
+      // ones carried from above it (card 1061) must not crowd them out.
+      const ownFiles = new Set(event.files ?? []);
+      const ownFirst = [...notImages.filter((file) => ownFiles.has(file)), ...notImages.filter((file) => !ownFiles.has(file))];
       const { texts, saved, unread } = overhear
         ? { texts: [], saved: [] as SavedAttachment[], unread: notImages }
         : await readTextAttachments(
-          notImages,
+          ownFirst,
           connection.config.botToken,
           fetchFile,
           fileDownloadTimeoutMs,
@@ -8815,7 +6405,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         mayStaySilent: replyOptional,
         now,
         streaming,
-        progressAfterMs,
         texts: connection.config.replies === 'texts',
         tagsAnAgent: (text: string) => tagsAnAgent(connection, text),
         statusThread: thread ?? event.ts,
@@ -9385,6 +6974,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     name: 'slack',
     ...(options.loadAgents !== undefined ? { reload } : {}),
     resolveOutbound,
+    // A `message.say` line goes to the turn running for that session, in
+    // its thread, through the same agent's app, or nowhere (card 1009).
+    // Running means the gateway's active turn, matched by id as for a
+    // credential form: the head of the queue can be a newer message's turn
+    // still waiting behind a recovery, which did not come from it.
+    say: async ({ sessionId, agentId, text }: { sessionId: string; agentId: string; text: string }): Promise<void> => {
+      const connection = connectionFor(agentId);
+      const active = gatewayRef?.activeTurnId?.(sessionId);
+      const renderer = active === undefined
+        ? undefined
+        : (renderers.get(sessionId) ?? []).find((candidate) => candidate.turnId === active);
+      if (!connection || !renderer || !renderer.postsAs(connection.web)) {
+        throw new Error('This conversation has no turn of yours running in Slack right now, so there is nothing to send into. Say it in your reply.');
+      }
+      await renderer.say(text);
+    },
     readConversation,
     sessionConversation,
     createConversation,
@@ -9476,7 +7081,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // the question it leads to (card 950). The wait is bounded: a line
         // Slack is slow to take must not keep the question from anyone.
         if (event.type === 'tool.approval-requested') {
-          head?.awaitingApproval(event.call.toolName, !foreign);
           const said = head?.sayBeforeAsking(!foreign);
           if (!said) {
             track(renderApprovalRequest(event));

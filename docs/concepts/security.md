@@ -92,7 +92,10 @@ linked own the full story.
   is for one agent, even on a shared key: a delegated agent runs as itself
   and gets only its own, while a sub-agent runs under its parent and gets
   the parent's. The config's `credentialsEnv` pins a variable over any
-  binding, and the audit line names the variable.
+  binding, and the audit line names the variable. A command that prints a
+  stored value as is gets `[redacted]` back in its place, which keeps an
+  accidental `printenv` out of the conversation but stops no command that
+  means to show it.
   ([tool-shell](../../packages/tool-shell/README.md#stored-credentials-in-the-environment))
 - **A credential link is a bearer capability, by choice.** Where no form
   can be shown, an agent whose soul lists `credential.request` (or has no
@@ -156,8 +159,10 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
 - **Two gates on every plugin-provided capability**: a trusted config
   enables the plugin, and the agent's own soul lists what it may call.
   The built-ins (echo, memory, delegation, schedules) register without a
-  plugin, and a soul that omits `tools:` gets every registered tool — an
-  empty `plugins` block is not an empty toolbox.
+  plugin, so an empty `plugins` block is not an empty toolbox. A soul that
+  omits `tools:` gets only the tools registered as safe (every tool on a
+  home set up before 0.14.3); `tools: ["*"]`,
+  which setup writes into new souls, gets every registered tool.
   ([Plugins](./plugins.md), [Tools](../guides/tools.md))
 - **Under the default open posture, gated tools run without asking**; the
   boundary is who may talk to the agent, the shell sandbox, and `tool-fs`
@@ -211,9 +216,11 @@ and nothing tries to strip instructions out of page text — a filter that
 mostly works invites the trust it cannot earn. What limits the damage is how
 little a steered agent can do. For an agent that browses or searches:
 
-- **List its tools.** A soul without `tools:` gets every registered tool.
-  Give a browsing agent `web.*` and `browser.*` and nothing that writes,
-  sends, or runs commands, unless its job needs one.
+- **List its tools.** A soul with `tools: ["*"]` gets every registered
+  tool, and one without `tools:` gets only the safe ones (every tool on a home
+  set up before 0.14.3). Give a browsing
+  agent `web.*` and `browser.*` and nothing that writes, sends, or runs
+  commands, unless its job needs one.
 - **Give it no credentials and no `delegates`.** A key it holds is a key a
   page can ask it to use, and delegation is the lateral move an injected
   agent would make.
@@ -247,5 +254,8 @@ little a steered agent can do. For an agent that browses or searches:
 The control API binds `127.0.0.1` and exists only when its package is
 installed. Cookie-authenticated requests are origin-bound; bearer ones are
 not, because a browser never attaches a bearer token on a page's behalf.
+On loopback it answers only to loopback names and the host of `api.publicUrl`,
+so a page that points its own name at `127.0.0.1` (DNS rebinding) is refused
+before any route runs. Binding beyond loopback is warned about at every start.
 Reaching a machine from outside goes through a tunnel, not a public bind.
 ([Remote access](../guides/remote-access.md))

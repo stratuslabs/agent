@@ -52,6 +52,12 @@ What they get:
 - **Linux** — a systemd user unit at
   `~/.config/systemd/user/stratusd.service`
 
+On Linux this needs systemd to be the running init, which setup and
+`stratus service` check the way `sd_booted(3)` does: `/run/systemd/system`
+exists. Most containers, Docker and Fly machines, and WSL without systemd
+have none, so there setup shows Always on as not available, writes no unit,
+and leaves `stratus serve` to you or your own supervisor.
+
 There is one such service per OS user: its name is the same whatever
 `HOME` is. So `stratus service`, `stratus update` and setup's Always on
 first ask the manager which unit file the loaded service came from. When
