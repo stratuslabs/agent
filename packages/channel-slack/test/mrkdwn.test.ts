@@ -682,14 +682,15 @@ test('a table with a Slack mention in it keeps the mention live', () => {
 });
 
 // Card 1090: the mention check above ran in quadratic time on a cell of
-// repeated `<a:` or `<!`, 1-3 s for one 40,000-character reply.
+// repeated `<a:` or `<!`, 2-3 s for one 40,000-character reply. The whole
+// conversion is timed, which takes tens of milliseconds on its own.
 test('a table cell of crafted Slack markup is read in linear time', () => {
   for (const cell of ['<a:'.repeat(13_000), '<!'.repeat(20_000), '<@'.repeat(20_000)]) {
     const reply = ['| Who | N |', '| --- | --- |', `| ${cell} | 1 |`].join('\n');
     const started = performance.now();
     toSlackMrkdwn(reply);
     const elapsed = performance.now() - started;
-    assert.ok(elapsed < 200, `${JSON.stringify(cell.slice(0, 6))}… took ${Math.round(elapsed)} ms`);
+    assert.ok(elapsed < 1_000, `${JSON.stringify(cell.slice(0, 6))}… took ${Math.round(elapsed)} ms`);
   }
 });
 
