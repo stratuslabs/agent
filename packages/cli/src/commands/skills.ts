@@ -321,7 +321,7 @@ const skillsJsonReport = (
               && allowlist.length > 0
               && matchesSkillAllowlist(skill.id, allowlist);
           })
-          .map((entry) => entry.soul.agent.name);
+          .map((entry) => entry.soul.agent.id);
     skills.push({ id: skill.id, description: skill.description, builtIn: false, enabledBy });
   }
   return { skills };

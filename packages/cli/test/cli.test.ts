@@ -867,7 +867,7 @@ test('runCli skills --format json reports each skill and who enables it as data'
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'agents', 'ava.md'),
-    '---\nname: Ava\nid: ava\nskills:\n  - site-audit\n---\n\nYou audit sites.\n',
+    '---\nname: Ava Lin\nid: ava\nskills:\n  - site-audit\n---\n\nYou audit sites.\n',
   );
 
   const { streams, output } = createStreams();
@@ -885,7 +885,7 @@ test('runCli skills --format json reports each skill and who enables it as data'
   assert.ok(installed, 'the installed skill is listed');
   assert.equal(installed.builtIn, false);
   assert.equal(installed.description, 'Use when auditing a live site.');
-  assert.deepEqual(installed.enabledBy, ['Ava']);
+  assert.deepEqual(installed.enabledBy, ['ava']);
 });
 
 test('runCli skills --format json lists the built-in alone when nothing is installed', async () => {
