@@ -1,14 +1,16 @@
+import './home-guard.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, cp, lstat, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, unlink } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, symlink, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { STATE_SCHEMA_VERSION, createHomeMemoryStore, loadCredentials, loadNamedCredentials } from '@stratusagent/state';
+import { parseSoul } from '@stratusagent/agents';
+import { STATE_SCHEMA_VERSION, createHomeMemoryStore, loadCredentials, loadNamedCredentials, unlistedToolsFor } from '@stratusagent/state';
 
 import { runCli } from '../src/index.ts';
 
@@ -187,6 +189,15 @@ for (const release of RELEASES) {
       // Older than the per-agent layout, so the first start has real work to do.
       assert.match(first, /state migration 0003-per-agent-state-layout/);
     }
+    // Neither soul had a tools: list, which these releases read as every
+    // tool. The home records that it predates the safe-tools default, so
+    // they keep every tool, and no soul is rewritten to say so.
+    assert.match(first, /state migration 0005-safe-tools-default: this home predates the safe-tools default/);
+    for (const id of ['ava', 'bob']) {
+      const soulPath = path.join(home, '.stratus', 'agents', `${id}.md`);
+      assert.equal(parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath }).agent.tools, undefined, id);
+    }
+    assert.equal(unlistedToolsFor({ homeDir: home }), 'every');
 
     const stamp = JSON.parse(await readFile(path.join(home, '.stratus', 'state.json'), 'utf8')) as { schemaVersion: number };
     assert.equal(stamp.schemaVersion, STATE_SCHEMA_VERSION);
@@ -212,6 +223,53 @@ for (const release of RELEASES) {
     assert.deepEqual((await memory.list('ava')).entries.map((entry) => entry.content), ['The deploy window is Tuesday (fixture fact).']);
   });
 }
+
+// The first start that migrates a home copies its state first, and the copy
+// is a home in its own right: put back the way docs/guides/updating.md says,
+// it reads as the release's again, and upgrading from it keeps everything.
+test('a home written by 0.11.0 is backed up before its first start migrates it, and the backup put back upgrades again intact', async () => {
+  const home = await homeFrom('0.11.0');
+  const stratus = path.join(home, '.stratus');
+  const stampBefore = await readFile(path.join(stratus, 'state.json'), 'utf8');
+  const memoryBefore = await readFile(path.join(stratus, 'memory.jsonl'), 'utf8');
+
+  const first = await serving(home, async () => {});
+  const announced = /state backup: copied \d+ state files to (\S+) before migrating/.exec(first);
+  assert.ok(announced?.[1], first);
+  const backup = announced[1];
+  assert.equal(path.dirname(backup), path.join(stratus, 'backups'));
+  assert.ok(first.indexOf('state backup:') < first.indexOf('state migration 0003-per-agent-state-layout'), first);
+
+  const files = path.join(backup, 'files');
+  assert.equal(await readFile(path.join(files, 'state.json'), 'utf8'), stampBefore);
+  assert.equal(await readFile(path.join(files, 'memory.jsonl'), 'utf8'), memoryBefore);
+  assert.ok(!existsSync(path.join(files, 'credentials.json')), 'the sign-in stays out of the backup');
+  const copied = new DatabaseSync(path.join(files, 'sessions.db'));
+  const rows = copied.prepare('SELECT id, agent_id FROM sessions ORDER BY id').all().map((row) => `${row.id}:${row.agent_id}`);
+  copied.close();
+  assert.deepEqual(rows, ['fixture-ava-1:ava', 'fixture-bob-1:bob']);
+
+  // The documented way back: the upgraded home moved aside, the backup in
+  // its place, and the sign-in the backup leaves out copied over.
+  const upgraded = `${stratus}.upgraded`;
+  await rename(stratus, upgraded);
+  await mkdir(stratus, { mode: 0o700 });
+  await cp(path.join(upgraded, path.relative(stratus, files)), stratus, { recursive: true });
+  await cp(path.join(upgraded, 'credentials.json'), path.join(stratus, 'credentials.json'));
+  assert.equal(await readFile(path.join(stratus, 'state.json'), 'utf8'), stampBefore);
+
+  const again = await serving(home, async (api) => {
+    const sessions = await api('GET', '/sessions');
+    const listed = (sessions.json.sessions as Array<{ id: string; agentId: string }>)
+      .map((session) => `${session.id}:${session.agentId}`).sort();
+    assert.deepEqual(listed, ['fixture-ava-1:ava', 'fixture-bob-1:bob']);
+    const ava = await api('GET', '/sessions/fixture-ava-1');
+    assert.ok(messageContents(ava.json.session).includes('user: Use the echo tool'));
+  });
+  assert.match(again, /state migration 0003-per-agent-state-layout/);
+  const memory = createHomeMemoryStore({ homeDir: home, cwd: home });
+  assert.deepEqual((await memory.list('ava')).entries.map((entry) => entry.content), ['The deploy window is Tuesday (fixture fact).']);
+});
 
 // A home the way a working host leaves it, written by 0.13.5's own daemon
 // (fixtures/homes/make-home.mjs): souls in the visible ~/Agents folder,
@@ -280,7 +338,15 @@ test('a home written by 0.13.5 upgrades with its grants, schedule, sign-ins, con
       return bob.json.session.status === 'completed' && messageContents(bob.json.session).includes('user: Hello again') ? true : undefined;
     }, 'the continued turn to complete');
   });
-  assert.doesNotMatch(first, /state migration/, '0.13.5 is already at the current layout');
+  // Already at the current layout, so the one migration is 0005, which
+  // records that this home predates the safe-tools default: Bob, who has no
+  // tools: list, keeps every tool, and no soul is rewritten.
+  assert.doesNotMatch(first, /state migration 000[1-4]/, '0.13.5 is already at the current layout');
+  assert.match(first, /state migration 0005-safe-tools-default: this home predates the safe-tools default/);
+  const bobSoul = path.join(stratusHome, 'agents', 'bob.md');
+  assert.equal((await lstat(bobSoul)).isSymbolicLink(), true, 'the soul link stays a link');
+  assert.equal(parseSoul(await readFile(bobSoul, 'utf8'), { seed: bobSoul }).agent.tools, undefined);
+  assert.equal(unlistedToolsFor({ homeDir: home }), 'every');
 
   const stamp = JSON.parse(await readFile(path.join(stratusHome, 'state.json'), 'utf8')) as { schemaVersion: number };
   assert.equal(stamp.schemaVersion, STATE_SCHEMA_VERSION);

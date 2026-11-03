@@ -557,3 +557,49 @@ test('a settleTrust that never settles labels external and still returns the res
   assert.equal(result.trust, 'external');
   assert.ok(Date.now() - started < 10_000);
 });
+
+test('values named in redact never reach a result, whether the command succeeds, fails or times out, or is cut short', async () => {
+  const secret = 'tok-0123456789abcdef';
+  const run = async (script: string, extra: { maxOutputBytes?: number; timeoutMs?: number } = {}) => {
+    const tool = defineLocalCommandTool({
+      name: 'leaky',
+      createCommand() {
+        return {
+          command: process.execPath,
+          args: ['-e', script],
+          env: { SECRET: secret },
+          redact: [secret],
+          ...extra,
+        };
+      },
+    });
+    return createLocalCommandExecutor().execute({ id: 'call-leak', toolName: 'leaky', input: {} }, tool, session);
+  };
+  const out = (result: { output: unknown }) => result.output as Record<string, unknown>;
+
+  const ok = await run('console.log("key=" + process.env.SECRET); console.error(process.env.SECRET)');
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(out(ok).stdout, 'key=[redacted]\n');
+  assert.equal(out(ok).stderr, '[redacted]\n');
+
+  const failed = await run('console.log(process.env.SECRET); process.exit(3)');
+  assert.equal(failed.ok, false);
+  assert.equal(out(failed).stdout, '[redacted]\n');
+  assert.ok(!JSON.stringify(failed).includes(secret), JSON.stringify(failed));
+
+  const timedOut = await run('console.log(process.env.SECRET); setTimeout(() => {}, 10_000)', { timeoutMs: 300 });
+  assert.equal(out(timedOut).timedOut, true);
+  assert.equal(out(timedOut).stdout, '[redacted]\n');
+
+  // A cap that lands inside the printed key: what was kept of it goes too.
+  const cut = await run('process.stdout.write("0123456789" + process.env.SECRET)', { maxOutputBytes: 25 });
+  assert.equal(out(cut).stdoutTruncated, true);
+  assert.equal(out(cut).stdout, '0123456789[redacted]');
+  // Three characters or fewer of it stay: no more than a key's kind tells.
+  const stub = await run('process.stdout.write("0123456789" + process.env.SECRET)', { maxOutputBytes: 13 });
+  assert.equal(out(stub).stdout, '0123456789tok');
+
+  // Output without the value is untouched.
+  const clean = await run('console.log("nothing here")');
+  assert.equal(out(clean).stdout, 'nothing here\n');
+});

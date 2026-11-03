@@ -1,3 +1,4 @@
+import './home-guard.ts';
 import { writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
@@ -52,6 +53,7 @@ import {
   readServiceCommand,
   readServiceStatus,
   serviceUnitPath,
+  servicePlatform,
   startService,
   stopService,
   uninstallService,
@@ -538,7 +540,12 @@ test('runCli prints help text', async () => {
 
 test('runCli executes the demo tool loop', async () => {
   const { streams, output } = createStreams();
-  const exitCode = await runCli({ argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool'], streams });
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
+  const exitCode = await runCli({
+    argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool'],
+    streams,
+    env: { homeDir: home, processEnv: {} },
+  });
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Starting Stratus Agent local loop with provider=demo/);
@@ -615,7 +622,7 @@ test('runCli skill add clones a git source — the transport skills.sh repos arr
   });
   await git('init', '--quiet');
   await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
-  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skills');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'skills');
 
   const { streams, output } = createStreams();
   const exitCode = await runCli({
@@ -647,7 +654,7 @@ test('runCli skill add of a repo whose root is a nameless skill refuses it, sugg
   });
   await git('init', '--quiet');
   await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
-  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skill');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'skill');
 
   const { streams, output } = createStreams();
   const exitCode = await runCli({
@@ -972,6 +979,56 @@ test('a soul listing only tools nothing provides is warned about, and still runs
   assert.match(output.stderr, /Warning: agent blair has an allowlist that grants nothing/);
 });
 
+test('stratus run names a soul with no tools list, which gets only the safe tools', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const soulPath = path.join(home, 'souls', 'quiet.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(soulPath, '---\nname: Quiet\nid: quiet\n---\n\nYou are Quiet.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: soulPath })}\n`);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  // The daemon says this at roster load; a local run has to as well, or an
+  // agent that cannot run the shell here and does not say why is the result.
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Warning: agent quiet has no tools: list, so it gets only safe tools \(reads and memory\)/);
+});
+
+test('on a home an older build set up, stratus run keeps a soul with no tools list on every tool and leaves the soul alone', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const soulPath = path.join(home, 'souls', 'quiet.md');
+  const soul = '---\nname: Quiet\nid: quiet\n---\n\nYou are Quiet.\n';
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(soulPath, soul);
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: soulPath })}\n`);
+  // What 0.14.2 left behind.
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stderr, /state migration 0005-safe-tools-default: this home predates the safe-tools default, so its souls with no tools: list keep every tool/);
+  assert.doesNotMatch(output.stderr, /has no tools: list/);
+  assert.equal(await readFile(soulPath, 'utf8'), soul, 'no soul is rewritten');
+});
+
 test('the CLI never imports the gateway at module scope', async () => {
   // `bin.ts` imports the barrel to call `unsupportedNodeMessage`, before
   // anything else has a chance to fail — the whole point being to explain
@@ -1052,9 +1109,11 @@ test('a daemon soul run locally is told the names are right and the process is n
 
 test('runCli denies tool calls when approvals are set to never', async () => {
   const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const exitCode = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'never'],
     streams,
+    env: { homeDir: home, processEnv: {} },
   });
 
   assert.equal(exitCode, 0);
@@ -1065,11 +1124,12 @@ test('runCli denies tool calls when approvals are set to never', async () => {
 });
 
 test('runCli prompts for approval in ask mode and honors the answer', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const approved = createStreams();
   const approvedExit = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
     streams: approved.streams,
-    env: { approvalInput: Readable.from(['y\n']) },
+    env: { approvalInput: Readable.from(['y\n']), homeDir: home, processEnv: {} },
   });
 
   assert.equal(approvedExit, 0);
@@ -1082,7 +1142,7 @@ test('runCli prompts for approval in ask mode and honors the answer', async () =
   const deniedExit = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
     streams: denied.streams,
-    env: { approvalInput: Readable.from(['n\n']) },
+    env: { approvalInput: Readable.from(['n\n']), homeDir: home, processEnv: {} },
   });
 
   assert.equal(deniedExit, 0);
@@ -1092,10 +1152,11 @@ test('runCli prompts for approval in ask mode and honors the answer', async () =
 
 test('runCli keeps stdout parseable when combining json format with ask approvals', async () => {
   const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const exitCode = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--format', 'json', '--approvals', 'ask'],
     streams,
-    env: { approvalInput: Readable.from(['y\n']) },
+    env: { approvalInput: Readable.from(['y\n']), homeDir: home, processEnv: {} },
   });
 
   assert.equal(exitCode, 0);
@@ -1113,9 +1174,11 @@ test('runCli keeps stdout parseable when combining json format with ask approval
 
 test('runCli can render machine-readable json output', async () => {
   const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const exitCode = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool', '--format', 'json'],
     streams,
+    env: { homeDir: home, processEnv: {} },
   });
 
   assert.equal(exitCode, 0);
@@ -1137,6 +1200,7 @@ test('resolveRuntimeConfig loads openai settings from renamed env vars', async (
     format: 'text',
     events: true,
   }, {
+    homeDir: tempHome,
     processEnv: {
       OPENAI_API_KEY: 'env-key',
       STRATUS_MODEL: 'gpt-4.1-mini',
@@ -1171,6 +1235,7 @@ test('resolveRuntimeConfig loads openai settings from config file', async () => 
     events: true,
     configPath,
   }, {
+    homeDir: tempHome,
     processEnv: {
       CUSTOM_OPENAI_KEY: 'config-key',
     },
@@ -1412,7 +1477,12 @@ test('runCli reports missing api key errors for real providers', async () => {
 test('runCli reads stdin from an injected stdin stream', async () => {
   const { streams, output } = createStreams();
   const stdinStream = Readable.from(['inspect this tool\n']);
-  const exitCode = await runCli({ argv: ['run', '--provider', 'demo', '--stdin'], streams, env: { stdinStream } });
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
+  const exitCode = await runCli({
+    argv: ['run', '--provider', 'demo', '--stdin'],
+    streams,
+    env: { stdinStream, homeDir: home, processEnv: {} },
+  });
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /inspect this tool/);
@@ -1420,8 +1490,10 @@ test('runCli reads stdin from an injected stdin stream', async () => {
 });
 
 test('source bin script works with piped stdin', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const child = spawn(process.execPath, ['--experimental-strip-types', './src/bin.ts', 'run', '--provider', 'demo', '--stdin'], {
     cwd: packageDir,
+    env: { ...process.env, HOME: home },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -1554,7 +1626,7 @@ Be warm and concise.
       format: 'text',
       events: true,
       soul: path.join(tempDir, 'missing.md'),
-    }, { cwd: tempDir, processEnv: {} }),
+    }, { cwd: tempDir, homeDir: tempHome, processEnv: {} }),
     /Soul file not found/,
   );
 });
@@ -1702,6 +1774,7 @@ test("resolveRuntimeConfig ignores another provider's config file settings", asy
     events: true,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: {
       ANTHROPIC_API_KEY: 'anthropic-key',
       CUSTOM_OPENAI_KEY: 'openai-key',
@@ -2572,7 +2645,11 @@ test('setup offers the Slack package its own choices imply, and nothing for the 
   // The dashboard is offered by `stratus dashboard` when someone runs it
   // (card 308), never by setup.
   assert.doesNotMatch(output.stdout, /control-api|@stratusagent\/dashboard/);
-  assert.deepEqual(installed, [['@stratusagent/channel-slack']]);
+  // At this CLI's own version, as the providers are: the packages ship in
+  // lockstep, so an unpinned install on an older CLI pulls a newer adapter
+  // than the core it loads into (card 1173).
+  assert.deepEqual(installed, [[`@stratusagent/channel-slack@${CLI_VERSION}`]]);
+  assert.match(output.stdout, new RegExp(`Running: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
 });
 
 test('setup never offers the dashboard, and still points at the command that does', async () => {
@@ -2730,7 +2807,38 @@ test('declining the offer prints the command instead of running it', async () =>
 
   assert.match(
     output.stdout,
-    /Skipped\. Install it yourself with: npm install -g @stratusagent\/channel-slack$/m,
+    new RegExp(`Skipped\\. Install it yourself with: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'),
+  );
+});
+
+test('a failed Slack package install names the same pinned command to run by hand', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => false,
+      packageInstaller: async () => ({ ok: false, message: 'EACCES' }),
+      // Save & finish, then "Install it now".
+      setupInput: Readable.from(['9\n', '1\n']),
+    },
+  });
+
+  assert.match(output.stderr, /Could not install: EACCES/);
+  assert.match(
+    output.stderr,
+    new RegExp(`run \`npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\` yourself`),
   );
 });
 
@@ -5021,6 +5129,50 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
   });
 });
 
+test('setup ends with the serve line for plugin channel secrets it leaves stored, not ones it stored and removed', async () => {
+  // No service manager, so nothing will start stratusd. The fixture plugin
+  // is enabled with no agent bound by its config, so only the secrets this
+  // run leaves behind bind anything.
+  const finish = async (input: string[]) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(
+      path.join(home, '.stratus', 'config.json'),
+      `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': {} } })}\n`,
+    );
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        servicePlatform: 'linux',
+        serviceSystemdBooted: false,
+        serviceRunner: stubServiceRunner,
+        setupInput: Readable.from(input.map((line) => `${line}\n`)),
+      },
+    });
+    assert.equal(exitCode, 0, output.stderr);
+    return output.stdout;
+  };
+
+  // Channels → fixture → Stratus → Store secrets → "token" → value → Back → Back → Save & finish
+  assert.match(
+    await finish(['5', '2', '1', '1', 'token', 'fixture-token-1', '3', '3', '9']),
+    /^ {2}stratus dashboard\n\nYour channels answer only while stratusd runs — start it with `stratus serve`\.$/m,
+  );
+  // … then Stratus again → Remove the stored secrets, before saving: the
+  // save ends with nothing bound, so there is nothing to bring online.
+  assert.doesNotMatch(
+    await finish(['5', '2', '1', '1', 'token', 'fixture-token-1', '1', '2', '3', '3', '9']),
+    /only while stratusd runs/,
+  );
+});
+
 test('setup counts an agent bound by any plugin carrying the channel kind, not only the first', async () => {
   // Channels key on agent and kind, so two plugins may carry one kind for
   // different agents. The twin binds Blair; listing only the first plugin's
@@ -5187,6 +5339,78 @@ test('setup suggests serve with the same --config it was run with', async () => 
   // A bare `stratus serve` would read a different config — and therefore a
   // different roster — so the stored Slack app would be skipped.
   assert.match(output.stdout, /run `stratus serve --config \.\/custom\.json` to bring them online/);
+  // Always on stayed on and the stub service reports running, so the
+  // finish screen has nothing to add about starting stratusd.
+  assert.doesNotMatch(output.stdout, /answers only while stratusd runs/);
+});
+
+test('setup ends by saying how to bring Slack online when nothing will run stratusd', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → tokens → no member ID → Back → Always on → "Do not run it for me" → Save.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '7\n', '3\n', '9\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The save line says it too, but optional-package installs scroll it
+  // away, and the closing list is what a first run reads last. Same
+  // --config as setup, for the same reason as the save line.
+  assert.match(
+    output.stdout,
+    /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve --config \.\/custom\.json`\.$/m,
+  );
+});
+
+test('setup on Linux without systemd ends by saying how to bring Slack online', async () => {
+  // The fresh-container case: Always on is left at its default, but there
+  // is no service manager to run it, so nothing will start stratusd.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceSystemdBooted: false,
+      serviceRunner: stubServiceRunner,
+      // Channels → Ava → tokens → no member ID → Back → Save.
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve`\.$/m);
 });
 
 test('setup reloads a running daemon once the channel secrets are written, and says whether Slack picked them up', async () => {
@@ -5583,6 +5807,62 @@ test('doctor against a real daemon: what it warned at start stays a problem afte
   } finally {
     controller.abort();
     await serving;
+  }
+});
+
+/**
+ * A real daemon on a runnable home, bound where `apiHost` says (or left to
+ * the default), with what `serve` printed and what `doctor` then said.
+ */
+const serveThenDoctor = async (apiHost: string | undefined) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-bind-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' }), { mode: 0o600 });
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }), { mode: 0o600 });
+  const controller = new AbortController();
+  const served = createStreams();
+  const serving = runCli({
+    argv: ['serve', '--no-events', ...(apiHost !== undefined ? ['--api-host', apiHost] : []), '--api-port', '0'],
+    streams: served.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+  try {
+    for (let tries = 0; ; tries += 1) {
+      try {
+        await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8');
+        break;
+      } catch {
+        if (tries > 100) throw new Error(`daemon never published gateway.json: ${served.output.stdout}${served.output.stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    const checked = createStreams();
+    const code = await runCli({ argv: ['doctor'], streams: checked.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    return { code, served: served.output.stderr, doctor: checked.output.stdout };
+  } finally {
+    controller.abort();
+    await serving;
+  }
+};
+
+test('serve warns when the control API binds beyond loopback, and doctor notes it without failing', async () => {
+  // The container image binds 0.0.0.0 on purpose, so this must not make
+  // doctor exit 1 there; it is a note under Daemon.
+  const { code, served, doctor } = await serveThenDoctor('0.0.0.0');
+  assert.match(served, /Warning: the control API binds 0\.0\.0\.0, so other machines can reach it/);
+  assert.match(served, /api\.publicUrl/);
+  assert.equal(code, 0, doctor);
+  assert.match(doctor, /API on 0\.0\.0\.0: other machines can reach it/);
+  assert.doesNotMatch(doctor, /warned at start/);
+  assert.match(doctor, /No problems found\./);
+});
+
+test('a loopback control API gets no exposure warning and no doctor note', async () => {
+  for (const apiHost of [undefined, '127.0.0.1', 'localhost']) {
+    const { code, served, doctor } = await serveThenDoctor(apiHost);
+    assert.doesNotMatch(served, /the control API binds/, String(apiHost));
+    assert.equal(code, 0, doctor);
+    assert.doesNotMatch(doctor, /API on /, String(apiHost));
   }
 });
 
@@ -7315,6 +7595,62 @@ test('the systemd unit restarts on failure and enables at login', async () => {
   ]);
 });
 
+test('Linux without systemd running has no service manager: nothing is written or run', async () => {
+  // A simulated Linux has systemd unless the test says otherwise.
+  assert.equal(servicePlatform({ platform: 'linux' }), 'systemd');
+  assert.equal(servicePlatform({ platform: 'linux', systemdBooted: true }), 'systemd');
+  assert.equal(servicePlatform({ platform: 'linux', systemdBooted: false }), undefined);
+
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const result = await installService({
+    platform: 'linux',
+    systemdBooted: false,
+    homeDir: home,
+    run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.messages.join('\n'), /systemd isn't running on this machine/);
+  assert.match(result.messages.join('\n'), /stratus serve/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(stat(path.join(home, '.config', 'systemd', 'user', 'stratusd.service')));
+});
+
+test('setup on Linux without systemd saves cleanly and leaves starting stratusd to the user', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceSystemdBooted: false,
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+      // Providers > Demo, then Save & finish with Always on left at its default.
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.deepEqual(calls, []);
+  await assert.rejects(stat(path.join(home, '.config', 'systemd', 'user', 'stratusd.service')));
+  assert.match(output.stdout, /Always on\s+not available \(systemd isn't running on this machine\)/);
+  assert.doesNotMatch(output.stderr, /systemctl|failed/);
+
+  const status = createStreams();
+  assert.equal(await runCli({
+    argv: ['service', 'status'],
+    streams: status.streams,
+    env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceSystemdBooted: false, serviceRunner: stubServiceRunner },
+  }), 1);
+  assert.match(status.output.stdout, /systemd isn't running on this machine/);
+});
+
 test('a failing service manager is reported, not swallowed', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const { streams, output } = createStreams();
@@ -7492,12 +7828,14 @@ test('setup enables a plugin and writes the setting it is useless without', asyn
     '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes', '~/work'] },
   });
   // No soul files, so the roster is the built-in `stratus` agent — which
-  // has no `tools:` key and is therefore allowlisted for every registered
-  // tool. Enabling granted capability here and now, and the line has to
-  // say so: this is the commonest configuration there is, and claiming
-  // "no agent can call it yet" would understate what just happened.
-  assert.match(output.stdout, /Stratus \(stratus\) has no `tools:` list, which means every registered tool/);
-  assert.match(output.stdout, /callable by that agent the next time the daemon starts/);
+  // says `tools: ["*"]` in code and is therefore allowlisted for every
+  // registered tool. Enabling granted capability here and now, and the line
+  // has to say so: this is the commonest configuration there is, and
+  // claiming "no agent can call it yet" would understate what just happened.
+  assert.match(output.stdout, /Stratus \(stratus\) has `tools: \["\*"\]`, which means every registered tool/);
+  // One agent, five tools: the verb follows neither count, because the
+  // sentence names the agent as the one that calls.
+  assert.match(output.stdout, /So the next time the daemon starts, that agent can call fs\.read, fs\.list, fs\.search, fs\.write, fs\.move\./);
   assert.doesNotMatch(output.stdout, /No agent can call it yet/);
 });
 
@@ -7534,6 +7872,71 @@ test('setup says a plugin grants nothing yet when every soul has a tools list', 
   // with or without the roster check.
   assert.match(output.stdout, /No agent can call it yet — every soul in the roster has a `tools:` list/);
   assert.match(output.stdout, /tools: \[fs\.read\]/);
+});
+
+test('setup does not count a soul with no tools list as able to call a plugin, and says why', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Takes the reserved id over so the roster holds this soul alone.
+  const soul = path.join(agentsDir, 'ava.md');
+  await writeFile(soul, '---\nname: Ava\nid: stratus\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // An omitted list is the safe tools now, not every tool, so enabling
+  // tool-fs granted this agent nothing that writes. It did grant fs.read,
+  // which is safe, so "no agent can call it" would be false (Codex P2
+  // 4430483703).
+  assert.match(output.stdout, /No soul's `tools:` list names what it contributes\. Ava \(stratus\) has no list, so it gets only the ones registered as safe/);
+  assert.doesNotMatch(output.stdout, /No agent can call it yet/);
+  assert.doesNotMatch(output.stdout, /which means every registered tool/);
+});
+
+test('on a home an older build set up, setup counts a soul with no tools list as having every tool, as it always did', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  const soul = path.join(agentsDir, 'ava.md');
+  await writeFile(soul, '---\nname: Ava\nid: stratus\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Ava \(stratus\) has no `tools:` list, which means every registered tool\./);
+  assert.match(output.stdout, /Give a soul a `tools:` list to narrow that\./);
+  assert.doesNotMatch(output.stdout, /only the ones registered as safe|only the tools registered as safe/);
 });
 
 test('setup names the browser tool-browser needs but cannot install', async () => {
@@ -8083,10 +8486,10 @@ test('setup does not call a plugin callable by an agent its required setting mis
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
   // Ava has the roots; the built-in `stratus` agent is seeded into every
-  // roster and has neither a `tools:` list nor an override. Being
-  // allowlisted for every registered tool buys it nothing here — tool-fs
-  // resolves an empty roots list for it and throws on the first call.
-  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // roster with `tools: ["*"]` and no override. Being allowlisted for
+  // every registered tool buys it nothing here — tool-fs resolves an empty
+  // roots list for it and throws on the first call.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\ntools: ["*"]\n---\n\nYou are Ava.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'anthropic',
     plugins: {
@@ -8109,11 +8512,11 @@ test('setup does not call a plugin callable by an agent its required setting mis
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Ava \(ava\) has no `tools:` list/);
+  assert.match(output.stdout, /Ava \(ava\) has `tools: \["\*"\]`/);
   assert.match(output.stdout, /Stratus \(stratus\) is allowlisted too, but roots is not set for it/);
   // The claim the caveat replaces: naming stratus alongside ava as an
   // agent the filesystem tools are callable by.
-  assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have no `tools:` list/);
+  assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have `tools:/);
 });
 
 test('setup enables a plugin after the roots prompt repairs the value that was wrong', async () => {
@@ -8332,7 +8735,8 @@ test('setup says what it did not check when enabling a plugin it could not have 
   // below it used to promise the tools were callable at the next daemon
   // start regardless, leaving two sentences that contradict each other.
   assert.match(output.stdout, /subject to the caveat above, which setup did not check/);
-  assert.doesNotMatch(output.stdout, /callable by that agent the next time the daemon starts/);
+  assert.match(output.stdout, /So at the next daemon start, that agent would gain mcp\.<server>\.<tool>, discovered at connect — subject to the caveat above/);
+  assert.doesNotMatch(output.stdout, /the next time the daemon starts, that agent can call/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.equal(config.plugins['@stratusagent/plugin-mcp'].enabled, true);
 });
@@ -9655,7 +10059,7 @@ test('opting out in setup removes a service an earlier run installed', async () 
   assert.ok(await readFile(unitPath, 'utf8').catch(() => undefined), 'installed to begin with');
 
   const calls: string[] = [];
-  const { streams } = createStreams();
+  const { streams, output } = createStreams();
   await runCli({
     argv: ['setup'],
     streams,
@@ -9674,6 +10078,77 @@ test('opting out in setup removes a service an earlier run installed', async () 
   // the menu said "off" — still burning usage and still answering in Slack.
   assert.ok(calls.some((call) => /disable --now/.test(call)), calls.join(', '));
   assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+  // No channel is stored, so stopping stratusd leaves nothing silent.
+  assert.doesNotMatch(output.stdout, /only while stratusd runs/);
+});
+
+test('opting out in setup with Slack stored ends by saying how to bring it back online', async () => {
+  // A rerun: Slack was connected and answered through the service an
+  // earlier run installed. This run edits no channel, so the save never
+  // mentions Slack, but turning Always on off stops the daemon that was
+  // answering, and the finish screen has to say so.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: async () => ({ code: 0, stdout: '', stderr: '' }),
+      // Always on → "Do not run it for me" → Save & finish.
+      setupInput: Readable.from(['7\n', '3\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /stratusd is stopped and will not start at login/);
+  assert.match(output.stdout, /^ {2}stratus dashboard\n\nSlack answers only while stratusd runs — start it with `stratus serve`\.$/m);
+});
+
+test('opting out in setup with a plugin channel bound ends by saying how to bring it back online', async () => {
+  // Bound by its plugin's config alone, as a channel that needs no secret
+  // is, so nothing under channels.* in the credentials says it exists.
+  const optOut = async (agents: Record<string, unknown> | undefined) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    const agentsDir = path.join(home, '.stratus', 'agents');
+    await mkdir(agentsDir, { recursive: true });
+    await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+    await writeFile(
+      path.join(home, '.stratus', 'config.json'),
+      `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': agents === undefined ? {} : { agents } } })}\n`,
+    );
+    await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        servicePlatform: 'linux',
+        serviceRunner: async () => ({ code: 0, stdout: '', stderr: '' }),
+        // Always on → "Do not run it for me" → Save & finish.
+        setupInput: Readable.from(['7\n', '3\n', '9\n']),
+      },
+    });
+    assert.equal(exitCode, 0, output.stderr);
+    assert.match(output.stdout, /stratusd is stopped and will not start at login/);
+    return output.stdout;
+  };
+
+  assert.match(await optOut({ ava: {} }), /^ {2}stratus dashboard\n\nYour channels answer only while stratusd runs — start it with `stratus serve`\.$/m);
+  // Enabled with no agent bound: nothing was answering there.
+  assert.doesNotMatch(await optOut(undefined), /only while stratusd runs/);
 });
 
 test('starting a LaunchAgent works after it has been booted out', async () => {
@@ -14273,13 +14748,40 @@ test('the example template in this repository installs', async () => {
   await stat(path.join(home, '.stratus', 'skills', 'meeting-notes', 'SKILL.md'));
 });
 
-test('a soul with no tools list is reviewed as unrestricted, not as "no tools"', async () => {
+test('a soul with no tools list is reviewed as safe tools only, and one listing * as every tool', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const source = await writeTemplateDir({
     'template.json': EXAMPLE_MANIFEST,
-    // No `tools:` line at all. `executeToolCall` skips the allowlist check
-    // for an undefined list, so this agent may call every registered tool —
-    // the opposite of the empty list it looks like.
+    // No `tools:` line at all: the safe tools, not the nothing an empty
+    // list grants and not the everything it used to be.
+    'agents/wide.md': '---\nname: Wide\n---\n\nI have no tools list.\n',
+    // A template asking for everything has to say `*`, and the review says
+    // that in the loudest words it has.
+    'agents/star.md': '---\nname: Star\ntools: ["*"]\n---\n\nI asked for everything.\n',
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stdout, /Wide \(wide\) — only safe tools \(reads and memory\), because the soul has no tools: list/);
+  assert.match(output.stdout, /Star \(star\) — EVERY tool, because the soul lists tools: \["\*"\]/);
+  assert.doesNotMatch(output.stdout, /Wide \(wide\) — no tools/);
+});
+
+test('on a home an older build set up, a template soul with no tools list is reviewed as every tool', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
     'agents/wide.md': '---\nname: Wide\n---\n\nI have no tools list.\n',
   });
 
@@ -14291,8 +14793,7 @@ test('a soul with no tools list is reviewed as unrestricted, not as "no tools"',
   });
 
   assert.equal(code, 0, output.stderr);
-  assert.match(output.stdout, /EVERY tool, because the soul has no tools: list/);
-  assert.doesNotMatch(output.stdout, /Wide \(wide\) — no tools/);
+  assert.match(output.stdout, /Wide \(wide\) — EVERY tool, because the soul has no tools: list/);
 });
 
 test('a soul whose id is already claimed by another file is refused, --force included', async () => {
@@ -15187,6 +15688,92 @@ test('plugins lets a configured soul take the built-in id over rather than listi
   assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
 });
 
+test('plugins does not show a grant to a soul with no tools: list as certain while the tool could still register riskier', async () => {
+  // Card 1038, from Codex on #510: a soul with no `tools:` list gets only the
+  // tools that *register* as safe. The report reads the manifest, and a tool
+  // object may raise its own risk at registration, so a manifest-safe tool
+  // is only probably safe. Shown as a plain arrow, the grant could name an
+  // agent the runner then refuses.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+
+  const json = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams: json.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(json.output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  const read = tools.find((tool) => tool.name === 'fs.read');
+  // The listed souls are certain; the unlisted one depends on the risk the
+  // tool registers at, which only a running daemon sees.
+  assert.deepEqual(read?.grantedTo, ['stratus', 'blair']);
+  assert.deepEqual(read?.grantedIfSafe, ['quiet']);
+  // Gated already, and registration only ever raises a risk: no grant to
+  // an unlisted soul, and nothing uncertain about it.
+  const write = tools.find((tool) => tool.name === 'fs.write');
+  assert.deepEqual(write?.grantedTo, []);
+  assert.equal(write?.grantedIfSafe, undefined);
+
+  const text = createStreams();
+  await runCli({ argv: ['plugins'], streams: text.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.match(text.output.stdout, /fs\.read\s+safe → stratus, blair; quiet if it registers as safe\n/);
+  assert.match(text.output.stdout, /fs\.list\s+safe → quiet if it registers as safe\n/);
+  assert.match(text.output.stdout, /fs\.write\s+gated → nobody, until a soul’s tools: list names it\n/);
+});
+
+test('plugins shows a soul with no tools: list as granted a tool the operator rated safe', async () => {
+  // An operator's `toolRisks` word replaces the object's own claim at
+  // registration, so a tool rated safe there is safe for certain.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.plugins['@stratusagent/tool-fs'].toolRisks = { 'fs.read': 'safe' };
+  await writeFile(configPath, JSON.stringify(config));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair', 'quiet']);
+  assert.equal(tools.find((tool) => tool.name === 'fs.read')?.grantedIfSafe, undefined);
+  // fs.list has no override, so it stays uncertain beside it.
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.list')?.grantedIfSafe, ['quiet']);
+});
+
+test('plugins shows every tool as granted to a soul with no tools: list on a home an older build set up', async () => {
+  // There an unlisted soul keeps every tool whatever it registers at, so
+  // nothing about the grant waits on the risk.
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'quiet.md'),
+    ['---', 'id: quiet', 'name: Quiet', '---', 'You are Quiet.'].join('\n'),
+  );
+  // What 0.14.2 left behind.
+  await writeFile(path.join(home, '.stratus', 'state.json'), JSON.stringify({
+    schemaVersion: 4,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({ argv: ['plugins', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[]; grantedIfSafe?: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair', 'quiet']);
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, ['quiet']);
+  assert.ok(tools.every((tool) => tool.grantedIfSafe === undefined));
+});
+
 test('plugins does not offer a stale Slack token as an approver route', async () => {
   const { home, cwd } = await writePluginFixture();
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
@@ -15814,10 +16401,11 @@ test('gated runs a safe tool without asking and asks about the rest; a defaulted
 
 test('runCli with no --approvals runs a safe tool at a terminal without a prompt', async () => {
   const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
   const exitCode = await runCli({
     argv: ['run', '--provider', 'demo', '--prompt', 'please use the echo tool'],
     streams,
-    env: { terminal: true },
+    env: { terminal: true, homeDir: home, processEnv: {} },
   });
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /tool.called demo\.echo/);
