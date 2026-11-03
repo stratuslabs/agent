@@ -240,8 +240,14 @@ test('a shutdown aborts a review still running once the turns have drained, and 
   let release: (() => void) | undefined;
   let sawAbort = false;
   let honorAbort = true;
+  // Each half stops the gateway only once its review is waiting on the
+  // provider: a fixed sleep raced a slow runner, whose stop() then cancelled
+  // the review before it ever reached the provider.
+  let reached: () => void = () => {};
+  let reachedProvider = new Promise<void>((resolve) => { reached = resolve; });
   const harness = await reviewGateway(() => openAiText('{"verdict":"allow","code":"asked-for","reason":"fine"}'));
   harness.onReviewCall((signal) => new Promise<Response>((resolve, reject) => {
+    reached();
     signal?.addEventListener('abort', () => {
       sawAbort = true;
       if (honorAbort) {
@@ -255,7 +261,7 @@ test('a shutdown aborts a review still running once the turns have drained, and 
   // A shadow review: nothing awaits it, and its turn is over.
   let settled: unknown;
   const review = ask(harness).then((answer) => { settled = answer; });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await reachedProvider;
   await harness.gateway.stop();
   assert.equal(sawAbort, true, 'the shutdown aborted the review');
   assert.deepEqual(settled, { failed: 'cancelled' }, 'and it had ended before stop() resolved');
@@ -265,16 +271,21 @@ test('a shutdown aborts a review still running once the turns have drained, and 
   const second = await reviewGateway(() => openAiText('{}'));
   sawAbort = false;
   honorAbort = false;
+  reachedProvider = new Promise<void>((resolve) => { reached = resolve; });
+  let aborted: () => void = () => {};
+  const abortReached = new Promise<void>((resolve) => { aborted = resolve; });
   second.onReviewCall((signal) => new Promise<Response>((resolve) => {
-    signal?.addEventListener('abort', () => { sawAbort = true; }, { once: true });
+    reached();
+    signal?.addEventListener('abort', () => { sawAbort = true; aborted(); }, { once: true });
     release = () => resolve(openAiText('{"verdict":"allow","code":"asked-for","reason":"late"}'));
   }));
   await second.gateway.start();
   await second.gateway.dispatch({ sessionId: 'cli-1', agentId: 'ava', userMessage: 'hello' });
   const stuck = ask(second);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await reachedProvider;
   let stopped = false;
   const stopping = second.gateway.stop().then(() => { stopped = true; });
+  await abortReached;
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(sawAbort, true);
   assert.equal(stopped, false, 'stop() waits for the review that ignored its abort');
