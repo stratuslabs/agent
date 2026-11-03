@@ -3497,18 +3497,28 @@ const mentions = (text: string, botUserId: string): boolean =>
   botUserId.length > 0 && text.includes(`<@${botUserId}>`);
 
 /**
+ * The users a message's `<@U123>` and `<@U123|name>` mentions name, in
+ * order. The classes leave out `<` so that reading crafted text such as
+ * `<@<@<@…` stays linear (card 1090). Slack escapes `<` in message text,
+ * so a real mention never has one inside it.
+ */
+const mentionedUsers = (text: string): string[] =>
+  [...text.matchAll(/<@([^|<>]+)(?:\|[^<>]*)?>/g)].map((match) => match[1] as string);
+
+/**
  * Whether a message asks this agent to stop (card 337): the word "stop"
  * and nothing else but mentions and closing punctuation, in any case. A
  * message that mentions someone and not this agent is for them. Exported
  * for tests.
  */
 export const isStopRequest = (text: string, botUserId: string): boolean => {
-  const mentioned = [...text.matchAll(/<@([^>|]+)(?:\|[^>]*)?>/g)].map((match) => match[1]);
+  const mentioned = mentionedUsers(text);
   if (mentioned.length > 0 && !mentioned.includes(botUserId)) {
     return false;
   }
-  const words = text.replace(/<@[^>|]+(?:\|[^>]*)?>/g, ' ').trim().replace(/[.!]+$/, '').trim();
-  return words.toLowerCase() === 'stop';
+  // Anchored at the start, so the engine tries one position rather than
+  // rescanning a long run of `.` from every one of them (card 1090).
+  return /^stop\s*[.!]*$/i.test(text.replace(/<@[^|<>]+(?:\|[^<>]*)?>/g, ' ').trim());
 };
 
 /**
@@ -4614,7 +4624,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * split reply loses everything after the tag.
    */
   const tagsAnAgent = async (connection: AgentConnection, text: string): Promise<boolean> => {
-    const tagged = new Set([...text.matchAll(/<@([^>|]+)(?:\|[^>]*)?>/g)].map((match) => match[1] as string));
+    const tagged = new Set(mentionedUsers(text));
     tagged.delete(connection.botUserId);
     const team = Object.values(connection.config.agentMentions?.team ?? {});
     for (const user of tagged) {
