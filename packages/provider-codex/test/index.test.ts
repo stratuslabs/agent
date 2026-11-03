@@ -629,18 +629,25 @@ test('a slow delta consumer is not counted as codex silence', async () => {
   assert.deepEqual(response.parts, [{ type: 'text', text: 'onetwo' }]);
 });
 
-test('the idle timer suspends across hosted tool waits and its abort reaches hosted work', async () => {
+test('the idle timer suspends across hosted tool waits and its abort reaches hosted work', async (t) => {
+  // The clock is mocked, so the check is about suspension and not speed.
+  // With a real 60ms timer, the fake's HTTP round trip into the hosted
+  // server could outlast it on a loaded runner, and the timer fired before
+  // the tool started (card 1074). Here time moves only inside the tool,
+  // so the timer fires exactly when it was still armed during the wait.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const IDLE_MS = 60;
   // Sampled while the tool is still executing: the turn-final abort in
   // generate()'s cleanup fires on every exit by design, so the signal's
   // state after the turn says nothing about the idle timer.
   const abortedDuringTool: boolean[] = [];
   let sawSignal = false;
   const provider = createCodexProvider({
-    idleTimeoutMs: 60,
+    idleTimeoutMs: IDLE_MS,
     executeTool: async (_session, call, context) => {
       sawSignal = context?.signal !== undefined;
-      // 3x the idle timeout — survives only if the timer suspended.
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // 3x the idle timeout: survives only if the timer suspended.
+      t.mock.timers.tick(IDLE_MS * 3);
       abortedDuringTool.push(context?.signal?.aborted ?? false);
       return { callId: call.id, toolName: call.toolName, ok: true, output: { echoed: true } };
     },
