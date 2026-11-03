@@ -2620,7 +2620,11 @@ test('setup offers the Slack package its own choices imply, and nothing for the 
   // The dashboard is offered by `stratus dashboard` when someone runs it
   // (card 308), never by setup.
   assert.doesNotMatch(output.stdout, /control-api|@stratusagent\/dashboard/);
-  assert.deepEqual(installed, [['@stratusagent/channel-slack']]);
+  // At this CLI's own version, as the providers are: the packages ship in
+  // lockstep, so an unpinned install on an older CLI pulls a newer adapter
+  // than the core it loads into (card 1173).
+  assert.deepEqual(installed, [[`@stratusagent/channel-slack@${CLI_VERSION}`]]);
+  assert.match(output.stdout, new RegExp(`Running: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
 });
 
 test('setup never offers the dashboard, and still points at the command that does', async () => {
@@ -2778,7 +2782,38 @@ test('declining the offer prints the command instead of running it', async () =>
 
   assert.match(
     output.stdout,
-    /Skipped\. Install it yourself with: npm install -g @stratusagent\/channel-slack$/m,
+    new RegExp(`Skipped\\. Install it yourself with: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'),
+  );
+});
+
+test('a failed Slack package install names the same pinned command to run by hand', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => false,
+      packageInstaller: async () => ({ ok: false, message: 'EACCES' }),
+      // Save & finish, then "Install it now".
+      setupInput: Readable.from(['9\n', '1\n']),
+    },
+  });
+
+  assert.match(output.stderr, /Could not install: EACCES/);
+  assert.match(
+    output.stderr,
+    new RegExp(`run \`npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\` yourself`),
   );
 });
 

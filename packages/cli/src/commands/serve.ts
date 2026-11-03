@@ -566,7 +566,7 @@ const serveHeldHome = async (
     } else {
       warn(
         `Slack tokens are stored for ${slackAgents.length} agent(s), but @stratusagent/channel-slack is not installed. `
-        + 'Run `npm install -g @stratusagent/channel-slack` to bring them online; starting without the Slack channel.',
+        + `Run \`npm install -g @stratusagent/channel-slack@${CLI_VERSION}\` to bring them online; starting without the Slack channel.`,
       );
     }
   }

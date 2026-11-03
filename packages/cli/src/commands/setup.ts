@@ -73,7 +73,7 @@ import { channelReloadLine, reloadRunningDaemonChannels, serviceEnvFor } from '.
 import type { CliStreams, CliEnvironment, CliConfigFile } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import { packageInstalled } from '../loaders.ts';
-import { isPackageName, isInstallableSpecifier, defaultPackageInstaller } from '../npm.ts';
+import { CLI_VERSION, isPackageName, isInstallableSpecifier, defaultPackageInstaller } from '../npm.ts';
 import type { CliProviderName, ParsedSetupCommand } from '../parse.ts';
 import { FIRST_PARTY_CAPABILITY_PACKAGES } from '../plugin-catalog.ts';
 import { checkPluginReleases, currentPlatformHost, installSpecifier, readPluginIndex, releaseVerdict } from '../plugin-index.ts';
@@ -2881,9 +2881,14 @@ export const runSetup = async (
    * port, and the time to ask about that is when someone runs
    * `stratus dashboard`, which offers its own packages (card 308).
    * Declining is a real answer and prints the command.
+   *
+   * Installed at this CLI's own version, as the providers are: the packages
+   * ship in lockstep, and an unpinned install on an older CLI pulls a newer
+   * adapter than the core it loads into.
    */
   const offerOptionalPackages = async (): Promise<void> => {
     const slackPackage = '@stratusagent/channel-slack';
+    const slackSpecifier = `${slackPackage}@${CLI_VERSION}`;
     const slackAgents = Object.keys(state.channels.slack ?? {}).length;
     if (slackAgents === 0 || packageInstalled(slackPackage, env)) {
       return;
@@ -2895,16 +2900,16 @@ export const runSetup = async (
 
     const answer = await prompter.select('Install now with npm install -g?', ['Install it now', 'Skip']);
     if (answer.kind !== 'index' || answer.index !== 0) {
-      writeLine(streams.stdout, `Skipped. Install it yourself with: npm install -g ${slackPackage}`);
+      writeLine(streams.stdout, `Skipped. Install it yourself with: npm install -g ${slackSpecifier}`);
       return;
     }
 
-    writeLine(streams.stdout, `Running: npm install -g ${slackPackage}`);
+    writeLine(streams.stdout, `Running: npm install -g ${slackSpecifier}`);
     // Never fails setup — not even its exit code, unlike the always-on
     // service step below: the config and credentials are already written,
     // and a package that did not install is a warning at the next start,
     // not a broken machine.
-    const result = await (env.packageInstaller ?? defaultPackageInstaller)([slackPackage])
+    const result = await (env.packageInstaller ?? defaultPackageInstaller)([slackSpecifier])
       .catch((error: unknown) => ({
         ok: false,
         message: error instanceof Error ? error.message : String(error),
@@ -2913,7 +2918,7 @@ export const runSetup = async (
       writeLine(streams.stdout, `Installed ${slackPackage}.`);
     } else {
       writeLine(streams.stderr, `Could not install: ${result.message}`);
-      writeLine(streams.stderr, `Setup is saved either way — run \`npm install -g ${slackPackage}\` yourself.`);
+      writeLine(streams.stderr, `Setup is saved either way — run \`npm install -g ${slackSpecifier}\` yourself.`);
     }
   };
 
