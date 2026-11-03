@@ -58,6 +58,9 @@ error that says why and names the setting below:
   can't start it, and so does Ubuntu 24.04's AppArmor restriction
   (`kernel.apparmor_restrict_unprivileged_userns=1`) for Playwright's
   Chromium.
+- **Linux, with the daemon running as root.** Chromium won't start its
+  sandbox as root, whatever the host allows. Run the daemon as a non-root
+  user, or turn the sandbox off.
 
 On a host like that, turn it off:
 

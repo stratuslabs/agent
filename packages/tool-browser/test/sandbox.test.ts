@@ -99,12 +99,35 @@ test("Chromium's own sandbox failure (Linux) is reported as that, with the opt-o
     'browserType.launch: Target page, context or browser has been closed\nBrowser logs:\n\nChromium sandboxing failed!\n'
     + '================================\nTo avoid the sandboxing issue, do either of the following:\n',
   );
-  const driver = createPlaywrightDriver(host, { sandboxRefusal: allowed });
+  const driver = createPlaywrightDriver(host, { sandboxRefusal: allowed, runsAsRoot: () => false });
 
   await assert.rejects(driver.launch({ headless: true, proxy }), (error: Error) => {
     assert.match(error.message, /Chromium sandboxing failed!/);
+    assert.match(error.message, /user namespaces/);
     assert.match(error.message, OPT_OUT);
     assert.doesNotMatch(error.message, /playwright install/);
+    return true;
+  });
+});
+
+test('as root, the same failure says to run the daemon as another user, not to allow user namespaces', async () => {
+  // Chromium refuses to sandbox as root ("Running as root without
+  // --no-sandbox is not supported. See https://crbug.com/638180.") and
+  // Playwright rewrites that line to the same box as "No usable sandbox!",
+  // so the message alone can't tell the two apart. No namespace setting
+  // fixes this one.
+  const { host } = fakePlaywright(
+    'browserType.launch: Target page, context or browser has been closed\nBrowser logs:\n\nChromium sandboxing failed!\n'
+    + '================================\nTo avoid the sandboxing issue, do either of the following:\n',
+  );
+  const driver = createPlaywrightDriver(host, { sandboxRefusal: allowed, runsAsRoot: () => true });
+
+  await assert.rejects(driver.launch({ headless: true, proxy }), (error: Error) => {
+    assert.match(error.message, /Chromium sandboxing failed!/);
+    assert.match(error.message, /as root/);
+    assert.match(error.message, /non-root user/);
+    assert.doesNotMatch(error.message, /user namespaces/);
+    assert.match(error.message, OPT_OUT);
     return true;
   });
 });

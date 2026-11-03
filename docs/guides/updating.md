@@ -442,7 +442,9 @@ Two kinds of install can't start it, and need a step when you upgrade:
   ```
 
 A daemon that runs inside `sandbox-exec` on macOS can't start it either,
-and the same key turns it off there.
+and neither can a Linux daemon that runs as root: Chromium won't start
+its sandbox as root. Run that daemon as a non-root user, or use the same
+key.
 
 Skip the step and the daemon still starts and every other tool works, but
 each `browser.*` call fails with an error that says Chromium's sandbox

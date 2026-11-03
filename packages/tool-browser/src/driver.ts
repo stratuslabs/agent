@@ -109,7 +109,17 @@ export interface PlaywrightDriverOptions {
    * itself. Tests replace it.
    */
   sandboxRefusal?: () => Promise<string | undefined>;
+  /**
+   * Whether the daemon runs as root, asked only after Chromium has failed
+   * to start its sandbox. Chromium refuses to sandbox as root, and
+   * Playwright reports that with the same words as a host that refuses
+   * user namespaces, so this is how the two get different advice.
+   * Defaults to the process's own uid. Tests replace it.
+   */
+  runsAsRoot?: () => boolean;
 }
+
+const processRunsAsRoot = (): boolean => process.getuid?.() === 0;
 
 /**
  * Playwright's own words for Chromium's "No usable sandbox!", and that line
@@ -166,6 +176,13 @@ export const createPlaywrightDriver = (
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (chromiumSandbox && sandboxFailed(message) && (driverOptions.runsAsRoot ?? processRunsAsRoot)()) {
+        throw new Error(
+          `Could not start a browser: ${message}\n`
+          + "This daemon runs as root, and Chromium won't start its sandbox as root. "
+          + `Run the daemon as a non-root user, or ${OPT_OUT}.`,
+        );
+      }
       if (chromiumSandbox && sandboxFailed(message)) {
         throw new Error(
           `Could not start a browser: ${message}\n`

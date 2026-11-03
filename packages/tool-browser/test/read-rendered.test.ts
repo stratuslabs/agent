@@ -330,13 +330,22 @@ test("a real Chromium starts with its own sandbox by default, or the launch says
     await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
     // Bounded, so a page that never opens fails here instead of hanging the
     // suite: that hang is the failure the macOS check exists to prevent.
-    return Promise.race([
-      (tools.get('browser.read') as Tool).execute({ url }, session).then(
-        (result) => ({ text: String((result as JsonObject).text) }),
-        (error: Error) => ({ error: error.message }),
-      ),
-      new Promise<{ error: string }>((resolve) => setTimeout(() => resolve({ error: 'no answer within 30s' }), 30_000)),
-    ]);
+    // The losing timer is cleared, or it holds the test process open for
+    // the full 30 seconds after a call that answered.
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        (tools.get('browser.read') as Tool).execute({ url }, session).then(
+          (result) => ({ text: String((result as JsonObject).text) }),
+          (error: Error) => ({ error: error.message }),
+        ),
+        new Promise<{ error: string }>((resolve) => {
+          timer = setTimeout(() => resolve({ error: 'no answer within 30s' }), 30_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   };
 
   const refusal = process.platform === 'darwin' ? await macSandboxRefusal() : undefined;
