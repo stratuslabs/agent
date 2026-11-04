@@ -440,823 +440,775 @@ const readOptionValue = (tokens: string[], index: number, flag: string): string 
   return value;
 };
 
-export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCommand => {
-  const [command, ...rest] = argv;
+const parseDashboardCommand = (rest: string[]): ParsedDashboardCommand | ParsedHelpCommand => {
+  let port: number | undefined;
+  let host: string | undefined;
+  let openBrowser = true;
 
-  if (!command || command === 'help' || command === '--help' || command === '-h') {
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--port') {
+      const value = Number(readOptionValue(rest, index, '--port'));
+      if (!Number.isInteger(value) || value < 0 || value > 65535) {
+        throw new Error(`Invalid value for --port: ${rest[index + 1] ?? '(missing)'}`);
+      }
+      port = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--host') {
+      host = readOptionValue(rest, index, '--host');
+      index += 1;
+      continue;
+    }
+    if (token === '--no-open') {
+      openBrowser = false;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+
+  return {
+    command: 'dashboard',
+    ...(port !== undefined ? { port } : {}),
+    ...(host !== undefined ? { host } : {}),
+    openBrowser,
+  };
+};
+
+const parseServeCommand = (rest: string[]): ParsedServeCommand | ParsedHelpCommand => {
+  const parsed: ParsedServeCommand = { command: 'serve', events: true };
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--config') {
+      parsed.configPath = readOptionValue(rest, index, '--config');
+      index += 1;
+      continue;
+    }
+    if (token === '--idle-timeout') {
+      const seconds = Number(readOptionValue(rest, index, '--idle-timeout'));
+      if (!Number.isFinite(seconds) || seconds < 0) {
+        throw new Error(`Invalid value for --idle-timeout: ${rest[index + 1] ?? '(missing)'}`);
+      }
+      parsed.idleTimeoutMs = Math.round(seconds * 1000);
+      index += 1;
+      continue;
+    }
+    if (token === '--approvals') {
+      const value = readOptionValue(rest, index, '--approvals');
+      if (value !== 'headless' && value !== 'remote') {
+        throw new Error(`Unsupported approvals mode: ${value}. Use headless or remote.`);
+      }
+      parsed.approvals = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--no-events') {
+      parsed.events = false;
+      continue;
+    }
+    if (token === '--no-log-file') {
+      parsed.logToFile = false;
+      continue;
+    }
+    if (token === '--log-format') {
+      const value = readOptionValue(rest, index, '--log-format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported --log-format: ${value}. Use text or json.`);
+      }
+      parsed.logFormat = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--no-api') {
+      parsed.api = false;
+      continue;
+    }
+    if (token === '--held') {
+      parsed.held = true;
+      continue;
+    }
+    if (token === '--hold-new-version') {
+      parsed.holdNewVersion = true;
+      continue;
+    }
+    if (token === '--api') {
+      parsed.api = true;
+      continue;
+    }
+    if (token === '--api-port') {
+      const port = Number(readOptionValue(rest, index, '--api-port'));
+      if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+        throw new Error(`Invalid value for --api-port: ${rest[index + 1] ?? '(missing)'}`);
+      }
+      parsed.apiPort = port;
+      index += 1;
+      continue;
+    }
+    if (token === '--api-host') {
+      parsed.apiHost = readOptionValue(rest, index, '--api-host');
+      index += 1;
+      continue;
+    }
+    if (token === '--events-host') {
+      parsed.eventsHost = readOptionValue(rest, index, '--events-host');
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return parsed;
+};
+
+const parseChatCommand = (rest: string[]): ParsedChatCommand | ParsedHelpCommand => {
+  const parsed: ParsedChatCommand = { command: 'chat', events: false };
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--provider') {
+      parsed.provider = parseProviderName(readOptionValue(rest, index, '--provider'), '--provider');
+      index += 1;
+      continue;
+    }
+    if (token === '--model') {
+      parsed.model = readOptionValue(rest, index, '--model');
+      index += 1;
+      continue;
+    }
+    if (token === '--base-url') {
+      parsed.baseUrl = readOptionValue(rest, index, '--base-url');
+      index += 1;
+      continue;
+    }
+    if (token === '--soul') {
+      parsed.soul = readOptionValue(rest, index, '--soul');
+      index += 1;
+      continue;
+    }
+    if (token === '--config') {
+      parsed.configPath = readOptionValue(rest, index, '--config');
+      index += 1;
+      continue;
+    }
+    if (token === '--approvals') {
+      const value = readOptionValue(rest, index, '--approvals');
+      if (value !== 'always' && value !== 'open' && value !== 'ask' && value !== 'gated' && value !== 'never') {
+        throw new Error(`Invalid value for --approvals: ${value}`);
+      }
+      parsed.approvals = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--max-turns') {
+      const value = Number(readOptionValue(rest, index, '--max-turns'));
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`Invalid value for --max-turns: ${rest[index + 1] ?? '(missing)'}`);
+      }
+      parsed.maxTurns = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--events') {
+      parsed.events = true;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return parsed;
+};
+
+const parseAgentsCommand = (command: 'agents' | 'agent', rest: string[]): ParsedAgentsCommand | ParsedHelpCommand => {
+  const agentsRest = command === 'agents' ? rest : rest.slice(1);
+  let format: 'text' | 'json' = 'text';
+  let gateway: string | undefined;
+  let token: string | undefined;
+  for (let index = 0; index < agentsRest.length; index += 1) {
+    const argument = agentsRest[index];
+    if (!argument) {
+      continue;
+    }
+    if (argument === '--help' || argument === '-h') {
+      return { command: 'help' };
+    }
+    if (argument === '--format') {
+      const value = readOptionValue(agentsRest, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported format: ${value}`);
+      }
+      format = value;
+      index += 1;
+      continue;
+    }
+    if (argument === '--gateway') {
+      gateway = readOptionValue(agentsRest, index, '--gateway');
+      index += 1;
+      continue;
+    }
+    if (argument === '--token') {
+      token = readOptionValue(agentsRest, index, '--token');
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${argument}`);
+  }
+  if (token !== undefined && gateway === undefined) {
+    throw new Error('--token only applies with --gateway.');
+  }
+  return {
+    command: 'agents',
+    format,
+    ...(gateway ? { gateway } : {}),
+    ...(token ? { token } : {}),
+  };
+};
+
+const parseSchedulesCommand = (command: 'schedules' | 'schedule', rest: string[]): ParsedSchedulesCommand | ParsedHelpCommand => {
+  const schedulesRest = command === 'schedules' ? rest : rest.slice(1);
+  const action = (command === 'schedule' ? rest[0] : schedulesRest[0]) === 'cancel' ? 'cancel' : 'list';
+  const tokens = action === 'cancel' && command === 'schedules' ? schedulesRest.slice(1) : schedulesRest;
+  let format: 'text' | 'json' = 'text';
+  let scheduleId: string | undefined;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || (action === 'list' && token === 'list' && index === 0)) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--format') {
+      const value = readOptionValue(tokens, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported format: ${value}`);
+      }
+      format = value;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      throw new Error(`Unknown option: ${token}`);
+    }
+    if (action === 'cancel' && scheduleId === undefined) {
+      scheduleId = token;
+      continue;
+    }
+    throw new Error(`Unexpected argument: ${token}. Try: stratus schedules, stratus schedules cancel <id>`);
+  }
+  if (action === 'cancel' && !scheduleId) {
+    throw new Error('schedules cancel needs the schedule id: stratus schedules cancel <id>.');
+  }
+  return {
+    command: 'schedules',
+    action,
+    ...(scheduleId ? { scheduleId } : {}),
+    format,
+  };
+};
+
+const parseDoctorCommand = (rest: string[]): ParsedDoctorCommand | ParsedHelpCommand => {
+  let format: 'text' | 'json' = 'text';
+  let configPath: string | undefined;
+  let live = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--format') {
+      const value = readOptionValue(rest, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported format: ${value}`);
+      }
+      format = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--config') {
+      configPath = readOptionValue(rest, index, '--config');
+      index += 1;
+      continue;
+    }
+    if (token === '--live') {
+      live = true;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return { command: 'doctor', format, ...(configPath ? { configPath } : {}), ...(live ? { live } : {}) };
+};
+
+const parseUpdateCommand = (rest: string[]): ParsedUpdateCommand | ParsedHelpCommand => {
+  let check = false;
+  for (const token of rest) {
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--check') {
+      check = true;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return { command: 'update', check };
+};
+
+const parseServiceCommand = (rest: string[]): ParsedServiceCommand | ParsedHelpCommand => {
+  const action = rest[0];
+  if (action === '--help' || action === '-h' || action === undefined) {
     return { command: 'help' };
   }
-
-  // Before every other command, and answered even where one would fail:
-  // the first thing anyone is asked for in a bug report is the version,
-  // and a build too broken to serve is exactly when it is wanted. Reaching
-  // it through `update --check` was the only way to see it, which asks npm
-  // over the network to answer a question about this machine.
-  if (command === 'version' || command === '--version' || command === '-v') {
-    return { command: 'version' };
+  if (action !== 'install' && action !== 'uninstall' && action !== 'status' && action !== 'start' && action !== 'stop') {
+    throw new Error(`Unknown service action: ${action} (expected install, uninstall, status, start, or stop)`);
   }
+  const parsed: ParsedServiceCommand = { command: 'service', action };
+  const serviceRest = rest.slice(1);
+  for (let index = 0; index < serviceRest.length; index += 1) {
+    const token = serviceRest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--no-login') {
+      if (action !== 'install') {
+        throw new Error('--no-login applies to `stratus service install`.');
+      }
+      parsed.runAtLogin = false;
+      continue;
+    }
+    if (token === '--config') {
+      if (action !== 'install') {
+        throw new Error('--config applies to `stratus service install`.');
+      }
+      parsed.configPath = readOptionValue(serviceRest, index, '--config');
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return parsed;
+};
 
-  if (command === 'dashboard') {
-    let port: number | undefined;
-    let host: string | undefined;
-    let openBrowser = true;
+const parseLogsCommand = (rest: string[]): ParsedLogsCommand | ParsedHelpCommand => {
+  let follow = false;
+  let limit = 50;
+  let agentId: string | undefined;
+  let sessionId: string | undefined;
+  let format: 'text' | 'json' = 'text';
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--follow' || token === '-f') {
+      follow = true;
+      continue;
+    }
+    if (token === '--lines' || token === '-n') {
+      const value = Number(readOptionValue(rest, index, token));
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error(`Invalid value for ${token}: ${rest[index + 1] ?? '(missing)'}`);
+      }
+      limit = Math.floor(value);
+      index += 1;
+      continue;
+    }
+    if (token === '--agent') {
+      agentId = readOptionValue(rest, index, '--agent');
+      index += 1;
+      continue;
+    }
+    if (token === '--session') {
+      sessionId = readOptionValue(rest, index, '--session');
+      index += 1;
+      continue;
+    }
+    if (token === '--format') {
+      const value = readOptionValue(rest, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported format: ${value}`);
+      }
+      format = value;
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return {
+    command: 'logs',
+    follow,
+    limit,
+    format,
+    ...(agentId ? { agentId } : {}),
+    ...(sessionId ? { sessionId } : {}),
+  };
+};
 
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--port') {
-        const value = Number(readOptionValue(rest, index, '--port'));
-        if (!Number.isInteger(value) || value < 0 || value > 65535) {
-          throw new Error(`Invalid value for --port: ${rest[index + 1] ?? '(missing)'}`);
-        }
-        port = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--host') {
-        host = readOptionValue(rest, index, '--host');
-        index += 1;
-        continue;
-      }
-      if (token === '--no-open') {
-        openBrowser = false;
-        continue;
-      }
+const parseCredentialCommand = (command: 'credentials' | 'credential', rest: string[]): ParsedCredentialCommand | ParsedHelpCommand => {
+  const [subcommand, ...credentialRest] = command === 'credentials' ? ['list', ...rest] : rest;
+  if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+    return { command: 'help' };
+  }
+  if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove' && subcommand !== 'env') {
+    throw new Error(`No credential subcommand named ${JSON.stringify(subcommand)}. It is set, list, remove, or env.`);
+  }
+  let name: string | undefined;
+  let agentId: string | undefined;
+  let variable: string | undefined;
+  let remove = false;
+  for (let index = 0; index < credentialRest.length; index += 1) {
+    const token = credentialRest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--agent') {
+      agentId = readOptionValue(credentialRest, index, '--agent');
+      index += 1;
+      continue;
+    }
+    if (token === '--env' && subcommand === 'set') {
+      variable = readOptionValue(credentialRest, index, '--env');
+      index += 1;
+      continue;
+    }
+    if (token === '--remove' && subcommand === 'env') {
+      remove = true;
+      continue;
+    }
+    if (token.startsWith('--')) {
       throw new Error(`Unknown option: ${token}`);
     }
-
-    return {
-      command: 'dashboard',
-      ...(port !== undefined ? { port } : {}),
-      ...(host !== undefined ? { host } : {}),
-      openBrowser,
-    };
+    // `env` takes the name and then the variable.
+    if (subcommand === 'env' && name !== undefined && variable === undefined) {
+      variable = token;
+      continue;
+    }
+    if (name !== undefined) {
+      throw new Error(subcommand === 'env'
+        ? `credential env takes a credential name and a variable; ${JSON.stringify(token)} is one more.`
+        : `credential ${subcommand} takes one credential name; got both ${JSON.stringify(name)} and ${JSON.stringify(token)}.`);
+    }
+    name = token;
   }
+  if (subcommand !== 'list' && name === undefined) {
+    throw new Error(`credential ${subcommand} needs a credential name — for a search backend that is search.apiKey.`);
+  }
+  if (subcommand === 'env' && variable === undefined) {
+    throw new Error('credential env needs the variable too: stratus credential env twilio.authToken TWILIO_AUTH_TOKEN --agent <id>.');
+  }
+  // A binding is one agent's consent, never the fleet's.
+  if (variable !== undefined && agentId === undefined) {
+    throw new Error(
+      subcommand === 'env'
+        ? 'credential env needs --agent <id>: a binding is for one agent\'s shell.'
+        : 'credential set --env needs --agent <id>: a binding is for one agent\'s shell. '
+          + 'For a shared key, store it with credential set, then bind it per agent with credential env.',
+    );
+  }
+  // The operator's rule; the stricter one is for names an agent picks.
+  const variableProblem = variable !== undefined && !remove ? credentialVariableProblem(variable) : undefined;
+  if (variableProblem !== undefined) {
+    throw new Error(variableProblem);
+  }
+  // A name keys a map that a soul's `credentials:` list also names, so the
+  // two spellings have to be able to meet. The store itself is
+  // prototype-safe whatever lands in it; this rule is what stops a typo —
+  // or a name no soul could ever write — from being stored and then
+  // reported missing forever.
+  if (name !== undefined && !CREDENTIAL_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `${JSON.stringify(name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
+      + 'starting with a letter — search.apiKey, or an environment-style SLACK_TOKEN.',
+    );
+  }
+  // The agents package's own rule, not a second one: it is already the
+  // answer to "what may key a plain object", and it rejects the names —
+  // `__proto__`, `toString` — that would store a credential nothing could
+  // ever resolve.
+  if (agentId !== undefined && !isValidAgentId(agentId)) {
+    throw new Error(
+      `${JSON.stringify(agentId)} cannot be an agent id, so a credential stored under it could never be resolved.`,
+    );
+  }
+  return {
+    command: 'credential',
+    action: subcommand,
+    ...(name !== undefined ? { name } : {}),
+    ...(agentId !== undefined ? { agentId } : {}),
+    ...(variable !== undefined ? { env: variable } : {}),
+    ...(remove ? { remove } : {}),
+  };
+};
 
-  if (command === 'serve') {
-    const parsed: ParsedServeCommand = { command: 'serve', events: true };
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--config') {
-        parsed.configPath = readOptionValue(rest, index, '--config');
-        index += 1;
-        continue;
-      }
-      if (token === '--idle-timeout') {
-        const seconds = Number(readOptionValue(rest, index, '--idle-timeout'));
-        if (!Number.isFinite(seconds) || seconds < 0) {
-          throw new Error(`Invalid value for --idle-timeout: ${rest[index + 1] ?? '(missing)'}`);
-        }
-        parsed.idleTimeoutMs = Math.round(seconds * 1000);
-        index += 1;
-        continue;
-      }
-      if (token === '--approvals') {
-        const value = readOptionValue(rest, index, '--approvals');
-        if (value !== 'headless' && value !== 'remote') {
-          throw new Error(`Unsupported approvals mode: ${value}. Use headless or remote.`);
-        }
-        parsed.approvals = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--no-events') {
-        parsed.events = false;
-        continue;
-      }
-      if (token === '--no-log-file') {
-        parsed.logToFile = false;
-        continue;
-      }
-      if (token === '--log-format') {
-        const value = readOptionValue(rest, index, '--log-format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported --log-format: ${value}. Use text or json.`);
-        }
-        parsed.logFormat = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--no-api') {
-        parsed.api = false;
-        continue;
-      }
-      if (token === '--held') {
-        parsed.held = true;
-        continue;
-      }
-      if (token === '--hold-new-version') {
-        parsed.holdNewVersion = true;
-        continue;
-      }
-      if (token === '--api') {
-        parsed.api = true;
-        continue;
-      }
-      if (token === '--api-port') {
-        const port = Number(readOptionValue(rest, index, '--api-port'));
-        if (!Number.isInteger(port) || port < 0 || port > 65_535) {
-          throw new Error(`Invalid value for --api-port: ${rest[index + 1] ?? '(missing)'}`);
-        }
-        parsed.apiPort = port;
-        index += 1;
-        continue;
-      }
-      if (token === '--api-host') {
-        parsed.apiHost = readOptionValue(rest, index, '--api-host');
-        index += 1;
-        continue;
-      }
-      if (token === '--events-host') {
-        parsed.eventsHost = readOptionValue(rest, index, '--events-host');
-        index += 1;
-        continue;
-      }
+const parseSignInCommand = (command: 'signin' | 'signins', rest: string[]): ParsedSignInCommand | ParsedHelpCommand => {
+  const [subcommand, ...signInRest] = command === 'signins' ? ['list', ...rest] : rest;
+  if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+    return { command: 'help' };
+  }
+  if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
+    throw new Error(`No signin subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
+  }
+  const positional: string[] = [];
+  let agentId: string | undefined;
+  let configPath: string | undefined;
+  for (let index = 0; index < signInRest.length; index += 1) {
+    const token = signInRest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--agent') {
+      agentId = readOptionValue(signInRest, index, '--agent');
+      index += 1;
+      continue;
+    }
+    if (token === '--config') {
+      configPath = readOptionValue(signInRest, index, '--config');
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--')) {
       throw new Error(`Unknown option: ${token}`);
     }
-    return parsed;
+    positional.push(token);
   }
+  // Only `set` checks the roster; `remove` and `list` read the
+  // credentials file alone, whichever config the daemon runs on.
+  if (configPath !== undefined && subcommand !== 'set') {
+    throw new Error(`--config is for signin set, which checks the agent against that config's roster. signin ${subcommand} reads only the credentials file.`);
+  }
+  if (subcommand === 'list') {
+    if (positional.length > 0 || agentId !== undefined) {
+      throw new Error('signin list takes no arguments; it lists every agent with a sign-in of its own.');
+    }
+    return { command: 'signin', action: 'list' };
+  }
+  const [provider, ...extra] = positional;
+  if (provider !== 'anthropic' || extra.length > 0) {
+    throw new Error(
+      `signin ${subcommand} takes one provider, and anthropic (a Claude subscription) is the only one with per-agent sign-ins: `
+      + `stratus signin ${subcommand} anthropic --agent <id>. The shared sign-in is \`stratus setup\`'s.`,
+    );
+  }
+  if (agentId === undefined) {
+    throw new Error(`signin ${subcommand} needs --agent: this is one agent's own sign-in. The shared one is \`stratus setup\`'s.`);
+  }
+  if (!isValidAgentId(agentId)) {
+    throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a sign-in stored under it could never be used.`);
+  }
+  return { command: 'signin', action: subcommand, provider, agentId, ...(configPath !== undefined ? { configPath } : {}) };
+};
 
-  if (command === 'chat') {
-    const parsed: ParsedChatCommand = { command: 'chat', events: false };
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--provider') {
-        parsed.provider = parseProviderName(readOptionValue(rest, index, '--provider'), '--provider');
-        index += 1;
-        continue;
-      }
-      if (token === '--model') {
-        parsed.model = readOptionValue(rest, index, '--model');
-        index += 1;
-        continue;
-      }
-      if (token === '--base-url') {
-        parsed.baseUrl = readOptionValue(rest, index, '--base-url');
-        index += 1;
-        continue;
-      }
-      if (token === '--soul') {
-        parsed.soul = readOptionValue(rest, index, '--soul');
-        index += 1;
-        continue;
-      }
-      if (token === '--config') {
-        parsed.configPath = readOptionValue(rest, index, '--config');
-        index += 1;
-        continue;
-      }
-      if (token === '--approvals') {
-        const value = readOptionValue(rest, index, '--approvals');
-        if (value !== 'always' && value !== 'open' && value !== 'ask' && value !== 'gated' && value !== 'never') {
-          throw new Error(`Invalid value for --approvals: ${value}`);
-        }
-        parsed.approvals = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--max-turns') {
-        const value = Number(readOptionValue(rest, index, '--max-turns'));
-        if (!Number.isInteger(value) || value < 1) {
-          throw new Error(`Invalid value for --max-turns: ${rest[index + 1] ?? '(missing)'}`);
-        }
-        parsed.maxTurns = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--events') {
-        parsed.events = true;
-        continue;
-      }
+const parseChannelCommand = (command: 'channel' | 'channels', rest: string[]): ParsedChannelCommand | ParsedHelpCommand => {
+  const [subcommand, ...channelRest] = command === 'channels' ? ['list', ...rest] : rest;
+  if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+    return { command: 'help' };
+  }
+  if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
+    throw new Error(`No channel subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
+  }
+  const positional: string[] = [];
+  let agentId: string | undefined;
+  for (let index = 0; index < channelRest.length; index += 1) {
+    const token = channelRest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--agent') {
+      agentId = readOptionValue(channelRest, index, '--agent');
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--')) {
       throw new Error(`Unknown option: ${token}`);
     }
-    return parsed;
+    positional.push(token);
   }
-
-  if (command === 'agents' || (command === 'agent' && rest[0] === 'list')) {
-    const agentsRest = command === 'agents' ? rest : rest.slice(1);
-    let format: 'text' | 'json' = 'text';
-    let gateway: string | undefined;
-    let token: string | undefined;
-    for (let index = 0; index < agentsRest.length; index += 1) {
-      const argument = agentsRest[index];
-      if (!argument) {
-        continue;
-      }
-      if (argument === '--help' || argument === '-h') {
-        return { command: 'help' };
-      }
-      if (argument === '--format') {
-        const value = readOptionValue(agentsRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
-        index += 1;
-        continue;
-      }
-      if (argument === '--gateway') {
-        gateway = readOptionValue(agentsRest, index, '--gateway');
-        index += 1;
-        continue;
-      }
-      if (argument === '--token') {
-        token = readOptionValue(agentsRest, index, '--token');
-        index += 1;
-        continue;
-      }
-      throw new Error(`Unknown option: ${argument}`);
+  const [kind, ...keys] = positional;
+  if (subcommand === 'list') {
+    if (positional.length > 0 || agentId !== undefined) {
+      throw new Error('channel list takes no arguments; it lists every channel with stored secrets.');
     }
-    if (token !== undefined && gateway === undefined) {
-      throw new Error('--token only applies with --gateway.');
-    }
-    return {
-      command: 'agents',
-      format,
-      ...(gateway ? { gateway } : {}),
-      ...(token ? { token } : {}),
-    };
+    return { command: 'channel', action: 'list', keys: [] };
   }
+  if (kind === undefined) {
+    throw new Error(`channel ${subcommand} needs a channel kind — the name its plugin declares, such as imessage.`);
+  }
+  if (!CHANNEL_KIND_PATTERN.test(kind)) {
+    throw new Error(`${JSON.stringify(kind)} is not a channel kind. Use the kind a channel plugin declares (lowercase, hyphens).`);
+  }
+  if (agentId === undefined) {
+    throw new Error(`channel ${subcommand} needs --agent: channel secrets are one set per agent, since each agent is its own identity on the channel.`);
+  }
+  // The same rule the credential command keeps, for the same reason: an
+  // entry under an id no agent can have is a binding nothing resolves.
+  if (!isValidAgentId(agentId)) {
+    throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a binding stored under it could never be resolved.`);
+  }
+  if (subcommand === 'remove') {
+    if (keys.length > 0) {
+      throw new Error('channel remove takes the kind and --agent only; it removes everything stored for that agent on that channel.');
+    }
+    return { command: 'channel', action: 'remove', kind, agentId, keys: [] };
+  }
+  if (kind !== 'slack' && keys.length === 0) {
+    throw new Error(
+      `channel set ${kind} needs the names of the secrets to store, from the plugin's README — for example \`stratus channel set ${kind} --agent ${agentId} apiKey apiSecret\`.`,
+    );
+  }
+  const bad = keys.find((key) => !CREDENTIAL_NAME_PATTERN.test(key));
+  if (bad !== undefined) {
+    throw new Error(`${JSON.stringify(bad)} is not a secret name. Use letters, digits, dots, dashes, or underscores, starting with a letter.`);
+  }
+  const repeated = keys.find((key, index) => keys.indexOf(key) !== index);
+  if (repeated !== undefined) {
+    throw new Error(`${repeated} is named twice; each secret is stored once.`);
+  }
+  return { command: 'channel', action: 'set', kind, agentId, keys };
+};
 
-  if (command === 'schedules' || (command === 'schedule' && rest[0] === 'list') || (command === 'schedule' && rest[0] === 'cancel')) {
-    const schedulesRest = command === 'schedules' ? rest : rest.slice(1);
-    const action = (command === 'schedule' ? rest[0] : schedulesRest[0]) === 'cancel' ? 'cancel' : 'list';
-    const tokens = action === 'cancel' && command === 'schedules' ? schedulesRest.slice(1) : schedulesRest;
-    let format: 'text' | 'json' = 'text';
-    let scheduleId: string | undefined;
-    for (let index = 0; index < tokens.length; index += 1) {
-      const token = tokens[index];
-      if (!token || (action === 'list' && token === 'list' && index === 0)) {
-        continue;
+const parsePluginsCommand = (command: 'plugins' | 'plugin', rest: string[]): ParsedPluginsCommand | ParsedHelpCommand => {
+  const pluginsRest = command === 'plugins' ? rest : rest.slice(1);
+  let format: 'text' | 'json' = 'text';
+  let configPath: string | undefined;
+  for (let index = 0; index < pluginsRest.length; index += 1) {
+    const token = pluginsRest[index] as string;
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--format') {
+      const value = readOptionValue(pluginsRest, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Invalid value for --format: ${value}. Use text or json.`);
       }
+      format = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--config') {
+      configPath = readOptionValue(pluginsRest, index, '--config');
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return { command: 'plugins', format, ...(configPath !== undefined ? { configPath } : {}) };
+};
+
+const parseSkillsCommand = (command: 'skills' | 'skill', rest: string[]): ParsedSkillsCommand | ParsedHelpCommand => {
+  const skillsRest = command === 'skills' ? rest : rest.slice(1);
+  for (const token of skillsRest) {
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return { command: 'skills' };
+};
+
+const parseTemplateCommand = (rest: string[]): ParsedTemplateAddCommand | ParsedHelpCommand => {
+  const [subcommand, ...templateRest] = rest;
+  if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+    return { command: 'help' };
+  }
+  if (subcommand !== 'add') {
+    throw new Error(`Unknown template subcommand: ${subcommand}. Try: stratus template add <path or owner/repo>`);
+  }
+  let source: string | undefined;
+  let yes = false;
+  let force = false;
+  for (const token of templateRest) {
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--yes' || token === '-y') {
+      yes = true;
+      continue;
+    }
+    if (token === '--force') {
+      force = true;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      throw new Error(`Unknown option: ${token}`);
+    }
+    if (source !== undefined) {
+      throw new Error(`template add takes one source; got both ${JSON.stringify(source)} and ${JSON.stringify(token)}.`);
+    }
+    source = token;
+  }
+  if (source === undefined) {
+    throw new Error('template add needs a source: a GitHub owner/repo, a git URL, or a local path.');
+  }
+  return {
+    command: 'template-add',
+    source,
+    ...(yes ? { yes } : {}),
+    ...(force ? { force } : {}),
+  };
+};
+
+const parseSkillCommand = (rest: string[]): ParsedSkillAddCommand | ParsedSkillValidateCommand | ParsedSkillReloadCommand | ParsedHelpCommand => {
+  const [subcommand, ...skillRest] = rest;
+  if (subcommand === '--help' || subcommand === '-h') {
+    return { command: 'help' };
+  }
+  if (subcommand === 'validate') {
+    let target: string | undefined;
+    for (const token of skillRest) {
       if (token === '--help' || token === '-h') {
         return { command: 'help' };
-      }
-      if (token === '--format') {
-        const value = readOptionValue(tokens, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
-        index += 1;
-        continue;
       }
       if (token.startsWith('--')) {
         throw new Error(`Unknown option: ${token}`);
       }
-      if (action === 'cancel' && scheduleId === undefined) {
-        scheduleId = token;
-        continue;
+      if (target !== undefined) {
+        throw new Error(`skill validate takes one target; got both ${JSON.stringify(target)} and ${JSON.stringify(token)}.`);
       }
-      throw new Error(`Unexpected argument: ${token}. Try: stratus schedules, stratus schedules cancel <id>`);
+      target = token;
     }
-    if (action === 'cancel' && !scheduleId) {
-      throw new Error('schedules cancel needs the schedule id: stratus schedules cancel <id>.');
+    if (target === undefined) {
+      throw new Error('skill validate needs a target: a skill directory, a directory of skills, or an installed skill id.');
     }
-    return {
-      command: 'schedules',
-      action,
-      ...(scheduleId ? { scheduleId } : {}),
-      format,
-    };
+    return { command: 'skill-validate', target };
   }
-
-  if (command === 'doctor') {
-    let format: 'text' | 'json' = 'text';
-    let configPath: string | undefined;
-    let live = false;
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--format') {
-        const value = readOptionValue(rest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--config') {
-        configPath = readOptionValue(rest, index, '--config');
-        index += 1;
-        continue;
-      }
-      if (token === '--live') {
-        live = true;
-        continue;
-      }
-      throw new Error(`Unknown option: ${token}`);
-    }
-    return { command: 'doctor', format, ...(configPath ? { configPath } : {}), ...(live ? { live } : {}) };
-  }
-
-  if (command === 'update') {
-    let check = false;
-    for (const token of rest) {
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--check') {
-        check = true;
-        continue;
-      }
-      throw new Error(`Unknown option: ${token}`);
-    }
-    return { command: 'update', check };
-  }
-
-  if (command === 'service') {
-    const action = rest[0];
-    if (action === '--help' || action === '-h' || action === undefined) {
-      return { command: 'help' };
-    }
-    if (action !== 'install' && action !== 'uninstall' && action !== 'status' && action !== 'start' && action !== 'stop') {
-      throw new Error(`Unknown service action: ${action} (expected install, uninstall, status, start, or stop)`);
-    }
-    const parsed: ParsedServiceCommand = { command: 'service', action };
-    const serviceRest = rest.slice(1);
-    for (let index = 0; index < serviceRest.length; index += 1) {
-      const token = serviceRest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--no-login') {
-        if (action !== 'install') {
-          throw new Error('--no-login applies to `stratus service install`.');
-        }
-        parsed.runAtLogin = false;
-        continue;
-      }
-      if (token === '--config') {
-        if (action !== 'install') {
-          throw new Error('--config applies to `stratus service install`.');
-        }
-        parsed.configPath = readOptionValue(serviceRest, index, '--config');
-        index += 1;
-        continue;
-      }
-      throw new Error(`Unknown option: ${token}`);
-    }
-    return parsed;
-  }
-
-  if (command === 'logs') {
-    let follow = false;
-    let limit = 50;
-    let agentId: string | undefined;
-    let sessionId: string | undefined;
-    let format: 'text' | 'json' = 'text';
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--follow' || token === '-f') {
-        follow = true;
-        continue;
-      }
-      if (token === '--lines' || token === '-n') {
-        const value = Number(readOptionValue(rest, index, token));
-        if (!Number.isFinite(value) || value < 0) {
-          throw new Error(`Invalid value for ${token}: ${rest[index + 1] ?? '(missing)'}`);
-        }
-        limit = Math.floor(value);
-        index += 1;
-        continue;
-      }
-      if (token === '--agent') {
-        agentId = readOptionValue(rest, index, '--agent');
-        index += 1;
-        continue;
-      }
-      if (token === '--session') {
-        sessionId = readOptionValue(rest, index, '--session');
-        index += 1;
-        continue;
-      }
-      if (token === '--format') {
-        const value = readOptionValue(rest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
-        index += 1;
-        continue;
-      }
-      throw new Error(`Unknown option: ${token}`);
-    }
-    return {
-      command: 'logs',
-      follow,
-      limit,
-      format,
-      ...(agentId ? { agentId } : {}),
-      ...(sessionId ? { sessionId } : {}),
-    };
-  }
-
-  if (command === 'credentials' || command === 'credential') {
-    const [subcommand, ...credentialRest] = command === 'credentials' ? ['list', ...rest] : rest;
-    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
-      return { command: 'help' };
-    }
-    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove' && subcommand !== 'env') {
-      throw new Error(`No credential subcommand named ${JSON.stringify(subcommand)}. It is set, list, remove, or env.`);
-    }
-    let name: string | undefined;
-    let agentId: string | undefined;
-    let variable: string | undefined;
-    let remove = false;
-    for (let index = 0; index < credentialRest.length; index += 1) {
-      const token = credentialRest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--agent') {
-        agentId = readOptionValue(credentialRest, index, '--agent');
-        index += 1;
-        continue;
-      }
-      if (token === '--env' && subcommand === 'set') {
-        variable = readOptionValue(credentialRest, index, '--env');
-        index += 1;
-        continue;
-      }
-      if (token === '--remove' && subcommand === 'env') {
-        remove = true;
-        continue;
-      }
-      if (token.startsWith('--')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      // `env` takes the name and then the variable.
-      if (subcommand === 'env' && name !== undefined && variable === undefined) {
-        variable = token;
-        continue;
-      }
-      if (name !== undefined) {
-        throw new Error(subcommand === 'env'
-          ? `credential env takes a credential name and a variable; ${JSON.stringify(token)} is one more.`
-          : `credential ${subcommand} takes one credential name; got both ${JSON.stringify(name)} and ${JSON.stringify(token)}.`);
-      }
-      name = token;
-    }
-    if (subcommand !== 'list' && name === undefined) {
-      throw new Error(`credential ${subcommand} needs a credential name — for a search backend that is search.apiKey.`);
-    }
-    if (subcommand === 'env' && variable === undefined) {
-      throw new Error('credential env needs the variable too: stratus credential env twilio.authToken TWILIO_AUTH_TOKEN --agent <id>.');
-    }
-    // A binding is one agent's consent, never the fleet's.
-    if (variable !== undefined && agentId === undefined) {
-      throw new Error(
-        subcommand === 'env'
-          ? 'credential env needs --agent <id>: a binding is for one agent\'s shell.'
-          : 'credential set --env needs --agent <id>: a binding is for one agent\'s shell. '
-            + 'For a shared key, store it with credential set, then bind it per agent with credential env.',
-      );
-    }
-    // The operator's rule; the stricter one is for names an agent picks.
-    const variableProblem = variable !== undefined && !remove ? credentialVariableProblem(variable) : undefined;
-    if (variableProblem !== undefined) {
-      throw new Error(variableProblem);
-    }
-    // A name keys a map that a soul's `credentials:` list also names, so the
-    // two spellings have to be able to meet. The store itself is
-    // prototype-safe whatever lands in it; this rule is what stops a typo —
-    // or a name no soul could ever write — from being stored and then
-    // reported missing forever.
-    if (name !== undefined && !CREDENTIAL_NAME_PATTERN.test(name)) {
-      throw new Error(
-        `${JSON.stringify(name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
-        + 'starting with a letter — search.apiKey, or an environment-style SLACK_TOKEN.',
-      );
-    }
-    // The agents package's own rule, not a second one: it is already the
-    // answer to "what may key a plain object", and it rejects the names —
-    // `__proto__`, `toString` — that would store a credential nothing could
-    // ever resolve.
-    if (agentId !== undefined && !isValidAgentId(agentId)) {
-      throw new Error(
-        `${JSON.stringify(agentId)} cannot be an agent id, so a credential stored under it could never be resolved.`,
-      );
-    }
-    return {
-      command: 'credential',
-      action: subcommand,
-      ...(name !== undefined ? { name } : {}),
-      ...(agentId !== undefined ? { agentId } : {}),
-      ...(variable !== undefined ? { env: variable } : {}),
-      ...(remove ? { remove } : {}),
-    };
-  }
-
-  if (command === 'signin' || command === 'signins') {
-    const [subcommand, ...signInRest] = command === 'signins' ? ['list', ...rest] : rest;
-    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
-      return { command: 'help' };
-    }
-    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
-      throw new Error(`No signin subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
-    }
-    const positional: string[] = [];
-    let agentId: string | undefined;
-    let configPath: string | undefined;
-    for (let index = 0; index < signInRest.length; index += 1) {
-      const token = signInRest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--agent') {
-        agentId = readOptionValue(signInRest, index, '--agent');
-        index += 1;
-        continue;
-      }
-      if (token === '--config') {
-        configPath = readOptionValue(signInRest, index, '--config');
-        index += 1;
-        continue;
-      }
-      if (token.startsWith('--')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      positional.push(token);
-    }
-    // Only `set` checks the roster; `remove` and `list` read the
-    // credentials file alone, whichever config the daemon runs on.
-    if (configPath !== undefined && subcommand !== 'set') {
-      throw new Error(`--config is for signin set, which checks the agent against that config's roster. signin ${subcommand} reads only the credentials file.`);
-    }
-    if (subcommand === 'list') {
-      if (positional.length > 0 || agentId !== undefined) {
-        throw new Error('signin list takes no arguments; it lists every agent with a sign-in of its own.');
-      }
-      return { command: 'signin', action: 'list' };
-    }
-    const [provider, ...extra] = positional;
-    if (provider !== 'anthropic' || extra.length > 0) {
-      throw new Error(
-        `signin ${subcommand} takes one provider, and anthropic (a Claude subscription) is the only one with per-agent sign-ins: `
-        + `stratus signin ${subcommand} anthropic --agent <id>. The shared sign-in is \`stratus setup\`'s.`,
-      );
-    }
-    if (agentId === undefined) {
-      throw new Error(`signin ${subcommand} needs --agent: this is one agent's own sign-in. The shared one is \`stratus setup\`'s.`);
-    }
-    if (!isValidAgentId(agentId)) {
-      throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a sign-in stored under it could never be used.`);
-    }
-    return { command: 'signin', action: subcommand, provider, agentId, ...(configPath !== undefined ? { configPath } : {}) };
-  }
-
-  if (command === 'channel' || command === 'channels') {
-    const [subcommand, ...channelRest] = command === 'channels' ? ['list', ...rest] : rest;
-    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
-      return { command: 'help' };
-    }
-    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
-      throw new Error(`No channel subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
-    }
-    const positional: string[] = [];
-    let agentId: string | undefined;
-    for (let index = 0; index < channelRest.length; index += 1) {
-      const token = channelRest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--agent') {
-        agentId = readOptionValue(channelRest, index, '--agent');
-        index += 1;
-        continue;
-      }
-      if (token.startsWith('--')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      positional.push(token);
-    }
-    const [kind, ...keys] = positional;
-    if (subcommand === 'list') {
-      if (positional.length > 0 || agentId !== undefined) {
-        throw new Error('channel list takes no arguments; it lists every channel with stored secrets.');
-      }
-      return { command: 'channel', action: 'list', keys: [] };
-    }
-    if (kind === undefined) {
-      throw new Error(`channel ${subcommand} needs a channel kind — the name its plugin declares, such as imessage.`);
-    }
-    if (!CHANNEL_KIND_PATTERN.test(kind)) {
-      throw new Error(`${JSON.stringify(kind)} is not a channel kind. Use the kind a channel plugin declares (lowercase, hyphens).`);
-    }
-    if (agentId === undefined) {
-      throw new Error(`channel ${subcommand} needs --agent: channel secrets are one set per agent, since each agent is its own identity on the channel.`);
-    }
-    // The same rule the credential command keeps, for the same reason: an
-    // entry under an id no agent can have is a binding nothing resolves.
-    if (!isValidAgentId(agentId)) {
-      throw new Error(`${JSON.stringify(agentId)} cannot be an agent id, so a binding stored under it could never be resolved.`);
-    }
-    if (subcommand === 'remove') {
-      if (keys.length > 0) {
-        throw new Error('channel remove takes the kind and --agent only; it removes everything stored for that agent on that channel.');
-      }
-      return { command: 'channel', action: 'remove', kind, agentId, keys: [] };
-    }
-    if (kind !== 'slack' && keys.length === 0) {
-      throw new Error(
-        `channel set ${kind} needs the names of the secrets to store, from the plugin's README — for example \`stratus channel set ${kind} --agent ${agentId} apiKey apiSecret\`.`,
-      );
-    }
-    const bad = keys.find((key) => !CREDENTIAL_NAME_PATTERN.test(key));
-    if (bad !== undefined) {
-      throw new Error(`${JSON.stringify(bad)} is not a secret name. Use letters, digits, dots, dashes, or underscores, starting with a letter.`);
-    }
-    const repeated = keys.find((key, index) => keys.indexOf(key) !== index);
-    if (repeated !== undefined) {
-      throw new Error(`${repeated} is named twice; each secret is stored once.`);
-    }
-    return { command: 'channel', action: 'set', kind, agentId, keys };
-  }
-
-  if (command === 'plugins' || (command === 'plugin' && rest[0] === 'list')) {
-    const pluginsRest = command === 'plugins' ? rest : rest.slice(1);
-    let format: 'text' | 'json' = 'text';
-    let configPath: string | undefined;
-    for (let index = 0; index < pluginsRest.length; index += 1) {
-      const token = pluginsRest[index] as string;
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--format') {
-        const value = readOptionValue(pluginsRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Invalid value for --format: ${value}. Use text or json.`);
-        }
-        format = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--config') {
-        configPath = readOptionValue(pluginsRest, index, '--config');
-        index += 1;
-        continue;
-      }
-      throw new Error(`Unknown option: ${token}`);
-    }
-    return { command: 'plugins', format, ...(configPath !== undefined ? { configPath } : {}) };
-  }
-
-  if (command === 'skills' || (command === 'skill' && rest[0] === 'list')) {
-    const skillsRest = command === 'skills' ? rest : rest.slice(1);
-    for (const token of skillsRest) {
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      throw new Error(`Unknown option: ${token}`);
-    }
-    return { command: 'skills' };
-  }
-
-  if (command === 'template') {
-    const [subcommand, ...templateRest] = rest;
-    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
-      return { command: 'help' };
-    }
-    if (subcommand !== 'add') {
-      throw new Error(`Unknown template subcommand: ${subcommand}. Try: stratus template add <path or owner/repo>`);
-    }
-    let source: string | undefined;
-    let yes = false;
-    let force = false;
-    for (const token of templateRest) {
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--yes' || token === '-y') {
-        yes = true;
-        continue;
-      }
-      if (token === '--force') {
-        force = true;
-        continue;
-      }
-      if (token.startsWith('--')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      if (source !== undefined) {
-        throw new Error(`template add takes one source; got both ${JSON.stringify(source)} and ${JSON.stringify(token)}.`);
-      }
-      source = token;
-    }
-    if (source === undefined) {
-      throw new Error('template add needs a source: a GitHub owner/repo, a git URL, or a local path.');
-    }
-    return {
-      command: 'template-add',
-      source,
-      ...(yes ? { yes } : {}),
-      ...(force ? { force } : {}),
-    };
-  }
-
-  if (command === 'skill') {
-    const [subcommand, ...skillRest] = rest;
-    if (subcommand === '--help' || subcommand === '-h') {
-      return { command: 'help' };
-    }
-    if (subcommand === 'validate') {
-      let target: string | undefined;
-      for (const token of skillRest) {
-        if (token === '--help' || token === '-h') {
-          return { command: 'help' };
-        }
-        if (token.startsWith('--')) {
-          throw new Error(`Unknown option: ${token}`);
-        }
-        if (target !== undefined) {
-          throw new Error(`skill validate takes one target; got both ${JSON.stringify(target)} and ${JSON.stringify(token)}.`);
-        }
-        target = token;
-      }
-      if (target === undefined) {
-        throw new Error('skill validate needs a target: a skill directory, a directory of skills, or an installed skill id.');
-      }
-      return { command: 'skill-validate', target };
-    }
-    if (subcommand === 'reload') {
-      const parsed: ParsedSkillReloadCommand = { command: 'skill-reload' };
-      for (let index = 0; index < skillRest.length; index += 1) {
-        const token = skillRest[index];
-        if (!token) {
-          continue;
-        }
-        if (token === '--help' || token === '-h') {
-          return { command: 'help' };
-        }
-        if (token === '--gateway') {
-          parsed.gateway = readOptionValue(skillRest, index, '--gateway');
-          index += 1;
-          continue;
-        }
-        if (token === '--token') {
-          parsed.token = readOptionValue(skillRest, index, '--token');
-          index += 1;
-          continue;
-        }
-        throw new Error(`Unknown option: ${token}`);
-      }
-      return parsed;
-    }
-    if (subcommand !== 'add') {
-      throw new Error(`Unknown skill subcommand: ${subcommand ?? '(missing)'}. Try: stratus skill add <source>, stratus skill validate <path>, stratus skill reload, stratus skills`);
-    }
-
-    let source: string | undefined;
-    const skillIds: string[] = [];
-    let force = false;
-    let agentId: string | undefined;
-    let reload = true;
-
+  if (subcommand === 'reload') {
+    const parsed: ParsedSkillReloadCommand = { command: 'skill-reload' };
     for (let index = 0; index < skillRest.length; index += 1) {
       const token = skillRest[index];
       if (!token) {
@@ -1265,531 +1217,560 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       if (token === '--help' || token === '-h') {
         return { command: 'help' };
       }
-      if (token === '--skill') {
-        skillIds.push(readOptionValue(skillRest, index, '--skill'));
-        index += 1;
-        continue;
-      }
-      if (token === '--agent') {
-        agentId = readOptionValue(skillRest, index, '--agent');
-        index += 1;
-        continue;
-      }
-      if (token === '--force') {
-        force = true;
-        continue;
-      }
-      if (token === '--no-reload') {
-        reload = false;
-        continue;
-      }
-      if (token.startsWith('--')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      if (source !== undefined) {
-        throw new Error(`skill add takes one source; got both ${JSON.stringify(source)} and ${JSON.stringify(token)}.`);
-      }
-      source = token;
-    }
-
-    if (source === undefined) {
-      throw new Error('skill add needs a source: a GitHub owner/repo, a git URL, or a local path.');
-    }
-
-    return {
-      command: 'skill-add',
-      source,
-      ...(skillIds.length > 0 ? { skillIds } : {}),
-      ...(force ? { force } : {}),
-      ...(agentId !== undefined ? { agentId } : {}),
-      ...(reload ? {} : { reload }),
-    };
-  }
-
-  if (command === 'grants') {
-    const action: ParsedGrantsCommand['action'] = rest[0] === 'revoke' ? 'revoke' : 'list';
-    const tokens = rest[0] === 'revoke' || rest[0] === 'list' ? rest.slice(1) : rest;
-    const usage = action === 'revoke'
-      ? 'stratus grants revoke <agent> --tool <name> | --scope "<command>" | --origin <origin> | --destination <channel:id>'
-      : 'stratus grants <agent>';
-    const parsed: ParsedGrantsCommand = { command: 'grants', action, agentId: '', format: 'text' };
-    for (let index = 0; index < tokens.length; index += 1) {
-      const token = tokens[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--format') {
-        const value = readOptionValue(tokens, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        parsed.format = value;
-        index += 1;
-        continue;
-      }
       if (token === '--gateway') {
-        parsed.gateway = readOptionValue(tokens, index, '--gateway');
+        parsed.gateway = readOptionValue(skillRest, index, '--gateway');
         index += 1;
         continue;
       }
       if (token === '--token') {
-        parsed.token = readOptionValue(tokens, index, '--token');
+        parsed.token = readOptionValue(skillRest, index, '--token');
         index += 1;
         continue;
       }
-      if (token === '--config') {
-        parsed.configPath = readOptionValue(tokens, index, '--config');
-        index += 1;
-        continue;
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return parsed;
+  }
+  if (subcommand !== 'add') {
+    throw new Error(`Unknown skill subcommand: ${subcommand ?? '(missing)'}. Try: stratus skill add <source>, stratus skill validate <path>, stratus skill reload, stratus skills`);
+  }
+
+  let source: string | undefined;
+  const skillIds: string[] = [];
+  let force = false;
+  let agentId: string | undefined;
+  let reload = true;
+
+  for (let index = 0; index < skillRest.length; index += 1) {
+    const token = skillRest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--skill') {
+      skillIds.push(readOptionValue(skillRest, index, '--skill'));
+      index += 1;
+      continue;
+    }
+    if (token === '--agent') {
+      agentId = readOptionValue(skillRest, index, '--agent');
+      index += 1;
+      continue;
+    }
+    if (token === '--force') {
+      force = true;
+      continue;
+    }
+    if (token === '--no-reload') {
+      reload = false;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      throw new Error(`Unknown option: ${token}`);
+    }
+    if (source !== undefined) {
+      throw new Error(`skill add takes one source; got both ${JSON.stringify(source)} and ${JSON.stringify(token)}.`);
+    }
+    source = token;
+  }
+
+  if (source === undefined) {
+    throw new Error('skill add needs a source: a GitHub owner/repo, a git URL, or a local path.');
+  }
+
+  return {
+    command: 'skill-add',
+    source,
+    ...(skillIds.length > 0 ? { skillIds } : {}),
+    ...(force ? { force } : {}),
+    ...(agentId !== undefined ? { agentId } : {}),
+    ...(reload ? {} : { reload }),
+  };
+};
+
+const parseGrantsCommand = (rest: string[]): ParsedGrantsCommand | ParsedHelpCommand => {
+  const action: ParsedGrantsCommand['action'] = rest[0] === 'revoke' ? 'revoke' : 'list';
+  const tokens = rest[0] === 'revoke' || rest[0] === 'list' ? rest.slice(1) : rest;
+  const usage = action === 'revoke'
+    ? 'stratus grants revoke <agent> --tool <name> | --scope "<command>" | --origin <origin> | --destination <channel:id>'
+    : 'stratus grants <agent>';
+  const parsed: ParsedGrantsCommand = { command: 'grants', action, agentId: '', format: 'text' };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--format') {
+      const value = readOptionValue(tokens, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported format: ${value}`);
       }
-      if (action === 'revoke'
-        && (token === '--tool' || token === '--scope' || token === '--origin' || token === '--destination')) {
-        const value = readOptionValue(tokens, index, token);
-        if (token === '--tool') {
-          parsed.tool = value;
-        } else if (token === '--scope') {
-          parsed.scope = value;
-        } else if (token === '--destination') {
-          parsed.destination = value;
-        } else {
-          parsed.origin = value;
-        }
-        index += 1;
-        continue;
+      parsed.format = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--gateway') {
+      parsed.gateway = readOptionValue(tokens, index, '--gateway');
+      index += 1;
+      continue;
+    }
+    if (token === '--token') {
+      parsed.token = readOptionValue(tokens, index, '--token');
+      index += 1;
+      continue;
+    }
+    if (token === '--config') {
+      parsed.configPath = readOptionValue(tokens, index, '--config');
+      index += 1;
+      continue;
+    }
+    if (action === 'revoke'
+      && (token === '--tool' || token === '--scope' || token === '--origin' || token === '--destination')) {
+      const value = readOptionValue(tokens, index, token);
+      if (token === '--tool') {
+        parsed.tool = value;
+      } else if (token === '--scope') {
+        parsed.scope = value;
+      } else if (token === '--destination') {
+        parsed.destination = value;
+      } else {
+        parsed.origin = value;
       }
-      if (token.startsWith('--')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      if (parsed.agentId === '') {
-        parsed.agentId = token;
-        continue;
-      }
-      throw new Error(`Unexpected argument: ${token}. Try: ${usage}`);
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      throw new Error(`Unknown option: ${token}`);
     }
     if (parsed.agentId === '') {
-      throw new Error(`grants${action === 'revoke' ? ' revoke' : ''} needs the agent id: ${usage}.`);
+      parsed.agentId = token;
+      continue;
     }
-    // The agents package's own rule, the same one the control API route and
-    // `credential --agent` apply — and the reason is sharper here: this id is
-    // joined into a path (`<id>/whitelist.json`), and the grant store
-    // documents it as an already-validated single segment by the time it
-    // reaches that join. Unchecked, `../../other` reads — and on a revoke
-    // rewrites — a grant file outside ~/.stratus/agents.
-    if (!isValidAgentId(parsed.agentId)) {
-      throw new Error(
-        `${JSON.stringify(parsed.agentId)} cannot be an agent id, so it names no grant file. `
-        + 'Use the id `stratus agents` lists.',
-      );
-    }
-    if (action === 'revoke') {
-      const named = [parsed.tool, parsed.scope, parsed.origin, parsed.destination]
-        .filter((value) => value !== undefined).length;
-      if (named !== 1) {
-        throw new Error(`grants revoke names exactly one of --tool, --scope, --origin, or --destination: ${usage}.`);
-      }
-    }
-    return parsed;
+    throw new Error(`Unexpected argument: ${token}. Try: ${usage}`);
   }
+  if (parsed.agentId === '') {
+    throw new Error(`grants${action === 'revoke' ? ' revoke' : ''} needs the agent id: ${usage}.`);
+  }
+  // The agents package's own rule, the same one the control API route and
+  // `credential --agent` apply — and the reason is sharper here: this id is
+  // joined into a path (`<id>/whitelist.json`), and the grant store
+  // documents it as an already-validated single segment by the time it
+  // reaches that join. Unchecked, `../../other` reads — and on a revoke
+  // rewrites — a grant file outside ~/.stratus/agents.
+  if (!isValidAgentId(parsed.agentId)) {
+    throw new Error(
+      `${JSON.stringify(parsed.agentId)} cannot be an agent id, so it names no grant file. `
+      + 'Use the id `stratus agents` lists.',
+    );
+  }
+  if (action === 'revoke') {
+    const named = [parsed.tool, parsed.scope, parsed.origin, parsed.destination]
+      .filter((value) => value !== undefined).length;
+    if (named !== 1) {
+      throw new Error(`grants revoke names exactly one of --tool, --scope, --origin, or --destination: ${usage}.`);
+    }
+  }
+  return parsed;
+};
 
-  if (command === 'memory') {
-    const [action, ...memoryRest] = rest;
-    if (action === undefined || action === '--help' || action === '-h') {
+const parseMemoryCommand = (rest: string[]): ParsedMemoryCommand | ParsedHelpCommand => {
+  const [action, ...memoryRest] = rest;
+  if (action === undefined || action === '--help' || action === '-h') {
+    return { command: 'help' };
+  }
+  const actions = ['list', 'search', 'forget', 'audit', 'pin', 'unpin', 'export', 'import', 'reassert', 'passes', 'undo-pass'] as const;
+  if (!(actions as readonly string[]).includes(action)) {
+    throw new Error(
+      `Unknown memory subcommand: ${action}. Try one of ${actions.join(', ')} — for example stratus memory list <agent>.`,
+    );
+  }
+  const memoryAction = action as ParsedMemoryCommand['action'];
+  // Which subcommands take bare arguments after the agent, and what they
+  // mean. Named here rather than re-tested at each branch, so adding a
+  // subcommand is one line and not four.
+  const takesIds = memoryAction === 'reassert' || memoryAction === 'forget'
+    || memoryAction === 'pin' || memoryAction === 'unpin';
+  let agentId: string | undefined;
+  let trust: TrustLevel | undefined;
+  let format: 'text' | 'json' = 'text';
+  let allUnknown = false;
+  let limit: number | undefined;
+  let file: string | undefined;
+  let preserveTrust = false;
+  let pass: string | undefined;
+  const ids: string[] = [];
+  const words: string[] = [];
+  for (let index = 0; index < memoryRest.length; index += 1) {
+    const token = memoryRest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
       return { command: 'help' };
     }
-    const actions = ['list', 'search', 'forget', 'audit', 'pin', 'unpin', 'export', 'import', 'reassert', 'passes', 'undo-pass'] as const;
-    if (!(actions as readonly string[]).includes(action)) {
-      throw new Error(
-        `Unknown memory subcommand: ${action}. Try one of ${actions.join(', ')} — for example stratus memory list <agent>.`,
-      );
+    if (token === '--trust') {
+      const value = readOptionValue(memoryRest, index, '--trust');
+      if (!isTrustLevel(value)) {
+        throw new Error(`Unsupported trust level: ${value}. Use one of ${TRUST_LEVELS.join(', ')}.`);
+      }
+      trust = value;
+      index += 1;
+      continue;
     }
-    const memoryAction = action as ParsedMemoryCommand['action'];
-    // Which subcommands take bare arguments after the agent, and what they
-    // mean. Named here rather than re-tested at each branch, so adding a
-    // subcommand is one line and not four.
-    const takesIds = memoryAction === 'reassert' || memoryAction === 'forget'
-      || memoryAction === 'pin' || memoryAction === 'unpin';
-    let agentId: string | undefined;
-    let trust: TrustLevel | undefined;
-    let format: 'text' | 'json' = 'text';
-    let allUnknown = false;
-    let limit: number | undefined;
-    let file: string | undefined;
-    let preserveTrust = false;
-    let pass: string | undefined;
-    const ids: string[] = [];
-    const words: string[] = [];
-    for (let index = 0; index < memoryRest.length; index += 1) {
-      const token = memoryRest[index];
-      if (!token) {
-        continue;
+    if (token === '--format') {
+      const value = readOptionValue(memoryRest, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported format: ${value}`);
       }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--trust') {
-        const value = readOptionValue(memoryRest, index, '--trust');
-        if (!isTrustLevel(value)) {
-          throw new Error(`Unsupported trust level: ${value}. Use one of ${TRUST_LEVELS.join(', ')}.`);
-        }
-        trust = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--format') {
-        const value = readOptionValue(memoryRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--limit' && (memoryAction === 'search' || memoryAction === 'passes')) {
-        const value = Number(readOptionValue(memoryRest, index, '--limit'));
-        if (!Number.isFinite(value) || value < 1) {
-          throw new Error('--limit needs a positive number of results.');
-        }
-        limit = Math.floor(value);
-        index += 1;
-        continue;
-      }
-      if (token === '--file' && (memoryAction === 'export' || memoryAction === 'import')) {
-        file = readOptionValue(memoryRest, index, '--file');
-        index += 1;
-        continue;
-      }
-      if (token === '--pass' && memoryAction === 'list') {
-        pass = readOptionValue(memoryRest, index, '--pass');
-        index += 1;
-        continue;
-      }
-      if (token === '--preserve-trust' && memoryAction === 'import') {
-        preserveTrust = true;
-        continue;
-      }
-      if (token === '--all-unknown' && memoryAction === 'reassert') {
-        allUnknown = true;
-        continue;
-      }
-      if (token.startsWith('--')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      if (agentId === undefined) {
-        agentId = token;
-        continue;
-      }
-      if (takesIds) {
-        ids.push(token);
-        continue;
-      }
-      if (memoryAction === 'search') {
-        words.push(token);
-        continue;
-      }
-      if (memoryAction === 'undo-pass') {
-        if (pass !== undefined) {
-          throw new Error(`memory undo-pass takes one pass id at a time: stratus memory undo-pass ${agentId} <pass-id>.`);
-        }
-        pass = token;
-        continue;
-      }
-      throw new Error(`Unexpected argument: ${token}. Try: stratus memory ${memoryAction} <agent>`);
+      format = value;
+      index += 1;
+      continue;
     }
-    if (!agentId) {
-      throw new Error(`memory ${memoryAction} needs the agent id: stratus memory ${memoryAction} <agent>${memoryAction === 'reassert' ? ' --trust user <id>...' : ''}.`);
-    }
-    if (memoryAction === 'reassert') {
-      if (trust === undefined) {
-        throw new Error('memory reassert needs --trust <user|agent|external|unknown>: the label you are vouching for.');
+    if (token === '--limit' && (memoryAction === 'search' || memoryAction === 'passes')) {
+      const value = Number(readOptionValue(memoryRest, index, '--limit'));
+      if (!Number.isFinite(value) || value < 1) {
+        throw new Error('--limit needs a positive number of results.');
       }
-      if (ids.length === 0 && !allUnknown) {
-        throw new Error('memory reassert needs entry ids, or --all-unknown to re-label every entry that has no recorded origin.');
+      limit = Math.floor(value);
+      index += 1;
+      continue;
+    }
+    if (token === '--file' && (memoryAction === 'export' || memoryAction === 'import')) {
+      file = readOptionValue(memoryRest, index, '--file');
+      index += 1;
+      continue;
+    }
+    if (token === '--pass' && memoryAction === 'list') {
+      pass = readOptionValue(memoryRest, index, '--pass');
+      index += 1;
+      continue;
+    }
+    if (token === '--preserve-trust' && memoryAction === 'import') {
+      preserveTrust = true;
+      continue;
+    }
+    if (token === '--all-unknown' && memoryAction === 'reassert') {
+      allUnknown = true;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      throw new Error(`Unknown option: ${token}`);
+    }
+    if (agentId === undefined) {
+      agentId = token;
+      continue;
+    }
+    if (takesIds) {
+      ids.push(token);
+      continue;
+    }
+    if (memoryAction === 'search') {
+      words.push(token);
+      continue;
+    }
+    if (memoryAction === 'undo-pass') {
+      if (pass !== undefined) {
+        throw new Error(`memory undo-pass takes one pass id at a time: stratus memory undo-pass ${agentId} <pass-id>.`);
       }
+      pass = token;
+      continue;
     }
-    if (takesIds && memoryAction !== 'reassert' && ids.length === 0) {
-      throw new Error(`memory ${memoryAction} needs at least one entry id: stratus memory ${memoryAction} ${agentId} <id>...`);
-    }
-    if (memoryAction === 'search' && words.length === 0) {
-      throw new Error(`memory search needs something to look for: stratus memory search ${agentId} deploy pipeline.`);
-    }
-    if (memoryAction === 'undo-pass' && pass === undefined) {
-      throw new Error(`memory undo-pass needs the pass id: stratus memory undo-pass ${agentId} <pass-id>. stratus memory passes ${agentId} lists them.`);
-    }
-    if (memoryAction === 'import' && file === undefined) {
-      throw new Error(`memory import needs --file <path>: the JSONL a stratus memory export wrote.`);
-    }
-    return {
-      command: 'memory',
-      action: memoryAction,
-      agentId,
-      ...(trust !== undefined ? { trust } : {}),
-      ids,
-      allUnknown,
-      ...(words.length > 0 ? { query: words.join(' ') } : {}),
-      ...(limit !== undefined ? { limit } : {}),
-      ...(pass !== undefined ? { pass } : {}),
-      ...(file !== undefined ? { file } : {}),
-      preserveTrust,
-      format,
-    };
+    throw new Error(`Unexpected argument: ${token}. Try: stratus memory ${memoryAction} <agent>`);
   }
-
-  if (command === 'sessions' || (command === 'session' && rest[0] === 'list')) {
-    const sessionsRest = command === 'sessions' ? rest : rest.slice(1);
-    const parsed: ParsedSessionsCommand = { command: 'sessions', format: 'text' };
-    for (let index = 0; index < sessionsRest.length; index += 1) {
-      const token = sessionsRest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--agent') {
-        parsed.agentId = readOptionValue(sessionsRest, index, '--agent');
-        index += 1;
-        continue;
-      }
-      if (token === '--status') {
-        const value = readOptionValue(sessionsRest, index, '--status');
-        if (!isSessionStatus(value) && value !== STOPPED_EARLY_FILTER) {
-          throw new Error(`Unknown status: ${value}. One of: ${[...SESSION_STATUSES, STOPPED_EARLY_FILTER].join(', ')}`);
-        }
-        parsed.status = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--limit') {
-        const value = readOptionValue(sessionsRest, index, '--limit');
-        if (!/^\d+$/.test(value) || Number(value) < 1) {
-          throw new Error(`--limit takes a whole number of 1 or more, not ${value}`);
-        }
-        parsed.limit = Number(value);
-        index += 1;
-        continue;
-      }
-      if (token === '--format') {
-        const value = readOptionValue(sessionsRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        parsed.format = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--gateway') {
-        parsed.gateway = readOptionValue(sessionsRest, index, '--gateway');
-        index += 1;
-        continue;
-      }
-      if (token === '--token') {
-        parsed.token = readOptionValue(sessionsRest, index, '--token');
-        index += 1;
-        continue;
-      }
-      if (token.startsWith('-')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      throw new Error(`Unexpected argument: ${token}. Try: stratus sessions [--agent <id>] [--status <status>]`);
-    }
-    return parsed;
+  if (!agentId) {
+    throw new Error(`memory ${memoryAction} needs the agent id: stratus memory ${memoryAction} <agent>${memoryAction === 'reassert' ? ' --trust user <id>...' : ''}.`);
   }
+  if (memoryAction === 'reassert') {
+    if (trust === undefined) {
+      throw new Error('memory reassert needs --trust <user|agent|external|unknown>: the label you are vouching for.');
+    }
+    if (ids.length === 0 && !allUnknown) {
+      throw new Error('memory reassert needs entry ids, or --all-unknown to re-label every entry that has no recorded origin.');
+    }
+  }
+  if (takesIds && memoryAction !== 'reassert' && ids.length === 0) {
+    throw new Error(`memory ${memoryAction} needs at least one entry id: stratus memory ${memoryAction} ${agentId} <id>...`);
+  }
+  if (memoryAction === 'search' && words.length === 0) {
+    throw new Error(`memory search needs something to look for: stratus memory search ${agentId} deploy pipeline.`);
+  }
+  if (memoryAction === 'undo-pass' && pass === undefined) {
+    throw new Error(`memory undo-pass needs the pass id: stratus memory undo-pass ${agentId} <pass-id>. stratus memory passes ${agentId} lists them.`);
+  }
+  if (memoryAction === 'import' && file === undefined) {
+    throw new Error(`memory import needs --file <path>: the JSONL a stratus memory export wrote.`);
+  }
+  return {
+    command: 'memory',
+    action: memoryAction,
+    agentId,
+    ...(trust !== undefined ? { trust } : {}),
+    ids,
+    allUnknown,
+    ...(words.length > 0 ? { query: words.join(' ') } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+    ...(pass !== undefined ? { pass } : {}),
+    ...(file !== undefined ? { file } : {}),
+    preserveTrust,
+    format,
+  };
+};
 
-  if (command === 'session') {
-    const [action, ...sessionRest] = rest;
-    if (action === undefined || action === '--help' || action === '-h') {
+const parseSessionsCommand = (command: 'sessions' | 'session', rest: string[]): ParsedSessionsCommand | ParsedHelpCommand => {
+  const sessionsRest = command === 'sessions' ? rest : rest.slice(1);
+  const parsed: ParsedSessionsCommand = { command: 'sessions', format: 'text' };
+  for (let index = 0; index < sessionsRest.length; index += 1) {
+    const token = sessionsRest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
       return { command: 'help' };
     }
-    if (action !== 'rollover') {
-      throw new Error(`Unknown session subcommand: ${action}. Try: stratus session rollover <session-id>, stratus sessions`);
+    if (token === '--agent') {
+      parsed.agentId = readOptionValue(sessionsRest, index, '--agent');
+      index += 1;
+      continue;
     }
-    const parsed: ParsedSessionCommand = { command: 'session', action: 'rollover', sessionId: '' };
-    for (let index = 0; index < sessionRest.length; index += 1) {
-      const token = sessionRest[index];
-      if (!token) {
-        continue;
+    if (token === '--status') {
+      const value = readOptionValue(sessionsRest, index, '--status');
+      if (!isSessionStatus(value) && value !== STOPPED_EARLY_FILTER) {
+        throw new Error(`Unknown status: ${value}. One of: ${[...SESSION_STATUSES, STOPPED_EARLY_FILTER].join(', ')}`);
       }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--gateway') {
-        parsed.gateway = readOptionValue(sessionRest, index, '--gateway');
-        index += 1;
-        continue;
-      }
-      if (token === '--token') {
-        parsed.token = readOptionValue(sessionRest, index, '--token');
-        index += 1;
-        continue;
-      }
-      if (token.startsWith('--')) {
-        throw new Error(`Unknown option: ${token}`);
-      }
-      if (parsed.sessionId.length > 0) {
-        throw new Error(`Unexpected argument: ${token}. Try: stratus session rollover <session-id>`);
-      }
-      parsed.sessionId = token;
+      parsed.status = value;
+      index += 1;
+      continue;
     }
-    if (parsed.sessionId.length === 0) {
-      throw new Error('session rollover needs the session id: stratus session rollover <session-id>. `stratus logs` shows ids in its last column.');
+    if (token === '--limit') {
+      const value = readOptionValue(sessionsRest, index, '--limit');
+      if (!/^\d+$/.test(value) || Number(value) < 1) {
+        throw new Error(`--limit takes a whole number of 1 or more, not ${value}`);
+      }
+      parsed.limit = Number(value);
+      index += 1;
+      continue;
     }
-    return parsed;
-  }
-
-  if (command === 'restart') {
-    const parsed: ParsedRestartCommand = { command: 'restart' };
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (!token) {
-        continue;
+    if (token === '--format') {
+      const value = readOptionValue(sessionsRest, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported format: ${value}`);
       }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--reason') {
-        parsed.reason = readOptionValue(rest, index, '--reason');
-        index += 1;
-        continue;
-      }
-      if (token === '--drain-timeout') {
-        const seconds = Number(readOptionValue(rest, index, '--drain-timeout'));
-        if (!Number.isFinite(seconds) || seconds < 0) {
-          throw new Error(`Invalid value for --drain-timeout: ${rest[index + 1] ?? '(missing)'}`);
-        }
-        parsed.drainTimeoutMs = Math.round(seconds * 1000);
-        index += 1;
-        continue;
-      }
-      if (token === '--gateway') {
-        parsed.gateway = readOptionValue(rest, index, '--gateway');
-        index += 1;
-        continue;
-      }
-      if (token === '--token') {
-        parsed.token = readOptionValue(rest, index, '--token');
-        index += 1;
-        continue;
-      }
+      parsed.format = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--gateway') {
+      parsed.gateway = readOptionValue(sessionsRest, index, '--gateway');
+      index += 1;
+      continue;
+    }
+    if (token === '--token') {
+      parsed.token = readOptionValue(sessionsRest, index, '--token');
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('-')) {
       throw new Error(`Unknown option: ${token}`);
     }
-    return parsed;
+    throw new Error(`Unexpected argument: ${token}. Try: stratus sessions [--agent <id>] [--status <status>]`);
   }
+  return parsed;
+};
 
-  if (command === 'health' || command === 'events') {
-    // The same three options: both only ask the running daemon.
-    const parsed: ParsedHealthCommand | ParsedEventsCommand = { command, format: 'text' };
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--format') {
-        const value = readOptionValue(rest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        parsed.format = value;
-        index += 1;
-        continue;
-      }
-      if (token === '--gateway') {
-        parsed.gateway = readOptionValue(rest, index, '--gateway');
-        index += 1;
-        continue;
-      }
-      if (token === '--token') {
-        parsed.token = readOptionValue(rest, index, '--token');
-        index += 1;
-        continue;
-      }
-      throw new Error(`Unknown option: ${token}`);
+const parseSessionCommand = (rest: string[]): ParsedSessionCommand | ParsedHelpCommand => {
+  const [action, ...sessionRest] = rest;
+  if (action === undefined || action === '--help' || action === '-h') {
+    return { command: 'help' };
+  }
+  if (action !== 'rollover') {
+    throw new Error(`Unknown session subcommand: ${action}. Try: stratus session rollover <session-id>, stratus sessions`);
+  }
+  const parsed: ParsedSessionCommand = { command: 'session', action: 'rollover', sessionId: '' };
+  for (let index = 0; index < sessionRest.length; index += 1) {
+    const token = sessionRest[index];
+    if (!token) {
+      continue;
     }
-    return parsed;
-  }
-
-  if (command === 'agent') {
-    const [subcommand, ...agentRest] = rest;
-    if (subcommand === '--help' || subcommand === '-h') {
+    if (token === '--help' || token === '-h') {
       return { command: 'help' };
     }
-    if (subcommand !== 'new') {
-      throw new Error(`Unknown agent subcommand: ${subcommand ?? '(missing)'}. Try: stratus agent new, stratus agent list`);
+    if (token === '--gateway') {
+      parsed.gateway = readOptionValue(sessionRest, index, '--gateway');
+      index += 1;
+      continue;
     }
-
-    let name: string | undefined;
-    let instructions: string | undefined;
-    let format: 'text' | 'json' | 'soul' = 'text';
-
-    for (let index = 0; index < agentRest.length; index += 1) {
-      const token = agentRest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--name') {
-        name = readOptionValue(agentRest, index, '--name');
-        index += 1;
-        continue;
-      }
-      if (token === '--instructions') {
-        instructions = readOptionValue(agentRest, index, '--instructions');
-        index += 1;
-        continue;
-      }
-      if (token === '--format') {
-        const value = readOptionValue(agentRest, index, '--format');
-        if (value !== 'text' && value !== 'json' && value !== 'soul') {
-          throw new Error(`Unsupported format: ${value}`);
-        }
-        format = value;
-        index += 1;
-        continue;
-      }
+    if (token === '--token') {
+      parsed.token = readOptionValue(sessionRest, index, '--token');
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--')) {
       throw new Error(`Unknown option: ${token}`);
     }
-
-    return {
-      command: 'agent-new',
-      ...(name ? { name } : {}),
-      ...(instructions ? { instructions } : {}),
-      format,
-    };
-  }
-
-  if (command === 'setup') {
-    let configPath: string | undefined;
-
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (!token) {
-        continue;
-      }
-      if (token === '--help' || token === '-h') {
-        return { command: 'help' };
-      }
-      if (token === '--config') {
-        configPath = readOptionValue(rest, index, '--config');
-        index += 1;
-        continue;
-      }
-      throw new Error(`Unknown option: ${token}`);
+    if (parsed.sessionId.length > 0) {
+      throw new Error(`Unexpected argument: ${token}. Try: stratus session rollover <session-id>`);
     }
+    parsed.sessionId = token;
+  }
+  if (parsed.sessionId.length === 0) {
+    throw new Error('session rollover needs the session id: stratus session rollover <session-id>. `stratus logs` shows ids in its last column.');
+  }
+  return parsed;
+};
 
-    return { command: 'setup', ...(configPath ? { configPath } : {}) };
+const parseRestartCommand = (rest: string[]): ParsedRestartCommand | ParsedHelpCommand => {
+  const parsed: ParsedRestartCommand = { command: 'restart' };
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--reason') {
+      parsed.reason = readOptionValue(rest, index, '--reason');
+      index += 1;
+      continue;
+    }
+    if (token === '--drain-timeout') {
+      const seconds = Number(readOptionValue(rest, index, '--drain-timeout'));
+      if (!Number.isFinite(seconds) || seconds < 0) {
+        throw new Error(`Invalid value for --drain-timeout: ${rest[index + 1] ?? '(missing)'}`);
+      }
+      parsed.drainTimeoutMs = Math.round(seconds * 1000);
+      index += 1;
+      continue;
+    }
+    if (token === '--gateway') {
+      parsed.gateway = readOptionValue(rest, index, '--gateway');
+      index += 1;
+      continue;
+    }
+    if (token === '--token') {
+      parsed.token = readOptionValue(rest, index, '--token');
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return parsed;
+};
+
+const parseHealthCommand = (command: 'health' | 'events', rest: string[]): ParsedHealthCommand | ParsedEventsCommand | ParsedHelpCommand => {
+  // The same three options: both only ask the running daemon.
+  const parsed: ParsedHealthCommand | ParsedEventsCommand = { command, format: 'text' };
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--format') {
+      const value = readOptionValue(rest, index, '--format');
+      if (value !== 'text' && value !== 'json') {
+        throw new Error(`Unsupported format: ${value}`);
+      }
+      parsed.format = value;
+      index += 1;
+      continue;
+    }
+    if (token === '--gateway') {
+      parsed.gateway = readOptionValue(rest, index, '--gateway');
+      index += 1;
+      continue;
+    }
+    if (token === '--token') {
+      parsed.token = readOptionValue(rest, index, '--token');
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+  return parsed;
+};
+
+const parseAgentCommand = (rest: string[]): ParsedAgentNewCommand | ParsedHelpCommand => {
+  const [subcommand, ...agentRest] = rest;
+  if (subcommand === '--help' || subcommand === '-h') {
+    return { command: 'help' };
+  }
+  if (subcommand !== 'new') {
+    throw new Error(`Unknown agent subcommand: ${subcommand ?? '(missing)'}. Try: stratus agent new, stratus agent list`);
   }
 
-  if (command !== 'run') {
-    throw new Error(`Unknown command: ${command}`);
+  let name: string | undefined;
+  let instructions: string | undefined;
+  let format: 'text' | 'json' | 'soul' = 'text';
+
+  for (let index = 0; index < agentRest.length; index += 1) {
+    const token = agentRest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--name') {
+      name = readOptionValue(agentRest, index, '--name');
+      index += 1;
+      continue;
+    }
+    if (token === '--instructions') {
+      instructions = readOptionValue(agentRest, index, '--instructions');
+      index += 1;
+      continue;
+    }
+    if (token === '--format') {
+      const value = readOptionValue(agentRest, index, '--format');
+      if (value !== 'text' && value !== 'json' && value !== 'soul') {
+        throw new Error(`Unsupported format: ${value}`);
+      }
+      format = value;
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
   }
 
+  return {
+    command: 'agent-new',
+    ...(name ? { name } : {}),
+    ...(instructions ? { instructions } : {}),
+    format,
+  };
+};
+
+const parseSetupCommand = (rest: string[]): ParsedSetupCommand | ParsedHelpCommand => {
+  let configPath: string | undefined;
+
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--config') {
+      configPath = readOptionValue(rest, index, '--config');
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+
+  return { command: 'setup', ...(configPath ? { configPath } : {}) };
+};
+
+const parseRunCommand = (rest: string[], env: CliEnvironment): ParsedRunCommand | ParsedHelpCommand => {
   let prompt = '';
   let provider: CliProviderName | undefined;
   let model: string | undefined;
@@ -1926,6 +1907,125 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     ...(approvals !== undefined ? { approvals } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
   };
+};
+
+export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCommand => {
+  const [command, ...rest] = argv;
+
+  if (!command || command === 'help' || command === '--help' || command === '-h') {
+    return { command: 'help' };
+  }
+
+  // Before every other command, and answered even where one would fail:
+  // the first thing anyone is asked for in a bug report is the version,
+  // and a build too broken to serve is exactly when it is wanted. Reaching
+  // it through `update --check` was the only way to see it, which asks npm
+  // over the network to answer a question about this machine.
+  if (command === 'version' || command === '--version' || command === '-v') {
+    return { command: 'version' };
+  }
+
+  if (command === 'dashboard') {
+    return parseDashboardCommand(rest);
+  }
+
+  if (command === 'serve') {
+    return parseServeCommand(rest);
+  }
+
+  if (command === 'chat') {
+    return parseChatCommand(rest);
+  }
+
+  if (command === 'agents' || (command === 'agent' && rest[0] === 'list')) {
+    return parseAgentsCommand(command, rest);
+  }
+
+  if (command === 'schedules' || (command === 'schedule' && rest[0] === 'list') || (command === 'schedule' && rest[0] === 'cancel')) {
+    return parseSchedulesCommand(command, rest);
+  }
+
+  if (command === 'doctor') {
+    return parseDoctorCommand(rest);
+  }
+
+  if (command === 'update') {
+    return parseUpdateCommand(rest);
+  }
+
+  if (command === 'service') {
+    return parseServiceCommand(rest);
+  }
+
+  if (command === 'logs') {
+    return parseLogsCommand(rest);
+  }
+
+  if (command === 'credentials' || command === 'credential') {
+    return parseCredentialCommand(command, rest);
+  }
+
+  if (command === 'signin' || command === 'signins') {
+    return parseSignInCommand(command, rest);
+  }
+
+  if (command === 'channel' || command === 'channels') {
+    return parseChannelCommand(command, rest);
+  }
+
+  if (command === 'plugins' || (command === 'plugin' && rest[0] === 'list')) {
+    return parsePluginsCommand(command, rest);
+  }
+
+  if (command === 'skills' || (command === 'skill' && rest[0] === 'list')) {
+    return parseSkillsCommand(command, rest);
+  }
+
+  if (command === 'template') {
+    return parseTemplateCommand(rest);
+  }
+
+  if (command === 'skill') {
+    return parseSkillCommand(rest);
+  }
+
+  if (command === 'grants') {
+    return parseGrantsCommand(rest);
+  }
+
+  if (command === 'memory') {
+    return parseMemoryCommand(rest);
+  }
+
+  if (command === 'sessions' || (command === 'session' && rest[0] === 'list')) {
+    return parseSessionsCommand(command, rest);
+  }
+
+  if (command === 'session') {
+    return parseSessionCommand(rest);
+  }
+
+  if (command === 'restart') {
+    return parseRestartCommand(rest);
+  }
+
+  if (command === 'health' || command === 'events') {
+    return parseHealthCommand(command, rest);
+  }
+
+  if (command === 'agent') {
+    return parseAgentCommand(rest);
+  }
+
+  if (command === 'setup') {
+    return parseSetupCommand(rest);
+  }
+
+  if (command !== 'run') {
+    throw new Error(`Unknown command: ${command}`);
+  }
+
+  return parseRunCommand(rest, env);
 };
 
 /**
