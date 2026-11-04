@@ -411,6 +411,49 @@ tool. No schema change: an
 older build reads an omitted list as every tool, which is what this home
 keeps.
 
+## `tool-browser` starts Chromium with its own sandbox on
+
+`@stratusagent/tool-browser` used to start Chromium the way Playwright does
+by default, with `--no-sandbox`. It now starts it with Chromium's own
+sandbox, which keeps a page that breaks the renderer away from the daemon's
+files and credentials. Most hosts start it with no change on your side: a
+Mac whose daemon runs under `launchd` or from a terminal, and Linux hosts
+that allow unprivileged user namespaces.
+
+Two kinds of install can't start it, and need a step when you upgrade:
+
+- **Docker.** Docker's default seccomp profile refuses the user namespaces
+  the sandbox needs. Rebuild the `browser` target from the new release: it
+  sets `STRATUS_BROWSER_CHROMIUM_SANDBOX=false`, so the plugin starts
+  Chromium without its sandbox there and the container contains the
+  browser. An image of your own built some other way needs the same
+  variable, or the config key below.
+- **Ubuntu 24.04**, and any Linux host with
+  `kernel.apparmor_restrict_unprivileged_userns=1`, under the system unit
+  too: AppArmor refuses Playwright's Chromium the namespace. Add the
+  opt-out to the plugin's block in `~/.stratus/config.json` and restart
+  the daemon:
+
+  ```jsonc
+  "@stratusagent/tool-browser": {
+    "enabled": true,
+    "chromiumSandbox": false
+  }
+  ```
+
+A daemon that runs inside `sandbox-exec` on macOS can't start it either,
+and neither can a Linux daemon that runs as root: Chromium won't start
+its sandbox as root. Run that daemon as a non-root user, or use the same
+key.
+
+Skip the step and the daemon still starts and every other tool works, but
+each `browser.*` call fails with an error that says Chromium's sandbox
+couldn't start and names the setting. Nothing is migrated and no file is
+rewritten. If you go back to an older version, take the
+`chromiumSandbox` key out first: the older plugin's config schema doesn't
+know it and refuses to load. See
+[Chromium's sandbox](../../packages/tool-browser/README.md#chromiums-sandbox).
+
 ## `stratus update` does the sequence in the order that cannot lose data
 
 ```bash

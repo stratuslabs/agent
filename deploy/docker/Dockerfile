@@ -102,6 +102,13 @@ USER root
 # Outside the home on purpose: the browser is part of the image, read-only
 # at runtime, and not something a backup of the volume should carry.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# tool-browser starts Chromium with its own sandbox on, and that sandbox
+# needs user namespaces, which Docker's default seccomp profile refuses. So
+# in this image the plugin's default is off, and the container is what
+# contains the browser. A "chromiumSandbox" key in the plugin's config
+# outranks this, so on a VM that runs the image and allows user namespaces,
+# `"chromiumSandbox": true` turns the sandbox back on.
+ENV STRATUS_BROWSER_CHROMIUM_SANDBOX=false
 # playwright-core's own installer, from the copy tool-browser depends on, so
 # the browser build is the one that playwright-core version drives.
 RUN --mount=type=secret,id=build_ca,required=false \
