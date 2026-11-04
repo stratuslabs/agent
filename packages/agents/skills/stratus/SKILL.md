@@ -212,7 +212,7 @@ When a stored key "isn't found", check in this order:
 | `stratus agent new` / `stratus agents` | Create an agent / list the roster |
 | `stratus template add <path\|owner/repo>` | Install a packaged agent: soul, skills, and plugin config |
 | `stratus skill add` / `stratus skill validate` / `stratus skill reload` | Install skills, check a skill directory, and have the running daemon re-read them |
-| `stratus skills` | List skills and which agents enable each |
+| `stratus skills` | List skills and which agents enable each. `--format json` |
 | `stratus plugins` | Every tool, its plugin, who is granted it, and what approvals do |
 | `stratus credential set` / `stratus credential remove` / `stratus credentials` | Store (value on stdin) or remove a named credential; list the names |
 | `stratus credential env <name> <VAR> --agent <id>` | Let that agent's shell commands read a stored key as `<VAR>`, from the next command; `--remove` undoes it |

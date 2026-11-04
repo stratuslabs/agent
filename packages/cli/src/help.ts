@@ -119,7 +119,7 @@ Commands:
                    Exit 1 if anything would be refused
   skills           List installed skills and which agents enable each, after
                    the built-in stratus skill every agent has
-                   (also: stratus skill list)
+                   (--format json; also: stratus skill list)
   plugins          What this machine's plugins are, and where the chain from
                    installed to callable breaks: whether the package resolves,
                    whether a trusted config enables it, which agents' tools:

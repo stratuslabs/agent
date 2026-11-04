@@ -864,10 +864,84 @@ test('runCli skills lists the built-in stratus skill first, enabled for every ag
   assert.match(output.stdout, /No skills installed in/);
 });
 
+test('runCli skills --format json reports each skill and who enables it as data', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilljson-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilljson-cwd-'));
+  const skillDir = path.join(home, '.stratus', 'skills', 'site-audit');
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    path.join(skillDir, 'SKILL.md'),
+    '---\ndescription: Use when auditing a live site.\n---\n\nOpen the page and walk the flows.\n',
+  );
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava Lin\nid: ava\nskills:\n  - site-audit\n---\n\nYou audit sites.\n',
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['skills', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 0, output.stderr);
+
+  const report = JSON.parse(output.stdout) as {
+    skills: Array<{ id: string; description: string; builtIn: boolean; enabledBy: string | string[] | null }>;
+  };
+  const builtin = report.skills.find((entry) => entry.id === 'stratus');
+  assert.ok(builtin, 'the built-in stratus skill is listed');
+  assert.equal(builtin.builtIn, true);
+  assert.equal(builtin.enabledBy, 'every agent');
+  const installed = report.skills.find((entry) => entry.id === 'site-audit');
+  assert.ok(installed, 'the installed skill is listed');
+  assert.equal(installed.builtIn, false);
+  assert.equal(installed.description, 'Use when auditing a live site.');
+  assert.deepEqual(installed.enabledBy, ['ava']);
+});
+
+test('runCli skills --format json lists the built-in alone when nothing is installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilljsonempty-'));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['skills', '--format', 'json'], streams, env: { cwd: home, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 0, output.stderr);
+
+  const report = JSON.parse(output.stdout) as { skills: Array<{ id: string; builtIn: boolean }> };
+  assert.equal(report.skills.length, 1);
+  assert.equal(report.skills[0]?.id, 'stratus');
+  assert.equal(report.skills[0]?.builtIn, true);
+});
+
+test('runCli skills --format json sets enabledBy null for every skill when the roster cannot load', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilljsonnull-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilljsonnull-cwd-'));
+  const dir = path.join(home, '.stratus', 'skills', 'code-review');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  // Two souls claiming one id: the roster refuses to load, deliberately.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'a.md'), '---\nname: Ava\nid: ava\n---\n\nA.\n');
+  await writeFile(path.join(home, '.stratus', 'agents', 'b.md'), '---\nname: Beatrix\nid: ava\n---\n\nB.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['skills', '--format', 'json'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stderr, /cannot say who enables what/);
+
+  const report = JSON.parse(output.stdout) as {
+    skills: Array<{ id: string; builtIn: boolean; enabledBy: string | string[] | null }>;
+  };
+  // The built-in stays "every agent" — a roster failure withholds
+  // enablement for installed skills, not for the one every agent has regardless.
+  const builtin = report.skills.find((entry) => entry.builtIn);
+  assert.equal(builtin?.enabledBy, 'every agent');
+  for (const skill of report.skills) {
+    if (skill.builtIn) continue;
+    assert.equal(skill.enabledBy, null, `${skill.id} enabledBy is null when the roster cannot load`);
+  }
+});
+
 test('runSkills reports a built-in skill that will not load instead of listing it as enabled', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillbroken-'));
   const { streams, output } = createStreams();
-  const exitCode = await runSkills(streams, { cwd: home, homeDir: home, processEnv: {} }, async () => {
+  const exitCode = await runSkills({ command: 'skills', format: 'text' }, streams, { cwd: home, homeDir: home, processEnv: {} }, async () => {
     throw new Error('ENOENT: no such file');
   });
   assert.equal(exitCode, 0);
@@ -908,8 +982,15 @@ test('parseCommand reads skill add and skills forms', () => {
     parseCommand(['skill', 'add', './local', '--skill', 'a', '--skill', 'b', '--force', '--agent', 'ava']),
     { command: 'skill-add', source: './local', skillIds: ['a', 'b'], force: true, agentId: 'ava' },
   );
-  assert.deepEqual(parseCommand(['skills']), { command: 'skills' });
-  assert.deepEqual(parseCommand(['skill', 'list']), { command: 'skills' });
+  assert.deepEqual(parseCommand(['skills']), { command: 'skills', format: 'text' });
+  assert.deepEqual(parseCommand(['skill', 'list']), { command: 'skills', format: 'text' });
+  assert.deepEqual(parseCommand(['skills', '--format', 'json']), { command: 'skills', format: 'json' });
+  assert.deepEqual(parseCommand(['skill', 'list', '--format', 'json']), { command: 'skills', format: 'json' });
+  assert.throws(
+    () => parseCommand(['skills', '--format', 'yaml']),
+    /Invalid value for --format: yaml\. Use text or json\./,
+  );
+  assert.throws(() => parseCommand(['skills', '--wat']), /Unknown option: --wat/);
   assert.throws(() => parseCommand(['skill', 'add']), /needs a source/);
   assert.throws(() => parseCommand(['skill', 'frobnicate']), /Unknown skill subcommand/);
 });

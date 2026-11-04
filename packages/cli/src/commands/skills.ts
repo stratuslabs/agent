@@ -1,7 +1,7 @@
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SkillRegistry, STRATUS_SKILL_ID, matchesSkillAllowlist } from '@stratusagent/core';
+import { SkillRegistry, STRATUS_SKILL_ID, matchesSkillAllowlist, type Skill } from '@stratusagent/core';
 import { formatSoul, isLoadableSkillId, loadStratusSkill, STRATUS_SKILL_PATH, type ParsedSoul } from '@stratusagent/agents';
 import {
   agentsDirPath,
@@ -26,6 +26,7 @@ import type {
   ParsedSkillAddCommand,
   ParsedSkillValidateCommand,
   ParsedSkillReloadCommand,
+  ParsedSkillsCommand,
 } from '../parse.ts';
 import { rosterSoulsWithConfigured } from '../roster.ts';
 import { resolveSource, redactedSourceUrl, cloneSource } from '../source.ts';
@@ -270,18 +271,75 @@ export const runSkillReload = async (
   return 0;
 };
 
+/**
+ * Loads the roster to say who enables what. A roster that will not load
+ * (a duplicate agent id, deliberately fatal) is unreadable enablement, not
+ * empty enablement: the warning goes to stderr and `rosterUnreadable` is
+ * set, so the caller withholds the claim rather than reporting every skill
+ * unused.
+ */
+const loadSkillEnablement = async (
+  env: CliEnvironment,
+  streams: CliStreams,
+): Promise<{ roster: Awaited<ReturnType<typeof loadRosterSouls>>; rosterUnreadable: boolean }> => {
+  try {
+    const resolved = await rosterSoulsWithConfigured(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+    return { roster: resolved.entries, rosterUnreadable: !resolved.complete };
+  } catch (error) {
+    writeLine(
+      streams.stderr,
+      `Warning: cannot say who enables what — the roster did not load: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { roster: [], rosterUnreadable: true };
+  }
+};
+
+/**
+ * The JSON document `stratus skills --format json` prints: one entry for
+ * the built-in stratus skill (when it loaded) and one per installed skill,
+ * each with the agents that enable it. `enabledBy` is `"every agent"` for
+ * the built-in, an array of agent names for an installed skill, or `null`
+ * when the roster could not be read — the same withholding the text output does.
+ */
+const skillsJsonReport = (
+  builtin: Skill | undefined,
+  installed: ReadonlyArray<{ id: string; description: string }>,
+  roster: Awaited<ReturnType<typeof loadRosterSouls>>,
+  rosterUnreadable: boolean,
+): { skills: Array<{ id: string; description: string; builtIn: boolean; enabledBy: string | string[] | null }> } => {
+  const skills: Array<{ id: string; description: string; builtIn: boolean; enabledBy: string | string[] | null }> = [];
+  if (builtin !== undefined) {
+    skills.push({ id: builtin.id, description: builtin.description, builtIn: true, enabledBy: 'every agent' });
+  }
+  for (const skill of installed) {
+    const enabledBy = rosterUnreadable
+      ? null
+      : roster
+          .filter((entry) => {
+            const allowlist = entry.soul.agent.skills;
+            return allowlist !== undefined
+              && allowlist.length > 0
+              && matchesSkillAllowlist(skill.id, allowlist);
+          })
+          .map((entry) => entry.soul.agent.id);
+    skills.push({ id: skill.id, description: skill.description, builtIn: false, enabledBy });
+  }
+  return { skills };
+};
+
 export const runSkills = async (
+  command: ParsedSkillsCommand,
   streams: CliStreams,
   env: CliEnvironment = {},
-  loadBuiltin: () => Promise<unknown> = loadStratusSkill,
+  loadBuiltin: () => Promise<Skill> = loadStratusSkill,
 ): Promise<number> => {
   // First, because an agent with no skills: still has it, and an operator
   // reading this to learn what an agent can read would otherwise not know.
   // Loaded the way the daemon loads it, so a broken install is said here
   // too rather than listed as serving.
+  let builtinSkill: Skill | undefined;
   try {
-    await loadBuiltin();
-    writeLine(streams.stdout, `${STRATUS_SKILL_ID.padEnd(24)}How Stratus itself works and how to set it up — built in, enabled for every agent (${STRATUS_SKILL_PATH})`);
+    builtinSkill = await loadBuiltin();
   } catch (error) {
     writeLine(
       streams.stderr,
@@ -292,6 +350,17 @@ export const runSkills = async (
   const skills = await loadOperatorSkills(env, registry, (line) => {
     writeLine(streams.stderr, `Warning: ${line}`);
   });
+
+  if (command.format === 'json') {
+    const { roster, rosterUnreadable } = await loadSkillEnablement(env, streams);
+    writeLine(streams.stdout, JSON.stringify(skillsJsonReport(builtinSkill, skills, roster, rosterUnreadable), null, 2));
+    return 0;
+  }
+
+  if (builtinSkill !== undefined) {
+    writeLine(streams.stdout, `${STRATUS_SKILL_ID.padEnd(24)}How Stratus itself works and how to set it up — built in, enabled for every agent (${STRATUS_SKILL_PATH})`);
+  }
+
   if (skills.length === 0) {
     writeLine(streams.stdout, `No skills installed in ${skillsDirPath(env)}.`);
     writeLine(streams.stdout, 'Install some: stratus skill add <owner/repo | git url | path>');
@@ -302,23 +371,7 @@ export const runSkills = async (
   // follows "what is installed" — read from the same roster a dispatch
   // serves. Plugin-contributed skills are the daemon's to list
   // (/catalog/tools); this command reads the operator directory.
-  //
-  // A roster that will not load (a duplicate agent id, deliberately
-  // fatal) is unreadable enablement, not empty enablement: say so and
-  // withhold the claim rather than reporting every skill unused.
-  let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
-  let rosterUnreadable = false;
-  try {
-    const resolved = await rosterSoulsWithConfigured(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
-    roster = resolved.entries;
-    rosterUnreadable = !resolved.complete;
-  } catch (error) {
-    rosterUnreadable = true;
-    writeLine(
-      streams.stderr,
-      `Warning: cannot say who enables what — the roster did not load: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  const { roster, rosterUnreadable } = await loadSkillEnablement(env, streams);
   for (const skill of skills) {
     let suffix = '';
     if (!rosterUnreadable) {

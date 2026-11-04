@@ -42,7 +42,7 @@ to [skills.sh](https://skills.sh) — installs directly:
 stratus skill add owner/skills-repo          # a whole repo of skills
 stratus skill add owner/repo --skill hn-search --agent blair
 stratus skill add ./my-skills                # a local directory
-stratus skills                               # what is installed, and who enables it
+stratus skills                               # what is installed, and who enables it (--format json for the same listing as data)
 ```
 
 `skill add` takes a GitHub `owner/repo`, any git URL, or a local path; it
