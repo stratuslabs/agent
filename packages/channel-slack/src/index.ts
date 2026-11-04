@@ -1529,6 +1529,9 @@ const SLACK_INVITE_REFUSALS = new Set([
   ...SLACK_AUTH_ERRORS,
 ]);
 
+/** The shape of a Slack user id: `U…`, or `W…` on Enterprise Grid. A conversation id never starts with either. */
+const SLACK_USER_ID = /^[UW][A-Z0-9]{2,}$/;
+
 /**
  * What `channel_not_found` means to an app: Slack says the same for a
  * wrong id and for a private channel it can't see, and so does
@@ -3006,6 +3009,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     try {
       conversation = (await connection.web.conversations.info({ channel: to })).channel;
     } catch (error) {
+      // A person's id (U…, or W… on Enterprise Grid) is not a conversation,
+      // so Slack answers channel_not_found for it too (card 1201). Said
+      // plainly, because the fix is not another id or scope: the adapter
+      // never opens a DM itself.
+      if (slackErrorCode(error) === 'channel_not_found' && SLACK_USER_ID.test(to)) {
+        throw new Error(
+          `slack: ${to} is a person's Slack user id, not a conversation. ${address.agentId}'s app writes to a person only in a direct message `
+          + 'they already have with it, named by its conversation id (D…), and never opens one itself. '
+          + 'Use that D… id, or post in a channel the app is in.',
+        );
+      }
       // channel_not_found covers both "no such id" and "not visible to
       // this app" — Slack deliberately does not distinguish, and neither
       // should the message pretend to.
