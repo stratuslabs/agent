@@ -411,7 +411,7 @@ tool. No schema change: an
 older build reads an omitted list as every tool, which is what this home
 keeps.
 
-## `tool-browser` starts Chromium with its own sandbox on
+## `tool-browser` starts Chromium with its own sandbox on (0.14.7)
 
 `@stratusagent/tool-browser` used to start Chromium the way Playwright does
 by default, with `--no-sandbox`. It now starts it with Chromium's own
