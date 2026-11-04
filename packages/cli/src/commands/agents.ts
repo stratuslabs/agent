@@ -1,5 +1,5 @@
 import type { AvatarTheme } from '@stratusagent/core';
-import { listAgentSummaries, migrateLegacyMemory, type AgentSummary } from '@stratusagent/state';
+import { listAgentSummaries, migrateLegacyMemory, withoutTrailingSlashes, type AgentSummary } from '@stratusagent/state';
 import { gatewayToken } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -11,7 +11,7 @@ const remoteAgentSummaries = async (
   env: CliEnvironment,
 ): Promise<AgentSummary[]> => {
   const token = await gatewayToken(env, command.token);
-  const base = String(command.gateway).replace(/\/+$/, '');
+  const base = withoutTrailingSlashes(String(command.gateway));
   const fetchImpl = env.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== 'function') {
     throw new Error('fetch is unavailable, so --gateway cannot reach a daemon from this runtime.');

@@ -26,7 +26,7 @@ import {
 } from './config.ts';
 import { normalizeTrustedDomain, parseReviewRule, trustedDomainProblem, type ReviewRule } from '@stratusagent/permissions';
 
-import { REGISTERED_PROVIDER_NAME_PATTERN, parseProviderName } from './provider-names.ts';
+import { REGISTERED_PROVIDER_NAME_PATTERN, parseProviderName, withoutTrailingSlashes } from './provider-names.ts';
 import { CREDENTIAL_NAME_PATTERN } from './credentials.ts';
 
 /**
@@ -391,7 +391,7 @@ export const normalizePublicUrl = (value: unknown): string => {
   if (parsed.href.includes('?') || parsed.href.includes('#')) {
     throw new Error('links are built by appending a path to it, so it can carry no query or fragment, not even an empty one.');
   }
-  return parsed.href.replace(/\/+$/, '');
+  return withoutTrailingSlashes(parsed.href);
 };
 
 const LOOPBACK = new BlockList();

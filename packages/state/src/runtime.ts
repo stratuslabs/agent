@@ -21,6 +21,7 @@ import {
   defaultModelFor,
   parseProviderName,
   defaultApiKeyEnvName,
+  withoutTrailingSlashes,
 } from './provider-names.ts';
 import { resolveSoulPath, loadSoulFile } from './souls.ts';
 
@@ -341,7 +342,7 @@ export const resolveRuntimeConfig = async (
     const fallbackUntrustedUrl = fallbackProvider === 'openai'
       && configTrusted === false
       && fileConfig.fallbackBaseUrl !== undefined
-      && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
+      && withoutTrailingSlashes(fileConfig.fallbackBaseUrl) !== DEFAULT_OPENAI_BASE_URL;
     const ownFallbackSignIn = fallbackProvider === 'anthropic' ? agentSignIn : undefined;
     const fallbackEnvKey = ownFallbackSignIn !== undefined
       ? undefined
@@ -511,7 +512,7 @@ export const resolveRuntimeConfig = async (
     && readNonEmptyString(processEnv.STRATUS_BASE_URL) === undefined
     && fileConfigApplies
     && fileConfig.baseUrl !== undefined
-    && fileConfig.baseUrl.replace(/\/+$/, '') !== defaultEndpointFor(String(provider));
+    && withoutTrailingSlashes(fileConfig.baseUrl) !== defaultEndpointFor(String(provider));
 
   // Env vars outrank the stored sign-in from `stratus setup`.
   // Except the agent's own sign-in, which outranks both: it is the one
@@ -570,7 +571,7 @@ export const resolveRuntimeConfig = async (
     }
   }
   if (boundBaseUrl && explicitBaseUrl
-    && String(explicitBaseUrl).replace(/\/+$/, '') !== boundBaseUrl.replace(/\/+$/, '')) {
+    && withoutTrailingSlashes(String(explicitBaseUrl)) !== withoutTrailingSlashes(boundBaseUrl)) {
     throw new Error(
       `Your saved ${provider} sign-in is bound to ${boundBaseUrl} and is not sent to ${explicitBaseUrl}. Set ${apiKeyEnvName} or STRATUS_API_KEY to use that endpoint.`,
     );

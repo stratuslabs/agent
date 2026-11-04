@@ -1933,6 +1933,76 @@ test('a credential configured with surrounding whitespace is redacted as sent', 
   }
 });
 
+// Both header trims used regexes that restart inside a run of whitespace
+// that is not at the end: `a`, 40,000 tabs and `a` took 2.7 s, and
+// `Bearer a`, 40,000 spaces and `b` took 2.6 s, on a Mac (CodeQL
+// js/polynomial-redos). The ceiling is 1 s, because a tighter one flaked on
+// a loaded CI runner before (AGT-300).
+test('header values with a long run of whitespace inside are checked for redaction quickly', async () => {
+  const tabbed = `a${'\t'.repeat(40_000)}a`;
+  const spaced = `Bearer a${' '.repeat(40_000)}b`;
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'unused-key',
+    headers: { 'x-api-key': tabbed, authorization: spaced },
+    fetch: (async () => ({
+      ok: false,
+      status: 401,
+      text: async () => JSON.stringify({ error: { message: 'invalid key: padded-secret-token' } }),
+    })) as unknown as typeof fetch,
+  });
+  const started = performance.now();
+  await assert.rejects(provider.generate(createRequest()), /invalid key: padded-secret-token/);
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 1_000, `took ${Math.round(elapsed)} ms`);
+});
+
+// What a configured authorization value counts as its credential, which is
+// redacted on its own: the part after the scheme, with whitespace of any
+// kind trimmed from both ends.
+test('the credential inside a padded authorization header is redacted on its own', async () => {
+  const cases: Array<{ value: string; credential: string }> = [
+    { value: ' \tBearer \t alt-secret-token \t', credential: 'alt-secret-token' },
+    { value: 'Basic dXNlcjpwYXNz wrapped', credential: 'dXNlcjpwYXNz wrapped' },
+    { value: 'Bearer\u00a0alt-secret-token\u00a0', credential: 'alt-secret-token' },
+  ];
+  for (const { value, credential } of cases) {
+    const provider = createOpenAICompatibleProvider({
+      model: 'gpt-4.1-mini',
+      apiKey: 'unused-key',
+      headers: { authorization: value },
+      fetch: (async () => ({
+        ok: false,
+        status: 401,
+        text: async () => JSON.stringify({ error: { message: `invalid token: ${credential}` } }),
+      })) as unknown as typeof fetch,
+    });
+    await assert.rejects(provider.generate(createRequest()), (error: Error) => {
+      assert.ok(!error.message.includes(credential), `${JSON.stringify(value)}: ${error.message}`);
+      assert.match(error.message, /invalid token: \[redacted\]/);
+      return true;
+    });
+  }
+});
+
+test('a base URL with a long run of slashes inside is trimmed quickly and the same way', async () => {
+  const urls: string[] = [];
+  const fetchStub = (async (url: string | URL) => {
+    urls.push(String(url));
+    return { ok: false, status: 400, text: async () => 'bad request' };
+  }) as unknown as typeof fetch;
+  const slashed = `https://example.test/${'/'.repeat(40_000)}v1`;
+  const started = performance.now();
+  const provider = createOpenAICompatibleProvider({ model: 'gpt-4.1-mini', apiKey: 'k', baseUrl: slashed, fetch: fetchStub });
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 1_000, `took ${Math.round(elapsed)} ms`);
+  await assert.rejects(provider.generate(createRequest()));
+  const trimmed = createOpenAICompatibleProvider({ model: 'gpt-4.1-mini', apiKey: 'k', baseUrl: 'https://example.test/v1///', fetch: fetchStub });
+  await assert.rejects(trimmed.generate(createRequest()));
+  assert.equal(urls[0], `${slashed}/chat/completions`);
+  assert.equal(urls.at(-1), 'https://example.test/v1/chat/completions');
+});
+
 // Every error `generate` throws is stored, logged and posted, not only the
 // non-2xx ones: a 200 can carry the endpoint's words too.
 test('a structured refusal that repeats the key is redacted like an error body', async () => {

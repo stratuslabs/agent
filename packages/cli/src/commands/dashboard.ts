@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { withoutTrailingSlashes } from '@stratusagent/state';
 import { gatewayToken, readGatewayInfo, gatewayAnswering, HomeHeldError } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
@@ -137,7 +138,7 @@ const mintDashboardUrl = async (
   // the absolute one: this command knows exactly which address answered, and
   // the daemon can only infer it from headers.
   if (payload.path) {
-    return `${base.replace(/\/+$/, '')}${payload.path}`;
+    return `${withoutTrailingSlashes(base)}${payload.path}`;
   }
   if (!payload.url) {
     throw new Error(`The gateway at ${base} did not return a dashboard URL.`);

@@ -7,6 +7,7 @@ import {
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   defaultApiKeyEnvName,
+  withoutTrailingSlashes,
 } from './provider-names.ts';
 
 /**
@@ -73,7 +74,7 @@ export const verifyProviderKey = async (
   // OpenAI key. (A ChatGPT subscription sign-in never reaches this
   // function — it has no key to check; callers short-circuit it the same
   // way they do a Claude subscription token.)
-  const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
+  const root = withoutTrailingSlashes(baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL));
   const url = provider === 'anthropic' ? `${root}/v1/models` : `${root}/models`;
   const headers = provider === 'anthropic'
     ? { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
@@ -183,7 +184,7 @@ export const probeProviderModel = async (
   if (typeof fetchImpl !== 'function') {
     return { status: 'no answer', detail: 'fetch is unavailable' };
   }
-  const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
+  const root = withoutTrailingSlashes(baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL));
   const messages = [{ role: 'user', content: 'ping' }];
   // The OpenAI-compatible adapter sends no output cap on a run, and some of
   // its models refuse `max_tokens`, so neither does this.
@@ -290,9 +291,9 @@ export const collectAvailableModels = async (
       // The same endpoint a real run uses: the stored key's bound URL is
       // authoritative, then a configured anthropic base URL (a proxy) —
       // never the official endpoint by accident.
-      const anthropicRoot = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
+      const anthropicRoot = withoutTrailingSlashes((credential?.type === 'api_key' ? credential.baseUrl : undefined)
         ?? (selection.provider === 'anthropic' ? selection.baseUrl : undefined)
-        ?? DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
+        ?? DEFAULT_ANTHROPIC_BASE_URL);
       try {
         const response = await fetchImpl(`${anthropicRoot}/v1/models?limit=100`, {
           headers: { 'x-api-key': String(apiKey), 'anthropic-version': '2023-06-01' },
@@ -321,9 +322,9 @@ export const collectAvailableModels = async (
     try {
       // A stored key's bound endpoint is authoritative, exactly as at run
       // time; only env-supplied keys follow the default provider's URL.
-      const root = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
+      const root = withoutTrailingSlashes((credential?.type === 'api_key' ? credential.baseUrl : undefined)
         ?? (selection.provider === 'openai' ? selection.baseUrl : undefined)
-        ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
+        ?? DEFAULT_OPENAI_BASE_URL);
       const response = await fetchImpl(`${root}/models`, {
         headers: { authorization: `Bearer ${String(apiKey)}` },
       });
