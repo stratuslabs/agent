@@ -106,6 +106,10 @@ const SLACK_BOT_SCOPES = [
   'im:write',
   'mpim:history',
   'mpim:read',
+  // The reaction a silent turn may leave on a message that needed no
+  // answer. An app installed without it stays silent, and the daemon log
+  // says once that the scope is missing.
+  'reactions:write',
   'users:read',
 ];
 

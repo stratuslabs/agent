@@ -4,11 +4,14 @@ import path from 'node:path';
 
 import {
   isLatestTurn,
+  latestTurnReaction,
   latestTurnReply,
   NO_REPLY_MARKER,
   turnFailureFor,
   turnFilesFor,
+  turnReactionFor,
   turnReplyFor,
+  type SilentReaction,
   CONVERSATION_METADATA_KEY,
   SENDER_TRUST_METADATA_KEY,
   sessionWriteTrust,
@@ -662,6 +665,16 @@ export interface SlackWebLike {
    */
   bookmarks?: {
     list(args: { channel_id: string }): Promise<{ bookmarks?: Array<{ title?: string; link?: string }> }>;
+  };
+  /**
+   * Puts an emoji reaction on a message: what a reply-optional turn that
+   * stays silent leaves instead of a reply, when it names one (card 1078).
+   * Needs `reactions:write`, which the manifest asks for; an app without
+   * it stays silent and is told once. Optional so an older SDK or fake
+   * still runs, without reactions.
+   */
+  reactions?: {
+    add(args: { channel: string; timestamp: string; name: string }): Promise<unknown>;
   };
   /**
    * Opens a modal, which is how a credential is entered: its answer comes
@@ -1457,7 +1470,17 @@ interface AgentConnection {
   teamId: string;
   /** Whether a refused loading status has been said for this app yet; see `ReplyRenderer.setStatus`. */
   statusWarned: { value: boolean };
+  /** Whether a missing `reactions:write` has been said for this app yet; see `addSilentReaction`. */
+  reactionWarned: { value: boolean };
 }
+
+/** Slack's name for each reaction a silent turn may leave (`SILENT_REACTIONS`). */
+const SLACK_REACTION_NAMES: Readonly<Record<SilentReaction, string>> = {
+  thumbsup: '+1',
+  laughing: 'laughing',
+  heart: 'heart',
+  tada: 'tada',
+};
 
 /**
  * The Slack channel adapter. One Slack app per agent — Slack has no way to
@@ -1508,6 +1531,42 @@ const slackErrorCode = (error: unknown): string | undefined => {
 
 /** Slack's code for a failed call, or the SDK's message when Slack never answered. */
 const describeSlackError = (error: unknown): string => slackErrorCode(error) ?? (error instanceof Error ? error.message : String(error));
+
+/**
+ * Leaves the reaction a reply-optional turn named instead of a reply on
+ * the message it was on (card 1078). Never fails the turn, which has
+ * already chosen silence: Slack answering `already_reacted` (a redelivered
+ * message) is what was wanted, a missing `reactions:write` is said once
+ * per app, and any other refusal is said and dropped.
+ */
+const addSilentReaction = async (
+  connection: AgentConnection,
+  channel: string,
+  timestamp: string,
+  reaction: SilentReaction,
+  warn: (line: string) => void,
+): Promise<void> => {
+  const reactions = connection.web.reactions;
+  if (!reactions) {
+    return;
+  }
+  try {
+    await reactions.add({ channel, timestamp, name: SLACK_REACTION_NAMES[reaction] });
+  } catch (error) {
+    const code = slackErrorCode(error);
+    if (code === 'already_reacted') {
+      return;
+    }
+    if (code === 'missing_scope') {
+      if (!connection.reactionWarned.value) {
+        connection.reactionWarned.value = true;
+        warn(`slack: ${connection.config.agentId}'s Slack app can't add reactions because it lacks the reactions:write scope, so its silent turns leave none. Add it to the app's manifest and reinstall the app.`);
+      }
+      return;
+    }
+    warn(`slack: ${connection.config.agentId} could not react to ${timestamp} in ${channel} (${describeSlackError(error)})`);
+  }
+};
 
 /** Codes Slack answers when the token itself is refused. */
 const SLACK_AUTH_ERRORS = new Set(['not_authed', 'invalid_auth', 'account_inactive', 'token_revoked', 'token_expired']);
@@ -6668,6 +6727,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ? overhearReply(connection, event.channel, thread, () => renderer.spokenText(replyLanded ? reply ?? '' : ''), session, settled)
         : undefined;
       const { spoke, spokeAt } = await finalized;
+      // A reply-optional turn that said nothing may have named a reaction
+      // to leave instead (card 1078), and it goes on this message only if
+      // nothing of the turn's reached the thread.
+      if (renderer.mayStaySilent && !spoke && (reply ?? '').trim().length === 0) {
+        const reaction = finished ? turnReactionFor(session, dispatchKey) : latestTurnReaction(session);
+        if (reaction !== undefined) {
+          await addSilentReaction(connection, event.channel, event.ts, reaction, warn);
+        }
+      }
       if (spoke && threadKey !== undefined) {
         // The voice that just answered, recorded where its reply sits in
         // the thread. For a judging agent this is the only record there
@@ -6771,6 +6839,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         botUserId,
         teamId,
         statusWarned: { value: false },
+        reactionWarned: { value: false },
       };
     } catch (error) {
       // One broken app must not take the rest of the fleet down.
