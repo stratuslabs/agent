@@ -48,8 +48,6 @@ import {
   type ApprovalPolicy,
   type Executor,
   type ExecutorContribution,
-  type ImageAttachment,
-  imagesWithinReplayBudget,
   type JsonObject,
   type MemoryStoreContribution,
   type ProviderCallGuard,
@@ -88,6 +86,15 @@ import {
   STRATUS_SKILL_PATH,
 } from '@stratusagent/agents';
 import type { AgentSource } from './agent-source.ts';
+import {
+  allAborted,
+  fitsReplayBudget,
+  joinableSignal,
+  MERGED_SEPARATOR,
+  MERGED_TEXT_BUDGET_CHARS,
+  type MergeBatch,
+  type MergeJoiner,
+} from './merge-batch.ts';
 import { createApprovalBroker } from './approvals.ts';
 import { createCredentialRequests } from './credential-requests.ts';
 import { createFleetReader } from './fleet.ts';
@@ -300,92 +307,6 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
  * question even when the rule answering it is not gateway code.
  */
 export { applySoulPins, type SoulPinContext } from '@stratusagent/state';
-
-/** A dispatch absorbed into a merged turn, waiting for its outcome. */
-interface MergeJoiner {
-  input: DispatchInput;
-  resolve: (session: Session) => void;
-  reject: (error: unknown) => void;
-}
-
-interface MergeBatch {
-  agentId: string | undefined;
-  /** The dispatch that opened the batch and runs it, unless it is steered. */
-  leader: MergeJoiner;
-  /**
-   * Nothing was queued on the session's chain when it opened, so nothing
-   * can be ahead of it: the chain is first in, first out. Only such a batch
-   * is steered (card 948); one behind other work waits its turn.
-   */
-  firstInLine: boolean;
-  absorbed: MergeJoiner[];
-  /**
-   * Taken by the turn running ahead of it (card 948), which settles every
-   * caller in it: the leader's place on the chain then runs nothing.
-   */
-  steered: boolean;
-  /** Every image in the batch so far, leader's first. */
-  images: ImageAttachment[];
-  /** Characters of the merged user message so far, separators included. */
-  chars: number;
-}
-
-/**
- * The most text one merged user message may hold (card 423). The runner's
- * overflow recovery can drop earlier transcript but never part of the
- * newest message, so a batch must not grow that message past what one
- * message could be on its own: this is Slack's own message-length limit.
- * A single message longer than this still runs, alone, as it would have
- * without merging.
- */
-const MERGED_TEXT_BUDGET_CHARS = 40_000;
-
-/** Separator between merged messages; counted against the text budget. */
-const MERGED_SEPARATOR = '\n\n';
-
-/**
- * Whether `images` all fit the replay budget together. A merged turn's
- * images are one message's, and the runner empties whatever falls outside
- * the budget before the provider sees it, so a batch that would overflow
- * must not take the message that overflows it (card 423).
- */
-const fitsReplayBudget = (images: readonly ImageAttachment[]): boolean =>
-  images.length === 0 || imagesWithinReplayBudget([{ id: '', createdAt: '', role: 'user', content: '', images: [...images] }]).size === images.length;
-
-/** A signal that aborts once every one of `signals` has. */
-const allAborted = (signals: readonly AbortSignal[]): AbortSignal => joinableSignal(signals).signal;
-
-/**
- * `allAborted` for callers that keep joining: a turn that takes in messages
- * at its tool steps (card 948) is cancelled only once every caller in it
- * is, the ones who joined late included. A caller joining with no signal
- * can never cancel, so from then on neither can the turn.
- */
-const joinableSignal = (initial: readonly AbortSignal[]): { signal: AbortSignal; join: (signal: AbortSignal | undefined) => void } => {
-  const controller = new AbortController();
-  const signals = [...initial];
-  let uncancellable = false;
-  const check = (): void => {
-    if (!uncancellable && !controller.signal.aborted && signals.every((signal) => signal.aborted)) {
-      controller.abort(signals[signals.length - 1]?.reason);
-    }
-  };
-  for (const signal of signals) {
-    signal.addEventListener('abort', check, { once: true });
-  }
-  check();
-  return {
-    signal: controller.signal,
-    join: (signal) => {
-      if (signal === undefined) {
-        uncancellable = true;
-        return;
-      }
-      signals.push(signal);
-      signal.addEventListener('abort', check, { once: true });
-    },
-  };
-};
 
 /**
  * The always-on Stratus process. One gateway holds the roster, the durable
