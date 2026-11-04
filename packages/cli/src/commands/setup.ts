@@ -188,6 +188,10 @@ export const runSetup = async (
     consumeNotices: () => recentNotices.splice(0),
   });
 
+  // Each menu is a factory in ./setup/ over the values above, called here in
+  // dependency order. None of those values is reassigned after this point:
+  // `streams` and `existing` are settled above, and `shadowConfigFlag`, which
+  // save() sets, is read through `serveCommand` at call time.
   const { channelRoster, fitMenuRow } = createSharedSetup({ streams, env, state, prompter });
   const {
     builtInDefaultModel,
