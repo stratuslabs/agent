@@ -54,6 +54,20 @@ export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 export const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
 
 /**
+ * `value` without its trailing slashes: how a base URL is compared with
+ * another and joined to a path. A loop, not `replace(/\/+$/, '')`, because
+ * that regex restarts at every slash of a run that is not at the end:
+ * 40,000 slashes and then an `x` took 2.4 s (CodeQL js/polynomial-redos).
+ */
+export const withoutTrailingSlashes = (value: string): string => {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+};
+
+/**
  * The model the Anthropic provider runs when nothing names one. Restated
  * from `@stratusagent/provider-anthropic` rather than imported, so the CLI
  * and the control API can name a default without loading the adapter; a

@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import type { Gateway, GatewayChannelAdapter } from '@stratusagent/gateway';
 import type { AgentGrantStore } from '@stratusagent/permissions';
-import { gatewayInfoPath, normalizePublicUrl, type StateEnvironment } from '@stratusagent/state';
+import { gatewayInfoPath, normalizePublicUrl, withoutTrailingSlashes, type StateEnvironment } from '@stratusagent/state';
 import { WebSocketServer } from 'ws';
 
 import {
@@ -453,7 +453,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
         ...(request.reason !== undefined ? { reason: request.reason } : {}),
         ...(request.env !== undefined ? { env: request.env } : {}),
       });
-      const base = (publicUrl ?? url).replace(/\/+$/, '');
+      const base = withoutTrailingSlashes(publicUrl ?? url);
       return {
         url: `${base}${API_PREFIX}/credential-links/${token}`,
         expiresAt: new Date(expiresAt).toISOString(),

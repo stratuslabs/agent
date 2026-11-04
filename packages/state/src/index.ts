@@ -139,6 +139,7 @@ export {
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
   defaultModelFor,
+  withoutTrailingSlashes,
   parseProviderName,
   defaultApiKeyEnvName,
 } from './provider-names.ts';

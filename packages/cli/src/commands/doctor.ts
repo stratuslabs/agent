@@ -37,6 +37,7 @@ import {
   quoteShellArg,
   verifyProviderKey,
   probeProviderModel,
+  withoutTrailingSlashes,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
 import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
@@ -315,7 +316,7 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     problems.push(`${infoPath} is damaged (no daemon address in it), so no command can find the running daemon. Run \`stratus restart\` to have it written again.`);
     return { state: 'no-api' };
   }
-  url = url.replace(/\/+$/, '');
+  url = withoutTrailingSlashes(url);
 
   let health: DaemonHealth;
   try {
