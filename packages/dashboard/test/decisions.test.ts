@@ -32,3 +32,14 @@ test('the tone marks refusals and shadow decisions that would have stopped the c
   assert.equal(decisionTone({ ...base, verdict: 'ask', shadow: true }), 'warn');
   assert.equal(decisionTone({ ...base, verdict: 'allow', shadow: true }), 'ok');
 });
+
+test('a shadow decision is never shown as a refusal: the policy reports it refused, but the call ran', () => {
+  // The review posture reports a shadow block with allowed false (it is what
+  // would have happened); nothing was refused, so it reads as a warning.
+  const shadowBlock = { ...base, allowed: false, layer: 'review', verdict: 'block' as const, reviewCode: 'not-asked-for', shadow: true };
+  assert.equal(decisionTone(shadowBlock), 'warn');
+  assert.equal(decisionNote(shadowBlock), 'would have blocked · review · not-asked-for');
+  // A shadow decision with no verdict (a rule step, "not reviewed") still says it was shadow.
+  assert.equal(decisionNote({ ...base, layer: 'risk', shadow: true }), 'shadow: allowed · risk');
+  assert.equal(decisionTone({ ...base, allowed: false, layer: 'review', shadow: true }), 'warn');
+});

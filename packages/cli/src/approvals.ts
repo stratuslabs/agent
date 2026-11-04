@@ -14,6 +14,7 @@ import {
   type PrincipalsConfig,
   type ChannelCredentials,
 } from '@stratusagent/state';
+import { createPermissionPolicy, describeReviewRule, type ReviewRule, type ReviewSettings } from '@stratusagent/permissions';
 import type { CliStreams, CliEnvironment } from './environment.ts';
 import { writeLine } from './io.ts';
 import { packageInstalled } from './loaders.ts';
@@ -91,9 +92,15 @@ export const createApprovalPolicy = (
   defaulted = false,
   /**
    * For `open`: `approvals.externalContent` is `gate` for this agent, so a
-   * conversation that has read external content asks again.
+   * conversation that has read external content asks again. `review`: the
+   * agent is on the review posture, and these are its settings.
    */
-  openOptions: { gateExternalContent?: boolean } = {},
+  openOptions: {
+    gateExternalContent?: boolean;
+    review?: ReviewSettings;
+    /** The agent's stored credential values, for the review posture's rule against sending one out. */
+    secretsFor?: (agentId: string) => Promise<readonly string[]>;
+  } = {},
 ): ApprovalPolicy => {
   if (mode === 'always') {
     if (!defaulted) {
@@ -119,6 +126,34 @@ export const createApprovalPolicy = (
   // `dangerous` runs, and a dangerous call still asks a person. So does a
   // gated call in a conversation that read external content, under
   // `externalContent: "gate"`, the same rule the daemon's policy applies.
+  // The review posture at a terminal: the daemon's own policy, with its
+  // rules, built-in rules and the gate's carve-outs, and no reviewer model
+  // (chat and run have none), so a call that would reach it asks here.
+  // Nobody to ask (a pipe, `--stdin`) refuses, and says so once.
+  if (mode === 'open' && openOptions.review !== undefined) {
+    const settings = openOptions.review;
+    let noted = false;
+    return createPermissionPolicy({
+      ...(defaulted
+        ? { mode: 'headless' as const }
+        : { mode: 'interactive' as const, ask: ask ?? promptOnce(streams, env) }),
+      review: {
+        settingsFor: () => settings,
+        ...(openOptions.secretsFor !== undefined ? { secretsFor: openOptions.secretsFor } : {}),
+      },
+      onDecision: (decision) => {
+        // A shadow decision is what the review would have done; the call ran.
+        if (defaulted && !decision.allowed && decision.shadow !== true && !noted) {
+          noted = true;
+          writeLine(
+            streams.stderr,
+            `Note: refusing ${decision.toolName} — ${decision.reason}. stdin is not a terminal, so nobody can be asked.`,
+          );
+        }
+      },
+    });
+  }
+
   if (mode === 'open') {
     // Defaulted means nobody can answer (a pipe, `--stdin`): what would
     // ask is refused, never read from consumed stdin or taken from the
@@ -218,6 +253,25 @@ export const createApprovalPolicy = (
 };
 
 /**
+ * One question at the terminal, answered by one line of stdin: the prompt
+ * on stderr so stdout stays parseable (`--format json`).
+ */
+const promptOnce = (streams: CliStreams, env: CliEnvironment) => async (question: string): Promise<string> => {
+  const readline = createInterface({ input: env.approvalInput ?? process.stdin, terminal: false });
+  streams.stderr.write(question);
+  try {
+    const answer = await new Promise<string>((resolve) => {
+      readline.once('line', resolve);
+      readline.once('close', () => resolve(''));
+    });
+    writeLine(streams.stderr);
+    return answer;
+  } finally {
+    readline.close();
+  }
+};
+
+/**
  * The list key that would let someone reach these agents. An agent's own
  * `slackUsers`, even an empty one, wins over the top level, so pointing
  * it at `principals.slackUsers` would be advice that changes nothing.
@@ -270,9 +324,88 @@ export const describePosture = (
     .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
   const except = exceptions.length > 0 ? ` except ${exceptions.join(', ')}` : '';
   // Headless asks nobody: what the posture would ask about is refused.
+  if (top === 'review') {
+    return `posture review for every agent${except} (gated tools run without asking until a conversation reads outside content; `
+      + `then rules and a reviewer decide, and what they ask about is ${mode === 'headless' ? 'refused, since headless asks nobody' : 'asked once in Slack'})`;
+  }
   return top === 'open'
     ? `posture open for every agent${except} (gated tools run without asking${externalGateNote(approvals, servedAgentIds)}; dangerous ones ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'still ask'})`
     : `posture guarded for every agent${except} (gated tools ${mode === 'headless' ? 'are refused, since headless asks nobody' : 'ask, or are refused with nobody to ask'})`;
+};
+
+/** What a startup line calls a scope hook. */
+const MATCHER_WORDS = { command: 'a command', origin: 'an origin', destination: 'a destination' } as const;
+
+/**
+ * Rules that name a matcher a registered tool they cover doesn't offer:
+ * `shell.run` with an `origin`, say. Such a rule never matches, so the call
+ * goes on to the next step, which is not what whoever wrote a `block` meant.
+ * Named at startup, once the tools are registered (a tool not loaded yet is
+ * not judged). Only while some served agent is on the review posture.
+ */
+export const describeUnmatchableRules = (
+  approvals: ApprovalsConfig,
+  tools: ReadonlyArray<{ name: string; scopedBy?: 'command' | 'origin' | 'destination' }>,
+  servedAgentIds: readonly string[],
+): string[] => {
+  if (!servedAgentIds.some((agentId) => resolveAgentApprovals(approvals, agentId).posture === 'review')) {
+    return [];
+  }
+  const lists: Array<[string, readonly ReviewRule[]]> = [
+    ['approvals.rules', approvals.rules ?? []],
+    ...Object.entries(approvals.agents ?? {})
+      .filter(([agentId]) => servedAgentIds.includes(agentId))
+      .map(([agentId, agent]): [string, readonly ReviewRule[]] => [`approvals.agents.${agentId}.rules`, agent.rules ?? []]),
+  ];
+  const lines: string[] = [];
+  for (const [where, rules] of lists) {
+    rules.forEach((rule, index) => {
+      const matcher = rule.command !== undefined ? 'command' : rule.origin !== undefined ? 'origin' : rule.destination !== undefined ? 'destination' : undefined;
+      if (matcher === undefined) {
+        return;
+      }
+      for (const tool of tools) {
+        const covered = rule.tool.endsWith('.*') ? tool.name.startsWith(rule.tool.slice(0, -1)) : tool.name === rule.tool;
+        if (covered && tool.scopedBy !== matcher) {
+          lines.push(`${where}[${index}] (${describeReviewRule(rule)}) never matches ${tool.name}, which `
+            + (tool.scopedBy === undefined ? 'names no command, origin or destination' : `is judged by ${MATCHER_WORDS[tool.scopedBy]}`));
+        }
+      }
+    });
+  }
+  return lines;
+};
+
+/**
+ * The review posture's own startup lines: which served agents are on it,
+ * with the reviewer's model and whether it is shadow; which of them have
+ * no approver to ask (headless), so an ask is a refusal nobody meets at
+ * 3am by surprise; and that rules are ignored for agents not on it.
+ * Nothing when no agent is on review and none has rules.
+ */
+export const describeReviewPosture = (
+  approvals: ApprovalsConfig,
+  mode: 'headless' | 'remote',
+  servedAgentIds: readonly string[],
+): string[] => {
+  const resolved = servedAgentIds.map((agentId) => [agentId, resolveAgentApprovals(approvals, agentId)] as const);
+  const reviewing = resolved.filter(([, agent]) => agent.posture === 'review');
+  const lines: string[] = [];
+  if (reviewing.length > 0) {
+    lines.push(`posture review for ${reviewing.map(([agentId, agent]) => {
+      const model = agent.review?.model !== undefined ? `model ${agent.review.model}` : 'the agent\'s own model';
+      return `${agentId} (${model}${agent.review?.shadow === true ? ', shadow: reviewed and logged, never enforced' : ''})`;
+    }).join(', ')}`);
+    const enforced = reviewing.filter(([, agent]) => agent.review?.shadow !== true).map(([agentId]) => agentId);
+    if (mode === 'headless' && enforced.length > 0) {
+      lines.push(`review asks are refused for ${enforced.join(', ')}: no approver (headless)`);
+    }
+  }
+  const ignored = resolved.filter(([, agent]) => agent.posture !== 'review' && (agent.rules ?? []).length > 0).map(([agentId]) => agentId);
+  if (ignored.length > 0) {
+    lines.push(`approvals.rules are ignored for ${ignored.join(', ')}: they apply only under posture review`);
+  }
+  return lines;
 };
 
 /** One line saying whose messages arrive as the operator's, per Slack agent. */
@@ -342,11 +475,11 @@ export const askingCalls = (approvals: ApprovalsConfig, agentIds: readonly strin
   const ids = agentIds.length > 0 ? agentIds : ['', ...Object.keys(approvals.agents ?? {})];
   const resolved = ids.map((agentId) => resolveAgentApprovals(approvals, agentId));
   const postures = new Set(resolved.map((agent) => agent.posture));
-  if (!postures.has('open')) {
+  if (!postures.has('open') && !postures.has('review')) {
     return { call: 'gated call', calls: 'gated calls' };
   }
   const externalGate = resolved.some((agent) => agent.posture === 'open' && agent.externalContent === 'gate');
-  return postures.size === 1 && !externalGate
+  return postures.size === 1 && postures.has('open') && !externalGate
     ? { call: 'dangerous call', calls: 'dangerous calls' }
     : { call: 'call that would ask', calls: 'calls that would ask' };
 };
@@ -381,17 +514,29 @@ export const describeRemoteMode = (approvals: ApprovalsConfig, askable: string[]
     .filter((agentId) => servedAgentIds === undefined || servedAgentIds.includes(agentId))
     .filter((agentId) => resolveAgentApprovals(approvals, agentId).posture !== top);
   const who = `(${describeApprovers(approvals, askable)})`;
+  const postureOf = (agentId: string) => resolveAgentApprovals(approvals, agentId).posture;
+  // Agents on the review posture park what a rule or the reviewer asks about.
+  const reviewing = differing.filter((agentId) => postureOf(agentId) === 'review');
+  const reviewNote = reviewing.length > 0 ? `; ${reviewing.join(', ')}'s calls the review asks about are parked too` : '';
+  if (top === 'review') {
+    const other = differing.filter((agentId) => postureOf(agentId) !== 'review');
+    return `approvals: remote — calls the review asks about, and dangerous ones, are parked and asked in Slack, once each`
+      + `${other.map((agentId) => `; ${agentId} is on posture ${postureOf(agentId)}`).join('')} ${who}`;
+  }
   if (top === 'open') {
-    const guarded = differing.length > 0 ? `, except ${differing.join(', ')}'s, whose gated calls are parked too` : '';
-    return `approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture${externalGateNote(approvals, servedAgentIds)}${guarded} ${who}`;
+    const guardedIds = differing.filter((agentId) => postureOf(agentId) === 'guarded');
+    const guarded = guardedIds.length > 0 ? `, except ${guardedIds.join(', ')}'s, whose gated calls are parked too` : '';
+    return `approvals: remote — dangerous calls are parked and asked in Slack; gated ones run without asking under the open posture${externalGateNote(approvals, servedAgentIds)}${guarded}${reviewNote} ${who}`;
   }
   // "Only dangerous ones" holds only when no open agent gates on external
   // content; otherwise the note before it already says what else is parked.
   const gateNote = externalGateNote(approvals, servedAgentIds);
-  const open = differing.length > 0
-    ? `, except ${differing.join(', ')}'s, which run without asking${gateNote}${gateNote === '' ? ' (only dangerous ones are parked)' : ''}`
+  const openIds = differing.filter((agentId) => postureOf(agentId) === 'open');
+  const open = openIds.length > 0
+    ? `, except ${openIds.join(', ')}'s, which run without asking${gateNote}${gateNote === '' ? ' (only dangerous ones are parked)' : ''}`
     : '';
-  return `approvals: remote — gated calls are parked and asked in Slack${open} ${who}`;
+  const reviewedInstead = reviewing.length > 0 ? `; ${reviewing.join(', ')}'s only when the review asks` : '';
+  return `approvals: remote — gated calls are parked and asked in Slack${open}${reviewedInstead} ${who}`;
 };
 
 /**
@@ -548,12 +693,12 @@ const postureReach = (
   // agent no longer served changes nothing the daemon does.
   const agentIds = servedAgentIds ?? ['', ...Object.keys(approvals.agents ?? {})];
   const postures = new Set(agentIds.map((agentId) => resolveAgentApprovals(approvals, agentId).posture));
-  if (!postures.has('open')) {
+  if (!postures.has('open') && !postures.has('review')) {
     return { call: 'an uncovered gated call', calls: 'gated calls', authorized: ` Already-authorized ones still run: ${ALREADY_AUTHORIZED}`, posture: [] };
   }
   // No grant, scope, site or destination ever covers a dangerous call, so
   // the all-open line offers none of them, and the mixed one only for gated.
-  const allOpen = postures.size === 1;
+  const allOpen = postures.size === 1 && postures.has('open');
   return {
     call: allOpen ? 'an uncovered dangerous call' : 'an uncovered call that would ask',
     calls: allOpen ? 'dangerous calls' : 'calls that would ask',

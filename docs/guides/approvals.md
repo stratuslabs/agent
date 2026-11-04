@@ -32,6 +32,10 @@ That default is `approvals.posture: "open"`:
 - **`guarded`**: every gated call asks, or is refused with nobody to ask,
   unless a scope or grant covers it. The rest of this page describes how
   that works.
+- **`review`**: like `open` until a conversation reads outside content;
+  after that, your rules, a few built-in rules and a reviewer model decide
+  each gated call, and a person is asked only when they can't tell. See
+  [The review posture](#the-review-posture).
 
 A config that can't be read leaves the daemon guarded rather than open. A
 project-local config that tries to set `approvals` is ignored, with a
@@ -54,7 +58,158 @@ terminal, and `never` when stdin is a pipe or a script, since nobody is
 there to ask (said once on stderr); pass `--approvals always` for an
 unattended script that should run everything. A config the posture can't
 be read from counts as `guarded`, and a project-local `approvals` block is
-ignored for the global one, as it is by the daemon.
+ignored for the global one, as it is by the daemon. Under `review`, chat and
+run apply your rules and the built-in ones, but they have no reviewer model:
+once the conversation has read outside content, a call that would go to the
+reviewer asks you at the terminal, and with no terminal it is refused.
+
+## The review posture
+
+`open` runs a call a web page talked the agent into. `guarded` asks about
+nearly everything. `review` sits between them: it costs nothing until a
+conversation reads something from outside, and then it looks at each risky
+call in the context of what the person actually asked for.
+
+```jsonc
+// ~/.stratus/config.json
+{
+  "approvals": {
+    "posture": "review",
+    "review": { "model": "claude-haiku-4-5", "shadow": true, "timeoutMs": 20000 },
+    "rules": [
+      { "tool": "web.fetch", "origin": "https://*.github.com", "verdict": "allow" },
+      { "tool": "shell.run", "command": "git push", "verdict": "allow" },
+      { "tool": "message.send", "destination": "slack:*", "verdict": "ask" },
+      { "tool": "mcp.stripe.*", "verdict": "block" }
+    ]
+  }
+}
+```
+
+A gated call is judged in this order, and the first step that settles it
+wins:
+
+1. A `safe` tool runs, and a `dangerous` one asks, as under every posture.
+2. **Your rules** (`approvals.rules`, the agent's own under
+   `approvals.agents.<id>.rules` first, then the shared ones; first match
+   wins). They hold in every session: a `block` always blocks, and an
+   `allow` holds even after outside content, because it is your standing
+   answer, not a click.
+3. **A conversation that has read nothing from outside runs the call**,
+   exactly as `open` does, with no review and no added time. "Outside" is
+   the `external` label: a web page, a search result, an MCP server's reply,
+   a trigger's event. Shell output doesn't count.
+4. **Built-in rules**: a cloud metadata address (`169.254.169.254`,
+   `fd00:ec2::254`, `metadata.google.internal`) anywhere in the call blocks;
+   a token (`xoxb-`, `xapp-`, `ghp_`, `github_pat_`, `sk-ant-`, `AKIA…`) or
+   the value of a credential the agent holds, in a call that sends outside
+   (`message.send`, `web.fetch`, `browser.*`, `mcp.*`, or a shell command
+   that runs a network client), blocks; a download piped into a shell or
+   interpreter (`curl … | sh`) asks. These catch the obvious cases only. A
+   script file gets around the last one. The reviewer and the shell sandbox
+   are what actually protect, so keep the sandbox on with `review`.
+5. **What the external-content gate leaves alone**: the built-in safe
+   commands, reads inside the agent's workspace, and a schedule's
+   pre-authorized destination. Grants a person made by clicking (command
+   scopes, sites, standing grants, **Always allow**) don't count in a
+   conversation that has read outside content.
+6. **The reviewer** decides `allow`, `ask` or `block`.
+
+Rules use the scope syntax that already exists for each kind of call:
+`tool` is an exact name or a prefix ending in `.*`; at most one of
+`command` (`git push`: an `allow` must cover every command of the line, with
+no redirection; an `ask` or `block` matches if any command does), `origin`
+(an origin, or `https://*.example.com` for a domain and its subdomains), or
+`destination` (`slack:C0123ABCD`, or `slack:*`). A malformed rule stops the
+daemon at startup with the reason. A rule that names a matcher its tool
+doesn't offer (`shell.run` with an `origin`) can never match, and the
+daemon warns about it at startup. Rules apply only under `review`; under
+`open` and `guarded` they are ignored, and the startup lines say so.
+
+A `command` rule reads the line as written. It understands quoting, a
+program called by its path, wrappers like `sudo` and `env`, options between
+the program and the rule's words, and one level of `bash -c "…"`. It does
+not understand variables, `eval`, aliases or encoded text. So an `ask` or
+`block` command rule catches the usual ways of writing a command, but it is
+not a boundary: the shell sandbox is.
+
+### The reviewer
+
+The reviewer is one call on the agent's own provider and credentials, with
+`review.model` (the agent's own model if unset), no tools and no fallback
+model, counted against the agent's budget like any other call. It sees:
+
+- **the request**: only what the people the agent serves wrote in this
+  conversation (newest last, up to 4 KB), or a schedule's or trigger's own
+  prompt (never the event text a trigger delivers, and nothing at all when
+  the schedule was set by a conversation that had read outside content), or
+  a delegating agent's instruction, marked as such;
+- **the proposed call**: tool, risk, the first line of the tool's
+  description (never for an `mcp.*` tool, whose description its server
+  wrote) and input, marked as data the agent composed. A call over 8 KB
+  is shown as its first and last 4 KB with the size of the middle named;
+- where outside content came from, whether a person is in the conversation,
+  and the destination or site the call names.
+
+It never sees tool output, fetched pages, an MCP server's tool descriptions
+or the agent's own text, so a page or a server can't argue with it directly. It blocks only on a clear sign that the call
+serves outside content or leaks something, asks when it can't tell, and
+allows a risky-looking call the request clearly asked for.
+
+If the review can't run (an unknown model, a provider error, a budget
+refusal, an answer it can't read, `timeoutMs` passing, 20 s by default, or
+a shell command too long to show whole), the call is asked about. It is
+never allowed.
+
+### What each answer does
+
+- **allow**: the call runs.
+- **block**: the call doesn't run, and the agent is told
+  `<tool> was blocked: <reason>. If the person you're working for really
+  wants this, tell them what it would do and ask them to confirm.` Your
+  confirmation in your next message is part of what the reviewer sees next
+  time. There is no flag the agent can set to get past a block, since a page
+  could tell it to set one. A rule's block says only you can change it.
+- **ask**: the usual approval flow for the agent's `approvals.mode`, with
+  one difference: every ask under `review` is for this call only, so Slack
+  offers **Allow once** and **Deny**, never **Always allow**, and shows
+  the reason (`Review: …`) beside the call. Under `headless`, or `remote`
+  with no approver, an ask is refused with "nobody is set up to approve
+  this", and the startup line says so for each agent it applies to.
+
+A call that was waiting for a person when the daemon restarted goes back to
+that person without another review. Only a block can still stop it first.
+
+### Shadow mode
+
+`"review": { "shadow": true }` keeps the agent on `open`: every call runs
+as it does today, and the review is worked out off the call path (not
+awaited) and recorded as a decision marked shadow. Nothing is asked and
+nothing is blocked. This is how to see what `review` would do before you
+turn it on.
+
+### Seeing decisions
+
+Each decision is a `permission.decided` event with its verdict, the check
+that made it (`rule`, `review`, or the usual layers) and a fixed code for
+the reviewer's reason (`asked-for`, `not-asked-for`,
+`follows-outside-content`, `sends-secret`, `new-destination`, `unclear`,
+`review-failed`). The reviewer's own words go only to the agent and to the
+approver, since they can echo the call's input. The dashboard's live view
+shows each decision beside its call, and a shadow one as `would have
+blocked` beside it, drawn dashed. The daemon log gets one line per review
+decision with `verdict=` and `code=` (a shadow one starts with `shadow`),
+which is what to count:
+
+```text
+approvals: posture review for atlas (model claude-haiku-4-5, shadow: reviewed and logged, never enforced)
+atlas: shadow [review] message.send was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for (session slack:atlas:…)
+```
+
+To turn it off, set `posture` back to `open` or `guarded`; your rules stay
+in the file, ignored. A daemon older than this feature refuses
+`"posture": "review"` at startup ("Use open or guarded"), so take it out
+before downgrading.
 
 ## What the daemon will do on its own
 
@@ -74,8 +229,9 @@ to change: `scope` (no command scope covered it), `parse` (the command
 couldn't be reduced to a scope), `grant` (no standing grant, site,
 destination or channel authorization covered it), `gate` (the conversation
 read external content; see below), `risk` (a `dangerous` tool, which nothing
-can grant), `approver` (a person said no) or `cancelled` (the turn stopped
-while it waited).
+can grant), `approver` (a person said no), `cancelled` (the turn stopped
+while it waited), or, under the review posture, `rule` (one of your rules or
+a built-in one) and `review` (the reviewer, or a review that couldn't run).
 
 The agent is told the same sentence as the call's error, so it can pick a
 way that doesn't need the approval, or tell you what it would need,
