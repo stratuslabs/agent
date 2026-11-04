@@ -25,9 +25,10 @@
  *
  * 100 KB matches `shell.run`, which is the closest comparison: somebody
  * else's program, writing as much as it likes. Counted in characters
- * rather than bytes, like the two bounds above and unlike the tool packs':
- * what is scarce here is the model's context, which is measured in tokens,
- * and a token follows a character more closely than it follows a byte.
+ * rather than bytes, like the two bounds in `descriptors.ts` and unlike
+ * the tool packs': what is scarce here is the model's context, which is
+ * measured in tokens, and a token follows a character more closely than it
+ * follows a byte.
  */
 export const BRIDGED_RESULT_MAX_LENGTH = 100_000;
 
@@ -164,11 +165,11 @@ export const noteReserveFor = (
 
 /**
  * `raw`'s length in code points, walked rather than materialized:
- * `Array.from` is how the two bounds above count, because they measure a
- * description against a fixed 1024, while these measure whatever a server
- * sent. Turning ten megabytes of result into ten million one-character
- * strings, to decide it is too long, would spend more memory on the check
- * than the string it guards against.
+ * `Array.from` is how the two bounds in `descriptors.ts` count, because
+ * they measure a description against a fixed 1024, while these measure
+ * whatever a server sent. Turning ten megabytes of result into ten million
+ * one-character strings, to decide it is too long, would spend more memory
+ * on the check than the string it guards against.
  */
 const codePointLength = (raw: string): number => {
   let count = 0;

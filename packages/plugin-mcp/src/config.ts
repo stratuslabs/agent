@@ -36,7 +36,7 @@ export interface McpServerSpec {
   callTimeoutMs: number;
   /**
    * The cap on one result's text, in characters — see
-   * `BRIDGED_RESULT_MAX_LENGTH` in `./normalize.ts` for the number and the
+   * `BRIDGED_RESULT_MAX_LENGTH` in `./result-budget.ts` for the number and the
    * reason. Per server because that is where the operator already tunes a
    * server's behavior, and because one verbose server should not force the
    * cap up for the rest.
