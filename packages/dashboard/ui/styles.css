@@ -188,7 +188,7 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px
 .bubble.tool { align-self: flex-start; background: none; border: 1px dashed var(--border); color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .bubble.streaming::after { content: '▍'; opacity: 0.6; }
 /* The permission decision beside a call: what was decided and by which check. */
-.bubble.tool .decision { margin-left: 8px; padding: 0 6px; border-radius: 6px; border: 1px solid currentColor; font-size: 11px; }
+.bubble.tool .decision { display: inline-block; white-space: nowrap; margin-left: 8px; padding: 0 6px; border-radius: 6px; border: 1px solid currentColor; font-size: 11px; }
 .bubble.tool .decision.ok { color: var(--muted); }
 .bubble.tool .decision.warn { color: var(--warn); }
 .bubble.tool .decision.bad { color: var(--danger); }
