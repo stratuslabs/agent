@@ -353,9 +353,8 @@ export {
   collectAvailableModels,
 } from './models.ts';
 
+export { withLegacyDefaultMemories, createHomeMemoryStore } from './home-memory.ts';
 export {
-  withLegacyDefaultMemories,
-  createHomeMemoryStore,
   declaredAgentIds,
   claimSoulFile,
   personaSnippet,
