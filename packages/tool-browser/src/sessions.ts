@@ -12,6 +12,8 @@ import type { BrowserContextLike, BrowserDriver, BrowserLike, PageLike } from '.
 export interface SessionPoolOptions {
   driver: BrowserDriver;
   headless?: boolean;
+  /** Chromium's own sandbox. On unless `false`. */
+  chromiumSandbox?: boolean;
   executablePath?: string;
   channel?: string;
   /** Close a context that has done nothing for this long. */
@@ -165,6 +167,7 @@ export class BrowserSessionPool {
         const browser = await this.options.driver.launch({
           headless: this.options.headless ?? true,
           proxy: chromiumProxyOptions(proxy),
+          chromiumSandbox: this.options.chromiumSandbox !== false,
           ...(this.options.executablePath ? { executablePath: this.options.executablePath } : {}),
           ...(this.options.channel ? { channel: this.options.channel } : {}),
         });

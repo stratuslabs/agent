@@ -7241,6 +7241,58 @@ test('resolveOutbound refuses a conversation the app cannot see', async () => {
   await adapter.stop();
 });
 
+/** What Slack's WebClient throws when `conversations.info` answers channel_not_found. */
+const channelNotFoundError = (): Error => Object.assign(new Error('An API error occurred: channel_not_found'), {
+  code: 'slack_webapi_platform_error',
+  data: { ok: false, error: 'channel_not_found' },
+});
+
+test('resolveOutbound refuses a Slack user id, saying the app only writes in a DM the person already has', async () => {
+  // Card 1201: a person's id (U…, or W… on Enterprise Grid) is not a
+  // conversation, so Slack answers channel_not_found, and the refusal read
+  // like a wrong id or a missing scope. The adapter never opens a DM itself.
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.conversations.info = async () => {
+    throw channelNotFoundError();
+  };
+  const adapter = await startedAdapterWith(web);
+
+  for (const user of ['U0CDKHFUSKA', 'W0123ABCD']) {
+    await assert.rejects(
+      () => adapter.resolveOutbound!({ agentId: 'ava', to: user }),
+      (error: Error) => {
+        assert.equal(
+          error.message,
+          `slack: ${user} is a person's Slack user id, not a conversation. ava's app writes to a person only in a direct message `
+          + 'they already have with it, named by its conversation id (D…), and never opens one itself. '
+          + 'Use that D… id, or post in a channel the app is in.',
+        );
+        return true;
+      },
+    );
+  }
+  assert.equal(web.posts.length, 0, 'nothing is posted on a refusal');
+  await adapter.stop();
+});
+
+test('resolveOutbound keeps the cannot-see refusal for a conversation id Slack does not know', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.conversations.info = async () => {
+    throw channelNotFoundError();
+  };
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(
+    () => adapter.resolveOutbound!({ agentId: 'ava', to: 'C0NOWHERE' }),
+    (error: Error) => {
+      assert.match(error.message, /^slack: ava's app cannot see C0NOWHERE \(An API error occurred: channel_not_found\)\. Use the conversation id, not a name/);
+      assert.doesNotMatch(error.message, /user id/);
+      return true;
+    },
+  );
+  await adapter.stop();
+});
+
 test('resolveOutbound treats a DM conversation as addressable without membership', async () => {
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('D-DYLAN', { is_im: true });

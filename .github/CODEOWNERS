@@ -1,0 +1,15 @@
+# Files that change CI or run code at install, build, test or release time.
+# A change to any of them needs a maintainer's review once "Require review
+# from Code Owners" is on for main.
+#
+# Packages' own package.json files are deliberately not listed: every
+# release's version bump touches all of them.
+
+/.github/            @dylanfeltus
+/scripts/            @dylanfeltus
+/deploy/             @dylanfeltus
+/package.json        @dylanfeltus
+/pnpm-lock.yaml      @dylanfeltus
+/pnpm-workspace.yaml @dylanfeltus
+/.npmrc              @dylanfeltus
+/.pnpmfile.cjs       @dylanfeltus
