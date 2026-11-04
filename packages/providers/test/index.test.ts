@@ -1937,7 +1937,7 @@ test('a credential configured with surrounding whitespace is redacted as sent', 
 // that is not at the end: `a`, 40,000 tabs and `a` took 2.7 s, and
 // `Bearer a`, 40,000 spaces and `b` took 2.6 s, on a Mac (CodeQL
 // js/polynomial-redos). The ceiling is 1 s, because a tighter one flaked on
-// a loaded CI runner before (card 1090).
+// a loaded CI runner before (AGT-300).
 test('header values with a long run of whitespace inside are checked for redaction quickly', async () => {
   const tabbed = `a${'\t'.repeat(40_000)}a`;
   const spaced = `Bearer a${' '.repeat(40_000)}b`;

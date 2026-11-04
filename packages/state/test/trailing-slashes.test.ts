@@ -20,7 +20,7 @@ test('withoutTrailingSlashes removes exactly what the old trailing-slash regex r
 // The regex restarted at every slash of a run that was not at the end:
 // 40,000 slashes and then an `x` took 2.4 s on a Mac (CodeQL flagged it as
 // js/polynomial-redos). The ceiling is 1 s, because a tighter one flaked on
-// a loaded CI runner before (card 1090).
+// a loaded CI runner before (AGT-300).
 test('withoutTrailingSlashes stays fast on a long run of slashes that is not at the end', () => {
   const value = `${'/'.repeat(40_000)}x`;
   const started = performance.now();
