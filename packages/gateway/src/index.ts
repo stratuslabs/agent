@@ -18,7 +18,6 @@ import {
   recordTurnFailure,
   completeAnsweredTurn,
   abortErrorFor,
-  sessionTrustOf,
   sessionWriteTrust,
   AgentRegistry,
   AgentRunner,
@@ -44,23 +43,13 @@ import {
   CONVERSATION_METADATA_KEY,
   STRATUS_SKILL_ID,
   type AgentDefinition,
-  type SubAgentHandle,
-  type SubAgentOutcome,
   type AgentRuntimeContext,
-  type CredentialDelivery,
-  type CredentialScope,
   type AgentMemoryStore,
-  type ApprovalDelegationOrigin,
-  type ApprovalAnswer,
-  type ApprovalOutcome,
   type ApprovalPolicy,
-  type ApprovalResolutionReason,
   type Executor,
   type ExecutorContribution,
   type ImageAttachment,
   imagesWithinReplayBudget,
-  matchesToolAllowlist,
-  resolveToolRisk,
   type JsonObject,
   type MemoryStoreContribution,
   type ProviderCallGuard,
@@ -74,8 +63,6 @@ import {
 } from '@stratusagent/core';
 import {
   CREDENTIAL_REQUEST_TOOL_NAME,
-  createCredentialRequestTool,
-  createDelegateTool,
   createForgetTool,
   createPinTool,
   createMessageSendTool,
@@ -89,23 +76,20 @@ import {
   createRecallTool,
   createRememberTool,
   createScheduleTools,
-  DELEGATED_BY_METADATA_KEY,
   DELEGATED_SESSION_ID_MARKER,
-  DEFAULT_MAX_DELEGATION_DEPTH,
-  DELEGATION_DEPTH_METADATA_KEY,
   delegatingSessionIdOf,
   isDelegatedSession,
   outstandingDelegationFor,
-  ROOT_SESSION_ID_METADATA_KEY,
   SCHEDULE_ID_METADATA_KEY,
   withoutDelegation,
   type ParsedSoul,
   type ScheduleDestination,
   loadStratusSkill,
   STRATUS_SKILL_PATH,
-  credentialVariableProblem,
 } from '@stratusagent/agents';
 import type { AgentSource } from './agent-source.ts';
+import { createApprovalBroker } from './approvals.ts';
+import { createCredentialRequests } from './credential-requests.ts';
 import { createFleetReader } from './fleet.ts';
 import { createMemoryPassHost, type MemoryPassModelRun } from './memory-passes.ts';
 import { callShownWhole, readReviewReply, REVIEW_RULES, reviewCaseText } from './review.ts';
@@ -122,6 +106,7 @@ import {
   SCHEDULE_SESSION_ID_PREFIX,
 } from './schedules.ts';
 import { ShardedSessionStore } from './sessions.ts';
+import { createSubAgents } from './sub-agents.ts';
 import {
   type ChannelReloadOutcome,
   DEFAULT_CHANNEL_RELOAD_TIMEOUT_MS,
@@ -142,25 +127,19 @@ import {
   writeIntakeState,
 } from './lifecycle.ts';
 import type {
-  ApprovalRequester,
   DispatchInput,
   Gateway,
-  GatewayApprovalRequest,
   GatewayChannelAdapter,
   GatewayOptions,
   GatewayPluginStatus,
   GatewayReviewRequest,
   ObserveInput,
   PendingApproval,
-  ProvideCredentialInput,
-  ProvideCredentialResult,
-  ResolveApprovalInput,
 } from './types.ts';
 import {
   ABANDONED_TURN_ERROR,
   crossIdentityError,
   CrossIdentityError,
-  DEFAULT_SUB_AGENTS_PER_TURN,
   EXECUTOR_METADATA_KEY,
   isSubAgentSession,
   ORPHANED_DELEGATION_ERROR,
@@ -172,7 +151,6 @@ import {
   ROLLOVER_REPEAT_WINDOW_MS,
   SUB_AGENT_METADATA_KEY,
   SUB_AGENT_SESSION_ID_MARKER,
-  subAgentNeverGets,
 } from './session-keys.ts';
 
 export {
@@ -273,21 +251,11 @@ import {
   loadRosterSouls,
   FALLBACK_ACTIVE_METADATA_KEY,
   loadSoulFile,
-  grantSoulCredential,
   withSoulFileLock,
-  addNamedCredential,
-  appendCredentialAudit,
-  replaceNamedCredential,
-  NamedCredentialMissingError,
-  namedCredentialSource,
-  NamedCredentialExistsError,
-  CREDENTIAL_NAME_PATTERN,
-  quoteShellArg,
   migrateLegacyMemory,
   PROVIDER_STATE_METADATA_KEYS,
   ConfigFileError,
   loadConfigFile,
-  readNonEmptyString,
   resolveConfigLocation,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
@@ -418,27 +386,6 @@ const joinableSignal = (initial: readonly AbortSignal[]): { signal: AbortSignal;
     },
   };
 };
-
-/**
- * A value from a form, without the line breaks around it.
- *
- * Forms take multi-line values now, so a one-line key copied with the line
- * break after it would otherwise be stored with it, and fail later inside
- * whatever header or command it lands in. Only line breaks: a value's own
- * spaces are its own, as on the CLI.
- */
-const formCredentialValue = (value: string): string => value.replace(/^[\r\n]+|[\r\n]+$/g, '');
-
-/**
- * A PEM block (a private key, a certificate) with no line breaks left, which
- * is what a one-line field makes of a pasted key file. PEM readers need the
- * line after the `-----BEGIN …-----` header, so storing it would only move
- * the failure to the first call that reads the key. Only a value that *is*
- * one: a PEM inside JSON (a service account file) escapes its line breaks,
- * so it has none of its own and is fine as sent.
- */
-const isFlattenedPem = (value: string): boolean =>
-  /^\s*-----BEGIN [A-Z0-9 ]+-----/.test(value) && !value.includes('\n');
 
 /**
  * The always-on Stratus process. One gateway holds the roster, the durable
@@ -665,344 +612,36 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     );
   }
 
-  type SettleApproval = (
-    answer: ApprovalAnswer,
-    reason: ApprovalResolutionReason,
-    actor?: string,
-  ) => void;
-
-  /**
-   * One parked call: how to settle it, and what it is. The summary is kept
-   * alongside the settler because a listing needs the request itself, and
-   * the map is the only place that knows a request is still outstanding.
-   */
-  interface ParkedCall {
-    settle: SettleApproval;
-    pending: PendingApproval;
-  }
-
-  const pendingApprovals = new Map<string, ParkedCall>();
-  /**
-   * In-flight `tool.approval-resolved` emissions. `EventBus.emit` awaits its
-   * subscribers in order, so one async handler ahead of a channel adapter
-   * suspends the emission before the adapter ever sees it. Nothing today is
-   * async in front of one — which is exactly the problem: the shutdown
-   * guarantee below would rest on that staying true, and the first async
-   * subscriber anyone adds would silently leave live-looking buttons in a
-   * workspace the daemon has left.
-   */
-  const approvalEmissions = new Set<Promise<void>>();
-
-  /**
-   * Publishes one parked call and settles when somebody answers it, the
-   * request expires, or the turn is cancelled.
-   *
-   * All three endings run through the same `settle`, which removes the
-   * request from the registry BEFORE resolving. That ordering is the whole
-   * point: a request that is no longer pending cannot be resolved twice,
-   * so a click racing the timeout — or arriving after an abort — is refused
-   * rather than executing a tool for a turn that has already moved on.
-   */
-  /**
-   * The conversation a delegated sub-session's work was asked from, read
-   * from the store rather than from anything the caller wrote: the root
-   * session `agent.delegate` recorded, which is where the person waiting
-   * on the answer is. Undefined for an ordinary session, or a root that no
-   * longer exists — the request is then asked the way it always was.
-   */
-  const delegationOriginOf = async (session: Session): Promise<ApprovalDelegationOrigin | undefined> => {
-    if (!isDelegatedSession(session)) {
-      return undefined;
-    }
-    const rootId = session.metadata?.[ROOT_SESSION_ID_METADATA_KEY];
-    if (typeof rootId !== 'string' || rootId === session.id) {
-      return undefined;
-    }
-    let root: Session | undefined;
-    try {
-      root = await store.get(rootId);
-    } catch (error) {
-      warn(`${session.id}: could not read the delegating session ${rootId} to route an approval (${error instanceof Error ? error.message : String(error)})`);
-      return undefined;
-    }
-    if (!root) {
-      return undefined;
-    }
-    return { agentId: root.agent.id, sessionId: root.id, ...(root.metadata ? { metadata: root.metadata } : {}) };
-  };
-
-  /**
-   * Which sessions are sub-agents, as the host knows it rather than as the
-   * session says (roadmap 24). Every tool in a slice is handed the same
-   * mutable Session, so the metadata marker and the id are claims a tool
-   * can rewrite. The ids are the ones `subAgents.run` minted, held while
-   * the sub-agent runs. A session object's id is read once, by the
-   * executor on its first tool call, before any tool has been handed it,
-   * so a session a tool renamed is still known by the id it ran under.
-   */
-  const liveSubAgentIds = new Set<string>();
-  const idAtFirstCall = new WeakMap<Session, string>();
-  const hostIdOf = (session: Session): string => idAtFirstCall.get(session) ?? session.id;
-  const isHostSubAgent = (session: Session): boolean =>
-    liveSubAgentIds.has(hostIdOf(session)) || isSubAgentSession(session);
-
-  const requestApproval: ApprovalRequester = async (request) => {
-    // A sub-agent asks no one (roadmap 24): its parent turn is the one a
-    // person is accountable for, and that turn gets the refusal back as a
-    // result and decides what to do. Denied as undeliverable, since nobody
-    // was asked, and announced only as a resolution, so no channel renders
-    // a question nobody may answer.
-    if (isHostSubAgent(request.session)) {
-      void bus.emit({
-        type: 'tool.approval-resolved',
-        sessionId: request.session.id,
-        requestId: randomUUID(),
-        answer: 'deny',
-        reason: 'undeliverable',
-      });
-      return { answer: 'deny' };
-    }
-    const delegatedFrom = await delegationOriginOf(request.session);
-    return requestApprovalFrom(request, delegatedFrom);
-  };
-
-  const requestApprovalFrom = (
-    request: GatewayApprovalRequest,
-    delegatedFrom: ApprovalDelegationOrigin | undefined,
-  ): Promise<ApprovalOutcome> => new Promise<ApprovalOutcome>((resolve) => {
-    // A shutdown denies what is parked once, at the top of stop(). Turns
-    // already running keep going through the drain, though, and one of them
-    // can reach a gated tool AFTER that snapshot — finishing a provider
-    // call, or moving to the next call in the same response. Parking it
-    // would deadlock the drain against a question nobody is left to answer:
-    // stop() waits for the turn, the turn waits for the approval, and the
-    // approval waits out its timeout — forever when there is none.
-    if (stopping) {
-      resolve({ answer: 'deny' });
-      void bus.emit({
-        type: 'tool.approval-resolved',
-        sessionId: request.session.id,
-        requestId: randomUUID(),
-        answer: 'deny',
-        reason: 'cancelled',
-      });
-      return;
-    }
-
-    const requestId = randomUUID();
-
-    let timer: NodeJS.Timeout | undefined;
-    const onAbort = (): void => settle('deny', 'cancelled');
-
-    /**
-     * Settles once the request has finished being announced.
-     *
-     * Both emissions go through the same subscriber list, in order, and
-     * `EventBus.emit` awaits each one — so an async subscriber ahead of a
-     * channel can hold the announcement while a timeout or abort fires
-     * behind it, and the channel would hear that a request it has never
-     * heard of was resolved. It drops that, then renders the announcement
-     * when it finally arrives, leaving buttons for a settled request that
-     * nothing will ever retract.
-     *
-     * Chaining is the fix rather than remembering orphaned resolutions in
-     * the channel: a resolution that arrives before its request is not
-     * something a consumer can act on, so it should not be able to happen.
-     * Starts resolved, because a turn already aborted never announces at
-     * all and its denial should not wait on an emission that never runs.
-     */
-    let announced: Promise<void> = Promise.resolve();
-
-    // Read when the request is made, from the scheduler's own records: a
-    // live firing of a schedule approved with a destination, nothing else.
-    // Delegated work is not included yet; its sub-session is not a firing.
-    const scheduleDestination = scheduler.approvalDestinationFor(request.session);
-
-    // Work one agent does for another is allowed one call at a time. The
-    // people asked are the delegating conversation's, and a standing grant
-    // would widen what the other agent may do on its own work for good —
-    // so nothing offers **Always allow** here, and an `always` that
-    // arrives anyway (the control API takes all three answers) runs the
-    // call once, recorded as exactly that.
-    const forAnotherAgent = delegatedFrom !== undefined && delegatedFrom.agentId !== request.session.agent.id;
-    const oneShot = request.oneShot === true || forAnotherAgent;
-    const always = forAnotherAgent ? undefined : request.always;
-
-    const settle: SettleApproval = (given, reason, actor) => {
-      const answer: ApprovalAnswer = forAnotherAgent && given === 'always' ? 'once' : given;
-      // Identity, not presence: a request that already settled is gone from
-      // the registry, and comparing against this exact function is what
-      // makes every ending — click, timeout, abort, shutdown — idempotent.
-      if (pendingApprovals.get(requestId)?.settle !== settle) {
-        return;
-      }
-      pendingApprovals.delete(requestId);
-      if (timer) {
-        clearTimeout(timer);
-      }
-      request.signal?.removeEventListener('abort', onAbort);
-      resolve({ answer, ...(actor ? { actor } : {}) });
-      const emitted = announced.then(() => bus.emit({
-        type: 'tool.approval-resolved',
-        sessionId: request.session.id,
-        requestId,
-        answer,
-        reason,
-        ...(actor ? { actor } : {}),
-      }));
-      approvalEmissions.add(emitted);
-      void emitted.finally(() => approvalEmissions.delete(emitted));
-    };
-
-    // What is left of the window, not a fresh one: a re-asked request
-    // carries when it originally parked, and the elapsed time counts.
-    // Computed before registration because the summary below quotes the
-    // deadline, and a listing that disagreed with the announcing event about
-    // when a request expires would be worse than one that said nothing.
-    const alreadyWaitedMs = request.parkedAt ? Date.now() - Date.parse(request.parkedAt) : 0;
-    const remainingTimeoutMs = effectiveApprovalTimeoutMs > 0
-      ? effectiveApprovalTimeoutMs - (Number.isFinite(alreadyWaitedMs) ? Math.max(0, alreadyWaitedMs) : 0)
-      : 0;
-    const expiresAt = remainingTimeoutMs > 0
-      ? new Date(Date.now() + remainingTimeoutMs).toISOString()
-      : undefined;
-
-    pendingApprovals.set(requestId, {
-      settle,
-      pending: {
-        requestId,
-        sessionId: request.session.id,
-        agentId: request.session.agent.id,
-        call: request.call,
-        risk: request.risk,
-        ...(request.origin !== undefined ? { origin: request.origin } : {}),
-        ...(oneShot ? { oneShot: true } : {}),
-        ...(always !== undefined ? { always } : {}),
-        ...(request.reviewNote !== undefined ? { reviewNote: request.reviewNote } : {}),
-        parkedAt: request.parkedAt ?? new Date().toISOString(),
-        ...(expiresAt ? { expiresAt } : {}),
-        ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
-        ...(delegatedFrom ? { delegatedFrom } : {}),
-        ...(scheduleDestination ? { scheduleDestination } : {}),
-      },
-    });
-
-    if (effectiveApprovalTimeoutMs > 0 && remainingTimeoutMs <= 0) {
-      // Nothing left to wait with. Settled here rather than armed with a
-      // zero timer, which `setTimeout` would still run a tick later — long
-      // enough to announce a request that is already over.
-      settle('deny', 'timeout');
-      return;
-    }
-
-    if (remainingTimeoutMs > 0) {
-      // Deliberately NOT unref'd. A parked turn is real outstanding work,
-      // and its timer is the only thing that will ever finish it — letting
-      // the process exit out from under one would abandon the turn instead
-      // of denying it. Shutdown is handled where it belongs, in stop(),
-      // which settles every outstanding request before draining.
-      timer = setTimeout(() => settle('deny', 'timeout'), remainingTimeoutMs);
-    }
-
-    // The abort listener is attached before the request is announced, so a
-    // turn cancelled while the event is still being delivered still ends
-    // the request rather than leaving it pending forever.
-    if (request.signal) {
-      if (request.signal.aborted) {
-        settle('deny', 'cancelled');
-        return;
-      }
-      request.signal.addEventListener('abort', onAbort, { once: true });
-    }
-
-    // `announced` is assigned BEFORE the emission starts, because emit runs
-    // its first subscribers synchronously — one of them settling the
-    // request inline would otherwise chain onto the already-resolved
-    // placeholder and race the very announcement it is answering.
-    let markAnnounced = (): void => {};
-    announced = new Promise<void>((resolveAnnounced) => {
-      markAnnounced = resolveAnnounced;
-    });
-    const announcing = bus.emit({
-      type: 'tool.approval-requested',
-      sessionId: request.session.id,
-      agentId: request.session.agent.id,
-      requestId,
-      call: request.call,
-      risk: request.risk,
-      ...(request.origin !== undefined ? { origin: request.origin } : {}),
-      ...(oneShot ? { oneShot: true } : {}),
-      ...(always !== undefined ? { always } : {}),
-      ...(request.reviewNote !== undefined ? { reviewNote: request.reviewNote } : {}),
-      ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
-      ...(delegatedFrom ? { delegatedFrom } : {}),
-      ...(scheduleDestination ? { scheduleDestination } : {}),
-      ...(expiresAt ? { expiresAt } : {}),
-    });
-    // Drained at shutdown alongside the resolutions: a channel that has not
-    // yet been told a request exists cannot be told it was denied either.
-    approvalEmissions.add(announcing);
-    void announcing.finally(() => {
-      approvalEmissions.delete(announcing);
-      markAnnounced();
-    });
+  // `stopping` is read late: it is declared further down, with shutdown.
+  const {
+    pendingApprovals,
+    approvalEmissions,
+    liveSubAgentIds,
+    idAtFirstCall,
+    hostIdOf,
+    isHostSubAgent,
+    requestApproval,
+    resolveApproval,
+    suspendWatchdog,
+    approvalWaits,
+    holdApprovalWait,
+  } = createApprovalBroker({
+    warn,
+    bus,
+    store,
+    scheduler,
+    effectiveApprovalTimeoutMs,
+    isStopping: () => stopping,
   });
 
-  const resolveApproval = (input: ResolveApprovalInput): boolean => {
-    const parked = pendingApprovals.get(input.requestId);
-    if (!parked) {
-      return false;
-    }
-    parked.settle(input.answer, input.reason ?? 'decided', input.actor);
-    return true;
-  };
 
-  /**
-   * How a turn's watchdog stops its own clock, registered while it runs.
-   *
-   * Recording that a tool phase is open is not enough on its own: the
-   * timer is only re-evaluated when an event arrives, so a phase opened by
-   * something that emits nothing — an approval policy handed straight to
-   * the gateway — would leave an already-armed timer running to fire
-   * mid-wait.
-   */
-  const suspendWatchdog = new Map<string, () => void>();
 
-  /**
-   * Approval waits in progress, per session.
-   *
-   * Deliberately a balanced counter and not a set of call ids. An earlier
-   * shape had the approval wrapper *open* a phase that the watchdog's
-   * event observer was expected to close, and that handoff was wrong in
-   * every way it could be: the observer does not exist when no watchdog is
-   * armed, so nothing closed it; a policy that threw closed nothing; and a
-   * stale entry did not merely leak, it suppressed the watchdog for the
-   * next turn on that session. Four separate exits, each patched in turn.
-   *
-   * A counter incremented and decremented in one `finally` cannot have any
-   * of those bugs, because the thing that opens the phase is the thing
-   * that closes it, in the same scope, on every path out.
-   */
-  const approvalWaits = new Map<string, number>();
-  const holdApprovalWait = (sessionId: string): (() => void) => {
-    approvalWaits.set(sessionId, (approvalWaits.get(sessionId) ?? 0) + 1);
-    // Stop any clock already running: this wait produces no events, so
-    // nothing else would.
-    suspendWatchdog.get(sessionId)?.();
-    let released = false;
-    return () => {
-      if (released) {
-        return;
-      }
-      released = true;
-      const remaining = (approvalWaits.get(sessionId) ?? 1) - 1;
-      if (remaining > 0) {
-        approvalWaits.set(sessionId, remaining);
-      } else {
-        approvalWaits.delete(sessionId);
-      }
-    };
-  };
+
+
+
+
+
+
 
   const configuredApprovals = typeof options.approvals === 'function'
     ? options.approvals({
@@ -1811,704 +1450,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return own !== undefined && own === source.to ? undefined : directMessageReadRefusal(`${source.channel}:${source.to}`);
     },
   }));
-  /**
-   * Credential requests waiting on a person, by request id.
-   *
-   * In memory on purpose: a request is a question somebody is being asked
-   * now, and a restart that forgot it only means the agent asks again. What
-   * matters is that the entry carries everything the answer needs, so a
-   * channel quoting the id back decides nothing about where the key goes.
-   */
-  const credentialRequests = new Map<string, {
-    agentId: string;
-    sessionId: string;
-    name: string;
-    scope: CredentialScope;
-    soulPath: string;
-    /** A new value for a key already stored where `scope` says, swapped in place. */
-    replace?: boolean;
-    /** The variable the agent's shell reads the key from once it is stored, which the form said. */
-    env?: string;
-    /** How it was put to someone, for the audit line. */
-    via?: CredentialDelivery;
-  }>();
-
-  tools.register(createCredentialRequestTool(async (request, session) => {
-    const agentId = session.agent.id;
-    const soulPath = sources.get(agentId)?.soulPath;
-    if (soulPath === undefined) {
-      throw new Error(
-        `${session.agent.name} is the built-in agent and has no soul file to grant a credential in. `
-        + `Your operator can store one on the machine with \`stratus credential set ${request.name}\`.`,
-      );
-    }
-    if (!CREDENTIAL_NAME_PATTERN.test(request.name)) {
-      throw new Error(
-        `${JSON.stringify(request.name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
-        + 'starting with a letter, the way the tool that needs it spells it: search.apiKey, github.token.',
-      );
-    }
-    // The stricter rule, for a name the model picked: checked before anyone
-    // is asked, so an approver never sees a form whose binding the store
-    // would refuse, and so a variable that changes what a judged command
-    // does (NODE_OPTIONS) is never offered at all.
-    if (request.env !== undefined) {
-      const problem = credentialVariableProblem(request.env, { requested: true });
-      if (problem !== undefined) {
-        throw new Error(`${problem} Nothing is pending.`);
-      }
-    }
-    // A key already stored is not something to ask a person for again: the
-    // form only adds, so it could only fail. Say what is actually missing.
-    const source = await namedCredentialSource(env, agentId, request.name);
-    const stored = source !== undefined;
-    const granted = session.agent.credentials?.includes(request.name) === true;
-    // Binding a key the agent already holds asks for no value, and every
-    // form today has a value field, so phase 1 leaves it to the machine.
-    const bindOnMachine = request.env !== undefined
-      ? ` To have your shell read it as ${request.env}, ask your operator to run \`stratus credential env ${request.name} ${request.env} --agent ${quoteShellArg(agentId)}\` on the machine.`
-      : '';
-    if (request.replace === true) {
-      // Checked here, before anyone is asked, so an approver is never shown
-      // a form whose answer could only be refused.
-      if (!stored || !granted) {
-        throw new Error(`You don't hold ${request.name}, so there is nothing to replace. Ask for it without replace.`);
-      }
-      if (source === 'environment') {
-        throw new Error(
-          `${request.name} comes from the daemon's environment, which a form can't change. `
-          + 'Ask your operator to change it where that environment is set.',
-        );
-      }
-      if (source === 'shared' && request.scope !== 'shared') {
-        throw new Error(
-          `${request.name} is a shared credential, so replacing it changes the key for every agent granted it. `
-          + 'Ask again with scope "shared" if that is what you mean.',
-        );
-      }
-      if (source === 'agent' && request.scope === 'shared') {
-        throw new Error(`${request.name} is your own credential, not a shared one. Ask again with scope "agent" to replace it.`);
-      }
-      if (request.via === 'link') {
-        throw new Error('A replacement is asked for in a form an approver answers, never a link. Nothing is pending.');
-      }
-    } else if (stored && granted) {
-      throw new Error(
-        `You already hold ${request.name}; the tools that need it use it for you. To rotate it for a new value, ask again with replace: true.${bindOnMachine}`
-        + (request.env !== undefined ? ' Nothing is pending.' : ''),
-      );
-    } else if (stored) {
-      throw new Error(
-        `${request.name} is already ${source === 'environment' ? "supplied by the daemon's environment" : 'stored'} but not granted to you. `
-        + `Ask your operator to add it to the credentials list in your soul; a form would only refuse to store it again.${bindOnMachine}`,
-      );
-    }
-    const onMachine = request.env === undefined
-      ? `\`stratus credential set ${request.name}${request.scope === 'agent' ? ` --agent ${quoteShellArg(agentId)}` : ''}\``
-      : request.scope === 'agent'
-        ? `\`stratus credential set ${request.name} --agent ${quoteShellArg(agentId)} --env ${request.env}\``
-        : `\`stratus credential set ${request.name}\`, then \`stratus credential env ${request.name} ${request.env} --agent ${quoteShellArg(agentId)}\``;
-    const record = {
-      agentId,
-      sessionId: session.id,
-      name: request.name,
-      scope: request.scope,
-      soulPath,
-      ...(request.replace === true ? { replace: true } : {}),
-      ...(request.env !== undefined ? { env: request.env } : {}),
-    };
-    const announce = async (requestId: string, via: CredentialDelivery): Promise<void> => {
-      await bus.emit({
-        type: 'credential.requested',
-        sessionId: session.id,
-        agentId,
-        requestId,
-        name: request.name,
-        scope: request.scope,
-        ...(request.reason !== undefined ? { reason: request.reason } : {}),
-        via,
-        ...(request.replace === true ? { replace: true } : {}),
-        ...(request.env !== undefined ? { env: request.env } : {}),
-        ...(session.metadata ? { metadata: session.metadata } : {}),
-      });
-    };
-    // A link only for an agent whose soul lists the tool. Every agent may
-    // ask through a form, because a form goes to an approver; a link is a
-    // bearer credential the model is handed, and whoever it reaches can
-    // store a key and amend the soul. That is the operator's to allow.
-    const allowlist = session.agent.tools ?? registry.get(agentId)?.tools;
-    // An omitted list grants the safe tools, this one among them, but a
-    // link is the operator's to allow by naming it, so only a list says yes.
-    // On a home an older build set up an omitted list is every tool, and
-    // has always allowed a link there.
-    const linkAllowed = allowlist === undefined
-      ? unlistedTools() === 'every'
-      : matchesToolAllowlist(CREDENTIAL_REQUEST_TOOL_NAME, allowlist);
-    // Why no form went up, said to the agent beside the link that replaces
-    // it, so it can tell the person why they are getting a link instead.
-    let formUnavailable: string | undefined;
-    if (request.via !== 'link') {
-      // Only a conversation a channel started has anywhere to show a form,
-      // and only a channel that renders one can show it: a scheduled or
-      // HTTP turn, or a channel with no form, would record a request nobody
-      // sees while the agent tells its user the operator was asked.
-      const kind = session.metadata?.channel;
-      const { adapter } = typeof kind === 'string'
-        ? channelCarrying(kind, agentId, (candidate) => candidate.requestCredential !== undefined
-          && (request.replace !== true || candidate.credentialReplaceForms === true)
-          // A form that can't say the key will be shell-readable must not
-          // be the approval for it: a link says it instead.
-          && (request.env === undefined || candidate.credentialEnvForms === true))
-        : { adapter: undefined };
-      if (!adapter?.requestCredential || !session.metadata) {
-        formUnavailable = typeof kind === 'string'
-          ? `This conversation's channel (${kind}) cannot show your operator a ${request.replace === true ? 'replacement' : 'credential'} form here${request.env !== undefined ? ' that says which variable your shell will read it from' : ''}.`
-          : 'This conversation is not in a channel that can show your operator a form.';
-      } else {
-        const requestId = randomUUID();
-        credentialRequests.set(requestId, { ...record, via: 'form' });
-        // Delivered before it is announced, and dropped if delivery fails: a
-        // request whose post never landed has no button to answer it, so
-        // keeping it would leave it pending for good behind a tool result
-        // saying the operator was asked.
-        try {
-          await adapter.requestCredential({
-            sessionId: session.id,
-            agentId,
-            requestId,
-            name: request.name,
-            scope: request.scope,
-            ...(request.reason !== undefined ? { reason: request.reason } : {}),
-            ...(request.replace === true ? { replace: true } : {}),
-            ...(request.env !== undefined ? { env: request.env } : {}),
-            metadata: session.metadata,
-          });
-          await announce(requestId, 'form');
-          return { requestId, via: 'form' };
-        } catch (error) {
-          credentialRequests.delete(requestId);
-          formUnavailable = `The form could not be shown here: ${error instanceof Error ? error.message : String(error)}`;
-        }
-      }
-      if (request.replace === true) {
-        // Never a link: whoever holds one could change a key in use.
-        throw new Error(`${formUnavailable} Nothing is pending. A replacement needs a conversation that can show an approver a form.`);
-      }
-      if (request.via === 'form') {
-        throw new Error(`${formUnavailable} Nothing is pending. ${linkAllowed ? 'Ask for a link instead (via: "link"), or ask' : 'Ask'} your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`);
-      }
-    }
-    if (!linkAllowed) {
-      throw new Error(
-        `${formUnavailable !== undefined ? `${formUnavailable} ` : ''}A one-time link needs ${CREDENTIAL_REQUEST_TOOL_NAME} in your soul's tools: list, and it is not there. Nothing is pending. `
-        + `Ask in a conversation that can show your operator a form, or ask your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`,
-      );
-    }
-    // A link where no form can go, from whichever adapter issues them: the
-    // control API, which is not tied to any one agent's transport.
-    const linker = startedChannels.find((candidate) => candidate.requestCredentialLink !== undefined);
-    if (!linker?.requestCredentialLink) {
-      throw new Error(
-        `${formUnavailable !== undefined ? `${formUnavailable} ` : ''}No control API is running to issue a link either. `
-        + `Ask your operator to store ${request.name} on the machine with ${onMachine} and grant it to you.`,
-      );
-    }
-    const requestId = randomUUID();
-    credentialRequests.set(requestId, { ...record, via: 'link' });
-    let link: { url: string; expiresAt: string; localOnly?: boolean };
-    try {
-      link = await linker.requestCredentialLink({
-        sessionId: session.id,
-        agentId,
-        agentName: session.agent.name,
-        requestId,
-        name: request.name,
-        scope: request.scope,
-        ...(request.reason !== undefined ? { reason: request.reason } : {}),
-        ...(request.env !== undefined ? { env: request.env } : {}),
-      });
-    } catch (error) {
-      credentialRequests.delete(requestId);
-      throw new Error(
-        `A link for ${request.name} could not be issued: ${error instanceof Error ? error.message : String(error)} `
-        + `Nothing is pending. Ask your operator to store it on the machine with ${onMachine}.`,
-      );
-    }
-    await announce(requestId, 'link');
-    return {
-      requestId,
-      via: 'link',
-      url: link.url,
-      expiresAt: link.expiresAt,
-      ...(link.localOnly === true ? { localOnly: true } : {}),
-      ...(formUnavailable !== undefined ? { formUnavailable } : {}),
-    };
-  }));
-
-  /**
-   * Requests an answer is being stored for now. Claimed before the first
-   * await: two approvers submitting one form at once would otherwise both
-   * start storing, and the second's add-only conflict would retire a
-   * request the first was about to settle as added.
-   */
-  const answering = new Set<string>();
-
-  const provideCredential = async (input: ProvideCredentialInput): Promise<ProvideCredentialResult> => {
-    const request = credentialRequests.get(input.requestId);
-    if (!request) {
-      return { ok: false, retired: true, message: 'That credential request is no longer pending. Ask the agent to request it again.' };
-    }
-    if (answering.has(input.requestId)) {
-      return { ok: false, message: 'Someone else\'s answer to this request is being stored right now. Wait a moment before trying again.' };
-    }
-    answering.add(input.requestId);
-    try {
-      return await answerCredentialRequest(input, request);
-    } finally {
-      answering.delete(input.requestId);
-    }
-  };
-
-  /**
-   * The audit line for a key changed from a chat or a link. After the
-   * store, since it records what happened; a line that can't be written is
-   * warned about rather than undoing a change that already landed.
-   */
-  const auditCredentialChange = async (
-    action: 'add' | 'replace',
-    request: NonNullable<ReturnType<typeof credentialRequests.get>>,
-    actor: string | undefined,
-  ): Promise<void> => {
-    try {
-      await appendCredentialAudit(env, {
-        action,
-        name: request.name,
-        ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
-        ...(actor !== undefined ? { actor } : {}),
-        via: request.via ?? 'form',
-        requestedBy: request.agentId,
-        ...(request.env !== undefined ? { env: request.env, bindingFor: request.agentId } : {}),
-      });
-    } catch (error) {
-      warn(`credentials: ${request.name} was ${action === 'add' ? 'added' : 'replaced'}, but the audit line could not be written (${error instanceof Error ? error.message : String(error)}).`);
-    }
-  };
-
-  const answerCredentialRequest = async (
-    input: ProvideCredentialInput,
-    request: NonNullable<ReturnType<typeof credentialRequests.get>>,
-  ): Promise<ProvideCredentialResult> => {
-    // The agent must still be served from the file the request captured: a
-    // repointed default soul (same id, another file) replaces the source,
-    // and a grant landing in the old file would report a key the agent now
-    // running cannot use.
-    const served = sources.get(request.agentId)?.soulPath;
-    if (served !== request.soulPath) {
-      credentialRequests.delete(input.requestId);
-      return {
-        ok: false,
-        retired: true,
-        message: `${request.agentId} is no longer served from ${request.soulPath}, so nothing was stored. Ask ${request.agentId} to request it again.`,
-      };
-    }
-    // The soul the grant will land in must still be the requester's, and is
-    // checked before anything is stored: a file reassigned to another agent
-    // while the request waited would otherwise receive a key nobody meant
-    // to give it. `grantSoulCredential` checks again as it writes.
-    let owner: string;
-    try {
-      owner = (await loadSoulFile(request.soulPath)).agent.id;
-    } catch (error) {
-      return {
-        ok: false,
-        message: `${request.agentId}'s soul could not be read (${error instanceof Error ? error.message : String(error)}), so nothing was stored.`,
-      };
-    }
-    if (owner !== request.agentId) {
-      credentialRequests.delete(input.requestId);
-      return {
-        ok: false,
-        retired: true,
-        message: `${request.soulPath} now belongs to ${owner}, not ${request.agentId}, so nothing was stored. Ask ${request.agentId} to request it again.`,
-      };
-    }
-    const value = formCredentialValue(input.value);
-    if (isFlattenedPem(value)) {
-      // Refused, not retired: the same form can still take the key whole.
-      const command = request.scope === 'agent'
-        ? `stratus credential set ${request.name} --agent ${quoteShellArg(request.agentId)} < key.pem`
-        : `stratus credential set ${request.name} < key.pem`;
-      return {
-        ok: false,
-        message: 'That looks like a PEM key whose line breaks were lost, so nothing was stored: whatever reads it would fail. '
-          + `Paste it again from the original file with its line breaks, or store it on the machine: ${command}.`,
-      };
-    }
-    const store = {
-      ...(request.scope === 'agent' ? { agentId: request.agentId } : {}),
-      // The binding the form promised, written with the value, always for
-      // the agent that asked: consent is per agent even for a shared key.
-      ...(request.env !== undefined ? { bind: { agentId: request.agentId, variable: request.env } } : {}),
-    };
-    if (request.replace === true) {
-      // Re-read under the soul lock, so a grant removed while the form
-      // waited (a shared key most of all) is never rotated on its behalf.
-      let stillGranted: boolean;
-      try {
-        stillGranted = await withSoulFileLock(async () => {
-          const soul = await loadSoulFile(request.soulPath);
-          if (soul.agent.id !== request.agentId || soul.agent.credentials?.includes(request.name) !== true) {
-            return false;
-          }
-          await replaceNamedCredential(env, { name: request.name, value, ...store });
-          return true;
-        });
-      } catch (error) {
-        // Removed since the request was made: no value can land now.
-        if (error instanceof NamedCredentialMissingError) {
-          credentialRequests.delete(input.requestId);
-          return { ok: false, retired: true, message: error.message };
-        }
-        return { ok: false, message: error instanceof Error ? error.message : String(error) };
-      }
-      if (!stillGranted) {
-        credentialRequests.delete(input.requestId);
-        return {
-          ok: false,
-          retired: true,
-          message: `${request.agentId} is no longer granted ${request.name} in ${request.soulPath}, so the stored key was kept. Ask ${request.agentId} to request it again if it still needs it.`,
-        };
-      }
-      credentialRequests.delete(input.requestId);
-      await auditCredentialChange('replace', request, input.actor);
-      await bus.emit({
-        type: 'credential.provided',
-        sessionId: request.sessionId,
-        agentId: request.agentId,
-        requestId: input.requestId,
-        name: request.name,
-        scope: request.scope,
-        replace: true,
-        ...(request.env !== undefined ? { env: request.env } : {}),
-        ...(input.actor !== undefined ? { actor: input.actor } : {}),
-      });
-      // The soul already lists it: a replace is only asked for a key held.
-      return { ok: true, name: request.name, scope: request.scope, agentId: request.agentId, granted: false };
-    }
-    try {
-      await addNamedCredential(env, {
-        name: request.name,
-        value,
-        ...store,
-      });
-    } catch (error) {
-      // A name stored since the request was made (another form for the
-      // same shared key, or the machine) is final under add-only: no value
-      // typed into this form can ever land, so the request is retired
-      // rather than left answering every submission with the same refusal.
-      if (error instanceof NamedCredentialExistsError) {
-        credentialRequests.delete(input.requestId);
-        return { ok: false, retired: true, message: error.message };
-      }
-      // Otherwise refused, not failed: the request stays pending, so a
-      // person who typed an empty value can try again from the same form.
-      return { ok: false, message: error instanceof Error ? error.message : String(error) };
-    }
-    credentialRequests.delete(input.requestId);
-    await auditCredentialChange('add', request, input.actor);
-    // Stored first, granted second: a key nobody may use is recoverable by
-    // editing the soul, while a soul naming a key that was never stored
-    // fails every call that reaches for it. Announced either way, because
-    // the store already changed and a shared key is already usable.
-    //
-    // The served path is checked again under the soul lock, which roster
-    // reloads take too: a default repointed while the key was being
-    // written, or while the grant queued behind another soul edit, would
-    // otherwise be granted in a file the running agent no longer reads.
-    let granted = false;
-    let grantError: string | undefined;
-    try {
-      granted = await grantSoulCredential(request.soulPath, request.name, request.agentId, {
-        check: () => {
-          const servedNow = sources.get(request.agentId)?.soulPath;
-          if (servedNow !== request.soulPath) {
-            throw new Error(`${request.agentId} is now served from ${servedNow ?? 'no soul file'}, not ${request.soulPath}`);
-          }
-        },
-      });
-    } catch (error) {
-      grantError = error instanceof Error ? error.message : String(error);
-    }
-    await bus.emit({
-      type: 'credential.provided',
-      sessionId: request.sessionId,
-      agentId: request.agentId,
-      requestId: input.requestId,
-      name: request.name,
-      scope: request.scope,
-      ...(request.env !== undefined ? { env: request.env } : {}),
-      ...(input.actor !== undefined ? { actor: input.actor } : {}),
-      ...(grantError !== undefined ? { grantError } : {}),
-    });
-    if (grantError !== undefined) {
-      return {
-        ok: false,
-        retired: true,
-        message: `${request.name} was stored, but could not be added to ${request.soulPath} `
-          + `(${grantError}). Add it to the soul's credentials list by hand.`,
-      };
-    }
-    return { ok: true, name: request.name, scope: request.scope, agentId: request.agentId, granted };
-  };
-
-  tools.register(createDelegateTool({
+  const { provideCredential } = createCredentialRequests({
+    env,
+    warn,
+    bus,
+    startedChannels,
+    channelCarrying,
     registry,
-    dispatch: (input) => dispatchInternal({
-      sessionId: input.sessionId,
-      agentId: input.agent.id,
-      userMessage: input.userMessage,
-      metadata: input.metadata,
-      // A cancelled parent turn cancels its delegated runs too.
-      ...(input.signal ? { signal: input.signal } : {}),
-    }),
-  }));
-
-  // ---- sub-agents (roadmap 24) -------------------------------------------
-
-  /**
-   * Running sub-agents per parent session, and who waits for a slot. A
-   * parent session runs one turn at a time, so this is per turn.
-   */
-  const maxSubAgentsPerTurn = options.subAgents?.maxConcurrentPerTurn ?? DEFAULT_SUB_AGENTS_PER_TURN;
-  // NaN, 0, a fraction or Infinity would queue every sub-agent forever or
-  // defeat the cap, so refuse it here instead of failing later in a turn.
-  if (!Number.isInteger(maxSubAgentsPerTurn) || maxSubAgentsPerTurn < 1) {
-    throw new Error(`subAgents.maxConcurrentPerTurn must be a whole number of at least 1 (got ${String(maxSubAgentsPerTurn)}).`);
-  }
-  const subAgentSlots = new Map<string, { running: number; waiting: Array<() => void> }>();
-  let subAgentCount = 0;
-
-  /**
-   * The session object each in-flight tool call was handed, with that
-   * call's turn signal. `subAgents.run` accepts only a parent found here:
-   * the session a running tool was given, by identity, never an id, so a
-   * plugin cannot start sub-agents of another turn (another agent's
-   * included) just because that turn is running. The signal is how the
-   * parent's cancel reaches its sub-agents whether or not the plugin
-   * passes one.
-   */
-  const toolCallsInFlight = new Map<Session, Array<AbortSignal | undefined>>();
-  const bindToolCalls = (inner: Executor): Executor => ({
-    async execute(call, tool, session, context) {
-      if (!idAtFirstCall.has(session)) {
-        idAtFirstCall.set(session, session.id);
-      }
-      const entry = toolCallsInFlight.get(session) ?? [];
-      toolCallsInFlight.set(session, entry);
-      const signal = context?.signal;
-      entry.push(signal);
-      try {
-        return await inner.execute(call, tool, session, context);
-      } finally {
-        entry.splice(entry.indexOf(signal), 1);
-        if (entry.length === 0) {
-          toolCallsInFlight.delete(session);
-        }
-      }
-    },
+    sources,
+    unlistedTools,
+    tools,
   });
 
-  const subAgentSlot = (parentId: string, signal: AbortSignal | undefined): Promise<() => void> =>
-    new Promise((resolve, reject) => {
-      const entry = subAgentSlots.get(parentId) ?? { running: 0, waiting: [] };
-      subAgentSlots.set(parentId, entry);
-      const release = (): void => {
-        entry.running -= 1;
-        const next = entry.waiting.shift();
-        if (next) {
-          next();
-        } else if (entry.running === 0) {
-          subAgentSlots.delete(parentId);
-        }
-      };
-      const take = (): void => {
-        entry.running += 1;
-        resolve(release);
-      };
-      if (entry.running < maxSubAgentsPerTurn) {
-        take();
-        return;
-      }
-      const onAbort = (): void => {
-        const at = entry.waiting.indexOf(waiter);
-        if (at >= 0) {
-          entry.waiting.splice(at, 1);
-        }
-        reject(abortErrorFor(signal));
-      };
-      const waiter = (): void => {
-        signal?.removeEventListener('abort', onAbort);
-        take();
-      };
-      entry.waiting.push(waiter);
-      signal?.addEventListener('abort', onAbort, { once: true });
-    });
 
-  /** Why this slice cannot be a sub-agent's, or undefined when it can. */
-  const subAgentSliceProblem = (parent: Session, requested: unknown): string | undefined => {
-    if (!Array.isArray(requested) || requested.some((name) => typeof name !== 'string' || name.length === 0)) {
-      return 'A sub-agent\'s tools are a list of tool names.';
-    }
-    // Read the way the runner reads it for the parent's own calls: the
-    // session's copy, else the registered agent's.
-    const allowlist = parent.agent.tools ?? registry.get(parent.agent.id)?.tools;
-    for (const name of requested as string[]) {
-      if (/[*?]/.test(name)) {
-        return `A sub-agent's tools are exact names, and ${name} is a pattern.`;
-      }
-      if (subAgentNeverGets(name)) {
-        return `${name} is never given to a sub-agent, even by an agent that holds it.`;
-      }
-      const tool = tools.get(name);
-      if (!tool) {
-        return `There is no tool named ${name}.`;
-      }
-      // The parent's allowlist as its running turn holds it: a slice can
-      // only narrow what that turn may already do. With no list, that is
-      // the tools registered as safe (every tool on a home an older build
-      // set up), and the slice is held to the same rule: naming a gated
-      // tool must not hand it to the sub-agent.
-      if (allowlist === undefined) {
-        if (unlistedTools() !== 'every' && resolveToolRisk(tool) !== 'safe') {
-          return `${name} is not a safe tool, and ${parent.agent.id}'s soul has no tools: list, so it gets only safe tools and a sub-agent of it cannot have ${name}.`;
-        }
-      } else if (!matchesToolAllowlist(name, allowlist)) {
-        return `${name} is not one of ${parent.agent.id}'s tools, so a sub-agent of it cannot have it.`;
-      }
-    }
-    return undefined;
-  };
 
-  const subAgents: SubAgentHandle = {
-    async run(request) {
-      // Copied before the first await, and only the copy is read from here
-      // on: the plugin keeps its own objects and can change them while this
-      // request is checked or waits for a slot, and a slice changed after
-      // it was checked must not be the slice the sub-agent runs with.
-      const handed = request?.parent as Session | undefined;
-      const callSignals = handed ? toolCallsInFlight.get(handed) : undefined;
-      if (!callSignals) {
-        throw new Error('subAgents.run starts sub-agents only for the session your tool was handed, while that call is running. Pass that session object as "parent".');
-      }
-      // The parent turn's own stop, and the caller's as an extra one: a
-      // plugin that passes no signal still has its sub-agents cancelled
-      // with the turn.
-      const stops = [...callSignals, request.signal].filter((signal): signal is AbortSignal => signal !== undefined);
-      const input = {
-        parent: { id: hostIdOf(handed!) },
-        instruction: request?.instruction,
-        tools: Array.isArray(request?.tools) ? [...request.tools] : request?.tools,
-        model: request?.model,
-        signal: stops.length === 0 ? undefined : stops.length === 1 ? stops[0] : AbortSignal.any(stops),
-      };
-      const parentId = typeof input.parent.id === 'string' ? input.parent.id : '';
-      if (!parentId) {
-        throw new Error('subAgents.run needs the session of the turn asking.');
-      }
-      const instruction = typeof input.instruction === 'string' ? input.instruction.trim() : '';
-      if (!instruction) {
-        throw new Error('subAgents.run needs an instruction.');
-      }
-      if (input.model !== undefined) {
-        throw new Error('A sub-agent\'s model cannot be chosen yet: it runs on its parent\'s. Leave "model" out.');
-      }
-      const parent = await store.get(parentId);
-      if (!parent) {
-        throw new Error(`There is no session ${parentId} to start a sub-agent from.`);
-      }
-      if (isHostSubAgent(handed!) || isSubAgentSession(parent)) {
-        throw new Error('A sub-agent cannot start sub-agents.');
-      }
-      if (parent.status !== 'running') {
-        throw new Error(`Session ${parentId} is not running a turn, and sub-agents start only from one.`);
-      }
-      const depth = typeof parent.metadata?.[DELEGATION_DEPTH_METADATA_KEY] === 'number'
-        ? parent.metadata[DELEGATION_DEPTH_METADATA_KEY]
-        : 0;
-      if (depth >= DEFAULT_MAX_DELEGATION_DEPTH) {
-        throw new Error(`Delegation depth limit reached (${DEFAULT_MAX_DELEGATION_DEPTH}).`);
-      }
-      const problem = subAgentSliceProblem(parent, input.tools);
-      if (problem) {
-        throw new Error(problem);
-      }
-      if (input.signal?.aborted) {
-        throw abortErrorFor(input.signal);
-      }
 
-      const release = await subAgentSlot(parent.id, input.signal);
-      subAgentCount += 1;
-      const sessionId = `${parent.id}${SUB_AGENT_SESSION_ID_MARKER}${depth + 1}:${subAgentCount}-${randomUUID().slice(0, 8)}`;
-      // The parent agent, narrowed: its id, provider and credentials, the
-      // slice for tools, and nothing else — no instructions (the persona),
-      // no skills, no delegates.
-      const definition: AgentDefinition = {
-        id: parent.agent.id,
-        name: parent.agent.name,
-        tools: [...new Set(input.tools as string[])],
-        skills: [],
-        delegates: [],
-        ...(parent.agent.credentials !== undefined ? { credentials: [...parent.agent.credentials] } : {}),
-      };
-      let session: Session;
-      liveSubAgentIds.add(sessionId);
-      try {
-        session = await onSessionChain(sessionId, () => dispatchInternal({
-          sessionId,
-          agentId: parent.agent.id,
-          userMessage: instruction,
-          metadata: {
-            [SUB_AGENT_METADATA_KEY]: true,
-            [DELEGATION_DEPTH_METADATA_KEY]: depth + 1,
-            [DELEGATED_BY_METADATA_KEY]: parent.agent.id,
-            [ROOT_SESSION_ID_METADATA_KEY]: typeof parent.metadata?.[ROOT_SESSION_ID_METADATA_KEY] === 'string'
-              ? parent.metadata[ROOT_SESSION_ID_METADATA_KEY]
-              : parent.id,
-            // The instruction is the parent's text, at the parent's label:
-            // a tainted parent must not hand a stranger's words to a
-            // session that has seen nothing.
-            [SENDER_TRUST_METADATA_KEY]: sessionWriteTrust(parent),
-            // On the runtime serving the parent's turn: a parent that has
-            // switched to its sticky fallback must not have its helpers
-            // retry the primary it left.
-            ...(parent.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true ? { [FALLBACK_ACTIVE_METADATA_KEY]: true } : {}),
-          },
-          ...(input.signal ? { signal: input.signal } : {}),
-        }, [], definition));
-      } catch (error) {
-        if (input.signal?.aborted) {
-          throw error;
-        }
-        // The error text may be the provider quoting what it refused,
-        // which is this sub-agent's context: labelled as nobody can vouch.
-        return { status: 'error', error: error instanceof Error ? error.message : String(error), sessionId, trust: 'unknown' };
-      } finally {
-        liveSubAgentIds.delete(sessionId);
-        release();
-      }
-      const trust = sessionTrustOf(session);
-      if (session.status === 'failed') {
-        return { status: 'error', error: session.lastError ?? 'The sub-agent failed.', sessionId, trust: 'unknown' };
-      }
-      const reply = [...session.messages]
-        .reverse()
-        .find((message) => message.role === 'assistant' && message.content.trim().length > 0);
-      const outcome: SubAgentOutcome = reply
-        ? { status: 'result', text: reply.content, sessionId, trust }
-        : { status: 'empty', sessionId, trust };
-      return outcome;
-    },
-  };
+
+
+  // dispatchInternal and onSessionChain are declared further down: late-bound.
+  const { bindToolCalls, subAgents } = createSubAgents({
+    options,
+    store,
+    registry,
+    unlistedTools,
+    tools,
+    dispatchInternal: (...args) => dispatchInternal(...args),
+    onSessionChain: (...args) => onSessionChain(...args),
+    liveSubAgentIds,
+    idAtFirstCall,
+    hostIdOf,
+    isHostSubAgent,
+  });
+
+
+
+
+
 
   const runners = new Map<string, AgentRunner>();
 
