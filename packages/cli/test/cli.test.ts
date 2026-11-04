@@ -4121,6 +4121,35 @@ test('anthropic keys bind to the endpoint they were verified against', async () 
   assert.equal(runtime.provider === 'openai' && runtime.fallback?.baseUrl, 'https://ant-proxy.test');
 });
 
+test('an anthropic key verified against the official endpoint with trailing slashes stays unbound', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    baseUrl: 'https://api.anthropic.com///',
+  }));
+
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-official\n', '9\n']),
+    },
+  });
+
+  // Trailing slashes still name the official endpoint, so the key is
+  // stored unbound, the same as one set up with no baseUrl.
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.anthropic, { type: 'api_key', value: 'sk-official' });
+});
+
 test('the inline test run honors the STRATUS_API_KEY_ENV selector', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

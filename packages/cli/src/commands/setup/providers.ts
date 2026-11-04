@@ -23,6 +23,7 @@ import {
   type CatalogModel,
   type CredentialProviderName,
   type StoredCredential,
+  withoutTrailingSlashes,
 } from '@stratusagent/state';
 import { writeLine } from '../../io.ts';
 import type { CliProviderName } from '../../parse.ts';
@@ -160,7 +161,7 @@ export const createProviderSetup = ({
       // it, so a later provider switch (or an anthropic fallback) can never
       // send a proxy credential to the official endpoint.
       const verifyEndpoint = state.provider === 'anthropic' ? state.baseUrl : undefined;
-      const binding = verifyEndpoint && verifyEndpoint.replace(/\/+$/, '') !== DEFAULT_ANTHROPIC_BASE_URL
+      const binding = verifyEndpoint && withoutTrailingSlashes(verifyEndpoint) !== DEFAULT_ANTHROPIC_BASE_URL
         ? { baseUrl: verifyEndpoint }
         : {};
       const verdict = await verifyProviderKey('anthropic', key, verifyEndpoint, env.fetch ?? globalThis.fetch);
