@@ -137,7 +137,11 @@ not a boundary: the shell sandbox is.
 
 The reviewer is one call on the agent's own provider and credentials, with
 `review.model` (the agent's own model if unset), no tools and no fallback
-model, counted against the agent's budget like any other call. It sees:
+model, counted against the agent's budget like any other call. While the
+reviewed turn runs, that is the provider and credentials the turn started
+with: a soul or config edited mid-turn reaches the next turn's reviews, not
+this one's. The call is not a conversation: it isn't stored, and the
+control API's event stream carries only its `session.usage`. It sees:
 
 - **the request**: only what the people the agent serves wrote in this
   conversation (newest last, up to 4 KB), or a schedule's or trigger's own
@@ -186,7 +190,9 @@ that person without another review. Only a block can still stop it first.
 as it does today, and the review is worked out off the call path (not
 awaited) and recorded as a decision marked shadow. Nothing is asked and
 nothing is blocked. This is how to see what `review` would do before you
-turn it on.
+turn it on. A daemon that stops lets its turns finish first, then cancels
+any shadow review still running and waits for it to end; that review is
+recorded as failed (`review-failed`).
 
 ### Seeing decisions
 

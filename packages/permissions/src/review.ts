@@ -609,6 +609,13 @@ export interface ReviewOptions {
    * call in a conversation that has read outside content.
    */
   secretsFor?(agentId: string): readonly string[] | Promise<readonly string[]>;
+  /**
+   * Handed each shadow review as it starts, the whole of it: the stored
+   * values it reads, the reviewer and the decision it reports. Nothing on
+   * the call path waits for one, so a host that stops waits for these
+   * instead, or loses what they would have reported. Never rejects.
+   */
+  offPath?(task: Promise<unknown>): void;
 }
 
 const REVIEW_REASON_LIMIT = 300;
