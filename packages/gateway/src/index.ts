@@ -105,6 +105,7 @@ import {
   STRATUS_SKILL_PATH,
   credentialVariableProblem,
 } from '@stratusagent/agents';
+import type { AgentSource } from './agent-source.ts';
 import { createFleetReader } from './fleet.ts';
 import { createMemoryPassHost, type MemoryPassModelRun } from './memory-passes.ts';
 import { callShownWhole, readReviewReply, REVIEW_RULES, reviewCaseText } from './review.ts';
@@ -439,14 +440,6 @@ const formCredentialValue = (value: string): string => value.replace(/^[\r\n]+|[
 const isFlattenedPem = (value: string): boolean =>
   /^\s*-----BEGIN [A-Z0-9 ]+-----/.test(value) && !value.includes('\n');
 
-interface AgentSource {
-  definition: AgentDefinition;
-  /** Soul file backing this agent; undefined for the built-in default. */
-  soulPath?: string;
-  /** The parsed soul, carried for its provider/model pins. */
-  soul?: ParsedSoul;
-}
-
 /**
  * The always-on Stratus process. One gateway holds the roster, the durable
  * session store, the shared event bus, and a pool of runners keyed by
@@ -540,6 +533,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   if (Object.keys(eventSources).length > 0) {
     openEvents();
   }
+
+  const startedChannels: GatewayChannelAdapter[] = [];
 
   /**
    * The started adapter of one kind that speaks for an agent and has the
@@ -5214,7 +5209,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return released;
   };
 
-  const startedChannels: GatewayChannelAdapter[] = [];
   /** Set once a shutdown has stopped the started channels; a start that finishes after it stops its own. */
   let channelsClosed = false;
 
