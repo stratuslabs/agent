@@ -1,0 +1,61 @@
+name: Re-run CI jobs that got no runner
+
+# GitHub's hosted macOS arm64 runners run short at busy hours. A job GitHub
+# can't place after three tries, five minutes apart, is cancelled at 15
+# minutes with no steps run ("The job was not acquired by Runner of type
+# hosted even after multiple attempts"). That turns the CI run red without
+# anything having been tested. This re-runs those jobs and nothing else. A run
+# where any job failed or timed out after starting is left alone, so a flaky
+# test never gets retried until it passes.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  rerun:
+    name: Re-run CI jobs that got no runner
+    # Only runs from this repository's own branches. A fork's CI is a
+    # maintainer's call. Attempts stop at 3, so a long outage ends with a red
+    # run instead of a loop.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # re-run the CI run's failed jobs
+    steps:
+      - name: Re-run if every failed job never got a runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          # "rerun" when each job that didn't succeed was cancelled before a
+          # runner took it (no runner name, no steps). A job cancelled by
+          # timeout-minutes has both.
+          verdict=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" --jq '
+            [.jobs[] | select(.conclusion != "success" and .conclusion != "skipped")] as $bad
+            | if ($bad | length) == 0 then "none"
+              elif all($bad[]; .conclusion == "cancelled" and (.runner_name // "") == "" and (.steps | length) == 0) then "rerun"
+              else "real" end')
+          case "$verdict" in
+            rerun)
+              echo "Attempt $ATTEMPT of run $RUN_ID: every failed job never got a runner. Re-running them."
+              gh run rerun "$RUN_ID" --failed --repo "$GITHUB_REPOSITORY"
+              ;;
+            real)
+              echo "Attempt $ATTEMPT of run $RUN_ID has a job that failed after it started. Leaving it as it is."
+              ;;
+            none)
+              echo "Attempt $ATTEMPT of run $RUN_ID has no failed jobs."
+              ;;
+            *)
+              echo "Unexpected verdict: $verdict" >&2
+              exit 1
+              ;;
+          esac
