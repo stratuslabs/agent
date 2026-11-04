@@ -38,10 +38,10 @@ review model the way `approvals.review.model` would:
 
 ```bash
 pnpm -r build
-pnpm eval:review -- --model claude-haiku-4-5
-pnpm eval:review -- --model claude-haiku-4-5 --group injected
+pnpm eval:review -- --model claude-haiku-5-5
+pnpm eval:review -- --model claude-haiku-5-5 --group injected
 pnpm eval:review -- --case inj-pipe-installer --case look-official-installer
-pnpm eval:review -- --model claude-haiku-4-5 --json review-haiku.json
+pnpm eval:review -- --model claude-haiku-5-5 --json review-haiku.json
 ```
 
 It prints each case with its verdict, code, reason and time, then:
