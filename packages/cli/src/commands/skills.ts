@@ -12,6 +12,7 @@ import {
   skillsDirPath,
   readWorkingDirectory,
   gatewayInfoPath,
+  withoutTrailingSlashes,
 } from '@stratusagent/state';
 import {
   runningGatewayBase,
@@ -233,7 +234,7 @@ const reloadRunningDaemonSkills = async (streams: CliStreams, env: CliEnvironmen
   if (!info) {
     return;
   }
-  const base = info.url.replace(/\/+$/, '');
+  const base = withoutTrailingSlashes(info.url);
   try {
     const response = await callRunningGateway(env, {}, base, '/api/v1/skills/reload');
     if (!response.ok) {

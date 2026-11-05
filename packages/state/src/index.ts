@@ -139,6 +139,7 @@ export {
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
   defaultModelFor,
+  withoutTrailingSlashes,
   parseProviderName,
   defaultApiKeyEnvName,
 } from './provider-names.ts';
@@ -353,9 +354,8 @@ export {
   collectAvailableModels,
 } from './models.ts';
 
+export { withLegacyDefaultMemories, createHomeMemoryStore } from './home-memory.ts';
 export {
-  withLegacyDefaultMemories,
-  createHomeMemoryStore,
   declaredAgentIds,
   claimSoulFile,
   personaSnippet,

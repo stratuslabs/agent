@@ -411,8 +411,38 @@ export const defineScriptedProvider = ({
  * the trimmed form.
  */
 const asSent = (value: string): string[] => {
-  const sent = value.replace(/^[\t ]+|[\t ]+$/g, '');
+  // Index walks, not `/^[\t ]+|[\t ]+$/g`: that regex restarts at every
+  // tab of a run that is not at the end, so `a`, 40,000 tabs and `a` took
+  // 2.7 s (CodeQL js/polynomial-redos).
+  const isTabOrSpace = (code: number): boolean => code === 0x09 || code === 0x20;
+  let start = 0;
+  let end = value.length;
+  while (start < end && isTabOrSpace(value.charCodeAt(start))) {
+    start += 1;
+  }
+  while (end > start && isTabOrSpace(value.charCodeAt(end - 1))) {
+    end -= 1;
+  }
+  const sent = value.slice(start, end);
   return sent === value ? [value] : [value, sent];
+};
+
+/**
+ * The credential in an authorization value: what follows the scheme, with
+ * surrounding whitespace trimmed, or nothing when there is no scheme, no
+ * credential, or a line break inside it. That is what
+ * `/^\s*\S+\s+(\S.*?)\s*$/` captured, but its lazy `.*?` retried the
+ * trailing `\s*` at every character, so `Bearer a`, 40,000 spaces and `b`
+ * took 2.6 s.
+ */
+const authorizationCredential = (value: string): string | undefined => {
+  const rest = value.trimStart();
+  const schemeEnd = rest.search(/\s/);
+  if (schemeEnd <= 0) {
+    return undefined;
+  }
+  const credential = rest.slice(schemeEnd).trim();
+  return credential === '' || /[\n\r\u2028\u2029]/.test(credential) ? undefined : credential;
 };
 
 /**
@@ -424,7 +454,7 @@ const asSent = (value: string): string[] => {
 const headerSecrets = (headers: Record<string, string>): string[] =>
   Object.entries(headers).flatMap(([name, value]) => {
     const credential = /^(?:proxy-)?authorization$/i.test(name)
-      ? /^\s*\S+\s+(\S.*?)\s*$/.exec(value)?.[1]
+      ? authorizationCredential(value)
       : undefined;
     return credential === undefined ? asSent(value) : [...asSent(value), credential];
   });
@@ -445,7 +475,14 @@ export const createOpenAICompatibleProvider = ({
     throw new Error('Global fetch is unavailable for the OpenAI-compatible provider.');
   }
 
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+  // Not `replace(/\/+$/, '')`, which is quadratic on a run of slashes
+  // that is not at the end (state's `withoutTrailingSlashes` says more;
+  // state depends on this package, so it cannot be imported here).
+  let baseUrlEnd = baseUrl.length;
+  while (baseUrlEnd > 0 && baseUrl.charCodeAt(baseUrlEnd - 1) === 0x2f) {
+    baseUrlEnd -= 1;
+  }
+  const normalizedBaseUrl = baseUrl.slice(0, baseUrlEnd);
   // Copied once: what is sent and what is redacted are the same values, so
   // a caller mutating its object later cannot send a credential the
   // redaction never heard of.

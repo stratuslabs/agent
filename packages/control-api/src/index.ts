@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import type { Gateway, GatewayChannelAdapter } from '@stratusagent/gateway';
 import type { AgentGrantStore } from '@stratusagent/permissions';
-import { gatewayInfoPath, normalizePublicUrl, type StateEnvironment } from '@stratusagent/state';
+import { gatewayInfoPath, normalizePublicUrl, withoutTrailingSlashes, type StateEnvironment } from '@stratusagent/state';
 import { WebSocketServer } from 'ws';
 
 import {
@@ -40,7 +40,7 @@ export {
 } from './event-listener.ts';
 
 /** Kept in step with package.json, the way the CLI keeps its own version. */
-export const CONTROL_API_VERSION = '0.14.7';
+export const CONTROL_API_VERSION = '0.14.8';
 
 /** The default port `stratusd` serves its API on. Loopback only. */
 /** How long stop() lets an answer already being written finish before it closes the socket anyway. */
@@ -453,7 +453,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
         ...(request.reason !== undefined ? { reason: request.reason } : {}),
         ...(request.env !== undefined ? { env: request.env } : {}),
       });
-      const base = (publicUrl ?? url).replace(/\/+$/, '');
+      const base = withoutTrailingSlashes(publicUrl ?? url);
       return {
         url: `${base}${API_PREFIX}/credential-links/${token}`,
         expiresAt: new Date(expiresAt).toISOString(),

@@ -5,6 +5,7 @@ import {
   readWorkingDirectory,
   gatewayInfoPath,
   gatewayTokenPath,
+  withoutTrailingSlashes,
 } from '@stratusagent/state';
 import type { ServiceEnvironment } from './service.ts';
 
@@ -81,10 +82,10 @@ interface RunningGatewayTarget {
  */
 export const runningGatewayBase = async (env: CliEnvironment, target: RunningGatewayTarget): Promise<string | undefined> => {
   if (target.gateway) {
-    return target.gateway.replace(/\/+$/, '');
+    return withoutTrailingSlashes(target.gateway);
   }
   const info = await readGatewayInfo(env);
-  return info?.url.replace(/\/+$/, '');
+  return info ? withoutTrailingSlashes(info.url) : undefined;
 };
 
 /** One authenticated call to a daemon's control API, with the network and auth failures said plainly. */
@@ -279,7 +280,7 @@ export const reloadRunningDaemonChannels = async (
   if (!info) {
     return undefined;
   }
-  const base = info.url.replace(/\/+$/, '');
+  const base = withoutTrailingSlashes(info.url);
   try {
     const response = await callRunningGateway(env, {}, base, '/api/v1/roster/reload');
     if (!response.ok) {
