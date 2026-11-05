@@ -71,6 +71,14 @@ For [`tool-browser`](./browser.md), set `target: browser` in
 `image:` tag) and build again: the `browser` target adds Playwright's
 Chromium and its system libraries to the slim image. Without it the daemon
 runs normally and a `browser.*` call fails with a message naming the fix.
+Chromium's own sandbox can't start in the container, because Docker's
+default seccomp profile refuses the user namespaces it needs, so the
+`browser` target sets `STRATUS_BROWSER_CHROMIUM_SANDBOX=false` and
+`tool-browser` starts Chromium without it there. The container is then
+what contains the browser. A `chromiumSandbox` key in the plugin's config
+outranks the variable. The
+[`tool-browser` README](../../packages/tool-browser/README.md#chromiums-sandbox)
+has the details.
 
 Then give it the [VM profile](../../examples/profiles/vm) — every tool
 plugin, remote approvals, named operators — as a template. The image's
@@ -446,7 +454,9 @@ What the recipe sets, and what it leaves to you.
   the unit uses the config's `api.host`, which the VM profile sets to
   `127.0.0.1`. Reach it from elsewhere through a tunnel — Tailscale, or
   `ssh -L 4123:127.0.0.1:4123` — never by publishing it on a public
-  interface. See [Remote access](./remote-access.md).
+  interface. A tunnel that passes its own name (Tailscale Serve does) needs
+  `api.publicUrl` set to that address; an `ssh -L` forward arrives as
+  `127.0.0.1` and needs nothing. See [Remote access](./remote-access.md).
 - [ ] **Remote approvals, a named approver, named operators.** The
   [VM profile](../../examples/profiles/vm) sets `approvals.mode: remote`,
   `slackApprovers`, and `principals.admit: principals`. Replace its

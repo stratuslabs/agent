@@ -285,6 +285,85 @@ often a `~/.stratus/state.json` that cannot be written: a command that
 writes state refuses rather than persist data the stamp was meant to
 protect, and a read-only one warns and continues.
 
+## Going back to the version you had
+
+Before a migration that moves or rewrites data runs, the state is copied to
+`~/.stratus/backups/<time>/`, and the command that ran it says where:
+
+    state backup: copied 9 state files to /Users/you/.stratus/backups/20261101T013000Z before migrating
+
+That is every file directly in `~/.stratus`, in `agents/` and in each
+`agents/<id>/`: the session and schedule databases (copied through SQLite,
+so the newest turns come too), memories, grants, souls, config and the
+stamp. A link, like a soul or workspace linked into the
+[agents folder](../reference/state-layout.md#the-agents-folder), is copied
+as the link. It leaves out `credentials.json` and `gateway-token`,
+which no migration rewrites, and the workspaces, logs, skills and plugins,
+which no migration rewrites either and can be any size. It is owner-only,
+and nothing deletes it; remove old ones when you no longer need them.
+
+A migration that leaves the data alone, like a stamp or a permission change,
+takes no backup, and neither does a home with no conversation or memory in
+it. A start that runs the same upgrade again within a day, such as a service
+restarting over a migration that keeps failing, reuses the backup it already
+took, but only if no state file changed since. If the failed migration
+changed nothing and something else was written in between (the older
+version, started again after the failure, saved a conversation), it takes a
+new backup and keeps the earlier one.
+
+A migration that fails partway can leave the state half moved, which no
+version reads as its own. So once a migration that changes data has changed
+the state and not finished (or was stopped before it could check), every
+retry of that upgrade keeps the backup from before it, however old, and
+says so:
+
+    state backup: keeping /Users/you/.stratus/backups/20261101T013000Z, the state as it was before this upgrade first ran (taken 2026-11-01T01:30:00.000Z). A migration that did not finish has changed the state since, so that copy is still the one to go back to; what was written after it is not in it
+
+Restoring it brings back the state from before the upgrade, without what
+was written after it; `~/.stratus.upgraded` below still has that. A
+migration that only tightens file permissions doesn't count as changing
+the state: when the one after it fails before moving anything, a retry
+copies the state again.
+
+If the copy can't be made (a full disk, a file it can't read), no
+migration runs and the command says why: the home is still as the older
+build left it, and that build still runs it.
+
+To go back, stop the daemon, put the backup in place of the home, bring
+over what it leaves out, and install the version you had:
+
+    stratus service stop
+    mv ~/.stratus ~/.stratus.upgraded
+    mkdir -m 700 ~/.stratus
+    cp -Rp ~/.stratus.upgraded/backups/<time>/files/. ~/.stratus/
+    for file in credentials.json gateway-token; do
+      if [ -e ~/.stratus.upgraded/$file ]; then cp -p ~/.stratus.upgraded/$file ~/.stratus/; fi
+    done
+    for dir in skills plugins logs workspaces; do
+      if [ -e ~/.stratus.upgraded/$dir ]; then cp -Rp ~/.stratus.upgraded/$dir ~/.stratus/; fi
+    done
+    # A workspace that is a directory rather than a link to the agents folder:
+    for workspace in ~/.stratus.upgraded/agents/*/workspace; do
+      agent=$(basename "$(dirname "$workspace")")
+      restored=~/.stratus/agents/$agent/workspace
+      if [ -d "$workspace" ] && [ ! -L "$workspace" ] && [ ! -e "$restored" ] && [ ! -L "$restored" ]; then
+        mkdir -p ~/.stratus/agents/$agent
+        cp -Rp "$workspace" ~/.stratus/agents/$agent/
+      fi
+    done
+    npm install -g @stratusagent/cli@<the version you had>   # and its companions, below
+    stratus service start
+
+Copying the workspaces back by their new path is right for any upgrade
+that doesn't move them. The one that does is the 0.12 layout move: when the
+`from` stamp in `backup.json` doesn't list `0004-per-agent-workspaces`,
+move each `agents/<id>/workspace` to `workspaces/<id>` instead. Keep
+`~/.stratus.upgraded` until the older version has served for a while; it
+is what you would go forward from again, and it keeps `backups/`.
+
+Upgrading again later migrates the restored home the same way the first
+time did, and takes a new backup first.
+
 ## Souls and workspaces move to the agents folder
 
 Not a migration: no schema version changes, and an older build still finds
@@ -331,6 +410,49 @@ each such soul when they start, and `tools: ["*"]` gives one back every
 tool. No schema change: an
 older build reads an omitted list as every tool, which is what this home
 keeps.
+
+## `tool-browser` starts Chromium with its own sandbox on (0.14.7)
+
+`@stratusagent/tool-browser` used to start Chromium the way Playwright does
+by default, with `--no-sandbox`. It now starts it with Chromium's own
+sandbox, which keeps a page that breaks the renderer away from the daemon's
+files and credentials. Most hosts start it with no change on your side: a
+Mac whose daemon runs under `launchd` or from a terminal, and Linux hosts
+that allow unprivileged user namespaces.
+
+Two kinds of install can't start it, and need a step when you upgrade:
+
+- **Docker.** Docker's default seccomp profile refuses the user namespaces
+  the sandbox needs. Rebuild the `browser` target from the new release: it
+  sets `STRATUS_BROWSER_CHROMIUM_SANDBOX=false`, so the plugin starts
+  Chromium without its sandbox there and the container contains the
+  browser. An image of your own built some other way needs the same
+  variable, or the config key below.
+- **Ubuntu 24.04**, and any Linux host with
+  `kernel.apparmor_restrict_unprivileged_userns=1`, under the system unit
+  too: AppArmor refuses Playwright's Chromium the namespace. Add the
+  opt-out to the plugin's block in `~/.stratus/config.json` and restart
+  the daemon:
+
+  ```jsonc
+  "@stratusagent/tool-browser": {
+    "enabled": true,
+    "chromiumSandbox": false
+  }
+  ```
+
+A daemon that runs inside `sandbox-exec` on macOS can't start it either,
+and neither can a Linux daemon that runs as root: Chromium won't start
+its sandbox as root. Run that daemon as a non-root user, or use the same
+key.
+
+Skip the step and the daemon still starts and every other tool works, but
+each `browser.*` call fails with an error that says Chromium's sandbox
+couldn't start and names the setting. Nothing is migrated and no file is
+rewritten. If you go back to an older version, take the
+`chromiumSandbox` key out first: the older plugin's config schema doesn't
+know it and refuses to load. See
+[Chromium's sandbox](../../packages/tool-browser/README.md#chromiums-sandbox).
 
 ## `stratus update` does the sequence in the order that cannot lose data
 

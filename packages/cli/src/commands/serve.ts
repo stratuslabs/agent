@@ -16,10 +16,14 @@ import {
   describeDestinationGrant,
   describeOriginScope,
   describeToolGrant,
+  ReviewFailure,
   type CommandNameGrant,
   type CommandScope,
   type OriginScope,
   type PermissionDecision,
+  type ReviewAnswer,
+  type ReviewOptions,
+  type ReviewSettings,
   type DestinationGrant,
   type ToolGrant,
   unboundStandingChannels,
@@ -38,18 +42,20 @@ import {
   repairWorkspacesIfPending,
   surfaceAgentsHome,
   runStateMigrations,
+  describeStateBackup,
   servedRuntimes,
   describeRuntimeEffort,
   discoverIgnoredUntrustedConfig,
+  bindsLoopback,
   trustedConfigError,
   grantReadSerializer,
   grantWriteSerializer,
   type EventsConfig,
 } from '@stratusagent/state';
 import { createLogWriter, truncateRedirectLogs, type LogRecord, type LogWriter } from '../logs.ts';
-import { describePrincipals, describePosture, describeRemoteMode, describeUnreachable } from '../approvals.ts';
+import { describePrincipals, describePosture, describeRemoteMode, describeReviewPosture, describeUnmatchableRules, describeUnreachable } from '../approvals.ts';
 import { createOperatorCommands } from '../operator-commands.ts';
-import { HomeHeldError, legacyDaemonServing, describeHeldHome } from '../daemon.ts';
+import { HomeHeldError, legacyDaemonServing, describeHeldHome, exposedApiWarning } from '../daemon.ts';
 import type { CliStreams, CliEnvironment, DashboardSession } from '../environment.ts';
 import { formatEvent, eventDetail } from '../events.ts';
 import { writeLine } from '../io.ts';
@@ -108,8 +114,38 @@ export const gatewayEventOptions = (
   };
 };
 
+/**
+ * The review posture's fixed fields, for counting decisions from the log:
+ * the verdict and the reviewer's code, never its words.
+ */
+const reviewFields = (decision: PermissionDecision): string =>
+  `${decision.verdict === undefined ? '' : ` verdict=${decision.verdict}`}${decision.reviewCode === undefined ? '' : ` code=${decision.reviewCode}`}`;
+
 export const refusalLogLine = (decision: PermissionDecision): string =>
-  `${decision.agentId}: ${decision.layer === undefined ? '' : `[${decision.layer}] `}${decision.reason} (session ${decision.sessionId})`;
+  `${decision.agentId}: ${decision.layer === undefined ? '' : `[${decision.layer}] `}${decision.reason}${reviewFields(decision)} (session ${decision.sessionId})`;
+
+/**
+ * The daemon log's line for a decision that isn't a grant record, or
+ * nothing. A refusal is a warning; a call a rule or the reviewer allowed is
+ * logged so an unattended run can be reconstructed; a shadow decision is
+ * logged, marked, and never as a refusal, since nothing was refused. An
+ * ordinary allowed call logs nothing, as before.
+ */
+export const decisionLogLine = (decision: PermissionDecision): { level: 'log' | 'warn'; line: string } | undefined => {
+  if (decision.shadow === true) {
+    return {
+      level: 'log',
+      line: `${decision.agentId}: shadow ${decision.layer === undefined ? '' : `[${decision.layer}] `}${decision.reason}${reviewFields(decision)} (session ${decision.sessionId})`,
+    };
+  }
+  if (!decision.allowed) {
+    return { level: 'warn', line: refusalLogLine(decision) };
+  }
+  if (decision.verdict !== undefined) {
+    return { level: 'log', line: refusalLogLine(decision) };
+  }
+  return undefined;
+};
 
 export const runServe = async (
   command: ParsedServeCommand,
@@ -268,7 +304,7 @@ const serveHeldHome = async (
   // so for an install that is never updated through `stratus update` this
   // is where the move actually happens: before the stores are opened, so
   // nothing here reads a path the migration is still populating.
-  for (const migration of await runStateMigrations(env, { exclusive: true })) {
+  for (const migration of await runStateMigrations(env, { exclusive: true, onBackup: (backup) => log(describeStateBackup(backup)) })) {
     log(`state migration ${migration.id}: ${migration.detail ?? migration.description}`);
   }
 
@@ -409,6 +445,11 @@ const serveHeldHome = async (
       });
       boundApi = api;
       controlApiChannels.push(api);
+      // Said every start, flag or config alike: the default is loopback, so
+      // this is always someone's choice, and the one place it is visible.
+      if (apiHost !== undefined && !(await bindsLoopback(apiHost))) {
+        warn(exposedApiWarning(apiHost));
+      }
     } else if (command.api === true || apiConfig.enabled === true) {
       // Only when someone asked for it explicitly. A daemon that was never
       // told to serve an API should not complain about not having one.
@@ -559,7 +600,7 @@ const serveHeldHome = async (
     } else {
       warn(
         `Slack tokens are stored for ${slackAgents.length} agent(s), but @stratusagent/channel-slack is not installed. `
-        + 'Run `npm install -g @stratusagent/channel-slack` to bring them online; starting without the Slack channel.',
+        + `Run \`npm install -g @stratusagent/channel-slack@${CLI_VERSION}\` to bring them online; starting without the Slack channel.`,
       );
     }
   }
@@ -639,9 +680,11 @@ const serveHeldHome = async (
         const by = decision.destinationGrant.grantedBy ? ` by ${decision.destinationGrant.grantedBy}` : '';
         log(`${decision.agentId}: ${decision.toolName} ran under a standing grant (${describeDestinationGrant(decision.destinationGrant)}, granted ${decision.destinationGrant.grantedAt}${by}) (session ${decision.sessionId})`);
       }
-      return;
     }
-    warn(refusalLogLine(decision));
+    const entry = decisionLogLine(decision);
+    if (entry !== undefined) {
+      (entry.level === 'warn' ? warn : log)(entry.line);
+    }
   };
   // A factory, not a policy: remote mode parks turns on a transport the
   // gateway owns, so the policy cannot exist until the gateway is building
@@ -698,7 +741,38 @@ const serveHeldHome = async (
     resolveAgentApprovals(approvalsConfig, agentId).externalContent === 'gate';
   const openFor = (agentId: string): boolean =>
     resolveAgentApprovals(approvalsConfig, agentId).posture === 'open';
+  // The review posture, read per call through the same resolver: an agent
+  // on `review` gets its merged rules, shadow and timeout; any other
+  // posture gets nothing, so its rules are ignored.
+  const reviewSettingsFor = (agentId: string): ReviewSettings | undefined => {
+    const resolved = resolveAgentApprovals(approvalsConfig, agentId);
+    if (resolved.posture !== 'review') {
+      return undefined;
+    }
+    return {
+      ...(resolved.rules !== undefined ? { rules: resolved.rules } : {}),
+      ...(resolved.review?.shadow === true ? { shadow: true } : {}),
+      ...(resolved.review?.timeoutMs !== undefined ? { timeoutMs: resolved.review.timeoutMs } : {}),
+    };
+  };
   const approvals = (transport: ApprovalTransport): ApprovalPolicy => {
+    // The reviewer is the gateway's side call; a review it couldn't run
+    // becomes a `ReviewFailure`, which the policy turns into an ask.
+    const review: ReviewOptions = {
+      settingsFor: reviewSettingsFor,
+      reviewer: async (request) => {
+        const model = resolveAgentApprovals(approvalsConfig, request.session.agent.id).review?.model;
+        const outcome = await transport.review({ ...request, ...(model !== undefined ? { model } : {}) });
+        if ('failed' in outcome) {
+          throw new ReviewFailure(outcome.failed);
+        }
+        // Checked field by field by the policy (`readReviewAnswer`).
+        return outcome.reply as unknown as ReviewAnswer;
+      },
+      secretsFor: (agentId) => transport.secretsFor(agentId),
+      // A shadow review, so the daemon's shutdown waits for it.
+      offPath: (task) => transport.offPath(task),
+    };
     // The standing-grant engine, in the same file again — and the tool's
     // contributor from the gateway, so a grant records which package's
     // tool the operator said yes to and stops applying when that changes.
@@ -729,8 +803,8 @@ const serveHeldHome = async (
       // grant is the only path a scope-less gated tool has to running
       // unattended, and headless is where that matters.
       approvalMode === 'remote'
-        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent, openFor }
-        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent, openFor },
+        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations, gateExternalContent, openFor, review }
+        : { mode: 'headless', onDecision, commands, origins, grants, destinations, gateExternalContent, openFor, review },
     );
   };
 
@@ -935,6 +1009,12 @@ const serveHeldHome = async (
     // for an agent no longer served changes nothing the daemon does.
     const served = gateway.agents().map((agent) => agent.id);
     log(`approvals: ${describePosture(approvalsConfig, approvalMode, served)}`);
+    for (const line of describeReviewPosture(approvalsConfig, approvalMode, served)) {
+      log(`approvals: ${line}`);
+    }
+    for (const line of describeUnmatchableRules(approvalsConfig, gateway.tools(), served)) {
+      warn(`approvals: ${line}`);
+    }
     if (approvalMode === 'remote') {
       // Only agents whose channel actually came up can be asked: tokens on
       // disk with the Slack package missing means nothing renders the

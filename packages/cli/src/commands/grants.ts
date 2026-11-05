@@ -16,6 +16,7 @@ import {
   grantsLockPath,
   resolveConfigLocation,
   stratusHomePath,
+  withoutTrailingSlashes,
 } from '@stratusagent/state';
 import { configCovers, createOperatorCommands } from '../operator-commands.ts';
 import { loadServeApprovals } from '../trusted-config.ts';
@@ -54,9 +55,8 @@ export const runGrants = async (
 ): Promise<number> => {
   const agentId = command.agentId;
   const encoded = encodeURIComponent(agentId);
-  const base = command.gateway
-    ? command.gateway.replace(/\/+$/, '')
-    : (await readGatewayInfo(env))?.url.replace(/\/+$/, '');
+  const gatewayUrl = command.gateway ? command.gateway : (await readGatewayInfo(env))?.url;
+  const base = gatewayUrl === undefined ? undefined : withoutTrailingSlashes(gatewayUrl);
 
   const revocation = command.action === 'revoke'
     ? command.tool !== undefined

@@ -38,6 +38,55 @@ Nothing here is loaded until a `browser.*` tool is actually called, so a
 daemon with the plugin enabled and no browser installed runs normally and
 fails that one call with a message naming the fix.
 
+## Chromium's sandbox
+
+The plugin starts Chromium with its own sandbox on. Playwright's default is
+off (`--no-sandbox`), and the sandbox is what keeps a page that breaks the
+renderer away from the daemon's files and credentials, so leave it on
+wherever it starts.
+
+Some hosts can't start it. There the first `browser.*` call fails with an
+error that says why and names the setting below:
+
+- **macOS, inside another sandbox.** macOS won't start one sandbox inside
+  another, so a daemon running under `sandbox-exec` can't start Chromium's.
+  A daemon started by `launchd` or from a terminal can. Chromium doesn't
+  fail its launch there (its helper processes die and the first page never
+  opens), so the plugin checks first, once per process.
+- **Linux without unprivileged user namespaces.** Chromium's sandbox needs
+  them. Docker's default seccomp profile refuses them, so a container
+  can't start it, and so does Ubuntu 24.04's AppArmor restriction
+  (`kernel.apparmor_restrict_unprivileged_userns=1`) for Playwright's
+  Chromium.
+- **Linux, with the daemon running as root.** Chromium won't start its
+  sandbox as root, whatever the host allows. Run the daemon as a non-root
+  user, or turn the sandbox off.
+
+On a host like that, turn it off:
+
+```jsonc
+"@stratusagent/tool-browser": {
+  "enabled": true,
+  "chromiumSandbox": false
+}
+```
+
+When the config doesn't set `chromiumSandbox`, the default comes from the
+`STRATUS_BROWSER_CHROMIUM_SANDBOX` environment variable: `false` or `0`
+turns the sandbox off, `true`, `1` or unset leaves it on, and any other
+value stops the plugin from loading, with an error naming the variable.
+The [Docker `browser` image](../../docs/guides/deployment.md#first-run-docker)
+sets it to `false`, because the config lives in the volume and an image
+can't write it. A key in the config outranks the variable either way.
+
+Pages then run without Chromium's sandbox. The address policy and the proxy
+below still apply, and whatever contains the daemon (the container, the
+outer sandbox) is what contains the browser.
+
+This is about the browser the plugin starts inside the daemon. A Playwright
+script an agent runs through `shell.run` launches its own browser, inside
+the shell's sandbox, and makes this choice itself.
+
 ## Risk model
 
 Under the default `approvals.posture: "open"` a `gated` call runs without asking; the column below is what each mode does with a call that still needs approval, which under `"guarded"` is every uncovered `gated` call.
@@ -131,13 +180,14 @@ version of all of this.
 | `channel` | none | Use an installed browser: `chrome`, `msedge`. |
 | `executablePath` | none | Use the browser at this path. |
 | `headless` | `true` | Set `false` to watch it work. |
+| `chromiumSandbox` | `true` (`false` in the Docker `browser` image) | Chromium's own sandbox. Set `false` only where it can't start; see [Chromium's sandbox](#chromiums-sandbox). Unset, `STRATUS_BROWSER_CHROMIUM_SANDBOX` decides. |
 | `allowedHosts` | none | Hosts exempt from the address check. |
 | `onlyHosts` | unset (every public host) | The only hosts the browser may reach — every navigation **and every subresource**, so a page's CDNs, fonts, and APIs need entries too (`*.example.com` covers subdomains, not the apex). A refused name is never looked up. `allowedHosts` entries stay reachable. `["*"]` under `agents` lifts an inherited list. See [`tool-web`](../tool-web/README.md#settings) for why. |
 | `allowPrivateAddresses` | `false` | Reach non-global addresses. The trusted-workstation posture. |
 | `idleMs` | `300000` | Close a conversation's context after this much quiet. |
 | `maxContexts` | `4` | Contexts at once; the least recently used goes first. |
 | `maxTextBytes` | `100000` | Cap on `browser.read`, then a `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
-| `navigationTimeoutMs` | `30000` | Per navigation, per action, and on reading a page — one whose script never yields is given up on, its context closed, and the next call opens a fresh page. |
+| `navigationTimeoutMs` | `30000` | Per navigation, per action, and on reading a page — one whose script never yields is given up on, its context closed, and the next call opens a fresh page. Opening a page is bounded too: a browser that doesn't open one in time is closed, and the next call launches a fresh one. A browser that crashes or is killed is replaced the same way, at once. |
 | `workspaceRoot` | the host's answer | Where screenshots go. Under the daemon the host answers per agent, so they land in `~/.stratus/agents/<id>/workspace/screenshots/`. Set here, it means one directory per agent under the root you name (`<root>/<agent-id>/screenshots`) — which is also how a host wiring this plugin by hand supplies one. |
 
 Address settings apply per agent under `agents`, and they are enforced —

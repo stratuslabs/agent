@@ -1,3 +1,4 @@
+import './home-guard.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, stat, writeFile, mkdir } from 'node:fs/promises';

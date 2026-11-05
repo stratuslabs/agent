@@ -1,6 +1,7 @@
 import type { EffortLevel, JsonObject } from '@stratusagent/core';
 import type { ParsedSoul } from '@stratusagent/agents';
 import type { ClaudeCodeTransport, CodexTransport } from '@stratusagent/providers';
+import type { ReviewRule } from '@stratusagent/permissions';
 import {
   type RegisteredProviderName,
   type StratusProviderName,
@@ -18,7 +19,23 @@ import {
 export type ExternalContentApprovals = 'label' | 'gate';
 
 /** Whether gated tools ask. See `AgentApprovalConfig.posture`. */
-export type ApprovalPosture = 'open' | 'guarded';
+export type ApprovalPosture = 'open' | 'guarded' | 'review';
+
+/**
+ * How the review posture reviews. Each key overrides per agent on its own,
+ * so an agent can turn shadow off and keep the shared model.
+ */
+export interface ReviewApprovalConfig {
+  /** The model the reviewer runs on, on the agent's own provider. Default: the agent's model. */
+  model?: string;
+  /**
+   * Work the review out without acting on it: calls run as under `open`,
+   * and each decision is logged and shown marked shadow.
+   */
+  shadow?: boolean;
+  /** How long one review may take before the call is asked about instead. Default 20000. */
+  timeoutMs?: number;
+}
 
 /**
  * Who may approve one agent's gated calls, where they are asked, and what
@@ -56,8 +73,21 @@ export interface AgentApprovalConfig {
    * conversation that read the web back to asking. `guarded`: every gated
    * call asks (or, under `headless`, is refused) unless a scope or grant
    * covers it, which is the behavior before postures existed.
+   * `review`: like `open` until the conversation reads outside content;
+   * after that, the operator's `rules`, the built-in review rules and a
+   * reviewer model decide each gated call (allow, ask or block), and every
+   * ask is one-shot. See `review` and `rules`.
    */
   posture?: ApprovalPosture;
+  /** Under posture `review`: the reviewer's model, shadow mode and timeout. */
+  review?: ReviewApprovalConfig;
+  /**
+   * Under posture `review`: the operator's standing answers, first match
+   * wins, held in every session (an `allow` holds after outside content, a
+   * `block` always blocks). An agent's list comes before the top-level one.
+   * Ignored under `open` and `guarded`.
+   */
+  rules?: ReviewRule[];
   /**
    * How much an agent may do in its own workspace without asking.
    * `workspace`: commands that only read, and only inside the agent's

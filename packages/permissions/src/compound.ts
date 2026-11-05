@@ -886,7 +886,7 @@ export interface CompoundJudgeOptions {
   names: readonly string[];
   /**
    * Workspace autonomy for one command in one directory, when it is on:
-   * the reads, local git, and downloads `index.ts` already judges.
+   * the reads, local git, and downloads `policy.ts` already judges.
    */
   autonomous?: (stage: CommandAnalysis, cwd: string) => Promise<boolean>;
   /** The plain workspace readers' check, `readsInsideWorkspace`. */

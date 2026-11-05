@@ -910,9 +910,54 @@ test('posture is open unless a config says guarded, per agent, and a misspelling
   assert.equal(resolveAgentApprovals(config.approvals, 'unlisted').posture, 'guarded');
 
   const top = await writeConfig('bad-posture.json', { approvals: { posture: 'yolo' } });
-  await assert.rejects(loadConfigFile(top), /Unsupported approvals\.posture in config .*: yolo\. Use open or guarded\./);
+  await assert.rejects(loadConfigFile(top), /Unsupported approvals\.posture in config .*: yolo\. Use open, guarded or review\./);
   const perAgent = await writeConfig('bad-agent-posture.json', { approvals: { agents: { ava: { posture: true } } } });
   await assert.rejects(loadConfigFile(perAgent), /Unsupported approvals\.agents\.ava\.posture/);
+});
+
+test('the review posture reads approvals.review and approvals.rules, per agent, and refuses what it cannot read', async () => {
+  const configPath = await writeConfig('review.json', {
+    approvals: {
+      posture: 'review',
+      review: { model: 'claude-haiku-4-5', shadow: true, timeoutMs: 15000 },
+      rules: [
+        { tool: 'web.fetch', origin: 'https://*.github.com', verdict: 'allow' },
+        { tool: 'mcp.stripe.*', verdict: 'block' },
+      ],
+      agents: {
+        ava: { review: { shadow: false }, rules: [{ tool: 'shell.run', command: 'git push', verdict: 'allow' }] },
+        bea: { posture: 'guarded' },
+      },
+    },
+  });
+  const config = await loadConfigFile(configPath);
+  const ava = resolveAgentApprovals(config.approvals, 'ava');
+  assert.equal(ava.posture, 'review');
+  // Per key: Ava's shadow overrides, the model and timeout are inherited.
+  assert.deepEqual(ava.review, { model: 'claude-haiku-4-5', shadow: false, timeoutMs: 15000 });
+  // The agent's rules first, then the top-level ones: first match wins.
+  assert.deepEqual(ava.rules?.map((rule) => rule.tool), ['shell.run', 'web.fetch', 'mcp.stripe.*']);
+  const bea = resolveAgentApprovals(config.approvals, 'bea');
+  assert.equal(bea.posture, 'guarded');
+  assert.equal(resolveAgentApprovals(config.approvals, 'cy').review?.shadow, true);
+  // No review keys anywhere: none resolved.
+  assert.equal(resolveAgentApprovals({ posture: 'review' }, 'ava').review, undefined);
+  assert.equal(resolveAgentApprovals({ posture: 'review' }, 'ava').rules, undefined);
+
+  const refused = async (approvals: unknown, pattern: RegExp): Promise<void> => {
+    const path = await writeConfig(`bad-review-${Math.random().toString(36).slice(2)}.json`, { approvals });
+    await assert.rejects(loadConfigFile(path), pattern);
+  };
+  await refused({ posture: 'yolo' }, /Use open, guarded or review\./);
+  await refused({ review: 'haiku' }, /Invalid approvals\.review in config .*: expected an object like/);
+  await refused({ review: { model: '' } }, /Invalid approvals\.review\.model/);
+  await refused({ review: { shadow: 'yes' } }, /Invalid approvals\.review\.shadow/);
+  await refused({ review: { timeoutMs: 0 } }, /Invalid approvals\.review\.timeoutMs/);
+  await refused({ review: { timeoutMs: 600001 } }, /Invalid approvals\.review\.timeoutMs/);
+  await refused({ review: { modle: 'x' } }, /Invalid approvals\.review in config .*: unknown key "modle"/);
+  await refused({ rules: { tool: 'x', verdict: 'allow' } }, /Invalid approvals\.rules in config .*: expected a list/);
+  await refused({ rules: [{ tool: 'shell.run', verdict: 'allow' }, { tool: 'shell.run', verdict: 'nope' }] }, /Invalid approvals\.rules\[1\] in config .*: it needs a verdict/);
+  await refused({ agents: { ava: { rules: [{ tool: 'shell.run', command: 'a | b', verdict: 'allow' }] } } }, /Invalid approvals\.agents\.ava\.rules\[0\].*pipeline/);
 });
 
 test('an explicitly empty approver list excludes an agent instead of inheriting', async () => {

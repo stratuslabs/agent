@@ -63,6 +63,8 @@ interface Harness {
   decisions: PermissionDecision[];
   reviews: ReviewRequest[];
   requests: ApprovalRequest[];
+  /** Settles once every shadow review handed off so far has. */
+  offPathDone(): Promise<unknown>;
 }
 
 const harness = (
@@ -73,11 +75,13 @@ const harness = (
   const decisions: PermissionDecision[] = [];
   const reviews: ReviewRequest[] = [];
   const requests: ApprovalRequest[] = [];
+  const offPath: Array<Promise<unknown>> = [];
   const policy = createPermissionPolicy({
     mode: 'headless',
     onDecision: (decision) => decisions.push(decision),
     review: {
       settingsFor: () => settings,
+      offPath: (task) => { offPath.push(task); },
       ...(answer
         ? {
             reviewer: (request: ReviewRequest) => {
@@ -95,6 +99,7 @@ const harness = (
     decisions,
     reviews,
     requests,
+    offPathDone: () => Promise.all(offPath),
     async decide(tool, session, input = {}, extra = {}) {
       const reported: ApprovalDecision[] = [];
       const answerValue = await policy.approve({
@@ -304,7 +309,7 @@ test('shadow mode runs every call as open does and records the review off the ca
   assert.equal(live.reported.length, 1);
   assert.equal(live.reported[0]?.shadow, undefined);
   release?.();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await h.offPathDone();
   const shadow = live.reported.at(-1) as ApprovalDecision;
   assert.equal(shadow.shadow, true);
   assert.equal(shadow.verdict, 'block');
@@ -315,10 +320,72 @@ test('shadow mode runs every call as open does and records the review off the ca
   const s = harness({ shadow: true }, asking, { mode: 'remote', request: async (request) => { requests.push(request); return 'deny'; } });
   const second = await s.decide(notes, ext);
   assert.equal(ran(second.answer), true);
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await s.offPathDone();
   assert.equal(requests.length, 0);
   assert.equal(second.reported.at(-1)?.verdict, 'ask');
   assert.equal(second.reported.at(-1)?.shadow, true);
+});
+
+test('a shadow review is handed to the host whole as it starts, so it can be waited for, credential read and report included', async () => {
+  let readSecrets: ((values: readonly string[]) => void) | undefined;
+  const tasks: Array<Promise<unknown>> = [];
+  const decisions: PermissionDecision[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    onDecision: (decision) => decisions.push(decision),
+    review: {
+      settingsFor: () => ({ shadow: true }),
+      reviewer: async () => ({ verdict: 'block', code: 'not-asked-for', reason: 'not asked for' }),
+      // A store that is slow to answer: the turn has moved on by then.
+      secretsFor: () => new Promise<readonly string[]>((resolve) => { readSecrets = resolve; }),
+      offPath: (task) => { tasks.push(task); },
+    },
+  });
+  const answer = await policy.approve({
+    call: { id: 'call-1', toolName: notes.name, input: {} },
+    tool: notes,
+    risk: 'gated',
+    session: sessionFor('ava', true),
+  });
+  assert.equal(ran(answer), true, 'the call runs without waiting for its review');
+  assert.equal(tasks.length, 1, 'the shadow review was handed over as it started');
+  let settled = false;
+  void (tasks[0] as Promise<unknown>).then(() => { settled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(readSecrets, 'it is reading the stored values');
+  assert.equal(settled, false, 'and the task is not done while it is');
+  assert.equal(decisions.some((decision) => decision.shadow === true), false);
+  readSecrets?.(['stored-secret-value']);
+  await tasks[0];
+  assert.equal(decisions.at(-1)?.shadow, true, 'its decision is reported before the task settles');
+  assert.equal(decisions.at(-1)?.allowed, false);
+
+  // Only the off-path review: an enforced one is part of the call itself.
+  const enforced: Array<Promise<unknown>> = [];
+  const onPath = createPermissionPolicy({
+    mode: 'headless',
+    review: {
+      settingsFor: () => ({}),
+      reviewer: allowing,
+      secretsFor: async () => [],
+      offPath: (task) => { enforced.push(task); },
+    },
+  });
+  await onPath.approve({ call: { id: 'call-2', toolName: notes.name, input: {} }, tool: notes, risk: 'gated', session: sessionFor('ava', true) });
+  assert.equal(enforced.length, 0);
+
+  // A host whose bookkeeping throws never fails the call being shadowed.
+  const throwing = createPermissionPolicy({
+    mode: 'headless',
+    review: {
+      settingsFor: () => ({ shadow: true }),
+      reviewer: allowing,
+      secretsFor: async () => [],
+      offPath: () => { throw new Error('the host broke'); },
+    },
+  });
+  const unharmed = await throwing.approve({ call: { id: 'call-3', toolName: notes.name, input: {} }, tool: notes, risk: 'gated', session: sessionFor('ava', true) });
+  assert.equal(ran(unharmed), true);
 });
 
 test('a secret store that cannot be read asks instead of failing the turn', async () => {

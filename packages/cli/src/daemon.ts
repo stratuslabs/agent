@@ -5,8 +5,25 @@ import {
   readWorkingDirectory,
   gatewayInfoPath,
   gatewayTokenPath,
+  withoutTrailingSlashes,
 } from '@stratusagent/state';
 import type { ServiceEnvironment } from './service.ts';
+
+/**
+ * How `serve`'s warning about a control API bound beyond loopback begins.
+ * `doctor` reads it off the daemon's startup warnings by this prefix and shows
+ * it as a note rather than a problem: the container image binds `0.0.0.0` on
+ * purpose (its port is published on the host's loopback), and an operator who
+ * binds a LAN or Tailscale address chose to, so neither should fail doctor.
+ */
+export const EXPOSED_API_WARNING_PREFIX = 'the control API binds ';
+
+/** `serve`'s warning for an API bound to `host`, a non-loopback address. */
+export const exposedApiWarning = (host: string): string =>
+  `${EXPOSED_API_WARNING_PREFIX}${host}, so other machines can reach it unless a firewall or a container's `
+  + 'port mapping stops them. Everything but the liveness check still needs the gateway token or a single-use link '
+  + 'the daemon issued, and no Host name is checked. To keep it on this machine, bind '
+  + '127.0.0.1 and reach it from elsewhere through a tunnel, with api.publicUrl set to the tunnel\'s address.';
 import type { CliEnvironment } from './environment.ts';
 
 /**
@@ -65,10 +82,10 @@ interface RunningGatewayTarget {
  */
 export const runningGatewayBase = async (env: CliEnvironment, target: RunningGatewayTarget): Promise<string | undefined> => {
   if (target.gateway) {
-    return target.gateway.replace(/\/+$/, '');
+    return withoutTrailingSlashes(target.gateway);
   }
   const info = await readGatewayInfo(env);
-  return info?.url.replace(/\/+$/, '');
+  return info ? withoutTrailingSlashes(info.url) : undefined;
 };
 
 /** One authenticated call to a daemon's control API, with the network and auth failures said plainly. */
@@ -263,7 +280,7 @@ export const reloadRunningDaemonChannels = async (
   if (!info) {
     return undefined;
   }
-  const base = info.url.replace(/\/+$/, '');
+  const base = withoutTrailingSlashes(info.url);
   try {
     const response = await callRunningGateway(env, {}, base, '/api/v1/roster/reload');
     if (!response.ok) {

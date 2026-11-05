@@ -84,6 +84,7 @@ export {
   stratusHomePath,
   globalConfigPath,
   logsDirPath,
+  backupsDirPath,
   credentialsPath,
   credentialAuditPath,
   agentsDirPath,
@@ -138,6 +139,7 @@ export {
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
   defaultModelFor,
+  withoutTrailingSlashes,
   parseProviderName,
   defaultApiKeyEnvName,
 } from './provider-names.ts';
@@ -151,6 +153,7 @@ export {
   type ApprovalsConfig,
   type ExternalContentApprovals,
   type ApprovalPosture,
+  type ReviewApprovalConfig,
   type AgentPrincipalsConfig,
   type PrincipalsAdmit,
   type PrincipalsConfig,
@@ -206,6 +209,7 @@ export {
   namedCredentialSource,
   resolveDaemonCredential,
   createFileCredentialResolver,
+  credentialValuesFor,
   type CredentialEnvBindings,
   type CredentialEnvBinding,
   loadCredentialEnvBindings,
@@ -236,6 +240,8 @@ export {
   unlistedToolsFor,
 } from './migrations.ts';
 
+export { type StateBackup, backUpStateBeforeMigrating, describeStateBackup } from './state-backup.ts';
+
 export {
   drainSharedMemory,
   hasBracketedLegacyState,
@@ -249,6 +255,9 @@ export {
   type IgnoredConfigKey,
   ignoredConfigKeys,
   loadConfigFile,
+  bindsLoopback,
+  type HostLookup,
+  isLoopbackAddress,
   normalizePublicUrl,
   validateConfigFile,
   resolveAgentApprovals,
@@ -345,9 +354,8 @@ export {
   collectAvailableModels,
 } from './models.ts';
 
+export { withLegacyDefaultMemories, createHomeMemoryStore } from './home-memory.ts';
 export {
-  withLegacyDefaultMemories,
-  createHomeMemoryStore,
   declaredAgentIds,
   claimSoulFile,
   personaSnippet,

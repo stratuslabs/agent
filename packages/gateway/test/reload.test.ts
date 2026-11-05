@@ -682,10 +682,8 @@ test('a stop that has to shut down around a stuck firing and a stuck plugin stil
   const firingStarted = new Promise<void>((resolve) => { firing = resolve; });
   const fetchImpl = (() => new Promise<Response>(() => { firing(); })) as typeof fetch;
 
-  // A full second, so the slack in the bound below is wider than a stalled
-  // event loop: a loaded CI runner has held this process for a quarter of a
-  // second in the middle of a stop.
-  const window = 1_000;
+  // Nothing below is timed, so the window only sets how long this takes.
+  const window = 250;
   const warnings: string[] = [];
   const gateway = createGateway({
     env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
@@ -713,16 +711,21 @@ test('a stop that has to shut down around a stuck firing and a stuck plugin stil
   scheduleStore.close();
   await firingStarted;
 
-  const began = Date.now();
   await gateway.stop();
-  const elapsed = Date.now() - began;
 
   assert.ok(warnings.some((line) => /did not stop after being aborted/.test(line)), warnings.join('\n'));
-  assert.ok(warnings.some((line) => /a plugin did not release what it holds/.test(line)), warnings.join('\n'));
-  // Two windows plus half a window of slack. A timer never fires early, so
-  // any phase that took a window of its own would make it at least three,
-  // and one window per phase would be four.
-  assert.ok(elapsed < 2.5 * window, `stop took ${elapsed}ms with a ${window}ms window`);
+  // The wait after the abort uses up the second window, so the phases after
+  // it are left nothing of it. One that took a window of its own, or a
+  // deadline set further out, would name a whole window here. Read from the
+  // warnings rather than timed: a stalled runner can only shrink what is
+  // left, where it pushes a timed stop past any slack.
+  const given = (pattern: RegExp): number => {
+    const found = warnings.map((line) => pattern.exec(line)).find((match) => match !== null);
+    assert.ok(found, `${pattern} in:\n${warnings.join('\n')}`);
+    return Number(found[1]);
+  };
+  assert.ok(given(/a scheduled firing did not stop within (\d+)ms/) < window / 2, warnings.join('\n'));
+  assert.ok(given(/a plugin did not release what it holds within (\d+)ms/) < window / 2, warnings.join('\n'));
 });
 
 test('a turn that outlives the drain window is aborted as restarting, and the restart still happens', async () => {
@@ -970,7 +973,7 @@ test('a channel whose stop rejects, or a plugin whose dispose rejects, leaves th
   assert.deepEqual((await outcomeOf({ plugin: false, channel: false })).outcome, { drained: true });
 });
 
-test('a turn queued behind the one aborted at the window is aborted too, not left running unrecorded', async () => {
+test('a turn queued behind the one aborted at the window is aborted too, not left running unrecorded', async (t) => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
 
@@ -988,6 +991,18 @@ test('a turn queued behind the one aborted at the window is aborted too, not lef
 
   let handOff!: (outcome: RestartOutcome) => void;
   const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  // The test owns the restart's clock. The window is armed twice: once for
+  // the turns to finish on their own (they never will: the provider blocks
+  // until aborted), and once more for the aborted turns to settle, which is
+  // two abort rejections, two session writes, and their events. On the wall
+  // clock that second window is whatever the first left of the shared
+  // deadline, so a runner that stalls past the first one leaves the settle
+  // no time and reports `drained: false` for a drain that was merely slow.
+  // Mocked, the first window ends when the test says so and the second
+  // never runs out, so `drained` reports only whether the aborted turns
+  // settled. The two hang guards below keep the real timer.
+  const realSetTimeout = globalThis.setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
   const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {}, onRestart: (outcome) => handOff(outcome) });
   await gateway.start();
@@ -996,14 +1011,8 @@ test('a turn queued behind the one aborted at the window is aborted too, not lef
   const running = gateway.dispatch({ sessionId: 'queued', agentId: 'ava', userMessage: 'first' });
   const queued = gateway.dispatch({ sessionId: 'queued', agentId: 'ava', userMessage: 'second' });
   await started;
-  // The window is armed twice: once for the turns to finish on their own
-  // (they never will — the provider blocks until aborted), and once more
-  // for the aborted turns to settle, which is two abort rejections, two
-  // session writes, and their events. 50ms lost that second race on a
-  // loaded CI runner and reported `drained: false` for a drain that was
-  // merely slow; the number has to sit far above that work, not just
-  // above it.
   gateway.restart({ drainTimeoutMs: 500 });
+  t.mock.timers.tick(500);
 
   const isRestartAbort = (error: Error): boolean => error instanceof RunAbortedError && error.message === RESTARTING_TURN_ERROR;
   await assert.rejects(running, isRestartAbort);
@@ -1011,11 +1020,16 @@ test('a turn queued behind the one aborted at the window is aborted too, not lef
   // provider forever and the restart only ends by shutting down around it.
   const second = await Promise.race([
     queued.then(() => 'completed', (error: Error) => (isRestartAbort(error) ? 'aborted' : `failed: ${error.message}`)),
-    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+    new Promise<'hung'>((resolve) => realSetTimeout(() => resolve('hung'), 5_000)),
   ]);
   assert.equal(second, 'aborted');
-  assert.deepEqual(await restarted, { drained: true });
+  const outcome = await Promise.race([
+    restarted,
+    new Promise<'hung'>((resolve) => realSetTimeout(() => resolve('hung'), 5_000)),
+  ]);
+  assert.deepEqual(outcome, { drained: true });
   await gateway.stop();
+  t.mock.timers.reset();
 
   const next = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
   await next.start();

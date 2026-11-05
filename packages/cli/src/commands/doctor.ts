@@ -11,6 +11,7 @@ import {
   loadCredentials,
   loadRosterSouls,
   loadSoulFile,
+  bindsLoopback,
   isSignedInRuntime,
   parseProviderName,
   readNonEmptyString,
@@ -36,9 +37,10 @@ import {
   quoteShellArg,
   verifyProviderKey,
   probeProviderModel,
+  withoutTrailingSlashes,
 } from '@stratusagent/state';
 import { readServiceCommand } from '../service.ts';
-import { callRunningGateway, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
+import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
 import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
@@ -212,7 +214,7 @@ export interface DoctorReport {
 export type DoctorDaemon =
   | { state: 'no-api' }
   | { state: 'unreachable'; url: string }
-  | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string };
+  | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string; exposedOn?: string };
 
 /** Long enough for a busy daemon on loopback, short enough that doctor never hangs on a wedged one. */
 const DAEMON_TIMEOUT_MS = 3_000;
@@ -314,7 +316,7 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     problems.push(`${infoPath} is damaged (no daemon address in it), so no command can find the running daemon. Run \`stratus restart\` to have it written again.`);
     return { state: 'no-api' };
   }
-  url = url.replace(/\/+$/, '');
+  url = withoutTrailingSlashes(url);
 
   let health: DaemonHealth;
   try {
@@ -351,6 +353,10 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   const intake = health.intake;
   const startupPauseOver = intake?.paused === false || (intake?.paused === true && intake.unreadable === false);
   for (const line of warnings) {
+    // A note under Daemon, not a problem: see EXPOSED_API_WARNING_PREFIX.
+    if (line.startsWith(EXPOSED_API_WARNING_PREFIX)) {
+      continue;
+    }
     if (line.startsWith(INTAKE_WARNING_PREFIX)) {
       if (!startupPauseOver) {
         problems.push(
@@ -396,9 +402,14 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     }
   });
   const configPath = configs.find((file) => file.sha256 !== null)?.path;
+  // The host it published, resolved as `listen` resolved it (a URL brackets
+  // an IPv6 address; `listen` is given it bare).
+  const bound = URL.parse(url)?.hostname;
+  const exposedOn = bound !== undefined && !(await bindsLoopback(bound.replace(/^\[(.*)\]$/, '$1'))) ? bound : undefined;
   return {
     state: 'running',
     url,
+    ...(exposedOn !== undefined ? { exposedOn } : {}),
     ...(typeof health.version === 'string' ? { version: health.version } : {}),
     ...(typeof health.startedAt === 'string' ? { startedAt: health.startedAt } : {}),
     ...(configPath !== undefined ? { configPath } : {}),
@@ -735,7 +746,7 @@ export const collectDoctorReport = async (
   if (slackAgents.length > 0 && !slackPackageInstalled) {
     problems.push(
       `Slack tokens are stored for ${slackAgents.length} agent(s) but @stratusagent/channel-slack is not installed, so \`stratus serve\` skips them. `
-      + 'Install it with: npm install -g @stratusagent/channel-slack',
+      + `Install it with: npm install -g @stratusagent/channel-slack@${CLI_VERSION}`,
     );
   }
 
@@ -1063,6 +1074,9 @@ export const runDoctor = async (
     writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}running${facts.length > 0 ? ` ${facts.join(', ')}` : ''}`);
     if (daemon.configPath !== undefined) {
       writeLine(streams.stdout, `  ${''.padEnd(10)}loaded ${daemon.configPath}`);
+    }
+    if (daemon.exposedOn !== undefined) {
+      writeLine(streams.stdout, `  ${''.padEnd(10)}API on ${daemon.exposedOn}: other machines can reach it unless a firewall or port mapping stops them`);
     }
   }
 

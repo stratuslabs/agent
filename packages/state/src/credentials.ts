@@ -3,6 +3,7 @@ import { appendFile, chmod, mkdir, readFile, rename, rm } from 'node:fs/promises
 import path from 'node:path';
 import { credentialVariableProblem, isValidAgentId } from '@stratusagent/agents';
 import {
+  type AgentDefinition,
   type ChannelTransportSecrets,
   type CredentialResolver,
   assertCredentialAllowed,
@@ -1016,6 +1017,17 @@ export const resolveDaemonCredential = async (env: StateEnvironment, name: strin
   }
   const fromEnv = readProcessEnv(env)[name];
   return typeof fromEnv === 'string' ? fromEnv : undefined;
+};
+
+/**
+ * The values of the credentials an agent's soul lists, read now: what the
+ * review posture's built-in rule checks an outbound call against. A listed
+ * name with nothing stored is left out; a store that can't be read rejects,
+ * so the caller can ask a person instead of checking against nothing.
+ */
+export const credentialValuesFor = async (resolver: CredentialResolver, agent: AgentDefinition): Promise<string[]> => {
+  const values = await Promise.all((agent.credentials ?? []).map((name) => resolver.resolve(agent, name)));
+  return values.filter((value): value is string => typeof value === 'string' && value.length > 0);
 };
 
 export const createFileCredentialResolver = (

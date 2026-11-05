@@ -12,6 +12,8 @@ import type { BrowserContextLike, BrowserDriver, BrowserLike, PageLike } from '.
 export interface SessionPoolOptions {
   driver: BrowserDriver;
   headless?: boolean;
+  /** Chromium's own sandbox. On unless `false`. */
+  chromiumSandbox?: boolean;
   executablePath?: string;
   channel?: string;
   /** Close a context that has done nothing for this long. */
@@ -19,7 +21,7 @@ export interface SessionPoolOptions {
   /** How many contexts may exist at once. The oldest goes when a new one would exceed it. */
   maxContexts?: number;
   /** Called when a page is dropped, so a caller can log it. */
-  onEvicted?: (event: { sessionId: string; reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive' }) => void;
+  onEvicted?: (event: { sessionId: string; reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive' | 'disconnected' }) => void;
   /** Reported rather than thrown: a sweep runs on a timer with nobody waiting on it. */
   onError?: (error: unknown) => void;
 }
@@ -43,6 +45,16 @@ interface BrowserEntry {
    * context closed the browser out from under that context.
    */
   admitting: number;
+  /**
+   * Rejects once this browser is gone: Chromium disconnected, or opening a
+   * page in it outlasted its timeout. Every open in the browser races it.
+   * A Chromium that died while a page was being created never settled that
+   * `newPage`, and the call waiting on it, with every call queued behind
+   * it, waited forever.
+   */
+  gone: Promise<never>;
+  /** Rejects `gone`. The first reason wins. */
+  end: (error: Error) => void;
 }
 
 interface PooledContext {
@@ -71,6 +83,12 @@ interface PooledContext {
 const DEFAULT_IDLE_MS = 5 * 60_000;
 const DEFAULT_MAX_CONTEXTS = 4;
 const MAX_SWEEP_INTERVAL_MS = 60_000;
+
+const BROWSER_QUIT = 'The browser quit while this page was opening, or since (it crashed or was killed). '
+  + 'The next browser call starts a fresh one.';
+
+/** `work`, unless the browser it runs in is gone first. */
+const whileAlive = <T>(entry: BrowserEntry, work: Promise<T>): Promise<T> => Promise.race([work, entry.gone]);
 
 /**
  * Browsers, contexts, and the proxies that own their connections.
@@ -149,10 +167,18 @@ export class BrowserSessionPool {
         const browser = await this.options.driver.launch({
           headless: this.options.headless ?? true,
           proxy: chromiumProxyOptions(proxy),
+          chromiumSandbox: this.options.chromiumSandbox !== false,
           ...(this.options.executablePath ? { executablePath: this.options.executablePath } : {}),
           ...(this.options.channel ? { channel: this.options.channel } : {}),
         });
-        const entry: BrowserEntry = { key, browser, proxy, sessions: new Set(), admitting: 0 };
+        let end!: (error: Error) => void;
+        const gone = new Promise<never>((_resolve, reject) => {
+          end = reject;
+        });
+        // Nothing may be racing it when it rejects.
+        gone.catch(() => undefined);
+        const entry: BrowserEntry = { key, browser, proxy, sessions: new Set(), admitting: 0, gone, end };
+        browser.on?.('disconnected', () => this.browserGone(entry, new Error(BROWSER_QUIT), 'disconnected'));
         this.browsers.set(key, entry);
         this.armSweep();
         return entry;
@@ -170,8 +196,13 @@ export class BrowserSessionPool {
   /**
    * The page this session works in, created on first use — under the
    * policy resolved for *this* agent, not for whoever asked first.
+   *
+   * `openTimeoutMs` bounds opening a page in a launched browser. A browser
+   * that does not open one in time is taken as wedged: it is closed, and
+   * this call and the next go to a fresh one. The launch itself is bounded
+   * by the driver (Playwright's own launch timeout).
    */
-  async pageFor(sessionId: string, now: number, policy: EgressPolicy = {}): Promise<PageLike> {
+  async pageFor(sessionId: string, now: number, policy: EgressPolicy = {}, openTimeoutMs?: number): Promise<PageLike> {
     const key = policyKeyFor(policy);
     const existing = this.contexts.get(sessionId);
     if (existing && existing.browserKey === key) {
@@ -182,8 +213,8 @@ export class BrowserSessionPool {
     }
 
     const admitted = this.admission.then(
-      () => this.admit(sessionId, now, policy, key),
-      () => this.admit(sessionId, now, policy, key),
+      () => this.admit(sessionId, now, policy, key, openTimeoutMs),
+      () => this.admit(sessionId, now, policy, key, openTimeoutMs),
     );
     // The queue advances whether or not this admission succeeded; a failed
     // launch must not block every later call behind it.
@@ -196,6 +227,7 @@ export class BrowserSessionPool {
     now: number,
     policy: EgressPolicy,
     key: string,
+    openTimeoutMs: number | undefined,
   ): Promise<PageLike> {
     // Re-read inside the queue: another admission may have created this
     // session's context, or changed what is in the pool, while this one
@@ -222,6 +254,7 @@ export class BrowserSessionPool {
     // what it refuses is this conversation's alone. Created inside the
     // block below so a failure anywhere after it still closes it.
     let proxy: EgressProxy | undefined;
+    let wedged: NodeJS.Timeout | undefined;
     try {
       const maxContexts = this.options.maxContexts ?? DEFAULT_MAX_CONTEXTS;
       while (this.contexts.size >= maxContexts) {
@@ -233,20 +266,37 @@ export class BrowserSessionPool {
       }
 
       proxy = await createEgressProxy(policy);
-      const context = await entry.browser.newContext({ proxy: chromiumProxyOptions(proxy) });
+      if (openTimeoutMs !== undefined) {
+        wedged = setTimeout(() => {
+          this.browserGone(entry, new Error(
+            `The browser did not open a page within ${openTimeoutMs}ms, so it was closed. `
+            + 'The next browser call starts a fresh one.',
+          ), 'unresponsive');
+        }, openTimeoutMs);
+      }
+      const context = await whileAlive(entry, entry.browser.newContext({ proxy: chromiumProxyOptions(proxy) }));
       let page: PageLike;
       try {
-        page = await context.newPage();
+        page = await whileAlive(entry, context.newPage());
       } catch (error) {
         // A context that never got a page is not in `contexts`, so the idle
         // sweep will never look at it — and neither will shutdown, which
-        // walks the same map. Closed here or not at all.
+        // walks the same map. Closed here or not at all, and not waited on
+        // past the browser's end: a context in a dead browser may never
+        // finish closing, and it went with the browser anyway.
         try {
-          await context.close();
+          await whileAlive(entry, context.close());
         } catch {
           // Already gone with the browser that owned it.
         }
         throw error;
+      }
+      if (this.browsers.get(key) !== entry) {
+        // The browser left the pool in the moment the page arrived (it died
+        // as it answered, or the pool is shutting down). A page in a browser
+        // the pool no longer holds is not one to hand a conversation.
+        void context.close().catch(() => undefined);
+        throw new Error(BROWSER_QUIT);
       }
       this.contexts.set(sessionId, {
         sessionId,
@@ -262,6 +312,7 @@ export class BrowserSessionPool {
       entry.sessions.add(sessionId);
       return page;
     } finally {
+      clearTimeout(wedged);
       entry.admitting -= 1;
       // A proxy whose context never came to be is a listening socket
       // nothing else would ever close.
@@ -333,7 +384,10 @@ export class BrowserSessionPool {
     return true;
   }
 
-  private async drop(entry: PooledContext, reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive'): Promise<void> {
+  private async drop(
+    entry: PooledContext,
+    reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive' | 'disconnected',
+  ): Promise<void> {
     // Only the context the pool still holds for this session. The idle
     // sweep and shutdown work from a snapshot and await each drop in turn,
     // so by the time they reach an entry, that session may have timed out,
@@ -398,6 +452,32 @@ export class BrowserSessionPool {
       return true;
     }
     return false;
+  }
+
+  /**
+   * A browser that is gone leaves the pool at once: opens waiting on it
+   * fail with `reason`, the conversations holding pages in it lose them,
+   * and the next call launches a fresh one.
+   *
+   * Playwright also reports `disconnected` for a close the pool asked for,
+   * which can arrive after a replacement launched under the same policy.
+   * A browser already retired only has its waiting opens failed: whatever
+   * holds its key now is not it.
+   */
+  private browserGone(entry: BrowserEntry, reason: Error, eviction: 'disconnected' | 'unresponsive'): void {
+    entry.end(reason);
+    if (this.browsers.get(entry.key) !== entry) {
+      return;
+    }
+    this.retireBrowser(entry);
+    // One browser per key, and a context only ever lives in the browser
+    // its key names, so these are exactly the contexts this browser held.
+    for (const context of [...this.contexts.values()]) {
+      if (context.browserKey === entry.key) {
+        void this.drop(context, eviction);
+      }
+    }
+    void this.shutBrowser(entry).catch((error) => this.options.onError?.(error));
   }
 
   /** Close a browser no session holds and no admission is about to. */

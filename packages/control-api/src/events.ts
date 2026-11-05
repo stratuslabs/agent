@@ -81,6 +81,31 @@ export const createEventStream = (gateway: Gateway) => {
    */
   const watchedTurns = new Map<string, { reported: boolean }>();
   const watchKey = (sessionId: string, turnId: string): string => `${sessionId}\u0000${turnId}`;
+  const callKey = (sessionId: string, callId: string, toolName: string): string =>
+    `${sessionId}\u0000${callId}\u0000${toolName}`;
+  /**
+   * The turn each recent call ran in, for a decision about it that arrives
+   * later: the review posture's shadow mode works its decision out off the
+   * call path, and by then the session may be running another turn. Keyed
+   * by session, call id and tool, the latest call winning, and bounded,
+   * oldest first. An endpoint that numbers its calls per response reuses
+   * ids, so the tool keeps a later call to another tool from taking the
+   * binding. A later call to the same tool under the same id, made before
+   * the earlier one's review is back, still takes it: telling those two
+   * apart needs an id per call on the event.
+   */
+  const callTurns = new Map<string, string>();
+  const CALL_TURNS_LIMIT = 4096;
+  const rememberCallTurn = (key: string, turnId: string): void => {
+    callTurns.delete(key);
+    callTurns.set(key, turnId);
+    if (callTurns.size > CALL_TURNS_LIMIT) {
+      const oldest = callTurns.keys().next().value;
+      if (oldest !== undefined) {
+        callTurns.delete(oldest);
+      }
+    }
+  };
 
   const resolveAgentSessions = (agentId: string): Set<string> =>
     new Set(gateway.store.list(agentId).map((session) => session.id));
@@ -97,7 +122,12 @@ export const createEventStream = (gateway: Gateway) => {
       return false;
     }
     if (client.agentSessions && !client.agentSessions.has(event.sessionId)) {
-      return false;
+      // A side run's usage and a memory pass's outcome name their agent, so
+      // they reach that agent's subscribers from a session they never saw
+      // created: its `session.created` stays off the stream, and a pass
+      // refused before it ran never had one.
+      return (event.type === 'session.usage' || event.type === 'memory.pass-completed')
+        && event.agentId === client.filter.agentId;
     }
     return true;
   };
@@ -133,6 +163,14 @@ export const createEventStream = (gateway: Gateway) => {
    * shape this needs.
    */
   const unsubscribe = gateway.bus.subscribe((event: StratusEvent) => {
+    // A side run (a reviewer call, a memory pass) is not a conversation: no
+    // client can send to it or find it in the store, and its deltas are a
+    // reviewer's words about a call, which a permission decision leaves out
+    // on purpose. Only what it cost comes through, for a client that meters
+    // from `session.usage`: counts, never content.
+    if (gateway.isSideRun(event.sessionId) && event.type !== 'session.usage') {
+      return;
+    }
     if (event.type === 'session.created') {
       for (const client of clients) {
         if (client.filter.agentId === event.agentId) {
@@ -150,7 +188,16 @@ export const createEventStream = (gateway: Gateway) => {
     // first stamped that failure with the second turn's id — falsely killing
     // a turn that was fine while the client waiting on the first one never
     // heard anything.
-    const turnId = turnOverrides.get(event.sessionId) ?? gateway.activeTurnId(event.sessionId);
+    const current = turnOverrides.get(event.sessionId) ?? gateway.activeTurnId(event.sessionId);
+    const turnId = event.type === 'permission.decided' && event.shadow === true
+      ? callTurns.get(callKey(event.sessionId, event.callId, event.toolName)) ?? current
+      : current;
+    // A refused call is bound too: its shadow review can still be out when
+    // the real path says no, and the runner emits tool.denied, not
+    // tool.called, for it.
+    if (current !== undefined && (event.type === 'tool.called' || event.type === 'tool.denied')) {
+      rememberCallTurn(callKey(event.sessionId, event.call.id, event.call.toolName), current);
+    }
     if (turnId !== undefined && (event.type === 'session.failed' || event.type === 'session.completed')) {
       // Noted before the no-clients shortcut below: whether a turn reported
       // its own outcome is not a question about who is watching.

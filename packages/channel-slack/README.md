@@ -721,7 +721,9 @@ Validation is membership: the app must be able to see the conversation
 (`conversations.info`) and be a member of it — `/invite` it where it should
 report. A DM id passes on its own, because a `D…` conversation exists only
 because someone opened it with the app; the adapter never opens new DMs, so
-an agent cannot cold-message a workspace. This is what the
+an agent cannot cold-message a workspace. A person's user id (`U…`, or `W…`
+on Enterprise Grid) is refused with that reason: name the `D…` id of a DM
+they already have with the app instead. This is what the
 `channels:read` / `groups:read` / `mpim:read` scopes in the manifest are
 for — an app created before this shipped needs them added under **OAuth &
 Permissions** and reinstalled once, or every destination reads as invisible.
