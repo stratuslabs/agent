@@ -348,6 +348,12 @@ test('a page of unclosed tags is extracted in one pass, not one rescan per tag',
     // Every end tag searches the open elements, so the stack must not
     // grow with the page.
     '<div>'.repeat(40_000) + '</span>'.repeat(30_000),
+    // A pass that removes a tag can take the page's last `>` with it, and
+    // leave the openers before it with none ahead: the comment here, and
+    // the raw text a textarea holds, once its noscript start tags go.
+    '<a'.repeat(5_000) + '<!---->',
+    '<textarea>' + '<noscript></noscript'.repeat(20_000),
+    '<p>x</p><xmp>' + '<li></li'.repeat(40_000),
   ];
   assert.equal(await extractsWithin(pages, 10_000), true);
   for (const page of pages) {

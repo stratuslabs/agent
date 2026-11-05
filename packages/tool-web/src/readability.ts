@@ -1729,6 +1729,22 @@ const removeSpans = (text: string, opener: RegExp, closer: RegExp, replacement: 
   return kept + text.slice(cursor);
 };
 
+/**
+ * `pass` run on the text before its last `>`, the rest kept as it is. Every
+ * pattern `htmlToText` removes tags with ends in `>`, so none can match
+ * past the last one, and the result is the same; but from every `<` after
+ * it a `[^>]*` scans to the end of the text and fails, and the final
+ * sweep's two quantifiers side by side then try every split as well. A
+ * pass that removes a tag can take the last `>` with it — the comment in
+ * `<a<a<a…<!---->`, read as markup only after the comments have gone —
+ * which left four thousand characters of `<a` taking fifty seconds. So
+ * each pass finds the last `>` again.
+ */
+const beforeLastGt = (text: string, pass: (head: string) => string): string => {
+  const end = text.lastIndexOf('>') + 1;
+  return pass(text.slice(0, end)) + text.slice(end);
+};
+
 export const extractTitle = (html: string): string | undefined => {
   // Two searches rather than one lazy regex, for the reason `removeSpans`
   // gives: a page of `<title>` with no `</title>` made the regex rescan the
@@ -1771,7 +1787,7 @@ export const htmlToText = (page: string): string => {
   // only to `-->`, a `--!>` comment ran on and the markup inside it
   // reached the visibility pass.
   let text = removeSpans(html.slice(0, end), /<!--/g, COMMENT_END, '');
-  text = text.replace(/<[!?][^>]*>/g, ' ');
+  text = beforeLastGt(text, (head) => head.replace(/<[!?][^>]*>/g, ' '));
 
   // Before the dropped elements, which are cut out by name with no regard
   // for the tree: an end tag inside a `nav` closes its ancestors as much as
@@ -1783,15 +1799,16 @@ export const htmlToText = (page: string): string => {
   text = visible.text;
 
   for (const element of DROPPED_ELEMENTS) {
-    text = removeSpans(text, new RegExp(`<${element}\\b[^>]*>`, 'gi'), new RegExp(`</${element}>`, 'gi'), ' ');
+    text = beforeLastGt(text, (head) =>
+      removeSpans(head, new RegExp(`<${element}\\b[^>]*>`, 'gi'), new RegExp(`</${element}>`, 'gi'), ' '));
     // Unclosed or self-closing forms of the same elements.
-    text = text.replace(new RegExp(`<${element}\\b[^>]*/?>`, 'gi'), ' ');
+    text = beforeLastGt(text, (head) => head.replace(new RegExp(`<${element}\\b[^>]*/?>`, 'gi'), ' '));
   }
-  text = removeSpans(text, /<head\b[^>]*>/gi, /<\/head>/gi, ' ');
+  text = beforeLastGt(text, (head) => removeSpans(head, /<head\b[^>]*>/gi, /<\/head>/gi, ' '));
 
-  text = text.replace(/<li\b[^>]*>/gi, '\n- ');
+  text = beforeLastGt(text, (head) => head.replace(/<li\b[^>]*>/gi, '\n- '));
   for (const element of BLOCK_ELEMENTS) {
-    text = text.replace(new RegExp(`</?${element}\\b[^>]*>`, 'gi'), '\n');
+    text = beforeLastGt(text, (head) => head.replace(new RegExp(`</?${element}\\b[^>]*>`, 'gi'), '\n'));
   }
   // Inline formatting is removed; every other tag becomes a space.
   //
@@ -1814,14 +1831,12 @@ export const htmlToText = (page: string): string => {
   // character outside `[a-zA-Z0-9-]` reads `<a:widget>` as the inline `a`
   // and deletes it — and a namespaced element is precisely the unknown tag
   // this default exists for.
-  text = text.replace(
-    /<\/?([a-zA-Z][^\s/>]*)[^>]*>/g,
-    (_tag, rawName: string) => {
+  text = beforeLastGt(text, (head) =>
+    head.replace(/<\/?([a-zA-Z][^\s/>]*)[^>]*>/g, (_tag, rawName: string) => {
       const name = rawName.toLowerCase();
       if (name === QUOTE_ELEMENT) return '"';
       return INLINE_ELEMENTS.has(name) ? '' : ' ';
-    },
-  );
+    }));
 
   text = decodeEntities(text + visible.tail);
 
