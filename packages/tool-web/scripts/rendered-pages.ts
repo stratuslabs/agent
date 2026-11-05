@@ -229,6 +229,23 @@ const CORPUS: readonly string[] = [
   '<i style="display:block"><b><p><span style="display:inherit;content-visibility:hidden">MARK</span></b>AFTER</p></i>',
   '<b style="display:flex"><p>FIRST<span style="content-visibility:hidden">MARK</span></b>AFTER</p>',
   '<b hidden=until-found><p><i style="display:block;content-visibility:inherit">MARK</i></b>AFTER</p>',
+  // A `>` inside a quoted value, and markup the page ends inside: a tag,
+  // a comment, a script or a style whose end never arrives, as a page cut
+  // by the download cap ends.
+  '<p>SHOWN</p><div title="x>LEAKA">AFTER</div>',
+  '<p>SHOWN</p><time title=\'13 June 2024 > LEAKB\'>DATE</time>',
+  '<p>SHOWN</p><div title="LEAKC',
+  '<p>SHOWN</p><a href=LEAKD',
+  '<p>SHOWN</p>TAIL <bLEAKE',
+  '<p>SHOWN</p></divLEAKF',
+  '<p>SHOWN</p><div data-props="{&quot;a&quot;:1} > LEAKG',
+  '<p>SHOWN</p><!-- LEAKH',
+  '<p>SHOWN</p><!-- open > LEAKI',
+  '<p>SHOWN</p><?xml LEAKJ',
+  '<p>SHOWN</p><script>var x = "LEAKK";',
+  '<p>SHOWN</p><style>p::after { content: "LEAKL" }',
+  '<p>SHOWN</p><script>LEAKM()</script',
+  '<p>SHOWN</p>TAIL 5 < 10 AND <3',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */
