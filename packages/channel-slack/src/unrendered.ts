@@ -58,19 +58,6 @@ export const createUnrenderedOutcomes = ({
   slackStopper,
 }: UnrenderedOutcomesDeps) => {
   /**
-   * Says so in the thread when a turn fails with nobody rendering it.
-   *
-   * The intake path reports a failure through the renderer it opened, so a
-   * turn this process started is always answered. A turn it did NOT start
-   * has no renderer: one the startup sweep failed because the last daemon
-   * died mid-turn, or one whose recovery could not be finished. Those are
-   * exactly the cases where the person is still looking at the thread,
-   * and silence there reads as an agent that simply never replied.
-   *
-   * The routing has to come from the durable session, because the only
-   * in-memory copy died with the process that had it.
-   */
-  /**
    * Post a turn's outcome into its thread ahead of a renderer queued behind
    * it, when there is one — through that renderer's placeholder, so the
    * thread reads in order — and as fresh messages otherwise. Each chunk on
@@ -149,6 +136,19 @@ export const createUnrenderedOutcomes = ({
     return landed;
   };
 
+  /**
+   * Says so in the thread when a turn fails with nobody rendering it.
+   *
+   * The intake path reports a failure through the renderer it opened, so a
+   * turn this process started is always answered. A turn it did NOT start
+   * has no renderer: one the startup sweep failed because the last daemon
+   * died mid-turn, or one whose recovery could not be finished. Those are
+   * exactly the cases where the person is still looking at the thread,
+   * and silence there reads as an agent that simply never replied.
+   *
+   * The routing has to come from the durable session, because the only
+   * in-memory copy died with the process that had it.
+   */
   const reportUnrenderedFailure = async (
     event: Extract<StratusEvent, { type: 'session.failed' }>,
     behind: HandoverClaim | undefined,
