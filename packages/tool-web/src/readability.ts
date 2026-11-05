@@ -1112,7 +1112,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // Every element closed before the end of the page, by id: a copy shares
   // its original's, so closing either closes both.
   const closed = new Set<number>();
-  // Whether any element could hide anything; a page with none is returned as it is.
+  // Whether any element could hide anything; on a page with none, nothing is dropped.
   let mayHide = false;
   // A run of text between tags, or one tag, and the node it lands in.
   const segments: { start: number; end: number; node: TreeNode | undefined; tag?: ScannedTag }[] = [];

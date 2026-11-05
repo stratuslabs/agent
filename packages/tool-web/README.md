@@ -60,10 +60,14 @@ stylesheet, a class, or a zero font size still comes through, which is
 why every result is labelled `external`. `raw: true` returns the body as
 received.
 
+Markup the page ends inside is dropped as a browser drops it, not
+returned as text: a tag, comment, script or style that `maxBytes` cut
+off, or that never ends.
+
 Each element is judged where a browser's parser puts it, misnested and
 unclosed markup included, so text moved out of a hidden element is kept
 and text moved into one is not. The tests hold this to Chromium: some
-1,700 pages, hand-written and generated, with what Chromium shows of each
+1,800 pages, hand-written and generated, with what Chromium shows of each
 recorded in [`test/rendered-in-chromium.json`](test/rendered-in-chromium.json)
 by [`scripts/render-in-chromium.ts`](scripts/render-in-chromium.ts).
 
