@@ -1000,6 +1000,14 @@ const scanTags = (html: string): ScannedTag[] => {
 const FOREIGN_ROOTS = new Set(['svg', 'math']);
 
 /**
+ * The svg and MathML elements inside which the tree builder may read HTML
+ * again: `foreignObject`, an svg `title` or `desc`, MathML's text elements
+ * and an `annotation-xml`. Named without regard to which of svg or math
+ * they are in, which can only make the walk more careful.
+ */
+const INTEGRATION_POINTS = new Set(['foreignobject', 'desc', 'title', 'mi', 'mo', 'mn', 'ms', 'mtext', 'annotation-xml']);
+
+/**
  * Start tags that end foreign content, from the tree builder's rules for
  * parsing tokens in foreign content (a `font` does with a color, face or
  * size); so do the end tags `</p>` and `</br>`.
@@ -1030,20 +1038,21 @@ const COMMENT_END = /(?<=<!--)-?>|--!?>/g;
  * `5 < 10` is prose: only a `<` followed by a letter, `/`, `!` or `?`
  * opens anything. Each character is visited a bounded number of times.
  *
- * Inside svg or math, `<![CDATA[` is character data up to `]]>`, and a
- * `style` or `script` is a foreign element whose text is read as markup
- * like any other, and which ends with its container, so neither may cut
- * the page. Which svg and math elements are
- * open is kept as a list of names rather than a tree: an end tag closes
- * the last one of its name and everything opened inside it, a `/>` never
- * opens one, and an HTML element such as `p` breaks out of all of them,
- * as in the tree builder. The integration points where HTML is read
- * again (`foreignObject`, MathML's `mi`) count as foreign, so a script the
- * page ends inside there is kept, as before this walk existed, rather than
- * a page cut short.
+ * In svg or math a script or style is not raw text but an element like
+ * any other, and `<![CDATA[` is character data up to `]]>`, so the walk
+ * keeps the elements open there as the tree builder does: an end tag
+ * closes the last one of its name and everything opened inside it, and a
+ * `/>` opens nothing. It does not follow the tree builder back into HTML
+ * from inside svg or math. Where the page would go there — a tag such as
+ * `p` that breaks out, a start tag inside an integration point such as
+ * `foreignObject`, an end tag that closes nothing open in svg or math —
+ * the walk stops and the page is kept whole, as this extractor kept every
+ * page before the walk existed: a script left in is a lesser fault than
+ * an article cut short.
  */
 const openAtEnd = (html: string): number => {
   let index = 0;
+  // The svg and math elements open, outermost first; empty in HTML.
   const foreign: string[] = [];
   for (;;) {
     const start = html.indexOf('<', index);
@@ -1078,25 +1087,24 @@ const openAtEnd = (html: string): number => {
     }
     if (tag === 'unterminated') return start;
     index = tag.end;
-    if (tag.closing) {
-      if (FOREIGN_ROOTS.has(tag.name)) {
-        const opened = foreign.lastIndexOf(tag.name);
-        if (opened !== -1) foreign.length = opened;
-      } else if (tag.name === 'p' || tag.name === 'br') {
-        foreign.length = 0;
-      }
-      continue;
-    }
-    if (FOREIGN_ROOTS.has(tag.name)) {
-      // Bounded as the visibility pass's stack is, for the same reason:
-      // every end tag naming one searches the list.
-      if (!tag.selfClosing && foreign.length < MAX_OPEN_ELEMENTS) foreign.push(tag.name);
-      continue;
-    }
     if (foreign.length > 0) {
+      if (tag.closing) {
+        const opened = foreign.lastIndexOf(tag.name);
+        if (opened === -1) return html.length;
+        foreign.length = opened;
+        continue;
+      }
       const font = tag.name === 'font' && ['color', 'face', 'size'].some((name) => tag.attributes.has(name));
-      if (!FOREIGN_BREAKOUT.has(tag.name) && !font) continue;
-      foreign.length = 0;
+      if (FOREIGN_BREAKOUT.has(tag.name) || font || INTEGRATION_POINTS.has(foreign.at(-1) ?? '')) return html.length;
+      // Unbounded, and still linear: an end tag searches the list only as
+      // far as it then closes, or ends the walk.
+      if (!tag.selfClosing) foreign.push(tag.name);
+      continue;
+    }
+    if (tag.closing) continue;
+    if (FOREIGN_ROOTS.has(tag.name)) {
+      if (!tag.selfClosing) foreign.push(tag.name);
+      continue;
     }
     if (tag.name === 'plaintext') return html.length;
     if (RAW_TEXT_ELEMENTS.has(tag.name)) {

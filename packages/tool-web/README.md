@@ -62,7 +62,10 @@ received.
 
 Markup the page ends inside is dropped as a browser drops it, not
 returned as text: a tag, comment, script or style that `maxBytes` cut
-off, or that never ends.
+off, or that never ends. The one exception is a page that leaves `svg`
+or `math` for HTML before that point (a `p` inside an `svg`, say). Telling
+where that happens means rebuilding the parser's tree, so the page is kept
+whole there, script included, rather than risk cutting it short.
 
 Each element is judged where a browser's parser puts it, misnested and
 unclosed markup included, so text moved out of a hidden element is kept

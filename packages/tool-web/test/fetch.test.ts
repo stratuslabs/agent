@@ -463,11 +463,12 @@ test('a script or style inside svg or math is not raw text, so it does not run t
   assert.equal(htmlToText('<p>a</p><svg><svg></svg></svg><script>LEAK()'), 'a');
   // An end tag closes every foreign element opened inside the one it names.
   assert.equal(htmlToText('<p>a</p><svg><math></svg><script>LEAK()'), 'a');
-  assert.equal(htmlToText('<p>a</p><svg></math><style>x</svg><p>shown</p>'), 'a\n\nshown');
-  // An HTML element like b breaks out of foreign content, as in a browser,
-  // and so does a </p>.
-  assert.equal(htmlToText('<p>a</p><svg><b>b<script>LEAK()'), 'a\nb');
-  assert.equal(htmlToText('<p>a</p><svg></p><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg><g></svg><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg><math><style>x</math></svg><p>shown</p>'), 'a\n\nshown');
+  // Icons and formulas as pages write them leave foreign content cleanly.
+  assert.equal(htmlToText('<svg><g><title>Close</title><path d="M0 0"/></g></svg><p>shown</p><script>LEAK()'), 'shown');
+  assert.equal(htmlToText('<math><mi>x</mi><mo>+</mo><mn>2</mn></math><p>shown</p><script>LEAK()'), 'x + 2\nshown');
+  assert.equal(htmlToText('<p>a</p><svg><title/><path/></svg><script>LEAK()'), 'a');
   // In svg or math, `<![CDATA[` runs to `]]>`, `>` and quotes included.
   assert.equal(
     htmlToText(`<p>before</p><svg><style><![CDATA[ a > b { content: "<a href='x" } ]]></style></svg><p>shown</p>`),
@@ -476,6 +477,23 @@ test('a script or style inside svg or math is not raw text, so it does not run t
   assert.match(htmlToText('<p>before</p><svg><![CDATA[<x></svg><script>]]></svg><p>shown</p>'), /shown$/);
   // A self-closing slash inside an unquoted value is part of the value.
   assert.equal(htmlToText('<svg x=y/><style>x</svg><p>shown</p>'), 'shown');
+});
+
+test('where svg or math goes back to HTML, the page is kept whole rather than cut short', () => {
+  // The tree builder leaves foreign content for a tag like b, a </p>, HTML
+  // inside an integration point, or an end tag naming nothing open in svg
+  // or math. The walk does not follow it there: it keeps the rest of the
+  // page, and the text a wrong guess about the tree would cut stays.
+  // Each of these lost its last paragraph when the walk guessed.
+  assert.match(htmlToText('<svg><foreignObject><p>x</p></foreignObject><style>x</svg><p>shown</p>'), /shown$/);
+  assert.match(htmlToText('<svg><svg><foreignObject><p></svg></p></foreignObject><style>x</svg><p>shown</p>'), /shown$/);
+  assert.match(htmlToText('<svg><foreignObject><section></svg></section></foreignObject><style>x</svg><p>shown</p>'), /shown$/);
+  assert.equal(htmlToText('<div><svg></div><style>a<b x="</style><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<svg><p>x</p><style>a<b x="</style><p>shown</p>'), 'x\n\nshown');
+  // So a script after it is kept, as it always was.
+  assert.equal(htmlToText('<p>a</p><svg><b>b<script>LEAK()'), 'a\nb LEAK()');
+  assert.equal(htmlToText('<p>a</p><svg></p><script>LEAK()'), 'a\n\nLEAK()');
+  assert.equal(htmlToText('<p>a</p><svg><foreignObject><div>d</div></foreignObject></svg><script>LEAK()'), 'a\nLEAK()');
 });
 
 test('an end tag inside a textarea or title does not close a hidden element', () => {
