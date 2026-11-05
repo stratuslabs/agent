@@ -860,6 +860,8 @@ interface ScannedTag {
   name: string;
   /** Lowercased name to raw value; the first of a repeated name, as a browser keeps it. */
   attributes: Map<string, string>;
+  /** Ends in `/>`, which closes the element at once in svg and math, and nowhere else. */
+  selfClosing: boolean;
 }
 
 type AttributeState = 'beforeName' | 'name' | 'afterName' | 'beforeValue' | 'unquoted';
@@ -907,7 +909,10 @@ const readTag = (html: string, start: number): ScannedTag | 'unterminated' | und
       if (state === 'name') keep(asciiLower(html.slice(mark, cursor)), '');
       else if (state === 'afterName' || state === 'beforeValue') keep(attribute, '');
       else if (state === 'unquoted') keep(attribute, html.slice(mark, cursor));
-      return { start, end: cursor + 1, closing, name, attributes };
+      // A `/` in an unquoted value is part of it; anywhere else it is
+      // read in the before-name state.
+      const selfClosing = state === 'beforeName' && html[cursor - 1] === '/';
+      return { start, end: cursor + 1, closing, name, attributes, selfClosing };
     }
     const space = isAsciiWhitespace(char);
     if (state === 'beforeName') {
@@ -991,6 +996,20 @@ const scanTags = (html: string): ScannedTag[] => {
   return tags;
 };
 
+/** The elements that start foreign content. */
+const FOREIGN_ROOTS = new Set(['svg', 'math']);
+
+/**
+ * Start tags that end foreign content, from the tree builder's rules for
+ * parsing tokens in foreign content (a `font` does with a color, face or
+ * size); so do the end tags `</p>` and `</br>`.
+ */
+const FOREIGN_BREAKOUT = new Set([
+  'b', 'big', 'blockquote', 'body', 'br', 'center', 'code', 'dd', 'div', 'dl', 'dt', 'em', 'embed', 'h1', 'h2', 'h3',
+  'h4', 'h5', 'h6', 'head', 'hr', 'i', 'img', 'li', 'listing', 'menu', 'meta', 'nobr', 'ol', 'p', 'pre', 'ruby', 's',
+  'small', 'span', 'strong', 'strike', 'sub', 'sup', 'table', 'tt', 'u', 'ul', 'var',
+]);
+
 /**
  * Where a comment ends, as the HTML tokenizer ends one: at `-->`, at
  * `--!>`, or at once in `<!-->` and `<!--->`. Global, searched from just
@@ -1010,9 +1029,20 @@ const COMMENT_END = /(?<=<!--)-?>|--!?>/g;
  * a quoted value or a script is not mistaken for the start of markup, and
  * `5 < 10` is prose: only a `<` followed by a letter, `/`, `!` or `?`
  * opens anything. Each character is visited a bounded number of times.
+ *
+ * Inside svg or math, a `style` or `script` is a foreign element whose
+ * text is read as markup like any other, and which ends with its
+ * container, so it must not cut the page. Which svg and math elements are
+ * open is counted rather than built: their end tags close them, a `/>`
+ * never opens one, and an HTML element such as `p` breaks out of all of
+ * them, as in the tree builder. The integration points where HTML is read
+ * again (`foreignObject`, MathML's `mi`) count as foreign, so a script the
+ * page ends inside there is kept, as before this walk existed, rather than
+ * a page cut short.
  */
 const openAtEnd = (html: string): number => {
   let index = 0;
+  let foreign = 0;
   for (;;) {
     const start = html.indexOf('<', index);
     if (start === -1) return html.length;
@@ -1040,7 +1070,20 @@ const openAtEnd = (html: string): number => {
     }
     if (tag === 'unterminated') return start;
     index = tag.end;
-    if (tag.closing) continue;
+    if (tag.closing) {
+      if (FOREIGN_ROOTS.has(tag.name) && foreign > 0) foreign -= 1;
+      else if (tag.name === 'p' || tag.name === 'br') foreign = 0;
+      continue;
+    }
+    if (FOREIGN_ROOTS.has(tag.name)) {
+      if (!tag.selfClosing) foreign += 1;
+      continue;
+    }
+    if (foreign > 0) {
+      const font = tag.name === 'font' && ['color', 'face', 'size'].some((name) => tag.attributes.has(name));
+      if (!FOREIGN_BREAKOUT.has(tag.name) && !font) continue;
+      foreign = 0;
+    }
     if (tag.name === 'plaintext') return html.length;
     if (RAW_TEXT_ELEMENTS.has(tag.name)) {
       // Raw text runs to its end tag, and the page may end before that end

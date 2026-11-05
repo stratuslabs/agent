@@ -445,6 +445,25 @@ test('a script or style the page ends inside is dropped to the end', () => {
   assert.equal(htmlToText('<p>a</p><textarea>kept'), 'a\nkept');
 });
 
+test('a script or style inside svg or math is not raw text, so it does not run to the end', () => {
+  // In foreign content the tokenizer stays in data: these elements close
+  // with their container, or at once when self-closing, and the page goes on.
+  assert.equal(htmlToText('<svg><style>x</svg><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<svg><style/></svg><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<svg><script href="a.js"/></svg><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<math><style/></math><p>shown</p>'), 'shown');
+  // Closed, or self-closed, the svg is no longer foreign content around them.
+  assert.equal(htmlToText('<p>a</p><svg></svg><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg/><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg><svg></svg></svg><script>LEAK()'), 'a');
+  // An HTML element like b breaks out of foreign content, as in a browser,
+  // and so does a </p>.
+  assert.equal(htmlToText('<p>a</p><svg><b>b<script>LEAK()'), 'a\nb');
+  assert.equal(htmlToText('<p>a</p><svg></p><script>LEAK()'), 'a');
+  // A self-closing slash inside an unquoted value is part of the value.
+  assert.equal(htmlToText('<svg x=y/><style>x</svg><p>shown</p>'), 'shown');
+});
+
 test('an end tag inside a textarea or title does not close a hidden element', () => {
   assert.equal(
     htmlToText('<div hidden><textarea></div>leak</textarea>still hidden</div><p>shown</p>'),

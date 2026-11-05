@@ -246,6 +246,19 @@ const CORPUS: readonly string[] = [
   '<p>SHOWN</p><style>p::after { content: "LEAKL" }',
   '<p>SHOWN</p><script>LEAKM()</script',
   '<p>SHOWN</p>TAIL 5 < 10 AND <3',
+  // In svg and math a style or script is not raw text: it ends with its
+  // container, and the page after it is read as usual.
+  '<svg><style>SVGSTYLE</svg><p>SHOWN</p>',
+  '<svg><style/></svg><p>SHOWN</p>',
+  '<svg><script/></svg><p>SHOWN</p>',
+  '<svg x=y/><style>SVGSTYLE</svg><p>SHOWN</p>',
+  '<math><style/></math><p>SHOWN</p>',
+  '<svg/><p>SHOWN</p><script>LEAKN()',
+  '<p>SHOWN</p><svg><p>BROKE</p><script>LEAKO()',
+  '<p>SHOWN</p><svg/><script>LEAKP()',
+  '<p>SHOWN</p><svg></svg><script>LEAKQ()',
+  '<p>SHOWN</p><svg><b>BOLD<script>LEAKR()',
+  '<p>SHOWN</p><svg></p><script>LEAKS()',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */
