@@ -60,7 +60,9 @@ import {
   type UnreadReasons,
 } from './attachments.ts';
 import type { AgentConnection } from './connection.ts';
+import type { Handover } from './handover.ts';
 import type { PendingApprovalPost, PendingCredentialPost } from './pending-posts.ts';
+import type { PendingIntake } from './pending-intake.ts';
 import { slackErrorCode } from './slack-errors.ts';
 import {
   defaultFetchFile,
@@ -722,19 +724,6 @@ const REPLAY_READ_MAX_MS = 10_000;
 /** The most messages kept at once; past it, a new one is refused, not kept. */
 const PENDING_INTAKE_MAX = 200;
 
-/** A message kept across a restart (see `pendingIntakePath`). No text. */
-interface PendingIntake {
-  agentId: string;
-  team: string;
-  channel: string;
-  ts: string;
-  threadTs?: string;
-  user: string;
-  channelType?: string;
-  /** When it was kept, in epoch milliseconds. */
-  keptAt: number;
-}
-
 const isPendingIntake = (value: unknown): value is PendingIntake => {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -1046,10 +1035,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
   const seenOrder: string[] = [];
-  // `cold`: rebuilt from a thread read rather than seen live. Those are
-  // posts only (a mention nobody has answered yet is not one), so the
-  // owner rule may use them but `holderAt` (who was asked last) may not.
-  type Handover = { agentId: string; ts: string; takes?: boolean; cold?: boolean };
 
   /**
    * Who each thread was last handed to, in SLACK RECEIPT ORDER — written
