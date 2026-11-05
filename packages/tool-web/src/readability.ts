@@ -865,17 +865,106 @@ interface ScannedTag {
 type AttributeState = 'beforeName' | 'name' | 'afterName' | 'beforeValue' | 'unquoted';
 
 /**
- * The page's tags, in one pass, read the way the HTML tokenizer reads them
+ * The tag that starts at `start`, read the way the HTML tokenizer reads it
  * rather than up to the first `>`. Attributes go through the tokenizer's
  * own states, because each shortcut is a page the browser reads one way
  * and this read another: a quote opens a value only where a value starts,
  * so `<div title="1>0" hidden>` is hidden; an `=` or a quote inside an
  * unquoted value is a character of it, so `<div x=a=">` ends at its `>`
- * rather than swallowing the page. A tag still open at the end of the page
- * is dropped, as a browser drops it, and nothing after it is a tag; nor is
- * anything after `<plaintext>`, which has no end tag at all. Every
- * character is visited a bounded number of times, so a hostile page costs
- * its length.
+ * rather than swallowing the page. `undefined` when the `<` there opens no
+ * tag, and `'unterminated'` when the page ends before the tag does. Every
+ * character of the tag is visited a bounded number of times.
+ */
+const readTag = (html: string, start: number): ScannedTag | 'unterminated' | undefined => {
+  let cursor = start + 1;
+  const closing = html[cursor] === '/';
+  if (closing) cursor += 1;
+  if (!/[a-zA-Z]/.test(html[cursor] ?? '')) return undefined;
+  const nameStart = cursor;
+  while (cursor < html.length && !isAsciiWhitespace(html[cursor] ?? '') && html[cursor] !== '/' && html[cursor] !== '>') {
+    cursor += 1;
+  }
+  const name = asciiLower(html.slice(nameStart, cursor));
+
+  const attributes = new Map<string, string>();
+  const keep = (attribute: string, value: string): void => {
+    if (!attributes.has(attribute)) attributes.set(attribute, value);
+  };
+  let state: AttributeState = 'beforeName';
+  let attribute = '';
+  let mark = cursor;
+  while (cursor < html.length) {
+    const char = html[cursor] ?? '';
+    if (state === 'beforeValue' && (char === '"' || char === "'")) {
+      const close = html.indexOf(char, cursor + 1);
+      if (close === -1) return 'unterminated';
+      keep(attribute, html.slice(cursor + 1, close));
+      cursor = close + 1;
+      state = 'beforeName';
+      continue;
+    }
+    if (char === '>') {
+      if (state === 'name') keep(asciiLower(html.slice(mark, cursor)), '');
+      else if (state === 'afterName' || state === 'beforeValue') keep(attribute, '');
+      else if (state === 'unquoted') keep(attribute, html.slice(mark, cursor));
+      return { start, end: cursor + 1, closing, name, attributes };
+    }
+    const space = isAsciiWhitespace(char);
+    if (state === 'beforeName') {
+      if (!space && char !== '/') {
+        state = 'name';
+        mark = cursor;
+      }
+    } else if (state === 'name') {
+      if (space || char === '/' || char === '=') {
+        attribute = asciiLower(html.slice(mark, cursor));
+        if (char === '=') {
+          state = 'beforeValue';
+        } else if (space) {
+          state = 'afterName';
+        } else {
+          keep(attribute, '');
+          state = 'beforeName';
+        }
+      }
+    } else if (state === 'afterName') {
+      if (char === '=') {
+        state = 'beforeValue';
+      } else if (char === '/') {
+        keep(attribute, '');
+        state = 'beforeName';
+      } else if (!space) {
+        keep(attribute, '');
+        state = 'name';
+        mark = cursor;
+      }
+    } else if (state === 'beforeValue') {
+      if (!space) {
+        state = 'unquoted';
+        mark = cursor;
+      }
+    } else if (space) {
+      keep(attribute, html.slice(mark, cursor));
+      state = 'beforeName';
+    }
+    cursor += 1;
+  }
+  return 'unterminated';
+};
+
+/** Where the end tag of the raw-text element `name` begins, from `from`; -1 if the page has none. */
+const rawTextEnd = (html: string, name: string, from: number): number => {
+  const endTag = new RegExp(`</${name}[ \\t\\n\\f\\r/>]`, 'gi');
+  endTag.lastIndex = from;
+  return endTag.exec(html)?.index ?? -1;
+};
+
+/**
+ * The page's tags, in one pass, each read by `readTag`. A tag still open
+ * at the end of the page is dropped, as a browser drops it, and nothing
+ * after it is a tag; nor is anything after `<plaintext>`, which has no end
+ * tag at all. Every character is visited a bounded number of times, so a
+ * hostile page costs its length.
  */
 const scanTags = (html: string): ScannedTag[] => {
   const tags: ScannedTag[] = [];
@@ -883,101 +972,88 @@ const scanTags = (html: string): ScannedTag[] => {
   for (;;) {
     const start = html.indexOf('<', index);
     if (start === -1) break;
-    let cursor = start + 1;
-    const closing = html[cursor] === '/';
-    if (closing) cursor += 1;
-    if (!/[a-zA-Z]/.test(html[cursor] ?? '')) {
+    const tag = readTag(html, start);
+    if (tag === undefined) {
       index = start + 1;
       continue;
     }
-    const nameStart = cursor;
-    while (cursor < html.length && !isAsciiWhitespace(html[cursor] ?? '') && html[cursor] !== '/' && html[cursor] !== '>') {
-      cursor += 1;
-    }
-    const name = asciiLower(html.slice(nameStart, cursor));
-
-    const attributes = new Map<string, string>();
-    const keep = (attribute: string, value: string): void => {
-      if (!attributes.has(attribute)) attributes.set(attribute, value);
-    };
-    let state: AttributeState = 'beforeName';
-    let attribute = '';
-    let mark = cursor;
-    let end = -1;
-    while (cursor < html.length) {
-      const char = html[cursor] ?? '';
-      if (state === 'beforeValue' && (char === '"' || char === "'")) {
-        const close = html.indexOf(char, cursor + 1);
-        if (close === -1) {
-          cursor = html.length;
-          break;
-        }
-        keep(attribute, html.slice(cursor + 1, close));
-        cursor = close + 1;
-        state = 'beforeName';
-        continue;
-      }
-      if (char === '>') {
-        if (state === 'name') keep(asciiLower(html.slice(mark, cursor)), '');
-        else if (state === 'afterName' || state === 'beforeValue') keep(attribute, '');
-        else if (state === 'unquoted') keep(attribute, html.slice(mark, cursor));
-        end = cursor;
-        break;
-      }
-      const space = isAsciiWhitespace(char);
-      if (state === 'beforeName') {
-        if (!space && char !== '/') {
-          state = 'name';
-          mark = cursor;
-        }
-      } else if (state === 'name') {
-        if (space || char === '/' || char === '=') {
-          attribute = asciiLower(html.slice(mark, cursor));
-          if (char === '=') {
-            state = 'beforeValue';
-          } else if (space) {
-            state = 'afterName';
-          } else {
-            keep(attribute, '');
-            state = 'beforeName';
-          }
-        }
-      } else if (state === 'afterName') {
-        if (char === '=') {
-          state = 'beforeValue';
-        } else if (char === '/') {
-          keep(attribute, '');
-          state = 'beforeName';
-        } else if (!space) {
-          keep(attribute, '');
-          state = 'name';
-          mark = cursor;
-        }
-      } else if (state === 'beforeValue') {
-        if (!space) {
-          state = 'unquoted';
-          mark = cursor;
-        }
-      } else if (space) {
-        keep(attribute, html.slice(mark, cursor));
-        state = 'beforeName';
-      }
-      cursor += 1;
-    }
-    if (end === -1) break;
-    tags.push({ start, end: end + 1, closing, name, attributes });
-    index = end + 1;
-    if (closing) continue;
-    if (name === 'plaintext') break;
-    if (RAW_TEXT_ELEMENTS.has(name)) {
-      const endTag = new RegExp(`</${name}[ \\t\\n\\f\\r/>]`, 'gi');
-      endTag.lastIndex = index;
-      const found = endTag.exec(html);
-      if (found === null) break;
-      index = found.index;
+    if (tag === 'unterminated') break;
+    tags.push(tag);
+    index = tag.end;
+    if (tag.closing) continue;
+    if (tag.name === 'plaintext') break;
+    if (RAW_TEXT_ELEMENTS.has(tag.name)) {
+      const found = rawTextEnd(html, tag.name, index);
+      if (found === -1) break;
+      index = found;
     }
   }
   return tags;
+};
+
+/**
+ * Where a comment ends, as the HTML tokenizer ends one: at `-->`, at
+ * `--!>`, or at once in `<!-->` and `<!--->`. Global, searched from just
+ * after the `<!--`.
+ */
+const COMMENT_END = /(?<=<!--)-?>|--!?>/g;
+
+/**
+ * Where the page ends inside markup: the `<` of a tag, comment, doctype
+ * or processing instruction with no end, or of a script, style or other
+ * dropped element whose end tag never arrives — or the page's length when
+ * it ends in text. A browser that reaches the end of the page in any of
+ * these drops what it was reading, so none of it is text. A page cut by
+ * the download cap usually ends this way: inside a tag, or a long script.
+ *
+ * The page is walked as the tokenizer walks it, so a `<` inside a comment,
+ * a quoted value or a script is not mistaken for the start of markup, and
+ * `5 < 10` is prose: only a `<` followed by a letter, `/`, `!` or `?`
+ * opens anything. Each character is visited a bounded number of times.
+ */
+const openAtEnd = (html: string): number => {
+  let index = 0;
+  for (;;) {
+    const start = html.indexOf('<', index);
+    if (start === -1) return html.length;
+    const next = html[start + 1] ?? '';
+    // A comment; or `<!`, `<?` or `</` before anything but a letter, `>`
+    // or the end, which the tokenizer reads as a comment to the next `>`.
+    if (next === '!' || next === '?' || (next === '/' && start + 2 < html.length && !/[a-zA-Z>]/.test(html[start + 2] ?? ''))) {
+      let close = -1;
+      if (html.startsWith('<!--', start)) {
+        COMMENT_END.lastIndex = start + 4;
+        const found = COMMENT_END.exec(html);
+        if (found !== null) close = found.index + found[0].length;
+      } else {
+        const gt = html.indexOf('>', start + 2);
+        if (gt !== -1) close = gt + 1;
+      }
+      if (close === -1) return start;
+      index = close;
+      continue;
+    }
+    const tag = readTag(html, start);
+    if (tag === undefined) {
+      index = start + 1;
+      continue;
+    }
+    if (tag === 'unterminated') return start;
+    index = tag.end;
+    if (tag.closing) continue;
+    if (tag.name === 'plaintext') return html.length;
+    if (RAW_TEXT_ELEMENTS.has(tag.name)) {
+      // Raw text runs to its end tag, and the page may end before that end
+      // tag does. A dropped element's text is dropped either way; a
+      // textarea's is shown, up to an end tag the page cut short.
+      const found = rawTextEnd(html, tag.name, index);
+      if (found === -1 || readTag(html, found) === 'unterminated') {
+        if (DROPPED_ELEMENTS.includes(tag.name)) return start;
+        return found === -1 ? html.length : found;
+      }
+      index = found;
+    }
+  }
 };
 
 /**
@@ -1013,6 +1089,10 @@ const scanTags = (html: string): ScannedTag[] => {
  * end of the page keeps its text: a closing rule this pass does not model
  * must not erase the article behind it, and keeping is what this extractor
  * did before it read visibility at all.
+ *
+ * Every tag it keeps comes back as its name alone, `<div>` or `</div>`,
+ * attributes gone, so the patterns after it end each tag where the
+ * tokenizer did.
  */
 const dropHiddenElements = (html: string, tail: string): { text: string; tail: string } => {
   // One stack of open elements, as the tree builder keeps, rather than one
@@ -1034,7 +1114,8 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   const closed = new Set<number>();
   // Whether any element could hide anything; a page with none is returned as it is.
   let mayHide = false;
-  const segments: { start: number; end: number; node: TreeNode | undefined }[] = [];
+  // A run of text between tags, or one tag, and the node it lands in.
+  const segments: { start: number; end: number; node: TreeNode | undefined; tag?: ScannedTag }[] = [];
   let nextId = 0;
   // The list of active formatting elements: formatting a block closed
   // around is still in force, and the tree builder rebuilds it, `hidden`
@@ -1256,7 +1337,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     }
     cursor = tag.end;
     const ignore = (): void => {
-      segments.push({ start: tag.start, end: tag.end, node: parentFor(false) });
+      segments.push({ start: tag.start, end: tag.end, node: parentFor(false), tag });
     };
     // The document's own elements are never hidden or closed here: an
     // `html` or `body` hidden until a script reveals it is the whole page,
@@ -1356,7 +1437,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       }
       if (!INSERTED_WITHOUT_REBUILDING.has(tag.name)) rebuild(fostered);
       const opened = element(tag.name, tag.attributes, parentFor(fostered));
-      segments.push({ start: tag.start, end: tag.end, node: opened.node });
+      segments.push({ start: tag.start, end: tag.end, node: opened.node, tag });
       // A void element holds no text, but a hidden one still has an
       // effect to withhold — `one<br hidden>two` is one line — so its tag
       // is dropped, and it is closed the moment it opens.
@@ -1393,7 +1474,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     // the form in scope there, and the document's pointer stays set.
     if (tag.name === 'form' && nearest(['template'], []) !== -1) {
       const index = nearest(['form'], SCOPE_BOUNDARIES);
-      segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node ?? parentFor(false) });
+      segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node ?? parentFor(false), tag });
       if (index !== -1) closeFrom(index);
       continue;
     }
@@ -1401,7 +1482,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       const pointer = form;
       form = undefined;
       const index = pointer === undefined ? -1 : stack.lastIndexOf(pointer);
-      segments.push({ start: tag.start, end: tag.end, node: pointer?.node ?? parentFor(false) });
+      segments.push({ start: tag.start, end: tag.end, node: pointer?.node ?? parentFor(false), tag });
       if (pointer !== undefined && index !== -1 && inScope(index)) {
         impliedEnds();
         const [left] = stack.splice(stack.lastIndexOf(pointer), 1);
@@ -1426,7 +1507,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       ignore();
       continue;
     }
-    segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node });
+    segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node, tag });
     closeFrom(index);
     if (MARKER_ELEMENTS.has(tag.name) && !CLEARED_ON_CLOSE.has(tag.name)) clearToMarker();
   }
@@ -1441,7 +1522,6 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   const tailFostered = /[^ \t\n\f\r]/.test(tail);
   if (tail !== '') rebuild(tailFostered);
   const tailNode = parentFor(tailFostered);
-  if (!mayHide) return { text: html, tail };
 
   // Each node's style in the finished tree, parents first, remembered so
   // a page costs its nodes once.
@@ -1476,19 +1556,25 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     return result;
   };
 
-  // A dropped stretch, however many segments, becomes one space.
+  // A dropped stretch, however many segments, becomes one space. A tag
+  // that stays is written with its name alone: the passes after this one
+  // find tags by pattern, and a pattern ends a tag at its first `>`, which
+  // in `<div title="x>y">` is inside a value and would leave `y">` as
+  // text. Nothing after this reads an attribute.
+  const drops = (node: TreeNode | undefined): boolean => mayHide && isDropped(node);
   let text = '';
   let dropping = false;
   for (const segment of segments) {
-    if (isDropped(segment.node)) {
+    if (drops(segment.node)) {
       if (!dropping) text += ' ';
       dropping = true;
     } else {
-      text += html.slice(segment.start, segment.end);
+      const { tag } = segment;
+      text += tag === undefined ? html.slice(segment.start, segment.end) : `<${tag.closing ? '/' : ''}${tag.name}>`;
       dropping = false;
     }
   }
-  return { text, tail: tail !== '' && isDropped(tailNode) ? ' ' : tail };
+  return { text, tail: tail !== '' && drops(tailNode) ? ' ' : tail };
 };
 
 /**
@@ -1659,7 +1745,12 @@ export const extractTitle = (html: string): string | undefined => {
   return title ? decodeEntities(title).trim() : undefined;
 };
 
-export const htmlToText = (html: string): string => {
+export const htmlToText = (page: string): string => {
+  // Markup the page ends inside — a tag, comment or script the download
+  // cap cut short — is dropped first, as a browser drops it. Left in, the
+  // patterns below have no `>` to end it at, and pass it on as text.
+  const html = page.slice(0, openAtEnd(page));
+
   // Every pattern below ends in `>`, so nothing after the page's last `>`
   // can be part of one — and that tail is where they turned from linear to
   // worse. A `[^>]*` with no `>` ahead of it scans to the end of the page
@@ -1676,10 +1767,10 @@ export const htmlToText = (html: string): string => {
   // that sweep reads `5 < 10 and 20 > 15` as a tag and deletes the middle
   // of the sentence — prose about arbitrary subjects is exactly what a
   // fetched page is.
-  // A comment ends where the HTML tokenizer ends it: at `-->`, at `--!>`,
-  // or at once in `<!-->` and `<!--->`. Read only to `-->`, a `--!>`
-  // comment ran on and the markup inside it reached the visibility pass.
-  let text = removeSpans(html.slice(0, end), /<!--/g, /(?<=<!--)-?>|--!?>/g, '');
+  // A comment ends where the HTML tokenizer ends it (COMMENT_END). Read
+  // only to `-->`, a `--!>` comment ran on and the markup inside it
+  // reached the visibility pass.
+  let text = removeSpans(html.slice(0, end), /<!--/g, COMMENT_END, '');
   text = text.replace(/<[!?][^>]*>/g, ' ');
 
   // Before the dropped elements, which are cut out by name with no regard

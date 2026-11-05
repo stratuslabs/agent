@@ -358,12 +358,9 @@ test('a page of unclosed tags is extracted in one pass, not one rescan per tag',
 test('the linear extraction reads a page exactly as the regexes did', () => {
   // Text after the last `>` is text, and still has its entities decoded.
   assert.equal(htmlToText('<p>maths</p> 5 < 10 &amp; 20'), 'maths\n5 < 10 & 20');
-  // A script with no end tag drops the tag and keeps what follows it, as
-  // the unclosed form always did; a closed one, in any case, goes whole.
-  assert.equal(htmlToText('<p>a</p><script>b'), 'a\nb');
+  // A closed script, in any case, goes whole. (One the page ends inside
+  // is dropped to the end, below.)
   assert.equal(htmlToText('<p>a</p><SCRIPT>gone()</Script><p>c</p>'), 'a\n\nc');
-  // An unclosed comment is left to the doctype sweep, as before.
-  assert.equal(htmlToText('<p>a</p><!-- open > b'), 'a\nb');
   // A character whose lowercase is longer cannot shift where a span ends.
   assert.equal(htmlToText('<p>İİİİ</p><script>secret()</script><p>after</p>'), 'İİİİ\n\nafter');
   assert.equal(extractTitle('<title>İstanbul</title><p>x</p>'), 'İstanbul');
@@ -392,6 +389,54 @@ test('a quoted > in an attribute does not end the tag before the attribute that 
   assert.equal(htmlToText(`<div data-x='a>b' style="display:none">secret</div><p>shown</p>`), 'shown');
   // A quote is a quote only where a value starts: in a name it is a name.
   assert.equal(htmlToText('<div a"b hidden>secret</div><p>shown</p>'), 'shown');
+});
+
+test('a quoted > in an attribute does not end the tag for the passes that remove tags', () => {
+  // The visibility pass read these tags right; the passes after it cut
+  // each one at its first `>` and returned the rest of the value as text.
+  assert.equal(htmlToText('<p>a</p><div title="x>LEAK">b</div>'), 'a\n\nb');
+  assert.equal(htmlToText(`<p>On <time title='13 June 2024 > 12'>13 June</time></p>`), 'On 13 June');
+  assert.equal(htmlToText('<p>a <b data-x="1>0">bold</b> c</p>'), 'a bold c');
+  // Every pass that names an element, not only the last one.
+  assert.equal(htmlToText('<li data-x="a>LEAK">item</li>'), '- item');
+  assert.equal(htmlToText('<script data-x="a>LEAK">code()</script><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<nav title="a>LEAK">menu</nav><p>shown</p>'), 'shown');
+  // An end tag with a space before its `>` is still the end tag.
+  assert.equal(htmlToText('<nav>menu</nav ><p>shown</p>'), 'shown');
+});
+
+test('markup the page ends inside is dropped, as a browser drops it', () => {
+  // A page cut by the download cap mostly ends inside a tag. A browser
+  // drops the unfinished tag; it is not text.
+  assert.equal(htmlToText('<p>a</p><div title="LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p><a href=LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p>tail <bLEAK'), 'a\ntail');
+  assert.equal(htmlToText('<p>a</p></divLEAK'), 'a');
+  // Cut inside a quoted value holding a `>`: the page's last `>` is in the
+  // attribute, so the unfinished tag is not in the text after it.
+  assert.equal(htmlToText('<p>a</p><div data-props="{&quot;html&quot;:&quot;<b>LEAK'), 'a');
+  // A comment, a doctype or a processing instruction with no end.
+  assert.equal(htmlToText('<p>a</p><!-- LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p><!-- open > LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p><!DOCTYPE LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p><?xml LEAK'), 'a');
+  // Only a `<` followed by a letter, `/`, `!` or `?` opens markup: prose
+  // keeps its less-than signs.
+  assert.equal(htmlToText('<p>a</p>5 < 10'), 'a\n5 < 10');
+  assert.equal(htmlToText('<p>a</p>x <3 and y </'), 'a\nx <3 and y </');
+});
+
+test('a script or style the page ends inside is dropped to the end', () => {
+  assert.equal(htmlToText('<p>a</p><script>var x = "LEAK";'), 'a');
+  assert.equal(htmlToText('<p>a</p><style>.x { content: "LEAK" }'), 'a');
+  assert.equal(htmlToText('<p>a</p><script>b'), 'a');
+  // A `>` in the script is not the end of it.
+  assert.equal(htmlToText('<p>a</p><script>if (a > b) LEAK()'), 'a');
+  // Cut inside its end tag, the script still never closed.
+  assert.equal(htmlToText('<p>a</p><script>LEAK()</script'), 'a');
+  assert.equal(htmlToText('<p>a</p><script>LEAK()</script data-x="'), 'a');
+  // A textarea's text is shown, closed or not, as it was.
+  assert.equal(htmlToText('<p>a</p><textarea>kept'), 'a\nkept');
 });
 
 test('an end tag inside a textarea or title does not close a hidden element', () => {
