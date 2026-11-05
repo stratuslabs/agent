@@ -456,6 +456,9 @@ test('a script or style inside svg or math is not raw text, so it does not run t
   assert.equal(htmlToText('<p>a</p><svg></svg><script>LEAK()'), 'a');
   assert.equal(htmlToText('<p>a</p><svg/><script>LEAK()'), 'a');
   assert.equal(htmlToText('<p>a</p><svg><svg></svg></svg><script>LEAK()'), 'a');
+  // An end tag closes every foreign element opened inside the one it names.
+  assert.equal(htmlToText('<p>a</p><svg><math></svg><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg></math><style>x</svg><p>shown</p>'), 'a\n\nshown');
   // An HTML element like b breaks out of foreign content, as in a browser,
   // and so does a </p>.
   assert.equal(htmlToText('<p>a</p><svg><b>b<script>LEAK()'), 'a\nb');

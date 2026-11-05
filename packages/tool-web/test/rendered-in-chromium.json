@@ -237,6 +237,8 @@
     "corpus-233": {"sha":"efd9271fb656981e","hidden":["LEAKQ"]},
     "corpus-234": {"sha":"a4d5f13093341552","hidden":["LEAKR"]},
     "corpus-235": {"sha":"69510cf57499c921","hidden":["LEAKS"]},
+    "corpus-236": {"sha":"820c7fad7eb228ad","hidden":["LEAKT"]},
+    "corpus-237": {"sha":"c65f6961eb17cef9","hidden":["SVGSTYLE"]},
     "soup-1-0": {"sha":"3460e4d64cba4ddd","hidden":["WABQ","WACQ"]},
     "soup-1-1": {"sha":"7c603778e9975ec2","hidden":["WACQ","WADQ"]},
     "soup-1-2": {"sha":"be137dc53182d704","hidden":[]},

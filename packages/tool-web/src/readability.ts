@@ -1033,16 +1033,17 @@ const COMMENT_END = /(?<=<!--)-?>|--!?>/g;
  * Inside svg or math, a `style` or `script` is a foreign element whose
  * text is read as markup like any other, and which ends with its
  * container, so it must not cut the page. Which svg and math elements are
- * open is counted rather than built: their end tags close them, a `/>`
- * never opens one, and an HTML element such as `p` breaks out of all of
- * them, as in the tree builder. The integration points where HTML is read
+ * open is kept as a list of names rather than a tree: an end tag closes
+ * the last one of its name and everything opened inside it, a `/>` never
+ * opens one, and an HTML element such as `p` breaks out of all of them,
+ * as in the tree builder. The integration points where HTML is read
  * again (`foreignObject`, MathML's `mi`) count as foreign, so a script the
  * page ends inside there is kept, as before this walk existed, rather than
  * a page cut short.
  */
 const openAtEnd = (html: string): number => {
   let index = 0;
-  let foreign = 0;
+  const foreign: string[] = [];
   for (;;) {
     const start = html.indexOf('<', index);
     if (start === -1) return html.length;
@@ -1071,18 +1072,22 @@ const openAtEnd = (html: string): number => {
     if (tag === 'unterminated') return start;
     index = tag.end;
     if (tag.closing) {
-      if (FOREIGN_ROOTS.has(tag.name) && foreign > 0) foreign -= 1;
-      else if (tag.name === 'p' || tag.name === 'br') foreign = 0;
+      if (FOREIGN_ROOTS.has(tag.name)) {
+        const opened = foreign.lastIndexOf(tag.name);
+        if (opened !== -1) foreign.length = opened;
+      } else if (tag.name === 'p' || tag.name === 'br') {
+        foreign.length = 0;
+      }
       continue;
     }
     if (FOREIGN_ROOTS.has(tag.name)) {
-      if (!tag.selfClosing) foreign += 1;
+      if (!tag.selfClosing) foreign.push(tag.name);
       continue;
     }
-    if (foreign > 0) {
+    if (foreign.length > 0) {
       const font = tag.name === 'font' && ['color', 'face', 'size'].some((name) => tag.attributes.has(name));
       if (!FOREIGN_BREAKOUT.has(tag.name) && !font) continue;
-      foreign = 0;
+      foreign.length = 0;
     }
     if (tag.name === 'plaintext') return html.length;
     if (RAW_TEXT_ELEMENTS.has(tag.name)) {
