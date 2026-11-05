@@ -76,6 +76,7 @@ import {
 } from './attachments.ts';
 import type { AgentConnection } from './connection.ts';
 import type { PendingApprovalPost, PendingCredentialPost } from './pending-posts.ts';
+import { describeSlackError, slackErrorCode } from './slack-errors.ts';
 import {
   defaultFetchFile,
   onlySlackFileHost,
@@ -1040,19 +1041,6 @@ const BOOKMARK_TITLE_LIMIT = 200;
 /** A bookmark link longer than this is replaced by `BOOKMARK_LINK_TOO_LONG`. */
 const BOOKMARK_LINK_LIMIT = 2000;
 const BOOKMARK_LINK_TOO_LONG = '(this link is longer than 2,000 characters, so it is not shown)';
-
-/**
- * The error code of a failed Web API call (`missing_scope`, `ratelimited`),
- * which `@slack/web-api` puts on the error's `data.error`. Undefined for a
- * failure that never reached Slack.
- */
-const slackErrorCode = (error: unknown): string | undefined => {
-  const code = (error as { data?: { error?: unknown } } | undefined)?.data?.error;
-  return typeof code === 'string' && code.length > 0 ? code : undefined;
-};
-
-/** Slack's code for a failed call, or the SDK's message when Slack never answered. */
-const describeSlackError = (error: unknown): string => slackErrorCode(error) ?? (error instanceof Error ? error.message : String(error));
 
 /** Codes Slack answers when the token itself is refused. */
 const SLACK_AUTH_ERRORS = new Set(['not_authed', 'invalid_auth', 'account_inactive', 'token_revoked', 'token_expired']);
