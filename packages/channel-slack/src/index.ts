@@ -2569,17 +2569,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     connectionFor,
   });
 
-
-
-
-
-
-
-
-
-
-
-
   // `gatewayRef` is read late: `start` sets it after the adapter is built.
   const { renderApprovalRequest, retireOrphanedPrompt, retractApprovalRequest } = createApprovalPrompts({
     warn,
@@ -2590,9 +2579,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     getGateway: () => gatewayRef,
     connectionFor,
   });
-
-
-
 
   // `gatewayRef` is read late: `start` sets it and `stop` clears it.
   const { takeUnrenderedFiles, reportUnrenderedFailure, reportUnrenderedReply } = createUnrenderedOutcomes({
@@ -2620,13 +2606,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     connectionFor,
     retireOrphanedPrompt,
   });
-
-
-
-
-
-
-
 
   /** One thread, whichever agent is talking in it. */
   const threadKeyFor = (parts: { team: string; conversation: string; thread: string }): string =>
