@@ -354,6 +354,9 @@ test('a page of unclosed tags is extracted in one pass, not one rescan per tag',
     '<a'.repeat(5_000) + '<!---->',
     '<textarea>' + '<noscript></noscript'.repeat(20_000),
     '<p>x</p><xmp>' + '<li></li'.repeat(40_000),
+    // The open svg and math elements are searched by every end tag that
+    // names one, so they must not grow with the page either.
+    '<svg>'.repeat(80_000) + '</math>'.repeat(80_000),
   ];
   assert.equal(await extractsWithin(pages, 10_000), true);
   for (const page of pages) {

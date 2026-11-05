@@ -1081,7 +1081,9 @@ const openAtEnd = (html: string): number => {
       continue;
     }
     if (FOREIGN_ROOTS.has(tag.name)) {
-      if (!tag.selfClosing) foreign.push(tag.name);
+      // Bounded as the visibility pass's stack is, for the same reason:
+      // every end tag naming one searches the list.
+      if (!tag.selfClosing && foreign.length < MAX_OPEN_ELEMENTS) foreign.push(tag.name);
       continue;
     }
     if (foreign.length > 0) {
