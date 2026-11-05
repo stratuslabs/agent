@@ -973,7 +973,7 @@ test('a channel whose stop rejects, or a plugin whose dispose rejects, leaves th
   assert.deepEqual((await outcomeOf({ plugin: false, channel: false })).outcome, { drained: true });
 });
 
-test('a turn queued behind the one aborted at the window is aborted too, not left running unrecorded', async () => {
+test('a turn queued behind the one aborted at the window is aborted too, not left running unrecorded', async (t) => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
 
@@ -991,6 +991,18 @@ test('a turn queued behind the one aborted at the window is aborted too, not lef
 
   let handOff!: (outcome: RestartOutcome) => void;
   const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  // The test owns the restart's clock. The window is armed twice: once for
+  // the turns to finish on their own (they never will: the provider blocks
+  // until aborted), and once more for the aborted turns to settle, which is
+  // two abort rejections, two session writes, and their events. On the wall
+  // clock that second window is whatever the first left of the shared
+  // deadline, so a runner that stalls past the first one leaves the settle
+  // no time and reports `drained: false` for a drain that was merely slow.
+  // Mocked, the first window ends when the test says so and the second
+  // never runs out, so `drained` reports only whether the aborted turns
+  // settled. The two hang guards below keep the real timer.
+  const realSetTimeout = globalThis.setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
   const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {}, onRestart: (outcome) => handOff(outcome) });
   await gateway.start();
@@ -999,14 +1011,8 @@ test('a turn queued behind the one aborted at the window is aborted too, not lef
   const running = gateway.dispatch({ sessionId: 'queued', agentId: 'ava', userMessage: 'first' });
   const queued = gateway.dispatch({ sessionId: 'queued', agentId: 'ava', userMessage: 'second' });
   await started;
-  // The window is armed twice: once for the turns to finish on their own
-  // (they never will — the provider blocks until aborted), and once more
-  // for the aborted turns to settle, which is two abort rejections, two
-  // session writes, and their events. 50ms lost that second race on a
-  // loaded CI runner and reported `drained: false` for a drain that was
-  // merely slow; the number has to sit far above that work, not just
-  // above it.
   gateway.restart({ drainTimeoutMs: 500 });
+  t.mock.timers.tick(500);
 
   const isRestartAbort = (error: Error): boolean => error instanceof RunAbortedError && error.message === RESTARTING_TURN_ERROR;
   await assert.rejects(running, isRestartAbort);
@@ -1014,11 +1020,16 @@ test('a turn queued behind the one aborted at the window is aborted too, not lef
   // provider forever and the restart only ends by shutting down around it.
   const second = await Promise.race([
     queued.then(() => 'completed', (error: Error) => (isRestartAbort(error) ? 'aborted' : `failed: ${error.message}`)),
-    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+    new Promise<'hung'>((resolve) => realSetTimeout(() => resolve('hung'), 5_000)),
   ]);
   assert.equal(second, 'aborted');
-  assert.deepEqual(await restarted, { drained: true });
+  const outcome = await Promise.race([
+    restarted,
+    new Promise<'hung'>((resolve) => realSetTimeout(() => resolve('hung'), 5_000)),
+  ]);
+  assert.deepEqual(outcome, { drained: true });
   await gateway.stop();
+  t.mock.timers.reset();
 
   const next = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
   await next.start();
