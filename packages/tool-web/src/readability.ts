@@ -1030,9 +1030,10 @@ const COMMENT_END = /(?<=<!--)-?>|--!?>/g;
  * `5 < 10` is prose: only a `<` followed by a letter, `/`, `!` or `?`
  * opens anything. Each character is visited a bounded number of times.
  *
- * Inside svg or math, a `style` or `script` is a foreign element whose
- * text is read as markup like any other, and which ends with its
- * container, so it must not cut the page. Which svg and math elements are
+ * Inside svg or math, `<![CDATA[` is character data up to `]]>`, and a
+ * `style` or `script` is a foreign element whose text is read as markup
+ * like any other, and which ends with its container, so neither may cut
+ * the page. Which svg and math elements are
  * open is kept as a list of names rather than a tree: an end tag closes
  * the last one of its name and everything opened inside it, a `/>` never
  * opens one, and an HTML element such as `p` breaks out of all of them,
@@ -1052,7 +1053,13 @@ const openAtEnd = (html: string): number => {
     // or the end, which the tokenizer reads as a comment to the next `>`.
     if (next === '!' || next === '?' || (next === '/' && start + 2 < html.length && !/[a-zA-Z>]/.test(html[start + 2] ?? ''))) {
       let close = -1;
-      if (html.startsWith('<!--', start)) {
+      if (foreign.length > 0 && html.startsWith('<![CDATA[', start)) {
+        // Character data in svg or math, through `]]>`; to the end of the
+        // page if that never comes, and text either way, never markup.
+        const cdataEnd = html.indexOf(']]>', start + 9);
+        if (cdataEnd === -1) return html.length;
+        close = cdataEnd + 3;
+      } else if (html.startsWith('<!--', start)) {
         COMMENT_END.lastIndex = start + 4;
         const found = COMMENT_END.exec(html);
         if (found !== null) close = found.index + found[0].length;

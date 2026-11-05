@@ -261,6 +261,8 @@ const CORPUS: readonly string[] = [
   '<p>SHOWN</p><svg></p><script>LEAKS()',
   '<p>SHOWN</p><svg><math></svg><script>LEAKT()',
   '<p>SHOWN</p><svg></math><style>SVGSTYLE</svg><p>AFTER</p>',
+  `<p>BEFORE</p><svg><style><![CDATA[ a > b { content: "<a href='x" } ]]></style></svg><p>SHOWN</p>`,
+  '<p>SHOWN</p><![CDATA[ x > TEXT <b title="LEAKU',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */

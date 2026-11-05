@@ -429,6 +429,8 @@ test('markup the page ends inside is dropped, as a browser drops it', () => {
   assert.equal(htmlToText('<p>a</p><!-- open > LEAK'), 'a');
   assert.equal(htmlToText('<p>a</p><!DOCTYPE LEAK'), 'a');
   assert.equal(htmlToText('<p>a</p><?xml LEAK'), 'a');
+  // Outside svg and math, `<![CDATA[` is a comment to the next `>`.
+  assert.equal(htmlToText('<p>a</p><![CDATA[ x > y <b title="LEAK'), 'a\ny');
   // Only a `<` followed by a letter, `/`, `!` or `?` opens markup: prose
   // keeps its less-than signs.
   assert.equal(htmlToText('<p>a</p>5 < 10'), 'a\n5 < 10');
@@ -466,6 +468,12 @@ test('a script or style inside svg or math is not raw text, so it does not run t
   // and so does a </p>.
   assert.equal(htmlToText('<p>a</p><svg><b>b<script>LEAK()'), 'a\nb');
   assert.equal(htmlToText('<p>a</p><svg></p><script>LEAK()'), 'a');
+  // In svg or math, `<![CDATA[` runs to `]]>`, `>` and quotes included.
+  assert.equal(
+    htmlToText(`<p>before</p><svg><style><![CDATA[ a > b { content: "<a href='x" } ]]></style></svg><p>shown</p>`),
+    'before\n\nshown',
+  );
+  assert.match(htmlToText('<p>before</p><svg><![CDATA[<x></svg><script>]]></svg><p>shown</p>'), /shown$/);
   // A self-closing slash inside an unquoted value is part of the value.
   assert.equal(htmlToText('<svg x=y/><style>x</svg><p>shown</p>'), 'shown');
 });
