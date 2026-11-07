@@ -370,7 +370,8 @@ credential form, and clicking it opens the link and does nothing else.
 Anything a person would fill in or pick from (inputs, menus, date pickers,
 `rich_text`), a button with no link, or a block type the daemon doesn't
 know sends the card's text alone. So does a card Slack refuses. Either
-way the log says why, without the card's content. Mentions and broadcasts
+way the log says why, without the card's content, and the text goes whole:
+a long one is split across messages, as a long reply is. Mentions and broadcasts
 in a card (`@here`, `@channel`, a mention of a person) are shown as text
 and notify nobody; the reply is where an agent mentions someone.
 

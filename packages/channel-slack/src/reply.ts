@@ -317,6 +317,12 @@ export const postPart = async (
  * call that never got an answer may have posted, and a second message
  * would say it twice. The warnings name a type or Slack's code, never the
  * post's content.
+ *
+ * Words that go alone go whole, in as many messages as a reply that long
+ * would take, since they are all the thread gets. With a card they are
+ * only its notification, one message's worth. As with a recovered reply,
+ * a part Slack refuses does not stop the rest, and once any part is in the
+ * post counts as posted: posting it again would say those parts twice.
  */
 export const postToolPost = async (
   web: SlackWebLike,
@@ -324,18 +330,14 @@ export const postToolPost = async (
   post: ToolPost,
   warn: (line: string) => void,
 ): Promise<{ ts?: string; channel?: string; message?: { ts?: string; thread_ts?: string } }> => {
-  const message = {
-    channel: target.channel,
-    text: neutralizeMentions(messageText(post.text)),
-    ...(target.thread ? { thread_ts: target.thread } : {}),
-  };
+  const where = { channel: target.channel, ...(target.thread ? { thread_ts: target.thread } : {}) };
   const checked = post.slack !== undefined ? sanitizePostBlocks(post.slack.blocks) : undefined;
   if (checked !== undefined && 'refused' in checked) {
     warn(`slack: a tool's post went as text alone, because its blocks held ${checked.refused}`);
   }
   if (checked !== undefined && 'blocks' in checked) {
     try {
-      return await web.chat.postMessage({ ...message, blocks: checked.blocks });
+      return await web.chat.postMessage({ ...where, text: neutralizeMentions(messageText(post.text)), blocks: checked.blocks });
     } catch (error) {
       const code = slackErrorCode(error);
       if (code === undefined) {
@@ -344,7 +346,25 @@ export const postToolPost = async (
       warn(`slack: Slack refused a tool's post with blocks (${code}), so it went as text alone`);
     }
   }
-  return web.chat.postMessage(message);
+  const parts = messageChunks(post.text).map(neutralizeMentions);
+  let landed: Awaited<ReturnType<SlackWebLike['chat']['postMessage']>> | undefined;
+  let failure: unknown;
+  let missed = 0;
+  for (const text of parts) {
+    try {
+      landed = await web.chat.postMessage({ ...where, text });
+    } catch (error) {
+      failure ??= error;
+      missed += 1;
+    }
+  }
+  if (landed === undefined) {
+    throw failure;
+  }
+  if (missed > 0) {
+    warn(`slack: ${missed} of ${parts.length} messages of a tool's post did not go out (${slackErrorCode(failure) ?? 'no answer from Slack'})`);
+  }
+  return landed;
 };
 
 /**

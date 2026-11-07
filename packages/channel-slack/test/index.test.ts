@@ -31,6 +31,7 @@ import {
   type SlackSocketLike,
   type SlackWebLike,
 } from '../src/index.ts';
+import { postToolPost } from '../src/reply.ts';
 
 /**
  * The adapter with every agent on the `stream` reply mode, unless a test
@@ -4668,6 +4669,78 @@ test('a post whose blocks hold something a card may not goes as its text alone',
 
   assert.deepEqual(web.posts.filter((entry) => entry.text === 'Pick one').map((entry) => entry.blocks), [undefined]);
   assert.ok(warnings.includes('slack: a tool\'s post went as text alone, because its blocks held a `static_select` type'));
+});
+
+// A post's words are its fallback, so they are never cut: alone, they go
+// as however many messages a long reply would (Codex P2 on #626).
+const LONG_ROWS = Array.from({ length: 400 }, (_, index) => `row ${index + 1}: ${'x'.repeat(12)}`);
+const LONG_TEXT = LONG_ROWS.join('\n');
+
+test('a post too long for one message goes whole as its text, in as many messages as it takes', async () => {
+  const { socket, web, gateway, adapter } = postAdapter({ post: { text: LONG_TEXT } });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> every row'));
+  await adapter.stop();
+
+  const parts = web.posts.filter((entry) => /^row \d+:/.test(entry.text));
+  assert.ok(parts.length >= 2, `more than one message (${parts.length})`);
+  assert.ok(parts.every((entry) => entry.text.length <= 4000 && entry.blocks === undefined && entry.thread_ts === web.posts[0]?.thread_ts));
+  assert.deepEqual(parts.flatMap((entry) => entry.text.split('\n')).filter((line) => line !== ''), LONG_ROWS, 'every row once, in order');
+});
+
+test('a long post whose blocks Slack refuses goes whole as its text; a card it takes keeps its words to one notification', async () => {
+  const refused = postAdapter({ post: { ...CARD_POST, text: LONG_TEXT } });
+  const post = refused.web.chat.postMessage.bind(refused.web.chat);
+  refused.web.chat.postMessage = async (args) => {
+    if (args.blocks !== undefined) {
+      throw Object.assign(new Error('An API error occurred: invalid_blocks'), { data: { ok: false, error: 'invalid_blocks' } });
+    }
+    return post(args);
+  };
+  await refused.adapter.start(refused.gateway);
+  await refused.socket.deliver('app_mention', mention('<@B-AVA> every row as a card'));
+  await refused.adapter.stop();
+  const parts = refused.web.posts.filter((entry) => /^row \d+:/.test(entry.text));
+  assert.deepEqual(parts.flatMap((entry) => entry.text.split('\n')).filter((line) => line !== ''), LONG_ROWS);
+
+  const shown = postAdapter({ post: { ...CARD_POST, text: LONG_TEXT } });
+  await shown.adapter.start(shown.gateway);
+  await shown.socket.deliver('app_mention', mention('<@B-AVA> every row as a card'));
+  await shown.adapter.stop();
+  const cards = shown.web.posts.filter((entry) => /^row \d+:/.test(entry.text));
+  assert.equal(cards.length, 1, 'the card, once');
+  assert.ok(cards[0]?.blocks !== undefined && cards[0].text.length <= 4000);
+});
+
+test('a long post posts every part Slack takes, counts as posted once any is in, and throws only when none is', async () => {
+  const fake = (refuse: (call: number) => boolean) => {
+    const sent: string[] = [];
+    let calls = 0;
+    const web = {
+      chat: {
+        postMessage: async (args: { channel: string; text: string }) => {
+          calls += 1;
+          if (refuse(calls)) {
+            throw Object.assign(new Error('An API error occurred: ratelimited'), { data: { ok: false, error: 'ratelimited' } });
+          }
+          sent.push(args.text);
+          return { ok: true, ts: `ts-${calls}`, channel: args.channel };
+        },
+      },
+    } as unknown as SlackWebLike;
+    return { web, sent, calls: () => calls };
+  };
+  const warnings: string[] = [];
+  const second = fake((call) => call === 2);
+  const posted = await postToolPost(second.web, { channel: 'C1', thread: 'T1' }, { text: LONG_TEXT }, (line) => warnings.push(line));
+  assert.ok(second.calls() >= 3, 'the parts after the refused one were still posted');
+  assert.equal(posted.ts, `ts-${second.calls()}`, 'placed at the last part that landed');
+  assert.equal(second.sent.length, second.calls() - 1);
+  assert.deepEqual(warnings, [`slack: 1 of ${second.calls()} messages of a tool's post did not go out (ratelimited)`]);
+
+  const none = fake(() => true);
+  await assert.rejects(postToolPost(none.web, { channel: 'C1' }, { text: LONG_TEXT }, (line) => warnings.push(line)), /ratelimited/);
+  assert.equal(warnings.length, 1, 'a post that never landed is the caller\'s to report');
 });
 
 test('a post from an external result never reaches the thread', async () => {
