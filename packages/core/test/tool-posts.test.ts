@@ -88,7 +88,7 @@ const toolPost = (text: string, createdAt: string): Message => ({
   toolResult: result({ post: { text, slack: { blocks: CARD_BLOCKS } } }),
 });
 
-test('a keyed message\'s posts are its own turn\'s, in order, each with when it was recorded', () => {
+test('a keyed message\'s posts are its own turn\'s, in order, each with where it was recorded', () => {
   const messages: Message[] = [
     user('first', 'k1'),
     toolPost('one', '2026-11-07T00:00:01.000Z'),
@@ -97,9 +97,9 @@ test('a keyed message\'s posts are its own turn\'s, in order, each with when it 
     toolPost('three', '2026-11-07T00:00:03.000Z'),
   ];
   assert.deepEqual(turnPostsFor({ messages }, 'k1'), [
-    { post: { text: 'one', slack: { blocks: CARD_BLOCKS } }, producedAt: '2026-11-07T00:00:01.000Z' },
-    { post: { text: 'two', slack: { blocks: CARD_BLOCKS } }, producedAt: '2026-11-07T00:00:02.000Z' },
+    { post: { text: 'one', slack: { blocks: CARD_BLOCKS } }, position: 1 },
+    { post: { text: 'two', slack: { blocks: CARD_BLOCKS } }, position: 2 },
   ]);
-  assert.deepEqual(turnPostsFor({ messages }, 'k2').map((entry) => entry.post.text), ['three']);
+  assert.deepEqual(turnPostsFor({ messages }, 'k2').map((entry) => [entry.post.text, entry.position]), [['three', 4]]);
   assert.deepEqual(turnPostsFor({ messages }, 'k9'), []);
 });
