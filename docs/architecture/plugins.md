@@ -153,6 +153,33 @@ not a gap in the contract: a plugin contributing any of the four registers
 it through its handle today, and the fixture plugins under `fixtures/` are
 the proof.
 
+### What a tool hands its conversation
+
+A tool's result can carry more for the conversation than its words to the
+model. An ok result whose output is an object may name files, `file:
+string` or `files: string[]` (`filePathsOf` in core), and a channel
+uploads them into the thread. It may also carry a **post** (`postOf`,
+AGT-324): a message ready to show, `post: { text, slack?: { blocks } }`.
+`text` is required: it is what a channel with no richer form posts,
+Slack's notification, and Slack's fallback when the blocks can't be shown.
+A channel that doesn't read posts shows nothing of them, and neither does
+the CLI, as it shows no file.
+`slack.blocks` is Slack Block Kit for the same message; core checks only
+that it is an array, and the Slack channel decides what of it may be sent
+(see [Cards a tool posts](../guides/slack.md#cards-a-tool-posts)). One post
+per result. A channel posts it in the turn's thread, in order with the
+turn's words and files, and a turn that posted one has spoken, as one that
+produced a file has.
+
+The model is shown the post as its `text` alone, never its blocks: it
+wrote the call that made them, and replaying them would cost context on
+every later turn. A post is ignored, and the output shown to the model as
+returned, when the result failed, when `post` is not an object with
+non-empty `text` (a CMS tool's `post` field stays data), or when the result
+is `external`: a server's card in the thread would read as the agent's own
+words. A post reaches only the conversation the reply goes to, so it needs
+no approval of its own beyond the tool's `risk`.
+
 ### What the module exports
 
 `Plugin` describes the object the registry receives. It does not say how the

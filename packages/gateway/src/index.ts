@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   type Message,
   filePathsOf,
+  postOf,
   isUnaddressedTurn,
   carriesKey,
   SENDER_TRUST_METADATA_KEY,
@@ -3271,9 +3272,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // placeholder by a process that died before saving its reply). It is
       // a new gateway seam, and it has to be ordered against the overhears
       // queued on the same session chain, so it is not built yet.
+      // A post a tool handed the thread (`postOf`, AGT-324) is speaking the
+      // same way a file is.
       const spoken = (message: Message): boolean =>
         (message.role === 'assistant' && message.content.trim().length > 0)
-        || (message.role === 'tool' && message.toolResult !== undefined && filePathsOf(message.toolResult).length > 0);
+        || (message.role === 'tool' && message.toolResult !== undefined
+          && (filePathsOf(message.toolResult).length > 0 || postOf(message.toolResult) !== undefined));
       const spokeIndex = session.messages.findLastIndex(spoken);
       const lastSpokeAt = spokeIndex >= 0 ? session.messages[spokeIndex]?.createdAt : undefined;
       return {
