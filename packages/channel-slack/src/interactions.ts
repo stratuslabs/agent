@@ -79,6 +79,9 @@ export interface InteractionsDeps extends Pick<ApprovalPrompts, 'retireOrphanedP
   connectionFor: (agentId: string) => AgentConnection | undefined;
 }
 
+/** What someone clicking a lookalike of an approval or credential button is told. */
+const NOT_THE_PROMPT = 'That button is not on the request\'s own message, so nothing was recorded.';
+
 export const createInteractions = ({
   warn,
   configuredAgents,
@@ -255,6 +258,18 @@ export const createInteractions = ({
     }
   };
 
+  /**
+   * Whether a click came from the prompt itself: the message the request
+   * was posted as, in its channel. The action id and the request id in a
+   * button's `value` are both readable by anyone in the thread, so without
+   * this a button with the same two on any other message the app posted
+   * would settle the request when an approver clicked it. Nothing posts
+   * one today: a tool's post has its buttons renamed (`sanitizePostBlocks`).
+   * This holds even if that ever changes (AGT-324).
+   */
+  const fromPrompt = (post: { channel: string; ts: string }, args: SlackSocketEventArgs): boolean =>
+    args.body?.message?.ts === post.ts && args.body?.channel?.id === post.channel;
+
   const handleCredentialClick = async (connection: AgentConnection, args: SlackSocketEventArgs, requestId: string): Promise<void> => {
     await args.ack();
     const post = credentialPosts.get(requestId);
@@ -262,6 +277,10 @@ export const createInteractions = ({
       // Live, with the index not caught up yet: retiring it here would
       // strip the button from a request about to be registered as pending.
       await tellClicker(connection, args, 'That credential request is still being posted. Try the button again in a moment.');
+      return;
+    }
+    if (post && !fromPrompt(post, args)) {
+      await tellClicker(connection, args, NOT_THE_PROMPT);
       return;
     }
     if (!post || post.connection !== connection) {
@@ -420,6 +439,10 @@ export const createInteractions = ({
     // A different agent's app relaying a click would bypass the approver
     // set bound to the request, since each app carries its own.
     if (post.connection !== connection) {
+      return;
+    }
+    if (!fromPrompt(post, args)) {
+      await tellClicker(connection, args, NOT_THE_PROMPT);
       return;
     }
     if (!clicker || !post.approvers.has(clicker)) {

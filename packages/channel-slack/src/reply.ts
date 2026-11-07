@@ -16,13 +16,17 @@ import {
   leastTrusted,
   MAX_IDEMPOTENCY_KEY_LENGTH,
   type OutboundMessageRef,
+  postOf,
   type ProviderPart,
   type StratusEvent,
+  type ToolPost,
   type ToolResult,
   type TrustLevel,
 } from '@stratusagent/core';
 
 import { codeRunsOf, toSlackMrkdwn } from './mrkdwn.ts';
+import { neutralizeMentions, sanitizePostBlocks } from './posts.ts';
+import { slackErrorCode } from './slack-errors.ts';
 import { textingParts } from './texts.ts';
 import type {
   SlackReplyMode,
@@ -124,12 +128,12 @@ export const dispatchKeyFor = (eventKey: string): string =>
 /**
  * What the report of a turn nobody was rendering got into the thread, part
  * by part: whether its text was said in full (or there was none to say),
- * and which of its files landed. A redelivery waiting behind the report
- * posts only what is missing from it.
+ * and which of its files (by path) and tool posts landed. A redelivery
+ * waiting behind the report posts only what is missing from it.
  */
 export interface ReportedOutcome {
   said: boolean;
-  landed: readonly string[];
+  landed: ReadonlyArray<string | ToolPost>;
 }
 
 export const NOTHING_REPORTED: ReportedOutcome = { said: false, landed: [] };
@@ -304,6 +308,46 @@ export const postPart = async (
 };
 
 /**
+ * Post a tool's ready-made message (`postOf`, AGT-324) as one message of
+ * its own: its words, converted as reply text is and with their mention
+ * markup shown as text, and its Slack blocks once `sanitizePostBlocks` has
+ * passed them. Blocks it refuses, or that Slack refuses, leave the words
+ * to go alone, so a card that cannot be shown is plain text in the thread
+ * and never silence. Only a refusal Slack answered is retried as text: a
+ * call that never got an answer may have posted, and a second message
+ * would say it twice. The warnings name a type or Slack's code, never the
+ * post's content.
+ */
+export const postToolPost = async (
+  web: SlackWebLike,
+  target: { channel: string; thread?: string | undefined },
+  post: ToolPost,
+  warn: (line: string) => void,
+): Promise<{ ts?: string; channel?: string; message?: { ts?: string; thread_ts?: string } }> => {
+  const message = {
+    channel: target.channel,
+    text: neutralizeMentions(messageText(post.text)),
+    ...(target.thread ? { thread_ts: target.thread } : {}),
+  };
+  const checked = post.slack !== undefined ? sanitizePostBlocks(post.slack.blocks) : undefined;
+  if (checked !== undefined && 'refused' in checked) {
+    warn(`slack: a tool's post went as text alone, because its blocks held ${checked.refused}`);
+  }
+  if (checked !== undefined && 'blocks' in checked) {
+    try {
+      return await web.chat.postMessage({ ...message, blocks: checked.blocks });
+    } catch (error) {
+      const code = slackErrorCode(error);
+      if (code === undefined) {
+        throw error;
+      }
+      warn(`slack: Slack refused a tool's post with blocks (${code}), so it went as text alone`);
+    }
+  }
+  return web.chat.postMessage(message);
+};
+
+/**
  * Renders one turn's reply into Slack, one of two ways. Streaming (the
  * `stream` reply mode): post `…` immediately, fold streaming deltas and
  * tool status lines into throttled edits, and finalize with the
@@ -423,7 +467,7 @@ export class ReplyRenderer {
   private saidMidTask = 0;
   /** A judged turn's status, waiting on its first tool call; see `showLoading`. */
   private loadOnFirstTool = false;
-  /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
+  /** Whether any upload or tool post of this turn's landed — a file or a card is something said, placeholder or not. */
   private uploaded = false;
   /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
   private edited = false;
@@ -859,6 +903,10 @@ export class ReplyRenderer {
         for (const filePath of collectFilePaths(event.result)) {
           this.queueUpload(filePath);
         }
+        const post = postOf(event.result);
+        if (post !== undefined) {
+          this.queuePost(post);
+        }
       }
     }
   }
@@ -923,6 +971,31 @@ export class ReplyRenderer {
         }
       })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /**
+   * Post a tool's ready-made message (`postToolPost`) in the thread, on the
+   * upload chain and under its rules, so it lands in order with the turn's
+   * files and words and `finalize` waits for it. For every rule here a post
+   * that landed is what a file that landed is: something the turn said,
+   * placed where Slack put it. A repeat of a finished turn queues the ones
+   * the session holds (`turnPostsFor`), which no event delivers.
+   */
+  queuePost(post: ToolPost): void {
+    const handover = this.handover;
+    const after = this.streaming ? undefined : this.after;
+    this.uploadChain = this.uploadChain
+      .then(() => handover)
+      .then(() => after)
+      .then(async () => {
+        const posted = await postToolPost(this.web, { channel: this.channel, thread: this.threadTs }, post, this.warn);
+        this.uploaded = true;
+        this.refreshLoading();
+        if (posted.ts !== undefined && (this.uploadedAt === undefined || posted.ts > this.uploadedAt)) {
+          this.uploadedAt = posted.ts;
+        }
+      })
+      .catch((error) => this.warn(`chat.postMessage failed for a tool's post: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   /**

@@ -17,6 +17,7 @@ import {
   type JsonObject,
   type Session,
   type StratusEvent,
+  type ToolPost,
 } from '@stratusagent/core';
 import {
   type HandoverClaim,
@@ -24,6 +25,7 @@ import {
   NO_REPLY_TEXT,
   NOTHING_REPORTED,
   postPart,
+  postToolPost,
   type ReportedOutcome,
 } from './reply.ts';
 import type { AgentConnection } from './connection.ts';
@@ -32,7 +34,8 @@ import type { AgentConnection } from './connection.ts';
 export interface UnrenderedOutcomesDeps {
   log: (line: string) => void;
   warn: (line: string) => void;
-  unrenderedFiles: Map<string, string[]>;
+  /** By session: the paths of the files, and the posts, its unrendered turn produced, in order. */
+  unrenderedFiles: Map<string, Array<string | ToolPost>>;
   getGateway: () => GatewayLike | undefined;
   tagsAnAgent: (connection: AgentConnection, text: string) => Promise<boolean>;
   connectionFor: (agentId: string) => AgentConnection | undefined;
@@ -97,29 +100,39 @@ export const createUnrenderedOutcomes = ({
   };
 
   /**
-   * The files an unrendered turn produced, taken off the session the moment
-   * its outcome arrives — before anything is awaited, so a next turn's files
-   * arriving while this outcome waits on Slack are never mistaken for its.
+   * The files and posts an unrendered turn produced, taken off the session
+   * the moment its outcome arrives — before anything is awaited, so a next
+   * turn's arriving while this outcome waits on Slack are never mistaken
+   * for its.
    */
-  const takeUnrenderedFiles = (sessionId: string): string[] => {
+  const takeUnrenderedFiles = (sessionId: string): Array<string | ToolPost> => {
     const paths = unrenderedFiles.get(sessionId) ?? [];
     unrenderedFiles.delete(sessionId);
     return paths;
   };
 
-  /** Post the files an unrendered turn produced into its thread, in order. */
+  /** Post the files and tool posts an unrendered turn produced into its thread, in order. */
   const uploadUnrenderedFiles = async (
     connection: AgentConnection,
     channel: string,
     thread: string | undefined,
-    paths: readonly string[],
-  ): Promise<string[]> => {
-    // Which files landed: a redelivery waiting behind this report posts
-    // the rest (`outcomeReportedAhead`), since a file that did not land is
+    paths: ReadonlyArray<string | ToolPost>,
+  ): Promise<Array<string | ToolPost>> => {
+    // Which landed: a redelivery waiting behind this report posts the rest
+    // (`outcomeReportedAhead`), since a file or post that did not land is
     // one only it can still post — and only the rest, or it would post
     // twice the ones that did.
-    const landed: string[] = [];
+    const landed: Array<string | ToolPost> = [];
     for (const filePath of paths) {
+      if (typeof filePath !== 'string') {
+        try {
+          await postToolPost(connection.web, { channel, thread }, filePath, warn);
+          landed.push(filePath);
+        } catch (error) {
+          warn(`chat.postMessage failed for a tool's post: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        continue;
+      }
       try {
         const data = await readFile(filePath);
         await connection.web.files.uploadV2({
@@ -152,7 +165,7 @@ export const createUnrenderedOutcomes = ({
   const reportUnrenderedFailure = async (
     event: Extract<StratusEvent, { type: 'session.failed' }>,
     behind: HandoverClaim | undefined,
-    files: readonly string[],
+    files: ReadonlyArray<string | ToolPost>,
   ): Promise<ReportedOutcome> => {
     // A turn no renderer here was showing (card 501) that a Slack stop
     // aborted fails with the stop's own reason, so who stopped it is read
@@ -208,7 +221,7 @@ export const createUnrenderedOutcomes = ({
       warn(`slack: a turn nobody asked for failed before saying anything: ${event.error}`);
       return { said: true, landed: await uploadUnrenderedFiles(connection, channel, thread, files) };
     }
-    let landed: string[] = [];
+    let landed: Array<string | ToolPost> = [];
     const said = await postAheadOf(
       behind,
       connection,
@@ -238,7 +251,7 @@ export const createUnrenderedOutcomes = ({
   const reportUnrenderedReply = async (
     event: Extract<StratusEvent, { type: 'session.completed' }>,
     behind: HandoverClaim | undefined,
-    files: readonly string[],
+    files: ReadonlyArray<string | ToolPost>,
   ): Promise<ReportedOutcome> => {
     const gateway = getGateway();
     if (!gateway?.sessionRouting) {
@@ -273,7 +286,7 @@ export const createUnrenderedOutcomes = ({
       : connection.config.replies;
     const chunks = routing.reply ? messageChunks(routing.reply, replies) : [];
     const posting = chunks.length > 0 ? chunks : (behind && files.length > 0 ? [NO_REPLY_TEXT] : []);
-    let landed: string[] = [];
+    let landed: Array<string | ToolPost> = [];
     const uploads = async (): Promise<void> => {
       landed = await uploadUnrenderedFiles(connection, channel, thread, files);
     };

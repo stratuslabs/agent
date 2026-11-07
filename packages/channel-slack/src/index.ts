@@ -22,6 +22,8 @@ import {
   type OutboundAddress,
   type OutboundConnection,
   type OutboundMessageRef,
+  postOf,
+  type ToolPost,
 } from '@stratusagent/core';
 
 import {
@@ -877,7 +879,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * they can follow it into the thread. A rendered turn's files go through
    * its renderer as they are produced; these have no renderer to go through.
    */
-  const unrenderedFiles = new Map<string, string[]>();
+  const unrenderedFiles = new Map<string, Array<string | ToolPost>>();
   // In-flight turns, so stop() can drain: a reply mid-render should reach
   // Slack before the sockets go away.
   const inflight = new Set<Promise<void>>();
@@ -2929,14 +2931,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           return;
         }
         if (event.type === 'tool.completed' && event.result.ok && (foreign || !head)) {
-          const produced = collectFilePaths(event.result);
+          // A tool's post (AGT-324) waits with them, in the order the turn made them.
+          const post = postOf(event.result);
+          const produced: Array<string | ToolPost> = [...collectFilePaths(event.result), ...(post !== undefined ? [post] : [])];
           if (produced.length > 0) {
             const held = [...(unrenderedFiles.get(event.sessionId) ?? []), ...produced];
             // Said out loud when it bites: these are files somebody asked
             // for, and attachments that never arrive with nothing in the
             // log is the hardest kind of loss to work out afterwards.
             if (held.length > MAX_UNRENDERED_FILES) {
-              warn(`slack: a turn with no renderer has produced ${held.length} files; only the last ${MAX_UNRENDERED_FILES} will be posted to its thread`);
+              warn(`slack: a turn with no renderer has produced ${held.length} files and posts; only the last ${MAX_UNRENDERED_FILES} will be posted to its thread`);
             }
             unrenderedFiles.set(event.sessionId, held.slice(-MAX_UNRENDERED_FILES));
           }

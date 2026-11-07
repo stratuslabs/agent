@@ -26,9 +26,11 @@ import {
   type Session,
   SESSION_TRUST_METADATA_KEY,
   sessionTrustOf,
+  type ToolPost,
   type TrustLevel,
   turnFailureFor,
   turnFilesFor,
+  turnPostsFor,
   turnReplyFor,
 } from '@stratusagent/core';
 import { dispatchKeyFor, NO_REPLY_TEXT, type ReplyOutcome, ReplyRenderer } from './reply.ts';
@@ -626,18 +628,33 @@ export const createInbound = ({
     if (session && finished) {
       // Counted, not a set: a turn can produce one path twice, and each
       // result is an upload of its own, so one landing does not cover both.
+      // A tool's post (AGT-324) is counted by what it says, the same way.
+      const keyOf = (entry: string | ToolPost): string => (typeof entry === 'string' ? `file:${entry}` : `post:${JSON.stringify(entry)}`);
       const landed = new Map<string, number>();
-      for (const filePath of reportedAhead?.landed ?? []) {
-        landed.set(filePath, (landed.get(filePath) ?? 0) + 1);
+      for (const entry of reportedAhead?.landed ?? []) {
+        landed.set(keyOf(entry), (landed.get(keyOf(entry)) ?? 0) + 1);
       }
-      renderer.queueFiles(turnFilesFor(session, dispatchKey).filter((file) => {
-        const left = landed.get(file.path) ?? 0;
+      const unlanded = (key: string): boolean => {
+        const left = landed.get(key) ?? 0;
         if (left > 0) {
-          landed.set(file.path, left - 1);
+          landed.set(key, left - 1);
           return false;
         }
         return true;
-      }));
+      };
+      // In the order the turn produced them; a file and a post from the
+      // same result keep the live order, files first (the sort is stable).
+      const outputs = [
+        ...turnFilesFor(session, dispatchKey)
+          .filter((file) => unlanded(keyOf(file.path)))
+          .map((file) => ({ at: file.producedAt, queue: () => renderer.queueFiles([file]) })),
+        ...turnPostsFor(session, dispatchKey)
+          .filter((entry) => unlanded(keyOf(entry.post)))
+          .map((entry) => ({ at: entry.producedAt, queue: () => renderer.queuePost(entry.post) })),
+      ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+      for (const output of outputs) {
+        output.queue();
+      }
     }
     if (reportedAhead?.said === true) {
       noteReplayAnsweredAhead(connection, event.channel, event.ts);

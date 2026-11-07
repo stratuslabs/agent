@@ -4571,6 +4571,238 @@ test('file-bearing tool results upload their contents into the conversation', as
   assert.equal(web.updates.at(-1)?.text, 'here you go');
 });
 
+// ---- a tool's ready-made post (AGT-324) ------------------------------------
+
+const CARD_POST = {
+  text: 'Open PRs: 13. <!channel> look',
+  slack: {
+    blocks: [
+      { type: 'header', text: { type: 'plain_text', text: 'Open PRs' } },
+      { type: 'section', text: { type: 'mrkdwn', text: '*13* open, ping <@U-DYLAN>' } },
+      {
+        type: 'actions',
+        elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open' }, url: 'https://github.com/stratuslabs/agent/pulls', action_id: 'stratus_approve_once', value: 'req-1' }],
+      },
+    ],
+  },
+};
+
+const postAdapter = (output: JsonObject, options: { trust?: 'agent' | 'external' } = {}) => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+  const warnings: string[] = [];
+  const gateway: GatewayLike = {
+    bus,
+    resolveApproval: () => false,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      await bus.emit({
+        type: 'tool.completed',
+        sessionId: input.sessionId,
+        result: { callId: 'c1', toolName: 'chat.card', ok: true, output, trust: options.trust ?? 'agent' },
+      });
+      return sessionWithReply(input.sessionId, 'here you go');
+    },
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  return { socket, web, gateway, adapter, warnings };
+};
+
+test('a tool\'s post lands in the thread as a card of its own, after its result\'s file and before the reply', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'slack-post-'));
+  const shot = path.join(dir, 'chart.png');
+  await writeFile(shot, 'png-bytes');
+  const { socket, web, gateway, adapter } = postAdapter({ file: shot, post: CARD_POST });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> open PRs as a card'));
+  await adapter.stop();
+
+  const card = web.posts.find((post) => post.blocks !== undefined);
+  assert.ok(card, 'the card was posted');
+  assert.equal(card.channel, 'C1');
+  assert.equal(card.thread_ts, web.posts[0]?.thread_ts, 'in the turn\'s own thread');
+  // Mentions and broadcasts in a post are shown as text, in its words and its mrkdwn.
+  assert.equal(card.text, 'Open PRs: 13. &lt;!channel&gt; look');
+  assert.deepEqual(card.blocks, [
+    { type: 'header', text: { type: 'plain_text', text: 'Open PRs' } },
+    { type: 'section', text: { type: 'mrkdwn', text: '*13* open, ping &lt;@U-DYLAN&gt;' } },
+    // Nothing in a post can wear an approval's id or carry a request id.
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open' }, url: 'https://github.com/stratuslabs/agent/pulls', action_id: 'stratus.post.1' }] },
+  ]);
+  assert.deepEqual(web.timeline.slice(-2), ['chart.png', card.text], 'the file, then the card');
+  assert.equal(web.updates.at(-1)?.text, 'here you go');
+});
+
+test('a post whose blocks Slack refuses goes as its text alone, and the warning names the code, not the content', async () => {
+  const { socket, web, gateway, adapter, warnings } = postAdapter({ post: CARD_POST });
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    if (args.blocks !== undefined) {
+      throw Object.assign(new Error('An API error occurred: invalid_blocks'), { data: { ok: false, error: 'invalid_blocks' } });
+    }
+    return post(args);
+  };
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> open PRs as a card'));
+  await adapter.stop();
+
+  assert.equal(web.posts.filter((entry) => entry.text === 'Open PRs: 13. &lt;!channel&gt; look' && entry.blocks === undefined).length, 1);
+  const warned = warnings.filter((line) => /tool's post/.test(line));
+  assert.deepEqual(warned, ['slack: Slack refused a tool\'s post with blocks (invalid_blocks), so it went as text alone']);
+});
+
+test('a post whose blocks hold something a card may not goes as its text alone', async () => {
+  const { socket, web, gateway, adapter, warnings } = postAdapter({
+    post: { text: 'Pick one', slack: { blocks: [{ type: 'actions', elements: [{ type: 'static_select', action_id: 'stratus_deny' }] }] } },
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> a menu'));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts.filter((entry) => entry.text === 'Pick one').map((entry) => entry.blocks), [undefined]);
+  assert.ok(warnings.includes('slack: a tool\'s post went as text alone, because its blocks held a `static_select` type'));
+});
+
+test('a post from an external result never reaches the thread', async () => {
+  const { socket, web, gateway, adapter } = postAdapter({ post: CARD_POST }, { trust: 'external' });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> read that server'));
+  await adapter.stop();
+
+  assert.equal(web.posts.some((entry) => entry.blocks !== undefined || /Open PRs/.test(entry.text)), false);
+  assert.equal(web.updates.at(-1)?.text, 'here you go');
+});
+
+test('a lookalike of an approval button on another message settles nothing; the prompt\'s own button still does', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  // An approver clicks a button carrying the prompt's action id and request
+  // id, on a message that is not the prompt.
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN', { ts: 'bot-ts-99' }));
+  assert.deepEqual(gateway.resolutions, []);
+  assert.equal(gateway.pendingApprovals.has('req-1'), true);
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /not on the request's own message, so nothing was recorded/);
+  assert.equal(web.updates.length, 0, 'neither message is rewritten');
+
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN', { ts: promptTs(web, 'req-1') }));
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN' }]);
+  await adapter.stop();
+});
+
+test('a lookalike of a credential button on another message opens no form', async () => {
+  const { socket, web, gateway, adapter, pending, ask } = credentialAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+  pending.add('cred-1');
+  await ask();
+  const updates = web.updates.length;
+
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN', 'bot-ts-99'));
+  assert.equal(web.views_opened.length, 0);
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /not on the request's own message/);
+  assert.equal(web.updates.length, updates, 'the other message is not retired as an orphan');
+
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN', promptTs(web, 'cred-1')));
+  assert.equal(web.views_opened.at(-1)?.view.private_metadata, 'cred-1');
+  await adapter.stop();
+});
+
+test('a click on a post\'s link button is acked and does nothing else', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+  const before = socket.acks;
+  await socket.deliver('interactive', {
+    body: {
+      team_id: 'T1',
+      user: { id: 'U-DYLAN' },
+      channel: { id: 'C1' },
+      message: { ts: 'bot-ts-7', thread_ts: '100.1' },
+      actions: [{ action_id: 'stratus.post.1' }],
+    },
+  });
+  await adapter.stop();
+  assert.equal(socket.acks - before, 1);
+  assert.deepEqual(gateway.resolutions, []);
+  assert.equal(web.ephemerals.length + web.updates.length + web.views_opened.length, 0);
+});
+
+test('a recovered turn\'s post follows its reply into the thread', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'Here is the card.',
+  });
+  await adapter.start(gateway);
+  await gateway.bus.emit({
+    type: 'tool.completed',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    result: { callId: 'c1', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: CARD_POST } },
+  });
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:100.1' });
+  await adapter.stop();
+
+  assert.deepEqual(web.timeline, ['Here is the card.', 'Open PRs: 13. &lt;!channel&gt; look']);
+  assert.equal(web.posts.at(-1)?.thread_ts, '100.1');
+  assert.equal(JSON.stringify(web.posts.at(-1)?.blocks).includes('stratus.post.1'), true);
+});
+
+test('a redelivery of a finished turn posts its post from the session, in order with its files, and once', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-repeat-post-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  // After the file was written: a repeat refuses a file changed since its turn.
+  const base = Date.now() + 1_000;
+  gateway.dispatch = async (input) => {
+    input.onRepeat?.('finished');
+    const at = (second: number) => new Date(base + second * 1_000).toISOString();
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: at(0), idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: at(1), toolResult: { callId: 'c1', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: { text: 'first card' } } } },
+        { id: 't2', role: 'tool', content: '', createdAt: at(2), toolResult: { callId: 'c2', toolName: 'chart.render', ok: true, output: { file: chart } } },
+        { id: 't3', role: 'tool', content: '', createdAt: at(3), toolResult: { callId: 'c3', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: CARD_POST } } },
+        { id: 'a1', role: 'assistant', content: 'the answer', createdAt: at(4) },
+      ],
+      createdAt: at(0),
+      updatedAt: at(4),
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+
+  assert.deepEqual(web.timeline.filter((entry) => entry !== '…'), ['first card', 'chart.png', 'Open PRs: 13. &lt;!channel&gt; look', 'the answer']);
+});
+
 test('a reset delta discards partial streamed text before the retry streams', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
@@ -5034,14 +5266,14 @@ const click = (
   actionId: string,
   requestId: string,
   user: string,
-  options: { settled?: boolean } = {},
+  options: { settled?: boolean; ts?: string } = {},
 ) => ({
   body: {
     team_id: 'T1',
     user: { id: user },
     channel: { id: 'C1' },
     message: {
-      ts: 'bot-ts-1',
+      ts: options.ts ?? 'bot-ts-1',
       thread_ts: '100.1',
       blocks: options.settled
         ? [{ type: 'section', text: { type: 'mrkdwn', text: 'already decided' } }]
@@ -5217,7 +5449,7 @@ test('a request that says what always grants is rendered and resolved in those w
   assert.match(JSON.stringify(posted?.blocks), /Always allow\* grants this tool to Ava until an operator revokes it/);
   assert.deepEqual(buttonIds(posted?.blocks), ['stratus_approve_once', 'stratus_approve_always', 'stratus_deny']);
 
-  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN', { ts: promptTs(web, 'req-1') }));
   const update = web.updates.at(-1);
   assert.equal(buttonIds(update?.blocks).length, 0);
   // The record names the grant that was made and how to take it back —
@@ -5232,7 +5464,7 @@ test('a request that says what always grants is rendered and resolved in those w
     always: 'destination',
   }));
   assert.match(JSON.stringify(web.posts.at(-1)?.blocks), /Always allow\* lets Ava use this tool on this conversation without asking, until revoked/);
-  await socket.deliver('interactive', click('stratus_approve_always', 'req-3', 'U-DYLAN'));
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-3', 'U-DYLAN', { ts: promptTs(web, 'req-3') }));
   assert.match(web.updates.at(-1)?.text ?? '', /Allowed, and granted to Ava for this conversation until revoked \(stratus grants ava\) by <@U-DYLAN>/);
 
   // A call naming no conversation is the one shape still scoped to the
@@ -5244,7 +5476,7 @@ test('a request that says what always grants is rendered and resolved in those w
     always: 'session',
   }));
   assert.match(JSON.stringify(web.posts.at(-1)?.blocks), /stops this tool asking again for the rest of this session/);
-  await socket.deliver('interactive', click('stratus_approve_always', 'req-2', 'U-DYLAN'));
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-2', 'U-DYLAN', { ts: promptTs(web, 'req-2') }));
   assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
 
   await adapter.stop();
@@ -9209,14 +9441,21 @@ const credentialRequest = (
   ...overrides,
 });
 
-const credentialClick = (requestId: string, user: string) => ({
+/**
+ * The ts the fake web gave the prompt carrying `requestId`: approvals and
+ * credential forms answer only clicks from their own message (AGT-324).
+ */
+const promptTs = (web: FakeWeb, requestId: string): string =>
+  `bot-ts-${web.posts.findIndex((post) => JSON.stringify(post.blocks ?? []).includes(`"value":"${requestId}"`)) + 1}`;
+
+const credentialClick = (requestId: string, user: string, ts = 'bot-ts-1') => ({
   body: {
     type: 'block_actions',
     team_id: 'T1',
     trigger_id: `trigger-${user}`,
     user: { id: user },
     channel: { id: 'C1' },
-    message: { ts: 'bot-ts-1', thread_ts: '100.1' },
+    message: { ts, thread_ts: '100.1' },
     actions: [{ action_id: 'stratus_credential_add', value: requestId }],
   },
 });
@@ -9336,11 +9575,11 @@ test('a credential request is posted in the thread with a button only an approve
   assert.deepEqual(buttonIds(posted?.blocks), ['stratus_credential_add']);
 
   // Anyone in the thread can see the button; only an approver gets the form.
-  await socket.deliver('interactive', credentialClick('cred-1', 'U-STRANGER'));
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-STRANGER', promptTs(web, 'cred-1')));
   assert.equal(web.views_opened.length, 0);
   assert.match(web.ephemerals.at(-1)?.text ?? '', /You are not an approver for Ava, so you cannot add its credentials\./);
 
-  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN', promptTs(web, 'cred-1')));
   const opened = web.views_opened.at(-1);
   assert.equal(opened?.trigger_id, 'trigger-U-DYLAN');
   assert.equal(opened?.view.callback_id, 'stratus_credential');
@@ -9384,7 +9623,7 @@ test('the form\'s field takes several lines, so a key file reaches the gateway w
   await adapter.start(gateway);
   pending.add('cred-1');
   await ask();
-  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN', promptTs(web, 'cred-1')));
   // A one-line plain_text_input flattens a pasted PEM private key's line
   // breaks; a multiline one keeps them.
   const view = web.views_opened.at(-1)?.view as { blocks?: Array<{ type?: string; element?: { type?: string; multiline?: boolean } }> } | undefined;
@@ -9632,7 +9871,7 @@ test('a click that lands while the credential post is still in flight leaves the
   };
   const asked = ask();
   await posting;
-  const click = credentialClick('cred-1', 'U-DYLAN');
+  const click = credentialClick('cred-1', 'U-DYLAN', promptTs(web, 'cred-1'));
   const blocks = [{ type: 'actions', elements: [{ type: 'button', action_id: 'stratus_credential_add', value: 'cred-1' }] }];
   await socket.deliver('interactive', { body: { ...click.body, message: { ...click.body.message, blocks } } });
   assert.equal(web.updates.length, 0, 'the live request was not retired as an orphan');
@@ -9640,7 +9879,7 @@ test('a click that lands while the credential post is still in flight leaves the
 
   release();
   await asked;
-  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN'));
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-DYLAN', promptTs(web, 'cred-1')));
   assert.equal(web.views_opened.at(-1)?.view.private_metadata, 'cred-1', 'the button still opens the form');
   await adapter.stop();
 });
@@ -17554,9 +17793,9 @@ test('a replace request says so on the post, the button and the form, and still 
   assert.match(blocks, /Only an approver can replace it\. .*the stored one is kept until it saves/);
   assert.match(blocks, /"text":"Replace credential"/);
 
-  await socket.deliver('interactive', credentialClick('cred-r', 'U-STRANGER'));
+  await socket.deliver('interactive', credentialClick('cred-r', 'U-STRANGER', promptTs(web, 'cred-r')));
   assert.equal(web.views_opened.length, 0);
-  await socket.deliver('interactive', credentialClick('cred-r', 'U-DYLAN'));
+  await socket.deliver('interactive', credentialClick('cred-r', 'U-DYLAN', promptTs(web, 'cred-r')));
   const view = web.views_opened.at(-1)?.view as { title?: { text?: string }; submit?: { text?: string } } | undefined;
   assert.equal(view?.title?.text, 'Replace a credential');
   assert.equal(view?.submit?.text, 'Replace');
@@ -17573,7 +17812,7 @@ test('a request for a key in a variable says on the post and the form that the a
   const blocks = JSON.stringify(formPosts().at(-1)?.blocks);
   assert.match(blocks, /Ava's shell commands will be able to read this as `GH_TOKEN`, so Ava can see the value\./);
 
-  await socket.deliver('interactive', credentialClick('cred-env', 'U-DYLAN'));
+  await socket.deliver('interactive', credentialClick('cred-env', 'U-DYLAN', promptTs(web, 'cred-env')));
   assert.match(JSON.stringify(web.views_opened.at(-1)?.view), /Ava's shell commands will be able to read this as `GH_TOKEN`, so Ava can see the value\./);
 
   await socket.deliver('interactive', credentialSubmission('cred-env', 'U-DYLAN', 'ghp-secret-value'), async () => {});
