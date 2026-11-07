@@ -17,6 +17,7 @@ import {
   type ImageAttachment,
   isLatestTurn,
   type JsonObject,
+  latestTurnReaction,
   latestTurnReply,
   leastTrusted,
   NO_REPLY_MARKER,
@@ -26,9 +27,11 @@ import {
   type Session,
   SESSION_TRUST_METADATA_KEY,
   sessionTrustOf,
+  type SilentReaction,
   type TrustLevel,
   turnFailureFor,
   turnFilesFor,
+  turnReactionFor,
   turnReplyFor,
 } from '@stratusagent/core';
 import { dispatchKeyFor, NO_REPLY_TEXT, type ReplyOutcome, ReplyRenderer } from './reply.ts';
@@ -46,10 +49,55 @@ import {
 } from './attachments.ts';
 import type { AgentConnection } from './connection.ts';
 import type { PendingIntake } from './pending-intake.ts';
+import { describeSlackError, slackErrorCode } from './slack-errors.ts';
 import type { SlackFileFetcher, SlackInboundFile } from './files.ts';
 import type { SlackAdapterOptions, SlackInboundEvent, SlackSocketEventArgs } from './index.ts';
 import type { ThreadTracking } from './threads.ts';
 import type { Admitter } from './admission.ts';
+
+/** Slack's name for each reaction a silent turn may leave (`SILENT_REACTIONS`). */
+const SLACK_REACTION_NAMES: Readonly<Record<SilentReaction, string>> = {
+  thumbsup: '+1',
+  laughing: 'laughing',
+  heart: 'heart',
+  tada: 'tada',
+};
+
+/**
+ * Leaves the reaction a reply-optional turn named instead of a reply on
+ * the message it was on (card 1078). Never fails the turn, which has
+ * already chosen silence: Slack answering `already_reacted` (a redelivered
+ * message) is what was wanted, a missing `reactions:write` is said once
+ * per app, and any other refusal is said and dropped.
+ */
+const addSilentReaction = async (
+  connection: AgentConnection,
+  channel: string,
+  timestamp: string,
+  reaction: SilentReaction,
+  warn: (line: string) => void,
+): Promise<void> => {
+  const reactions = connection.web.reactions;
+  if (!reactions) {
+    return;
+  }
+  try {
+    await reactions.add({ channel, timestamp, name: SLACK_REACTION_NAMES[reaction] });
+  } catch (error) {
+    const code = slackErrorCode(error);
+    if (code === 'already_reacted') {
+      return;
+    }
+    if (code === 'missing_scope') {
+      if (!connection.reactionWarned.value) {
+        connection.reactionWarned.value = true;
+        warn(`slack: ${connection.config.agentId}'s Slack app can't add reactions because it lacks the reactions:write scope, so its silent turns leave none. Add it to the app's manifest and reinstall the app.`);
+      }
+      return;
+    }
+    warn(`slack: ${connection.config.agentId} could not react to ${timestamp} in ${channel} (${describeSlackError(error)})`);
+  }
+};
 
 /** What createInbound closes over: values createSlackChannelAdapter owns. */
 export interface InboundDeps extends Pick<ThreadTracking, 'rememberAddressee' | 'threadOwner' | 'followUpWinner'>, Pick<Admitter, 'stopTurns' | 'admit'> {
@@ -689,6 +737,15 @@ export const createInbound = ({
         ? overhearReply(connection, event.channel, thread, () => renderer.spokenText(replyLanded ? reply ?? '' : ''), session, settled)
         : undefined;
       const { spoke, spokeAt } = await finalized;
+      // A reply-optional turn that said nothing may have named a reaction
+      // to leave instead (card 1078), and it goes on this message only if
+      // nothing of the turn's reached the thread.
+      if (renderer.mayStaySilent && !spoke && (reply ?? '').trim().length === 0) {
+        const reaction = finished ? turnReactionFor(session, dispatchKey) : latestTurnReaction(session);
+        if (reaction !== undefined) {
+          await addSilentReaction(connection, event.channel, event.ts, reaction, warn);
+        }
+      }
       if (spoke && threadKey !== undefined) {
         // The voice that just answered, recorded where its reply sits in
         // the thread. For a judging agent this is the only record there

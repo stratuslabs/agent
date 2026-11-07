@@ -203,7 +203,8 @@ machines, turn on `agentMentions`:
   messages directly above the tag, with nobody else speaking between and
   within the hour before it, read as if they were attached to the tag.
 - A tagged message from another agent may need no answer: a report, a
-  thanks. The agent is told it can stay quiet then, and posts nothing.
+  thanks. The agent is told it can stay quiet then, and posts nothing, or
+  leaves one reaction on the message instead (see **Reactions** below).
   A question or a request still gets one.
 - The reply isn't tagged automatically. The answering agent is told the
   asker's tag and includes it when the asker needs to see the answer; an
@@ -573,6 +574,14 @@ already turns on for approval buttons; no scope is added.
   under **OAuth & Permissions** and be reinstalled; until then the read
   returns the messages and tells the agent the scope is missing. Details in
   [Reading a channel](../../packages/channel-slack/README.md#reading-a-channel).
+- **Reactions** — an agent that stays quiet on a message said to it that
+  needs no answer (a thanks, a report) may leave one reaction on it instead:
+  :+1:, :laughing:, :heart: or :tada:. Never on a message it only overheard,
+  and never in place of an answer a question or request is owed. It needs the
+  `reactions:write` scope, which the manifest asks for. An app created before
+  it should have the scope added under **OAuth & Permissions** and be
+  reinstalled; until then the agent stays silent, and the daemon log says
+  once that the scope is missing.
 - **Images in a read** — `message.read` shows the agent the images on the
   messages it reads, at most 5 and 10 MB per read, held to the same limits
   as an image someone sends it (Slack's preview for one over 5 MB). Each

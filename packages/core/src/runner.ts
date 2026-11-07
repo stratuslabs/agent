@@ -48,7 +48,6 @@ import {
   type ImageAttachment,
   type ImageReplayBudget,
   InMemorySessionStore,
-  isNoReplyAnswer,
   isReplyOptionalTurn,
   isStoppedEarlyReason,
   isTaintedTrust,
@@ -66,6 +65,7 @@ import {
   type Message,
   messagesWithinContextFloor,
   type ModelProvider,
+  noReplyAnswerOf,
   omitImagesOutsideReplayBudget,
   originOf,
   PENDING_APPROVAL_METADATA_KEY,
@@ -1911,7 +1911,12 @@ export class AgentRunner {
         // A turn that may stay quiet said so with the marker: from here on
         // it is the silence an empty answer is, before anything records,
         // announces or posts it (card 601).
-        if (isReplyOptionalTurn(session) && isNoReplyAnswer(response)) {
+        // A reaction named with it is kept for the silence recorded below,
+        // on a turn whose message was said to the agent and only there: an
+        // overheard one was never offered one (card 1078).
+        const silent = isReplyOptionalTurn(session) ? noReplyAnswerOf(response) : undefined;
+        const reaction = silent !== undefined && !isUnaddressedTurn(session) ? silent.reaction : undefined;
+        if (silent !== undefined) {
           response = { ...response, parts: [] };
         }
         // Checked before anything of the response is saved: a call made on
@@ -1967,6 +1972,7 @@ export class AgentRunner {
             role: 'assistant',
             content: '',
             createdAt: new Date().toISOString(),
+            ...(reaction !== undefined ? { reaction } : {}),
           });
         }
         // Saved with the answer it describes, so a restart that finishes
