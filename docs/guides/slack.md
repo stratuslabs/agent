@@ -352,6 +352,33 @@ Restart the daemon to apply it. In `stream` mode the setting is made when
 the placeholder is posted; Slack's edit call takes no preview setting of its
 own.
 
+### Cards a tool posts
+
+A tool can hand the thread a finished message of its own: a card with a
+header, fields, a table, a chart and link buttons, built from Slack's
+blocks, with plain text beside it (see
+[what a tool returns](../architecture/plugins.md#what-a-tool-hands-its-conversation)).
+The agent posts it in the turn's thread, in order with the turn's words
+and files. Nothing new is needed from your Slack app: `chat:write` covers
+it.
+
+Before it goes out, the daemon checks the blocks. A card may hold headers,
+sections, context, dividers, images from a web address, Slack's tables and
+charts, and buttons that open a link. A button's id is renamed and its
+value dropped, so a card's button can't stand in for an approval or a
+credential form, and clicking it opens the link and does nothing else.
+Anything a person would fill in or pick from (inputs, menus, date pickers,
+`rich_text`), a button with no link, or a block type the daemon doesn't
+know sends the card's text alone. So does a card Slack refuses. Either
+way the log says why, without the card's content. Mentions and broadcasts
+in a card (`@here`, `@channel`, a mention of a person) are shown as text
+and notify nobody; the reply is where an agent mentions someone.
+
+A tool's card is never taken from a result labelled
+[`external`](tools.md), such as an MCP server's: a server's words would
+read as the agent's own. Approval and credential buttons also answer only
+from their own message: a lookalike elsewhere settles nothing.
+
 ## Stopping a turn
 
 Reply `stop` in the thread (or the DM) while the agent is working, or
