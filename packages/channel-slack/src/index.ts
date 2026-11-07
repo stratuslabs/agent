@@ -543,6 +543,16 @@ export interface SlackWebLike {
     list(args: { channel_id: string }): Promise<{ bookmarks?: Array<{ title?: string; link?: string }> }>;
   };
   /**
+   * Puts an emoji reaction on a message: what a reply-optional turn that
+   * stays silent leaves instead of a reply, when it names one (card 1078).
+   * Needs `reactions:write`, which the manifest asks for; an app without
+   * it stays silent and is told once. Optional so an older SDK or fake
+   * still runs, without reactions.
+   */
+  reactions?: {
+    add(args: { channel: string; timestamp: string; name: string }): Promise<unknown>;
+  };
+  /**
    * Opens a modal, which is how a credential is entered: its answer comes
    * back as a `view_submission` to this app and never becomes a message in
    * the conversation. Optional so a fake without it still runs; an adapter
@@ -2591,6 +2601,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         botUserId,
         teamId,
         statusWarned: { value: false },
+        reactionWarned: { value: false },
       };
     } catch (error) {
       // One broken app must not take the rest of the fleet down.

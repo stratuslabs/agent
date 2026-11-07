@@ -32,6 +32,7 @@
         "im:write",
         "mpim:history",
         "mpim:read",
+        "reactions:write",
         "users:read"
       ]
     }

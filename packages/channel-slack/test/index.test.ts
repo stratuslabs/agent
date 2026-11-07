@@ -14,6 +14,7 @@ import {
   type GatewayLike,
   type ImageAttachment,
   type JsonObject,
+  type Message,
   type Session,
   type StratusEvent,
 } from '@stratusagent/core';
@@ -122,6 +123,10 @@ interface FakeWeb extends SlackWebLike {
   infoAsked: string[];
   /** Thrown by files.uploadV2, as a missing scope or an outage would. */
   uploadFails?: Error;
+  /** reactions.add calls, in order. */
+  reactions_added: Array<{ channel: string; timestamp: string; name: string }>;
+  /** Thrown by reactions.add, as a missing scope would. */
+  reactionFails?: Error;
   userInfoDelayMs?: (callIndex: number) => number;
   /** Profile names to answer with, by user id, ahead of the default `name-<id>`. */
   displayNames?: Map<string, string>;
@@ -170,6 +175,16 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
     ephemerals: [],
     views_opened: [],
     uploads: [],
+    reactions_added: [],
+    reactions: {
+      async add(args) {
+        if (web.reactionFails) {
+          throw web.reactionFails;
+        }
+        web.reactions_added.push(args);
+        return {};
+      },
+    },
     grantedScopes: [
       'app_mentions:read', 'channels:history', 'channels:read', 'chat:write',
       'files:read', 'files:write', 'groups:history', 'groups:read',
@@ -18625,4 +18640,136 @@ test('a reply-optional turn that ends empty after words written before its last 
   assert.deepEqual(web.posts.map((post) => post.text), ['The deploy log shows one retried step.']);
   assert.deepEqual(web.deletes, []);
   assert.equal([...web.posts, ...web.updates].some((entry) => entry.text === '(no reply)'), false);
+});
+
+/** A session whose latest turn was a reply-optional one's silence, with a reaction. */
+const sessionWithReaction = (id: string, reaction: Message['reaction']): Session => {
+  const session = sessionWithReply(id, '');
+  session.messages = [{ id: 'm1', role: 'assistant', content: '', createdAt: session.createdAt, ...(reaction !== undefined ? { reaction } : {}) }];
+  return session;
+};
+
+/** Slack's answer to a call the token has no scope for, as @slack/web-api throws it. */
+const slackError = (code: string): Error => Object.assign(new Error(`An API error occurred: ${code}`), { data: { ok: false, error: code } });
+
+test('a reply-optional turn that stays silent with a reaction puts it on the message, and posts nothing (card 1078)', async () => {
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReaction(sessionId, 'thumbsup'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:570.0', '2026-01-01T00:00:00.000Z']]));
+  const { socket, web, adapter } = quietAdapter();
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'thanks, that works', ts: '570.1', thread: '570.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.replyOptional, ['Dylan: thanks, that works']);
+  // Slack's name for the thumbs up, on the message the turn was on.
+  assert.deepEqual(web.reactions_added, [{ channel: 'C1', timestamp: '570.1', name: '+1' }]);
+  assert.deepEqual(web.posts, []);
+  assert.deepEqual(web.updates, []);
+});
+
+test('each silent reaction maps to its Slack name (card 1078)', async () => {
+  const names: string[] = [];
+  for (const [index, reaction] of (['laughing', 'heart', 'tada'] as const).entries()) {
+    const thread = `${580 + index}.0`;
+    const gateway = createStubGateway(({ sessionId }) => sessionWithReaction(sessionId, reaction));
+    gateway.sessionRouting = routingOver(new Map([[`slack:ava:T1:C1:${thread}`, '2026-01-01T00:00:00.000Z']]));
+    const { socket, web, adapter } = quietAdapter();
+    await adapter.start(gateway);
+    await socket.deliver('message', channelMessage({ text: 'ha, nice', ts: `${580 + index}.1`, thread }));
+    await adapter.stop();
+    names.push(...web.reactions_added.map((added) => added.name));
+  }
+  assert.deepEqual(names, ['laughing', 'heart', 'tada']);
+});
+
+test('a reaction is only left where nothing was said: an answer, a turn that owes one, or plain silence get none (card 1078)', async () => {
+  // A reply-optional turn that answered: its words, no reaction.
+  const answered = createStubGateway(({ sessionId }) => {
+    const session = sessionWithReply(sessionId, 'Glad it works.');
+    session.messages[0] = { ...session.messages[0]!, reaction: 'tada' };
+    return session;
+  });
+  answered.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:590.0', '2026-01-01T00:00:00.000Z']]));
+  const first = quietAdapter();
+  await first.adapter.start(answered);
+  await first.socket.deliver('message', channelMessage({ text: 'thanks!', ts: '590.1', thread: '590.0' }));
+  await first.adapter.stop();
+  assert.deepEqual(first.web.reactions_added, []);
+  assert.ok(first.web.posts.some((post) => post.text === 'Glad it works.'));
+
+  // A tagged message owes an answer, whatever the session says.
+  const tagged = createStubGateway(({ sessionId }) => sessionWithReaction(sessionId, 'tada'));
+  const second = quietAdapter();
+  await second.adapter.start(tagged);
+  await second.socket.deliver('app_mention', mention('<@B-AVA> thanks', { ts: '591.1' }));
+  await second.adapter.stop();
+  assert.deepEqual(second.web.reactions_added, []);
+
+  // Silence that named no reaction.
+  const plain = createStubGateway(({ sessionId }) => sessionWithReaction(sessionId, undefined));
+  plain.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:592.0', '2026-01-01T00:00:00.000Z']]));
+  const third = quietAdapter();
+  await third.adapter.start(plain);
+  await third.socket.deliver('message', channelMessage({ text: 'thanks!', ts: '592.1', thread: '592.0' }));
+  await third.adapter.stop();
+  assert.deepEqual(third.web.reactions_added, []);
+  assert.deepEqual(third.web.posts, []);
+});
+
+test('an app without reactions:write stays silent and says so once, not on every turn (card 1078)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.reactionFails = slackError('missing_scope');
+  const warnings: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReaction(sessionId, 'heart'));
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:600.0', '2026-01-01T00:00:00.000Z'],
+    ['slack:ava:T1:C1:601.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    progressAfterMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'thanks!', ts: '600.1', thread: '600.0' }));
+  await socket.deliver('message', channelMessage({ text: 'thanks again!', ts: '601.1', thread: '601.0' }));
+  await adapter.stop();
+
+  assert.equal(gateway.replyOptional.length, 2);
+  assert.deepEqual(web.posts, []);
+  assert.deepEqual(web.updates, []);
+  const scope = warnings.filter((line) => line.includes('reactions:write'));
+  assert.equal(scope.length, 1, warnings.join('\n'));
+  assert.match(scope[0]!, /ava's Slack app can't add reactions/);
+});
+
+test('a reaction Slack already has, or one it refuses for another reason, never fails the turn (card 1078)', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.reactionFails = slackError('already_reacted');
+  const warnings: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReaction(sessionId, 'tada'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:610.0', '2026-01-01T00:00:00.000Z']]));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    progressAfterMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'shipped', ts: '610.1', thread: '610.0' }));
+  web.reactionFails = slackError('message_not_found');
+  await socket.deliver('message', channelMessage({ text: 'shipped again', ts: '610.2', thread: '610.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(web.posts, []);
+  // Already there is what was wanted; a refusal is said, and nothing more.
+  assert.equal(warnings.filter((line) => line.includes('already_reacted')).length, 0, warnings.join('\n'));
+  assert.equal(warnings.filter((line) => line.includes('message_not_found')).length, 1, warnings.join('\n'));
 });

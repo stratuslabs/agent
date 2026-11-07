@@ -99,9 +99,15 @@ More in [Agents](docs/concepts/agents.md).
 
 Everything else is in [`docs/`](docs/README.md).
 
+## Known limitations
+
+What doesn't work yet, or works differently than you might assume, is in
+[Known limitations](docs/concepts/limitations.md).
+
 ## From source
 
 ```bash
+# Node 25+ no longer ships Corepack: npm install -g corepack
 corepack enable && corepack prepare pnpm@10.18.3 --activate
 git clone https://github.com/stratuslabs/agent.git && cd agent
 pnpm install --frozen-lockfile
@@ -109,7 +115,8 @@ pnpm build && pnpm typecheck && pnpm test    # what CI runs
 node packages/cli/dist/bin.js setup          # the CLI from the checkout
 ```
 
-Read [`CLAUDE.md`](CLAUDE.md) before opening a PR.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR. Report
+security problems privately, as [`SECURITY.md`](SECURITY.md) describes.
 
 ## License
 

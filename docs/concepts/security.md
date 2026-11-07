@@ -3,6 +3,9 @@
 The one-page map of what protects what. Each rule is deliberate; the pages
 linked own the full story.
 
+Found a way around one of these? Report it privately, as
+[SECURITY.md](../../SECURITY.md) describes, not in a public issue.
+
 ## Secrets on disk
 
 - `~/.stratus/credentials.json` is `0600` (owner-read-only), and so are

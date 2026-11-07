@@ -151,6 +151,39 @@ export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey:
 };
 
 /**
+ * The reaction a session's latest turn left instead of a reply
+ * (`Message.reaction`, card 1078), or undefined. Read off the turn's last
+ * assistant message, the silence the runner records, and never past the
+ * latest user message: an earlier turn's reaction is not this one's.
+ */
+export const latestTurnReaction = (session: Pick<Session, 'messages'>): SilentReaction | undefined => {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index];
+    if (message?.role === 'user') {
+      return undefined;
+    }
+    if (message?.role === 'assistant') {
+      return message.reaction;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * The reaction of the turn a keyed message started, where
+ * `latestTurnReaction` is the newest turn's: what `turnReplyFor` is to
+ * `latestTurnReply`, for an adapter answering a repeat of a finished turn.
+ */
+export const turnReactionFor = (session: Pick<Session, 'messages'>, idempotencyKey: string): SilentReaction | undefined => {
+  const start = session.messages.findLastIndex((message) => carriesKey(message, idempotencyKey));
+  if (start < 0) {
+    return undefined;
+  }
+  const next = session.messages.findIndex((message, index) => index > start && startsTurn(message));
+  return latestTurnReaction({ messages: session.messages.slice(0, next < 0 ? undefined : next) });
+};
+
+/**
  * The files the turn a keyed message started produced (`filePathsOf` over
  * its tool results), the other half of what `turnReplyFor` reads. A
  * channel uploads a turn's files as the results arrive, so an adapter
@@ -476,18 +509,50 @@ export const isReplyOptionalTurn = (session: Pick<Session, 'messages'>): boolean
 };
 
 /**
- * Whether a response is the marker a turn that may stay quiet answers
- * with to say nothing: no tool call, and its text, trimmed, exactly
- * `NO_REPLY_MARKER`. The whole answer or nothing: the word inside a
- * sentence is a sentence.
+ * The reactions a reply-optional turn may leave instead of a reply
+ * (card 1078): `NO_REPLY_MARKER` followed by one of these names puts it
+ * on the message the turn was on, where the channel can. Fixed and small
+ * on purpose, and without an "on it" or "thinking" face: the turn ends
+ * silent, so a reaction promising work that never follows would mislead.
+ * Channel-neutral names; each channel maps them to its own.
  */
-export const isNoReplyAnswer = (response: Pick<ProviderResponse, 'parts'>): boolean => {
-  if (response.parts.some((part) => part.type !== 'text')) {
-    return false;
+export const SILENT_REACTIONS = ['thumbsup', 'laughing', 'heart', 'tada'] as const;
+
+export type SilentReaction = (typeof SILENT_REACTIONS)[number];
+
+/** Names a model may write for a reaction that are another's name for it. */
+const SILENT_REACTION_ALIASES: Readonly<Record<string, SilentReaction>> = { '+1': 'thumbsup' };
+
+/**
+ * What a response says if it is the marker a turn that may stay quiet
+ * answers with to say nothing: undefined if it is not, and otherwise the
+ * reaction it names, when that is one of `SILENT_REACTIONS`. The marker
+ * qualifies only as the whole answer: no tool call, and its text, trimmed,
+ * exactly `NO_REPLY_MARKER` or the marker and one word. A word outside the
+ * set is still silence, never posted as text, with no reaction; the
+ * marker inside a sentence is a sentence.
+ */
+export const noReplyAnswerOf = (response: Pick<ProviderResponse, 'parts'>): { reaction?: SilentReaction } | undefined => {
+  if (response.parts.length === 0 || response.parts.some((part) => part.type !== 'text')) {
+    return undefined;
   }
   const text = response.parts.map((part) => (part.type === 'text' ? part.text : '')).join('');
-  return text.trim() === NO_REPLY_MARKER;
+  // The marker, then at most one word: the reaction it names, `:colons:` allowed.
+  const matched = new RegExp(`^${NO_REPLY_MARKER}(?:\\s+:?([A-Za-z0-9_+-]+):?)?$`).exec(text.trim());
+  if (!matched) {
+    return undefined;
+  }
+  const name = matched[1]?.toLowerCase();
+  if (name === undefined) {
+    return {};
+  }
+  const reaction = SILENT_REACTION_ALIASES[name] ?? SILENT_REACTIONS.find((candidate) => candidate === name);
+  return reaction !== undefined ? { reaction } : {};
 };
+
+/** Whether a response is a silent answer (`noReplyAnswerOf`), with or without a reaction. */
+export const isNoReplyAnswer = (response: Pick<ProviderResponse, 'parts'>): boolean =>
+  noReplyAnswerOf(response) !== undefined;
 
 /**
  * Where the dispatch carrying `idempotencyKey` stands in this session:
@@ -589,7 +654,7 @@ export const NO_REPLY_MARKER = 'NO_REPLY';
  * the same probe.
  */
 export const REPLY_OPTIONAL_NOTE =
-  `This message was said to you. Answer it as you normally would: a question or a request always gets an answer, whether a person or an agent sent it, even one you cannot fully help with. Only if it just thanks you, acknowledges something or reports something, and asks nothing of you, reply with exactly ${NO_REPLY_MARKER} and nothing else. Any message without a note like this one always gets an answer.`;
+  `This message was said to you. Answer it as you normally would: a question or a request always gets an answer, whether a person or an agent sent it, even one you cannot fully help with. Only if it just thanks you, acknowledges something or reports something, and asks nothing of you, reply with exactly ${NO_REPLY_MARKER} and nothing else. If a reaction fits, you may follow ${NO_REPLY_MARKER} with one of ${SILENT_REACTIONS.slice(0, -1).join(', ')} or ${SILENT_REACTIONS.at(-1)}, as in ${NO_REPLY_MARKER} thumbsup, and that reaction goes on the message instead. Any message without a note like this one always gets an answer.`;
 
 /**
  * What a turn nobody asked for is told, after the message it ends on.

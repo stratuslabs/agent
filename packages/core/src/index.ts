@@ -38,6 +38,8 @@ import {
   type MemoryPassStatus,
 } from './memory.ts';
 
+import { type SilentReaction } from './turns.ts';
+
 import type { ImageAttachment } from './images.ts';
 
 import type { JsonObject } from './json.ts';
@@ -90,6 +92,15 @@ export interface Message {
    * build reads past it, and the message is then one that was answered.
    */
   replyOptional?: boolean;
+  /**
+   * On the empty assistant message a reply-optional turn's silence leaves
+   * (card 1078): the reaction the model named with `NO_REPLY_MARKER`, one
+   * of `SILENT_REACTIONS`, for the channel to put on the message the turn
+   * was on. Recorded only on a turn whose message was said to the agent
+   * (`replyOptional`), never on an overheard one. Present only when named;
+   * an older build reads past it, and the turn is then plain silence.
+   */
+  reaction?: SilentReaction;
   /**
    * Appended by `observe`, so it started no turn. `overheard` alone cannot
    * say so: a turn dispatched with `addressed: false` is overheard too, and
@@ -1059,11 +1070,13 @@ export {
   isReplyOptionalTurn,
   isUnaddressedTurn,
   lastResponseIsAnswer,
+  latestTurnReaction,
   latestTurnReply,
   markPromptDelivered,
   MAX_IDEMPOTENCY_KEY_LENGTH,
   messagesAfterOverheard,
   NO_REPLY_MARKER,
+  noReplyAnswerOf,
   OVERHEARD_IMAGES_NOTE,
   promptTextOf,
   type PromptTextOptions,
@@ -1073,12 +1086,15 @@ export {
   redactSecrets,
   REPLY_OPTIONAL_NOTE,
   SAID_TO_YOU_MARK,
+  SILENT_REACTIONS,
+  type SilentReaction,
   TURN_LIMIT_NOTE,
   turnFailureFor,
   turnFilesFor,
   turnKeyOf,
   turnMessageOf,
   turnPostsFor,
+  turnReactionFor,
   turnReplyFor,
   UNADDRESSED_TURN_NOTE,
   workItemState,
