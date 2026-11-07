@@ -18716,6 +18716,25 @@ test('a reaction is only left where nothing was said: an answer, a turn that owe
   assert.deepEqual(third.web.posts, []);
 });
 
+test('a silent reply-optional turn whose tool posted a card has spoken, so it leaves no reaction (card 1078, AGT-324)', async () => {
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({
+      type: 'tool.completed',
+      sessionId,
+      result: { callId: 'c1', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: { text: 'Open PRs: 13' } } },
+    });
+    return sessionWithReaction(sessionId, 'tada');
+  });
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:593.0', '2026-01-01T00:00:00.000Z']]));
+  const { socket, web, adapter } = quietAdapter();
+  await adapter.start(gateway);
+  await socket.deliver('message', channelMessage({ text: 'thanks!', ts: '593.1', thread: '593.0' }));
+  await adapter.stop();
+
+  assert.ok(web.posts.some((post) => post.text === 'Open PRs: 13'), 'the card went out');
+  assert.deepEqual(web.reactions_added, []);
+});
+
 test('an app without reactions:write stays silent and says so once, not on every turn (card 1078)', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
