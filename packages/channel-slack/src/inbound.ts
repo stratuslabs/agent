@@ -690,16 +690,18 @@ export const createInbound = ({
         }
         return true;
       };
-      // In the order the turn produced them; a file and a post from the
-      // same result keep the live order, files first (the sort is stable).
+      // In the order the turn produced them: by place in the transcript,
+      // not time, which two results can share to the millisecond. A file
+      // and a post from the same result keep the live order, files first
+      // (the sort is stable).
       const outputs = [
         ...turnFilesFor(session, dispatchKey)
           .filter((file) => unlanded(keyOf(file.path)))
-          .map((file) => ({ at: file.producedAt, queue: () => renderer.queueFiles([file]) })),
+          .map((file) => ({ position: file.position, queue: () => renderer.queueFiles([file]) })),
         ...turnPostsFor(session, dispatchKey)
           .filter((entry) => unlanded(keyOf(entry.post)))
-          .map((entry) => ({ at: entry.producedAt, queue: () => renderer.queuePost(entry.post) })),
-      ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+          .map((entry) => ({ position: entry.position, queue: () => renderer.queuePost(entry.post) })),
+      ].sort((a, b) => a.position - b.position);
       for (const output of outputs) {
         output.queue();
       }

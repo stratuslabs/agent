@@ -4891,6 +4891,46 @@ test('a redelivery of a finished turn posts its post from the session, in order 
   assert.deepEqual(web.timeline.filter((entry) => entry !== '…'), ['first card', 'chart.png', 'Open PRs: 13. &lt;!channel&gt; look', 'the answer']);
 });
 
+test('a redelivery of a finished turn keeps a post ahead of a later file recorded in the same millisecond', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-repeat-post-ms-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  // Parallel tool calls can be recorded in one millisecond, and createdAt
+  // keeps no finer time: the transcript's order is the only order left.
+  const at = new Date(Date.now() + 1_000).toISOString();
+  gateway.dispatch = async (input) => {
+    input.onRepeat?.('finished');
+    return {
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      messages: [
+        { id: 'u1', role: 'user', content: 'hello there', createdAt: at, idempotencyKey: input.idempotencyKey ?? '' },
+        { id: 't1', role: 'tool', content: '', createdAt: at, toolResult: { callId: 'c1', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: { text: 'first card' } } } },
+        { id: 't2', role: 'tool', content: '', createdAt: at, toolResult: { callId: 'c2', toolName: 'chart.render', ok: true, output: { file: chart } } },
+        { id: 'a1', role: 'assistant', content: 'the answer', createdAt: at },
+      ],
+      createdAt: at,
+      updatedAt: at,
+    };
+  };
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> hello there'));
+  await adapter.stop();
+
+  assert.deepEqual(web.timeline.filter((entry) => entry !== '…'), ['first card', 'chart.png', 'the answer']);
+});
+
 test('a reset delta discards partial streamed text before the retry streams', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

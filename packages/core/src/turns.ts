@@ -193,11 +193,14 @@ export const turnReactionFor = (session: Pick<Session, 'messages'>, idempotencyK
  * A path, not the bytes: the transcript never held them. `producedAt` is
  * when the result naming it was recorded, so a reader can refuse a path
  * that has been written since — by now it may hold a later turn's file.
+ * `position` is that result's index in `messages`: the order to replay a
+ * turn's files and posts in, since two results (parallel tool calls) can
+ * share a `producedAt` millisecond.
  */
 export const turnFilesFor = (
   session: Pick<Session, 'messages'>,
   idempotencyKey: string,
-): Array<{ path: string; producedAt: string }> => {
+): Array<{ path: string; producedAt: string; position: number }> => {
   const start = session.messages.findLastIndex((message) => carriesKey(message, idempotencyKey));
   if (start < 0) {
     return [];
@@ -205,8 +208,8 @@ export const turnFilesFor = (
   const next = session.messages.findIndex((message, index) => index > start && startsTurn(message));
   return session.messages
     .slice(start + 1, next < 0 ? undefined : next)
-    .flatMap((message) => (message.role === 'tool' && message.toolResult !== undefined
-      ? filePathsOf(message.toolResult).map((filePath) => ({ path: filePath, producedAt: message.createdAt }))
+    .flatMap((message, offset) => (message.role === 'tool' && message.toolResult !== undefined
+      ? filePathsOf(message.toolResult).map((filePath) => ({ path: filePath, producedAt: message.createdAt, position: start + 1 + offset }))
       : []));
 };
 
@@ -215,12 +218,14 @@ export const turnFilesFor = (
  * tool results), beside `turnFilesFor`: a channel posts them as the
  * results arrive, so an adapter answering a repeat of a finished turn
  * has the session and nothing else to find them by. Unlike a file, a post
- * is all in the transcript, so nothing it names can have changed since.
+ * is all in the transcript, so nothing it names can have changed since,
+ * and only `position` is kept: it orders the post against the turn's
+ * files, as in `turnFilesFor`.
  */
 export const turnPostsFor = (
   session: Pick<Session, 'messages'>,
   idempotencyKey: string,
-): Array<{ post: ToolPost; producedAt: string }> => {
+): Array<{ post: ToolPost; position: number }> => {
   const start = session.messages.findLastIndex((message) => carriesKey(message, idempotencyKey));
   if (start < 0) {
     return [];
@@ -228,9 +233,9 @@ export const turnPostsFor = (
   const next = session.messages.findIndex((message, index) => index > start && startsTurn(message));
   return session.messages
     .slice(start + 1, next < 0 ? undefined : next)
-    .flatMap((message) => {
+    .flatMap((message, offset) => {
       const post = message.role === 'tool' && message.toolResult !== undefined ? postOf(message.toolResult) : undefined;
-      return post !== undefined ? [{ post, producedAt: message.createdAt }] : [];
+      return post !== undefined ? [{ post, position: start + 1 + offset }] : [];
     });
 };
 
