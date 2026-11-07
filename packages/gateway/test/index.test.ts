@@ -280,6 +280,29 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     const withFile = await gateway.sessionRouting('thread-o');
     assert.equal(withFile?.lastSpokeAt, at);
 
+    // So is a post (AGT-324): a card the channel put in the thread with no
+    // words beside it. A post from an external result is not one, and is
+    // not counted.
+    const posted = await gateway.store.get('thread-o');
+    assert.ok(posted);
+    const later = '2026-09-12T12:05:00.000Z';
+    const cardResult = (trust: 'agent' | 'external') => ({
+      callId: `card-${trust}`, toolName: 'chat.card', ok: true, trust, output: { post: { text: 'Open PRs: 13' } },
+    });
+    posted.messages.push(
+      { id: 'thread-o:user:p1', role: 'user', content: 'Sam: as a card?', createdAt: later, overheard: true },
+      { id: 'thread-o:tool:card-agent', role: 'tool', name: 'chat.card', content: '{}', createdAt: later, toolResult: cardResult('agent') },
+    );
+    await gateway.store.save(posted);
+    assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, later);
+    const external = await gateway.store.get('thread-o');
+    assert.ok(external);
+    external.messages.push(
+      { id: 'thread-o:tool:card-external', role: 'tool', name: 'mcp.card', content: '{}', createdAt: '2026-09-12T12:10:00.000Z', toolResult: cardResult('external') },
+    );
+    await gateway.store.save(external);
+    assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, later);
+
     // An agent hears only conversations it is already in: nothing is
     // created on its behalf, and "not in that one" is an answer rather
     // than a refusal — a channel asks this for every thread its app can

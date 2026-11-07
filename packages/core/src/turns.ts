@@ -11,9 +11,11 @@ import {
   type EventBus,
   filePathsOf,
   type Message,
+  postOf,
   type ProviderResponse,
   type Session,
   type SessionStore,
+  type ToolPost,
 } from './index.ts';
 
 /**
@@ -173,6 +175,30 @@ export const turnFilesFor = (
     .flatMap((message) => (message.role === 'tool' && message.toolResult !== undefined
       ? filePathsOf(message.toolResult).map((filePath) => ({ path: filePath, producedAt: message.createdAt }))
       : []));
+};
+
+/**
+ * The posts the turn a keyed message started produced (`postOf` over its
+ * tool results), beside `turnFilesFor`: a channel posts them as the
+ * results arrive, so an adapter answering a repeat of a finished turn
+ * has the session and nothing else to find them by. Unlike a file, a post
+ * is all in the transcript, so nothing it names can have changed since.
+ */
+export const turnPostsFor = (
+  session: Pick<Session, 'messages'>,
+  idempotencyKey: string,
+): Array<{ post: ToolPost; producedAt: string }> => {
+  const start = session.messages.findLastIndex((message) => carriesKey(message, idempotencyKey));
+  if (start < 0) {
+    return [];
+  }
+  const next = session.messages.findIndex((message, index) => index > start && startsTurn(message));
+  return session.messages
+    .slice(start + 1, next < 0 ? undefined : next)
+    .flatMap((message) => {
+      const post = message.role === 'tool' && message.toolResult !== undefined ? postOf(message.toolResult) : undefined;
+      return post !== undefined ? [{ post, producedAt: message.createdAt }] : [];
+    });
 };
 
 /**
