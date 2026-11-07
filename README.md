@@ -99,11 +99,6 @@ More in [Agents](docs/concepts/agents.md).
 
 Everything else is in [`docs/`](docs/README.md).
 
-## Known limitations
-
-What doesn't work yet, or works differently than you might assume, is in
-[Known limitations](docs/concepts/limitations.md).
-
 ## From source
 
 ```bash
