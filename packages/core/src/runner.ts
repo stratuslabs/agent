@@ -2100,8 +2100,16 @@ export class AgentRunner {
     } catch {
       return { error, text: plain(error) };
     }
-    const masked = typeof error === 'string' ? redactSecrets(error, secrets) : redactedError(error, secrets);
-    return { error: masked, text: redactSecrets(plain(masked), secrets) };
+    if (error instanceof Error) {
+      const masked = redactedError(error, secrets);
+      return { error: masked, text: plain(masked) };
+    }
+    // Anything else is shown by its text (a channel stringifies what a
+    // dispatch rejected with), so a value whose text held a secret is
+    // replaced by the masked text; one with nothing to mask stays itself.
+    const text = plain(error);
+    const masked = redactSecrets(text, secrets);
+    return { error: masked === text ? error : masked, text: masked };
   }
 
   /**

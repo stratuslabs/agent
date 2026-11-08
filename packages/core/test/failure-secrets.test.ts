@@ -93,6 +93,32 @@ test('a thrown string is masked the same way', async () => {
   assert.equal((await store.get('mask-3'))?.lastError, 'raw [redacted]');
 });
 
+test('a thrown value that is neither an Error nor a string is replaced by its masked text when it held a secret', async () => {
+  // A channel stringifies whatever the dispatch rejected with, so a value
+  // whose own text carries the secret must not be rethrown as it is.
+  const store = new InMemorySessionStore();
+  const boxed = { toString: () => `boxed ${TOKEN}` };
+  const runner = new AgentRunner({
+    provider: failingWith(boxed),
+    store,
+    failureSecrets: async () => [TOKEN],
+  });
+
+  await assert.rejects(
+    () => runner.run({ sessionId: 'mask-6', agent: AGENT, userMessage: 'hello' }),
+    (thrown: unknown) => thrown === 'boxed [redacted]',
+  );
+  assert.equal((await store.get('mask-6'))?.lastError, 'boxed [redacted]');
+
+  // One with nothing to mask is rethrown as itself.
+  const plain = { toString: () => 'nothing secret' };
+  await assert.rejects(
+    () => new AgentRunner({ provider: failingWith(plain), failureSecrets: async () => [TOKEN] })
+      .run({ sessionId: 'mask-7', agent: AGENT, userMessage: 'hello' }),
+    (thrown: unknown) => thrown === plain,
+  );
+});
+
 test('when the secrets cannot be read, the failure is still recorded and announced, unmasked', async () => {
   // The store being unreadable is most often the failure being reported,
   // and its own message names a path, not a value: withholding the text
