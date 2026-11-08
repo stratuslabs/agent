@@ -217,6 +217,7 @@ import {
   createFileCredentialResolver,
   credentialValuesFor,
   resolveDaemonCredential,
+  storedSecretValues,
   createHomeMemoryStore,
   drainSharedMemory,
   hasBracketedLegacyStateIn,
@@ -1401,6 +1402,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // reads the agent's memory; no skill catalog, so its prompt is its
   // instruction and its tools; and grants nothing to every agent, since
   // the credential request asks a person.
+  // What a failed turn's text is masked against before it is recorded,
+  // announced or thrown (`failureSecrets`): every value the credentials
+  // file holds, plus what the failing agent's listed credentials resolve to
+  // now, which adds any the environment supplies. Read per failure, so a
+  // key stored or rotated while the daemon runs is covered.
+  const failureSecrets = async (session: Session): Promise<string[]> => [
+    ...await storedSecretValues(env),
+    ...await credentialValuesFor(createFileCredentialResolver(env), session.agent),
+  ];
+
   const runnerFor = (config: RuntimeConfig, agentId: string, subAgent = false): AgentRunner => {
     // The budget is a provider-construction input too (the harness
     // runtimes take it as their inner limit), so it is part of the key:
@@ -1456,6 +1467,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ? { autoContinue, waitingInput: (sessionId: string) => (waitingDispatches.get(sessionId) ?? 0) > 0 }
         : {}),
       providerCallGuards,
+      failureSecrets,
     });
     hostedRunner = runner;
     runners.set(key, runner);
@@ -2248,6 +2260,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       bus,
       maxTurns,
       providerCallGuards,
+      failureSecrets,
     });
     const definition: AgentDefinition = {
       id: source.definition.id,

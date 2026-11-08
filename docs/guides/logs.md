@@ -116,10 +116,12 @@ date and approver, so it can be told from one that ran because the tool was
 `safe` — see [Approvals](./approvals.md#what-the-log-records-about-a-grant).
 
 One exception worth knowing before you paste a log anywhere. A failed
-session records the **provider's error text verbatim**, and providers
-routinely quote the request that failed — so a malformed prompt can end up
-inside an error message. Skim a log before sharing it, and prefer `--agent`
-or `--session` to narrow it to the run you actually mean.
+session records the **error text** it failed with. Any key or token stored
+in `~/.stratus/credentials.json`, and any credential the agent's soul lists,
+shows as `[redacted]` in it. But providers routinely quote the request that
+failed, so a malformed prompt can still end up inside an error message.
+Skim a log before sharing it, and prefer `--agent` or `--session` to narrow
+it to the run you actually mean.
 
 ## When the log is empty
 

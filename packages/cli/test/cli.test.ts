@@ -12874,6 +12874,74 @@ test('a stop signal during a restart\'s drain stops the daemon; it does not come
   assert.ok(!watched.output.stdout.includes('Restarting stratusd.'), watched.output.stdout);
 });
 
+test('a failed turn that quotes stored secrets reaches stratusd.jsonl and `stratus logs` masked', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-masked-failure-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\ncredentials: [search.apiKey]\n---\n\nYou are Ava.\n',
+  );
+  // Synthetic values: a named credential and a channel's transport token.
+  // The channel kind has no plugin installed here, so serve stores it and
+  // connects nothing.
+  const named = 'synthetic-named-credential-1234';
+  const channelToken = 'synthetic-channel-transport-token';
+  await writeFile(path.join(serveHome, '.stratus', 'credentials.json'), JSON.stringify({
+    named: { agents: { ava: { 'search.apiKey': named } } },
+    channels: { 'imessage-photon': { ava: { projectSecret: channelToken } } },
+  }), { mode: 0o600 });
+  const fetchImpl = (async () => new Response(
+    JSON.stringify({ error: { message: `rejected header ${named}; upstream token ${channelToken}` } }),
+    { status: 400, headers: { 'content-type': 'application/json' } },
+  )) as typeof fetch;
+
+  const watched = watchedServeStreams();
+  const controller = new AbortController();
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: { OPENAI_API_KEY: 'sk-test' },
+      fetch: fetchImpl,
+      shutdownSignal: controller.signal,
+    },
+  });
+
+  const logPath = path.join(serveHome, '.stratus', 'logs', 'stratusd.jsonl');
+  try {
+    const base = await watched.apiUrl;
+    const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+    const queued = await postJson(`${base}/api/v1/sessions/s-masked/messages`, token, { message: 'hello', agentId: 'ava' });
+    assert.equal(queued.status, 202, queued.body);
+    // The log write is queued off the event's path; wait for it to land.
+    const deadline = Date.now() + 5_000;
+    while (!(await readFile(logPath, 'utf8').catch(() => '')).includes('"session.failed"')) {
+      assert.ok(Date.now() < deadline, 'the failure never reached the daemon log');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  } finally {
+    controller.abort();
+    await serving;
+  }
+
+  const log = await readFile(logPath, 'utf8');
+  const failed = log.split('\n').filter((line) => line.includes('"session.failed"')).map((line) => JSON.parse(line));
+  assert.deepEqual(failed.map((record) => record.detail?.error), ['rejected header [redacted]; upstream token [redacted]']);
+  assert.ok(!log.includes(named), 'the named credential reached the log');
+  assert.ok(!log.includes(channelToken), 'the channel token reached the log');
+
+  const shown = createStreams();
+  assert.equal(await runCli({
+    argv: ['logs', '--session', 's-masked'],
+    streams: shown.streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: {} },
+  }), 0);
+  assert.match(shown.output.stdout, /session\.failed .*rejected header \[redacted\]; upstream token \[redacted\]/);
+  assert.ok(!shown.output.stdout.includes(named) && !shown.output.stdout.includes(channelToken), shown.output.stdout);
+});
+
 test('a restart respawns the bin beside the running module, compiled or source', () => {
   assert.equal(restartEntrypoint('file:///opt/stratus/dist/index.js'), path.join('/opt/stratus/dist', 'bin.js'));
   // `pnpm cli serve` runs src/bin.ts under type stripping; there is no

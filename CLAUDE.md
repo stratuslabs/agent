@@ -307,8 +307,12 @@ These are deliberate. Changing one is a decision, not a refactor.
 - **The daemon log is a trace, not a second transcript.** It records that
   a tool ran and that a session completed. Prompts, replies, and tool
   inputs stay out of it — keep it that way when adding events. The one
-  gap today is `session.failed`, which persists the provider's error text
-  verbatim, and providers quote the failing request; do not document the
+  gap is `session.failed`, which persists the failure's text. Every stored
+  secret value is masked in it first (the runner's `failureSecrets`, which
+  the gateway fills from the whole credentials file plus what the failing
+  agent's credentials resolve to), so the same masked text reaches the
+  log, `lastError` and a channel's failure line. Providers still quote the
+  failing request, so conversation text can be in it; do not document the
   log as safe to share without qualifying that.
 - A stored sign-in is endpoint-bound: a credential saved for one endpoint
   is never sent to an endpoint a project-local config selects.
