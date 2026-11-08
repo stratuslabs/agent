@@ -102,7 +102,10 @@ const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
 // stub: the real launchctl/systemctl would touch the developer's machine,
 // and `systemctl --user` blocks without a session bus.
 // It answers like a healthy manager: install and start ask afterwards
-// whether the daemon is running, and only say so when it is.
+// whether the daemon is running, and only say so when it is. It answers
+// launchctl and systemctl alike, so a test can run on the host's own manager;
+// one that does sets serviceSystemdBooted: true, or a Linux host without
+// systemd, like a container, has none.
 const stubServiceRunner = async (command: string, args: string[]) => ({
   code: 0,
   stdout: command === 'launchctl' && args[0] === 'print'
@@ -2730,6 +2733,7 @@ test('setup exits non-zero when the always-on install it ran failed', async () =
         cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
         homeDir: await mkdtemp(path.join(os.tmpdir(), 'stratus-home-')),
         processEnv: {},
+        serviceSystemdBooted: true,
         serviceRunner,
         packageResolver: () => true,
         // Save & finish.
@@ -5354,6 +5358,7 @@ test('setup suggests serve with the same --config it was run with', async () => 
       cwd: project,
       homeDir: home,
       processEnv: {},
+      serviceSystemdBooted: true,
       serviceRunner: stubServiceRunner,
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
@@ -7690,6 +7695,7 @@ test('a failing service manager is reported, not swallowed', async () => {
       homeDir: home,
       cwd: home,
       processEnv: {},
+      serviceSystemdBooted: true,
       serviceRunner: async (command) => (command === 'launchctl'
         ? { code: 1, stdout: '', stderr: 'Load failed: 5: Input/output error' }
         : { code: 1, stdout: '', stderr: 'Failed to connect to bus' }),
@@ -9736,6 +9742,7 @@ test('setup installs the always-on service when it saves', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      serviceSystemdBooted: true,
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
       // Straight to Save & finish: the service is on by default, because a
       // runtime you have to remember to start is not always-on.
@@ -9760,6 +9767,7 @@ test('setup can be told not to run the service', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      serviceSystemdBooted: true,
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
       // Always on → "Do not run it for me" → Save & finish.
       setupInput: Readable.from(['7\n', '3\n', '9\n']),
@@ -10351,6 +10359,7 @@ test('setup reports a service the manager accepted but is not running as a faile
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
+      serviceSystemdBooted: true,
       serviceSleep: async () => {},
       serviceRunner: async (command, args) => ({
         code: 0,
