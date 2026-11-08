@@ -2,7 +2,7 @@
  * `stratus template`, `stratus skill`, `stratus skills` and `stratus plugins`:
  * what an agent is built from, added, checked and listed.
  */
-import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
+import { type ParsedHelpCommand, readFormatValue, readOptionValue } from './shared.ts';
 
 export interface ParsedTemplateAddCommand {
   command: 'template-add';
@@ -62,11 +62,7 @@ export const parsePluginsCommand = (command: 'plugins' | 'plugin', rest: string[
       return { command: 'help' };
     }
     if (token === '--format') {
-      const value = readOptionValue(pluginsRest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Invalid value for --format: ${value}. Use text or json.`);
-      }
-      format = value;
+      format = readFormatValue(pluginsRest, index, ['text', 'json']);
       index += 1;
       continue;
     }

@@ -24,3 +24,13 @@ export const readOptionValue = (tokens: string[], index: number, flag: string): 
   }
   return value;
 };
+
+export const readFormatValue = <T extends string>(tokens: string[], index: number, allowed: readonly T[]): T => {
+  const value = readOptionValue(tokens, index, '--format');
+  const format = allowed.find((candidate) => candidate === value);
+  if (format === undefined) {
+    const choices = `${allowed.slice(0, -1).join(', ')} or ${allowed.at(-1)}`;
+    throw new Error(`Unsupported --format: ${value}. Use ${choices}.`);
+  }
+  return format;
+};

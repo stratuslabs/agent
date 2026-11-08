@@ -2,7 +2,7 @@
  * `stratus doctor`, `stratus update`, `stratus service` and `stratus logs`:
  * this machine's install, its service and its logs.
  */
-import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
+import { type ParsedHelpCommand, readFormatValue, readOptionValue } from './shared.ts';
 
 export interface ParsedDoctorCommand {
   command: 'doctor';
@@ -51,11 +51,7 @@ export const parseDoctorCommand = (rest: string[]): ParsedDoctorCommand | Parsed
       return { command: 'help' };
     }
     if (token === '--format') {
-      const value = readOptionValue(rest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      format = value;
+      format = readFormatValue(rest, index, ['text', 'json']);
       index += 1;
       continue;
     }
@@ -167,11 +163,7 @@ export const parseLogsCommand = (rest: string[]): ParsedLogsCommand | ParsedHelp
       continue;
     }
     if (token === '--format') {
-      const value = readOptionValue(rest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      format = value;
+      format = readFormatValue(rest, index, ['text', 'json']);
       index += 1;
       continue;
     }

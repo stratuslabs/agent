@@ -9,6 +9,7 @@ import {
   type CliApprovalMode,
   type CliProviderName,
   type ParsedHelpCommand,
+  readFormatValue,
   readOptionValue,
   readPromptFromEnvironment,
 } from './shared.ts';
@@ -172,11 +173,7 @@ export const parseRunCommand = (rest: string[], env: CliEnvironment): ParsedRunC
     }
 
     if (token === '--format') {
-      const value = readOptionValue(rest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      format = value;
+      format = readFormatValue(rest, index, ['text', 'json']);
       index += 1;
       continue;
     }
