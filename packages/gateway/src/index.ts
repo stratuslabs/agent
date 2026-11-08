@@ -1398,10 +1398,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return createHash('sha256').update(JSON.stringify(providerInputs)).digest('hex');
   };
 
-  // A sub-agent's runner has no memory store, so no turn of it injects or
-  // reads the agent's memory; no skill catalog, so its prompt is its
-  // instruction and its tools; and grants nothing to every agent, since
-  // the credential request asks a person.
   // What a failed turn's text is masked against before it is recorded,
   // announced or thrown (`failureSecrets`): every value the credentials
   // file holds, plus what the failing agent's listed credentials resolve to
@@ -1412,6 +1408,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     ...await credentialValuesFor(createFileCredentialResolver(env), session.agent),
   ];
 
+  // A sub-agent's runner has no memory store, so no turn of it injects or
+  // reads the agent's memory; no skill catalog, so its prompt is its
+  // instruction and its tools; and grants nothing to every agent, since
+  // the credential request asks a person.
   const runnerFor = (config: RuntimeConfig, agentId: string, subAgent = false): AgentRunner => {
     // The budget is a provider-construction input too (the harness
     // runtimes take it as their inner limit), so it is part of the key:
