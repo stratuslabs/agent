@@ -50,7 +50,9 @@ const createStreams = () => {
 };
 
 // Answers as a manager whose job is loaded and running, on either platform —
-// tests must not depend on which OS the suite happens to run on.
+// tests must not depend on which OS the suite happens to run on. A test that
+// runs on the host's own manager sets systemdBooted (serviceSystemdBooted for
+// the CLI), or a Linux host without systemd, like a container, has none.
 const runningServiceRunner: ServiceRunner = async (command, args) => {
   if (command === 'launchctl' && args[0] === 'print') {
     return { code: 0, stdout: 'state = running', stderr: '' };
@@ -333,7 +335,7 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
   // A unit installed by an older world: a node path that no longer exists.
   const staleNode = path.join(home, 'nvm', 'v20.0.0', 'node');
   const seeded = await installService(
-    { homeDir: home, cwd: home, execPath: staleNode, scriptPath: path.join(home, 'old-bin.js'), execArgv: [], run: runningServiceRunner },
+    { homeDir: home, cwd: home, execPath: staleNode, scriptPath: path.join(home, 'old-bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
     { configPath },
   );
   assert.equal(seeded.ok, true, seeded.messages.join('\n'));
@@ -344,6 +346,7 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
     homeDir: home,
     cwd: home,
     processEnv: {},
+    serviceSystemdBooted: true,
     serviceRunner: runningServiceRunner,
     packageVersionFetcher: async () => '99.0.0',
     // Nothing of ours beside the CLI, so this stays a test about the CLI
@@ -384,7 +387,7 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
 test('an unreachable npm still migrates and repairs the unit — the offline case is the repair case', async () => {
   const home = await freshHome();
   await installService(
-    { homeDir: home, cwd: home, execPath: path.join(home, 'gone-node'), scriptPath: path.join(home, 'gone.js'), execArgv: [], run: runningServiceRunner },
+    { homeDir: home, cwd: home, execPath: path.join(home, 'gone-node'), scriptPath: path.join(home, 'gone.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
     {},
   );
 
@@ -396,6 +399,7 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
       homeDir: home,
       cwd: home,
       processEnv: {},
+      serviceSystemdBooted: true,
       serviceRunner: runningServiceRunner,
       packageVersionFetcher: async () => undefined,
       // Behind this build, so the installer below is reachable at all: a
@@ -983,7 +987,7 @@ test('update --check flags an entrypoint that exists but is not the one this she
   await mkdir(path.dirname(oldEntrypoint), { recursive: true });
   await writeFile(oldEntrypoint, '// old build');
   await installService(
-    { homeDir: home, cwd: home, execPath: process.execPath, scriptPath: oldEntrypoint, execArgv: [], run: runningServiceRunner },
+    { homeDir: home, cwd: home, execPath: process.execPath, scriptPath: oldEntrypoint, execArgv: [], systemdBooted: true, run: runningServiceRunner },
     {},
   );
 
@@ -995,6 +999,7 @@ test('update --check flags an entrypoint that exists but is not the one this she
       homeDir: home,
       cwd: home,
       processEnv: {},
+      serviceSystemdBooted: true,
       serviceRunner: runningServiceRunner,
       packageVersionFetcher: async () => CLI_VERSION,
     },
@@ -1038,7 +1043,7 @@ test('starting a systemd service reloads the manager first, so the unit on disk 
 test('doctor names a unit whose interpreter no longer exists', async () => {
   const home = await freshHome();
   await installService(
-    { homeDir: home, cwd: home, execPath: path.join(home, 'nvm', 'v20.0.0', 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    { homeDir: home, cwd: home, execPath: path.join(home, 'nvm', 'v20.0.0', 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
     {},
   );
 
@@ -1046,7 +1051,7 @@ test('doctor names a unit whose interpreter no longer exists', async () => {
   await runCli({
     argv: ['doctor', '--format', 'json'],
     streams,
-    env: { homeDir: home, cwd: home, processEnv: {}, serviceRunner: runningServiceRunner },
+    env: { homeDir: home, cwd: home, processEnv: {}, serviceSystemdBooted: true, serviceRunner: runningServiceRunner },
   });
   const report = JSON.parse(output.stdout) as { problems: string[] };
   assert.ok(
