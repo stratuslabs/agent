@@ -69,3 +69,46 @@ test('a provider failure that quotes stored secrets reaches the record, the even
     await gateway.stop();
   }
 });
+
+test('a runtime key the environment supplies is masked too, for a provider that does not mask its own', async () => {
+  // The API adapters strip their own key from what they throw; the codex
+  // adapter hands its key to the transport and does not, so the runner's
+  // set has to carry the key the runtime resolved, wherever it came from.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-failure-runtime-key-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'cody.md'),
+    '---\nname: Cody\nprovider: codex\nmodel: gpt-test\n---\n\nYou are Cody.\n',
+  );
+  const key = 'synthetic-codex-env-api-key-9876';
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { CODEX_API_KEY: key },
+    // eslint-disable-next-line require-yield
+    codexRunTurn: async function* (): AsyncIterable<unknown> {
+      throw new Error(`transport refused key ${key}`);
+    },
+  };
+  const gateway = createGateway({ env });
+  const failures: string[] = [];
+  gateway.bus.subscribe((event) => {
+    if (event.type === 'session.failed') {
+      failures.push(event.error);
+    }
+  });
+  await gateway.start();
+
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'masked-codex', agentId: 'cody', userMessage: 'hello' }),
+      (error: Error) => !error.message.includes(key) && error.message.includes('[redacted]'),
+    );
+    assert.equal(failures.length, 1);
+    assert.ok(!failures[0]?.includes(key) && failures[0]?.includes('[redacted]'), failures[0]);
+    const lastError = (await gateway.store.get('masked-codex'))?.lastError ?? '';
+    assert.ok(!lastError.includes(key) && lastError.includes('[redacted]'), lastError);
+  } finally {
+    await gateway.stop();
+  }
+});

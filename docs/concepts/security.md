@@ -242,9 +242,10 @@ little a steered agent can do. For an agent that browses or searches:
   the label and the name of what lowered it; never prompts, replies, tool
   inputs, shell command text, or the content that did the tainting. The one
   qualification: a failed session records the error text it failed with.
-  Stored keys and tokens, and the credentials the agent's soul lists, are
-  masked in it, but providers quote the failing request, so skim a log
-  before sharing it. ([Logs](../guides/logs.md))
+  Stored keys and tokens, the credentials the agent's soul lists, and its
+  model key are masked in it, but providers quote the failing request, and
+  a fallback warning is not masked yet, so skim a log before sharing it.
+  ([Logs](../guides/logs.md))
 - **No control API endpoint returns a secret.** Credential reads report
   presence, type, and bound endpoint; session reads strip the Anthropic
   raw-turn cache. Named credentials are not on that API at all yet — the

@@ -309,11 +309,12 @@ These are deliberate. Changing one is a decision, not a refactor.
   inputs stay out of it — keep it that way when adding events. The one
   gap is `session.failed`, which persists the failure's text. Every stored
   secret value is masked in it first (the runner's `failureSecrets`, which
-  the gateway fills from the whole credentials file plus what the failing
-  agent's credentials resolve to), so the same masked text reaches the
-  log, `lastError` and a channel's failure line. Providers still quote the
-  failing request, so conversation text can be in it; do not document the
-  log as safe to share without qualifying that.
+  the gateway fills from the whole credentials file, what the failing
+  agent's credentials resolve to, and its runtime's keys), so the same
+  masked text reaches the log, `lastError` and a channel's failure line.
+  Providers still quote the failing request, so conversation text can be
+  in it, and the fallback warning (`default model failed (…)`) is not
+  masked; do not document the log as safe to share without qualifying that.
 - A stored sign-in is endpoint-bound: a credential saved for one endpoint
   is never sent to an endpoint a project-local config selects.
 - **The control API's token file is `0600`, and so is `~/.stratus/gateway.json`.**

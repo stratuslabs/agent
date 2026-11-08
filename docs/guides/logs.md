@@ -117,11 +117,13 @@ date and approver, so it can be told from one that ran because the tool was
 
 One exception worth knowing before you paste a log anywhere. A failed
 session records the **error text** it failed with. Any key or token stored
-in `~/.stratus/credentials.json`, and any credential the agent's soul lists,
-shows as `[redacted]` in it. But providers routinely quote the request that
-failed, so a malformed prompt can still end up inside an error message.
-Skim a log before sharing it, and prefer `--agent` or `--session` to narrow
-it to the run you actually mean.
+in `~/.stratus/credentials.json`, any credential the agent's soul lists, and
+the model key the agent runs with show as `[redacted]` in it. Two things
+aren't covered: providers routinely quote the request that failed, so a
+malformed prompt can still end up inside an error message; and the warning
+written when the default model fails and the fallback takes over carries
+that error as the provider reported it. Skim a log before sharing it, and
+prefer `--agent` or `--session` to narrow it to the run you actually mean.
 
 ## When the log is empty
 

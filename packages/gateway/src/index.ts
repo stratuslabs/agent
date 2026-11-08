@@ -1408,6 +1408,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     ...await credentialValuesFor(createFileCredentialResolver(env), session.agent),
   ];
 
+  // The keys a runtime resolved, its fallback's included, wherever they came
+  // from (the environment, most often, when they are in no file). The API
+  // adapters strip their own key from what they throw; the codex adapter
+  // hands its key to the transport and does not, so a runner's set carries
+  // its runtime's keys for every provider.
+  const runtimeKeysOf = (config: RuntimeConfig): string[] => {
+    const held = config as { apiKey?: unknown; authToken?: unknown; fallback?: { apiKey?: unknown; authToken?: unknown } };
+    return [held.apiKey, held.authToken, held.fallback?.apiKey, held.fallback?.authToken]
+      .filter((value): value is string => typeof value === 'string' && value !== '');
+  };
+
   // A sub-agent's runner has no memory store, so no turn of it injects or
   // reads the agent's memory; no skill catalog, so its prompt is its
   // instruction and its tools; and grants nothing to every agent, since
@@ -1467,7 +1478,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ? { autoContinue, waitingInput: (sessionId: string) => (waitingDispatches.get(sessionId) ?? 0) > 0 }
         : {}),
       providerCallGuards,
-      failureSecrets,
+      failureSecrets: async (session) => [...runtimeKeysOf(config), ...await failureSecrets(session)],
     });
     hostedRunner = runner;
     runners.set(key, runner);
@@ -2260,7 +2271,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       bus,
       maxTurns,
       providerCallGuards,
-      failureSecrets,
+      failureSecrets: async (session) => [...runtimeKeysOf(config), ...await failureSecrets(session)],
     });
     const definition: AgentDefinition = {
       id: source.definition.id,
