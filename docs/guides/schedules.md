@@ -95,10 +95,12 @@ destination, because that is what is being approved. See
   the schedule's own label. A one-shot has no next firing and isn't
   resumed.
 - **A report that never arrived is said where it should have gone.** A
-  firing's reply goes nowhere; only `message.send` reaches anyone. When a
-  firing's send fails, the error ends by naming where its schedule reports
+  firing's reply goes nowhere; only `message.send` reaches anyone. When the
+  channel rejects a firing's send (a wrong id, a thread that isn't there),
+  the error ends by naming where its schedule reports
   (`This scheduled run reports to slack:C0123456789, in thread …`), so the
-  agent can retry there. If the run still completes with a `message.send`
+  agent can retry there; a send the approval policy refuses doesn't carry
+  that line yet. If the run still completes with a `message.send`
   that failed or was refused and none that reached the schedule's
   destination, the daemon posts one notice there (under the report thread,
   if it has one): the agent, the first line of the error, the schedule id
