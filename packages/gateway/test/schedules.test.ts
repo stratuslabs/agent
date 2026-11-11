@@ -902,12 +902,12 @@ test('an approved schedule fires headless and reports to its declared destinatio
   assert.equal(firing?.metadata?.[SCHEDULED_TURN_METADATA_KEY], true);
   assert.equal(firing?.messages[0]?.content, 'check the repo and report what changed');
   // …and the undeclared destination was refused exactly as headless
-  // refuses any gated call.
+  // refuses any gated call, with where the schedule reports (AGT-336).
   const results = (firing?.messages ?? []).filter((message) => message.toolResult).map((message) => message.toolResult!);
   assert.equal(results.length, 2);
   assert.equal(results[0]?.ok, true);
   assert.equal(results[1]?.ok, false);
-  assert.equal(results[1]?.error, 'message.send is gated and nobody is available to approve it');
+  assert.equal(results[1]?.error, 'message.send is gated and nobody is available to approve it. This scheduled run reports to slack:C-ENG.');
 });
 
 test('a firing\'s report thread is bound like its grant: live firing, its agent, its conversation', async () => {
@@ -1680,6 +1680,98 @@ test('end to end: a headless firing whose only send fails is told where it repor
   assert.match(posts[0]!.text, /^ava's scheduled run didn't report here\. A message\.send in it failed: slack: C-ENG has no thread 9\.9, so nothing was posted\./);
   assert.ok(posts[0]!.text.includes(`session ${sessionId}.`));
   assert.ok(!posts[0]!.text.includes('posted the report'), 'the final reply is not posted: it was written for nobody');
+});
+
+test('a headless firing whose send is refused is told where its schedule reports; any other session\'s refusal is unchanged (AGT-336)', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+  const slot = new Date(Date.now() - 5).toISOString();
+  // Seeded as a human-approved row would be: a one-shot reporting into a thread.
+  const rows = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+  rows.insert(record({
+    id: 'nightly',
+    cadence: { kind: 'at', at: slot },
+    nextFireAt: slot,
+    destination: { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' },
+  }));
+  rows.close();
+
+  let calls = 0;
+  const fetchFake = (async () => {
+    calls += 1;
+    switch (calls) {
+      // The firing sends where its schedule was never approved to speak, is
+      // refused, and follows the hint to its own destination.
+      case 1: return openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-OTHER' }, text: 'nightly report' });
+      case 2: return openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'nightly report' }, 'call-2');
+      case 3: return openAiText('posted the report');
+      // An ordinary conversation making the same send.
+      case 4: return openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-OTHER' }, text: 'hello' }, 'call-3');
+      default: return openAiText('could not post');
+    }
+  }) as typeof fetch;
+  const posts: Array<{ to: string; text: string; thread?: string }> = [];
+  const slack: GatewayChannelAdapter = {
+    name: 'slack',
+    async start() {},
+    async stop() {},
+    async resolveOutbound({ to, thread }) {
+      return {
+        post: async (text: string) => {
+          posts.push({ to, text, ...(thread !== undefined ? { thread } : {}) });
+          return { channel: to, ts: '2' };
+        },
+      };
+    },
+  };
+  const firingDone = deferred<string>();
+  const refusalsLogged: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    channels: [slack],
+    approvals: (transport: ApprovalTransport) => createPermissionPolicy({ mode: 'headless', destinations: transport.destinations }),
+  });
+  gateway.bus.subscribe((event: StratusEvent) => {
+    if (event.type === 'session.completed' && event.sessionId.startsWith('schedule:nightly:')) {
+      firingDone.resolve(event.sessionId);
+    }
+    if (event.type === 'permission.decided' && !event.allowed) {
+      refusalsLogged.push(event.reason);
+    }
+  });
+  await gateway.start();
+  let firing: Session | undefined;
+  let chat: Session | undefined;
+  try {
+    firing = await gateway.store.get(await firingDone.promise);
+    chat = await gateway.dispatch({ sessionId: 'ava-chat', agentId: 'ava', userMessage: 'post hello in C-OTHER' });
+  } finally {
+    await gateway.stop();
+  }
+
+  const firingResults = (firing?.messages ?? []).flatMap((message) => (message.toolResult ? [message.toolResult] : []));
+  assert.equal(firingResults.length, 2);
+  assert.equal(firingResults[0]?.ok, false);
+  assert.equal(
+    firingResults[0]?.error,
+    'message.send is gated and nobody is available to approve it. '
+      + 'This scheduled run reports to slack:C-ENG, in thread 1791400000.000100.',
+  );
+  assert.equal(firingResults[1]?.ok, true, 'the retry at the named destination went through');
+  assert.deepEqual(posts, [{ to: 'C-ENG', text: 'nightly report', thread: '1791400000.000100' }]);
+
+  // Not a firing: the refusal reads exactly as it did.
+  const chatResult = (chat?.messages ?? []).find((message) => message.toolResult)?.toolResult;
+  assert.equal(chatResult?.ok, false);
+  assert.equal(chatResult?.error, 'message.send is gated and nobody is available to approve it');
+
+  // The hint is for the agent; the decision log keeps the policy's own words.
+  assert.deepEqual(refusalsLogged, [
+    'message.send is gated and nobody is available to approve it',
+    'message.send is gated and nobody is available to approve it',
+  ]);
 });
 
 test('a cancel that lands while the delivery check reads the session still stops the notice (AGT-335)', async () => {

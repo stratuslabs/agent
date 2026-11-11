@@ -154,9 +154,18 @@ const withReportHint = (
   ) {
     return error;
   }
-  const where = canonicalDestination(reportsTo) + (reportsTo.thread !== undefined ? `, in thread ${reportsTo.thread}` : '');
-  return new Error(`${errorText(error)} This scheduled run reports to ${where}.`, { cause: error });
+  return new Error(`${errorText(error)} ${reportsToHint(reportsTo)}`, { cause: error });
 };
+
+/**
+ * The sentence a firing's failed or refused send ends with: where its
+ * schedule reports, thread included. One wording for the channel's
+ * rejection (above) and the policy's refusal, which the host appends
+ * because a refusal happens before this tool runs (AGT-336).
+ */
+export const reportsToHint = (reportsTo: ScheduleDestination): string =>
+  `This scheduled run reports to ${canonicalDestination(reportsTo)}`
+  + `${reportsTo.thread !== undefined ? `, in thread ${reportsTo.thread}` : ''}.`;
 
 export const MESSAGE_SAY_TOOL_NAME = 'message.say';
 

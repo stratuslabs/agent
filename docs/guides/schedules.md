@@ -97,10 +97,12 @@ destination, because that is what is being approved. See
 - **A report that never arrived is said where it should have gone.** A
   firing's reply goes nowhere; only `message.send` reaches anyone. When the
   channel rejects a firing's send (a wrong id, a thread that isn't there),
-  the error ends by naming where its schedule reports
+  or the approval policy refuses one (headless, to a destination the
+  schedule wasn't approved for), the error ends by naming where its
+  schedule reports
   (`This scheduled run reports to slack:C0123456789, in thread …`), so the
-  agent can retry there; a send the approval policy refuses doesn't carry
-  that line yet. If the run still completes with a `message.send`
+  agent can retry there. The log and `permission.decided` keep the
+  policy's own reason. If the run still completes with a `message.send`
   that failed or was refused and none that reached the schedule's
   destination, the daemon posts one notice there (under the report thread,
   if it has one): the agent, the first line of the error, the schedule id

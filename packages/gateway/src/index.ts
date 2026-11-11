@@ -36,7 +36,9 @@ import {
   type AgentDefinition,
   type AgentRuntimeContext,
   type AgentMemoryStore,
+  type ApprovalContext,
   type ApprovalPolicy,
+  type ApprovalRefusal,
   type Executor,
   type ExecutorContribution,
   type JsonObject,
@@ -53,6 +55,7 @@ import {
   CREDENTIAL_REQUEST_TOOL_NAME,
   createForgetTool,
   createPinTool,
+  canonicalDestination,
   createMessageSendTool,
   createMessageSayTool,
   createMessageReadTool,
@@ -65,6 +68,8 @@ import {
   createRememberTool,
   createScheduleTools,
   DELEGATED_SESSION_ID_MARKER,
+  MESSAGE_SEND_TOOL_NAME,
+  reportsToHint,
   type ParsedSoul,
   type ScheduleDestination,
   loadStratusSkill,
@@ -594,6 +599,30 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     : options.approvals;
 
   /**
+   * A live firing's refused message.send, told where its schedule reports
+   * (AGT-336). The policy refuses before the tool runs, so the tool's own
+   * hint for a send the channel rejected (AGT-335) never sees it, and a
+   * headless refusal alone leaves the agent nowhere to retry. Only the
+   * agent's words change: the policy has already reported its decision in
+   * its own words, so the log and `permission.decided` read as before. A
+   * send that named the schedule's destination was refused for some other
+   * reason, and any other session gets the policy's answer untouched.
+   */
+  const withRefusalReportHint = (context: ApprovalContext, answer: boolean | ApprovalRefusal): boolean | ApprovalRefusal => {
+    if (context.call.toolName !== MESSAGE_SEND_TOOL_NAME) {
+      return answer;
+    }
+    const reportsTo = scheduler.approvalDestinationFor(context.session);
+    if (reportsTo === undefined || context.tool.destinationFor?.(context.call.input) === canonicalDestination(reportsTo)) {
+      return answer;
+    }
+    const given = typeof answer === 'object' && answer !== null && typeof answer.reason === 'string' ? answer.reason.trim() : '';
+    // The runner's own words for a refusal that gave none, kept.
+    const reason = given || `Tool call denied by approval policy: ${context.call.toolName}`;
+    return { allowed: false, reason: `${reason}${/[.!?…]$/.test(reason) ? '' : '.'} ${reportsToHint(reportsTo)}` };
+  };
+
+  /**
    * Every approval opens a tool phase, whatever policy answers it.
    *
    * `tool.approval-requested` is the broker's event, so it exists only for
@@ -608,7 +637,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         async approve(context) {
           const release = holdApprovalWait(context.session.id);
           try {
-            return await configuredApprovals.approve(context);
+            const answer = await configuredApprovals.approve(context);
+            return answer === true ? answer : withRefusalReportHint(context, answer);
           } finally {
             // Every path out, including a policy that throws. What happens
             // after the answer is the tool events' business, and they are

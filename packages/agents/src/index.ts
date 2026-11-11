@@ -134,6 +134,7 @@ export {
   createMessageSayTool,
   type DefaultThreadResolver,
   type ReportDestinationResolver,
+  reportsToHint,
   MESSAGE_READ_TOOL_NAME,
   MESSAGE_READ_MAX_LIMIT,
   MESSAGE_READ_BOOKMARK_BUDGET,
