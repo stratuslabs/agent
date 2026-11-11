@@ -269,20 +269,24 @@ export const renderResumeBlock = (
 const UNDELIVERED_ERROR_MAX_CHARS = 300;
 
 /**
- * What a firing's `message.send` calls left undelivered (AGT-335): the
- * first failed send's error when one failed, refused included, and no
- * send reached `destination`; otherwise undefined. A run that never tried
- * to send owes its destination nothing, since a firing's reply goes
- * nowhere by design, and a retry that got there settles it. Reads tool
- * results only, never what the agent said.
+ * What a completed firing's `message.send` calls left undelivered
+ * (AGT-335): the first failed send's error when one failed, refused
+ * included, and no send reached `destination`; otherwise undefined. A run
+ * that never tried to send owes its destination nothing, since a firing's
+ * reply goes nowhere by design, and a retry that got there settles it. A
+ * run still parked on an approval may yet report, and one that failed is
+ * a different problem. Reads tool results only, never what the agent said.
  */
 export const undeliveredSendError = (
-  messages: readonly Message[],
+  session: { status: SessionStatus; messages: readonly Message[] },
   destination: ScheduleDestination,
 ): string | undefined => {
+  if (session.status !== 'completed') {
+    return undefined;
+  }
   const target = canonicalDestination(destination);
   let failed: string | undefined;
-  for (const { toolResult: result } of messages) {
+  for (const { toolResult: result } of session.messages) {
     if (result?.toolName !== MESSAGE_SEND_TOOL_NAME) {
       continue;
     }

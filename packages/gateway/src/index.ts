@@ -475,7 +475,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // through. Tool results only, never the transcript's words.
     undeliveredSend: async (sessionId, destination) => {
       const session = await store.get(sessionId);
-      return session?.status === 'completed' ? undeliveredSendError(session.messages, destination) : undefined;
+      return session ? undeliveredSendError(session, destination) : undefined;
     },
     // The runtime's own line, so no speaker: it is nobody's turn to hear.
     notify: async (agentId, destination, text) => {

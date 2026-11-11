@@ -1475,26 +1475,30 @@ const sendResult = (callId: string, result: { ok: true; destination: string } | 
 
 test('a firing\'s report is undelivered when a send failed and none reached its destination', () => {
   const eng = { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' };
+  const ran = (messages: Message[], status: Session['status'] = 'completed') => ({ status, messages });
   const failed = sendResult('a', { ok: false, error: 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.' });
-  assert.equal(undeliveredSendError([failed], eng), 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.');
+  assert.equal(undeliveredSendError(ran([failed]), eng), 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.');
   // A retry that got there settles it, whichever thread it went under.
-  assert.equal(undeliveredSendError([failed, sendResult('b', { ok: true, destination: 'slack:C-ENG' })], eng), undefined);
+  assert.equal(undeliveredSendError(ran([failed, sendResult('b', { ok: true, destination: 'slack:C-ENG' })]), eng), undefined);
   // Reaching somewhere else is not reaching the destination.
   assert.equal(
-    undeliveredSendError([sendResult('b', { ok: true, destination: 'slack:C-OTHER' }), failed], eng),
+    undeliveredSendError(ran([sendResult('b', { ok: true, destination: 'slack:C-OTHER' }), failed]), eng),
     'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.',
   );
   // A refusal is a failed send too: headless, nobody saw it.
   assert.equal(
-    undeliveredSendError([sendResult('c', { ok: false, error: 'message.send is gated and nobody is available to approve it' })], eng),
+    undeliveredSendError(ran([sendResult('c', { ok: false, error: 'message.send is gated and nobody is available to approve it' })]), eng),
     'message.send is gated and nobody is available to approve it',
   );
   // A run that never tried, or whose sends all went through, owes nothing.
-  assert.equal(undeliveredSendError([], eng), undefined);
-  assert.equal(undeliveredSendError([sendResult('d', { ok: true, destination: 'slack:C-OTHER' })], eng), undefined);
+  assert.equal(undeliveredSendError(ran([]), eng), undefined);
+  assert.equal(undeliveredSendError(ran([sendResult('d', { ok: true, destination: 'slack:C-OTHER' })]), eng), undefined);
+  // Still parked on an approval it may yet report; a failed run is another problem.
+  assert.equal(undeliveredSendError(ran([failed], 'pending_approval'), eng), undefined);
+  assert.equal(undeliveredSendError(ran([failed], 'failed'), eng), undefined);
   // Another tool's failure is not a failed report.
   const other: Message = { ...failed, toolResult: { ...failed.toolResult!, toolName: 'shell.run' } };
-  assert.equal(undeliveredSendError([other], eng), undefined);
+  assert.equal(undeliveredSendError(ran([other]), eng), undefined);
 });
 
 test('a completed firing whose send never arrived leaves a notice in its destination, and only then (AGT-335)', async () => {
