@@ -1681,3 +1681,35 @@ test('end to end: a headless firing whose only send fails is told where it repor
   assert.ok(posts[0]!.text.includes(`session ${sessionId}.`));
   assert.ok(!posts[0]!.text.includes('posted the report'), 'the final reply is not posted: it was written for nobody');
 });
+
+test('a cancel that lands while the delivery check reads the session still stops the notice (AGT-335)', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  let notified = 0;
+  let checked = 0;
+  // Late-bound: the check cancels through the runtime it belongs to.
+  let cancel: (id: string) => boolean = () => false;
+  const runtime = runtimeWith(store, {
+    undeliveredSend: async () => {
+      checked += 1;
+      // The operator's DELETE arrives mid-read.
+      cancel('racing');
+      return 'slack: C-OTHER has no thread 1.2, so nothing was posted.';
+    },
+    notify: async () => {
+      notified += 1;
+    },
+  });
+  cancel = (id) => runtime.cancel(id);
+  store.insert(record({ id: 'racing', nextFireAt: new Date(Date.now() - 5).toISOString(), destination: { channel: 'slack', to: 'C-ENG' } }));
+  await runtime.start();
+  try {
+    await waitFor(() => checked === 1, 'the delivery check to run');
+  } finally {
+    runtime.stop();
+    await runtime.drain();
+  }
+  assert.equal(store.get('racing'), undefined);
+  assert.equal(notified, 0, 'the revoked destination heard nothing');
+  store.close();
+});

@@ -588,7 +588,8 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   /**
    * AGT-335: a firing that tried to report and never got through says so
    * in its destination, instead of ending "completed" with nobody told.
-   * Read from the row as it is now: a schedule cancelled mid-run took its
+   * Read from the row as it is now, and again after the session read: a
+   * schedule cancelled mid-run, or while that read awaited, took its
    * destination grant with it, and the runtime doesn't speak there in its
    * place. Never throws; a notice that can't be posted is a log line.
    */
@@ -597,14 +598,24 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     if (!undeliveredSend || !notify) {
       return;
     }
+    const live = (): ScheduleRecord | undefined => {
+      const row = store.get(record.id);
+      return row !== undefined && row.agentId === record.agentId && row.destination !== undefined ? row : undefined;
+    };
     let undelivered = false;
     try {
-      const current = store.get(record.id);
-      if (current === undefined || current.agentId !== record.agentId || current.destination === undefined) {
+      const before = live();
+      if (before?.destination === undefined) {
         return;
       }
-      const error = await undeliveredSend(sessionId, current.destination);
-      if (error === undefined) {
+      const error = await undeliveredSend(sessionId, before.destination);
+      // Nothing awaits between this read and the post's start.
+      const current = live();
+      if (
+        error === undefined
+        || current?.destination === undefined
+        || canonicalDestination(current.destination) !== canonicalDestination(before.destination)
+      ) {
         return;
       }
       undelivered = true;
