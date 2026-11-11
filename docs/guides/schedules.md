@@ -100,9 +100,9 @@ destination, because that is what is being approved. See
   (`This scheduled run reports to slack:C0123456789, in thread …`), so the
   agent can retry there. If the run still completes with a `message.send`
   that failed or was refused and none that reached the schedule's
-  destination, the daemon posts one notice there, under the report thread:
-  the agent, the first line of the error, the schedule id and the session
-  id. It never posts the run's reply, which was written for nobody. A run
+  destination, the daemon posts one notice there (under the report thread,
+  if it has one): the agent, the first line of the error, the schedule id
+  and the session id. It never posts the run's reply, which was written for nobody. A run
   that never tried to send posts nothing, as before, and neither does one
   whose schedule was cancelled while it ran. The notice follows the turn,
   so a daemon stopping at that moment can lose it, and the log says so.

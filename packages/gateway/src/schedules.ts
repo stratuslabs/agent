@@ -318,7 +318,7 @@ const renderUndeliveredNotice = (
     : `${firstLine.slice(0, UNDELIVERED_ERROR_MAX_CHARS - 1).trimEnd()}…`;
   const run = record.cadence.kind === 'event' ? 'event-triggered run' : 'scheduled run';
   return `${record.agentId}'s ${run} didn't report here. A message.send in it failed: ${quoted}`
-    + `${/[.!?…]$/.test(quoted) ? '' : '.'} Nothing it sent arrived. Schedule ${record.id}, session ${sessionId}.`;
+    + `${/[.!?…]$/.test(quoted) ? '' : '.'} Schedule ${record.id}, session ${sessionId}.`;
 };
 
 export interface SchedulerLimits {
