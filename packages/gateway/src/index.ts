@@ -90,6 +90,7 @@ import {
   isScheduleSessionId,
   SqliteScheduleStore,
   SCHEDULE_SESSION_ID_PREFIX,
+  undeliveredSendError,
 } from './schedules.ts';
 import { ShardedSessionStore } from './sessions.ts';
 import { createSubAgents } from './sub-agents.ts';
@@ -157,6 +158,7 @@ export {
   SCHEDULE_SESSION_ID_PREFIX,
   type PreviousRun,
   type ScheduleStoreLike,
+  undeliveredSendError,
   type SchedulerLimits,
   type SchedulerRuntime,
   type SchedulerRuntimeOptions,
@@ -468,6 +470,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(reply !== undefined ? { reply } : {}),
         trust: sessionWriteTrust(session),
       };
+    },
+    // AGT-335: a completed firing that tried to report and never got
+    // through. Tool results only, never the transcript's words.
+    undeliveredSend: async (sessionId, destination) => {
+      const session = await store.get(sessionId);
+      return session?.status === 'completed' ? undeliveredSendError(session.messages, destination) : undefined;
+    },
+    // The runtime's own line, so no speaker: it is nobody's turn to hear.
+    notify: async (agentId, destination, text) => {
+      const connection = await outboundFor(agentId, destination, destination.thread);
+      await connection.post(text);
     },
     hasAgent: (agentId) => registry.get(agentId) !== undefined,
     ...(options.schedules ? { limits: options.schedules } : {}),
@@ -1137,7 +1150,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // that reports no id simply has none to hand back.
     const ts = typeof posted === 'object' && posted !== null ? (posted as { ts?: unknown }).ts : undefined;
     return typeof ts === 'string' && ts.length > 0 ? { id: ts } : {};
-  }, { defaultThread: (session, destination) => scheduler.reportThreadFor(session, destination) }));
+  }, {
+    defaultThread: (session, destination) => scheduler.reportThreadFor(session, destination),
+    // Bound exactly as an approval's destination is: a live firing, its schedule.
+    reportsTo: (session) => scheduler.approvalDestinationFor(session),
+  }));
   // A mid-task message goes where the conversation is, through the channel
   // carrying this agent there, and nowhere else (card 1009). A session no
   // channel started (a terminal run, a schedule nobody watches) has nobody
