@@ -94,6 +94,19 @@ destination, because that is what is being approved. See
   on from, so a run that read a web page can't pass that page's text on at
   the schedule's own label. A one-shot has no next firing and isn't
   resumed.
+- **A report that never arrived is said where it should have gone.** A
+  firing's reply goes nowhere; only `message.send` reaches anyone. When a
+  firing's send fails, the error ends by naming where its schedule reports
+  (`This scheduled run reports to slack:C0123456789, in thread …`), so the
+  agent can retry there. If the run still completes with a `message.send`
+  that failed or was refused and none that reached the schedule's
+  destination, the daemon posts one notice there, under the report thread:
+  the agent, the first line of the error, the schedule id and the session
+  id. It never posts the run's reply, which was written for nobody. A run
+  that never tried to send posts nothing, as before, and neither does one
+  whose schedule was cancelled while it ran. The notice follows the turn,
+  so a daemon stopping at that moment can lose it, and the log says so.
+  Event triggers work the same way.
 - **A schedule never overlaps itself.** Its next slot waits while its
   previous firing is still running or waiting on a person, so each firing
   reads a finished predecessor. With the default per-agent cap of one this
