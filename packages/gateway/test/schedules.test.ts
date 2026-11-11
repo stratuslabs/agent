@@ -1548,7 +1548,7 @@ test('a completed firing whose send never arrived leaves a notice in its destina
   assert.equal(notice?.agentId, 'quinn');
   assert.deepEqual(notice?.destination, { channel: 'slack', to: 'C-AGENTS', thread: '1791400000.000100' });
   assert.match(notice!.text, /^quinn's scheduled run didn't report here\. A message\.send in it failed: slack: C-OTHER has no thread 1791400000\.000100, so nothing was posted\./);
-  assert.match(notice!.text, new RegExp(`Schedule reported, session schedule:reported:${slot.replace(/[.]/g, '\\.')}\\.$`));
+  assert.ok(notice!.text.endsWith(` Schedule reported, session schedule:reported:${slot}.`), notice!.text);
   store.close();
 });
 

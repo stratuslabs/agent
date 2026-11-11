@@ -813,7 +813,8 @@ test('an event firing whose send never arrived leaves a notice in its trigger\'s
     assert.equal(notices.length, 1);
     assert.equal(notices[0]?.agentId, 'atlas');
     assert.deepEqual(notices[0]?.destination, { channel: 'slack', to: 'C-ENG' });
-    assert.match(notices[0]!.text, new RegExp(`^atlas's event-triggered run didn't report here\\. .*Schedule ${id}, session ${turn!.sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.$`));
+    assert.ok(notices[0]!.text.startsWith('atlas\'s event-triggered run didn\'t report here. A message.send in it failed: '), notices[0]!.text);
+    assert.ok(notices[0]!.text.endsWith(` Schedule ${id}, session ${turn!.sessionId}.`), notices[0]!.text);
   } finally {
     await r.stop();
   }
