@@ -39,6 +39,12 @@ export type OutboundMessenger = (input: {
 export type DefaultThreadResolver = (session: Session, destination: ScheduleDestination) => string | undefined;
 
 /**
+ * Where a live firing's schedule reports, thread included, or undefined for
+ * any other session. Bound by the host exactly as the default thread is.
+ */
+export type ReportDestinationResolver = (session: Session) => ScheduleDestination | undefined;
+
+/**
  * Post to a channel or DM outside the current conversation — what makes a
  * scheduled turn observable.
  *
@@ -51,7 +57,7 @@ export type DefaultThreadResolver = (session: Session, destination: ScheduleDest
  */
 export const createMessageSendTool = (
   send: OutboundMessenger,
-  options: { defaultThread?: DefaultThreadResolver } = {},
+  options: { defaultThread?: DefaultThreadResolver; reportsTo?: ReportDestinationResolver } = {},
 ): Tool => ({
   name: MESSAGE_SEND_TOOL_NAME,
   description: 'Send a message to a channel or DM you are not currently talking in, at the top level or as a reply in one of its threads. '
@@ -102,13 +108,18 @@ export const createMessageSendTool = (
       throw new Error('message.send takes either "thread" or "topLevel": true, not both.');
     }
     const thread = explicit ?? (input.topLevel === true ? undefined : options.defaultThread?.(session, destination));
-    const posted = await send({
-      agentId: session.agent.id,
-      destination,
-      text,
-      ...(thread !== undefined ? { thread } : {}),
-      speaker: { sessionId: session.id, trust: sessionWriteTrust(session) },
-    });
+    let posted: { id?: string } | void;
+    try {
+      posted = await send({
+        agentId: session.agent.id,
+        destination,
+        text,
+        ...(thread !== undefined ? { thread } : {}),
+        speaker: { sessionId: session.id, trust: sessionWriteTrust(session) },
+      });
+    } catch (error) {
+      throw withReportHint(error, destination, thread, options.reportsTo?.(session));
+    }
     const id = posted && typeof posted.id === 'string' && posted.id.length > 0 ? posted.id : undefined;
     // The thread a reply to this post names: the root it went under, or,
     // for a top-level post, the post itself. Always the root, because a
@@ -123,6 +134,29 @@ export const createMessageSendTool = (
     };
   },
 });
+
+/**
+ * A firing's failed send, told where its schedule reports (AGT-335). Quinn's
+ * one-shot sent to the wrong channel, got "has no thread", and ended
+ * without trying its own destination, which the error never named. A send
+ * that already went exactly there failed for some other reason, so the
+ * error is left as the channel wrote it.
+ */
+const withReportHint = (
+  error: unknown,
+  destination: ScheduleDestination,
+  thread: string | undefined,
+  reportsTo: ScheduleDestination | undefined,
+): unknown => {
+  if (
+    reportsTo === undefined
+    || (canonicalDestination(reportsTo) === canonicalDestination(destination) && reportsTo.thread === thread)
+  ) {
+    return error;
+  }
+  const where = canonicalDestination(reportsTo) + (reportsTo.thread !== undefined ? `, in thread ${reportsTo.thread}` : '');
+  return new Error(`${errorText(error)} This scheduled run reports to ${where}.`, { cause: error });
+};
 
 export const MESSAGE_SAY_TOOL_NAME = 'message.say';
 
