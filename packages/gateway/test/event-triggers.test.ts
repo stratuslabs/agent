@@ -788,3 +788,34 @@ test('a graceful stop mid-turn leaves the event\'s turn for the next start, whic
     await second.stop();
   }
 });
+
+test('an event firing whose send never arrived leaves a notice in its trigger\'s destination (AGT-335)', async () => {
+  const notices: Array<{ agentId: string; destination: JsonObject; text: string }> = [];
+  const asked: string[] = [];
+  const r = await rig({
+    undeliveredSend: async (sessionId) => {
+      asked.push(sessionId);
+      return 'slack: C-OTHER has no thread 1.2, so nothing was posted.';
+    },
+    notify: async (agentId, destination, text) => {
+      notices.push({ agentId, destination: { ...destination }, text });
+    },
+  });
+  try {
+    const id = await r.trigger();
+    await r.runtime.start();
+    r.deliver(id, 'd-1');
+    r.runtime.kickEvents();
+    const [turn] = r.dispatched;
+    turn!.finish();
+    await settle();
+    assert.deepEqual(asked, [turn!.sessionId]);
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0]?.agentId, 'atlas');
+    assert.deepEqual(notices[0]?.destination, { channel: 'slack', to: 'C-ENG' });
+    assert.ok(notices[0]!.text.startsWith('atlas\'s event-triggered run didn\'t report here. A message.send in it failed: '), notices[0]!.text);
+    assert.ok(notices[0]!.text.endsWith(` Schedule ${id}, session ${turn!.sessionId}.`), notices[0]!.text);
+  } finally {
+    await r.stop();
+  }
+});

@@ -133,6 +133,7 @@ export {
   type ConversationSayer,
   createMessageSayTool,
   type DefaultThreadResolver,
+  type ReportDestinationResolver,
   MESSAGE_READ_TOOL_NAME,
   MESSAGE_READ_MAX_LIMIT,
   MESSAGE_READ_BOOKMARK_BUDGET,
