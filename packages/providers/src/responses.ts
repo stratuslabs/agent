@@ -124,18 +124,27 @@ interface StreamEvent {
  * kept as fields beside the same message as before: the HTTP status
  * (absent for a failure inside a stream, which arrived on a 200), the
  * error's code and param when it gave them, and the request ID it answered
- * with. For a caller that recovers by code: Sign in with ChatGPT's plan
- * limits arrive this way, and OpenAI asks that the request ID be kept.
+ * with. `detail` is the body's top-level `detail` text when the body had no
+ * error object at all, the shape a layer in front of the API refuses with.
+ * For a caller that recovers by code: Sign in with ChatGPT's plan limits
+ * arrive this way, and OpenAI asks that the request ID be kept.
  */
 export class ResponsesApiError extends Error {
   readonly status: number | undefined;
   readonly code: string | undefined;
   readonly param: string | undefined;
   readonly requestId: string | undefined;
+  readonly detail: string | undefined;
 
   constructor(
     message: string,
-    details: { status?: number | undefined; code?: string | undefined; param?: string | undefined; requestId?: string | undefined },
+    details: {
+      status?: number | undefined;
+      code?: string | undefined;
+      param?: string | undefined;
+      requestId?: string | undefined;
+      detail?: string | undefined;
+    },
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -144,6 +153,7 @@ export class ResponsesApiError extends Error {
     this.code = details.code;
     this.param = details.param;
     this.requestId = details.requestId;
+    this.detail = details.detail;
   }
 }
 
@@ -246,6 +256,7 @@ export const createOpenAIResponsesProvider = ({
               code: filled(payload.error?.code),
               param: filled(payload.error?.param),
               requestId: requestIdOf(response),
+              detail: payload.error === undefined ? filled(payload.detail) : undefined,
             });
           }
           if (response.body === null) {
@@ -478,10 +489,10 @@ const usageOf = (response: ResponseObject, providerName: string, model: string):
 
 const readErrorBody = async (response: Response): Promise<{
   reported: string;
-  payload: { error?: { code?: string; message?: unknown; param?: unknown } };
+  payload: { error?: { code?: string; message?: unknown; param?: unknown }; detail?: unknown };
 }> => {
   const rawText = await response.text();
-  let payload: { error?: { code?: string; message?: unknown; param?: unknown } } = {};
+  let payload: { error?: { code?: string; message?: unknown; param?: unknown }; detail?: unknown } = {};
   try {
     const parsed: unknown = rawText.length > 0 ? JSON.parse(rawText) : undefined;
     // Only an object can be the error envelope; any other JSON is shown as

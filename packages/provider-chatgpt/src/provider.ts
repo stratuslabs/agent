@@ -91,7 +91,7 @@ const describePlanError = (error: unknown): unknown => {
   const explain = error.code !== undefined ? PLAN_ERRORS[error.code] : undefined;
   const lead = explain !== undefined
     ? explain(error.param)
-    : error.code === undefined && error.status !== undefined
+    : error.code === undefined && error.detail !== undefined && error.status !== undefined
       ? ADMISSION_ERRORS[error.status]
       : undefined;
   if (lead === undefined) {
@@ -121,14 +121,17 @@ export const createChatGPTProvider = (options: ChatGPTProviderOptions): ModelPro
   // and when the turn is cancelled: a GET spends nothing, unlike the refresh
   // it is for, which is never cut off once sent.
   const lookUp = async (signal: AbortSignal | undefined): Promise<ChatGPTEndpoints> => {
-    const timeout = AbortSignal.timeout(discoveryTimeoutMs);
+    // A timer of our own, cleared when the lookup ends, rather than
+    // AbortSignal.timeout, whose timer doesn't keep the process waiting.
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(new Error('The lookup timed out.')), discoveryTimeoutMs);
     try {
       return await discoverEndpoints({
         ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
-        signal: signal !== undefined ? AbortSignal.any([signal, timeout]) : timeout,
+        signal: signal !== undefined ? AbortSignal.any([signal, timeout.signal]) : timeout.signal,
       });
     } catch (error) {
-      if (timeout.aborted && signal?.aborted !== true) {
+      if (timeout.signal.aborted && signal?.aborted !== true) {
         const seconds = Math.ceil(discoveryTimeoutMs / 1000);
         throw new ChatGPTAuthError(
           'timeout',
@@ -137,6 +140,8 @@ export const createChatGPTProvider = (options: ChatGPTProviderOptions): ModelPro
         );
       }
       throw error;
+    } finally {
+      clearTimeout(timer);
     }
   };
   let discovered: Promise<ChatGPTEndpoints> | undefined;

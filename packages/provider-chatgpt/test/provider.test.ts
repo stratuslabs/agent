@@ -410,6 +410,9 @@ test('other failures come through as the adapter reports them', async () => {
     ['a server error with a code', () => json(500, { error: { code: 'server_error', message: 'The server had an error.' } }), 'The server had an error.'],
     ['a 401 with another code', () => json(401, { error: { code: 'invalid_api_key', message: 'Bad token.' } }), 'Bad token.'],
     ['a 429 without a code', () => json(429, { error: { message: 'Slow down.' } }), 'Slow down.'],
+    ['a structured 403 without a code', () => json(403, { error: { code: null, message: 'Forbidden.' } }), 'Forbidden.'],
+    ['a structured 401 without a code', () => json(401, { error: { message: 'Unauthorized.' } }), 'Unauthorized.'],
+    ['a structured 503 without a code', () => json(503, { error: { message: 'Overloaded.' } }), 'Overloaded.'],
   ] as const) {
     const net = network({ [RESPONSES_URL]: reply });
     const provider = createChatGPTProvider({ model: 'gpt-test', store: memoryStore(savedSession()), withSessionLock, fetch: net.fetch, now: () => NOW });

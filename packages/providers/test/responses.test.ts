@@ -407,6 +407,7 @@ test('a refusal or failure carries the endpoint\'s status, code, param and reque
       assert.equal(error.code, 'subscription_sharing_usage_limit_exceeded');
       assert.equal(error.param, undefined);
       assert.equal(error.requestId, 'req_abc123');
+      assert.equal(error.detail, undefined);
       return true;
     },
   );
@@ -420,9 +421,17 @@ test('a refusal or failure carries the endpoint\'s status, code, param and reque
       assert.ok(error instanceof ResponsesApiError);
       assert.equal(error.status, 403);
       assert.equal(error.code, undefined);
+      assert.equal(error.detail, 'Region not supported.');
       assert.equal(error.message, '{"detail":"Region not supported."}');
       return true;
     },
+  );
+
+  // Beside an error object, a `detail` is not that shape: the error object speaks.
+  const { fetch: both } = fakeFetch(() => jsonResponse(403, { error: { message: 'Forbidden.' }, detail: 'Also this.' }));
+  await assert.rejects(
+    createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch: both }).generate(sayHello()),
+    (error: unknown) => error instanceof ResponsesApiError && error.detail === undefined && error.message === 'Forbidden.',
   );
 
   // Inside the stream: no status (the response was a 200), the code and
