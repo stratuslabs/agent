@@ -79,6 +79,8 @@ import {
 import {
   loadServeApprovals,
   loadServePrincipals,
+  loadSlackPeople,
+  type SlackPeople,
   loadServeSlack,
   loadServeApi,
   loadServeEvents,
@@ -554,12 +556,14 @@ const serveHeldHome = async (
     const adapter = await loadSlackAdapter();
     if (adapter) {
       slackAdapterUp = true;
-      // One agent's Slack settings, from the config this daemon started
-      // with: a reload (card 894) changes which apps are connected, never
-      // how an agent is configured.
-      const slackAgentConfig = ([agentId, tokens]: [string, { appToken: string; botToken: string }]) => {
-        const route = resolveAgentApprovals(approvalsConfig, agentId);
-        const principals = resolveAgentPrincipals(principalsConfig, agentId);
+      // One agent's Slack settings. How it presents itself comes from the
+      // config this daemon started with; who it answers to (`principals`,
+      // and the approvers and approval channel in `approvals`) from
+      // `people`, which a reload reads again, so a teammate added or
+      // removed reaches a connected app without a restart (AGT-337).
+      const slackAgentConfig = (people: SlackPeople) => ([agentId, tokens]: [string, { appToken: string; botToken: string }]) => {
+        const route = resolveAgentApprovals(people.approvals, agentId);
+        const principals = resolveAgentPrincipals(people.principals, agentId);
         const presentation = resolveAgentSlack(slackConfig, agentId);
         const { homeChannels } = presentation;
         return {
@@ -584,11 +588,15 @@ const serveHeldHome = async (
         };
       };
       channels.push(adapter({
-        agents: slackAgents.map(slackAgentConfig),
+        agents: slackAgents.map(slackAgentConfig({ approvals: approvalsConfig, principals: principalsConfig })),
         // Read again on every roster reload, so an app stored while the
         // daemon runs (`stratus channel set`, setup, the dashboard) connects
-        // without a restart, and one removed disconnects.
-        loadAgents: async () => Object.entries((await loadChannelCredentials(env)).slack ?? {}).map(slackAgentConfig),
+        // without a restart, and one removed disconnects; and so do the
+        // people lists, from the trusted config, under the rules start used.
+        loadAgents: async () => {
+          const people = await loadSlackPeople(env, command.configPath, warn);
+          return Object.entries((await loadChannelCredentials(env)).slack ?? {}).map(slackAgentConfig(people));
+        },
         attachmentStore: (() => {
           const workspaces = createAgentWorkspaces(env);
           return { workspaces, ledger: createFileLedger((id) => workspaces.forAgent(id), (id) => workspaces.prepare(id)) };
