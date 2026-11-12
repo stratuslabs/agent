@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { connect, createServer } from 'node:net';
 import { ChatGPTAuthError, listenForCallback } from '../src/index.ts';
 
+// The wait's own timeout is each test's way to lose: a regression that never
+// answers fails after this instead of holding the run for the 5-minute default.
+const LOSE_AFTER_MS = 10_000;
+
 const portOf = (redirectUri: string): number => Number(new URL(redirectUri).port);
 
 const get = async (url: string): Promise<{ status: number; body: string; csp: string | null }> => {
@@ -23,7 +27,7 @@ test('the listener hands back the callback carrying the attempt state, answers t
   const listener = await listenForCallback({ ports: [0] });
   t.after(() => listener.close());
   assert.match(listener.redirectUri, /^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/);
-  const waiting = listener.waitFor('state-1');
+  const waiting = listener.waitFor('state-1', { timeoutMs: LOSE_AFTER_MS });
 
   const browser = await get(`${listener.redirectUri}?code=c1&state=state-1&client_id=oaiapp_x`);
   assert.equal(browser.status, 200);
@@ -41,7 +45,7 @@ test('the listener hands back the callback carrying the attempt state, answers t
 test('a request with another state or path does not end the sign-in', async (t) => {
   const listener = await listenForCallback({ ports: [0] });
   t.after(() => listener.close());
-  const waiting = listener.waitFor('state-1');
+  const waiting = listener.waitFor('state-1', { timeoutMs: LOSE_AFTER_MS });
   const origin = new URL(listener.redirectUri).origin;
 
   assert.equal((await get(`${listener.redirectUri}?code=c0&state=forged`)).status, 400);
@@ -64,16 +68,29 @@ const rawRequest = (port: number, request: string): Promise<string> =>
     });
     socket.on('end', () => resolve(reply));
     socket.on('error', reject);
+    // A listener that throws on the request never answers; fail instead of hanging.
+    socket.setTimeout(5000, () => {
+      socket.destroy();
+      reject(new Error(`no reply from the listener; got ${JSON.stringify(reply)}`));
+    });
   });
 
 test('a request target that is not a URL gets a 400 and the sign-in keeps waiting', async (t) => {
   const listener = await listenForCallback({ ports: [0] });
   t.after(() => listener.close());
-  const waiting = listener.waitFor('state-1');
+  const waiting = listener.waitFor('state-1', { timeoutMs: LOSE_AFTER_MS });
   const reply = await rawRequest(portOf(listener.redirectUri), 'GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n');
   assert.match(reply, /^HTTP\/1\.1 400 /);
   await get(`${listener.redirectUri}?code=c1&state=state-1`);
   assert.equal((await waiting).get('code'), 'c1');
+});
+
+test('closing the listener while it waits cancels the wait', async () => {
+  const listener = await listenForCallback({ ports: [0] });
+  const waiting = listener.waitFor('state-1', { timeoutMs: LOSE_AFTER_MS });
+  await listener.close();
+  await assert.rejects(waiting, (error: unknown) => error instanceof ChatGPTAuthError && error.code === 'cancelled');
+  assert.equal(await refusesConnections(portOf(listener.redirectUri)), true);
 });
 
 test('the preferred port being taken falls back to the next one', async (t) => {

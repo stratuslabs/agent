@@ -64,6 +64,17 @@ const signingKeyFor = (keys: JsonWebKeySet, kid: unknown): JsonWebKey => {
   return key;
 };
 
+/** The `kid` a token's header names, or undefined when it names none or can't be read. */
+export const idTokenKeyId = (token: string): string | undefined => {
+  const [headerSegment] = token.split('.');
+  try {
+    const header: unknown = JSON.parse(Buffer.from(headerSegment ?? '', 'base64url').toString('utf8'));
+    return isRecord(header) && typeof header.kid === 'string' ? header.kid : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 export const verifyIdToken = (options: VerifyIdTokenOptions): IdTokenClaims => {
   const parts = options.token.split('.');
   const [headerSegment, payloadSegment, signatureSegment] = parts;

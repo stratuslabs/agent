@@ -7,7 +7,7 @@
 import { createHash, randomBytes, randomUUID, type JsonWebKey } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { ChatGPTAuthError } from './errors.ts';
-import { verifyIdToken, type JsonWebKeySet } from './id-token.ts';
+import { idTokenKeyId, verifyIdToken, type JsonWebKeySet } from './id-token.ts';
 
 export const CHATGPT_ISSUER = 'https://auth.openai.com';
 /** The API the tokens are for, sent as `resource` on every authorize and token request. */
@@ -445,7 +445,7 @@ export const completeSignIn = async (options: CompleteSignInOptions): Promise<Ch
   // The keys come first: the code is single-use, so a key outage after the
   // exchange would throw away a good sign-in, and before it the caller can
   // retry with the same callback.
-  const keys = await fetchSigningKeys(endpoints, options);
+  let keys = await fetchSigningKeys(endpoints, options);
   const tokens = await exchangeCode({
     ...options,
     clientId,
@@ -456,6 +456,12 @@ export const completeSignIn = async (options: CompleteSignInOptions): Promise<Ch
   });
   if (tokens.idToken === undefined) {
     throw new ChatGPTAuthError('id_token_invalid', "OpenAI's sign-in response has no ID token, so the sign-in was not accepted. Sign in with ChatGPT again.");
+  }
+  // A key published after that fetch (a rollover) gets one refetch rather
+  // than costing the user a new browser sign-in.
+  const kid = idTokenKeyId(tokens.idToken);
+  if (kid !== undefined && !keys.keys.some((key) => key.kid === kid)) {
+    keys = await fetchSigningKeys(endpoints, options);
   }
   const claims = verifyIdToken({
     token: tokens.idToken,

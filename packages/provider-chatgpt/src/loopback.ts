@@ -25,8 +25,8 @@ export interface CallbackListener {
   readonly redirectUri: string;
   /**
    * Resolves with the query of the first callback carrying `state`, after the
-   * browser has its answer; rejects on timeout or abort. The listener closes
-   * either way.
+   * browser has its answer; rejects on timeout, abort or `close()`. The
+   * listener closes either way.
    */
   waitFor(state: string, options?: WaitForCallbackOptions): Promise<URLSearchParams>;
   close(): Promise<void>;
@@ -53,7 +53,13 @@ const describeWait = (ms: number): string =>
   ms >= 60_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.max(1, Math.round(ms / 1000))} seconds`;
 
 export const listenForCallback = async (options: ListenForCallbackOptions = {}): Promise<CallbackListener> => {
-  let pending: { readonly state: string; readonly settle: (params: URLSearchParams) => void } | undefined;
+  let pending:
+    | {
+        readonly state: string;
+        readonly settle: (params: URLSearchParams) => void;
+        readonly fail: (error: Error) => void;
+      }
+    | undefined;
 
   const server = createServer((request, response) => {
     // Node's parser passes request targets that aren't URLs (`GET http://[`),
@@ -80,6 +86,11 @@ export const listenForCallback = async (options: ListenForCallbackOptions = {}):
 
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => {
+    // A wait still open would otherwise hold its timer, and the caller, until
+    // the timeout: closing during a sign-in (Ctrl+C in setup) cancels it.
+    const current = pending;
+    pending = undefined;
+    current?.fail(new ChatGPTAuthError('cancelled', 'The ChatGPT sign-in was cancelled.'));
     closing ??= new Promise<void>((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections();
@@ -152,6 +163,10 @@ export const listenForCallback = async (options: ListenForCallbackOptions = {}):
           settle: (params) => {
             finish();
             resolve(params);
+          },
+          fail: (error) => {
+            finish();
+            reject(error);
           },
         };
       });

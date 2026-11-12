@@ -68,9 +68,13 @@ interface RecordedRequest {
 
 type Reply = { readonly status: number; readonly body?: unknown } | 'network-error';
 
-const createFakeAuthServer = (replies: { token?: Reply[]; revoke?: Reply[]; jwks?: Reply; discovery?: Reply } = {}) => {
+const createFakeAuthServer = (replies: { token?: Reply[]; revoke?: Reply[]; jwks?: Reply | Reply[]; discovery?: Reply } = {}) => {
   const requests: RecordedRequest[] = [];
-  const queues = { token: [...(replies.token ?? [])], revoke: [...(replies.revoke ?? [])] };
+  const queues = {
+    token: [...(replies.token ?? [])],
+    revoke: [...(replies.revoke ?? [])],
+    jwks: Array.isArray(replies.jwks) ? [...replies.jwks] : undefined,
+  };
   const toResponse = (reply: Reply | undefined): Response => {
     if (reply === undefined) {
       throw new Error('the fake auth server got a request nothing was queued for');
@@ -90,7 +94,10 @@ const createFakeAuthServer = (replies: { token?: Reply[]; revoke?: Reply[]; jwks
       return toResponse(queues.revoke.shift());
     }
     if (url === endpoints.jwksUri) {
-      return toResponse(replies.jwks ?? { status: 200, body: { keys: [publishedKey] } });
+      if (queues.jwks !== undefined) {
+        return toResponse(queues.jwks.shift());
+      }
+      return toResponse((replies.jwks as Reply | undefined) ?? { status: 200, body: { keys: [publishedKey] } });
     }
     if (url === `${ISSUER}/.well-known/openid-configuration`) {
       return toResponse(replies.discovery);
@@ -363,6 +370,37 @@ test('a signing-key outage fails before the single-use code is spent, so the sam
   const recovered = createFakeAuthServer({ token: [tokenReply(signJwt(idTokenClaims(attempt)))] });
   const signIn = await completeSignIn({ endpoints, attempt, callback: callbackFor(attempt), fetch: recovered.fetch, now: () => NOW });
   assert.equal(signIn.subject, 'user-sub-1');
+});
+
+test('an ID token signed with a key newer than the fetched set gets one refetch of the keys', async () => {
+  const attempt = firstAttempt();
+  const retiredKey: JsonWebKey = { ...otherKey.publicKey.export({ format: 'jwk' }), kid: 'key-0', use: 'sig', alg: 'RS256' };
+  const rollover = createFakeAuthServer({
+    jwks: [
+      { status: 200, body: { keys: [retiredKey] } },
+      { status: 200, body: { keys: [retiredKey, publishedKey] } },
+    ],
+    token: [tokenReply(signJwt(idTokenClaims(attempt)))],
+  });
+  const signIn = await completeSignIn({ endpoints, attempt, callback: callbackFor(attempt), fetch: rollover.fetch, now: () => NOW });
+  assert.equal(signIn.subject, 'user-sub-1');
+  assert.equal(rollover.requests.filter((request) => request.url === endpoints.jwksUri).length, 2);
+
+  // A key that is still missing after the refetch is refused, not retried again.
+  const second = firstAttempt();
+  const missing = createFakeAuthServer({
+    jwks: [
+      { status: 200, body: { keys: [retiredKey] } },
+      { status: 200, body: { keys: [retiredKey] } },
+    ],
+    token: [tokenReply(signJwt(idTokenClaims(second)))],
+  });
+  await rejectsWithCode(
+    completeSignIn({ endpoints, attempt: second, callback: callbackFor(second), fetch: missing.fetch, now: () => NOW }),
+    'id_token_invalid',
+    /key key-1/,
+  );
+  assert.equal(missing.requests.filter((request) => request.url === endpoints.jwksUri).length, 2);
 });
 
 test('refreshTokens sends the issued client ID and resource without scope, and returns the replacement', async () => {
