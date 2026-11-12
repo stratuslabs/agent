@@ -45,8 +45,14 @@ import {
 
 export interface OpenAIResponsesProviderConfig {
   model: string;
-  /** Sent as `authorization: Bearer …`: an API key, or a sign-in's access token. */
-  apiKey: string;
+  /**
+   * Sent as `authorization: Bearer …`: an API key, or a function that gives
+   * a sign-in's current access token. The function is asked before every
+   * request sent, with that request's signal, so a turn that outlives an
+   * hour-long token sends the refreshed one. What it throws fails the turn
+   * in its own words, before anything is sent.
+   */
+  apiKey: string | ((signal: AbortSignal | undefined) => string | Promise<string>);
   /** Where `/responses` lives. Default `https://api.openai.com/v1`. */
   baseUrl?: string;
   /** The provider name usage and errors are attributed to. Default `openai`. */
@@ -61,6 +67,12 @@ export interface OpenAIResponsesProviderConfig {
   requestTimeoutMs?: number;
   /** As on the chat-completions adapter: how much of the transcript's images one request may replay. */
   imageReplayBudget?: ImageReplayBudget;
+  /**
+   * Sends the tools inside one namespace instead of at the top level, as
+   * Sign in with ChatGPT requires. Calls come back by registry name whether
+   * or not the endpoint echoes the namespace.
+   */
+  toolNamespace?: { name: string; description: string };
 }
 
 type InputContent =
@@ -69,7 +81,7 @@ type InputContent =
 
 type InputItem =
   | { role: 'user' | 'assistant'; content: string | InputContent[] }
-  | { type: 'function_call'; call_id: string; name: string; arguments: string }
+  | { type: 'function_call'; call_id: string; namespace?: string; name: string; arguments: string }
   | { type: 'function_call_output'; call_id: string; output: string | InputContent[] };
 
 interface OutputItem {
@@ -116,20 +128,25 @@ export const createOpenAIResponsesProvider = ({
   fetch: fetchImpl = globalThis.fetch,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   imageReplayBudget,
+  toolNamespace,
 }: OpenAIResponsesProviderConfig): ModelProvider => {
+  // The pattern the endpoint holds a namespace to.
+  if (toolNamespace !== undefined && !/^[a-zA-Z0-9_-]{1,128}$/.test(toolNamespace.name)) {
+    throw new Error(`A tool namespace is 1 to 128 letters, digits, _ or -, so ${JSON.stringify(toolNamespace.name)} cannot be one.`);
+  }
   if (typeof fetchImpl !== 'function') {
     throw new Error('Global fetch is unavailable for the OpenAI Responses provider.');
   }
   const url = `${withoutTrailingSlashes(baseUrl)}/responses`;
   // Copied once, so what is sent and what is redacted stay the same values.
   const configuredHeaders: Record<string, string> = { ...headers };
-  const secrets = [...asSent(apiKey), ...headerSecrets(configuredHeaders)];
+  const secrets = [...(typeof apiKey === 'string' ? asSent(apiKey) : []), ...headerSecrets(configuredHeaders)];
 
   const provider = defineProvider({
     name,
     async generate(request) {
       const toolNames = createOpenAICompatibleToolNameMapping(request.tools);
-      const tools = createTools(request.tools, toolNames);
+      const tools = createTools(request.tools, toolNames, toolNamespace);
       const instructions = renderSystemPromptSections(request, {
         ...(systemPrompt ? { preamble: systemPrompt } : {}),
       }).join('\n\n');
@@ -142,6 +159,9 @@ export const createOpenAIResponsesProvider = ({
         ? AbortSignal.any([request.signal, timeout])
         : timeout ?? request.signal;
 
+      // A getter's tokens are known only once asked for, so they are
+      // redacted here; the key and headers by the wrapper below.
+      const tokens: string[] = [];
       try {
         // Sent at most twice, as on the chat-completions adapter: once as
         // built, and once with no images at all if the endpoint refused
@@ -149,13 +169,15 @@ export const createOpenAIResponsesProvider = ({
         // omitting the refused images frees replay budget an older image
         // would otherwise take.
         for (let imagesRetried = false; ;) {
-          const { input, sent } = createInput(request, toolNames, !imagesRetried, imageReplayBudget);
+          const { input, sent } = createInput(request, toolNames, !imagesRetried, imageReplayBudget, toolNamespace?.name);
+          const token = typeof apiKey === 'string' ? apiKey : await apiKey(signal);
+          tokens.push(...asSent(token));
           const response = await fetchImpl(url, {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
               accept: 'text/event-stream',
-              authorization: `Bearer ${apiKey}`,
+              authorization: `Bearer ${token}`,
               ...configuredHeaders,
             },
             body: JSON.stringify({
@@ -199,7 +221,7 @@ export const createOpenAIResponsesProvider = ({
         if (timeout?.aborted && !request.signal?.aborted) {
           throw new Error(`Provider request timed out after ${requestTimeoutMs}ms: ${name}`);
         }
-        throw error;
+        throw redactedError(error, tokens);
       }
     },
   });
@@ -496,16 +518,24 @@ const parseEvent = (text: string): StreamEvent => {
   }
 };
 
+type FunctionTool = { type: 'function'; name: string; description?: string; parameters: JsonObject };
+
+/** The request's tools, inside `namespace` when one is set. A namespace may not be empty, so no tools means none sent. */
 const createTools = (
   tools: ToolDescriptor[] | undefined,
   toolNames: OpenAICompatibleToolNameMapping,
-): Array<{ type: 'function'; name: string; description?: string; parameters: JsonObject }> =>
-  (tools ?? []).map((tool) => ({
+  namespace: { name: string; description: string } | undefined,
+): Array<FunctionTool | { type: 'namespace'; name: string; description: string; tools: FunctionTool[] }> => {
+  const functions = (tools ?? []).map((tool): FunctionTool => ({
     type: 'function',
     name: toWireToolName(tool.name, toolNames),
     ...(tool.description ? { description: tool.description } : {}),
     parameters: tool.parameters ?? { type: 'object', properties: {} },
   }));
+  return namespace === undefined || functions.length === 0
+    ? functions
+    : [{ type: 'namespace', name: namespace.name, description: namespace.description, tools: functions }];
+};
 
 const imageInput = (image: ImageAttachment, replayed: ReadonlySet<ImageAttachment>): InputContent =>
   (replayed.has(image)
@@ -524,6 +554,8 @@ const createInput = (
   toolNames: OpenAICompatibleToolNameMapping,
   images: boolean,
   imageReplayBudget: ImageReplayBudget | undefined,
+  /** The namespace the tools are declared in, which an earlier call is replayed under too. */
+  namespace: string | undefined,
 ): { input: InputItem[]; sent: ImageAttachment[] } => {
   const transcript = transcriptOf(request);
   const replayed: ReadonlySet<ImageAttachment> = images
@@ -543,6 +575,7 @@ const createInput = (
         input.push({
           type: 'function_call',
           call_id: call.id,
+          ...(namespace !== undefined ? { namespace } : {}),
           name: toWireToolName(call.toolName, toolNames),
           arguments: JSON.stringify(call.input),
         });

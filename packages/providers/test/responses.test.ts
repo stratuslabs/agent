@@ -466,3 +466,118 @@ test('a refusal is reported as one, and an empty answer as a failure', async () 
     /empty response/,
   );
 });
+
+test('a token getter is asked for every request sent, and what it gives is sent and redacted', async () => {
+  const tokens = ['tok-first', 'tok-second', 'tok-third-secret'];
+  let asked = 0;
+  const apiKey = async () => tokens[asked++] ?? 'tok-spare';
+  const { calls, fetch } = fakeFetch((call) => (call < 3
+    ? sseResponse([terminal('response.completed', { status: 'completed', output: [outputMessage('Hello')] })])
+    : jsonResponse(401, { error: { message: 'Token tok-third-secret was rejected.', code: 'invalid_api_key' } })));
+  const provider = createOpenAIResponsesProvider({ model: 'gpt-test', apiKey, fetch });
+
+  await provider.generate(sayHello());
+  await provider.generate(sayHello());
+  const headerOf = (index: number) => (calls[index]?.init.headers as Record<string, string>).authorization;
+  // A sign-in's token turns over hourly, so each request reads the current one.
+  assert.equal(headerOf(0), 'Bearer tok-first');
+  assert.equal(headerOf(1), 'Bearer tok-second');
+
+  await assert.rejects(provider.generate(sayHello()), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /was rejected/);
+    assert.doesNotMatch(error.message, /tok-third-secret/);
+    return true;
+  });
+
+  // A getter that cannot give a token (a sign-in that has to be redone)
+  // fails the turn in its own words, before anything is sent.
+  const { calls: none, fetch: unused } = fakeFetch(() => sseResponse([]));
+  await assert.rejects(
+    createOpenAIResponsesProvider({
+      model: 'gpt-test',
+      apiKey: () => { throw new Error('Sign in with ChatGPT again: the session ended.'); },
+      fetch: unused,
+    }).generate(sayHello()),
+    /Sign in with ChatGPT again/,
+  );
+  assert.equal(none.length, 0);
+});
+
+test('a 400 blaming an image asks the getter again for the retry', async () => {
+  let asked = 0;
+  const { calls, fetch } = fakeFetch((call) => (call === 1
+    ? jsonResponse(400, { error: { message: 'Invalid image data.', code: 'invalid_image' } })
+    : sseResponse([terminal('response.completed', { status: 'completed', output: [outputMessage('Fine')] })])));
+  const provider = createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: () => `tok-${++asked}`, fetch });
+
+  await provider.generate(requestWith([
+    { id: 'm1', role: 'user', content: 'Look', images: [png('aGk=')], createdAt: now },
+  ]));
+
+  assert.equal(calls.length, 2);
+  assert.equal((calls[1]?.init.headers as Record<string, string>).authorization, 'Bearer tok-2');
+});
+
+test('tools can go out in one namespace, and calls come back by registry name with or without it', async () => {
+  const namespaced = { id: 'fc_1', type: 'function_call', call_id: 'call_1', namespace: 'stratus', name: 'demo_echo', arguments: '{"text":"hi"}', status: 'completed' };
+  const bare = { id: 'fc_2', type: 'function_call', call_id: 'call_2', name: 'demo_echo', arguments: '{"text":"yo"}', status: 'completed' };
+  const { calls, fetch } = fakeFetch(() => sseResponse([
+    { type: 'response.output_item.added', output_index: 0, item: { ...namespaced, arguments: '', status: 'in_progress' } },
+    { type: 'response.output_item.done', output_index: 0, item: namespaced },
+    { type: 'response.output_item.done', output_index: 1, item: bare },
+    terminal('response.completed', { status: 'completed', output: [namespaced, bare] }),
+  ]));
+  const provider = createOpenAIResponsesProvider({
+    model: 'gpt-test',
+    apiKey: 'sk-test',
+    fetch,
+    toolNamespace: { name: 'stratus', description: 'Tools this agent can use.' },
+  });
+  const tools = [{ name: 'demo.echo', description: 'Echo text', parameters: { type: 'object', properties: { text: { type: 'string' } } } }];
+  const result: ToolResult = { callId: 'call_0', toolName: 'demo.echo', ok: true, output: { echoed: 'a' }, trust: 'agent' };
+  const deltas: ProviderDelta[] = [];
+
+  const response = await provider.generate({
+    ...requestWith([
+      { id: 'm1', role: 'user', content: 'Echo', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', toolCalls: [{ id: 'call_0', toolName: 'demo.echo', input: { text: 'a' } }], createdAt: now },
+      { id: 'm3', role: 'tool', name: 'demo.echo', content: '', toolResult: result, createdAt: now },
+    ]),
+    tools,
+    onDelta: (delta) => { deltas.push(delta); },
+  });
+
+  assert.deepEqual(calls[0]?.body.tools, [{
+    type: 'namespace',
+    name: 'stratus',
+    description: 'Tools this agent can use.',
+    tools: [{ type: 'function', name: 'demo_echo', description: 'Echo text', parameters: tools[0]?.parameters }],
+  }]);
+  // A call the model made earlier goes back under the namespace it was made in.
+  assert.deepEqual((calls[0]?.body.input as unknown[])[1], {
+    type: 'function_call', call_id: 'call_0', namespace: 'stratus', name: 'demo_echo', arguments: '{"text":"a"}',
+  });
+  assert.deepEqual(deltas, [{ type: 'tool-call', toolName: 'demo.echo' }]);
+  assert.deepEqual(response.parts, [
+    { type: 'tool-call', call: { id: 'call_1', toolName: 'demo.echo', input: { text: 'hi' } } },
+    { type: 'tool-call', call: { id: 'call_2', toolName: 'demo.echo', input: { text: 'yo' } } },
+  ]);
+
+  // The wrap-up turn keeps the namespace declared; a turn with no tools sends
+  // none, since a namespace may not be empty.
+  await provider.generate({ ...sayHello(), tools, toolChoice: 'none' });
+  assert.equal(calls[1]?.body.tool_choice, 'none');
+  assert.equal((calls[1]?.body.tools as Array<{ type: string }>)[0]?.type, 'namespace');
+  await provider.generate(sayHello());
+  assert.equal('tools' in (calls[2]?.body ?? {}), false);
+});
+
+test('a namespace name the endpoint would refuse is refused when the provider is made', () => {
+  for (const name of ['', 'my tools', 'stratus.tools']) {
+    assert.throws(
+      () => createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', toolNamespace: { name, description: 'Tools.' } }),
+      /namespace/,
+    );
+  }
+});
