@@ -285,16 +285,21 @@ const readResponse = async (
   const items = done.size > 0
     ? [...done.entries()].sort(([a], [b]) => a - b).map(([, item]) => item)
     : response.output ?? [];
+  // In the model's order, the order the deltas already showed: words said
+  // before a call stay before it. Separate messages next to each other
+  // (commentary, then the answer) stay separate paragraphs rather than
+  // running into one another.
   const builder = createProviderResponseBuilder();
-  const texts: string[] = [];
   const refusals: string[] = [];
+  let afterText = false;
   for (const [index, item] of items.entries()) {
     if (item.type === 'message') {
       const text = (item.content ?? [])
         .map((part) => (part.type === 'output_text' && typeof part.text === 'string' ? part.text : ''))
         .join('');
       if (text.length > 0) {
-        texts.push(text);
+        builder.addText(afterText ? `\n\n${text}` : text);
+        afterText = true;
       }
       for (const part of item.content ?? []) {
         if (part.type === 'refusal' && typeof part.refusal === 'string' && part.refusal.length > 0) {
@@ -303,12 +308,8 @@ const readResponse = async (
       }
     } else if (item.type === 'function_call') {
       builder.addToolCall(toolCallOf(item, index, toolNames));
+      afterText = false;
     }
-  }
-  // Separate messages (commentary, then the answer) stay separate
-  // paragraphs rather than running into one another.
-  if (texts.length > 0) {
-    builder.addText(texts.join('\n\n'));
   }
 
   const result = builder.done();
@@ -416,7 +417,12 @@ const readErrorBody = async (response: Response): Promise<{
   const rawText = await response.text();
   let payload: { error?: { code?: string; message?: unknown } } = {};
   try {
-    payload = rawText.length > 0 ? JSON.parse(rawText) as typeof payload : {};
+    const parsed: unknown = rawText.length > 0 ? JSON.parse(rawText) : undefined;
+    // Only an object can be the error envelope; any other JSON is shown as
+    // it came, like a body that is not JSON at all.
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      payload = parsed as typeof payload;
+    }
   } catch {
     // Not JSON: a proxy's page, shown as it came.
   }

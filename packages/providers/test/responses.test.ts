@@ -221,6 +221,23 @@ test('tool calls go out by wire name, stream as fragments, and come back by regi
   assert.equal((calls[1]?.body.tools as unknown[]).length, 1);
 });
 
+test('output keeps the model\'s order: words before a call stay before it, separate messages stay apart', async () => {
+  const call = { id: 'fc_1', type: 'function_call', call_id: 'call_1', name: 'demo_echo', arguments: '{}', status: 'completed' };
+  const { fetch } = fakeFetch(() => sseResponse([terminal('response.completed', {
+    status: 'completed',
+    output: [outputMessage('Let me check.', 'msg_1'), outputMessage('One moment.', 'msg_2'), call, outputMessage('Asked.', 'msg_3')],
+  })]));
+  const provider = createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch });
+
+  const result = await provider.generate({ ...sayHello(), tools: [{ name: 'demo.echo' }] });
+
+  assert.deepEqual(result.parts, [
+    { type: 'text', text: 'Let me check.\n\nOne moment.' },
+    { type: 'tool-call', call: { id: 'call_1', toolName: 'demo.echo', input: {} } },
+    { type: 'text', text: 'Asked.' },
+  ]);
+});
+
 test('arguments that are not a JSON object fail the turn with the tool named', async () => {
   const call = { id: 'fc_1', type: 'function_call', call_id: 'call_1', name: 'demo_echo', arguments: '{"text":', status: 'completed' };
   const { fetch } = fakeFetch(() => sseResponse([terminal('response.completed', { status: 'completed', output: [call] })]));
@@ -335,7 +352,14 @@ test('a caller abort mid-stream cancels the request and is not reported as a tim
 test('a stream that goes quiet is bounded by the request timeout', async () => {
   const { fetch } = fakeFetch((_call, init) => new Response(new ReadableStream<Uint8Array>({
     start(stream) {
-      init.signal?.addEventListener('abort', () => stream.error(init.signal?.reason), { once: true });
+      // AbortSignal.timeout's own timer is unref'd; this one keeps the
+      // event loop alive while the quiet stream waits to be aborted, as a
+      // real socket would.
+      const keepAlive = setTimeout(() => {}, 60_000);
+      init.signal?.addEventListener('abort', () => {
+        clearTimeout(keepAlive);
+        stream.error(init.signal?.reason);
+      }, { once: true });
     },
   }), { status: 200 }));
   const provider = createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch, requestTimeoutMs: 50 });
@@ -357,6 +381,13 @@ test('an HTTP error is thrown in the endpoint\'s words with the key redacted', a
   await assert.rejects(
     createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch: gateway }).generate(sayHello()),
     /Bad gateway/,
+  );
+
+  // JSON that is not an error envelope is shown as it came, not tripped over.
+  const { fetch: nullBody } = fakeFetch(() => new Response('null', { status: 500 }));
+  await assert.rejects(
+    createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch: nullBody }).generate(sayHello()),
+    (error: unknown) => error instanceof Error && !(error instanceof TypeError) && error.message === 'null',
   );
 });
 
