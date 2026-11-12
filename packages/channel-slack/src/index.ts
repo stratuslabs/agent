@@ -2241,8 +2241,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ...(next.approvalChannel !== undefined ? { approvalChannel: next.approvalChannel } : {}),
     };
   };
+  // No principals list and an empty one stay apart: `authorFor` names
+  // senders differently under each. Absent and empty approvers are the
+  // same to `mayDecide` (nobody), so they share a key.
   const peopleKey = (config: SlackAgentConfig): string =>
-    JSON.stringify([config.principals ?? [], config.admit ?? 'anyone', config.approvers ?? [], config.approvalChannel ?? '']);
+    JSON.stringify([config.principals ?? null, config.admit ?? 'anyone', config.approvers ?? [], config.approvalChannel ?? '']);
   /** For the log: counts, never the ids, which the config already holds. */
   const describePeople = (config: SlackAgentConfig): string => {
     const listed = (config.principals ?? []).length;

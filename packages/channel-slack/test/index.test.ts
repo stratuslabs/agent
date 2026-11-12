@@ -18978,3 +18978,18 @@ test('a socket kept on its old app because it won\'t close still takes the new p
   };
   await setup.adapter.stop();
 });
+
+test('a reload between no principals list and an empty one applies, since the two name senders differently (Codex P2 4546238133)', async () => {
+  // No list: every author keeps their display name. An empty list: every
+  // author is their id. Same admit and approvers either way, so only the
+  // list itself tells them apart.
+  const setup = reloadingAdapter([{ ...ava, admit: 'anyone' }], ['ava']);
+  await setup.adapter.start(setup.gateway);
+  setup.store([{ ...ava, admit: 'anyone', principals: [] }]);
+  await setup.adapter.reload!();
+  assert.equal(setup.logs.filter((line) => line.startsWith('slack: ava now admits')).length, 1, setup.logs.join('\n'));
+  setup.store([{ ...ava, admit: 'anyone' }]);
+  await setup.adapter.reload!();
+  assert.equal(setup.logs.filter((line) => line.startsWith('slack: ava now admits')).length, 2, setup.logs.join('\n'));
+  await setup.adapter.stop();
+});
