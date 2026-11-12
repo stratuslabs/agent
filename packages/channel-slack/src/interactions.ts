@@ -12,7 +12,7 @@
 import type { ChannelCredentialRequest, GatewayLike, StratusEvent } from '@stratusagent/core';
 import type { ReplyRenderer } from './reply.ts';
 import type { AgentConnection } from './connection.ts';
-import type { PendingApprovalPost, PendingCredentialPost } from './pending-posts.ts';
+import { mayDecide, type PendingApprovalPost, type PendingCredentialPost } from './pending-posts.ts';
 import {
   APPROVAL_ACTIONS,
   CREDENTIAL_ACK_MS,
@@ -296,7 +296,7 @@ export const createInteractions = ({
     // By actor, as approvals are: the request sits in a thread anyone in
     // it can read, and a key is a bigger thing to hand over than a click.
     const clicker = args.body?.user?.id;
-    if (!clicker || !post.approvers.has(clicker)) {
+    if (!mayDecide(post, clicker)) {
       await tellClicker(connection, args, `You are not an approver for ${post.agentName}, so you cannot add its credentials.`);
       return;
     }
@@ -334,7 +334,7 @@ export const createInteractions = ({
     // Checked again on the answer, not only on the click: the form is a
     // separate interaction, and the click is not what stores anything.
     const submitter = args.body?.user?.id;
-    if (!submitter || !post.approvers.has(submitter)) {
+    if (!mayDecide(post, submitter)) {
       await refuse(`You are not an approver for ${post.agentName}, so you cannot add its credentials.`);
       return;
     }
@@ -445,7 +445,7 @@ export const createInteractions = ({
       await tellClicker(connection, args, NOT_THE_PROMPT);
       return;
     }
-    if (!clicker || !post.approvers.has(clicker)) {
+    if (!mayDecide(post, clicker)) {
       // The request stays pending: someone who may not decide clicking is
       // not a decision, and consuming the request would let any channel
       // member deny an agent's work.

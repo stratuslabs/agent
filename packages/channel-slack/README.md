@@ -19,7 +19,7 @@ Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no w
 }
 ```
 
-- **A new agent's app connects without a restart.** Saving an agent's tokens (`stratus channel set slack`, `stratus setup` → Channels, or the dashboard) reloads the running daemon, which connects that app, reconnects one whose tokens changed, and drops one whose tokens were removed or whose soul is gone. Every other app stays connected. An agent's Slack settings (`slack`, `approvals`, `principals` in the config) still come from the config the daemon started with, and a daemon that started with no Slack app at all needs a restart for its first one.
+- **A new agent's app connects without a restart.** Saving an agent's tokens (`stratus channel set slack`, `stratus setup` → Channels, or the dashboard) reloads the running daemon, which connects that app, reconnects one whose tokens changed, and drops one whose tokens were removed or whose soul is gone. Every other app stays connected. The same reload hands each connected app who it answers to now (`principals.slackUsers`, `principals.admit`, `approvals.slackApprovers`, `approvals.slackChannel`), without reconnecting it: see [Changing who an agent answers to](#changing-who-an-agent-answers-to). Its other settings (`slack`, the rest of `approvals`) still come from the config the daemon started with, and a daemon that started with no Slack app at all needs a restart for its first one.
 
 ## Who a message is for
 
@@ -511,6 +511,25 @@ Like `approvals`, this block is read only from a config you chose —
 project-local `stratus.config.json` cannot appoint itself the principal.
 The labels themselves are documented in
 [Memory](../../docs/concepts/memory.md#where-a-fact-came-from).
+
+### Changing who an agent answers to
+
+The people lists take effect at the next reload, with no restart: who an
+agent admits (`principals.slackUsers` and `principals.admit`), who may
+approve its calls (`approvals.slackApprovers`), and where it asks
+(`approvals.slackChannel`). Saving settings through the control API
+(`PUT /config`) reloads by itself; after editing the config file by
+hand, `POST /roster/reload` (or `stratus restart`) applies it. The app
+stays connected, and the daemon logs the new counts, such as
+`slack: ava now admits 3 listed people and has 1 approver`.
+
+Someone removed loses access at that reload: their next message is
+refused, and as an approver they can no longer answer an approval or
+credential request, including one posted while they were still on the
+list. Someone added can answer requests posted from then on. The lists
+are read under the same rules as at start: a project-local config is
+ignored, and a config that will not read refuses every sender and every
+approval until it is fixed and reloaded.
 
 ### Other agents' bots
 
