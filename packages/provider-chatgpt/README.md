@@ -38,4 +38,5 @@ with no dependencies beyond Node's own `crypto` and `http`:
 
 Every failure is a `ChatGPTAuthError` with a stable `code`: `temporary` keeps
 the tokens, `signin_required` means the refresh token is dead and the user
-signs in again. No message quotes a token.
+signs in again, and `storage_failed` means the saved sign-in or its lock
+failed on this machine. No message quotes a token.

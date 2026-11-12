@@ -56,8 +56,8 @@ export interface ChatGPTTokenSource {
   /**
    * A current access token. Throws a `ChatGPTAuthError`: `signin_required`
    * when there is no usable sign-in, `temporary` when a refresh is due but
-   * OpenAI can't be reached and the token has run out, `cancelled` when the
-   * signal fires first.
+   * OpenAI can't be reached and the token has run out, `storage_failed` when
+   * the store or the lock fails, `cancelled` when the signal fires first.
    */
   accessToken(signal: AbortSignal | undefined): Promise<string>;
 }
@@ -79,6 +79,27 @@ export const sessionFromSignIn = (signIn: ChatGPTSignIn): ChatGPTSession => ({
 
 const signInRequired = (): ChatGPTAuthError =>
   new ChatGPTAuthError('signin_required', 'Stratus is not signed in with ChatGPT on this install. Sign in with ChatGPT in `stratus setup`.');
+
+/**
+ * A store or lock failure as `storage_failed`, with the original error as
+ * the cause, so callers can branch on `code` alone. Our own errors, which
+ * the work inside the lock throws, come through as they are.
+ */
+const storageFailed = (what: string, error: unknown): ChatGPTAuthError => {
+  if (error instanceof ChatGPTAuthError) {
+    return error;
+  }
+  const reason = error instanceof Error ? error.message : String(error);
+  return new ChatGPTAuthError('storage_failed', `Couldn't ${what} (${reason.length > 300 ? `${reason.slice(0, 300)}…` : reason}).`, { cause: error });
+};
+
+const local = async <T>(what: string, call: () => Promise<T>): Promise<T> => {
+  try {
+    return await call();
+  } catch (error) {
+    throw storageFailed(what, error);
+  }
+};
 
 const cancelled = (signal: AbortSignal): ChatGPTAuthError =>
   new ChatGPTAuthError('cancelled', 'Getting the ChatGPT access token was cancelled.', { cause: signal.reason });
@@ -107,7 +128,8 @@ const unlessCancelled = <T>(signal: AbortSignal | undefined, work: () => Promise
 export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): ChatGPTTokenSource => {
   const now = options.now ?? Date.now;
   const refreshBeforeMs = options.refreshBeforeMs ?? DEFAULT_REFRESH_BEFORE_MS;
-  const { store } = options;
+  const read = () => local('read the saved ChatGPT sign-in', () => options.store.read());
+  const save = (session: ChatGPTSession) => local('save the ChatGPT sign-in', () => options.store.write(session));
 
   const usable = (session: ChatGPTSession | undefined): session is ChatGPTSession & { accessToken: string; refreshToken: string } =>
     session?.accessToken !== undefined && session.refreshToken !== undefined;
@@ -118,7 +140,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
   const refreshUnderLock = async (signal: AbortSignal | undefined): Promise<string> => {
     // Another caller, here or in another process, may have refreshed while
     // this one waited, and the token it read before is spent.
-    const current = await store.read();
+    const current = await read();
     if (!usable(current)) {
       throw signInRequired();
     }
@@ -143,7 +165,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
         // The refresh token is dead. Keep the account and the ID token, the
         // hint for signing in again; drop what can't be used.
         const { accessToken: _access, refreshToken: _refresh, expiresAt: _expiry, ...account } = current;
-        await store.write({ ...account, savedAt: now() });
+        await save({ ...account, savedAt: now() });
         throw error;
       }
       // Anything else leaves the refresh token as it was, so the current
@@ -153,7 +175,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
       }
       throw error;
     }
-    await store.write({
+    await save({
       ...current,
       ...(tokens.idToken !== undefined ? { idToken: tokens.idToken } : {}),
       accessToken: tokens.accessToken,
@@ -169,7 +191,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
   return {
     accessToken: (signal) =>
       unlessCancelled(signal, async () => {
-        const saved = await store.read();
+        const saved = await read();
         if (!usable(saved)) {
           throw signInRequired();
         }
@@ -179,7 +201,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
         if (signal?.aborted === true) {
           throw cancelled(signal);
         }
-        return options.withSessionLock(() => refreshUnderLock(signal));
+        return local('take the ChatGPT sign-in lock', () => options.withSessionLock(() => refreshUnderLock(signal)));
       }),
   };
 };
