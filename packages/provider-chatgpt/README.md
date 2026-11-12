@@ -26,12 +26,14 @@ with no dependencies beyond Node's own `crypto` and `http`:
 - `refreshTokens` trades the rotating refresh token for a new set, and
   `revokeRefreshToken` ends the session at sign-out, retrying an outage.
 - `createChatGPTTokenSource` hands out the access token during a run. Five
-  minutes before it expires, it refreshes under the caller's lock, rereads the
-  saved record inside it (another process may have refreshed already), and
-  saves the replacement before returning it. An outage keeps the tokens; a
+  minutes before it expires, it refreshes under the caller's session lock
+  (which every write of the record takes, sign-in and sign-out included),
+  rereads the saved record inside it (another process may have refreshed
+  already), and saves the replacement before returning it. An outage keeps the tokens; a
   dead refresh token clears them and keeps the account for signing in again.
-  A cancelled caller returns at once, but a refresh already sent finishes and
-  is saved, because the old refresh token may already be spent.
+  A cancelled caller returns at once and sends no refresh, but a refresh
+  already sent finishes and is saved, because the old refresh token may
+  already be spent.
   `sessionFromSignIn` makes the record to save from a completed sign-in.
 
 Every failure is a `ChatGPTAuthError` with a stable `code`: `temporary` keeps

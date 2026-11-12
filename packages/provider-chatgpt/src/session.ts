@@ -1,10 +1,11 @@
 // Keeping a ChatGPT sign-in usable during a run: hands out the access token,
 // and refreshes it shortly before it expires. The refresh token rotates and
-// a spent one can't be used again, so every refresh runs under a lock that
-// also holds across processes (the daemon and a foreground `stratus run`
-// share one sign-in), rereads the record inside it, and saves the
-// replacement before handing it out. Where the record lives and how the lock
-// works belong to the caller; this file owns only the order of operations.
+// a spent one can't be used again, so every refresh runs under the session
+// lock, which also holds across processes (the daemon and a foreground
+// `stratus run` share one sign-in), rereads the record inside it, and saves
+// the replacement before handing it out. Where the record lives and how the
+// lock works belong to the caller; this file owns only the order of
+// operations.
 import { ChatGPTAuthError } from './errors.ts';
 import { refreshTokens, type ChatGPTEndpoints, type ChatGPTSignIn } from './protocol.ts';
 
@@ -38,10 +39,13 @@ export interface ChatGPTTokenSourceOptions {
   readonly endpoints: ChatGPTEndpoints;
   readonly store: ChatGPTSessionStore;
   /**
-   * Runs `work` while no other refresh of this session runs, in this process
-   * or any other that shares the store.
+   * Runs `work` while nothing else changes the saved session, in this
+   * process or any other that shares the store. Every write of the record
+   * takes this lock: a refresh here, and a sign-in or sign-out elsewhere.
+   * A write outside it can be overwritten by a refresh that read the record
+   * before it.
    */
-  readonly withRefreshLock: <T>(work: () => Promise<T>) => Promise<T>;
+  readonly withSessionLock: <T>(work: () => Promise<T>) => Promise<T>;
   /** Refresh when the access token has this long left. Default five minutes. */
   readonly refreshBeforeMs?: number;
   readonly fetch?: typeof fetch;
@@ -80,14 +84,14 @@ const cancelled = (signal: AbortSignal): ChatGPTAuthError =>
   new ChatGPTAuthError('cancelled', 'Getting the ChatGPT access token was cancelled.', { cause: signal.reason });
 
 /**
- * Waits for `work` unless the signal fires first. The work itself goes on:
- * a refresh cut off mid-flight may already have spent the old refresh token
- * at OpenAI, so it finishes and saves the replacement whether or not anyone
- * is still waiting for it.
+ * Runs `work` and waits for it unless the signal fires first. The work
+ * itself goes on: it checks the signal before it sends a refresh, but a
+ * refresh already sent may have spent the old refresh token at OpenAI, so it
+ * finishes and saves the replacement whether or not anyone still waits.
  */
-const unlessCancelled = <T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> => {
+const unlessCancelled = <T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> => {
   if (signal === undefined) {
-    return work;
+    return work();
   }
   if (signal.aborted) {
     return Promise.reject(cancelled(signal));
@@ -97,7 +101,7 @@ const unlessCancelled = <T>(work: Promise<T>, signal: AbortSignal | undefined): 
     onAbort = () => reject(cancelled(signal));
     signal.addEventListener('abort', onAbort, { once: true });
   });
-  return Promise.race([work, aborted]).finally(() => signal.removeEventListener('abort', onAbort));
+  return Promise.race([work(), aborted]).finally(() => signal.removeEventListener('abort', onAbort));
 };
 
 export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): ChatGPTTokenSource => {
@@ -111,7 +115,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
     session.expiresAt !== undefined && session.expiresAt - now() > refreshBeforeMs;
   const unexpired = (session: ChatGPTSession): boolean => session.expiresAt !== undefined && session.expiresAt > now();
 
-  const refreshUnderLock = async (): Promise<string> => {
+  const refreshUnderLock = async (signal: AbortSignal | undefined): Promise<string> => {
     // Another caller, here or in another process, may have refreshed while
     // this one waited, and the token it read before is spent.
     const current = await store.read();
@@ -121,9 +125,12 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
     if (fresh(current)) {
       return current.accessToken;
     }
+    if (signal?.aborted === true) {
+      throw cancelled(signal);
+    }
     let tokens;
     try {
-      // No signal: see unlessCancelled.
+      // No signal once it's sent: see unlessCancelled.
       tokens = await refreshTokens({
         endpoints: options.endpoints,
         clientId: current.clientId,
@@ -160,18 +167,19 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
   };
 
   return {
-    accessToken: async (signal) => {
-      if (signal?.aborted === true) {
-        throw cancelled(signal);
-      }
-      const saved = await store.read();
-      if (!usable(saved)) {
-        throw signInRequired();
-      }
-      if (fresh(saved)) {
-        return saved.accessToken;
-      }
-      return unlessCancelled(options.withRefreshLock(refreshUnderLock), signal);
-    },
+    accessToken: (signal) =>
+      unlessCancelled(signal, async () => {
+        const saved = await store.read();
+        if (!usable(saved)) {
+          throw signInRequired();
+        }
+        if (fresh(saved)) {
+          return saved.accessToken;
+        }
+        if (signal?.aborted === true) {
+          throw cancelled(signal);
+        }
+        return options.withSessionLock(() => refreshUnderLock(signal));
+      }),
   };
 };

@@ -61,7 +61,7 @@ const memoryLock = (beforeWork?: () => void | Promise<void>) => {
   let tail: Promise<unknown> = Promise.resolve();
   const lock = {
     taken: 0,
-    withRefreshLock: <T>(work: () => Promise<T>): Promise<T> => {
+    withSessionLock: <T>(work: () => Promise<T>): Promise<T> => {
       const run = tail.then(async () => {
         lock.taken += 1;
         await beforeWork?.();
@@ -72,6 +72,17 @@ const memoryLock = (beforeWork?: () => void | Promise<void>) => {
     },
   };
   return lock;
+};
+
+/** Waits for a condition the code under test should reach soon; fails instead of spinning forever. */
+const until = async (condition: () => boolean, what: string): Promise<void> => {
+  for (let turn = 0; turn < 1000; turn += 1) {
+    if (condition()) {
+      return;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`never happened: ${what}`);
 };
 
 type Reply = { readonly status: number; readonly body?: unknown } | 'network-error';
@@ -116,7 +127,7 @@ const sourceFor = (
   server: { fetch: typeof fetch },
   lock = memoryLock(),
   now: () => number = () => NOW,
-) => ({ lock, source: createChatGPTTokenSource({ endpoints, store, withRefreshLock: lock.withRefreshLock, fetch: server.fetch, now }) });
+) => ({ lock, source: createChatGPTTokenSource({ endpoints, store, withSessionLock: lock.withSessionLock, fetch: server.fetch, now }) });
 
 test('a token with more than five minutes left is used as is, without the lock or a refresh', async () => {
   const saved = memoryStore(savedSession({ expiresAt: NOW + 5 * MINUTE + 1 }));
@@ -226,9 +237,7 @@ test("cancelling the caller doesn't cancel a refresh in flight: the replacement 
   const { source } = sourceFor(saved.store, server);
   const controller = new AbortController();
   const pending = source.accessToken(controller.signal);
-  while (server.requests.length === 0) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+  await until(() => server.requests.length > 0, 'the refresh was sent');
   assert.equal(server.requests[0]?.signal, undefined, "the refresh doesn't carry the caller's signal");
   controller.abort();
   await rejectsWithCode(pending, 'cancelled');
@@ -242,10 +251,22 @@ test("cancelling the caller doesn't cancel a refresh in flight: the replacement 
 });
 
 test('an already cancelled caller gets cancelled before anything is read or sent', async () => {
-  const server = refreshServer([]);
-  const { source } = sourceFor(memoryStore(savedSession({ expiresAt: NOW - 1 })).store, server);
-  await rejectsWithCode(source.accessToken(AbortSignal.abort()), 'cancelled');
-  assert.equal(server.requests.length, 0);
+  for (const expiresAt of [NOW - 1, NOW + 60 * MINUTE]) {
+    let reads = 0;
+    const saved = memoryStore(savedSession({ expiresAt }));
+    const store: ChatGPTSessionStore = {
+      read: async () => {
+        reads += 1;
+        return saved.current();
+      },
+      write: saved.store.write,
+    };
+    const server = refreshServer([]);
+    const { source } = sourceFor(store, server);
+    await rejectsWithCode(source.accessToken(AbortSignal.abort()), 'cancelled');
+    assert.equal(reads, 0);
+    assert.equal(server.requests.length, 0);
+  }
 });
 
 test('a cancel that lands while the record is being read still returns the caller promptly', { timeout: 5000 }, async () => {
@@ -260,9 +281,48 @@ test('a cancel that lands while the record is being read still returns the calle
   };
   let release!: () => void;
   const server = refreshServer([refreshed()], new Promise<void>((resolve) => (release = resolve)));
-  const { source } = sourceFor(store, server);
+  const { lock, source } = sourceFor(store, server);
   await rejectsWithCode(source.accessToken(controller.signal), 'cancelled');
   release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lock.taken, 0, 'a caller cancelled before its refresh started takes no lock');
+  assert.equal(server.requests.length, 0);
+});
+
+test('a read that hangs still lets a cancelled caller go', { timeout: 5000 }, async () => {
+  const controller = new AbortController();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const store: ChatGPTSessionStore = {
+    read: async () => {
+      await gate;
+      return savedSession();
+    },
+    write: async () => undefined,
+  };
+  const { source } = sourceFor(store, refreshServer([]));
+  const pending = source.accessToken(controller.signal);
+  controller.abort();
+  await rejectsWithCode(pending, 'cancelled');
+  release();
+});
+
+test('a caller cancelled while waiting for the lock sends no refresh', { timeout: 5000 }, async () => {
+  const saved = memoryStore(savedSession({ expiresAt: NOW - 1 }));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const lock = memoryLock(() => gate);
+  const server = refreshServer([]);
+  const { source } = sourceFor(saved.store, server, lock);
+  const controller = new AbortController();
+  const pending = source.accessToken(controller.signal);
+  await until(() => lock.taken > 0, 'the caller reached the lock');
+  controller.abort();
+  await rejectsWithCode(pending, 'cancelled');
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(server.requests.length, 0);
+  assert.equal(saved.writes.length, 0);
 });
 
 test('sessionFromSignIn saves the account and its tokens, and the ID token from the validated sign-in', () => {
