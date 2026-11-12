@@ -159,6 +159,7 @@ export const runSetup = async (
     // that dropped it would put every agent back on the shared budget.
     ...(existing.agentMaxTurns !== undefined ? { agentMaxTurns: existing.agentMaxTurns } : {}),
     ...(existing.autoContinue !== undefined ? { autoContinue: existing.autoContinue } : {}),
+    ...(existing.concurrentScheduledTurns !== undefined ? { concurrentScheduledTurns: existing.concurrentScheduledTurns } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -490,6 +491,9 @@ export const runSetup = async (
     }
     if (state.autoContinue !== undefined) {
       config.autoContinue = state.autoContinue;
+    }
+    if (state.concurrentScheduledTurns !== undefined) {
+      config.concurrentScheduledTurns = state.concurrentScheduledTurns;
     }
 
     await saveConfigFile(configPath, config);

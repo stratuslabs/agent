@@ -55,6 +55,7 @@ export interface SetupState {
   maxTurns?: number;
   agentMaxTurns?: Record<string, number>;
   autoContinue?: Record<string, true | number>;
+  concurrentScheduledTurns?: Record<string, number>;
   /**
    * The four blocks an operator writes by hand, carried for the same reason
    * `vision` is — with more at stake, because each one is a decision about

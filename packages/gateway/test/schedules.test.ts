@@ -1915,3 +1915,54 @@ test('a cancel that lands while the delivery check reads the session still stops
   assert.equal(notified, 0, 'the revoked destination heard nothing');
   store.close();
 });
+
+test('through the gateway: schedules.maxConcurrentByAgent lets two of one agent\'s schedules run at once, and the default keeps them in turn', async () => {
+  // Real sessions, runner and provider calls: nothing else in the gateway
+  // may hold an agent to one turn at a time once the scheduler allows two.
+  const peakWith = async (limits: { maxConcurrentByAgent?: Record<string, number> }): Promise<number> => {
+    const home = await newHome();
+    await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+    let inflight = 0;
+    let peak = 0;
+    const release = deferred<void>();
+    const fetchFake = (async () => {
+      inflight += 1;
+      peak = Math.max(peak, inflight);
+      await release.promise;
+      inflight -= 1;
+      return openAiText('done');
+    }) as typeof fetch;
+    const completed: string[] = [];
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+      idleTimeoutMs: 0,
+      schedules: { tickMs: 25, ...limits },
+    });
+    gateway.bus.subscribe((event: StratusEvent) => {
+      if (event.type === 'session.completed' && event.sessionId.startsWith('schedule:')) {
+        completed.push(event.sessionId);
+      }
+    });
+    const store = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+    for (const id of ['ava-one', 'ava-two']) {
+      store.insert(record({ id, cadence: { kind: 'every', intervalMs: 600_000 }, nextFireAt: new Date(Date.now() - 5).toISOString() }));
+    }
+    store.close();
+    await gateway.start();
+    try {
+      await waitFor(() => inflight >= 1, 'the first firing\'s provider call');
+      // Plenty of ticks for a second firing to start if it is allowed to.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const seen = peak;
+      release.resolve();
+      await waitFor(() => completed.length === 2, 'both firings to complete');
+      return seen;
+    } finally {
+      release.resolve();
+      await gateway.stop();
+    }
+  };
+
+  assert.equal(await peakWith({ maxConcurrentByAgent: { ava: 2 } }), 2, 'ava\'s two schedules run side by side');
+  assert.equal(await peakWith({}), 1, 'without a limit of its own, ava takes them in turn');
+});

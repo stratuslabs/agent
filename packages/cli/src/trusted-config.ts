@@ -470,6 +470,50 @@ export const loadServeAutoContinue = async (
 };
 
 /**
+ * How many of one agent's schedules may run a firing at once
+ * (`concurrentScheduledTurns: { "<id>": n }`), under `agentMaxTurns`'s trust
+ * rule and for its reason: a turn spends the operator's tokens, and a soul
+ * can come from someone else's template. An entry that isn't a whole number
+ * of at least 1 is ignored with a warning, so that agent keeps the default
+ * of one at a time.
+ */
+export const loadServeConcurrentScheduledTurns = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<Record<string, number>> => {
+  let block = await readTrustedConfigBlock('concurrentScheduledTurns', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring concurrentScheduledTurns in ${block.path}: a project-local config cannot decide how many turns `
+      + 'an agent runs at once. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('concurrentScheduledTurns', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring concurrentScheduledTurns (${block.error instanceof Error ? block.error.message : String(block.error)})`);
+    return {};
+  }
+  if (block.status !== 'present') {
+    return {};
+  }
+  const value: unknown = block.value;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warn('ignoring concurrentScheduledTurns: expected an object of agent ids to a number of scheduled turns, like { "atlas": 2 }');
+    return {};
+  }
+  const limits: Record<string, number> = {};
+  for (const [agentId, limit] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof limit === 'number' && Number.isInteger(limit) && limit >= 1) {
+      limits[agentId] = limit;
+    } else {
+      warn(`ignoring concurrentScheduledTurns.${agentId}: ${JSON.stringify(limit)} is not a whole number of scheduled turns at once, 1 or more`);
+    }
+  }
+  return limits;
+};
+
+/**
  * The daemon's `executor` or `memoryStore` selection — a name a plugin
  * registered — under the trust rule `plugins` has, and for the same
  * reason one step on: the plugins block decides which code runs, and
