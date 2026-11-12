@@ -24,13 +24,13 @@ import { isValidAgentId } from '@stratusagent/agents';
 import { linkedDerivedComponent } from '@stratusagent/permissions';
 import { LEDGER_FILENAME } from '@stratusagent/plugins';
 
-import { type StateEnvironment } from './environment.ts';
+import { type StateEnvironment } from '../environment.ts';
 import {
   agentDirectoryOrQuarantine,
   createStateDirectoryNames,
   type DirectoryReport,
-} from './layout-migration.ts';
-import { memoryAppendNeedsNewline } from './memory.ts';
+} from './layout.ts';
+import { memoryAppendNeedsNewline } from '../memory.ts';
 import {
   agentStateDirPath,
   agentWorkspacePath,
@@ -38,8 +38,8 @@ import {
   legacyAgentWorkspaceIn,
   legacyWorkspacesDirPath,
   stratusHomePath,
-} from './paths.ts';
-import { syncDirectory, writeFileSynced } from './durable-write.ts';
+} from '../paths.ts';
+import { syncDirectory, writeFileSynced } from '../durable-write.ts';
 
 // The fourth per-agent resource: the workspace, from
 // `workspaces/<id>` to `agents/<id>/workspace`.
@@ -614,7 +614,7 @@ const foldArchivesInto = async (
  *
  * Nor does the exclusive bracket close it. That bracket keeps *other
  * migrations* off the home; ordinary commands take no home lock at all,
- * deliberately — see `layout-migration.ts` — so an older build's command
+ * deliberately — see `layout.ts` — so an older build's command
  * is exactly what can be writing here, and nothing this function orders
  * will stop it. What the second read buys is that the window is the gap
  * between two reads rather than the whole fold.
@@ -1159,7 +1159,7 @@ export const strayWorkspaceNames = async (env: StateEnvironment): Promise<readon
  *
  * The migration holds the home against other *migrations*, never against
  * ordinary commands, which take no home lock by design (see
- * `layout-migration.ts`). An older build's command resolves
+ * `layout.ts`). An older build's command resolves
  * `workspaces/<id>` by pathname on every tainted write, so it can create one
  * at any moment during this pass — or after it. Four rounds of review
  * narrowed that window and none of them closed it, because nothing in Node

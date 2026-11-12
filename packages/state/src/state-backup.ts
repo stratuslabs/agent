@@ -6,7 +6,7 @@ import path from 'node:path';
 import { isValidAgentId } from '@stratusagent/agents';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
 import { type StateEnvironment } from './environment.ts';
-import type { StateStamp } from './migrations.ts';
+import type { StateStamp } from './migrations/index.ts';
 import {
   agentsDirPath,
   backupsDirPath,
