@@ -366,6 +366,19 @@ test('a transcript past the context window is reported as recoverable', async ()
   }));
   const provider = createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch });
   await assert.rejects(provider.generate(sayHello()), ContextOverflowError);
+
+  // The same refusal arriving inside the stream, as a failed response or an
+  // error event, by its code only: prose in a stream is not a 400.
+  for (const event of [
+    terminal('response.failed', { status: 'failed', error: { code: 'context_length_exceeded', message: 'Your input exceeds the context window of this model.' } }),
+    { type: 'error', sequence_number: 1, code: 'context_length_exceeded', message: 'Your input exceeds the context window of this model.', param: null },
+  ]) {
+    const { fetch: streamed } = fakeFetch(() => sseResponse([event]));
+    await assert.rejects(
+      createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch: streamed }).generate(sayHello()),
+      ContextOverflowError,
+    );
+  }
 });
 
 test('a failed or incomplete response fails the turn and still reports what it cost', async () => {

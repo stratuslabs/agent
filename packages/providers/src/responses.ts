@@ -245,7 +245,7 @@ const readResponse = async (
       break;
     }
     if (type === 'error') {
-      throw new Error(`Provider stream failed (${event.code ?? 'error'}): ${event.message ?? 'no message'}`);
+      throw streamError('Provider stream failed', event.code, event.message, model);
     }
     if (type === 'response.output_item.done' && event.item && typeof event.output_index === 'number') {
       done.set(event.output_index, event.item);
@@ -270,8 +270,7 @@ const readResponse = async (
   }
 
   if (final.type === 'response.failed') {
-    const code = response.error?.code ?? 'failed';
-    throw new Error(`Provider response failed (${code}): ${response.error?.message ?? 'no message'}`);
+    throw streamError('Provider response failed', response.error?.code, response.error?.message, model);
   }
   if (final.type === 'response.incomplete') {
     const reason = response.incomplete_details?.reason ?? 'unknown';
@@ -323,6 +322,18 @@ const readResponse = async (
     }
   }
   return usage ? { ...result, usage } : result;
+};
+
+/**
+ * A failure reported inside the stream. An overflow is recognized by its
+ * code alone: the prose match is kept for a 400, where the request itself
+ * was refused.
+ */
+const streamError = (prefix: string, code: string | null | undefined, message: string | undefined, model: string): Error => {
+  const text = `${prefix} (${code ?? 'no code'}): ${message ?? 'no message'}`;
+  return code === 'context_length_exceeded'
+    ? new ContextOverflowError(`The conversation no longer fits ${model}'s context window (${text}).`)
+    : new Error(text);
 };
 
 /** What an event says about progress, for a renderer and an activity watchdog. */
