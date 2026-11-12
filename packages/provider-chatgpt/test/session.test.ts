@@ -326,11 +326,13 @@ test('a caller cancelled while waiting for the lock sends no refresh', { timeout
 });
 
 test('a store or lock that fails comes back as storage_failed with the cause, not as a bare error', async () => {
-  const diskError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+  // A store's own error text stays in the cause: it may quote the record.
+  const diskError = Object.assign(new Error('EACCES: permission denied, record {"refreshToken":"refresh-1"}'), { code: 'EACCES' });
   const failingRead: ChatGPTSessionStore = { read: async () => Promise.reject(diskError), write: async () => undefined };
   const readFailure = await rejectsWithCode(sourceFor(failingRead, refreshServer([])).source.accessToken(undefined), 'storage_failed');
   assert.equal(readFailure.cause, diskError);
-  assert.match(readFailure.message, /read the saved ChatGPT sign-in.*EACCES/);
+  assert.match(readFailure.message, /read the saved ChatGPT sign-in/);
+  assert.ok(!/EACCES|refresh-1/.test(readFailure.message), 'the store error text stays in the cause');
 
   // The refresh went through but its replacement couldn't be saved.
   const saved = memoryStore(savedSession({ expiresAt: NOW - 1 }));
@@ -338,7 +340,7 @@ test('a store or lock that fails comes back as storage_failed with the cause, no
   const writeFailure = await rejectsWithCode(sourceFor(failingWrite, refreshServer([refreshed()])).source.accessToken(undefined), 'storage_failed');
   assert.equal(writeFailure.cause, diskError);
   assert.match(writeFailure.message, /save the ChatGPT sign-in/);
-  assert.ok(!/access-2|refresh-2/.test(writeFailure.message), 'no token in the message');
+  assert.ok(!/access-2|refresh-2|refresh-1/.test(writeFailure.message), 'no token in the message');
 
   const lockError = new Error('lock held too long');
   const brokenLock = { taken: 0, withSessionLock: async <T>(_work: () => Promise<T>): Promise<T> => Promise.reject(lockError) };

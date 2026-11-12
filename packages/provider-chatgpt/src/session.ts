@@ -81,17 +81,13 @@ const signInRequired = (): ChatGPTAuthError =>
   new ChatGPTAuthError('signin_required', 'Stratus is not signed in with ChatGPT on this install. Sign in with ChatGPT in `stratus setup`.');
 
 /**
- * A store or lock failure as `storage_failed`, with the original error as
- * the cause, so callers can branch on `code` alone. Our own errors, which
- * the work inside the lock throws, come through as they are.
+ * A store or lock failure as `storage_failed`, so callers can branch on
+ * `code` alone. The original error is only the cause, never message text:
+ * a store's error may quote the record, tokens included. Our own errors,
+ * which the work inside the lock throws, come through as they are.
  */
-const storageFailed = (what: string, error: unknown): ChatGPTAuthError => {
-  if (error instanceof ChatGPTAuthError) {
-    return error;
-  }
-  const reason = error instanceof Error ? error.message : String(error);
-  return new ChatGPTAuthError('storage_failed', `Couldn't ${what} (${reason.length > 300 ? `${reason.slice(0, 300)}…` : reason}).`, { cause: error });
-};
+const storageFailed = (what: string, error: unknown): ChatGPTAuthError =>
+  error instanceof ChatGPTAuthError ? error : new ChatGPTAuthError('storage_failed', `Couldn't ${what}.`, { cause: error });
 
 const local = async <T>(what: string, call: () => Promise<T>): Promise<T> => {
   try {
