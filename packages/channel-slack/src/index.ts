@@ -2230,14 +2230,39 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const sameApp = (a: SlackAgentConfig, b: SlackAgentConfig): boolean =>
     a.appToken === b.appToken && a.botToken === b.botToken;
 
+  /** `current` with `next`'s people settings: who it admits, who may approve, where it asks. */
+  const withPeopleOf = (current: SlackAgentConfig, next: SlackAgentConfig): SlackAgentConfig => {
+    const { principals: _principals, admit: _admit, approvers: _approvers, approvalChannel: _approvalChannel, ...rest } = current;
+    return {
+      ...rest,
+      ...(next.principals !== undefined ? { principals: next.principals } : {}),
+      ...(next.admit !== undefined ? { admit: next.admit } : {}),
+      ...(next.approvers !== undefined ? { approvers: next.approvers } : {}),
+      ...(next.approvalChannel !== undefined ? { approvalChannel: next.approvalChannel } : {}),
+    };
+  };
+  const peopleKey = (config: SlackAgentConfig): string =>
+    JSON.stringify([config.principals ?? [], config.admit ?? 'anyone', config.approvers ?? [], config.approvalChannel ?? '']);
+  /** For the log: counts, never the ids, which the config already holds. */
+  const describePeople = (config: SlackAgentConfig): string => {
+    const listed = (config.principals ?? []).length;
+    const approvers = (config.approvers ?? []).length;
+    const admits = config.admit === 'principals'
+      ? (listed === 0 ? 'admits nobody' : `admits ${listed === 1 ? '1 listed person' : `${listed} listed people`}`)
+      : `admits anyone (${listed} listed)`;
+    return `${admits} and has ${approvers === 0 ? 'no approvers' : approvers === 1 ? '1 approver' : `${approvers} approvers`}`;
+  };
+
   /**
    * Brings the connected apps in line with the agents to carry now (card
    * 894): connects an agent whose app is new, or that the roster has only
    * now, or that did not come up before; reconnects one whose tokens
    * changed; disconnects one whose tokens were removed or whose soul is
    * gone. Every other socket is left alone, so a conversation on it never
-   * notices. Settings come with the list `options.loadAgents` reads, which
-   * for the daemon is the config it started with.
+   * notices. A connected agent takes its people settings (who it admits,
+   * who may approve, where it asks) from the list `options.loadAgents`
+   * reads, which for the daemon re-reads them from its trusted config;
+   * every other setting stays as it connected with.
    */
   const reconcile = async (): Promise<void> => {
     const gateway = gatewayRef;
@@ -2281,7 +2306,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connections.find((connection) => connection.config.agentId === agentId);
     const arriving = [...wanted.values()].filter((config) => serving(config.agentId) === undefined);
 
-    // A connected app keeps the configuration it is serving with.
+    // Who a connected app answers to follows the list just read (AGT-337),
+    // so a teammate added or removed reaches it without a reconnect: who it
+    // admits, who may approve and where it asks. Everything else stays as
+    // it connected with. A socket kept on old tokens keeps its people too.
+    for (const connection of connections) {
+      const config = wanted.get(connection.config.agentId);
+      if (config === undefined || !sameApp(config, connection.config)) {
+        continue;
+      }
+      const updated = withPeopleOf(connection.config, config);
+      if (peopleKey(updated) !== peopleKey(connection.config)) {
+        connection.config = updated;
+        log(`slack: ${updated.agentId} now ${describePeople(updated)}`);
+      }
+    }
+
+    // A connected app keeps the rest of the configuration it is serving with.
     carried = [
       ...next.map((config) => serving(config.agentId)?.config ?? config),
       ...connections.filter((connection) => !next.some((config) => config.agentId === connection.config.agentId)).map((connection) => connection.config),

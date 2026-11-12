@@ -9622,8 +9622,10 @@ const credentialAdapter = (approvers: string[]) => {
     settleAsked(outcome);
     return sessionWithReply(sessionId, 'asked');
   });
+  let stored = [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers }];
   const adapter = createSlackChannelAdapter({
-    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers }] as never,
+    agents: stored,
+    loadAgents: async () => stored,
     editIntervalMs: 0,
     createSocketClient: () => socket,
     createWebClient: () => web,
@@ -9682,6 +9684,9 @@ const credentialAdapter = (approvers: string[]) => {
   const formPosts = () => web.posts.filter((post) => buttonIds(post.blocks).includes('stratus_credential_add'));
   return { socket, web, gateway, adapter, provided, pending, ask, formPosts, refuse: (message: string, options: { retired?: boolean } = {}) => {
     refuseWith = { message, retired: options.retired === true };
+  }, approvers: async (next: string[]) => {
+    stored = [{ ...stored[0]!, approvers: next }];
+    await adapter.reload!();
   } };
 };
 
@@ -18139,7 +18144,7 @@ const IDENTITIES: Record<string, [string, string]> = {
 const ava = { agentId: 'ava', appToken: 'xapp-ava', botToken: 'xoxb-ava' };
 const bea = { agentId: 'bea', appToken: 'xapp-bea', botToken: 'xoxb-bea' };
 
-const reloadingAdapter = (initial: Array<{ agentId: string; appToken: string; botToken: string }>, roster = ['ava', 'bea'], extra: { stopWaitMs?: number } = {}) => {
+const reloadingAdapter = (initial: Array<{ agentId: string; appToken: string; botToken: string; principals?: string[]; admit?: 'anyone' | 'principals'; approvers?: string[] }>, roster = ['ava', 'bea'], extra: { stopWaitMs?: number } = {}) => {
   const sockets: Array<{ appToken: string; socket: FakeSocket }> = [];
   const authCalls: string[] = [];
   let stored = initial;
@@ -18831,4 +18836,119 @@ test('a reaction Slack already has, or one it refuses for another reason, never 
   // Already there is what was wanted; a refusal is said, and nothing more.
   assert.equal(warnings.filter((line) => line.includes('already_reacted')).length, 0, warnings.join('\n'));
   assert.equal(warnings.filter((line) => line.includes('message_not_found')).length, 1, warnings.join('\n'));
+});
+
+// AGT-337: a teammate added or removed while the daemon runs. The app stays
+// connected; who it admits and who may decide follow the list a reload reads.
+test('a reload gives a connected agent its new principals without reconnecting, and someone removed is refused again', async () => {
+  const listing = (principals: string[]) => [{ ...ava, principals, admit: 'principals' as const }];
+  const setup = reloadingAdapter(listing(['U-DYLAN']), ['ava']);
+  await setup.adapter.start(setup.gateway);
+  const [socket] = setup.socketsFor('xapp-ava');
+
+  await socket!.deliver('app_mention', mention('<@B-AVA> hi', { ts: '100.1', user: 'U-NEW' }));
+  assert.equal(setup.gateway.dispatches.length, 0, 'not listed yet');
+
+  setup.store(listing(['U-DYLAN', 'U-NEW']));
+  await setup.adapter.reload!();
+  assert.equal(setup.socketsFor('xapp-ava').length, 1, 'no second socket');
+  assert.equal(socket!.disconnected, false, 'the app stays connected');
+  assert.ok(setup.logs.includes('slack: ava now admits 2 listed people and has no approvers'), setup.logs.join('\n'));
+  await socket!.deliver('app_mention', mention('<@B-AVA> hi again', { ts: '100.2', user: 'U-NEW' }));
+  assert.deepEqual(setup.gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava']);
+
+  setup.store(listing(['U-DYLAN']));
+  await setup.adapter.reload!();
+  await socket!.deliver('app_mention', mention('<@B-AVA> still there?', { ts: '100.3', user: 'U-NEW' }));
+  assert.equal(setup.gateway.dispatches.length, 1, 'removed, so refused again');
+  await setup.adapter.stop();
+});
+
+test('a reload with the same people logs nothing about them', async () => {
+  const listed = [{ ...ava, principals: ['U-DYLAN'], approvers: ['U-DYLAN'] }];
+  const setup = reloadingAdapter(listed, ['ava']);
+  await setup.adapter.start(setup.gateway);
+  setup.store([{ ...ava, principals: ['U-DYLAN'], approvers: ['U-DYLAN'] }]);
+  await setup.adapter.reload!();
+  assert.equal(setup.logs.filter((line) => line.includes('now admits')).length, 0, setup.logs.join('\n'));
+  await setup.adapter.stop();
+});
+
+const reloadingApprovals = (approvers: string[]) => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  let stored = [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers }];
+  const logs: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    agents: stored,
+    loadAgents: async () => stored,
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: (line) => logs.push(line),
+  });
+  return {
+    socket,
+    web,
+    gateway,
+    adapter,
+    logs,
+    async approvers(next: string[]) {
+      stored = [{ ...stored[0]!, approvers: next }];
+      await adapter.reload!();
+    },
+  };
+};
+
+test('an approver removed by a reload can no longer decide a prompt posted while they were one', async () => {
+  const { socket, web, gateway, adapter, approvers } = reloadingApprovals(['U-DYLAN', 'U-BLAIR']);
+  await adapter.start(gateway);
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  await approvers(['U-DYLAN']);
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-BLAIR', { ts: promptTs(web, 'req-1') }));
+  assert.deepEqual(gateway.resolutions, []);
+  assert.equal(gateway.pendingApprovals.has('req-1'), true);
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /not an approver for/);
+
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN', { ts: promptTs(web, 'req-1') }));
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN' }]);
+  await adapter.stop();
+});
+
+test('an approver added by a reload is asked from the next prompt on', async () => {
+  const { socket, web, gateway, adapter, approvers } = reloadingApprovals([]);
+  await adapter.start(gateway);
+
+  await approvers(['U-DYLAN']);
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+  assert.ok(promptTs(web, 'req-1') !== 'bot-ts-0', 'the prompt was posted');
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN', { ts: promptTs(web, 'req-1') }));
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN' }]);
+  await adapter.stop();
+});
+
+test('an approver removed by a reload after opening a credential form cannot submit it', async () => {
+  const { socket, web, gateway, adapter, provided, pending, ask, approvers } = credentialAdapter(['U-DYLAN', 'U-BLAIR']);
+  await adapter.start(gateway);
+  pending.add('cred-1');
+  await ask();
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-BLAIR', promptTs(web, 'cred-1')));
+  assert.equal(web.views_opened.at(-1)?.view.private_metadata, 'cred-1', 'the form opened while they were an approver');
+
+  await approvers(['U-DYLAN']);
+  const acks: unknown[] = [];
+  await socket.deliver('interactive', credentialSubmission('cred-1', 'U-BLAIR', 'ghp-1'), async (response?: unknown) => {
+    acks.push(response);
+  });
+  assert.deepEqual(provided, []);
+  assert.match(JSON.stringify(acks), /not an approver for Ava/);
+  const opened = web.views_opened.length;
+  await socket.deliver('interactive', credentialClick('cred-1', 'U-BLAIR', promptTs(web, 'cred-1')));
+  assert.equal(web.views_opened.length, opened, 'no new form for someone removed');
+  assert.equal(pending.has('cred-1'), true);
+  await adapter.stop();
 });
