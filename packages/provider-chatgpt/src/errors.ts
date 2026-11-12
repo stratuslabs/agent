@@ -26,6 +26,8 @@ export type ChatGPTAuthErrorCode =
   | 'temporary'
   /** Any other refused or malformed response. */
   | 'request_failed'
+  /** Reading or saving the stored sign-in, or taking its lock, failed on this machine. */
+  | 'storage_failed'
   | 'timeout'
   | 'cancelled';
 

@@ -2,8 +2,9 @@
 
 Sign in with ChatGPT for Stratus Agent, so agents can run on a ChatGPT plan
 through the OpenAI Responses API. **Not wired up yet, and not published:**
-this package holds the sign-in protocol only. Storing the sign-in, refreshing
-it during a run, and the setup and doctor screens come next.
+this package holds the sign-in protocol and the refresh logic. Where the
+sign-in is saved, the lock shared between processes, and the setup and doctor
+screens come next.
 
 It follows OpenAI's documentation for open-source hosts
 ([ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source)),
@@ -24,7 +25,18 @@ with no dependencies beyond Node's own `crypto` and `http`:
   `planUsage` says whether the user granted `chatgpt.tokens.use.direct`.
 - `refreshTokens` trades the rotating refresh token for a new set, and
   `revokeRefreshToken` ends the session at sign-out, retrying an outage.
+- `createChatGPTTokenSource` hands out the access token during a run. Five
+  minutes before it expires, it refreshes under the caller's session lock
+  (which every write of the record takes, sign-in and sign-out included),
+  rereads the saved record inside it (another process may have refreshed
+  already), and saves the replacement before returning it. An outage keeps the tokens; a
+  dead refresh token clears them and keeps the account for signing in again.
+  A cancelled caller returns at once and sends no refresh, but a refresh
+  already sent finishes and is saved, because the old refresh token may
+  already be spent.
+  `sessionFromSignIn` makes the record to save from a completed sign-in.
 
 Every failure is a `ChatGPTAuthError` with a stable `code`: `temporary` keeps
 the tokens, `signin_required` means the refresh token is dead and the user
-signs in again. No message quotes a token.
+signs in again, and `storage_failed` means the saved sign-in or its lock
+failed on this machine. No message quotes a token.
