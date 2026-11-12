@@ -6,12 +6,13 @@ import path from 'node:path';
 
 import type { JsonObject, Message, Session, StratusEvent } from '@stratusagent/core';
 import {
+  parseEventFilter,
   SCHEDULE_ID_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
   type ScheduleRecord,
 } from '@stratusagent/agents';
 import { createPermissionPolicy } from '@stratusagent/permissions';
-import { fleetDbPath } from '@stratusagent/state';
+import { addNamedCredential, fleetDbPath } from '@stratusagent/state';
 import {
   createGateway,
   createSchedulerRuntime,
@@ -1628,6 +1629,32 @@ test('a completed firing\'s sends against its destination come to reached, faile
   assert.equal(sendOutcome(ran([], 'failed'), eng), undefined);
 });
 
+test('with a key, only the turn that key started counts: an event session\'s earlier turns are not this one\'s (AGT-353)', () => {
+  const eng = { channel: 'slack', to: 'C-ENG' };
+  const user = (key: string, extra: Partial<Message> = {}): Message => ({
+    id: `u-${key}`, role: 'user', content: 'event', createdAt: new Date().toISOString(), idempotencyKey: key, ...extra,
+  });
+  const posted = sendResult('a', { ok: true, destination: 'slack:C-ENG' });
+  const failed = sendResult('b', { ok: false, error: 'slack: C-ENG has no thread 9.9, so nothing was posted.' });
+  const session = (messages: Message[]) => ({ status: 'completed' as const, messages });
+  // The first turn posted; the second stayed quiet.
+  const two = session([user('k1'), posted, user('k2')]);
+  assert.deepEqual(sendOutcome(two, eng, 'k1'), { kind: 'reached' });
+  assert.deepEqual(sendOutcome(two, eng, 'k2'), { kind: 'none' });
+  // Without a key the whole session counts, as for a timed firing's own session.
+  assert.deepEqual(sendOutcome(two, eng), { kind: 'reached' });
+  // An earlier turn's failed send is not reported again, and a later turn's post isn't this one's.
+  assert.deepEqual(sendOutcome(session([user('k1'), failed, user('k2')]), eng, 'k2'), { kind: 'none' });
+  assert.deepEqual(sendOutcome(session([user('k1'), user('k2'), posted]), eng, 'k1'), { kind: 'none' });
+  // A message steered into the turn doesn't end it; one absorbed into it is found by its key.
+  const steered = session([user('k1'), user('mid', { steered: true }), posted]);
+  assert.deepEqual(sendOutcome(steered, eng, 'k1'), { kind: 'reached' });
+  const absorbed = session([user('k1', { absorbedKeys: ['k2'] }), posted]);
+  assert.deepEqual(sendOutcome(absorbed, eng, 'k2'), { kind: 'reached' });
+  // A key no message carries has no turn to judge.
+  assert.equal(sendOutcome(two, eng, 'k3'), undefined);
+});
+
 test('a completed firing whose send never arrived leaves a notice in its destination, and only then (AGT-335)', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
@@ -1915,6 +1942,77 @@ test('the gateway warns when a firing completes without posting to its destinati
   assert.equal(posted.posts.length, 1, JSON.stringify(posted));
   assert.equal(posted.posts[0]?.text, 'nightly report');
   assert.deepEqual(posted.warnings.filter((line) => line.startsWith('schedule posted:')), []);
+});
+
+test('an event trigger\'s quiet firing warns even after an earlier firing in the same session posted (AGT-353)', async () => {
+  const { createHmac } = await import('node:crypto');
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+  const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' } };
+  await addNamedCredential(env, { name: 'events.board', value: secret });
+  const rows = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+  rows.insert({
+    id: 'trig',
+    agentId: 'ava',
+    cadence: { kind: 'event', source: 'board', filter: parseEventFilter({ prefix: { type: 'card.' } }) },
+    prompt: 'A card moved. Report it if it matters.',
+    destination: { channel: 'slack', to: 'C-ENG' },
+    createdAt: new Date().toISOString(),
+    trust: 'user',
+  });
+  rows.close();
+  // The first turn posts, then answers; every later call just answers.
+  const replies = [
+    () => openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'card 590 moved' }),
+    () => openAiText('reported'),
+    () => openAiText('nothing worth saying this time'),
+  ];
+  let calls = 0;
+  const fetchFake = (async () => replies[Math.min(calls++, replies.length - 1)]!()) as typeof fetch;
+  const channel = fakeSlackChannel();
+  const warnings: string[] = [];
+  const completed: string[] = [];
+  const gateway = createGateway({
+    env: { ...env, fetch: fetchFake },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    channels: [channel],
+    approvals: (transport: ApprovalTransport) => createPermissionPolicy({ mode: 'headless', destinations: transport.destinations }),
+    events: { sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } },
+    warn: (line: string) => warnings.push(line),
+    log: (line: string) => {
+      if (line.startsWith('event trigger trig fired')) completed.push(line);
+    },
+  });
+  const signed = (id: string) => {
+    const body = JSON.stringify({ specversion: '1.0', id, source: 'https://board.example', type: 'card.moved', subject: 'card/590' });
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = `v1,${createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${id}.${timestamp}.${body}`).digest('base64')}`;
+    return {
+      sourceId: 'board',
+      headers: { 'content-type': 'application/json', 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': signature },
+      body: Buffer.from(body),
+    };
+  };
+  const quiet = (line: string) => line.startsWith('event trigger trig:') && line.includes('finished without posting');
+  await gateway.start();
+  try {
+    assert.equal((await gateway.receiveEvent(signed('ce-1'))).body.status, 'matched');
+    await waitFor(() => completed.length === 1 && channel.posts.length === 1, 'the first firing to post and finish');
+    // Delivered only once the first turn is over, so it is a second turn in
+    // the same session rather than a batch coalesced into the first.
+    assert.equal((await gateway.receiveEvent(signed('ce-2'))).body.status, 'matched');
+    await waitFor(() => completed.length === 2 && warnings.some(quiet), 'the second firing to finish and be warned about');
+  } finally {
+    await gateway.stop();
+  }
+  const sessions = completed.map((line) => /session (\S+) completed/.exec(line)?.[1]);
+  assert.equal(sessions[0], sessions[1], 'both firings ran in the one session for card/590');
+  assert.equal(channel.posts.length, 1, 'only the first firing posted');
+  assert.deepEqual(warnings.filter(quiet), [
+    `event trigger trig: session ${sessions[1]} finished without posting to its destination slack:C-ENG (no message.send reached it)`,
+  ], warnings.join(' | '));
 });
 
 test('a headless firing whose send is refused is told where its schedule reports; any other session\'s refusal is unchanged (AGT-336)', async () => {

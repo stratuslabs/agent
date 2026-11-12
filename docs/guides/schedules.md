@@ -115,7 +115,8 @@ destination, because that is what is being approved. See
   firings. Nothing is posted or logged for a schedule cancelled while its
   run went on. The notice follows the turn, so a daemon stopping at that
   moment can lose it, and the log says so. Event triggers work the same
-  way.
+  way, judged on the firing's own turn: firings for one subject share a
+  session, and an earlier turn's post or failed send isn't this one's.
 - **A schedule never overlaps itself.** Its next slot waits while its
   previous firing is still running or waiting on a person, so each firing
   reads a finished predecessor. With the default per-agent cap of one this

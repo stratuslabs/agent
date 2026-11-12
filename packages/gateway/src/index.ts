@@ -481,9 +481,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
     // AGT-335 and AGT-353: how a completed firing's sends ended at its
     // destination. Tool results only, never the transcript's words.
-    sendOutcome: async (sessionId, destination) => {
+    sendOutcome: async (sessionId, destination, idempotencyKey) => {
       const session = await store.get(sessionId);
-      return session ? sendOutcome(session, destination) : undefined;
+      return session ? sendOutcome(session, destination, idempotencyKey) : undefined;
     },
     // The runtime's own line, so no speaker: it is nobody's turn to hear.
     notify: async (agentId, destination, text) => {
