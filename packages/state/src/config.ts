@@ -479,6 +479,13 @@ export interface StratusConfigFile {
    * only, like `maxTurns`: it spends the operator's tokens.
    */
   autoContinue?: Record<string, true | number>;
+  /**
+   * How many of one agent's schedules may run a firing at once, keyed by
+   * agent id: `{ "atlas": 2 }`. 1 for any agent not listed. One schedule
+   * still never overlaps itself, and event triggers keep their own cap.
+   * Trusted config only, like `maxTurns`: it spends the operator's tokens.
+   */
+  concurrentScheduledTurns?: Record<string, number>;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */

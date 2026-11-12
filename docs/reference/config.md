@@ -69,6 +69,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `maxTurns` | How many tool turns one message may take before the agent stops and reports where it got to. Default `40` — trusted configs only, see below |
 | `agentMaxTurns` | Per-agent replacements for `maxTurns`, keyed by agent id. Trusted configs only |
 | `autoContinue` | Agents that keep working past their budget instead of stopping to ask, keyed by agent id: `true` (no cap) or a number of extra budgets per message. Off for agents not listed. Trusted configs only. See [how many turns one message may spend](#how-many-turns-one-message-may-spend) |
+| `concurrentScheduledTurns` | How many of an agent's schedules may run a firing at once, keyed by agent id: `{ "atlas": 2 }`. 1 for agents not listed; one schedule never overlaps itself whatever the number. Trusted configs only. See [Schedules](../guides/schedules.md#limits) |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -329,6 +330,7 @@ set.
 | `api` | Which interface and port a daemon binds, and the address credential links point at | [Remote access](../guides/remote-access.md) |
 | `events` | Whether a second port opens for deliveries, on which interface, and who may wake the daemon's agents | [Events](../guides/events.md) |
 | `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |
+| `concurrentScheduledTurns` | How many unattended turns one agent runs at once, which multiplies what its schedules can spend | [Schedules](../guides/schedules.md#limits) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 | `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
 

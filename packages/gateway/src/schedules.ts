@@ -336,6 +336,15 @@ export interface SchedulerLimits {
    * thing that should pile up behind its own slow firings.
    */
   maxConcurrentPerAgent?: number;
+  /**
+   * `maxConcurrentPerAgent` for the agents named here, by agent id: an
+   * operator who wants one agent's work loops to overlap raises that agent
+   * alone, and the rest keep the default. Only different schedules share
+   * the extra room: one schedule still never starts a firing while its
+   * previous one is running or waiting on an approval. Event triggers keep
+   * their own cap (`SchedulerEventOptions.maxConcurrentPerAgent`).
+   */
+  maxConcurrentByAgent?: Readonly<Record<string, number>>;
   /** How often the due scan runs, milliseconds. Default one second. */
   tickMs?: number;
 }
@@ -553,6 +562,10 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   let maxEventsPerAgent = events?.maxConcurrentPerAgent ?? 1;
   const minIntervalMs = options.limits?.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
   const maxConcurrentPerAgent = options.limits?.maxConcurrentPerAgent ?? DEFAULT_MAX_CONCURRENT_PER_AGENT;
+  // A Map, not the record itself: an agent called `constructor` must read
+  // the default, not a property every object inherits.
+  const maxConcurrentByAgent = new Map(Object.entries(options.limits?.maxConcurrentByAgent ?? {}));
+  const capFor = (agentId: string): number => maxConcurrentByAgent.get(agentId) ?? maxConcurrentPerAgent;
   const tickMs = options.limits?.tickMs ?? DEFAULT_TICK_MS;
 
   let stopped = false;
@@ -960,7 +973,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     deferralsWarned.delete(`${record.id}:${slot}:paused`);
 
     const running = runningPerAgent.get(record.agentId) ?? 0;
-    if (running >= maxConcurrentPerAgent) {
+    if (running >= capFor(record.agentId)) {
       // Deferred, not dropped: the slot stays due and the next tick
       // retries. Warned once per deferred slot, not once per tick — a
       // firing that outlasts its cadence would otherwise repeat the same

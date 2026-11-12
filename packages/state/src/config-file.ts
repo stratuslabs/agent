@@ -218,6 +218,25 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
     }
     resolved.autoContinue = { ...(entries as Record<string, true | number>) };
   }
+  if (config.concurrentScheduledTurns !== undefined) {
+    // Refused, not dropped, for the reason `agentMaxTurns` is: an operator
+    // who raised one agent's limit and silently got 1 would find out as
+    // that agent's work loops still taking turns, with nothing to say why.
+    const limits = config.concurrentScheduledTurns as unknown;
+    if (typeof limits !== 'object' || limits === null || Array.isArray(limits)) {
+      throw new Error(
+        `Invalid concurrentScheduledTurns in config ${configPath}: expected agent ids mapped to a number of scheduled turns, like { "atlas": 2 }.`,
+      );
+    }
+    for (const [agentId, limit] of Object.entries(limits as Record<string, unknown>)) {
+      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
+        throw new Error(
+          `Invalid concurrentScheduledTurns.${agentId} in config ${configPath}: ${JSON.stringify(limit)}. Use a whole number of scheduled turns at once, 1 or more.`,
+        );
+      }
+    }
+    resolved.concurrentScheduledTurns = { ...(limits as Record<string, number>) };
+  }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
     resolved.approvals = approvals;

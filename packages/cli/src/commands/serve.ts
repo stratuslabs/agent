@@ -86,6 +86,7 @@ import {
   loadServeRuntimeSelection,
   loadServeAgentMaxTurns,
   loadServeAutoContinue,
+  loadServeConcurrentScheduledTurns,
   loadServeMaxTurns,
 } from '../trusted-config.ts';
 
@@ -378,6 +379,7 @@ const serveHeldHome = async (
   const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
   const agentMaxTurns = await loadServeAgentMaxTurns(env, command.configPath, warn);
   const autoContinue = await loadServeAutoContinue(env, command.configPath, warn);
+  const concurrentScheduledTurns = await loadServeConcurrentScheduledTurns(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -843,6 +845,9 @@ const serveHeldHome = async (
   if (Object.keys(autoContinue).length > 0) {
     log(`autoContinue: ${Object.entries(autoContinue).map(([agentId, setting]) => `${agentId} ${setting === true ? 'no cap' : `up to ${setting} more`}`).join(', ')} (the codex runtime is not covered and wraps up as before)`);
   }
+  if (Object.keys(concurrentScheduledTurns).length > 0) {
+    log(`scheduled turns at once: ${Object.entries(concurrentScheduledTurns).map(([agentId, limit]) => `${agentId} ${limit}`).join(', ')}; 1 for the rest (concurrentScheduledTurns; one schedule still never overlaps itself)`);
+  }
   if (slackAdapterUp) {
     // Said at startup, because the failure it names is silent otherwise: a
     // daemon with no principals serves every Slack message as `unknown`,
@@ -914,6 +919,7 @@ const serveHeldHome = async (
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
     ...(Object.keys(autoContinue).length > 0 ? { autoContinueFor: (agentId: string) => autoContinue[agentId] } : {}),
+    ...(Object.keys(concurrentScheduledTurns).length > 0 ? { schedules: { maxConcurrentByAgent: concurrentScheduledTurns } } : {}),
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at

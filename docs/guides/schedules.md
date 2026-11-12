@@ -137,7 +137,31 @@ destination, because that is what is being approved. See
   a firing that would exceed it waits, tick by tick, for the running turn
   to finish, and fires late once it has; if its whole window passes first
   it is skipped with a log line that says the cap deferred it, the same
-  rule as a window missed while the daemon was down).
+  rule as a window missed while the daemon was down). See [Limits](#limits)
+  to raise the cap for one agent.
+
+## Limits
+
+An agent whose schedules are separate work loops can run more than one at
+once. Set it per agent in `~/.stratus/config.json` (or a file named by
+`--config`), and restart the daemon:
+
+```json
+{
+  "concurrentScheduledTurns": { "atlas": 2 }
+}
+```
+
+- Only **different** schedules share the extra room. One schedule never
+  starts a firing while its previous one is still running or waiting on an
+  approval, whatever the number.
+- Agents not listed keep one at a time.
+- Event triggers have their own cap of one per agent, apart from this one,
+  and it doesn't change.
+- Two turns at once can spend twice as fast, and both work in the same
+  workspace, so give an agent room only when its loops touch different
+  things. A project-local `stratus.config.json` can't set it, and the
+  startup log names each agent that has a limit of its own.
 
 ## The operator's view
 
