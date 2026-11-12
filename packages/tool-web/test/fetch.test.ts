@@ -303,6 +303,15 @@ test('an element the page ends inside hides its text to the end, as a browser do
   // what lies between its start tag and the next end tag of its name.
   assert.equal(htmlToText('<p>a<canvas>fallback<div>b</div>'), 'a\nb');
   assert.equal(htmlToText('<template><template>t</template>u</template>v'), 'v');
+  // A hidden one's tags go with it, as before, so they cannot pair with a
+  // stray end tag after a table moved its text out.
+  assert.equal(htmlToText('<table><canvas style="display:none"><tbody>shown </canvas>'), 'shown');
+  // `</template>` closes the template whatever is open inside it.
+  assert.equal(htmlToText('<template><p>t<table><tr><td>u</template>v'), 'v');
+  // A frameset after the body has content is ignored by the parser, so it
+  // hides nothing, open or closed.
+  assert.equal(htmlToText('<p>a</p><frameset hidden>shown'), 'a\nshown');
+  assert.equal(htmlToText('<p>a</p><frameset hidden>shown</frameset>after'), 'a\nshown after');
   // What an implied end tag closes is not open at the end: the text after
   // it is shown.
   assert.equal(htmlToText('<div hidden><p>x</div>y'), 'y');
@@ -321,8 +330,24 @@ test('an element the page ends inside hides its text to the end, as a browser do
   assert.equal(htmlToText('<p>a</p><svg style="display:none"><p>shown'), 'a\n\nshown');
   assert.equal(htmlToText('<p>a</p><svg><g hidden><p>shown'), 'a\n\nshown');
   assert.equal(htmlToText('<p>a</p><h2 hidden><math><h1>shown'), 'a\n\nshown');
+  // Once the page has left one for HTML, which elements are open at the end
+  // is a guess even after the svg or math is closed.
+  assert.equal(htmlToText('<p>a</p><h2 hidden><math><h1>shown</h1></math>more'), 'a\n\nshown\nmore');
+  // So it is when a title, style or script in svg held markup: there it is
+  // markup, and here it was read as text, so `</template>` closed nothing.
+  assert.equal(htmlToText('<p>a</p><template><svg><title></template>shown'), 'a\nshown');
+  assert.equal(htmlToText('<p>a</p><template><svg><style></template></style>shown'), 'a\nshown');
+  // Text alone in one is read the same either way, as is markup in an HTML
+  // textarea, so the HTML around them still hides.
+  assert.equal(htmlToText('<p>a</p><div hidden><svg><title>Icon</title><path/></svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><div hidden><textarea><b>x</b></textarea>gone'), 'a');
+  // Until a tag that leaves svg or math for HTML, the HTML around them is
+  // still open, and a hidden element there hides them.
+  assert.equal(htmlToText('<p>a</p><div hidden><svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><div hidden><math><mi>gone'), 'a');
   // A closed svg changes nothing after it.
   assert.equal(htmlToText('<p>a</p><div hidden><svg></svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg></svg><div hidden><p>gone'), 'a');
   // A template's tags stay for the cut by name, which still pairs the
   // outer one here with the end tag of the inner one this pass dropped.
   assert.equal(htmlToText('<p>a</p><svg><template>x<template></template>'), 'a');

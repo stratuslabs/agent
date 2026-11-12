@@ -78,10 +78,12 @@ recorded in [`test/rendered-in-chromium.json`](test/rendered-in-chromium.json)
 by [`scripts/render-in-chromium.ts`](scripts/render-in-chromium.ts).
 
 Two exceptions are deliberate, and both keep text a browser would not
-show: on a page that ends inside `svg` or `math`, nothing open at the end
-hides the rest, because the parser leaves those for HTML in ways this
-extraction does not rebuild, and a wrong guess there would erase the
-article after it; and a hidden `html` or `body` hides nothing, because a
+show. Inside `svg` or `math` the parser can leave for HTML (a `p` inside an
+`svg`, say) or read a `title`, `style` or `script` as markup, and this
+extraction does not rebuild either; so what is open inside one the page
+ends in hides nothing to the end, and once a page has done either, nothing
+open at the end does, because a wrong guess there would erase the article
+after it. And a hidden `html` or `body` hides nothing, because a
 page that hides its whole document until a script runs is showing all of
 it — hiding everything hides nothing from a reader that the page shows
 anyone else.

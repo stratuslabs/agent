@@ -272,6 +272,8 @@ const CORPUS: readonly string[] = [
   '<p>SHOWN</p><canvas>FALLBACK',
   '<p>SHOWN<canvas>FALLBACK<div>AFTER</div>',
   '<template><template>TPLD</template>TPLE</template>AFTER',
+  '<template><p>TPLG<table><tr><td>TPLH</template>AFTER',
+  '<table><canvas style="display:none"><tbody>SHOWN </canvas>',
   // What an implied end tag closes is not open at the end.
   '<div hidden><p>GONE</div>AFTER',
   '<div><nav>MENU</div>AFTER',
@@ -280,6 +282,18 @@ const CORPUS: readonly string[] = [
   '<p>SHOWN</p><svg style="display:none"><p>BROKE',
   '<p>SHOWN</p><h2 hidden><math><h1>BROKE',
   '<p>SHOWN</p><svg><template>TPLF<template></template>',
+  '<p>SHOWN</p><h2 hidden><math><h1>BROKE</h1></math>AFTER',
+  '<p>SHOWN</p><template><svg><title></template>AFTER',
+  '<p>SHOWN</p><template><svg><style></template></style>AFTER',
+  '<p>SHOWN</p><div hidden><svg><title>ICON</title><path/></svg>GONE',
+  '<p>SHOWN</p><div hidden><textarea><b>TEXTX</b></textarea>GONE',
+  // Until a tag leaves svg or math, the HTML around them is still open.
+  '<p>SHOWN</p><div hidden><svg>SECRET',
+  '<p>SHOWN</p><div hidden><svg><g/>SECRET',
+  '<p>SHOWN</p><svg></svg><div hidden><p>GONE',
+  // A frameset after the page has shown text opens nothing.
+  '<p>SHOWN</p><frameset hidden>FRAMED',
+  '<p>SHOWN</p><frameset hidden>FRAMED</frameset>AFTER',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */
