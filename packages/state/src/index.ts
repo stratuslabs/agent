@@ -210,6 +210,7 @@ export {
   resolveDaemonCredential,
   createFileCredentialResolver,
   credentialValuesFor,
+  storedSecretValues,
   type CredentialEnvBindings,
   type CredentialEnvBinding,
   loadCredentialEnvBindings,

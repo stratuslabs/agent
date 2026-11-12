@@ -224,6 +224,7 @@ import {
   createFileCredentialResolver,
   credentialValuesFor,
   resolveDaemonCredential,
+  storedSecretValues,
   createHomeMemoryStore,
   drainSharedMemory,
   hasBracketedLegacyStateIn,
@@ -1444,6 +1445,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return createHash('sha256').update(JSON.stringify(providerInputs)).digest('hex');
   };
 
+  // What a failed turn's text is masked against before it is recorded,
+  // announced or thrown (`failureSecrets`): every value the credentials
+  // file holds, plus what the failing agent's listed credentials resolve to
+  // now, which adds any the environment supplies. Read per failure, so a
+  // key stored or rotated while the daemon runs is covered.
+  const failureSecrets = async (session: Session): Promise<string[]> => [
+    ...await storedSecretValues(env),
+    ...await credentialValuesFor(createFileCredentialResolver(env), session.agent),
+  ];
+
+  // The keys a runtime resolved, its fallback's included, wherever they came
+  // from (the environment, most often, when they are in no file). The API
+  // adapters strip their own key from what they throw; the codex adapter
+  // hands its key to the transport and does not, so a runner's set carries
+  // its runtime's keys for every provider.
+  const runtimeKeysOf = (config: RuntimeConfig): string[] => {
+    const held = config as { apiKey?: unknown; authToken?: unknown; fallback?: { apiKey?: unknown; authToken?: unknown } };
+    return [held.apiKey, held.authToken, held.fallback?.apiKey, held.fallback?.authToken]
+      .filter((value): value is string => typeof value === 'string' && value !== '');
+  };
+
   // A sub-agent's runner has no memory store, so no turn of it injects or
   // reads the agent's memory; no skill catalog, so its prompt is its
   // instruction and its tools; and grants nothing to every agent, since
@@ -1503,6 +1525,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ? { autoContinue, waitingInput: (sessionId: string) => (waitingDispatches.get(sessionId) ?? 0) > 0 }
         : {}),
       providerCallGuards,
+      failureSecrets: async (session) => [...runtimeKeysOf(config), ...await failureSecrets(session)],
     });
     hostedRunner = runner;
     runners.set(key, runner);
@@ -2295,6 +2318,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       bus,
       maxTurns,
       providerCallGuards,
+      failureSecrets: async (session) => [...runtimeKeysOf(config), ...await failureSecrets(session)],
     });
     const definition: AgentDefinition = {
       id: source.definition.id,
