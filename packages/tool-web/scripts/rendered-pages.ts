@@ -294,6 +294,10 @@ const CORPUS: readonly string[] = [
   // A frameset after the page has shown text opens nothing.
   '<p>SHOWN</p><frameset hidden>FRAMED',
   '<p>SHOWN</p><frameset hidden>FRAMED</frameset>AFTER',
+  '<img><frameset hidden>FRAMED',
+  '<hr><frameset hidden>FRAMED',
+  '<title>title</title><frameset hidden>FRAMED',
+  '<input type=hidden><frameset hidden>FRAMED',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */

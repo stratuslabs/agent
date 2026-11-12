@@ -309,9 +309,15 @@ test('an element the page ends inside hides its text to the end, as a browser do
   // `</template>` closes the template whatever is open inside it.
   assert.equal(htmlToText('<template><p>t<table><tr><td>u</template>v'), 'v');
   // A frameset after the body has content is ignored by the parser, so it
-  // hides nothing, open or closed.
+  // hides nothing, open or closed: text turns its frameset-ok flag off, and
+  // so do elements such as an image or a rule.
   assert.equal(htmlToText('<p>a</p><frameset hidden>shown'), 'a\nshown');
   assert.equal(htmlToText('<p>a</p><frameset hidden>shown</frameset>after'), 'a\nshown after');
+  assert.equal(htmlToText('<img><frameset hidden>shown'), 'shown');
+  assert.equal(htmlToText('<hr><frameset hidden>shown'), 'shown');
+  // A title's text, or a hidden input, leaves it on.
+  assert.equal(htmlToText('<title>t</title><frameset hidden>gone'), 't');
+  assert.equal(htmlToText('<input type=hidden><frameset hidden>gone'), '');
   // What an implied end tag closes is not open at the end: the text after
   // it is shown.
   assert.equal(htmlToText('<div hidden><p>x</div>y'), 'y');

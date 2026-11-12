@@ -1000,6 +1000,16 @@ const scanTags = (html: string): ScannedTag[] => {
 const FOREIGN_ROOTS = new Set(['svg', 'math']);
 
 /**
+ * Start tags that turn the parser's frameset-ok flag off, as text in the
+ * body does; after one, a frameset start tag is ignored. An `input` does
+ * unless its type is hidden.
+ */
+const CLEARS_FRAMESET_OK = new Set([
+  'applet', 'area', 'br', 'button', 'dd', 'dt', 'embed', 'hr', 'iframe', 'image', 'img', 'input', 'keygen', 'li',
+  'listing', 'marquee', 'object', 'pre', 'select', 'table', 'textarea', 'wbr', 'xmp',
+]);
+
+/**
  * Dropped elements a browser never shows either: a template's content is
  * not rendered, and a canvas's fallback is not while scripts run. So the
  * visibility pass drops what they hold where the tree builder puts it, as
@@ -1214,9 +1224,11 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   let leftForeign = false;
   let rawFrom = -1;
   const MARKUP = /<[a-zA-Z/!?]/;
-  // Whether the page has shown text yet, after which the parser ignores a
-  // frameset start tag.
-  let sawText = false;
+  // The parser's frameset-ok flag: once off, a frameset start tag is
+  // ignored. Text in the body turns it off, but not a title's or a
+  // script's, so whether the last tag opened raw text is kept too.
+  let framesetOk = true;
+  let inRawText = false;
 
   const nearest = (names: readonly string[], stopAt: readonly string[]): number => {
     for (let index = stack.length - 1; index >= 0; index -= 1) {
@@ -1427,11 +1439,16 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   for (const tag of scanTags(html)) {
     if (tag.start > cursor) {
       const fostered = /[^ \t\n\f\r]/.test(html.slice(cursor, tag.start));
-      if (fostered) sawText = true;
+      if (fostered && !inRawText) framesetOk = false;
       rebuild(fostered);
       segments.push({ start: cursor, end: tag.start, node: parentFor(fostered) });
     }
     cursor = tag.end;
+    inRawText = !tag.closing && RAW_TEXT_ELEMENTS.has(tag.name);
+    if (tag.name === 'br' || (!tag.closing && CLEARS_FRAMESET_OK.has(tag.name)
+      && !(tag.name === 'input' && asciiLower(tag.attributes.get('type') ?? '') === 'hidden'))) {
+      framesetOk = false;
+    }
     if (rawFrom !== -1 && MARKUP.test(html.slice(rawFrom, tag.start))) leftForeign = true;
     rawFrom = foreignOpen > 0 && !tag.closing && RAW_TEXT_ELEMENTS.has(tag.name) ? tag.end : -1;
     if (foreignOpen > 0 && (tag.closing
@@ -1451,10 +1468,9 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       continue;
     }
     if (!tag.closing) {
-      // A frameset once the page has shown text is ignored: the parser's
-      // frameset-ok flag is off by then, so it opens nothing and hides
-      // nothing, open or closed.
-      if (tag.name === 'frameset' && sawText) {
+      // A frameset once the frameset-ok flag is off is ignored, so it opens
+      // nothing and hides nothing, open or closed.
+      if (tag.name === 'frameset' && !framesetOk) {
         ignore();
         continue;
       }
