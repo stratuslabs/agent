@@ -24,7 +24,7 @@ import {
 import { callRunningGateway, readGatewayInfo, reloadRunningDaemonChannels } from '../daemon.ts';
 import type { CliEnvironment, CliStreams } from '../environment.ts';
 import { writeLine } from '../io.ts';
-import { CLI_VERSION, compareVersions } from '../npm.ts';
+import { compareVersions } from '../npm.ts';
 import type { ParsedPeopleCommand } from '../parse.ts';
 import { quoteShellArg } from '../prompter.ts';
 import { rosterSoulsWithConfigured } from '../roster.ts';
@@ -221,17 +221,25 @@ const daemonVersion = async (env: CliEnvironment, base: string): Promise<string 
   try {
     const response = await callRunningGateway(env, {}, base, '/api/v1/health', undefined, 'GET', AbortSignal.timeout(5_000));
     const { version } = await response.json() as { version?: unknown };
-    return typeof version === 'string' ? version : undefined;
+    return typeof version === 'string' && version.trim() !== '' ? version : undefined;
   } catch {
     return undefined;
   }
 };
 
 /**
+ * The last release whose Slack reload kept the people lists it started
+ * with while still reporting `reloaded`. A fixed bar, not this CLI's own
+ * version: one built from source before the next release carries this
+ * same number, and a daemon newer than the CLI re-reads them too.
+ */
+const LAST_START_ONLY_PEOPLE = '0.14.12';
+
+/**
  * Reload a running daemon and say, truthfully, whether the change is live.
- * Only Slack reads these lists, so Slack's outcome is the answer; and an
- * older daemon reports Slack `reloaded` without re-reading the lists, so
- * its version decides whether that can be believed.
+ * Only Slack reads these lists, so Slack's outcome is the answer; and a
+ * daemon from 0.14.12 or before reports Slack `reloaded` without re-reading
+ * the lists, so its version decides whether that can be believed.
  */
 const reportDaemon = async (env: CliEnvironment, streams: CliStreams): Promise<void> => {
   const reload = await reloadRunningDaemonChannels(env);
@@ -258,11 +266,12 @@ const reportDaemon = async (env: CliEnvironment, streams: CliStreams): Promise<v
     return;
   }
   const version = await daemonVersion(env, reload.base);
-  if (version === undefined || compareVersions(version, CLI_VERSION) < 0) {
+  if (version === undefined || compareVersions(version, LAST_START_ONLY_PEOPLE) <= 0) {
     writeLine(
       streams.stdout,
-      `The running daemon (${reload.base}) is ${version ?? 'a version this CLI could not read'}, older than this CLI (${CLI_VERSION}), `
-      + 'so it may still use the old lists. Apply them with: stratus restart',
+      version === undefined
+        ? `The running daemon (${reload.base}) did not say which version it is, so it may still use the old lists. Apply them with: stratus restart`
+        : `The running daemon (${reload.base}) is ${version}, which reads these lists only when it starts, so it still uses the old ones. Apply them with: stratus restart`,
     );
     return;
   }

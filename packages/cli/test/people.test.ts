@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { CLI_VERSION, parseCommand, runCli } from '../src/index.ts';
+import { parseCommand, runCli } from '../src/index.ts';
 
 const createStreams = () => {
   let stdout = '';
@@ -46,7 +46,7 @@ const run = async (argv: string[], env: object) => {
 /** A daemon that answers health with `version` and a roster reload with `channels`. */
 const publishDaemon = async (
   home: string,
-  answer: { version?: string; channels?: unknown; reloadStatus?: number; configPath?: string },
+  answer: { version?: string | null; channels?: unknown; reloadStatus?: number; configPath?: string },
 ): Promise<{ fetch: typeof fetch; calls: string[] }> => {
   await writeFile(path.join(home, '.stratus', 'gateway.json'), JSON.stringify({ url: 'http://127.0.0.1:4123', pid: process.pid }));
   await writeFile(path.join(home, '.stratus', 'gateway-token'), 'tok-1\n');
@@ -55,7 +55,9 @@ const publishDaemon = async (
     const target = new URL(String(url));
     calls.push(`${init?.method ?? 'GET'} ${target.pathname}`);
     if (target.pathname === '/api/v1/health') {
-      return new Response(JSON.stringify({ ok: true, version: answer.version ?? CLI_VERSION }), { status: 200 });
+      // By default, the first release whose reload re-reads the people lists.
+      // `null` leaves the version out.
+      return new Response(JSON.stringify({ ok: true, version: answer.version === null ? undefined : answer.version ?? '0.14.13' }), { status: 200 });
     }
     if (target.pathname === '/api/v1/config' && (init?.method ?? 'GET') === 'GET') {
       return new Response(JSON.stringify({ path: answer.configPath ?? path.join(home, '.stratus', 'config.json'), config: {} }), { status: 200 });
@@ -263,7 +265,39 @@ test('people add does not claim an older daemon applied it', async () => {
   const result = await run(['people', 'add', 'U01AAAAAA'], { ...env, fetch: daemon.fetch });
   assert.equal(result.code, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /applied this now/);
-  assert.match(result.stdout, /is 0\.0\.1, older than this CLI .* stratus restart/);
+  assert.match(result.stdout, /is 0\.0\.1, which reads these lists only when it starts, .* stratus restart/);
+});
+
+test('people add does not claim a 0.14.12 daemon applied it: its reload kept the lists it started with', async () => {
+  // 0.14.12 is the last release whose Slack reload did not re-read the
+  // people lists, and it reports `reloaded` all the same. A CLI built from
+  // source before the next release carries the same version number, so the
+  // CLI's own version cannot be the bar.
+  const { home, env } = await homeWith({});
+  const daemon = await publishDaemon(home, { version: '0.14.12', channels: [{ name: 'slack', outcome: 'reloaded' }] });
+  const result = await run(['people', 'add', 'U01AAAAAA'], { ...env, fetch: daemon.fetch });
+  assert.equal(result.code, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /applied this now/);
+  assert.match(result.stdout, /is 0\.14\.12, which reads these lists only when it starts, .* stratus restart/);
+});
+
+test('people add does not claim a daemon that names no version applied it', async () => {
+  for (const version of [null, '']) {
+    const { home, env } = await homeWith({});
+    const daemon = await publishDaemon(home, { version, channels: [{ name: 'slack', outcome: 'reloaded' }] });
+    const result = await run(['people', 'add', 'U01AAAAAA'], { ...env, fetch: daemon.fetch });
+    assert.equal(result.code, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /applied this now/);
+    assert.match(result.stdout, /did not say which version it is, so it may still use the old lists\. Apply them with: stratus restart/, String(version));
+  }
+});
+
+test('people add believes a daemon newer than this CLI', async () => {
+  const { home, env } = await homeWith({});
+  const daemon = await publishDaemon(home, { version: '99.0.0', channels: [{ name: 'slack', outcome: 'reloaded' }] });
+  const result = await run(['people', 'add', 'U01AAAAAA'], { ...env, fetch: daemon.fetch });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /applied this now, with no restart\./);
 });
 
 test('people add says so when the daemon could not reload Slack or has no Slack connection', async () => {

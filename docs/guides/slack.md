@@ -53,7 +53,8 @@ stratus people remove U0123ABCD --approver  # still talks to them, no longer app
 starting as a copy of the shared one so nobody loses access. Later changes to
 the shared list don't reach it, and `stratus people add` names the agents it
 didn't reach. A running daemon applies the change at once, with no restart
-and the Slack app still connected, and the command says whether it did.
+and the Slack app still connected (one from 0.14.12 or before needs
+`stratus restart`), and the command says whether it did.
 Approvers are only asked when `approvals.mode` is `remote`; the command says
 so when it isn't.
 
