@@ -106,7 +106,10 @@ export interface HandoverClaim {
  * the thread what landed sits — the ts of the lowest message of the
  * turn's that Slack took — present exactly when `spoke` is. `refused`:
  * there was text to say and Slack refused some of it, unlike a turn that
- * decided to say nothing, which is unpublished but not refused.
+ * decided to say nothing, which is unpublished but not refused. A turn
+ * that said nothing in words is refused too when nothing of it landed and
+ * Slack refused a file or tool post it produced (AGT-133): that was its
+ * answer, not silence.
  */
 export interface ReplyOutcome {
   published: boolean;
@@ -489,6 +492,12 @@ export class ReplyRenderer {
   private loadOnFirstTool = false;
   /** Whether any upload or tool post of this turn's landed — a file or a card is something said, placeholder or not. */
   private uploaded = false;
+  /**
+   * Whether Slack refused an upload or tool post of this turn's. A file
+   * that could not be read is not counted: it is gone or changed, and no
+   * later attempt would post it (AGT-133).
+   */
+  private outputRefused = false;
   /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
   private edited = false;
   /**
@@ -980,6 +989,9 @@ export class ReplyRenderer {
           file: data,
           filename: path.basename(filePath),
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+        }).catch((error: unknown) => {
+          this.outputRefused = true;
+          throw error;
         });
         this.uploaded = true;
         // The upload is a post of the app's in this thread, which takes
@@ -1008,7 +1020,10 @@ export class ReplyRenderer {
       .then(() => handover)
       .then(() => after)
       .then(async () => {
-        const posted = await postToolPost(this.web, { channel: this.channel, thread: this.threadTs }, post, this.warn);
+        const posted = await postToolPost(this.web, { channel: this.channel, thread: this.threadTs }, post, this.warn).catch((error: unknown) => {
+          this.outputRefused = true;
+          throw error;
+        });
         this.uploaded = true;
         this.refreshLoading();
         if (posted.ts !== undefined && (this.uploadedAt === undefined || posted.ts > this.uploadedAt)) {
@@ -1326,7 +1341,9 @@ export class ReplyRenderer {
         this.setStatus('');
         await this.statusChain;
       }
-      return this.outcome(false, this.uploaded);
+      // Unless all it had was a file or post Slack refused: then nothing
+      // was said, and that is not the silence it chose.
+      return this.outcome(false, this.uploaded, !this.uploaded && this.outputRefused);
     }
     // The first line lands before the reply is judged: one that already
     // said what the reply says (the model's only words came before a tool
@@ -1363,7 +1380,7 @@ export class ReplyRenderer {
         await this.statusChain;
       }
       const spoke = this.interimPosted || this.uploaded;
-      return this.outcome(this.interimPosted, spoke);
+      return this.outcome(this.interimPosted, spoke, !spoke && this.outputRefused);
     }
     if (!this.ref && this.interimPosted && reply.trim().length === 0) {
       // Nothing posts after this to take the status down, so it is cleared.
