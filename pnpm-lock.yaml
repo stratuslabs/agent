@@ -317,6 +317,13 @@ importers:
         version: 5.9.3
 
   packages/provider-chatgpt:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/providers':
+        specifier: workspace:*
+        version: link:../providers
     devDependencies:
       '@stratusagent/state':
         specifier: workspace:*

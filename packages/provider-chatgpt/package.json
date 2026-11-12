@@ -23,6 +23,10 @@
   "engines": {
     "node": ">=22.16 <23 || >=24"
   },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/providers": "workspace:*"
+  },
   "devDependencies": {
     "@stratusagent/state": "workspace:*",
     "@types/node": "^24.6.0",

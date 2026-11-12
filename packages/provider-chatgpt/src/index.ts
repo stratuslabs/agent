@@ -37,6 +37,8 @@ export type {
   SignInAttempt,
   SignInAttemptOptions,
 } from './protocol.ts';
+export { CHATGPT_TOOL_NAMESPACE, CHATGPT_USAGE_URL, DEFAULT_DISCOVERY_TIMEOUT_MS, createChatGPTProvider } from './provider.ts';
+export type { ChatGPTProviderOptions } from './provider.ts';
 export { DEFAULT_REFRESH_BEFORE_MS, createChatGPTTokenSource, sessionFromSignIn } from './session.ts';
 export type { ChatGPTSession, ChatGPTSessionStore, ChatGPTTokenSource, ChatGPTTokenSourceOptions } from './session.ts';
 export { createChatGPTSessionStore, ensureChatGPTHostId, parseChatGPTSession } from './session-file.ts';

@@ -21,6 +21,12 @@ export type ChatGPTAuthErrorCode =
   | 'account_mismatch'
   /** The refresh token can't be used again; the user signs in again. */
   | 'signin_required'
+  /**
+   * The sign-in is valid but doesn't allow using the ChatGPT plan
+   * (`chatgpt.tokens.use.direct` wasn't granted), so no inference may be sent
+   * on it. The user signs in again and allows it, or uses an API key.
+   */
+  | 'plan_usage_not_granted'
   | 'invalid_client'
   /** A network failure, 429 or 5xx: keep the tokens and try later. */
   | 'temporary'

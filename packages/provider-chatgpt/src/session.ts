@@ -7,7 +7,7 @@
 // lock works belong to the caller; this file owns only the order of
 // operations.
 import { ChatGPTAuthError } from './errors.ts';
-import { refreshTokens, type ChatGPTEndpoints, type ChatGPTSignIn } from './protocol.ts';
+import { CHATGPT_PLAN_SCOPE, refreshTokens, type ChatGPTEndpoints, type ChatGPTSignIn } from './protocol.ts';
 
 /** One signed-in ChatGPT account, as saved. JSON-safe. */
 export interface ChatGPTSession {
@@ -36,7 +36,15 @@ export interface ChatGPTSessionStore {
 }
 
 export interface ChatGPTTokenSourceOptions {
-  readonly endpoints: ChatGPTEndpoints;
+  /**
+   * OpenAI's sign-in endpoints, or a function that finds them, asked only
+   * when a refresh is due, inside the session lock, with the caller's signal.
+   * It holds the lock while it runs, so it should give up on its own too. A
+   * function that fails counts as a refresh that failed for a reason other
+   * than the sign-in: the tokens are kept, and an access token that hasn't
+   * run out still serves.
+   */
+  readonly endpoints: ChatGPTEndpoints | ((signal: AbortSignal | undefined) => Promise<ChatGPTEndpoints>);
   readonly store: ChatGPTSessionStore;
   /**
    * Runs `work` while nothing else changes the saved session, in this
@@ -54,8 +62,10 @@ export interface ChatGPTTokenSourceOptions {
 
 export interface ChatGPTTokenSource {
   /**
-   * A current access token. Throws a `ChatGPTAuthError`: `signin_required`
-   * when there is no usable sign-in, `temporary` when a refresh is due but
+   * A current access token, only for a sign-in that allows using the ChatGPT
+   * plan. Throws a `ChatGPTAuthError`: `signin_required` when there is no
+   * usable sign-in, `plan_usage_not_granted` when it doesn't allow plan usage
+   * (OpenAI: don't proceed to inference then), `temporary` when a refresh is due but
    * OpenAI can't be reached and the token has run out, `storage_failed` when
    * the store fails, or the lock does and the token has run out, `cancelled`
    * when the signal fires first.
@@ -80,6 +90,15 @@ export const sessionFromSignIn = (signIn: ChatGPTSignIn): ChatGPTSession => ({
 
 const signInRequired = (): ChatGPTAuthError =>
   new ChatGPTAuthError('signin_required', 'Stratus is not signed in with ChatGPT on this install. Sign in with ChatGPT in `stratus setup`.');
+
+const planUsageNotGranted = (): ChatGPTAuthError =>
+  new ChatGPTAuthError(
+    'plan_usage_not_granted',
+    "This ChatGPT sign-in doesn't allow Stratus Agent to use your ChatGPT plan. Sign in with ChatGPT again in `stratus setup` and allow it, or use an OpenAI API key.",
+  );
+
+/** OpenAI's rule: no inference on a sign-in without the plan permission. */
+const grantsPlanUsage = (session: ChatGPTSession): boolean => session.scopes.includes(CHATGPT_PLAN_SCOPE);
 
 /**
  * A store or lock failure as `storage_failed`, so callers can branch on
@@ -141,6 +160,9 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
     if (!usable(current)) {
       throw signInRequired();
     }
+    if (!grantsPlanUsage(current)) {
+      throw planUsageNotGranted();
+    }
     if (fresh(current)) {
       return current.accessToken;
     }
@@ -151,7 +173,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
     try {
       // No signal once it's sent: see unlessCancelled.
       tokens = await refreshTokens({
-        endpoints: options.endpoints,
+        endpoints: typeof options.endpoints === 'function' ? await options.endpoints(signal) : options.endpoints,
         clientId: current.clientId,
         refreshToken: current.refreshToken,
         ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
@@ -172,7 +194,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
       }
       throw error;
     }
-    await save({
+    const replacement: ChatGPTSession = {
       ...current,
       ...(tokens.idToken !== undefined ? { idToken: tokens.idToken } : {}),
       accessToken: tokens.accessToken,
@@ -181,7 +203,12 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
       // A refresh that doesn't list scopes leaves the grant as it was.
       scopes: tokens.scopes ?? current.scopes,
       savedAt: tokens.receivedAt,
-    });
+    };
+    // Saved either way: the old refresh token is spent.
+    await save(replacement);
+    if (!grantsPlanUsage(replacement)) {
+      throw planUsageNotGranted();
+    }
     return tokens.accessToken;
   };
 
@@ -191,6 +218,9 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
         const saved = await read();
         if (!usable(saved)) {
           throw signInRequired();
+        }
+        if (!grantsPlanUsage(saved)) {
+          throw planUsageNotGranted();
         }
         if (fresh(saved)) {
           return saved.accessToken;

@@ -10,7 +10,7 @@ import {
   type ProviderRequest,
   type ToolResult,
 } from '@stratusagent/core';
-import { createOpenAIResponsesProvider } from '../src/index.ts';
+import { ResponsesApiError, createOpenAIResponsesProvider } from '../src/index.ts';
 
 const now = new Date().toISOString();
 
@@ -389,6 +389,83 @@ test('an HTTP error is thrown in the endpoint\'s words with the key redacted', a
     createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch: nullBody }).generate(sayHello()),
     (error: unknown) => error instanceof Error && !(error instanceof TypeError) && error.message === 'null',
   );
+});
+
+test('a refusal or failure carries the endpoint\'s status, code, param and request ID as fields', async () => {
+  // Before a stream opens: the status, the error object's code and param,
+  // and the request ID header, beside the same words as before.
+  const { fetch } = fakeFetch(() => new Response(
+    JSON.stringify({ error: { message: 'Usage limit reached.', code: 'subscription_sharing_usage_limit_exceeded', param: null } }),
+    { status: 429, headers: { 'content-type': 'application/json', 'x-request-id': 'req_abc123' } },
+  ));
+  await assert.rejects(
+    createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch }).generate(sayHello()),
+    (error: unknown) => {
+      assert.ok(error instanceof ResponsesApiError);
+      assert.equal(error.message, 'Usage limit reached.');
+      assert.equal(error.status, 429);
+      assert.equal(error.code, 'subscription_sharing_usage_limit_exceeded');
+      assert.equal(error.param, undefined);
+      assert.equal(error.requestId, 'req_abc123');
+      assert.equal(error.detail, undefined);
+      return true;
+    },
+  );
+
+  // A body without the error object (a direct-admission `{detail}`) still
+  // carries its status, and its text as the message.
+  const { fetch: admission } = fakeFetch(() => jsonResponse(403, { detail: 'Region not supported.' }));
+  await assert.rejects(
+    createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch: admission }).generate(sayHello()),
+    (error: unknown) => {
+      assert.ok(error instanceof ResponsesApiError);
+      assert.equal(error.status, 403);
+      assert.equal(error.code, undefined);
+      assert.equal(error.detail, 'Region not supported.');
+      assert.equal(error.message, '{"detail":"Region not supported."}');
+      return true;
+    },
+  );
+
+  // Beside an error object, a `detail` is not that shape: the error object speaks.
+  const { fetch: both } = fakeFetch(() => jsonResponse(403, { error: { message: 'Forbidden.' }, detail: 'Also this.' }));
+  await assert.rejects(
+    createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch: both }).generate(sayHello()),
+    (error: unknown) => error instanceof ResponsesApiError && error.detail === undefined && error.message === 'Forbidden.',
+  );
+
+  // Inside the stream: no status (the response was a 200), the code and
+  // param from the event, and the request ID of the response it came on.
+  for (const { event, code, param } of [
+    {
+      event: terminal('response.failed', { status: 'failed', error: { code: 'subscription_sharing_usage_limit_exceeded', message: 'Usage limit reached.' } }),
+      code: 'subscription_sharing_usage_limit_exceeded',
+      param: undefined,
+    },
+    {
+      event: { type: 'error', sequence_number: 1, code: 'subscription_sharing_unsupported_capability', message: 'Not supported.', param: 'tools[0]' },
+      code: 'subscription_sharing_unsupported_capability',
+      param: 'tools[0]',
+    },
+  ]) {
+    const { fetch: fetchStreamed } = fakeFetch(() => {
+      const response = sseResponse([event]);
+      response.headers.set('x-request-id', 'req_stream1');
+      return response;
+    });
+    await assert.rejects(
+      createOpenAIResponsesProvider({ model: 'gpt-test', apiKey: 'sk-test', fetch: fetchStreamed }).generate(sayHello()),
+      (error: unknown) => {
+        assert.ok(error instanceof ResponsesApiError);
+        assert.equal(error.status, undefined);
+        assert.equal(error.code, code);
+        assert.equal(error.param, param);
+        assert.equal(error.requestId, 'req_stream1');
+        assert.match(error.message, /Provider (stream|response) failed \(subscription_sharing_/);
+        return true;
+      },
+    );
+  }
 });
 
 test('a transcript past the context window is reported as recoverable', async () => {
