@@ -57,7 +57,8 @@ export interface ChatGPTTokenSource {
    * A current access token. Throws a `ChatGPTAuthError`: `signin_required`
    * when there is no usable sign-in, `temporary` when a refresh is due but
    * OpenAI can't be reached and the token has run out, `storage_failed` when
-   * the store or the lock fails, `cancelled` when the signal fires first.
+   * the store fails, or the lock does and the token has run out, `cancelled`
+   * when the signal fires first.
    */
   accessToken(signal: AbortSignal | undefined): Promise<string>;
 }
@@ -197,7 +198,18 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
         if (signal?.aborted === true) {
           throw cancelled(signal);
         }
-        return local('take the ChatGPT sign-in lock', () => options.withSessionLock(() => refreshUnderLock(signal)));
+        try {
+          return await options.withSessionLock(() => refreshUnderLock(signal));
+        } catch (error) {
+          // Our own errors come from the work inside the lock and say what
+          // happened. Anything else is the lock itself: held past its wait
+          // by another process, or its file unusable. The token read above
+          // still works until it runs out, and the next call tries again.
+          if (!(error instanceof ChatGPTAuthError) && unexpired(saved)) {
+            return saved.accessToken;
+          }
+          throw storageFailed('take the ChatGPT sign-in lock', error);
+        }
       }),
   };
 };

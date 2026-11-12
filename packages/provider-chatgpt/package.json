@@ -24,6 +24,7 @@
     "node": ">=22.16 <23 || >=24"
   },
   "devDependencies": {
+    "@stratusagent/state": "workspace:*",
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },

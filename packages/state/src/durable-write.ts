@@ -1,4 +1,6 @@
-import { open } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, open, rename, rm } from 'node:fs/promises';
+import path from 'node:path';
 
 /**
  * Writes `data` to `filePath` and flushes it to disk before returning.
@@ -59,5 +61,33 @@ export const syncDirectory = async (directory: string): Promise<void> => {
     }
   } finally {
     await handle.close();
+  }
+};
+
+/**
+ * Replaces `filePath` with `data`, readable only by the owner: written
+ * beside it, flushed, and renamed over it, never truncated and rewritten in
+ * place. A reader sees the old file or the new one and never half of
+ * either, and a crash mid-write leaves the old one rather than none.
+ *
+ * Atomic for a reader only: two processes each doing a read-modify-write
+ * can still lose one another's update unless they share a lock.
+ */
+export const replaceOwnerOnlyFile = async (filePath: string, data: string): Promise<void> => {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  // Unique per write, so two writers never share a temporary file.
+  const temporary = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    await writeFileSynced(temporary, data, { mode: 0o600 });
+    // Before the rename rather than after: the destination must never exist
+    // at a looser mode, even briefly. The mode above applies only when the
+    // file is created, so the explicit chmod stays.
+    await chmod(temporary, 0o600);
+    await rename(temporary, filePath);
+    await syncDirectory(path.dirname(filePath));
+  } catch (error) {
+    // A failed write must not leave a file holding secrets behind.
+    await rm(temporary, { force: true });
+    throw error;
   }
 };

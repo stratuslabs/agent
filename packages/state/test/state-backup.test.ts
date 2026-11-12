@@ -46,6 +46,8 @@ const seedHome = async (): Promise<{ home: string; stratus: string; stampBytes: 
   // and workspaces (large, and moved rather than rewritten).
   await writeFile(path.join(stratus, 'credentials.json'), '{"anthropic":{"type":"api_key","value":"sk-ant-FIXTURE"}}\n');
   await writeFile(path.join(stratus, 'gateway-token'), 'token-FIXTURE\n');
+  await writeFile(path.join(stratus, 'chatgpt-sign-in.json'), '{"session":{"refreshToken":"rt-FIXTURE"}}\n');
+  await writeFile(path.join(stratus, 'chatgpt-sign-in.lock'), '');
   await writeFile(path.join(stratus, 'gateway.json'), '{"port":1}\n');
   await writeFile(path.join(stratus, 'grants.lock'), '');
   await mkdir(path.join(stratus, 'logs'), { recursive: true });
