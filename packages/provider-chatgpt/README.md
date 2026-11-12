@@ -43,7 +43,9 @@ with no dependencies beyond Node's own `crypto` and `http` and Stratus's
   `@stratusagent/providers` on the token source's access token, at
   `https://api.openai.com/v1` with `store: false` and streaming, and the tools
   inside one `stratus` namespace, as the plan requires. OpenAI's sign-in
-  endpoints are looked up the first time a refresh needs them. The plan's own
+  endpoints are looked up the first time a refresh needs them, inside the
+  session lock, so the lookup gives up after 15 seconds and when the turn is
+  cancelled. The plan's own
   errors (a usage limit, an account that isn't eligible, a refused admission)
   fail the turn in words that say what to do, with OpenAI's text, the HTTP
   status and the request ID kept; none is retried or sent another way.

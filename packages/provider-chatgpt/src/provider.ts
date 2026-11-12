@@ -4,6 +4,7 @@
 // is kept and how it is locked belong to the caller, as for the token source.
 import type { ModelProvider } from '@stratusagent/core';
 import { ResponsesApiError, createOpenAIResponsesProvider } from '@stratusagent/providers';
+import { ChatGPTAuthError } from './errors.ts';
 import { CHATGPT_RESOURCE, discoverEndpoints, type ChatGPTEndpoints } from './protocol.ts';
 import { createChatGPTTokenSource, type ChatGPTSessionStore } from './session.ts';
 
@@ -18,6 +19,8 @@ export interface ChatGPTProviderOptions {
    * the first time a refresh needs them, and kept once read.
    */
   readonly endpoints?: ChatGPTEndpoints;
+  /** How long that lookup may take. Default 15 seconds. */
+  readonly discoveryTimeoutMs?: number;
   readonly systemPrompt?: string;
   readonly fetch?: typeof fetch;
   readonly now?: () => number;
@@ -35,6 +38,8 @@ export const CHATGPT_TOOL_NAMESPACE = {
 } as const;
 
 export const CHATGPT_USAGE_URL = 'https://chatgpt.com/settings/usage';
+
+export const DEFAULT_DISCOVERY_TIMEOUT_MS = 15_000;
 
 const SIGN_IN_AGAIN = 'Sign in with ChatGPT again in `stratus setup`.';
 
@@ -111,10 +116,34 @@ const describePlanError = (error: unknown): unknown => {
  * the turn with a `ChatGPTAuthError` before anything is sent.
  */
 export const createChatGPTProvider = (options: ChatGPTProviderOptions): ModelProvider => {
+  const discoveryTimeoutMs = options.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS;
+  // The lookup runs inside the session lock, so it stops at its own timeout
+  // and when the turn is cancelled: a GET spends nothing, unlike the refresh
+  // it is for, which is never cut off once sent.
+  const lookUp = async (signal: AbortSignal | undefined): Promise<ChatGPTEndpoints> => {
+    const timeout = AbortSignal.timeout(discoveryTimeoutMs);
+    try {
+      return await discoverEndpoints({
+        ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
+        signal: signal !== undefined ? AbortSignal.any([signal, timeout]) : timeout,
+      });
+    } catch (error) {
+      if (timeout.aborted && signal?.aborted !== true) {
+        const seconds = Math.ceil(discoveryTimeoutMs / 1000);
+        throw new ChatGPTAuthError(
+          'timeout',
+          `OpenAI's sign-in configuration didn't answer within ${seconds} second${seconds === 1 ? '' : 's'}. Check the connection and try again.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  };
   let discovered: Promise<ChatGPTEndpoints> | undefined;
-  const endpoints = options.endpoints ?? (() => {
-    // Kept once read; a failed read is not, so the next refresh asks again.
-    discovered ??= discoverEndpoints(options.fetch !== undefined ? { fetch: options.fetch } : {}).catch((error: unknown) => {
+  const endpoints = options.endpoints ?? ((signal: AbortSignal | undefined) => {
+    // Kept once found; a lookup that failed, timed out or was cancelled is
+    // not, so the next refresh looks again.
+    discovered ??= lookUp(signal).catch((error: unknown) => {
       discovered = undefined;
       throw error;
     });

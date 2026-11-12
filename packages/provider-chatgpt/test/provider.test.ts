@@ -189,6 +189,91 @@ test('when the token endpoint can\'t be found, a token that hasn\'t run out stil
   assert.equal(new Headers(net.to(RESPONSES_URL)[1]?.init.headers).get('authorization'), 'Bearer access-2');
 });
 
+/** Serializes callers like the real lock, so a holder that never lets go hangs the next caller. */
+const serialLock = () => {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(work: () => Promise<T>): Promise<T> => {
+    const run = tail.then(work);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+};
+
+/** A request that never answers, until its signal aborts it. Without a signal it hangs. */
+const hangs = (aborted: { count: number }): Route => (init) =>
+  new Promise<Response>((_, reject) => {
+    init.signal?.addEventListener('abort', () => {
+      aborted.count += 1;
+      reject(init.signal?.reason);
+    }, { once: true });
+  });
+
+test('a lookup of the sign-in endpoints that never answers gives up, letting go of the lock, and isn\'t kept', { timeout: 5000 }, async () => {
+  const store = memoryStore(savedSession({ expiresAt: NOW + 2 * MINUTE }));
+  const aborted = { count: 0 };
+  const net = network({
+    [DISCOVERY_URL]: [hangs(aborted), () => json(200, discovery)],
+    [TOKEN_URL]: [() => json(200, { access_token: 'access-2', refresh_token: 'refresh-2', token_type: 'Bearer', expires_in: 3600 })],
+    [RESPONSES_URL]: [() => sseResponse([completed('one')]), () => sseResponse([completed('two')])],
+  });
+  const provider = createChatGPTProvider({
+    model: 'gpt-test',
+    store,
+    withSessionLock: serialLock(),
+    fetch: net.fetch,
+    now: () => NOW,
+    discoveryTimeoutMs: 50,
+  });
+
+  // The token hasn't run out, so this turn goes ahead on it.
+  await provider.generate(sayHello());
+  assert.equal(aborted.count, 1);
+  assert.equal(new Headers(net.to(RESPONSES_URL)[0]?.init.headers).get('authorization'), 'Bearer access-1');
+
+  // The lock is free and the stalled lookup is gone, so the next turn looks again and refreshes.
+  await provider.generate(sayHello());
+  assert.equal(net.to(DISCOVERY_URL).length, 2);
+  assert.equal(new Headers(net.to(RESPONSES_URL)[1]?.init.headers).get('authorization'), 'Bearer access-2');
+});
+
+test('once the token has run out, a lookup that never answers fails the turn as a timeout', { timeout: 5000 }, async () => {
+  const net = network({ [DISCOVERY_URL]: [hangs({ count: 0 })] });
+  const provider = createChatGPTProvider({
+    model: 'gpt-test',
+    store: memoryStore(savedSession({ expiresAt: NOW - 1 })),
+    withSessionLock: serialLock(),
+    fetch: net.fetch,
+    now: () => NOW,
+    discoveryTimeoutMs: 50,
+  });
+  await assert.rejects(provider.generate(sayHello()), (error: unknown) => {
+    assert.ok(error instanceof ChatGPTAuthError);
+    assert.equal(error.code, 'timeout');
+    assert.match(error.message, /didn't answer within 1 second\. Check the connection/);
+    return true;
+  });
+  assert.equal(net.to(RESPONSES_URL).length, 0);
+});
+
+test('cancelling the turn cancels a lookup of the sign-in endpoints too', { timeout: 5000 }, async () => {
+  const store = memoryStore(savedSession({ expiresAt: NOW + 2 * MINUTE }));
+  const aborted = { count: 0 };
+  const net = network({ [DISCOVERY_URL]: [hangs(aborted)] });
+  const lock = serialLock();
+  const provider = createChatGPTProvider({ model: 'gpt-test', store, withSessionLock: lock, fetch: net.fetch, now: () => NOW });
+  const controller = new AbortController();
+  const turn = provider.generate({ ...sayHello(), signal: controller.signal });
+  for (let turnOf = 0; turnOf < 1000 && net.to(DISCOVERY_URL).length === 0; turnOf += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  controller.abort(new Error('stopped'));
+  await assert.rejects(turn);
+  // The lookup was aborted, so the lock comes free.
+  await lock(async () => undefined);
+  assert.equal(aborted.count, 1);
+  assert.equal(net.to(RESPONSES_URL).length, 0);
+});
+
 test('with no saved sign-in the turn fails asking for one, and nothing is sent', async () => {
   const net = network({});
   const provider = createChatGPTProvider({ model: 'gpt-test', store: memoryStore(undefined), withSessionLock, fetch: net.fetch, now: () => NOW });
