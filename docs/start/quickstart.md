@@ -119,7 +119,9 @@ Starting Stratus Agent local loop with provider=demo
 
 Messages
 [user] say hello
-[assistant] Demo provider ready. Prompt received: say helloNo tool call was needed, so this run stays text-only. Mention "tool" or "echo" to trigger the demo tool.
+[assistant] Demo provider ready. Prompt received: say hello
+
+No tool call was needed, so this run stays text-only. Mention “tool” or “echo” to trigger the demo tool.
 ```
 
 A prompt that mentions `tool` or `echo` runs the full multi-turn loop: the
