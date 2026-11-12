@@ -1000,6 +1000,28 @@ const scanTags = (html: string): ScannedTag[] => {
 const FOREIGN_ROOTS = new Set(['svg', 'math']);
 
 /**
+ * Start tags that turn the parser's frameset-ok flag off, as text in the
+ * body does; after one, a frameset start tag is ignored. An `input` does
+ * unless its type is hidden.
+ */
+const CLEARS_FRAMESET_OK = new Set([
+  'applet', 'area', 'br', 'button', 'dd', 'dt', 'embed', 'hr', 'iframe', 'image', 'img', 'input', 'keygen', 'li',
+  'listing', 'marquee', 'object', 'pre', 'select', 'table', 'textarea', 'wbr', 'xmp',
+]);
+
+/**
+ * Dropped elements a browser never shows either: a template's content is
+ * not rendered, and a canvas's fallback is not while scripts run. So the
+ * visibility pass drops what they hold where the tree builder puts it, as
+ * it does a hidden element's, before the cut by name: one the page ends
+ * inside has no end tag to pair with, and a canvas a `div` closed holds
+ * nothing after the `div`. The rest of DROPPED_ELEMENTS are either raw
+ * text, which `openAtEnd` already cuts, or page furniture a browser shows,
+ * which keeps its text when the page ends inside it.
+ */
+const NEVER_RENDERED = new Set(['template', 'canvas']);
+
+/**
  * The svg and MathML elements inside which the tree builder may read HTML
  * again: `foreignObject`, an svg `title` or `desc`, MathML's text elements
  * and an `annotation-xml`. Named without regard to which of svg or math
@@ -1151,9 +1173,10 @@ const openAtEnd = (html: string): number => {
  * agency. Each rule here was checked against Chromium, page by page and by
  * comparing random malformed pages; foreign content (`svg`, `math`) and
  * `select`'s own rendering are not modelled. An element still open at the
- * end of the page keeps its text: a closing rule this pass does not model
- * must not erase the article behind it, and keeping is what this extractor
- * did before it read visibility at all.
+ * end of the page is open to the end of it, as in a browser, so a hidden
+ * one hides the rest; but where svg or math makes which elements are open
+ * a guess (see guessedOpen), what is open hides nothing, and the article
+ * behind it is not erased on that guess.
  *
  * Every tag it keeps comes back as its name alone, `<div>` or `</div>`,
  * attributes gone, so the patterns after it end each tag where the
@@ -1170,8 +1193,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // receive it — usually the top of the stack, but text or a tag a table
   // cannot hold is placed before the table, so in `<table hidden>visible`
   // the text is the table's parent's, and shown. A run is dropped when a
-  // hidden element on its ancestry was closed; one still open at the end
-  // of the page confirms nothing, and its text is kept.
+  // hidden element is on its ancestry, closed or still open at the end.
   const stack: OpenElement[] = [];
   const onStack = new Set<OpenElement>();
   // Every element closed before the end of the page, by id: a copy shares
@@ -1191,6 +1213,22 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // The form element pointer: while a form is open, another form start tag
   // is ignored, and `</form>` removes that form alone.
   let form: OpenElement | undefined;
+  // How many svg and math elements are open, and whether the tree here
+  // stopped being the parser's while one was: a tag that leaves them for
+  // HTML arrived, which this pass does not follow, or a title, style,
+  // script or other raw-text element held markup, which in svg and math is
+  // markup and here was read as text. From then on which elements are open
+  // is a guess (see guessedOpen below). `rawFrom` is where such an
+  // element's text starts, until the tag after it.
+  let foreignOpen = 0;
+  let leftForeign = false;
+  let rawFrom = -1;
+  const MARKUP = /<[a-zA-Z/!?]/;
+  // The parser's frameset-ok flag: once off, a frameset start tag is
+  // ignored. Text in the body turns it off, but not a title's or a
+  // script's, so whether the last tag opened raw text is kept too.
+  let framesetOk = true;
+  let inRawText = false;
 
   const nearest = (names: readonly string[], stopAt: readonly string[]): number => {
     for (let index = stack.length - 1; index >= 0; index -= 1) {
@@ -1206,6 +1244,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     if (stack.length >= MAX_OPEN_ELEMENTS) return false;
     stack.push(element);
     onStack.add(element);
+    if (FOREIGN_ROOTS.has(element.name)) foreignOpen += 1;
     return true;
   };
   const clearToMarker = (): void => {
@@ -1216,6 +1255,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   const removed = (element: OpenElement): void => {
     onStack.delete(element);
     closed.add(element.id);
+    if (FOREIGN_ROOTS.has(element.name)) foreignOpen -= 1;
     if (CLEARED_ON_CLOSE.has(element.name)) clearToMarker();
   };
   const closeFrom = (index: number): void => {
@@ -1253,7 +1293,9 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     parent: TreeNode | undefined,
     id = nextId++,
   ): OpenElement => {
-    if (attributes.has('hidden') || attributes.has('style') || attributes.has('aria-hidden')) mayHide = true;
+    if (attributes.has('hidden') || attributes.has('style') || attributes.has('aria-hidden') || NEVER_RENDERED.has(name)) {
+      mayHide = true;
+    }
     return { id, name, attributes, node: { id, name, attributes, parent } };
   };
   /**
@@ -1397,10 +1439,23 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   for (const tag of scanTags(html)) {
     if (tag.start > cursor) {
       const fostered = /[^ \t\n\f\r]/.test(html.slice(cursor, tag.start));
+      if (fostered && !inRawText) framesetOk = false;
       rebuild(fostered);
       segments.push({ start: cursor, end: tag.start, node: parentFor(fostered) });
     }
     cursor = tag.end;
+    inRawText = !tag.closing && RAW_TEXT_ELEMENTS.has(tag.name);
+    if (tag.name === 'br' || (!tag.closing && CLEARS_FRAMESET_OK.has(tag.name)
+      && !(tag.name === 'input' && asciiLower(tag.attributes.get('type') ?? '') === 'hidden'))) {
+      framesetOk = false;
+    }
+    if (rawFrom !== -1 && MARKUP.test(html.slice(rawFrom, tag.start))) leftForeign = true;
+    rawFrom = foreignOpen > 0 && !tag.closing && RAW_TEXT_ELEMENTS.has(tag.name) ? tag.end : -1;
+    if (foreignOpen > 0 && (tag.closing
+      ? tag.name === 'p' || tag.name === 'br'
+      : FOREIGN_BREAKOUT.has(tag.name) || (tag.name === 'font' && ['color', 'face', 'size'].some((name) => tag.attributes.has(name))))) {
+      leftForeign = true;
+    }
     const ignore = (): void => {
       segments.push({ start: tag.start, end: tag.end, node: parentFor(false), tag });
     };
@@ -1413,6 +1468,12 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       continue;
     }
     if (!tag.closing) {
+      // A frameset once the frameset-ok flag is off is ignored, so it opens
+      // nothing and hides nothing, open or closed.
+      if (tag.name === 'frameset' && !framesetOk) {
+        ignore();
+        continue;
+      }
       // A second form while the form pointer is set is ignored before it
       // does anything else — before it closes a paragraph, too.
       if (tag.name === 'form' && form !== undefined && nearest(['template'], []) === -1) {
@@ -1561,7 +1622,10 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     // in their own scopes; a block in the default scope; and anything else
     // only up to the nearest special element.
     let index: number;
-    if (TABLE_PARTS.has(tag.name)) index = nearest([tag.name], TABLE_SCOPE.filter((name) => name !== tag.name));
+    // `</template>` closes the last template open, with no scope to stop it:
+    // a cell or a table open inside the template ends with it.
+    if (tag.name === 'template') index = nearest(['template'], []);
+    else if (TABLE_PARTS.has(tag.name)) index = nearest([tag.name], TABLE_SCOPE.filter((name) => name !== tag.name));
     else if (HEADINGS.includes(tag.name)) index = nearest(HEADINGS, SCOPE_BOUNDARIES);
     else if (tag.name === 'p') index = nearest(['p'], [...SCOPE_BOUNDARIES, 'button']);
     else if (tag.name === 'li') index = nearest(['li'], [...SCOPE_BOUNDARIES, 'ol', 'ul']);
@@ -1576,6 +1640,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     closeFrom(index);
     if (MARKER_ELEMENTS.has(tag.name) && !CLEARED_ON_CLOSE.has(tag.name)) clearToMarker();
   }
+  if (rawFrom !== -1 && MARKUP.test(html.slice(rawFrom) + tail)) leftForeign = true;
   if (cursor < html.length) {
     const fostered = /[^ \t\n\f\r]/.test(html.slice(cursor));
     rebuild(fostered);
@@ -1599,8 +1664,26 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     return result;
   };
 
-  // Whether a node is dropped: it, or a node it is in, is hidden and was
-  // closed. Read once the page is done, since nodes move until then;
+  // The elements whose being open at the end is a guess. From svg or math
+  // the tree builder leaves for HTML at a tag such as `p` or `h1`, which
+  // this pass does not follow: in `<svg style="display:none"><p>shown` the
+  // paragraph is the body's in a browser and still the svg's here, and in
+  // `<h2 hidden><math><h1>shown</h1></math>more` leaving the math closes
+  // the h2. A title or style there holding markup is the same: in
+  // `<template><svg><title></template>shown` the end tag closes the
+  // template in a browser, and was text here. So once either happened,
+  // every element open at the end is a guess; otherwise those from the
+  // first svg or math open at the end on are, since a self-closing tag ends
+  // an element there. None of these hides anything to the end, and their
+  // text is kept rather than cut on that guess; the HTML elements around an
+  // svg the page ends inside are still open, and still hide it.
+  const foreignAt = stack.findIndex((open) => FOREIGN_ROOTS.has(open.name));
+  const guessedOpen = new Set((leftForeign ? stack : foreignAt === -1 ? [] : stack.slice(foreignAt)).map((open) => open.id));
+
+  // Whether a node is dropped: it, or a node it is in, is hidden, or is a
+  // template or canvas. A browser keeps an element open to the end of the
+  // page, so one still open here hides the rest, as a closed one hides what
+  // it held. Read once the page is done, since nodes move until then;
   // remembered per node, so a page costs its nodes once.
   const dropped = new Map<TreeNode, boolean>();
   const isDropped = (node: TreeNode | undefined): boolean => {
@@ -1615,7 +1698,8 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       chain.push(at);
     }
     for (const at of chain.reverse()) {
-      result = result || (closed.has(at.id) && judge(at).hidden);
+      const open = !closed.has(at.id);
+      result = result || (!(open && guessedOpen.has(at.id)) && (NEVER_RENDERED.has(at.name) || judge(at).hidden));
       dropped.set(at, result);
     }
     return result;
@@ -1626,11 +1710,25 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // find tags by pattern, and a pattern ends a tag at its first `>`, which
   // in `<div title="x>y">` is inside a value and would leave `y">` as
   // text. Nothing after this reads an attribute.
+  //
+  // A template's or canvas's own tags stay unless it is hidden or what
+  // holds it is dropped, so the cut by name after this still pairs one with
+  // its end tag, as it did before this pass judged them. Inside svg or math, where
+  // this pass's tree is a guess, that cut is what keeps hidden what a
+  // browser hides: in `<svg><template>x<template></template>` the inner
+  // template is closed and dropped here, and its end tag still ends the
+  // outer one's cut, which takes `x` with it.
   const drops = (node: TreeNode | undefined): boolean => mayHide && isDropped(node);
+  const keepsTag = ({ node, tag }: { node: TreeNode | undefined; tag?: ScannedTag }): boolean => {
+    if (tag === undefined || !NEVER_RENDERED.has(tag.name)) return false;
+    // Its own start or end tag, or a stray end tag in whatever holds it.
+    const own = node?.name === tag.name ? node : undefined;
+    return own === undefined ? !drops(node) : !drops(own.parent) && !judge(own).hidden;
+  };
   let text = '';
   let dropping = false;
   for (const segment of segments) {
-    if (drops(segment.node)) {
+    if (drops(segment.node) && !keepsTag(segment)) {
       if (!dropping) text += ' ';
       dropping = true;
     } else {

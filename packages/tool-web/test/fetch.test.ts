@@ -279,12 +279,84 @@ test('a void or unclosed hidden element does not swallow the page', () => {
   // `</p>` around it ends, and `b` is inside it — hidden, as a browser
   // hides it — while the page after the paragraph is untouched.
   assert.equal(htmlToText('<p>a<span hidden/>b</p><p>c</p>'), 'a\n\nc');
-  // Still open at the end of the page, an element keeps its text: a
-  // closing rule this pass does not model must not erase the rest.
-  assert.equal(htmlToText('<p>a</p><section hidden>open to the end'), 'a\n\nopen to the end');
   // `li` closes at the next `li`, so a hidden one ends there and the
   // visible item after it is kept.
   assert.equal(htmlToText('<ul><li hidden>a<li>b</ul><p>c</p>'), '- b\n\nc');
+});
+
+test('an element the page ends inside hides its text to the end, as a browser does', () => {
+  // A browser keeps an element open to the end of the page, so a hidden
+  // one the page ends inside hides everything after it: a page cut short
+  // by the download cap ends this way.
+  assert.equal(htmlToText('<p>a</p><section hidden>open to the end'), 'a');
+  assert.equal(htmlToText('<p>a</p><div hidden><p>x</p>y'), 'a');
+  assert.equal(htmlToText("<p>a</p><div hidden>inject <script>var s = '"), 'a');
+  // The text after the page's last `>` is the open element's too.
+  assert.equal(htmlToText('<p>a</p><div style="display:none">tail'), 'a');
+  // A template's content is never shown, nor a canvas's fallback, so one
+  // left open drops what follows it; an end tag the template cannot see
+  // past closes nothing.
+  assert.equal(htmlToText('<p>a</p><template>t <script>x</template>'), 'a');
+  assert.equal(htmlToText('<p>a</p><div><template>t</div>y'), 'a');
+  assert.equal(htmlToText('<p>a</p><canvas>fallback'), 'a');
+  // A template or canvas the tree builder closes holds what it held, not
+  // what lies between its start tag and the next end tag of its name.
+  assert.equal(htmlToText('<p>a<canvas>fallback<div>b</div>'), 'a\nb');
+  assert.equal(htmlToText('<template><template>t</template>u</template>v'), 'v');
+  // A hidden one's tags go with it, as before, so they cannot pair with a
+  // stray end tag after a table moved its text out.
+  assert.equal(htmlToText('<table><canvas style="display:none"><tbody>shown </canvas>'), 'shown');
+  // `</template>` closes the template whatever is open inside it.
+  assert.equal(htmlToText('<template><p>t<table><tr><td>u</template>v'), 'v');
+  // A frameset after the body has content is ignored by the parser, so it
+  // hides nothing, open or closed: text turns its frameset-ok flag off, and
+  // so do elements such as an image or a rule.
+  assert.equal(htmlToText('<p>a</p><frameset hidden>shown'), 'a\nshown');
+  assert.equal(htmlToText('<p>a</p><frameset hidden>shown</frameset>after'), 'a\nshown after');
+  assert.equal(htmlToText('<img><frameset hidden>shown'), 'shown');
+  assert.equal(htmlToText('<hr><frameset hidden>shown'), 'shown');
+  // A title's text, or a hidden input, leaves it on.
+  assert.equal(htmlToText('<title>t</title><frameset hidden>gone'), 't');
+  assert.equal(htmlToText('<input type=hidden><frameset hidden>gone'), '');
+  // What an implied end tag closes is not open at the end: the text after
+  // it is shown.
+  assert.equal(htmlToText('<div hidden><p>x</div>y'), 'y');
+  assert.equal(htmlToText('<ul><li hidden>a<li>b'), '- b');
+  assert.equal(htmlToText('<div><nav>x</div>y'), 'x\ny');
+  assert.equal(htmlToText('<div><template>t</template></div>y'), 'y');
+  // Elements dropped as page furniture rather than hidden by a browser
+  // keep their text when the page ends inside one: a browser shows it, and
+  // some sites wrap the whole page in a form.
+  assert.equal(htmlToText('<p>a</p><form><p>article'), 'a\n\narticle');
+  assert.equal(htmlToText('<p>a</p><nav>menu'), 'a\nmenu');
+  // From svg or math the tree builder leaves for HTML at a tag like `p` or
+  // `h1`, which this pass does not follow, so on a page that ends inside
+  // one, what is open at the end is kept rather than guessed at. Leaving
+  // the math here closes the hidden h2, and a browser shows `shown`.
+  assert.equal(htmlToText('<p>a</p><svg style="display:none"><p>shown'), 'a\n\nshown');
+  assert.equal(htmlToText('<p>a</p><svg><g hidden><p>shown'), 'a\n\nshown');
+  assert.equal(htmlToText('<p>a</p><h2 hidden><math><h1>shown'), 'a\n\nshown');
+  // Once the page has left one for HTML, which elements are open at the end
+  // is a guess even after the svg or math is closed.
+  assert.equal(htmlToText('<p>a</p><h2 hidden><math><h1>shown</h1></math>more'), 'a\n\nshown\nmore');
+  // So it is when a title, style or script in svg held markup: there it is
+  // markup, and here it was read as text, so `</template>` closed nothing.
+  assert.equal(htmlToText('<p>a</p><template><svg><title></template>shown'), 'a\nshown');
+  assert.equal(htmlToText('<p>a</p><template><svg><style></template></style>shown'), 'a\nshown');
+  // Text alone in one is read the same either way, as is markup in an HTML
+  // textarea, so the HTML around them still hides.
+  assert.equal(htmlToText('<p>a</p><div hidden><svg><title>Icon</title><path/></svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><div hidden><textarea><b>x</b></textarea>gone'), 'a');
+  // Until a tag that leaves svg or math for HTML, the HTML around them is
+  // still open, and a hidden element there hides them.
+  assert.equal(htmlToText('<p>a</p><div hidden><svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><div hidden><math><mi>gone'), 'a');
+  // A closed svg changes nothing after it.
+  assert.equal(htmlToText('<p>a</p><div hidden><svg></svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg></svg><div hidden><p>gone'), 'a');
+  // A template's tags stay for the cut by name, which still pairs the
+  // outer one here with the end tag of the inner one this pass dropped.
+  assert.equal(htmlToText('<p>a</p><svg><template>x<template></template>'), 'a');
 });
 
 test('the extractor reads a page at the default size limit with hidden elements throughout', () => {
@@ -357,6 +429,9 @@ test('a page of unclosed tags is extracted in one pass, not one rescan per tag',
     // The open svg and math elements are searched by every end tag that
     // names one, so they must not grow with the page either.
     '<svg>'.repeat(80_000) + '</math>'.repeat(80_000),
+    // Templates and canvases are judged in the tree too, and their tags
+    // kept for the cut by name after it.
+    '<p>x</p>' + '<template><canvas>'.repeat(40_000) + '</template>'.repeat(40_000),
   ];
   assert.equal(await extractsWithin(pages, 10_000), true);
   for (const page of pages) {

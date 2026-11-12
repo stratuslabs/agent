@@ -263,6 +263,41 @@ const CORPUS: readonly string[] = [
   '<p>SHOWN</p><svg></math><style>SVGSTYLE</svg><p>AFTER</p>',
   `<p>BEFORE</p><svg><style><![CDATA[ a > b { content: "<a href='x" } ]]></style></svg><p>SHOWN</p>`,
   '<p>SHOWN</p><![CDATA[ x > TEXT <b title="LEAKU',
+  // An element the page ends inside is open to the end of it, in Chromium
+  // and here: one that hides, a template or a canvas hides the rest.
+  `<p>SHOWN</p><div hidden>INJECT <script>var s = '`,
+  '<p>SHOWN</p><div style="display:none"><p>GONE</p>ALSO',
+  '<p>SHOWN</p><template>TPLA <script>LEAKV</template>',
+  '<div><template>TPLB</div>TPLC',
+  '<p>SHOWN</p><canvas>FALLBACK',
+  '<p>SHOWN<canvas>FALLBACK<div>AFTER</div>',
+  '<template><template>TPLD</template>TPLE</template>AFTER',
+  '<template><p>TPLG<table><tr><td>TPLH</template>AFTER',
+  '<table><canvas style="display:none"><tbody>SHOWN </canvas>',
+  // What an implied end tag closes is not open at the end.
+  '<div hidden><p>GONE</div>AFTER',
+  '<div><nav>MENU</div>AFTER',
+  // Where svg or math goes back to HTML the tree here is a guess, so a
+  // page that ends inside one keeps what is open: Chromium shows these.
+  '<p>SHOWN</p><svg style="display:none"><p>BROKE',
+  '<p>SHOWN</p><h2 hidden><math><h1>BROKE',
+  '<p>SHOWN</p><svg><template>TPLF<template></template>',
+  '<p>SHOWN</p><h2 hidden><math><h1>BROKE</h1></math>AFTER',
+  '<p>SHOWN</p><template><svg><title></template>AFTER',
+  '<p>SHOWN</p><template><svg><style></template></style>AFTER',
+  '<p>SHOWN</p><div hidden><svg><title>ICON</title><path/></svg>GONE',
+  '<p>SHOWN</p><div hidden><textarea><b>TEXTX</b></textarea>GONE',
+  // Until a tag leaves svg or math, the HTML around them is still open.
+  '<p>SHOWN</p><div hidden><svg>SECRET',
+  '<p>SHOWN</p><div hidden><svg><g/>SECRET',
+  '<p>SHOWN</p><svg></svg><div hidden><p>GONE',
+  // A frameset after the page has shown text opens nothing.
+  '<p>SHOWN</p><frameset hidden>FRAMED',
+  '<p>SHOWN</p><frameset hidden>FRAMED</frameset>AFTER',
+  '<img><frameset hidden>FRAMED',
+  '<hr><frameset hidden>FRAMED',
+  '<title>title</title><frameset hidden>FRAMED',
+  '<input type=hidden><frameset hidden>FRAMED',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */
@@ -293,11 +328,18 @@ const FORMATTING_TAGS = ['b', 'i', 'em', 'a', 'nobr', 'u', 'font', 's', 'p', 'di
 
 /**
  * Random tag soup: start and end tags in any order, some hidden by the
- * attribute, some by an inline style, with a marker word between them. The
- * page closes everything at the end, because an element still open there
- * keeps its text on purpose and would otherwise excuse most of the page.
+ * attribute, some by an inline style, with a marker word between them.
+ * Closed, the page ends with every tag it draws from closed, so what is
+ * checked is the misnesting; open, it ends wherever the soup does, as a
+ * page cut short by the download cap does.
  */
-const tagSoup = (tags: readonly string[], prefix: string, seed: number, count: number): RenderedPage[] => {
+const tagSoup = (
+  tags: readonly string[],
+  prefix: string,
+  seed: number,
+  count: number,
+  ending: 'closed' | 'open' = 'closed',
+): RenderedPage[] => {
   const rand = createRandom(seed);
   const pages: RenderedPage[] = [];
   for (let n = 0; n < count; n += 1) {
@@ -316,7 +358,7 @@ const tagSoup = (tags: readonly string[], prefix: string, seed: number, count: n
         marker += 1;
       }
     }
-    pages.push({ id: `${prefix}-${seed}-${n}`, html: html + CLOSE_PAGE + 'ENDQ' });
+    pages.push({ id: `${prefix}-${seed}-${n}`, html: ending === 'closed' ? html + CLOSE_PAGE + 'ENDQ' : `STARTQ ${html}` });
   }
   return pages;
 };
@@ -354,6 +396,7 @@ export const renderedPages = (): RenderedPage[] => {
     ...CORPUS.map((html, n) => ({ id: `corpus-${n}`, html })),
     ...tagSoup(SOUP_TAGS, 'soup', 1, 300),
     ...tagSoup(FORMATTING_TAGS, 'formatting', 1, 300),
+    ...tagSoup([...SOUP_TAGS, 'template', 'canvas'], 'open', 1, 300, 'open'),
     ...inlineStyles(1, 1000),
   ].map((page) => ({ id: page.id, html: `<!doctype html>${page.html}` }));
   for (const page of pages) {
