@@ -777,8 +777,10 @@ export interface ChannelAdapter {
    * Connects, reconnects or drops only what changed and leaves every other
    * connection alone, so a conversation on an unchanged app never notices.
    * Settings other than the secrets come from wherever `start` read them,
-   * which for the daemon is the config it started with: a reload changes
-   * which apps are connected, never how an agent is configured.
+   * which for the daemon is the config it started with, with one
+   * exception a channel may make: who a connected agent answers to (who
+   * it admits, who may approve) can follow what the reload read, so a
+   * teammate added or removed takes effect without a restart. Slack does.
    *
    * Resolves once done. Rejects, with a reason for the log, only when the
    * reload could not run at all; one app that would not connect is the

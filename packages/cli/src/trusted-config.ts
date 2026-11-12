@@ -231,6 +231,28 @@ export const loadServePrincipals = async (
   return block.status === 'present' ? block.value : {};
 };
 
+/** Who an agent's Slack app answers to: the trusted `approvals` and `principals` blocks. */
+export interface SlackPeople {
+  approvals: ApprovalsConfig;
+  principals: PrincipalsConfig;
+}
+
+/**
+ * The two blocks that decide who an agent's Slack app answers to, read
+ * again on every reload so a teammate added or removed while the daemon
+ * runs takes effect without a restart (AGT-337). Through `loadServeApprovals`
+ * and `loadServePrincipals`, so a reload follows the rules start does: a
+ * project-local block is ignored, and one that will not read fails closed.
+ */
+export const loadSlackPeople = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<SlackPeople> => ({
+  approvals: await loadServeApprovals(env, configPath, warn),
+  principals: await loadServePrincipals(env, configPath, warn),
+});
+
 /**
  * The `slack` block — how agents present themselves in Slack — under the
  * `principals` rule: a project-local config is refused with a warning and

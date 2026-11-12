@@ -43,6 +43,7 @@ import {
   externalContentGated,
   reviewSettingsIn,
   loadServePrincipals,
+  loadSlackPeople,
   loadServeSlack,
   loadServeConcurrentScheduledTurns,
   currentLogPosition,
@@ -16854,6 +16855,49 @@ test('chat and run follow the review posture: rules hold, outside content asks a
   assert.equal(await shadow.approve(call(notes, external)), true);
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.doesNotMatch(shadowPiped.output.stderr, /Note: refusing/);
+});
+
+test('who a Slack app answers to is read again on every reload, under the rules start used (AGT-337)', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const env = { cwd: elsewhere, homeDir: home, processEnv: {} };
+  const people = (slackUsers: string[], slackApprovers: string[]) => JSON.stringify({
+    provider: 'demo',
+    principals: { slackUsers },
+    approvals: { mode: 'remote', slackApprovers },
+  });
+
+  await writeFile(configPath, people(['U0DYLAN'], ['U0DYLAN']));
+  const first = await loadSlackPeople(env, undefined, () => {});
+  assert.deepEqual(first.principals.slackUsers, ['U0DYLAN']);
+  assert.deepEqual(first.approvals.slackApprovers, ['U0DYLAN']);
+
+  // A teammate added, then a reload: the new lists, not the ones start read.
+  await writeFile(configPath, people(['U0DYLAN', 'U0BLAIR'], ['U0DYLAN', 'U0BLAIR']));
+  const second = await loadSlackPeople(env, undefined, () => {});
+  assert.deepEqual(second.principals.slackUsers, ['U0DYLAN', 'U0BLAIR']);
+  assert.deepEqual(second.approvals.slackApprovers, ['U0DYLAN', 'U0BLAIR']);
+
+  // A project-local config still cannot appoint anyone on a reload.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    principals: { slackUsers: ['U0STRANGER'] },
+    approvals: { slackApprovers: ['U0STRANGER'] },
+  }));
+  const warnings: string[] = [];
+  const cloned = await loadSlackPeople({ cwd: project, homeDir: home, processEnv: {} }, undefined, (line) => warnings.push(line));
+  assert.deepEqual(cloned.principals.slackUsers, ['U0DYLAN', 'U0BLAIR']);
+  assert.deepEqual(cloned.approvals.slackApprovers, ['U0DYLAN', 'U0BLAIR']);
+  assert.equal(warnings.length, 2, warnings.join('\n'));
+
+  // A config broken while the daemon runs fails closed, as at start.
+  await writeFile(configPath, '{ not json');
+  const broken = await loadSlackPeople(env, undefined, () => {});
+  assert.deepEqual(broken.principals, { admit: 'principals' });
+  assert.equal(broken.approvals.slackApprovers, undefined);
+  assert.equal(broken.approvals.posture, 'guarded');
 });
 
 test('an approvals block that cannot be trusted or read leaves the daemon guarded, never open', async () => {
