@@ -1001,12 +1001,13 @@ const FOREIGN_ROOTS = new Set(['svg', 'math']);
 
 /**
  * Dropped elements a browser never shows either: a template's content is
- * not rendered, and a canvas's fallback is not while scripts run. Closed,
- * they are cut out by name with the rest of DROPPED_ELEMENTS; one the page
- * ends inside has no end tag to pair, so the visibility pass drops it to
- * the end, as it does a hidden element. The rest of DROPPED_ELEMENTS are
- * either raw text, which `openAtEnd` already cuts, or page furniture a
- * browser shows, and those keep their text when the page ends inside one.
+ * not rendered, and a canvas's fallback is not while scripts run. So the
+ * visibility pass drops what they hold where the tree builder puts it, as
+ * it does a hidden element's, before the cut by name: one the page ends
+ * inside has no end tag to pair with, and a canvas a `div` closed holds
+ * nothing after the `div`. The rest of DROPPED_ELEMENTS are either raw
+ * text, which `openAtEnd` already cuts, or page furniture a browser shows,
+ * which keeps its text when the page ends inside it.
  */
 const NEVER_RENDERED = new Set(['template', 'canvas']);
 
@@ -1162,9 +1163,10 @@ const openAtEnd = (html: string): number => {
  * agency. Each rule here was checked against Chromium, page by page and by
  * comparing random malformed pages; foreign content (`svg`, `math`) and
  * `select`'s own rendering are not modelled. An element still open at the
- * end of the page keeps its text: a closing rule this pass does not model
- * must not erase the article behind it, and keeping is what this extractor
- * did before it read visibility at all.
+ * end of the page is open to the end of it, as in a browser, so a hidden
+ * one hides the rest; but on a page that ends inside svg or math, where
+ * which elements are open is a guess, nothing open hides anything, and the
+ * article behind it is not erased on that guess.
  *
  * Every tag it keeps comes back as its name alone, `<div>` or `</div>`,
  * attributes gone, so the patterns after it end each tag where the
@@ -1181,8 +1183,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // receive it — usually the top of the stack, but text or a tag a table
   // cannot hold is placed before the table, so in `<table hidden>visible`
   // the text is the table's parent's, and shown. A run is dropped when a
-  // hidden element on its ancestry was closed; one still open at the end
-  // of the page confirms nothing, and its text is kept.
+  // hidden element is on its ancestry, closed or still open at the end.
   const stack: OpenElement[] = [];
   const onStack = new Set<OpenElement>();
   // Every element closed before the end of the page, by id: a copy shares
@@ -1612,20 +1613,20 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     return result;
   };
 
-  // What is open at the end inside svg or math. There the tree builder
-  // leaves for HTML at a tag such as `p`, which this pass does not follow:
-  // in `<svg style="display:none"><p>shown` the paragraph is the body's in
-  // a browser, and here it is still the svg's. So these hide nothing to the
-  // end of the page, and their text is kept rather than guessed at.
-  const foreignAt = stack.findIndex((open) => FOREIGN_ROOTS.has(open.name));
-  const openInForeign = new Set(foreignAt === -1 ? [] : stack.slice(foreignAt).map((open) => open.id));
+  // Whether the page ends inside svg or math. There the tree builder
+  // leaves for HTML at a tag such as `p` or `h1`, which this pass does not
+  // follow: in `<svg style="display:none"><p>shown` the paragraph is the
+  // body's in a browser and still the svg's here, and in `<h2 hidden><math>
+  // <h1>shown` leaving the math closes the h2. Which elements are open at
+  // the end is then a guess, so none of them hides anything to the end, and
+  // their text is kept rather than cut on that guess.
+  const endsInForeign = stack.some((open) => FOREIGN_ROOTS.has(open.name));
 
   // Whether a node is dropped: it, or a node it is in, is hidden, or is a
-  // template or canvas the page ends inside. A browser keeps an element
-  // open to the end of the page, so one still open here hides the rest, as
-  // a closed one hides what it held. Read once the page is done, since
-  // nodes move until then; remembered per node, so a page costs its nodes
-  // once.
+  // template or canvas. A browser keeps an element open to the end of the
+  // page, so one still open here hides the rest, as a closed one hides what
+  // it held. Read once the page is done, since nodes move until then;
+  // remembered per node, so a page costs its nodes once.
   const dropped = new Map<TreeNode, boolean>();
   const isDropped = (node: TreeNode | undefined): boolean => {
     const chain: TreeNode[] = [];
@@ -1639,7 +1640,8 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       chain.push(at);
     }
     for (const at of chain.reverse()) {
-      result = result || (!openInForeign.has(at.id) && (judge(at).hidden || (NEVER_RENDERED.has(at.name) && !closed.has(at.id))));
+      const open = !closed.has(at.id);
+      result = result || (!(open && endsInForeign) && (NEVER_RENDERED.has(at.name) || judge(at).hidden));
       dropped.set(at, result);
     }
     return result;
@@ -1650,11 +1652,21 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // find tags by pattern, and a pattern ends a tag at its first `>`, which
   // in `<div title="x>y">` is inside a value and would leave `y">` as
   // text. Nothing after this reads an attribute.
+  //
+  // A template's or canvas's own tags stay unless what holds them is
+  // dropped, so the cut by name after this still pairs one with its end
+  // tag, as it did before this pass judged them. Inside svg or math, where
+  // this pass's tree is a guess, that cut is what keeps hidden what a
+  // browser hides: in `<svg><template>x<template></template>` the inner
+  // template is closed and dropped here, and its end tag still ends the
+  // outer one's cut, which takes `x` with it.
   const drops = (node: TreeNode | undefined): boolean => mayHide && isDropped(node);
+  const keepsTag = ({ node, tag }: { node: TreeNode | undefined; tag?: ScannedTag }): boolean =>
+    tag !== undefined && NEVER_RENDERED.has(tag.name) && !drops(node?.name === tag.name ? node.parent : node);
   let text = '';
   let dropping = false;
   for (const segment of segments) {
-    if (drops(segment.node)) {
+    if (drops(segment.node) && !keepsTag(segment)) {
       if (!dropping) text += ' ';
       dropping = true;
     } else {

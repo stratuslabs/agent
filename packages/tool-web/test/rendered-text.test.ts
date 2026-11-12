@@ -10,7 +10,6 @@ import { markersOf, renderedPages } from '../scripts/rendered-pages.ts';
 interface Recorded {
   sha: string;
   hidden: string[];
-  openAtEnd?: string[];
 }
 const recorded = JSON.parse(readFileSync(new URL('./rendered-in-chromium.json', import.meta.url), 'utf8')) as {
   chromium: string;

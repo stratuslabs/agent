@@ -69,14 +69,18 @@ whole there, script included, rather than risk cutting it short.
 
 Each element is judged where a browser's parser puts it, misnested and
 unclosed markup included, so text moved out of a hidden element is kept
-and text moved into one is not. The tests hold this to Chromium: some
-1,800 pages, hand-written and generated, with what Chromium shows of each
+and text moved into one is not. An element the page ends inside is open
+to the end of it, as in a browser, so a hidden one (or a `template` or
+`canvas`) hides the rest of the page: what a page cut short by `maxBytes`
+was still hiding stays hidden. The tests hold this to Chromium: some
+2,100 pages, hand-written and generated, with what Chromium shows of each
 recorded in [`test/rendered-in-chromium.json`](test/rendered-in-chromium.json)
 by [`scripts/render-in-chromium.ts`](scripts/render-in-chromium.ts).
 
 Two exceptions are deliberate, and both keep text a browser would not
-show: an element still open at the end of the page keeps what it holds,
-so a closing rule this extraction does not model cannot erase the
+show: on a page that ends inside `svg` or `math`, nothing open at the end
+hides the rest, because the parser leaves those for HTML in ways this
+extraction does not rebuild, and a wrong guess there would erase the
 article after it; and a hidden `html` or `body` hides nothing, because a
 page that hides its whole document until a script runs is showing all of
 it — hiding everything hides nothing from a reader that the page shows
