@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -45,6 +45,36 @@ test('the sign-in is its own file, so a credentials.json writer never puts back 
   await saveCredentials(env, { anthropic: { type: 'api_key', value: 'sk-ant-1' } });
   assert.deepEqual(await file.read(), { session: { refreshToken: 'rt-2' } });
   assert.doesNotMatch(await readFile(credentialsPath(env), 'utf8'), /rt-2/);
+});
+
+test('a sign-in file with another hard link is never replaced, so the link can never outlive its protection', async () => {
+  // The host refuses a hard link to the file by its inode. Replacing the
+  // file renames a new inode over it, which would leave a link made earlier
+  // (in a workspace, say) pointing at the old inode, now unprotected, with
+  // the old tokens in it (Codex on agent#659).
+  const env = await newEnv();
+  const file = createChatGPTSignInFile(env);
+  await file.write({ session: { accessToken: 'access-1' } });
+  const elsewhere = path.join(env.homeDir, 'workspace-copy.json');
+  await link(chatgptSignInPath(env), elsewhere);
+
+  await assert.rejects(file.write({ session: { accessToken: 'access-2' } }), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /hard link/);
+    assert.doesNotMatch(error.message, /access-/);
+    return true;
+  });
+  assert.deepEqual(await file.read(), { session: { accessToken: 'access-1' } });
+  assert.equal((await stat(elsewhere)).ino, (await stat(chatgptSignInPath(env))).ino);
+  // Nor is the lock taken, so a refresh never goes out whose replacement
+  // token couldn't be saved.
+  let ran = false;
+  await assert.rejects(file.withLock(async () => { ran = true; }), /hard link/);
+  assert.equal(ran, false);
+
+  await rm(elsewhere);
+  await file.write({ session: { accessToken: 'access-2' } });
+  assert.deepEqual(await file.read(), { session: { accessToken: 'access-2' } });
 });
 
 test('a sign-in file that is not a JSON object is refused without quoting what it holds', async () => {
