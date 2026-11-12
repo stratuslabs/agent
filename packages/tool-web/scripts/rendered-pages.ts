@@ -263,6 +263,23 @@ const CORPUS: readonly string[] = [
   '<p>SHOWN</p><svg></math><style>SVGSTYLE</svg><p>AFTER</p>',
   `<p>BEFORE</p><svg><style><![CDATA[ a > b { content: "<a href='x" } ]]></style></svg><p>SHOWN</p>`,
   '<p>SHOWN</p><![CDATA[ x > TEXT <b title="LEAKU',
+  // Comments, doctypes, processing instructions and CDATA are markup only
+  // where the tokenizer reads them: not inside a quoted value, a script or
+  // an xmp. In svg or math CDATA runs to `]]>`, and `</` before anything
+  // but a letter opens a comment to the next `>`, so a tag inside it is
+  // none. Nor is a tag in raw text, or one a `<` of text runs into once a
+  // comment is gone.
+  '<p>SHOWN</p><a href="<?php echo $u; ">LINKA</a>',
+  '<div data-tpl="<!-- x">KEPTB</div>',
+  `<a title='a<!b'>TITLEC</a><span title="x <? y">TITLED</span>`,
+  `<script>var s = '<!--';</script><p>SHOWN</p>AFTER -->`,
+  '<xmp>LITERAL <!--</xmp><p>SHOWN</p>AFTER -->',
+  '<p>BEFORE</p><svg><![CDATA[<x></svg><script>LEAKW]]></svg><p>SHOWN</p>',
+  '<math><mi><![CDATA[a <!-- b]]></mi></math><p>SHOWN</p>AFTER -->',
+  '<p>SHOWN</p>LITERAL </3 <div hidden>> AFTER',
+  '<style>a { content: "<script>" }</style><p>SHOWN</p><script>x</script><p>AFTER</p>',
+  '<xmp>LITERAL <style></xmp><p>SHOWN</p><style>x</style>',
+  '<p>SHOWN</p><<!x>div hidden>AFTER',
   // An element the page ends inside is open to the end of it, in Chromium
   // and here: one that hides, a template or a canvas hides the rest.
   `<p>SHOWN</p><div hidden>INJECT <script>var s = '`,

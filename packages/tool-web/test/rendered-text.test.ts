@@ -19,7 +19,7 @@ const pages = renderedPages();
 // Pages that leave svg or math for HTML before a script the page ends
 // inside. Chromium drops the script; htmlToText keeps it on purpose, as it
 // always did, rather than follow the tree builder back into HTML and risk
-// cutting a page short (see openAtEnd). Kept, so a change is noticed.
+// cutting a page short (see readMarkup). Kept, so a change is noticed.
 const KEPT_ON_PURPOSE = new Set(['LEAKO', 'LEAKR', 'LEAKS']);
 const REGENERATE = 'Regenerate the record with pnpm --filter @stratusagent/tool-web render-in-chromium.';
 
