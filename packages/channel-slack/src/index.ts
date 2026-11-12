@@ -2309,10 +2309,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // Who a connected app answers to follows the list just read (AGT-337),
     // so a teammate added or removed reaches it without a reconnect: who it
     // admits, who may approve and where it asks. Everything else stays as
-    // it connected with. A socket kept on old tokens keeps its people too.
+    // it connected with. That includes a socket kept on its old tokens
+    // because it would not close: it still serves, so it is the one that
+    // has to stop admitting someone removed. One whose tokens were removed
+    // has no list to read here and keeps what it had until it closes.
     for (const connection of connections) {
       const config = wanted.get(connection.config.agentId);
-      if (config === undefined || !sameApp(config, connection.config)) {
+      if (config === undefined) {
         continue;
       }
       const updated = withPeopleOf(connection.config, config);

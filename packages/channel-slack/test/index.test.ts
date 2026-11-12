@@ -18952,3 +18952,29 @@ test('an approver removed by a reload after opening a credential form cannot sub
   assert.equal(pending.has('cred-1'), true);
   await adapter.stop();
 });
+
+test('a socket kept on its old app because it won\'t close still takes the new people lists (Codex P1 4546191621)', async () => {
+  const listing = (tokens: { appToken: string; botToken: string }, principals: string[]) => [
+    { agentId: 'bea', ...tokens, principals, admit: 'principals' as const },
+  ];
+  const setup = reloadingAdapter(listing({ appToken: 'xapp-bea', botToken: 'xoxb-bea' }, ['U-DYLAN', 'U-GONE']), ['bea']);
+  await setup.adapter.start(setup.gateway);
+  const [oldBea] = setup.socketsFor('xapp-bea');
+  oldBea!.disconnect = async () => {
+    throw new Error('socket is in a bad state');
+  };
+
+  // Rotated and someone removed in the same save: the old socket serves on,
+  // so it is the one that has to stop admitting them.
+  setup.store(listing({ appToken: 'xapp-bea-2', botToken: 'xoxb-bea-2' }, ['U-DYLAN']));
+  await setup.adapter.reload!();
+  assert.equal(setup.socketsFor('xapp-bea-2').length, 0, 'nothing started beside it');
+  await oldBea!.deliver('app_mention', mention('<@B-BEA> hello', { ts: '100.1', user: 'U-GONE' }));
+  assert.equal(setup.gateway.dispatches.length, 0, 'removed, so refused on the old socket too');
+  await oldBea!.deliver('app_mention', mention('<@B-BEA> hello', { ts: '100.2', user: 'U-DYLAN' }));
+  assert.equal(setup.gateway.dispatches.length, 1);
+  oldBea!.disconnect = async () => {
+    oldBea!.disconnected = true;
+  };
+  await setup.adapter.stop();
+});
