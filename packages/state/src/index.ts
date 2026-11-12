@@ -52,7 +52,7 @@ export {
   surveyLegacyWorkspaces,
   workspaceRepairPending,
   type LegacyWorkspaceState,
-} from './workspace-migration.ts';
+} from './migrations/workspaces.ts';
 
 export {
   AGENTS_DIR_ENV,
@@ -239,7 +239,7 @@ export {
   runStateMigrations,
   PREDATES_SAFE_TOOLS_FACT,
   unlistedToolsFor,
-} from './migrations.ts';
+} from './migrations/index.ts';
 
 export { type StateBackup, backUpStateBeforeMigrating, describeStateBackup } from './state-backup.ts';
 
@@ -249,7 +249,7 @@ export {
   hasBracketedLegacyStateIn,
   legacyStateHeld,
   legacyStateHeldIn,
-} from './layout-migration.ts';
+} from './migrations/layout.ts';
 
 export {
   ConfigFileError,
