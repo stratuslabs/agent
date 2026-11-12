@@ -2263,6 +2263,16 @@ test('autoContinue parses per agent as true or a cap, and refuses anything else'
   }
 });
 
+test('concurrentScheduledTurns parses per agent as a whole number, and refuses anything else', async () => {
+  const configPath = await writeConfig('concurrent-scheduled-turns.json', { concurrentScheduledTurns: { atlas: 2, nova: 1 } });
+  const config = await loadConfigFile(configPath);
+  assert.deepEqual(config.concurrentScheduledTurns, { atlas: 2, nova: 1 });
+  for (const [name, value] of [['list', ['atlas']], ['number', 2], ['zero', { atlas: 0 }], ['fraction', { atlas: 1.5 }], ['text', { atlas: '2' }], ['true', { atlas: true }]] as const) {
+    const bad = await writeConfig(`concurrent-scheduled-turns-${name}.json`, { concurrentScheduledTurns: value });
+    await assert.rejects(loadConfigFile(bad), /Invalid concurrentScheduledTurns/, name);
+  }
+});
+
 test('agentMaxTurns parses per agent and refuses a budget that is not one', async () => {
   const configPath = await writeConfig('agent-max-turns.json', { maxTurns: 40, agentMaxTurns: { atlas: 300, nova: 120 } });
   const config = await loadConfigFile(configPath);
