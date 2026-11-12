@@ -451,8 +451,20 @@ test('a refresh outage keeps the sign-in; invalid_client and other refusals are 
   await rejectsWithCode(refresh('network-error'), 'temporary');
   await rejectsWithCode(refresh({ status: 401, body: { error: 'invalid_client' } }), 'invalid_client');
   await rejectsWithCode(refresh({ status: 400, body: { detail: 'region not permitted' } }), 'request_failed', /region not permitted/);
-  // A 200 without the replacement refresh token would strand the session.
-  await rejectsWithCode(refresh(tokenReply(undefined, { refresh_token: undefined })), 'request_failed', /refresh_token/);
+});
+
+test('a refresh answered 200 but missing a field ends the sign-in, since the old refresh token may already be spent', async () => {
+  const refresh = (reply: Reply) =>
+    refreshTokens({ endpoints, clientId: ISSUED_CLIENT_ID, refreshToken: 'refresh-secret-xyz', fetch: createFakeAuthServer({ token: [reply] }).fetch });
+  for (const [field, overrides] of [
+    ['refresh_token', { refresh_token: undefined }],
+    ['access_token', { access_token: '' }],
+    ['expires_in', { expires_in: 'soon' }],
+  ] as const) {
+    const error = await rejectsWithCode(refresh(tokenReply(undefined, overrides)), 'signin_required', new RegExp(field));
+    assert.ok(!error.message.includes('refresh-secret-xyz'));
+  }
+  await rejectsWithCode(refresh({ status: 200, body: 'not an object' }), 'signin_required', /body/);
 });
 
 test('revocation posts the refresh token and the issued client ID, and confirms on 200', async () => {

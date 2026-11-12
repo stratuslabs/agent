@@ -314,9 +314,14 @@ const describeFailure = (status: number, body: unknown): string => {
 
 const isTemporaryStatus = (status: number): boolean => status === 429 || status >= 500;
 
-const tokensOf = (body: unknown, receivedAt: number, what: string): ChatGPTTokens => {
+const tokensOf = (body: unknown, receivedAt: number, what: 'sign-in' | 'refresh'): ChatGPTTokens => {
+  // A refresh answered 200 has spent the old refresh token, so a reply
+  // missing a field ends the sign-in rather than leaving a dead token to be
+  // tried again (OpenAI treats a reused one as `refresh_token_reused`).
   const malformed = (field: string): ChatGPTAuthError =>
-    new ChatGPTAuthError('request_failed', `OpenAI's ${what} response has no ${field}. Sign in with ChatGPT again.`);
+    what === 'refresh'
+      ? new ChatGPTAuthError('signin_required', `OpenAI's refresh response has no ${field}, and the old sign-in may already be spent. Sign in with ChatGPT again.`)
+      : new ChatGPTAuthError('request_failed', `OpenAI's ${what} response has no ${field}. Sign in with ChatGPT again.`);
   if (!isRecord(body)) {
     throw malformed('body');
   }
