@@ -39,8 +39,10 @@ import {
   type ParsedChannelCommand,
   type ParsedCredentialCommand,
   type ParsedGrantsCommand,
+  type ParsedPeopleCommand,
   type ParsedSignInCommand,
   parseGrantsCommand,
+  parsePeopleCommand,
   parseSignInCommand,
 } from './parse/access.ts';
 import { type ParsedMemoryCommand, parseMemoryCommand } from './parse/memory.ts';
@@ -99,6 +101,7 @@ export type ParsedCommand =
   | ParsedEventsCommand
   | ParsedSchedulesCommand
   | ParsedGrantsCommand
+  | ParsedPeopleCommand
   | ParsedMemoryCommand
   | ParsedSessionCommand
   | ParsedSessionsCommand
@@ -194,6 +197,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     return parseGrantsCommand(rest);
   }
 
+  if (command === 'people') {
+    return parsePeopleCommand(rest);
+  }
+
   if (command === 'memory') {
     return parseMemoryCommand(rest);
   }
@@ -268,6 +275,7 @@ export {
   type ParsedChannelCommand,
   type ParsedCredentialCommand,
   type ParsedGrantsCommand,
+  type ParsedPeopleCommand,
   type ParsedSignInCommand,
 } from './parse/access.ts';
 

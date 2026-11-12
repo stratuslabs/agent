@@ -4,6 +4,13 @@
 // on it (or on the ~9 MB of Slack SDKs underneath).
 const SLACK_API_ROOT = 'https://slack.com/api';
 
+/**
+ * Whether `id` is shaped like a Slack member ID (`U0123ABCD`, or `W…` on
+ * Enterprise Grid). The people lists match senders by this id alone, so a
+ * name or an @handle written there matches nobody.
+ */
+export const isSlackMemberId = (id: string): boolean => /^[UW][A-Z0-9]{2,}$/.test(id);
+
 interface SlackIdentity {
   botUserId?: string;
   teamName?: string;

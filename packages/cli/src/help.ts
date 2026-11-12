@@ -32,6 +32,8 @@ Usage:
   stratus schedules cancel <id>
   stratus grants blair
   stratus grants revoke blair --tool web.fetch
+  stratus people
+  stratus people add U0123ABCD --approver
   stratus memory list blair
   stratus memory search blair deploy pipeline
   stratus memory pin blair blair:memory:...
@@ -213,6 +215,18 @@ Commands:
                    lists approvals.commands from config: the daemon's own
                    when one is serving, else the file --config names (or
                    the one stratus serve would find)
+  people           Who each agent answers to on Slack and who may approve its
+                   calls: its admit setting, people and approvers, and
+                   whether each list is the shared one or its own. "stratus
+                   people add <member-id>" adds a teammate to the shared
+                   list (--agent <id>: that agent's own list, starting as a
+                   copy of the shared one; --approver: as an approver too).
+                   "stratus people remove <member-id>" takes them off every
+                   list (--agent: that agent only; --approver: approving
+                   only). Edits the trusted config (--config, else
+                   STRATUS_CONFIG, else ~/.stratus/config.json), then
+                   reloads a running daemon, which applies it with no
+                   restart, and says whether it did
   memory list      Show an agent's live memory with the trust label each
                    entry carries — user, agent, unknown (no recorded origin,
                    or written in a conversation with someone not configured
