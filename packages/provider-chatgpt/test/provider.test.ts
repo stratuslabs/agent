@@ -357,14 +357,14 @@ test('ChatGPT plan errors say what to do, keeping OpenAI\'s words, the status, t
     {
       what: 'invalid user',
       reply: () => json(401, { error: { code: 'subscription_sharing_invalid_user', message: 'Invalid user.' } }),
-      expected: /^ChatGPT couldn't validate the signed-in account\. If it keeps happening, sign in with ChatGPT again in `stratus setup`\./,
+      expected: /^ChatGPT couldn't validate the account this sign-in belongs to\. Try again later, and if it keeps failing, report it with the request ID\. \(OpenAI: Invalid user\.; HTTP 401\)$/,
       status: 401,
       code: 'subscription_sharing_invalid_user',
     },
     {
       what: 'permission context',
       reply: () => json(403, { error: { code: 'chatpass_v2_scope_not_authorized', message: 'Scope.' } }),
-      expected: /^This ChatGPT sign-in isn't authorized to use the plan for this request\. Sign in with ChatGPT again in `stratus setup`\./,
+      expected: /^ChatGPT says this sign-in isn't authorized to use the plan for this request\. That points to how Stratus registered the sign-in, not to your account, so signing in again won't help: please report it with the request ID\. \(OpenAI: Scope\.; HTTP 403\)$/,
       status: 403,
       code: 'chatpass_v2_scope_not_authorized',
     },

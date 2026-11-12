@@ -43,6 +43,9 @@ export const DEFAULT_DISCOVERY_TIMEOUT_MS = 15_000;
 
 const SIGN_IN_AGAIN = 'Sign in with ChatGPT again in `stratus setup`.';
 
+const CLIENT_NOT_AUTHORIZED =
+  "ChatGPT says this sign-in isn't authorized to use the plan for this request. That points to how Stratus registered the sign-in, not to your account, so signing in again won't help: please report it with the request ID.";
+
 /**
  * What to tell a person for each ChatGPT plan error OpenAI documents a
  * recovery for, by code ("Errors and recovery" in OpenAI's Sign in with
@@ -62,10 +65,15 @@ const PLAN_ERRORS: Readonly<Record<string, (param: string | undefined) => string
     `ChatGPT plan usage doesn't support part of this request${param !== undefined ? ` (${param})` : ''}.`,
   subscription_sharing_route_not_supported: () =>
     "ChatGPT plan usage doesn't support the endpoint Stratus called. This is a Stratus bug; please report it.",
+  // OpenAI: sign in again only after a confirmed revocation or a dead
+  // refresh token, which the token source already handles; otherwise keep
+  // the request ID and diagnose.
   subscription_sharing_invalid_user: () =>
-    "ChatGPT couldn't validate the signed-in account. If it keeps happening, sign in with ChatGPT again in `stratus setup`.",
-  chatpass_v2_scope_not_authorized: () => `This ChatGPT sign-in isn't authorized to use the plan for this request. ${SIGN_IN_AGAIN}`,
-  chatpass_v2_invalid_authorization_context: () => `This ChatGPT sign-in isn't authorized to use the plan for this request. ${SIGN_IN_AGAIN}`,
+    "ChatGPT couldn't validate the account this sign-in belongs to. Try again later, and if it keeps failing, report it with the request ID.",
+  // OpenAI: check the client and grant configuration, not OAuth again. The
+  // client is the one Stratus registered at sign-in.
+  chatpass_v2_scope_not_authorized: () => CLIENT_NOT_AUTHORIZED,
+  chatpass_v2_invalid_authorization_context: () => CLIENT_NOT_AUTHORIZED,
 };
 
 /**
