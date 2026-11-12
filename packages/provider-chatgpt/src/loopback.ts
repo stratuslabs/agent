@@ -56,7 +56,15 @@ export const listenForCallback = async (options: ListenForCallbackOptions = {}):
   let pending: { readonly state: string; readonly settle: (params: URLSearchParams) => void } | undefined;
 
   const server = createServer((request, response) => {
-    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    // Node's parser passes request targets that aren't URLs (`GET http://[`),
+    // and a throw here would be uncaught and end the process mid-sign-in.
+    let url: URL;
+    try {
+      url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    } catch {
+      respond(response, 400, MISMATCH);
+      return;
+    }
     if (request.method !== 'GET' || url.pathname !== CALLBACK_PATH) {
       respond(response, 404, 'Not found.');
       return;

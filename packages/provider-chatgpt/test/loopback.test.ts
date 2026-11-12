@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { ChatGPTAuthError, listenForCallback } from '../src/index.ts';
 
 const portOf = (redirectUri: string): number => Number(new URL(redirectUri).port);
@@ -52,6 +52,28 @@ test('a request with another state or path does not end the sign-in', async (t) 
   assert.equal(declined.status, 200);
   assert.match(declined.body, /didn't finish/);
   assert.equal((await waiting).get('error'), 'access_denied');
+});
+
+const rawRequest = (port: number, request: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const socket = connect({ port, host: '127.0.0.1' }, () => socket.end(request));
+    let reply = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk: string) => {
+      reply += chunk;
+    });
+    socket.on('end', () => resolve(reply));
+    socket.on('error', reject);
+  });
+
+test('a request target that is not a URL gets a 400 and the sign-in keeps waiting', async (t) => {
+  const listener = await listenForCallback({ ports: [0] });
+  t.after(() => listener.close());
+  const waiting = listener.waitFor('state-1');
+  const reply = await rawRequest(portOf(listener.redirectUri), 'GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n');
+  assert.match(reply, /^HTTP\/1\.1 400 /);
+  await get(`${listener.redirectUri}?code=c1&state=state-1`);
+  assert.equal((await waiting).get('code'), 'c1');
 });
 
 test('the preferred port being taken falls back to the next one', async (t) => {
