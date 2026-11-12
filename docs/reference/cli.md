@@ -68,6 +68,10 @@ stratus grants revoke blair --tool web.fetch            # take a standing grant 
 stratus grants revoke blair --scope "git push"          # or a command scope, by the line the listing shows
 stratus grants revoke blair --origin https://app.example.com
 stratus grants revoke blair --destination slack:C0123ABCD  # a conversation granted for message.read or message.send
+stratus people                         # who each agent answers to on Slack, and who may approve its calls
+stratus people add U0123ABCD --approver     # a teammate on the shared list, who may approve too; a running daemon applies it with no restart
+stratus people add U0123ABCD --agent blair  # blair's own list only (it starts as a copy of the shared one)
+stratus people remove U0123ABCD        # off every list; --approver takes away approving only
 stratus memory list blair              # every live fact, with its trust label, pin, and validity
 stratus memory list blair --trust unknown --format json
 stratus memory search blair deploy pipeline             # the way the agent searches: words, and what a fact is about
@@ -105,6 +109,7 @@ stratus dashboard                      # local browser dashboard
 | `sessions` | [Always on](../guides/always-on.md#while-it-runs) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
+| `people`, `people add`, `people remove` | [Slack](../guides/slack.md#adding-and-removing-teammates), [Approvals](../guides/approvals.md#asking-a-human-remote-approval) |
 | `memory list`, `memory search`, `memory audit`, `memory forget` | [Memory](../concepts/memory.md#searching-it-yourself) — every `memory` subcommand works the built-in store, and refuses against a fleet whose config selects another |
 | `memory pin`, `memory unpin` | [Memory](../concepts/memory.md#pinned-facts) |
 | `memory export`, `memory import` | [Memory](../concepts/memory.md#moving-an-agents-memory) |
@@ -156,7 +161,8 @@ stratus dashboard                      # local browser dashboard
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
-| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `credential env` (and `credential set --env`): the agent whose shell the binding is for (required). `signin set` / `signin remove`: the agent whose own sign-in it is (required). `channel set` / `channel remove`: the agent whose binding it is (required) |
+| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `credential env` (and `credential set --env`): the agent whose shell the binding is for (required). `signin set` / `signin remove`: the agent whose own sign-in it is (required). `channel set` / `channel remove`: the agent whose binding it is (required). `people add` / `people remove`: that agent's own list rather than the shared one |
+| `--approver` | `stratus people add`: as an approver as well as a teammate. `stratus people remove`: take away approving only |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
 | `--force` | `stratus skill add`: replace an already-installed skill id. `stratus template add`: replace an agent or skill already installed under the same name |

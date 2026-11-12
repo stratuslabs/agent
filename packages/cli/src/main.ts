@@ -19,6 +19,7 @@ import { runSignIn } from './commands/signin.ts';
 import { runDashboard } from './commands/dashboard.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runGrants } from './commands/grants.ts';
+import { runPeople } from './commands/people.ts';
 import { runHealth } from './commands/health.ts';
 import { runEvents } from './commands/events.ts';
 import { runLogs } from './commands/logs.ts';
@@ -238,6 +239,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
 
     if (command.command === 'grants') {
       return await runGrants(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'people') {
+      return await runPeople(command, streams, resolvedEnv);
     }
 
     if (command.command === 'memory') {

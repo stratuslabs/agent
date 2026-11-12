@@ -33,6 +33,31 @@ streaming edits, session keys) — is documented in the
 [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md),
 which is canonical for the Slack surface.
 
+### Adding and removing teammates
+
+Who may talk to an agent, and who may approve its calls, are lists of Slack
+member IDs in the trusted config (in Slack: the person's profile → ⋯ →
+Copy member ID). `stratus people` shows them for each agent and changes
+them without editing the file:
+
+```sh
+stratus people                              # each agent's admit setting, people and approvers
+stratus people add U0123ABCD                # may talk to every agent on the shared list
+stratus people add U0123ABCD --approver     # and may approve their calls
+stratus people add U0123ABCD --agent blair  # blair only
+stratus people remove U0123ABCD             # off every list, approvers included
+stratus people remove U0123ABCD --approver  # still talks to them, no longer approves
+```
+
+`--agent` on an agent that uses the shared list gives it a list of its own,
+starting as a copy of the shared one so nobody loses access. Later changes to
+the shared list don't reach it, and `stratus people add` names the agents it
+didn't reach. A running daemon applies the change at once, with no restart
+and the Slack app still connected (one from 0.14.12 or before needs
+`stratus restart`), and the command says whether it did.
+Approvers are only asked when `approvals.mode` is `remote`; the command says
+so when it isn't.
+
 ## Talking to an agent
 
 Mention it — `@Blair what's blocking the release?` — and it answers in a

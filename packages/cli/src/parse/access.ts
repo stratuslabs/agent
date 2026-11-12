@@ -1,10 +1,12 @@
 /*
- * `stratus credentials`, `stratus signin`, `stratus channel` and
- * `stratus grants`: the keys an agent holds and what it is allowed to do.
+ * `stratus credentials`, `stratus signin`, `stratus channel`,
+ * `stratus grants` and `stratus people`: the keys an agent holds, what it
+ * is allowed to do, and who it answers to.
  */
 import { credentialVariableProblem, isValidAgentId } from '@stratusagent/agents';
 import { CHANNEL_KIND_PATTERN, CREDENTIAL_NAME_PATTERN } from '@stratusagent/state';
 
+import { isSlackMemberId } from '../slack.ts';
 import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
 
 export interface ParsedCredentialCommand {
@@ -393,4 +395,78 @@ export const parseGrantsCommand = (rest: string[]): ParsedGrantsCommand | Parsed
     }
   }
   return parsed;
+};
+
+export interface ParsedPeopleCommand {
+  command: 'people';
+  action: 'list' | 'add' | 'remove';
+  /** A Slack member ID, `U0123ABCD`. add/remove only. */
+  memberId?: string;
+  /** The agent whose own list changes; absent means the shared one (add) or every list (remove). */
+  agentId?: string;
+  /** add: approver as well as teammate. remove: approver rights only. */
+  approver?: boolean;
+  /** The trusted config to edit; default `STRATUS_CONFIG`, then `~/.stratus/config.json`. */
+  configPath?: string;
+}
+
+const PEOPLE_USAGE = 'stratus people [add|remove <member-id> [--agent <id>] [--approver]] [--config <path>]';
+
+export const parsePeopleCommand = (rest: string[]): ParsedPeopleCommand | ParsedHelpCommand => {
+  const [first] = rest;
+  if (first !== undefined && !first.startsWith('-') && first !== 'list' && first !== 'add' && first !== 'remove') {
+    throw new Error(`Unknown people command: ${first}. Try: ${PEOPLE_USAGE}`);
+  }
+  const action: ParsedPeopleCommand['action'] = first === 'add' || first === 'remove' ? first : 'list';
+  const tokens = first === undefined || first.startsWith('-') ? rest : rest.slice(1);
+  const parsed: ParsedPeopleCommand = { command: 'people', action };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token) {
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      return { command: 'help' };
+    }
+    if (token === '--config') {
+      parsed.configPath = readOptionValue(tokens, index, '--config');
+      index += 1;
+      continue;
+    }
+    if (action !== 'list' && token === '--agent') {
+      parsed.agentId = readOptionValue(tokens, index, '--agent');
+      index += 1;
+      continue;
+    }
+    if (action !== 'list' && token === '--approver') {
+      parsed.approver = true;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      throw new Error(`Unknown option: ${token}. Try: ${PEOPLE_USAGE}`);
+    }
+    if (action !== 'list' && parsed.memberId === undefined) {
+      parsed.memberId = token;
+      continue;
+    }
+    throw new Error(`Unexpected argument: ${token}. Try: ${PEOPLE_USAGE}`);
+  }
+  if (action === 'list') {
+    return parsed;
+  }
+  if (parsed.memberId === undefined) {
+    throw new Error(`people ${action} needs a Slack member ID (in Slack: their profile → ⋯ → Copy member ID): stratus people ${action} <member-id>.`);
+  }
+  // Refused here, before anything is written: a name or an @handle on the
+  // list matches no sender, so the teammate it was meant for stays locked
+  // out, and on a remove the person it was meant for keeps their access.
+  if (!isSlackMemberId(parsed.memberId)) {
+    throw new Error(
+      `${JSON.stringify(parsed.memberId)} is not a Slack member ID (they look like U0123ABCD; in Slack: their profile → ⋯ → Copy member ID).`,
+    );
+  }
+  if (parsed.agentId !== undefined && !isValidAgentId(parsed.agentId)) {
+    throw new Error(`${JSON.stringify(parsed.agentId)} cannot be an agent id. Use the id \`stratus agents\` lists.`);
+  }
+  return { ...parsed, approver: parsed.approver ?? false };
 };
