@@ -93,7 +93,9 @@ export const createDemoProvider = (): ModelProvider =>
           input: { text: prompt },
         });
       } else {
-        builder.addText('No tool call was needed, so this run stays text-only. Mention “tool” or “echo” to trigger the demo tool.');
+        // addText joins straight onto the text before it (it also carries
+        // streamed deltas), so the paragraph break is part of the text.
+        builder.addText('\n\nNo tool call was needed, so this run stays text-only. Mention “tool” or “echo” to trigger the demo tool.');
       }
 
       return builder.done();

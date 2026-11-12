@@ -559,6 +559,35 @@ test('runCli executes the demo tool loop', async () => {
   assert.match(output.stdout, /\[tool:demo\.echo\]/);
   assert.match(output.stdout, /"uppercase": "PLEASE USE THE ECHO TOOL"/);
   assert.match(output.stdout, /The demo\.echo tool finished with/);
+  // The tool path's transcript lines, pinned as they read today.
+  assert.ok(
+    output.stdout.includes(
+      '[assistant] Demo provider ready. Prompt received: please use the echo tool\n' +
+        '[assistant] → tool call demo.echo({"text":"please use the echo tool"})\n',
+    ),
+    output.stdout,
+  );
+  assert.equal(output.stderr, '');
+});
+
+test('runCli demo text-only reply keeps its two sentences apart', async () => {
+  const { streams, output } = createStreams();
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-home-'));
+  // The Quickstart's first command: the first reply a new user reads.
+  const exitCode = await runCli({
+    argv: ['run', '--provider', 'demo', 'say hello'],
+    streams,
+    env: { homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(
+    output.stdout.endsWith(
+      '[assistant] Demo provider ready. Prompt received: say hello\n\n' +
+        'No tool call was needed, so this run stays text-only. Mention “tool” or “echo” to trigger the demo tool.\n',
+    ),
+    output.stdout,
+  );
   assert.equal(output.stderr, '');
 });
 
