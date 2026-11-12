@@ -27,7 +27,7 @@ export interface ChatGPTSignInFile {
    * change the file. In-process callers queue; another process's holder is
    * waited for without blocking the thread, up to the lock wait, then
    * `FileLockHeldError` and `work` never runs. Refused, with `work` never
-   * run, while the file has another hard link.
+   * run, unless the file is a plain file with one link.
    */
   withLock<T>(work: () => Promise<T>): Promise<T>;
 }
@@ -42,24 +42,33 @@ export const CHATGPT_SIGN_IN_LOCK_WAIT_MS = 30_000;
 const CHATGPT_SIGN_IN_LOCK_POLL_MS = 50;
 
 /**
- * The host refuses a hard link to this file by its inode (see
- * `createHostProtectedPaths`). A write renames a new inode over the file, so
- * a link made earlier would be left on the old inode, no longer protected,
- * with the old tokens in it. Replacing is refused instead while another link
- * exists, and so is taking the lock: the inode stays the protected one, and
- * the sign-in stops refreshing until the link is gone.
+ * The host protects this path's inode and, while the path is a link, what
+ * it points at (see `createHostProtectedPaths`). A write renames a new inode
+ * over the path, so a hard link made earlier would be left on the old
+ * inode, and a symbolic link's target would be left behind: either one no
+ * longer protected, with the old tokens in it. Replacing is refused instead
+ * unless the path is a plain file with one link, and so is taking the lock:
+ * the protected file stays the one in use, and the sign-in stops refreshing
+ * until the link is gone.
  */
-const refuseOtherLinks = async (filePath: string): Promise<void> => {
-  let links: number;
+const refuseLinkedFile = async (filePath: string): Promise<void> => {
+  let info;
   try {
-    links = (await lstat(filePath)).nlink;
+    info = await lstat(filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return;
     }
     throw error;
   }
-  if (links > 1) {
+  const remedy = 'Put the file back at that path as a plain file, then try again.';
+  if (info.isSymbolicLink()) {
+    throw new Error(`${filePath} is a symbolic link, so it wasn't replaced: what it points at would keep the old sign-in. ${remedy}`);
+  }
+  if (!info.isFile()) {
+    throw new Error(`${filePath} is not a file, so it wasn't replaced. ${remedy}`);
+  }
+  if (info.nlink > 1) {
     throw new Error(
       `${filePath} has another hard link, so it wasn't replaced: the link would keep the old sign-in readable. `
       + `Remove the link (\`find ~ -samefile ${filePath}\` finds it), then try again.`,
@@ -97,14 +106,14 @@ export const createChatGPTSignInFile = (
       return parsed as Record<string, unknown>;
     },
     write: async (contents) => {
-      await refuseOtherLinks(filePath);
+      await refuseLinkedFile(filePath);
       await replaceOwnerOnlyFile(filePath, `${JSON.stringify(contents, null, 2)}\n`);
     },
     withLock: (work) =>
       serializeFileWrite(chatgptSignInLockPath(env), async () => {
         // Here as well as in the write, so a refresh is never sent whose
         // replacement token the write would then refuse to save.
-        await refuseOtherLinks(filePath);
+        await refuseLinkedFile(filePath);
         return work();
       }, {
         waitMs: options.lockWaitMs ?? CHATGPT_SIGN_IN_LOCK_WAIT_MS,

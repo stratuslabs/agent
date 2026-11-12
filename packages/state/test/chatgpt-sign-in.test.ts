@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { link, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -75,6 +75,25 @@ test('a sign-in file with another hard link is never replaced, so the link can n
   await rm(elsewhere);
   await file.write({ session: { accessToken: 'access-2' } });
   assert.deepEqual(await file.read(), { session: { accessToken: 'access-2' } });
+});
+
+test('a sign-in file that is a symbolic link is never replaced, so what it points at keeps its protection', async () => {
+  // The host protects the target of a link at a listed path while the link
+  // is there. Replacing the link with a new file would leave the target
+  // (moved into a workspace, say) outside that, holding the old tokens
+  // (Codex r2 on agent#659).
+  const env = await newEnv();
+  const file = createChatGPTSignInFile(env);
+  await file.write({ session: { accessToken: 'access-1' } });
+  const moved = path.join(env.homeDir, 'workspace-file.json');
+  await rename(chatgptSignInPath(env), moved);
+  await symlink(moved, chatgptSignInPath(env));
+
+  await assert.rejects(file.write({ session: { accessToken: 'access-2' } }), /symbolic link/);
+  let ran = false;
+  await assert.rejects(file.withLock(async () => { ran = true; }), /symbolic link/);
+  assert.equal(ran, false);
+  assert.deepEqual(JSON.parse(await readFile(moved, 'utf8')), { session: { accessToken: 'access-1' } });
 });
 
 test('a sign-in file that is not a JSON object is refused without quoting what it holds', async () => {
