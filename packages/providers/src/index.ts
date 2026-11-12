@@ -28,6 +28,8 @@ export {
 export type {
   OpenAICompatibleProviderConfig,
 } from './chat-completions.ts';
+export { createOpenAIResponsesProvider } from './responses.ts';
+export type { OpenAIResponsesProviderConfig } from './responses.ts';
 export {
   DEFAULT_CODEX_MODEL,
   SDK_SESSION_METADATA_KEY,

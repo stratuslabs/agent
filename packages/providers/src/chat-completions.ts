@@ -149,7 +149,7 @@ interface OpenAICompatibleResponse {
  * throw away conversation history to "fix" a request that was wrong in some
  * other way.
  */
-const overflowedContext = (payload: { error?: { code?: string } }, message: string): boolean =>
+export const overflowedContext = (payload: { error?: { code?: string } }, message: string): boolean =>
   payload.error?.code === 'context_length_exceeded'
   // The families that actually occur: "maximum context length is N tokens"
   // (OpenAI, vLLM), "exceeds the available context size" (llama.cpp),
@@ -158,15 +158,29 @@ const overflowedContext = (payload: { error?: { code?: string } }, message: stri
   // omit it.
   || /context (?:length|size|window)|maximum context|too many tokens|prompt is too long|reduce the length of the messages/i.test(message);
 
-const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
-const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+export const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+
+/**
+ * A base URL without its trailing slashes. Not `replace(/\/+$/, '')`,
+ * which is quadratic on a run of slashes that is not at the end (state's
+ * `withoutTrailingSlashes` says more; state depends on this package, so it
+ * cannot be imported here).
+ */
+export const withoutTrailingSlashes = (url: string): string => {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 0x2f) {
+    end -= 1;
+  }
+  return url.slice(0, end);
+};
 
 /**
  * A configured value both as written and as Fetch sends it: Fetch trims
  * surrounding spaces and tabs from a header value, so an endpoint echoes
  * the trimmed form.
  */
-const asSent = (value: string): string[] => {
+export const asSent = (value: string): string[] => {
   // Index walks, not `/^[\t ]+|[\t ]+$/g`: that regex restarts at every
   // tab of a run that is not at the end, so `a`, 40,000 tabs and `a` took
   // 2.7 s (CodeQL js/polynomial-redos).
@@ -207,7 +221,7 @@ const authorizationCredential = (value: string): string | undefined => {
  * endpoint may name the credential alone ("invalid token: ..."), so that
  * part counts on its own too.
  */
-const headerSecrets = (headers: Record<string, string>): string[] =>
+export const headerSecrets = (headers: Record<string, string>): string[] =>
   Object.entries(headers).flatMap(([name, value]) => {
     const credential = /^(?:proxy-)?authorization$/i.test(name)
       ? authorizationCredential(value)
@@ -231,14 +245,7 @@ export const createOpenAICompatibleProvider = ({
     throw new Error('Global fetch is unavailable for the OpenAI-compatible provider.');
   }
 
-  // Not `replace(/\/+$/, '')`, which is quadratic on a run of slashes
-  // that is not at the end (state's `withoutTrailingSlashes` says more;
-  // state depends on this package, so it cannot be imported here).
-  let baseUrlEnd = baseUrl.length;
-  while (baseUrlEnd > 0 && baseUrl.charCodeAt(baseUrlEnd - 1) === 0x2f) {
-    baseUrlEnd -= 1;
-  }
-  const normalizedBaseUrl = baseUrl.slice(0, baseUrlEnd);
+  const normalizedBaseUrl = withoutTrailingSlashes(baseUrl);
   // Copied once: what is sent and what is redacted are the same values, so
   // a caller mutating its object later cannot send a credential the
   // redaction never heard of.
@@ -491,7 +498,7 @@ const extractOpenAICompatibleUsage = (
   };
 };
 
-interface OpenAICompatibleToolNameMapping {
+export interface OpenAICompatibleToolNameMapping {
   toWire: Map<string, string>;
   fromWire: Map<string, string>;
 }
@@ -504,7 +511,7 @@ export const sanitizeOpenAICompatibleToolName = (name: string): string => {
   return sanitized.length > 0 ? sanitized : 'tool';
 };
 
-const createOpenAICompatibleToolNameMapping = (
+export const createOpenAICompatibleToolNameMapping = (
   tools: ToolDescriptor[] | undefined,
 ): OpenAICompatibleToolNameMapping => {
   const toWire = new Map<string, string>();
@@ -528,7 +535,7 @@ const createOpenAICompatibleToolNameMapping = (
   return { toWire, fromWire };
 };
 
-const toWireToolName = (name: string, mapping: OpenAICompatibleToolNameMapping): string =>
+export const toWireToolName = (name: string, mapping: OpenAICompatibleToolNameMapping): string =>
   mapping.toWire.get(name) ?? sanitizeOpenAICompatibleToolName(name);
 
 const createOpenAICompatibleTools = (
