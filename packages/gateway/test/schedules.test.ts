@@ -415,6 +415,116 @@ test('the per-agent cap defers a firing while one is still running', async () =>
   store.close();
 });
 
+test('a per-agent limit of 2 runs two of that agent\'s schedules at once, never one schedule twice, and leaves other agents at 1', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const gates: Deferred<void>[] = [];
+  const fired: string[] = [];
+  const running = new Map<string, number>();
+  let peak = { ava: 0, bea: 0 };
+
+  const runtime = runtimeWith(store, {
+    limits: { minIntervalMs: 1, tickMs: 10, maxConcurrentPerAgent: 1, maxConcurrentByAgent: { ava: 2 } },
+    dispatch: async (input) => {
+      fired.push(String(input.metadata[SCHEDULE_ID_METADATA_KEY]));
+      const agent = input.agentId as 'ava' | 'bea';
+      running.set(agent, (running.get(agent) ?? 0) + 1);
+      peak = { ...peak, [agent]: Math.max(peak[agent], running.get(agent) ?? 0) };
+      const gate = deferred<void>();
+      gates.push(gate);
+      await gate.promise;
+      running.set(agent, (running.get(agent) ?? 1) - 1);
+    },
+  });
+
+  const now = new Date().toISOString();
+  for (const id of ['ava-one', 'ava-two', 'ava-three']) {
+    store.insert(record({ id, cadence: { kind: 'every', intervalMs: 20 }, nextFireAt: now }));
+  }
+  for (const id of ['bea-one', 'bea-two']) {
+    store.insert(record({ id, agentId: 'bea', cadence: { kind: 'every', intervalMs: 20 }, nextFireAt: now }));
+  }
+  await runtime.start();
+
+  await waitFor(() => (running.get('ava') ?? 0) === 2 && (running.get('bea') ?? 0) === 1, 'two ava firings and one bea firing');
+  // Many ticks pass with every gate held: nothing else may start.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(peak.ava, 2, 'ava runs two scheduled turns at once, and no third');
+  assert.equal(peak.bea, 1, 'an agent without its own limit keeps the default of 1');
+  const avaSchedules = fired.filter((scheduleId) => scheduleId.startsWith('ava-'));
+  assert.equal(avaSchedules.length, 2);
+  assert.equal(new Set(avaSchedules).size, 2, 'the two running ava turns are two different schedules');
+
+  runtime.stop();
+  for (const gate of gates) {
+    gate.resolve();
+  }
+  await runtime.drain();
+  store.close();
+});
+
+test('one schedule never overlaps itself under a per-agent limit above 1', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const fired: string[] = [];
+  const first = deferred<void>();
+  const runtime = runtimeWith(store, {
+    limits: { minIntervalMs: 1, tickMs: 10, maxConcurrentPerAgent: 1, maxConcurrentByAgent: { ava: 2 } },
+    dispatch: async (input) => {
+      fired.push(input.sessionId);
+      if (fired.length === 1) {
+        await first.promise;
+      }
+    },
+  });
+  store.insert(record({ id: 'ava-fast', cadence: { kind: 'every', intervalMs: 20 }, nextFireAt: new Date().toISOString() }));
+  await runtime.start();
+
+  await waitFor(() => fired.length === 1, 'the first firing');
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(fired.length, 1, 'the spare slot does not go to the same schedule\'s next firing');
+  first.resolve();
+  await waitFor(() => fired.length === 2, 'the next firing once the first settled');
+
+  runtime.stop();
+  await runtime.drain();
+  store.close();
+});
+
+test('a per-agent limit names agents by their own ids only, never by an inherited property', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const gates: Deferred<void>[] = [];
+  let peak = 0;
+  let running = 0;
+  const runtime = runtimeWith(store, {
+    limits: { minIntervalMs: 1, tickMs: 10, maxConcurrentPerAgent: 1, maxConcurrentByAgent: { ava: 2 } },
+    dispatch: async () => {
+      running += 1;
+      peak = Math.max(peak, running);
+      const gate = deferred<void>();
+      gates.push(gate);
+      await gate.promise;
+      running -= 1;
+    },
+  });
+  const now = new Date().toISOString();
+  for (const id of ['one', 'two']) {
+    store.insert(record({ id, agentId: 'constructor', cadence: { kind: 'every', intervalMs: 20 }, nextFireAt: now }));
+  }
+  await runtime.start();
+  await waitFor(() => running >= 1, 'the first firing');
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(peak, 1, 'an agent called "constructor" keeps the default of 1');
+
+  runtime.stop();
+  for (const gate of gates) {
+    gate.resolve();
+  }
+  await runtime.drain();
+  store.close();
+});
+
 test('missed windows: one late catch-up when the window is still open, a logged skip when it is gone', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
