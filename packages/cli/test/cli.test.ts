@@ -12448,9 +12448,29 @@ const postJson = (url: string, token: string, body: unknown): Promise<{ status: 
   });
 
 /**
+ * POST /api/v1/restart, asked again while the daemon is still starting.
+ * The control API announces itself (the "control API on" line, then
+ * gateway.json) partway through the daemon's start, and the gateway
+ * refuses a restart with 409 "still starting" until that start has
+ * returned: the contract is to ask again once it serves. A test that asks
+ * the moment the address appears would otherwise race the rest of the
+ * start, which a loaded runner loses. Any other answer is returned as it
+ * came, as is the last refusal once the deadline passes.
+ */
+const postRestart = async (base: string, token: string, body: unknown): Promise<{ status: number; body: string }> => {
+  for (const deadline = Date.now() + 30_000; ;) {
+    const answer = await postJson(`${base}/api/v1/restart`, token, body);
+    if (answer.status !== 409 || !answer.body.includes('still starting') || Date.now() >= deadline) {
+      return answer;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+};
+
+/**
  * `stratus serve` with its output watched: resolves the control API's URL
- * the moment the daemon prints it, which is the event a restart request
- * has to wait for.
+ * the moment the daemon prints it, which is the event a request has to
+ * wait for. A restart waits for the rest of the start too: see postRestart.
  */
 const watchedServeStreams = () => {
   const base = createStreams();
@@ -12496,7 +12516,7 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
 
   const base = await watched.apiUrl;
   const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
-  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 5000 });
+  const accepted = await postRestart(base, token, { reason: 'test', drainTimeoutMs: 5000 });
   assert.equal(accepted.status, 202, accepted.body);
 
   // The command's exit is the last daemon's exit: the supervisor started
@@ -12552,7 +12572,7 @@ test('a restart over a trusted config that will not load is refused while the da
   assert.ok(!watched.output.stdout.includes('restart requested'), 'nothing may be announced for a refused restart');
 
   await writeFile(configFile, JSON.stringify({ provider: 'demo' }));
-  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test' });
+  const accepted = await postRestart(base, token, { reason: 'test' });
   assert.equal(accepted.status, 202, accepted.body);
   assert.equal(await serving, 0);
   assert.equal(respawns, 1);
@@ -12579,7 +12599,7 @@ test('a supervised daemon answers a restart by exiting with the restart status, 
 
   const base = await watched.apiUrl;
   const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
-  const accepted = await postJson(`${base}/api/v1/restart`, token, {});
+  const accepted = await postRestart(base, token, {});
   assert.equal(accepted.status, 202, accepted.body);
 
   assert.equal(await serving, RESTART_EXIT_CODE);
@@ -12901,7 +12921,7 @@ test('a stop signal during a restart\'s drain stops the daemon; it does not come
   const queued = await postJson(`${base}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' });
   assert.equal(queued.status, 202, queued.body);
   await started;
-  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 60_000 });
+  const accepted = await postRestart(base, token, { reason: 'test', drainTimeoutMs: 60_000 });
   assert.equal(accepted.status, 202, accepted.body);
 
   // The stop lands mid-drain; then the held turn is let finish.
@@ -13015,7 +13035,7 @@ test('a supervised daemon that could not drain ends the supervisor, so the servi
 
   const base = await watched.apiUrl;
   const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
-  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 5000 });
+  const accepted = await postRestart(base, token, { reason: 'test', drainTimeoutMs: 5000 });
   assert.equal(accepted.status, 202, accepted.body);
 
   // One daemon started, and no second one beside whatever it leaked: the
@@ -13058,7 +13078,7 @@ test('a supervised daemon that could not drain exits with the undrained status, 
   const queued = await postJson(`${base}/api/v1/sessions/s-stuck/messages`, token, { message: 'hang', agentId: 'ava' });
   assert.equal(queued.status, 202, queued.body);
   await started;
-  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 50 });
+  const accepted = await postRestart(base, token, { reason: 'test', drainTimeoutMs: 50 });
   assert.equal(accepted.status, 202, accepted.body);
 
   // Said with the status the supervisor ends on, so the service manager
@@ -13136,7 +13156,8 @@ test('the supervisor hands each daemon the port its predecessor bound, and a sup
   });
   const base = await watched.apiUrl;
   const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
-  assert.equal((await postJson(`${base}/api/v1/restart`, token, {})).status, 202);
+  const accepted = await postRestart(base, token, {});
+  assert.equal(accepted.status, 202, accepted.body);
   assert.equal(await serving, 0);
   assert.deepEqual(hints, [Number(new URL(base).port), 45_001]);
 
@@ -13245,7 +13266,8 @@ test('the dashboard sessions live at a restart go to the daemon that comes back,
   const sessionId = cookie.slice(`${SESSION_COOKIE}=`.length);
   assert.equal((await rawGet(`${base}/api/v1/health`, { cookie })).status, 200);
 
-  assert.equal((await postJson(`${base}/api/v1/restart`, token, {})).status, 202);
+  const accepted = await postRestart(base, token, {});
+  assert.equal(accepted.status, 202, accepted.body);
   assert.equal(await serving, 0);
 
   // The first daemon handed the browser it had signed in; the replacement
@@ -13306,7 +13328,8 @@ test('a supervised daemon takes the sessions handed down its channel before it s
 
   // A browser this daemon signed in itself goes back up with the adopted one.
   const own = (await signInToDashboard(base, token)).slice(`${SESSION_COOKIE}=`.length);
-  assert.equal((await postJson(`${base}/api/v1/restart`, token, {})).status, 202);
+  const accepted = await postRestart(base, token, {});
+  assert.equal(accepted.status, 202, accepted.body);
   assert.equal(await serving, RESTART_EXIT_CODE);
   const handedBack = sent.find((message) => message.type === 'stratusd.sessions');
   assert.deepEqual(handedBack?.sessions?.sort(), [handed.id, own].sort());
@@ -13364,7 +13387,8 @@ test('a stop delivered to the whole process group after a restart drains the rep
     }
     assert.ok(first, `the daemon never published gateway.json:\n${output}`);
     const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
-    assert.equal((await postJson(`${first.url}/api/v1/restart`, token, { reason: 'test' })).status, 202);
+    const accepted = await postRestart(first.url, token, { reason: 'test' });
+    assert.equal(accepted.status, 202, accepted.body);
 
     let second: { pid?: number; url: string } | undefined;
     for (const deadline = Date.now() + 30_000; !second && Date.now() < deadline;) {
@@ -13376,6 +13400,16 @@ test('a stop delivered to the whole process group after a restart drains the rep
       }
     }
     assert.ok(second, `no replacement daemon came up:\n${output}`);
+    // Answering health is not yet serving: the replacement's API is up
+    // partway through its start, and its stop handler goes in only once
+    // that start has returned, in the same step that prints "Press Ctrl+C
+    // to stop." A group stop sent before that line is a stop during a
+    // start, which is not what this test is about.
+    const started = (): number => output.split('Press Ctrl+C to stop.').length - 1;
+    for (const deadline = Date.now() + 30_000; started() < 2 && Date.now() < deadline;) {
+      await sleep(50);
+    }
+    assert.equal(started(), 2, `the replacement never finished starting:\n${output}`);
     // The supervisor is the process the manager started; the replacement
     // is on the port the first daemon bound.
     assert.equal(first.pid, daemon.pid);
@@ -18055,7 +18089,7 @@ test('an announced restart under --log-format json keeps stdout JSON, and the ne
 
   const base = await watched.apiUrl;
   const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
-  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 5000 });
+  const accepted = await postRestart(base, token, { reason: 'test', drainTimeoutMs: 5000 });
   assert.equal(accepted.status, 202, accepted.body);
   assert.equal(await serving, 0);
 
