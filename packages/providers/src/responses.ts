@@ -97,7 +97,7 @@ interface ResponseObject {
   status?: string;
   model?: string;
   output?: OutputItem[];
-  error?: { code?: string | null; message?: string } | null;
+  error?: { code?: string | null; message?: string; param?: string | null } | null;
   incomplete_details?: { reason?: string } | null;
   usage?: {
     input_tokens?: number;
@@ -116,7 +116,50 @@ interface StreamEvent {
   response?: ResponseObject;
   code?: string | null;
   message?: string;
+  param?: string | null;
 }
+
+/**
+ * What the endpoint said when it refused a request or failed a response,
+ * kept as fields beside the same message as before: the HTTP status
+ * (absent for a failure inside a stream, which arrived on a 200), the
+ * error's code and param when it gave them, and the request ID it answered
+ * with. `detail` is the body's top-level `detail` text when the body had no
+ * error object at all, the shape a layer in front of the API refuses with.
+ * For a caller that recovers by code: Sign in with ChatGPT's plan limits
+ * arrive this way, and OpenAI asks that the request ID be kept.
+ */
+export class ResponsesApiError extends Error {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+  readonly param: string | undefined;
+  readonly requestId: string | undefined;
+  readonly detail: string | undefined;
+
+  constructor(
+    message: string,
+    details: {
+      status?: number | undefined;
+      code?: string | undefined;
+      param?: string | undefined;
+      requestId?: string | undefined;
+      detail?: string | undefined;
+    },
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'ResponsesApiError';
+    this.status = details.status;
+    this.code = details.code;
+    this.param = details.param;
+    this.requestId = details.requestId;
+    this.detail = details.detail;
+  }
+}
+
+const filled = (value: unknown): string | undefined => (typeof value === 'string' && value !== '' ? value : undefined);
+
+const requestIdOf = (response: Response): string | undefined => filled(response.headers.get('x-request-id'));
 
 export const createOpenAIResponsesProvider = ({
   model,
@@ -208,12 +251,18 @@ export const createOpenAIResponsesProvider = ({
               imagesRetried = true;
               continue;
             }
-            throw new Error(message);
+            throw new ResponsesApiError(message, {
+              status: response.status,
+              code: filled(payload.error?.code),
+              param: filled(payload.error?.param),
+              requestId: requestIdOf(response),
+              detail: payload.error === undefined ? filled(payload.detail) : undefined,
+            });
           }
           if (response.body === null) {
             throw new Error('Provider returned no response stream.');
           }
-          return await readResponse(response.body, request, toolNames, name, model);
+          return await readResponse(response.body, request, toolNames, name, model, requestIdOf(response));
         }
       } catch (error) {
         // A timed-out request is a provider failure (fallback-eligible),
@@ -252,6 +301,7 @@ const readResponse = async (
   toolNames: OpenAICompatibleToolNameMapping,
   providerName: string,
   model: string,
+  requestId: string | undefined,
 ) => {
   const onDelta = request.onDelta;
   const callNames = new Map<string, string>();
@@ -267,7 +317,7 @@ const readResponse = async (
       break;
     }
     if (type === 'error') {
-      throw streamError('Provider stream failed', event.code, event.message, model);
+      throw streamError('Provider stream failed', event, model, requestId);
     }
     if (type === 'response.output_item.done' && event.item && typeof event.output_index === 'number') {
       done.set(event.output_index, event.item);
@@ -292,7 +342,7 @@ const readResponse = async (
   }
 
   if (final.type === 'response.failed') {
-    throw streamError('Provider response failed', response.error?.code, response.error?.message, model);
+    throw streamError('Provider response failed', response.error ?? {}, model, requestId);
   }
   if (final.type === 'response.incomplete') {
     const reason = response.incomplete_details?.reason ?? 'unknown';
@@ -352,11 +402,16 @@ const readResponse = async (
  * code alone: the prose match is kept for a 400, where the request itself
  * was refused.
  */
-const streamError = (prefix: string, code: string | null | undefined, message: string | undefined, model: string): Error => {
+const streamError = (
+  prefix: string,
+  { code, message, param }: { code?: string | null | undefined; message?: string | undefined; param?: string | null | undefined },
+  model: string,
+  requestId: string | undefined,
+): Error => {
   const text = `${prefix} (${code ?? 'no code'}): ${message ?? 'no message'}`;
   return code === 'context_length_exceeded'
     ? new ContextOverflowError(`The conversation no longer fits ${model}'s context window (${text}).`)
-    : new Error(text);
+    : new ResponsesApiError(text, { code: filled(code), param: filled(param), requestId });
 };
 
 /** What an event says about progress, for a renderer and an activity watchdog. */
@@ -434,10 +489,10 @@ const usageOf = (response: ResponseObject, providerName: string, model: string):
 
 const readErrorBody = async (response: Response): Promise<{
   reported: string;
-  payload: { error?: { code?: string; message?: unknown } };
+  payload: { error?: { code?: string; message?: unknown; param?: unknown }; detail?: unknown };
 }> => {
   const rawText = await response.text();
-  let payload: { error?: { code?: string; message?: unknown } } = {};
+  let payload: { error?: { code?: string; message?: unknown; param?: unknown }; detail?: unknown } = {};
   try {
     const parsed: unknown = rawText.length > 0 ? JSON.parse(rawText) : undefined;
     // Only an object can be the error envelope; any other JSON is shown as
