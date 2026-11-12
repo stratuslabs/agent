@@ -278,12 +278,41 @@ test('a shadow pass\'s recall hides a fact it superseded, and the pass never sup
     assert.deepEqual(after.results.map((found) => found.content), ['Ava works in Denver.'], `${mode}: the superseded fact is hidden`);
     await assert.rejects(
       () => remember.execute({ fact: 'Ava works in Austin.', supersedes: fact.id }, passSession()),
-      /already superseded/,
+      mode === 'shadow' ? /already superseded/ : /No live memory entry/,
       `${mode}: a second supersede of one id is refused`,
     );
     assert.deepEqual(tally(), { saved: 1, superseded: 1 }, mode);
     assert.equal(shadow.written.length, mode === 'shadow' ? 1 : 0, mode);
   }
+});
+
+test('a successor not true yet retires nothing, in either mode: the fact it names is still shown and may be superseded again', async () => {
+  for (const mode of ['shadow', 'write'] as const) {
+    const store = new InMemoryAgentMemoryStore();
+    const fact = await store.append('ava', 'Ava works in Boston.');
+    const shadow = fakeShadowWriter();
+    const { recall, remember, tally } = createMemoryPassTools(store, stateFor(), mode === 'shadow' ? { write: shadow.write } : {});
+    await recall.execute({ query: 'Ava' }, passSession());
+    await remember.execute({ fact: 'Ava works in Denver.', validFrom: '2099-01-01T00:00:00.000Z', supersedes: fact.id }, passSession());
+
+    const after = await recall.execute({ query: 'Ava' }, passSession()) as Shown;
+    assert.deepEqual(after.results.map((found) => found.content).sort(), ['Ava works in Boston.', 'Ava works in Denver.'], mode);
+    await remember.execute({ fact: 'Ava works in Austin.', supersedes: fact.id }, passSession());
+    assert.deepEqual(tally(), { saved: 2, superseded: 2 }, mode);
+  }
+});
+
+test('a shadow pass\'s recall fills the limit past a fact it retired, as a write-mode recall would', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const older = await store.append('ava', 'Ava works in Boston.');
+  const newer = await store.append('ava', 'Ava works in Chicago.');
+  const shadow = fakeShadowWriter();
+  const { recall, remember } = createMemoryPassTools(store, stateFor(), { write: shadow.write });
+  await recall.execute({ query: 'Ava works' }, passSession());
+  await remember.execute({ fact: 'Her home is Denver now.', supersedes: newer.id }, passSession());
+
+  const one = await recall.execute({ query: 'Ava works', limit: 1 }, passSession()) as Shown;
+  assert.deepEqual([one.results.map((found) => found.id), one.truncated], [[older.id], false]);
 });
 
 test('a shadow tidy recalls its merge in place of the facts it merged, and only at its own label', async () => {

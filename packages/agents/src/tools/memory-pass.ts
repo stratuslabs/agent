@@ -13,6 +13,7 @@ import {
   memorySupersedesField,
   sessionTaintedBy,
   sessionWriteTrust,
+  supersededMemoryIdsAt,
   tokenizeMemoryText,
   type AgentMemoryStore,
   type JsonObject,
@@ -105,13 +106,14 @@ const supersedesInput = (value: unknown): string[] | undefined => {
  *   names an id cannot retire a fact the pass never saw. It may name
  *   several (a merge) only when the store takes a list, and every id is
  *   checked before anything is stored;
- * - every fact carries `metadata.memoryPass` so it can be found and undone;
- * - a fact is superseded once: recall stops showing it, and naming it
- *   again is refused, as the store refuses a fact that is no longer live.
+ * - every fact carries `metadata.memoryPass` so it can be found and undone.
  *
- * A shadow pass (`options.write`) writes nothing the store sees, so its
- * recall overlays the pass's own facts the way a store would show them.
- * The overlay is the pass's alone: a later pass does not see an earlier
+ * A shadow pass (`options.write`) writes nothing the store sees, so the
+ * pass keeps what the store would have: its recall shows the pass's own
+ * facts and stops showing a fact one of them retired, and a retired fact
+ * cannot be superseded again. Retired means what the store means
+ * (`supersededMemoryIdsAt`): only while the successor is true now. The
+ * overlay is the pass's alone: a later pass does not see an earlier
  * pass's shadow facts, as it would in write mode.
  *
  * No forget, no pin: forgetting what a pass wrote undoes all of it.
@@ -129,24 +131,28 @@ export const createMemoryPassTools = (
   const shown = new Map<string, TrustLevel>((state.handed ?? []).map((fact) => [fact.id, fact.trust]));
   let saved = 0;
   let superseded = 0;
-  /** Every id a fact this pass wrote replaced: superseded once, never again. */
-  const retired = new Set<string>();
+  const now = options.now ?? (() => new Date());
   /** A shadow pass's own facts, oldest first, as its recall shows them. */
   const own: MemoryEntry[] = [];
-  const outside = options.write !== undefined;
+  /** What the pass's own facts retire now, as the store would compute it. */
+  const retiredNow = (): Set<string> => supersededMemoryIdsAt(own, now());
 
   /**
    * The store's answer, less what this pass retired, plus a shadow pass's
    * own facts placed as the store ranks: one holding every word ahead of
    * the store's (it is the newest), one holding some of them after, and
-   * only under a ranked search, since `recency` needs every word.
+   * only under a ranked search, since `recency` needs every word. The
+   * store is asked for as many more as are retired, so a retired match
+   * does not take the place of a live one past the limit.
    */
-  const overlaid: Pick<AgentMemoryStore, 'search'> = {
+  const overlaid: Pick<AgentMemoryStore, 'search'> = options.write === undefined ? store : {
     async search(agentId, query, searchOptions) {
-      const result = await store.search(agentId, query, searchOptions);
-      if (retired.size === 0 && own.length === 0) {
-        return result;
+      if (own.length === 0) {
+        return store.search(agentId, query, searchOptions);
       }
+      const retired = retiredNow();
+      const limit = clampMemoryRecallLimit(searchOptions?.limit);
+      const result = await store.search(agentId, query, { ...searchOptions, limit: limit + retired.size });
       const tokens = tokenizeMemoryText(query);
       const ranked = result.strategy !== undefined && result.strategy !== 'recency';
       const every: MemoryEntry[] = [];
@@ -166,10 +172,7 @@ export const createMemoryPassTools = (
       some.sort((a, b) => b.hits - a.hits);
       const ownIds = new Set(own.map((entry) => entry.id));
       const kept = result.entries.filter((entry) => !retired.has(entry.id) && !ownIds.has(entry.id));
-      const bounded = boundRankedMemoryRead(
-        [...every, ...kept, ...some.map((found) => found.entry)],
-        clampMemoryRecallLimit(searchOptions?.limit),
-      );
+      const bounded = boundRankedMemoryRead([...every, ...kept, ...some.map((found) => found.entry)], limit);
       return { ...result, entries: bounded.entries, truncated: result.truncated || bounded.truncated };
     },
   };
@@ -177,7 +180,6 @@ export const createMemoryPassTools = (
   // Filtered before the recall tool sees the result, so a fact with another
   // label never reaches the model or lowers the pass session's label.
   const only = state.recallOnly;
-  const now = options.now ?? (() => new Date());
   const searched: Pick<AgentMemoryStore, 'search'> = only === undefined ? overlaid : {
     async search(agentId, query, searchOptions) {
       const result = await overlaid.search(agentId, query, searchOptions);
@@ -263,8 +265,11 @@ export const createMemoryPassTools = (
       }
       /** The tainted labels the facts it replaces have now: the new fact is never more trusted than one of them. */
       const lowered: TrustLevel[] = [];
+      // The store refuses a fact that is no longer live; a shadow pass's
+      // own facts are not in it, so the pass refuses for it.
+      const retired = options.write === undefined ? undefined : retiredNow();
       for (const replaced of replaces ?? []) {
-        if (retired.has(replaced)) {
+        if (retired?.has(replaced) === true) {
           throw new Error(`${replaced} was already superseded in this pass, and a fact is superseded once. Nothing was stored.`);
         }
         const label = shown.get(replaced);
@@ -303,10 +308,7 @@ export const createMemoryPassTools = (
       });
       saved += 1;
       superseded += replaces?.length ?? 0;
-      for (const replaced of replaces ?? []) {
-        retired.add(replaced);
-      }
-      if (outside) {
+      if (options.write !== undefined) {
         own.push({
           id: written.id,
           agentId,
