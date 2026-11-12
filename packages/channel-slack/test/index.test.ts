@@ -17424,6 +17424,132 @@ test('a replayed message a judged turn chose not to answer is not kept again', a
   assert.equal(await readKept(file), undefined);
 });
 
+test('a replayed turn that may stay silent, whose only output Slack refused, stays kept until it lands (AGT-133)', async () => {
+  // A judged turn, and a reply-optional one (card 601), each with a file or
+  // a tool's post as all it had to say. Slack refusing that is not a turn
+  // that chose silence: the message stays kept, and the next start repeats
+  // the finished turn, which reads its outputs from the session.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-kept-output-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, 'png bytes');
+  const outputs = {
+    file: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } },
+    post: { callId: 'c1', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: { text: 'Open PRs: 13' } } },
+  } as const;
+  for (const listens of ['judge', 'reply-optional'] as const) {
+    for (const kind of ['file', 'post'] as const) {
+      const label = `${listens}, ${kind}`;
+      const file = await keptFile();
+      const kept = { agentId: 'ava', team: 'T1', channel: 'C1', ts: '980.3', threadTs: '980.0', user: 'U-DYLAN', keptAt: Date.now() };
+      await writeFile(file, JSON.stringify([kept]));
+      const history = [{ ts: '980.3', thread_ts: '980.0', user: 'U-DYLAN', text: 'and then' }];
+      const configure = (gateway: StubGateway): void => {
+        if (listens === 'judge') {
+          gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+        }
+        gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:980.0', '2026-01-01T00:00:00.000Z']]));
+      };
+      const warnings: string[] = [];
+
+      // The turn runs, and Slack refuses its one output.
+      const failing = webWithHistory('B-AVA', history);
+      failing.knownConversations.set('C1', { is_member: true });
+      if (kind === 'file') {
+        failing.uploadFails = new Error('ratelimited');
+      } else {
+        failing.chat.postMessage = async () => {
+          throw new Error('ratelimited');
+        };
+      }
+      const first: StubGateway = createStubGateway(async ({ sessionId }) => {
+        await first.bus.emit({ type: 'tool.completed', sessionId, result: outputs[kind] });
+        return sessionWithReply(sessionId, '');
+      });
+      configure(first);
+      const before = createAdapterAsShipped({
+        agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+        editIntervalMs: 0,
+        createSocketClient: () => createFakeSocket(),
+        createWebClient: () => failing,
+        pendingIntakePath: file,
+        warn: (line) => warnings.push(line),
+      });
+      await before.start(first);
+      await before.stop();
+      assert.equal(first.dispatches.length, 1, label);
+      assert.deepEqual(first.replyOptional.length, listens === 'reply-optional' ? 1 : 0, label);
+      assert.deepEqual(await readKept(file), [kept], label);
+      assert.ok(warnings.some((line) => line === 'slack: ava could not post the answer to 980.3 in C1 kept from a restart; keeping it for the next start'), `${label}: ${warnings.join('\n')}`);
+
+      // The next start: the gateway repeats the finished turn, with no
+      // events, and its output is read from the session.
+      const working = webWithHistory('B-AVA', history);
+      working.knownConversations.set('C1', { is_member: true });
+      const second = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+      second.dispatch = async (input) => {
+        input.onRepeat?.('finished');
+        const at = new Date().toISOString();
+        return {
+          id: input.sessionId,
+          agent: { id: 'ava', name: 'Ava' },
+          status: 'completed',
+          messages: [
+            { id: 'u1', role: 'user', content: 'and then', createdAt: at, idempotencyKey: input.idempotencyKey ?? '' },
+            { id: 't1', role: 'tool', content: '', createdAt: at, toolResult: outputs[kind] },
+            { id: 'a1', role: 'assistant', content: '', createdAt: at },
+          ],
+          createdAt: at,
+          updatedAt: at,
+        };
+      };
+      configure(second);
+      const after = createAdapterAsShipped({
+        agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+        editIntervalMs: 0,
+        createSocketClient: () => createFakeSocket(),
+        createWebClient: () => working,
+        pendingIntakePath: file,
+      });
+      await after.start(second);
+      await after.stop();
+      if (kind === 'file') {
+        assert.deepEqual(working.uploads.map((upload) => upload.filename), ['chart.png'], label);
+      } else {
+        assert.deepEqual(working.posts.map((post) => post.text), ['Open PRs: 13'], label);
+      }
+      assert.equal(await readKept(file), undefined, label);
+    }
+  }
+});
+
+test('a replayed judged turn whose file is gone before it could be read is not kept again: no start could post it (AGT-133)', async () => {
+  const file = await keptFile();
+  await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '980.3', threadTs: '980.0', user: 'U-DYLAN', keptAt: Date.now() }]));
+  const web = webWithHistory('B-AVA', [{ ts: '980.3', thread_ts: '980.0', user: 'U-DYLAN', text: 'and then' }]);
+  web.knownConversations.set('C1', { is_member: true });
+  const gone = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-kept-gone-')), 'chart.png');
+  const warnings: string[] = [];
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: gone } } });
+    return sessionWithReply(sessionId, '');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:980.0', '2026-01-01T00:00:00.000Z']]));
+  const adapter = createAdapterAsShipped({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => createFakeSocket(),
+    createWebClient: () => web,
+    pendingIntakePath: file,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  await adapter.stop();
+  assert.ok(warnings.some((line) => line.startsWith(`files.uploadV2 failed for ${gone}`)), warnings.join('\n'));
+  assert.deepEqual(web.uploads, []);
+  assert.equal(await readKept(file), undefined);
+});
+
 test('a replayed message the start-up recovery answered comes off the list only if that answer reached Slack', async () => {
   // The recovery sweep owns the message's turn, so the replay is a live
   // repeat and withdraws; the sweep's own report is the answer. A report
