@@ -201,6 +201,23 @@ test('with no saved sign-in the turn fails asking for one, and nothing is sent',
   assert.equal(net.calls.length, 0);
 });
 
+test('a sign-in that didn\'t allow plan usage fails the turn before anything is sent', async () => {
+  const net = network({});
+  const provider = createChatGPTProvider({
+    model: 'gpt-test',
+    store: memoryStore(savedSession({ scopes: ['openid', 'profile', 'email'] })),
+    withSessionLock,
+    fetch: net.fetch,
+    now: () => NOW,
+  });
+  await assert.rejects(provider.generate(sayHello()), (error: unknown) => {
+    assert.ok(error instanceof ChatGPTAuthError);
+    assert.equal(error.code, 'plan_usage_not_granted');
+    return true;
+  });
+  assert.equal(net.calls.length, 0);
+});
+
 test('ChatGPT plan errors say what to do, keeping OpenAI\'s words, the status, the code and the request ID', async () => {
   const cases: Array<{ what: string; reply: () => Response; expected: RegExp; status: number | undefined; code: string | undefined }> = [
     {

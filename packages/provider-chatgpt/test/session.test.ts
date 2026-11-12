@@ -156,11 +156,43 @@ test('inside the last five minutes it refreshes under the lock and saves the rep
 
 test('a refresh that lists scopes or brings an ID token replaces the saved ones', async () => {
   const saved = memoryStore(savedSession({ expiresAt: NOW - 1 }));
-  const server = refreshServer([refreshed({ scope: 'openid email', id_token: 'id-token-2' })]);
+  const server = refreshServer([refreshed({ scope: 'openid email chatgpt.tokens.use.direct', id_token: 'id-token-2' })]);
   const { source } = sourceFor(saved.store, server);
   await source.accessToken(undefined);
-  assert.deepEqual(saved.current()?.scopes, ['openid', 'email']);
+  assert.deepEqual(saved.current()?.scopes, ['openid', 'email', 'chatgpt.tokens.use.direct']);
   assert.equal(saved.current()?.idToken, 'id-token-2');
+});
+
+test('a sign-in without permission to use the ChatGPT plan gets no token, and nothing is refreshed', async () => {
+  for (const expiresAt of [NOW + 60 * MINUTE, NOW - 1]) {
+    const server = refreshServer([]);
+    const { lock, source } = sourceFor(memoryStore(savedSession({ scopes: ['openid', 'email'], expiresAt })).store, server);
+    const error = await rejectsWithCode(source.accessToken(undefined), 'plan_usage_not_granted');
+    assert.match(error.message, /stratus setup/);
+    assert.equal(server.requests.length, 0);
+    assert.equal(lock.taken, 0);
+  }
+});
+
+test('a refresh that comes back without the plan permission is saved, but its token is not handed out', async () => {
+  const saved = memoryStore(savedSession({ expiresAt: NOW - 1 }));
+  const server = refreshServer([refreshed({ scope: 'openid email' })]);
+  const { source } = sourceFor(saved.store, server);
+  await rejectsWithCode(source.accessToken(undefined), 'plan_usage_not_granted');
+  assert.equal(saved.current()?.refreshToken, 'refresh-2');
+  assert.deepEqual(saved.current()?.scopes, ['openid', 'email']);
+  // And the next call refuses from the saved record, without a request.
+  await rejectsWithCode(source.accessToken(undefined), 'plan_usage_not_granted');
+  assert.equal(server.requests.length, 1);
+});
+
+test('a sign-in another process saved without the plan permission, while this one waited for the lock, gets no token', async () => {
+  const saved = memoryStore(savedSession({ expiresAt: NOW - 1 }));
+  const server = refreshServer([]);
+  const lock = memoryLock(() => saved.replace(savedSession({ accessToken: 'access-other', scopes: ['openid'] })));
+  const { source } = sourceFor(saved.store, server, lock);
+  await rejectsWithCode(source.accessToken(undefined), 'plan_usage_not_granted');
+  assert.equal(server.requests.length, 0);
 });
 
 test('callers waiting together get one refresh: the second rereads the record inside the lock', async () => {

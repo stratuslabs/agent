@@ -35,7 +35,9 @@ with no dependencies beyond Node's own `crypto` and `http` and Stratus's
   dead refresh token clears them and keeps the account for signing in again.
   A cancelled caller returns at once and sends no refresh, but a refresh
   already sent finishes and is saved, because the old refresh token may
-  already be spent.
+  already be spent. It hands out no token for a sign-in that doesn't allow
+  using the ChatGPT plan (`chatgpt.tokens.use.direct` not granted), as OpenAI
+  asks.
   `sessionFromSignIn` makes the record to save from a completed sign-in.
 - `createChatGPTProvider` is the model provider: the Responses adapter from
   `@stratusagent/providers` on the token source's access token, at
@@ -48,5 +50,6 @@ with no dependencies beyond Node's own `crypto` and `http` and Stratus's
 
 Every failure is a `ChatGPTAuthError` with a stable `code`: `temporary` keeps
 the tokens, `signin_required` means the refresh token is dead and the user
-signs in again, and `storage_failed` means the saved sign-in or its lock
+signs in again, `plan_usage_not_granted` means the sign-in is valid but the
+user didn't allow plan usage, and `storage_failed` means the saved sign-in or its lock
 failed on this machine. No message quotes a token.
