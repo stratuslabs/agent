@@ -1016,7 +1016,7 @@ const CLEARS_FRAMESET_OK = new Set([
  * it does a hidden element's, before the cut by name: one the page ends
  * inside has no end tag to pair with, and a canvas a `div` closed holds
  * nothing after the `div`. The rest of DROPPED_ELEMENTS are either raw
- * text, which `openAtEnd` already cuts, or page furniture a browser shows,
+ * text, which `readMarkup` already cuts, or page furniture a browser shows,
  * which keeps its text when the page ends inside it.
  */
 const NEVER_RENDERED = new Set(['template', 'canvas']);
@@ -1048,17 +1048,30 @@ const FOREIGN_BREAKOUT = new Set([
 const COMMENT_END = /(?<=<!--)-?>|--!?>/g;
 
 /**
- * Where the page ends inside markup: the `<` of a tag, comment, doctype
- * or processing instruction with no end, or of a script, style or other
- * dropped element whose end tag never arrives — or the page's length when
- * it ends in text. A browser that reaches the end of the page in any of
- * these drops what it was reading, so none of it is text. A page cut by
- * the download cap usually ends this way: inside a tag, or a long script.
+ * The page as the HTML tokenizer leaves it for the passes below: its
+ * comments gone, the doctype, processing instructions, other bogus
+ * comments and CDATA sections with them, every `<` that is text escaped
+ * (`&lt;`, decoded again at the end), and cut where the page ends inside
+ * markup. So each `<` the passes below see opens a tag the tokenizer read,
+ * and none of them can find markup in a script's text, an xmp's, or a
+ * `<` that a removed comment left beside a word.
+ *
+ * The cut is at the `<` of a tag, comment, doctype or processing
+ * instruction with no end, or of a script, style or other dropped element
+ * whose end tag never arrives. A browser that reaches the end of the page
+ * in any of these drops what it was reading, so none of it is text. A
+ * page cut by the download cap usually ends this way: inside a tag, or a
+ * long script.
  *
  * The page is walked as the tokenizer walks it, so a `<` inside a comment,
  * a quoted value or a script is not mistaken for the start of markup, and
  * `5 < 10` is prose: only a `<` followed by a letter, `/`, `!` or `?`
  * opens anything. Each character is visited a bounded number of times.
+ * Comments are removed in the same walk, not by a pattern run before tags
+ * are read: a `<!` or `<?` in a quoted value, or a `<!--` in a script, is
+ * no comment, and a pattern that took it for one deleted the element's
+ * text up to the next `>` or `-->`. Every kind of comment leaves nothing
+ * behind, not even a space, as in a browser.
  *
  * In svg or math a script or style is not raw text but an element like
  * any other, and `<![CDATA[` is character data up to `]]>`, so the walk
@@ -1068,28 +1081,48 @@ const COMMENT_END = /(?<=<!--)-?>|--!?>/g;
  * from inside svg or math. Where the page would go there — a tag such as
  * `p` that breaks out, a start tag inside an integration point such as
  * `foreignObject`, an end tag that closes nothing open in svg or math —
- * the walk stops and the page is kept whole, as this extractor kept every
- * page before the walk existed: a script left in is a lesser fault than
- * an article cut short.
+ * the walk reads on as HTML, and still cuts at a tag or comment the page
+ * ends inside, which the tokenizer reads alike in svg, math and HTML. But
+ * a script or other raw-text element whose end never comes is not cut
+ * there: it may be an element of svg or math after all, so it and the rest
+ * are read as markup, and kept whole, as this extractor kept every page
+ * before the walk existed. A script left in is a lesser fault than an
+ * article cut short.
  */
-const openAtEnd = (html: string): number => {
+const readMarkup = (html: string): string => {
   let index = 0;
+  // The page up to `copied` as the passes below read it, comments gone.
+  let kept = '';
+  let copied = 0;
+  const upTo = (end: number): string => kept + html.slice(copied, end);
+  // Text as the tokenizer read it, each `<` in it escaped, so that no
+  // pattern below reads markup there; `decodeEntities` turns it back.
+  const asText = (from: number, to: number): string => html.slice(from, to).replace(/</g, '&lt;');
+  // Whether the walk has left svg or math for HTML on a guess; and then,
+  // whether a raw-text element ran to the end of the page, after which the
+  // rest is read as markup, no element as raw text, and nothing is cut: it
+  // may all be text.
+  let guessing = false;
+  let rawTextOff = false;
+  const cutAt = (start: number): string => upTo(rawTextOff ? html.length : start);
   // The svg and math elements open, outermost first; empty in HTML.
   const foreign: string[] = [];
   for (;;) {
     const start = html.indexOf('<', index);
-    if (start === -1) return html.length;
+    if (start === -1) return upTo(html.length);
     const next = html[start + 1] ?? '';
-    // A comment; or `<!`, `<?` or `</` before anything but a letter, `>`
-    // or the end, which the tokenizer reads as a comment to the next `>`.
-    if (next === '!' || next === '?' || (next === '/' && start + 2 < html.length && !/[a-zA-Z>]/.test(html[start + 2] ?? ''))) {
+    // A comment; or `<!`, `<?` or `</` before anything but a letter or the
+    // end, which the tokenizer reads as a comment to the next `>` — `</>`
+    // is nothing at all.
+    if (next === '!' || next === '?' || (next === '/' && start + 2 < html.length && !/[a-zA-Z]/.test(html[start + 2] ?? ''))) {
       let close = -1;
       if (foreign.length > 0 && html.startsWith('<![CDATA[', start)) {
-        // Character data in svg or math, through `]]>`; to the end of the
-        // page if that never comes, and text either way, never markup.
+        // Character data in svg or math, through `]]>`, and never markup.
+        // It goes with what it holds, which is an svg style or script as
+        // pages write it; a browser shows its text only inside a MathML
+        // token element or an svg text, which are rare enough to leave out.
         const cdataEnd = html.indexOf(']]>', start + 9);
-        if (cdataEnd === -1) return html.length;
-        close = cdataEnd + 3;
+        if (cdataEnd !== -1) close = cdataEnd + 3;
       } else if (html.startsWith('<!--', start)) {
         COMMENT_END.lastIndex = start + 4;
         const found = COMMENT_END.exec(html);
@@ -1098,47 +1131,67 @@ const openAtEnd = (html: string): number => {
         const gt = html.indexOf('>', start + 2);
         if (gt !== -1) close = gt + 1;
       }
-      if (close === -1) return start;
-      index = close;
+      if (close === -1) return cutAt(start);
+      kept = upTo(start);
+      copied = index = close;
       continue;
     }
     const tag = readTag(html, start);
     if (tag === undefined) {
-      index = start + 1;
+      // A `<` that opens nothing is text, and must stay text once a comment
+      // after it is gone: `<<!x>b>` is no `<b>` tag.
+      kept = upTo(start) + asText(start, start + 1);
+      copied = index = start + 1;
       continue;
     }
-    if (tag === 'unterminated') return start;
+    if (tag === 'unterminated') return cutAt(start);
     index = tag.end;
     if (foreign.length > 0) {
       if (tag.closing) {
+        // Unbounded, and still linear: an end tag searches the list only as
+        // far as it then closes, or empties it.
         const opened = foreign.lastIndexOf(tag.name);
-        if (opened === -1) return html.length;
-        foreign.length = opened;
-        continue;
+        if (opened !== -1) {
+          foreign.length = opened;
+          continue;
+        }
+      } else {
+        const font = tag.name === 'font' && ['color', 'face', 'size'].some((name) => tag.attributes.has(name));
+        if (!FOREIGN_BREAKOUT.has(tag.name) && !font && !INTEGRATION_POINTS.has(foreign.at(-1) ?? '')) {
+          if (!tag.selfClosing) foreign.push(tag.name);
+          continue;
+        }
       }
-      const font = tag.name === 'font' && ['color', 'face', 'size'].some((name) => tag.attributes.has(name));
-      if (FOREIGN_BREAKOUT.has(tag.name) || font || INTEGRATION_POINTS.has(foreign.at(-1) ?? '')) return html.length;
-      // Unbounded, and still linear: an end tag searches the list only as
-      // far as it then closes, or ends the walk.
-      if (!tag.selfClosing) foreign.push(tag.name);
-      continue;
+      // The tree builder goes back to HTML here, or may: the walk reads
+      // this tag and the rest as HTML from now on.
+      guessing = true;
+      foreign.length = 0;
     }
     if (tag.closing) continue;
     if (FOREIGN_ROOTS.has(tag.name)) {
       if (!tag.selfClosing) foreign.push(tag.name);
       continue;
     }
-    if (tag.name === 'plaintext') return html.length;
-    if (RAW_TEXT_ELEMENTS.has(tag.name)) {
+    if (tag.name === 'plaintext') return upTo(index) + asText(index, html.length);
+    if (RAW_TEXT_ELEMENTS.has(tag.name) && !rawTextOff) {
       // Raw text runs to its end tag, and the page may end before that end
       // tag does. A dropped element's text is dropped either way; a
-      // textarea's is shown, up to an end tag the page cut short.
+      // textarea's is shown, up to an end tag the page cut short. After a
+      // guess it may be no raw text at all, so it is read as markup, and
+      // what it holds is kept: a script left in is a lesser fault than an
+      // article cut short. Either way a tag in a script's or an xmp's text
+      // is none, and no pass below may cut an element by it.
       const found = rawTextEnd(html, tag.name, index);
       if (found === -1 || readTag(html, found) === 'unterminated') {
-        if (DROPPED_ELEMENTS.includes(tag.name)) return start;
-        return found === -1 ? html.length : found;
+        if (guessing) {
+          rawTextOff = true;
+          continue;
+        }
+        if (DROPPED_ELEMENTS.includes(tag.name)) return upTo(start);
+        return upTo(index) + asText(index, found === -1 ? html.length : found);
       }
-      index = found;
+      kept = upTo(index) + asText(index, found);
+      copied = index = found;
     }
   }
 };
@@ -1898,9 +1951,9 @@ const removeSpans = (text: string, opener: RegExp, closer: RegExp, replacement: 
  * past the last one, and the result is the same; but from every `<` after
  * it a `[^>]*` scans to the end of the text and fails, and the final
  * sweep's two quantifiers side by side then try every split as well. A
- * pass that removes a tag can take the last `>` with it — the comment in
- * `<a<a<a…<!---->`, read as markup only after the comments have gone —
- * which left four thousand characters of `<a` taking fifty seconds. So
+ * pass that removes a tag can take the last `>` with it: a comment pattern
+ * run before tags were read once took the one ending `<a<a<a…<!---->`,
+ * and left four thousand characters of `<a` taking fifty seconds. So
  * each pass finds the last `>` again.
  */
 const beforeLastGt = (text: string, pass: (head: string) => string): string => {
@@ -1925,10 +1978,11 @@ export const extractTitle = (html: string): string | undefined => {
 };
 
 export const htmlToText = (page: string): string => {
-  // Markup the page ends inside — a tag, comment or script the download
-  // cap cut short — is dropped first, as a browser drops it. Left in, the
-  // patterns below have no `>` to end it at, and pass it on as text.
-  const html = page.slice(0, openAtEnd(page));
+  // Comments go first, where the tokenizer reads them, and markup the page
+  // ends inside — a tag, comment or script the download cap cut short — is
+  // dropped, as a browser drops it (readMarkup). Left in, the patterns
+  // below have no `>` to end it at, and pass it on as text.
+  const html = readMarkup(page);
 
   // Every pattern below ends in `>`, so nothing after the page's last `>`
   // can be part of one — and that tail is where they turned from linear to
@@ -1940,17 +1994,7 @@ export const htmlToText = (page: string): string => {
   // The tail is text, and joins the rest before entities are decoded.
   const end = html.lastIndexOf('>') + 1;
   const tail = html.slice(end);
-
-  // Comments first, then the doctype and any processing instruction. These
-  // are removed by name rather than by a blanket `<[^>]*>` sweep, because
-  // that sweep reads `5 < 10 and 20 > 15` as a tag and deletes the middle
-  // of the sentence — prose about arbitrary subjects is exactly what a
-  // fetched page is.
-  // A comment ends where the HTML tokenizer ends it (COMMENT_END). Read
-  // only to `-->`, a `--!>` comment ran on and the markup inside it
-  // reached the visibility pass.
-  let text = removeSpans(html.slice(0, end), /<!--/g, COMMENT_END, '');
-  text = beforeLastGt(text, (head) => head.replace(/<[!?][^>]*>/g, ' '));
+  let text = html.slice(0, end);
 
   // Before the dropped elements, which are cut out by name with no regard
   // for the tree: an end tag inside a `nav` closes its ancestors as much as

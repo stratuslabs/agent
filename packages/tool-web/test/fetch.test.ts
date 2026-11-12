@@ -432,6 +432,9 @@ test('a page of unclosed tags is extracted in one pass, not one rescan per tag',
     // Templates and canvases are judged in the tree too, and their tags
     // kept for the cut by name after it.
     '<p>x</p>' + '<template><canvas>'.repeat(40_000) + '</template>'.repeat(40_000),
+    // Each comment comes out, and each `<` of text beside it is escaped,
+    // in the one walk.
+    '<p>x</p>' + '<<!x></<?y>'.repeat(50_000),
   ];
   assert.equal(await extractsWithin(pages, 10_000), true);
   for (const page of pages) {
@@ -521,8 +524,9 @@ test('a script or style the page ends inside is dropped to the end', () => {
   // Cut inside its end tag, the script still never closed.
   assert.equal(htmlToText('<p>a</p><script>LEAK()</script'), 'a');
   assert.equal(htmlToText('<p>a</p><script>LEAK()</script data-x="'), 'a');
-  // A textarea's text is shown, closed or not, as it was.
+  // A textarea's text is shown, closed or not, as it was: as text.
   assert.equal(htmlToText('<p>a</p><textarea>kept'), 'a\nkept');
+  assert.equal(htmlToText('<p>a</p><textarea><b>kept</b>'), 'a\n<b>kept</b>');
 });
 
 test('a script or style inside svg or math is not raw text, so it does not run to the end', () => {
@@ -569,6 +573,10 @@ test('where svg or math goes back to HTML, the page is kept whole rather than cu
   assert.equal(htmlToText('<p>a</p><svg><b>b<script>LEAK()'), 'a\nb LEAK()');
   assert.equal(htmlToText('<p>a</p><svg></p><script>LEAK()'), 'a\n\nLEAK()');
   assert.equal(htmlToText('<p>a</p><svg><foreignObject><div>d</div></foreignObject></svg><script>LEAK()'), 'a\nLEAK()');
+  // And what such an element holds is read as markup but never cut: it
+  // may all be text, as this xmp's is.
+  assert.equal(htmlToText('<p>a</p><svg><p>b</p><xmp>c <!-- d'), 'a\n\nb\nc <!-- d');
+  assert.equal(htmlToText('<p>a</p><svg><p>b</p><xmp>c <b title="d'), 'a\n\nb\nc <b title="d');
 });
 
 test('an end tag inside a textarea or title does not close a hidden element', () => {
@@ -1051,6 +1059,34 @@ test('a comment ends where the HTML tokenizer ends it', () => {
   assert.equal(htmlToText('<div hidden>gone<!-- x > </div> --!>still hidden</div><p>shown</p>'), 'shown');
   assert.equal(htmlToText('<p>a<!-->b</p>'), 'ab');
   assert.equal(htmlToText('<p>a<!--->b</p>'), 'ab');
+});
+
+test('comments, doctypes, processing instructions and CDATA are read where the tokenizer reads them', () => {
+  // A `<!` or `<?` inside a quoted value is part of the value: the tag
+  // ends at its own `>`, and the element's text is shown.
+  assert.equal(htmlToText('<p>a</p><a href="<?php echo $u; ">link</a>'), 'a\nlink');
+  assert.equal(htmlToText('<div data-tpl="<!-- x">kept</div>'), 'kept');
+  assert.equal(htmlToText(`<a title='a<!b'>t</a><span title="x <? y">s</span>`), 'ts');
+  // Inside a script or style a `<!--` is the script's text, and opens
+  // nothing that could run on past its end tag.
+  assert.equal(htmlToText(`<script>var s = '<!--';</script><p>shown</p>-->`), 'shown\n-->');
+  // In svg or math, CDATA runs to `]]>`, and none of it is markup: it goes
+  // whole, as the svg style or script it nearly always is.
+  assert.equal(htmlToText('<p>before</p><svg><![CDATA[<x></svg><script>LEAK]]></svg><p>shown</p>'), 'before\n\nshown');
+  assert.equal(htmlToText('<p>before</p><math><mi><![CDATA[a <!-- b]]></mi></math><p>shown</p>-->'), 'before\n\nshown\n-->');
+  // A `<` that opens nothing stays text once a comment after it is gone.
+  assert.equal(htmlToText('<p>a<<!x>b hidden>c</p>'), 'a<b hidden>c');
+  // Nor is a tag in a script's, a style's or an xmp's text one for the
+  // passes that cut elements by name: each is text to its end tag.
+  assert.equal(htmlToText('<style>a { content: "<script>" }</style><p>shown</p><script>x</script><p>after</p>'), 'shown\n\nafter');
+  assert.equal(htmlToText('<xmp><b>x</b> <style>y</xmp><p>shown</p><style>z</style>'), '<b>x</b> <style>y\nshown');
+  assert.equal(htmlToText('<plaintext><b>x</b> <!-- y -->'), '<b>x</b> <!-- y -->');
+  // `</` before anything but a letter opens a comment to the next `>`,
+  // and `</>` is nothing at all.
+  assert.equal(htmlToText('<p>shown</p>literal </3 LEAK> after'), 'shown\nliteral after');
+  assert.equal(htmlToText('<p>a</>b</p>'), 'ab');
+  // A comment of any kind leaves nothing behind, a space included.
+  assert.equal(htmlToText('<p>a<!x>b<?y>c</p>'), 'abc');
 });
 
 test('web.fetch is judged by the origin of its URL', async () => {
