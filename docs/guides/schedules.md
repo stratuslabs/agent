@@ -107,10 +107,15 @@ destination, because that is what is being approved. See
   destination, the daemon posts one notice there (under the report thread,
   if it has one): the agent, the first line of the error, the schedule id
   and the session id. It never posts the run's reply, which was written for nobody. A run
-  that never tried to send posts nothing, as before, and neither does one
-  whose schedule was cancelled while it ran. The notice follows the turn,
-  so a daemon stopping at that moment can lose it, and the log says so.
-  Event triggers work the same way.
+  that never tried to send, or sent only somewhere else, posts nothing, as
+  before, but the daemon log gets one warning naming the schedule and the
+  session (`schedule <id>: session <session> finished without posting to its
+  destination …`), so a report that was expected and never came leaves a
+  trace. A run that posts only when it has news logs that line on its quiet
+  firings. Nothing is posted or logged for a schedule cancelled while its
+  run went on. The notice follows the turn, so a daemon stopping at that
+  moment can lose it, and the log says so. Event triggers work the same
+  way.
 - **A schedule never overlaps itself.** Its next slot waits while its
   previous firing is still running or waiting on a person, so each firing
   reads a finished predecessor. With the default per-agent cap of one this

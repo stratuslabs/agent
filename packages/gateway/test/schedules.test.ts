@@ -16,6 +16,7 @@ import {
   createGateway,
   createSchedulerRuntime,
   SqliteScheduleStore,
+  sendOutcome,
   undeliveredSendError,
   type ApprovalTransport,
   type GatewayChannelAdapter,
@@ -1611,6 +1612,22 @@ test('a firing\'s report is undelivered when a send failed and none reached its 
   assert.equal(undeliveredSendError(ran([other]), eng), undefined);
 });
 
+test('a completed firing\'s sends against its destination come to reached, failed or none (AGT-353)', () => {
+  const eng = { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' };
+  const ran = (messages: Message[], status: Session['status'] = 'completed') => ({ status, messages });
+  const failed = sendResult('a', { ok: false, error: 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.' });
+  assert.deepEqual(sendOutcome(ran([failed, sendResult('b', { ok: true, destination: 'slack:C-ENG' })]), eng), { kind: 'reached' });
+  assert.deepEqual(sendOutcome(ran([failed]), eng), { kind: 'failed', error: 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.' });
+  // Never tried, sent only somewhere else, or failed at another tool: none.
+  assert.deepEqual(sendOutcome(ran([]), eng), { kind: 'none' });
+  assert.deepEqual(sendOutcome(ran([sendResult('c', { ok: true, destination: 'slack:C-OTHER' })]), eng), { kind: 'none' });
+  const other: Message = { ...failed, toolResult: { ...failed.toolResult!, toolName: 'shell.run' } };
+  assert.deepEqual(sendOutcome(ran([other]), eng), { kind: 'none' });
+  // A run that hasn't completed has no outcome yet.
+  assert.equal(sendOutcome(ran([], 'pending_approval'), eng), undefined);
+  assert.equal(sendOutcome(ran([], 'failed'), eng), undefined);
+});
+
 test('a completed firing whose send never arrived leaves a notice in its destination, and only then (AGT-335)', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
@@ -1790,6 +1807,114 @@ test('end to end: a headless firing whose only send fails is told where it repor
   assert.match(posts[0]!.text, /^ava's scheduled run didn't report here\. A message\.send in it failed: slack: C-ENG has no thread 9\.9, so nothing was posted\./);
   assert.ok(posts[0]!.text.includes(`session ${sessionId}.`));
   assert.ok(!posts[0]!.text.includes('posted the report'), 'the final reply is not posted: it was written for nobody');
+});
+
+test('a completed firing that never posted to its destination is one warning, and only then (AGT-353)', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const asked: string[] = [];
+  const notices: string[] = [];
+  const warnings: string[] = [];
+  const settled = { quiet: deferred<void>(), posted: deferred<void>(), failed: deferred<void>(), silent: deferred<void>(), dropped: deferred<void>() };
+  // Late-bound: the dropped firing cancels its own schedule mid-run.
+  let cancel: (id: string) => boolean = () => false;
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      const { sessionId } = input as Fired;
+      if (sessionId.startsWith('schedule:dropped:')) assert.equal(cancel('dropped'), true);
+      for (const [id, done] of Object.entries(settled)) {
+        if (sessionId.startsWith(`schedule:${id}:`)) done.resolve();
+      }
+    },
+    sendOutcome: async (sessionId) => {
+      asked.push(sessionId.split(':')[1]!);
+      if (sessionId.startsWith('schedule:posted:')) return { kind: 'reached' };
+      if (sessionId.startsWith('schedule:failed:')) return { kind: 'failed', error: 'slack: C-OPS has no thread 1.2, so nothing was posted.' };
+      return { kind: 'none' };
+    },
+    notify: async (_agentId, _destination, text) => {
+      notices.push(text);
+    },
+    warn: (line) => warnings.push(line),
+  });
+  cancel = (id) => runtime.cancel(id);
+
+  const slot = new Date(Date.now() - 5).toISOString();
+  store.insert(record({
+    id: 'quiet',
+    agentId: 'quinn',
+    cadence: { kind: 'at', at: slot },
+    nextFireAt: slot,
+    destination: { channel: 'slack', to: 'C-AGENTS', thread: '1791400000.000100' },
+  }));
+  store.insert(record({ id: 'posted', agentId: 'ava', nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+  store.insert(record({ id: 'failed', agentId: 'cy', nextFireAt: slot, destination: { channel: 'slack', to: 'C-OPS' } }));
+  store.insert(record({ id: 'silent', agentId: 'bea', nextFireAt: slot }));
+  store.insert(record({ id: 'dropped', agentId: 'dee', nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+  await runtime.start();
+  await Promise.all(Object.values(settled).map((done) => done.promise));
+  runtime.stop();
+  await runtime.drain();
+
+  // A schedule with no destination owes nobody a post, and one cancelled
+  // while its run went on has none any more, so neither is asked.
+  assert.deepEqual(asked.sort(), ['failed', 'posted', 'quiet']);
+  const quiet = warnings.filter((line) => line.includes('finished without posting'));
+  assert.deepEqual(quiet, [
+    `schedule quiet: session schedule:quiet:${slot} finished without posting to its destination slack:C-AGENTS (no message.send reached it)`,
+  ], warnings.join(' | '));
+  // The warning is a log line only; the failed send keeps AGT-335's notice and its own line.
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]!, /^cy's scheduled run didn't report here\./);
+  assert.ok(warnings.some((line) => line.startsWith('schedule failed: no send reached slack:C-OPS')), warnings.join(' | '));
+  assert.equal(warnings.length, 2, warnings.join(' | '));
+  store.close();
+});
+
+test('the gateway warns when a firing completes without posting to its destination, and not when it posted (AGT-353)', async () => {
+  const run = async (id: string, replies: Array<() => Response>) => {
+    const home = await newHome();
+    await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+    const slot = new Date(Date.now() - 5).toISOString();
+    const rows = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+    rows.insert(record({ id, cadence: { kind: 'at', at: slot }, nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+    rows.close();
+    let calls = 0;
+    const fetchFake = (async () => replies[Math.min(calls++, replies.length - 1)]!()) as typeof fetch;
+    const channel = fakeSlackChannel();
+    const warnings: string[] = [];
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+      idleTimeoutMs: 0,
+      schedules: { tickMs: 25 },
+      channels: [channel],
+      approvals: (transport: ApprovalTransport) => createPermissionPolicy({ mode: 'headless', destinations: transport.destinations }),
+      warn: (line: string) => warnings.push(line),
+    });
+    await gateway.start();
+    try {
+      // The one-shot's row is retired only after the delivery check, so its
+      // absence means the check has run.
+      await waitFor(() => !gateway.schedules().some((row) => row.id === id), `${id}'s firing to finish`);
+    } finally {
+      await gateway.stop();
+    }
+    return { posts: channel.posts, warnings };
+  };
+
+  const quiet = await run('quiet', [() => openAiText('nothing new, so no report')]);
+  assert.equal(quiet.posts.length, 0, 'the warning is a log line, never a post');
+  const lines = quiet.warnings.filter((line) => line.startsWith('schedule quiet:'));
+  assert.equal(lines.length, 1, quiet.warnings.join(' | '));
+  assert.match(lines[0]!, /^schedule quiet: session schedule:quiet:\S+ finished without posting to its destination slack:C-ENG \(no message\.send reached it\)$/);
+
+  const posted = await run('posted', [
+    () => openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'nightly report' }),
+    () => openAiText('posted the report'),
+  ]);
+  assert.equal(posted.posts.length, 1, JSON.stringify(posted));
+  assert.equal(posted.posts[0]?.text, 'nightly report');
+  assert.deepEqual(posted.warnings.filter((line) => line.startsWith('schedule posted:')), []);
 });
 
 test('a headless firing whose send is refused is told where its schedule reports; any other session\'s refusal is unchanged (AGT-336)', async () => {

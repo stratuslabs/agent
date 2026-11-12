@@ -95,7 +95,7 @@ import {
   isScheduleSessionId,
   SqliteScheduleStore,
   SCHEDULE_SESSION_ID_PREFIX,
-  undeliveredSendError,
+  sendOutcome,
 } from './schedules.ts';
 import { ShardedSessionStore } from './sessions.ts';
 import { createSubAgents } from './sub-agents.ts';
@@ -163,6 +163,8 @@ export {
   SCHEDULE_SESSION_ID_PREFIX,
   type PreviousRun,
   type ScheduleStoreLike,
+  sendOutcome,
+  type SendOutcome,
   undeliveredSendError,
   type SchedulerLimits,
   type SchedulerRuntime,
@@ -477,11 +479,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         trust: sessionWriteTrust(session),
       };
     },
-    // AGT-335: a completed firing that tried to report and never got
-    // through. Tool results only, never the transcript's words.
-    undeliveredSend: async (sessionId, destination) => {
+    // AGT-335 and AGT-353: how a completed firing's sends ended at its
+    // destination. Tool results only, never the transcript's words.
+    sendOutcome: async (sessionId, destination) => {
       const session = await store.get(sessionId);
-      return session ? undeliveredSendError(session, destination) : undefined;
+      return session ? sendOutcome(session, destination) : undefined;
     },
     // The runtime's own line, so no speaker: it is nobody's turn to hear.
     notify: async (agentId, destination, text) => {

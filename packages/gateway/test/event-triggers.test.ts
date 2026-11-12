@@ -789,6 +789,33 @@ test('a graceful stop mid-turn leaves the event\'s turn for the next start, whic
   }
 });
 
+test('an event firing that never posted to its trigger\'s destination is a warning naming the trigger (AGT-353)', async () => {
+  let notified = 0;
+  const r = await rig({
+    sendOutcome: async () => ({ kind: 'none' }),
+    notify: async () => {
+      notified += 1;
+    },
+  });
+  try {
+    const id = await r.trigger();
+    await r.runtime.start();
+    r.deliver(id, 'd-1');
+    r.runtime.kickEvents();
+    const [turn] = r.dispatched;
+    turn!.finish();
+    await settle();
+    assert.equal(notified, 0, 'a log line only');
+    assert.deepEqual(
+      r.warnings.filter((line) => line.includes('finished without posting')),
+      [`event trigger ${id}: session ${turn!.sessionId} finished without posting to its destination slack:C-ENG (no message.send reached it)`],
+      r.warnings.join('\n'),
+    );
+  } finally {
+    await r.stop();
+  }
+});
+
 test('an event firing whose send never arrived leaves a notice in its trigger\'s destination (AGT-335)', async () => {
   const notices: Array<{ agentId: string; destination: JsonObject; text: string }> = [];
   const asked: string[] = [];
