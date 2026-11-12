@@ -190,6 +190,16 @@ test('people add of someone already listed changes nothing', async () => {
   assert.equal(await readFile(configPath, 'utf8'), original);
 });
 
+test('people add of someone the shared list already has still names the agents whose own list lacks them', async () => {
+  const original = JSON.stringify({ principals: { slackUsers: ['U01AAAAAA'], agents: { bea: { slackUsers: ['U02BBBBBB'] } } } });
+  const { configPath, env } = await homeWith(original);
+  const result = await run(['people', 'add', 'U01AAAAAA'], env);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /U01AAAAAA is already on principals\.slackUsers; nothing changed\./);
+  assert.match(result.stdout, /bea has its own list, so this doesn't reach it: stratus people add U01AAAAAA --agent bea/);
+  assert.equal(await readFile(configPath, 'utf8'), original);
+});
+
 test('people add refuses an agent that is not in the roster', async () => {
   const { configPath, env } = await homeWith({});
   const result = await run(['people', 'add', 'U01AAAAAA', '--agent', 'cal'], env);

@@ -381,10 +381,18 @@ export const runPeople = async (command: ParsedPeopleCommand, streams: CliStream
 
   const next = structuredClone(config);
   const edit = editPeople(next, { action: command.action, memberId, agentId, approver });
+  // Said whether or not anything was written: someone already on the
+  // shared list is still turned away by an agent whose own list lacks them.
+  const reportNotReached = (): void => {
+    for (const other of edit.notReached) {
+      writeLine(streams.stdout, `${other} has its own list, so this doesn't reach it: stratus people add ${memberId} --agent ${other}${approver ? ' --approver' : ''}`);
+    }
+  };
   const changed = [...edit.added, ...edit.removed, ...edit.copied];
   if (changed.length === 0) {
     if (command.action === 'add') {
       writeLine(streams.stdout, `${memberId} is already on ${edit.already.join(' and ')}; nothing changed.`);
+      reportNotReached();
       return 0;
     }
     const where = agentId !== undefined
@@ -415,9 +423,7 @@ export const runPeople = async (command: ParsedPeopleCommand, streams: CliStream
   for (const list of edit.copied) {
     writeLine(streams.stdout, `${agentId} used the shared list, so ${list} starts as a copy of it. Later changes to the shared list don't reach ${agentId}.`);
   }
-  for (const other of edit.notReached) {
-    writeLine(streams.stdout, `${other} has its own list, so this doesn't reach it: stratus people add ${memberId} --agent ${other}${approver ? ' --approver' : ''}`);
-  }
+  reportNotReached();
   if (command.action === 'add' && approver) {
     const approvals = next.approvals;
     const mode = isObject(approvals) ? approvals.mode : undefined;
