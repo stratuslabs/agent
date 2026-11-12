@@ -36,7 +36,13 @@ export interface ChatGPTSessionStore {
 }
 
 export interface ChatGPTTokenSourceOptions {
-  readonly endpoints: ChatGPTEndpoints;
+  /**
+   * OpenAI's sign-in endpoints, or a function that finds them, asked only
+   * when a refresh is due. A function that fails counts as a refresh that
+   * failed for a reason other than the sign-in: the tokens are kept, and an
+   * access token that hasn't run out still serves.
+   */
+  readonly endpoints: ChatGPTEndpoints | (() => Promise<ChatGPTEndpoints>);
   readonly store: ChatGPTSessionStore;
   /**
    * Runs `work` while nothing else changes the saved session, in this
@@ -150,7 +156,7 @@ export const createChatGPTTokenSource = (options: ChatGPTTokenSourceOptions): Ch
     try {
       // No signal once it's sent: see unlessCancelled.
       tokens = await refreshTokens({
-        endpoints: options.endpoints,
+        endpoints: typeof options.endpoints === 'function' ? await options.endpoints() : options.endpoints,
         clientId: current.clientId,
         refreshToken: current.refreshToken,
         ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),

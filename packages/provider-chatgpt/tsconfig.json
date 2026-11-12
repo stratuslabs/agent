@@ -7,6 +7,7 @@
     "rewriteRelativeImportExtensions": true,
     "types": ["node"]
   },
+  "references": [{ "path": "../core" }, { "path": "../providers" }],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "test"]
 }
