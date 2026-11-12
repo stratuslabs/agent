@@ -1,0 +1,49 @@
+{
+  "name": "@stratusagent/provider-chatgpt",
+  "version": "0.14.15",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.16 <23 || >=24"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "description": "Sign in with ChatGPT for Stratus Agent: the OAuth protocol that lets agents run on a ChatGPT plan through the Responses API",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "chatgpt",
+    "openai",
+    "oauth"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/provider-chatgpt"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

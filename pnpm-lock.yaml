@@ -316,6 +316,15 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/provider-chatgpt:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.19.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/provider-claude-code:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
