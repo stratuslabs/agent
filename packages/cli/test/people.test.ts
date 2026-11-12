@@ -134,6 +134,29 @@ test('people add --agent starts the agent\'s own list as a copy of the shared on
   assert.match(result.stdout, /ava used the shared list, so principals\.agents\.ava\.slackUsers starts as a copy of it/);
 });
 
+test('people add --agent copies the shared list even when they are on it already, so later shared changes stop reaching that agent', async () => {
+  const { configPath, env } = await homeWith({ principals: { slackUsers: ['U01AAAAAA'] }, approvals: { slackApprovers: ['U09ZZZZZZ'] } });
+  const result = await run(['people', 'add', 'U01AAAAAA', '--agent', 'ava', '--approver'], env);
+  assert.equal(result.code, 0, result.stderr);
+  const written = await readConfig(configPath);
+  assert.deepEqual(written.principals, { slackUsers: ['U01AAAAAA'], agents: { ava: { slackUsers: ['U01AAAAAA'] } } });
+  assert.deepEqual(written.approvals, { slackApprovers: ['U09ZZZZZZ'], agents: { ava: { slackApprovers: ['U09ZZZZZZ', 'U01AAAAAA'] } } });
+  assert.match(result.stdout, /U01AAAAAA is already on principals\.agents\.ava\.slackUsers\./);
+  assert.doesNotMatch(result.stdout, /nothing changed/);
+  assert.match(result.stdout, /Added U01AAAAAA to approvals\.agents\.ava\.slackApprovers in /);
+  assert.match(result.stdout, /ava used the shared list, so principals\.agents\.ava\.slackUsers starts as a copy of it/);
+  assert.match(result.stdout, /ava used the shared list, so approvals\.agents\.ava\.slackApprovers starts as a copy of it/);
+});
+
+test('people add --agent of someone the shared list already has gives the agent its own copy and says so', async () => {
+  const { configPath, env } = await homeWith({ principals: { slackUsers: ['U01AAAAAA'] } });
+  const result = await run(['people', 'add', 'U01AAAAAA', '--agent', 'ava'], env);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual((await readConfig(configPath)).principals, { slackUsers: ['U01AAAAAA'], agents: { ava: { slackUsers: ['U01AAAAAA'] } } });
+  assert.doesNotMatch(result.stdout, /Added|nothing changed/);
+  assert.match(result.stdout, /^U01AAAAAA is already on principals\.agents\.ava\.slackUsers\.\nava used the shared list, so principals\.agents\.ava\.slackUsers starts as a copy of it\./m);
+});
+
 test('people add without --agent names the agents whose own list it does not reach', async () => {
   const { configPath, env } = await homeWith({ principals: { slackUsers: ['U01AAAAAA'], agents: { bea: { slackUsers: ['U01AAAAAA'] } } } });
   const result = await run(['people', 'add', 'U02BBBBBB'], env);
@@ -356,6 +379,13 @@ test('stratus people lists each agent\'s admit setting, people and approvers, an
   assert.match(result.stdout, /^ava\n {2}admits {5}listed people only\n {2}people {5}U01AAAAAA, U02BBBBBB \(shared list\)\n {2}approvers {2}U01AAAAAA \(shared list\)$/m);
   assert.match(result.stdout, /^bea\n {2}admits {5}anyone\n {2}people {5}U03CCCCCC \(its own list\)\n {2}approvers {2}U01AAAAAA \(shared list\)$/m);
   assert.match(result.stdout, /approvals\.mode is headless/);
+});
+
+test('stratus people lists the built-in agent too, which every daemon serves', async () => {
+  const { env } = await homeWith({ principals: { slackUsers: ['U01AAAAAA'] } });
+  const result = await run(['people'], env);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^stratus\n {2}admits {5}listed people only\n {2}people {5}U01AAAAAA \(shared list\)\n {2}approvers {2}nobody$/m);
 });
 
 test('stratus people says nobody is listed on a fresh home', async () => {

@@ -7,7 +7,6 @@
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import {
-  DEFAULT_STRATUS_AGENT,
   globalConfigPath,
   readNonEmptyString,
   readProcessEnv,
@@ -113,6 +112,13 @@ const editPeople = (
       const current = own ?? (agentId === undefined ? [] : readList(config, kind) ?? []);
       if (current.includes(memberId)) {
         edit.already.push(listName(kind, agentId));
+        // On the shared list already, but `--agent` still gives the agent
+        // its own copy, so a later change to the shared list stops reaching
+        // it, as it would have had they not been on it.
+        if (own === undefined && agentId !== undefined) {
+          writeList(config, kind, agentId, [...current]);
+          edit.copied.push(listName(kind, agentId));
+        }
       } else {
         writeList(config, kind, agentId, [...current, memberId]);
         edit.added.push(listName(kind, agentId));
@@ -167,7 +173,9 @@ const trustedConfigPath = (env: CliEnvironment, configPath: string | undefined):
 
 /** Roster agents, then any agent the two blocks already name. `configPath` is `--config`, as the daemon was given it. */
 const knownAgentIds = async (env: CliEnvironment, configPath: string | undefined, config: Raw, warn: (line: string) => void): Promise<string[]> => {
-  const { entries } = await rosterSoulsWithConfigured(env, warn, configPath !== undefined ? { configPath } : {});
+  // With the built-in agent, which every daemon serves whether or not a
+  // soul file or config entry names it.
+  const { entries } = await rosterSoulsWithConfigured(env, warn, { includeBuiltIn: true, ...(configPath !== undefined ? { configPath } : {}) });
   const ids = entries.map((entry) => entry.soul.agent.id);
   for (const blockName of ['principals', 'approvals'] as const) {
     const block = config[blockName];
@@ -354,7 +362,7 @@ export const runPeople = async (command: ParsedPeopleCommand, streams: CliStream
 
   if (agentId !== undefined) {
     const known = await knownAgentIds(env, command.configPath, config, (line) => writeLine(streams.stderr, `Warning: ${line}`));
-    if (!known.includes(agentId) && agentId !== DEFAULT_STRATUS_AGENT.id) {
+    if (!known.includes(agentId)) {
       writeLine(streams.stderr, `No agent ${agentId} here, so nothing changed. \`stratus agents\` lists them.`);
       return 1;
     }
@@ -373,7 +381,7 @@ export const runPeople = async (command: ParsedPeopleCommand, streams: CliStream
 
   const next = structuredClone(config);
   const edit = editPeople(next, { action: command.action, memberId, agentId, approver });
-  const changed = [...edit.added, ...edit.removed];
+  const changed = [...edit.added, ...edit.removed, ...edit.copied];
   if (changed.length === 0) {
     if (command.action === 'add') {
       writeLine(streams.stdout, `${memberId} is already on ${edit.already.join(' and ')}; nothing changed.`);
@@ -394,12 +402,16 @@ export const runPeople = async (command: ParsedPeopleCommand, streams: CliStream
   }
   await saveConfigFile(configPath, next as StratusConfigFile);
 
-  writeLine(
-    streams.stdout,
-    command.action === 'add'
-      ? `Added ${memberId} to ${edit.added.join(' and ')} in ${configPath}.`
-      : `Removed ${memberId} from ${edit.removed.join(', ')} in ${configPath}.`,
-  );
+  if (command.action === 'add') {
+    if (edit.added.length > 0) {
+      writeLine(streams.stdout, `Added ${memberId} to ${edit.added.join(' and ')} in ${configPath}.`);
+    }
+    if (edit.already.length > 0) {
+      writeLine(streams.stdout, `${memberId} is already on ${edit.already.join(' and ')}.`);
+    }
+  } else {
+    writeLine(streams.stdout, `Removed ${memberId} from ${edit.removed.join(', ')} in ${configPath}.`);
+  }
   for (const list of edit.copied) {
     writeLine(streams.stdout, `${agentId} used the shared list, so ${list} starts as a copy of it. Later changes to the shared list don't reach ${agentId}.`);
   }
