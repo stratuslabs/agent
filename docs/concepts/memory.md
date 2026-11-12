@@ -385,9 +385,13 @@ instead of reading a conversation. The runtime picks what it reads:
   `supersedes` gets no tidy passes (`skipped`, `store-unsupported`).
 
 In `shadow` mode a pass runs the same way but writes what it would have
-saved to `agents/<id>/memory-shadow.jsonl`, and no real fact changes. Shadow
-and write passes keep separate places, so write mode still tidies a group a
-shadow pass looked at.
+saved to `agents/<id>/memory-shadow.jsonl`, and no real fact changes. Within
+one pass, recall sees it as write mode would: the facts the pass would have
+saved are found, the ones it would have replaced are not, and no fact is
+replaced twice. A later pass doesn't see an earlier pass's shadow facts, so
+counts summed across shadow passes can include a fact that write mode would
+have saved once. Shadow and write passes keep separate places, so write mode
+still tidies a group a shadow pass looked at.
 
 ### The ledger
 

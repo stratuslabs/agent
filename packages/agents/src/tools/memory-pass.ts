@@ -1,17 +1,24 @@
 import {
+  boundRankedMemoryRead,
+  clampMemoryRecallLimit,
   effectiveMemoryValidityAt,
   isTaintedTrust,
   leastTrusted,
   MEMORY_PASS_KINDS,
   MEMORY_PASS_MAX_SAVES,
   MEMORY_PASS_METADATA_KEY,
+  memoryEntryFields,
+  memoryEntryTokens,
   memoryEntryTrust,
   memorySupersedesField,
   sessionTaintedBy,
   sessionWriteTrust,
+  supersededMemoryIdsAt,
+  tokenizeMemoryText,
   type AgentMemoryStore,
   type JsonObject,
   type MemoryAppendOptions,
+  type MemoryEntry,
   type MemoryOrigin,
   type MemoryPassKind,
   type Session,
@@ -58,7 +65,11 @@ export type MemoryPassWrite = (
 ) => Promise<{ id: string; trust: TrustLevel }>;
 
 export interface MemoryPassToolOptions extends MemoryToolOptions {
-  /** Default: `store.append`. */
+  /**
+   * Default: `store.append`. Given (a shadow pass), the facts land where
+   * the store's search cannot see them, so the pass's own recall shows
+   * them too: a pass that cannot see what it just wrote saves it again.
+   */
   write?: MemoryPassWrite;
   /**
    * The store takes a list in `supersedes` (its contribution declares
@@ -97,6 +108,14 @@ const supersedesInput = (value: unknown): string[] | undefined => {
  *   checked before anything is stored;
  * - every fact carries `metadata.memoryPass` so it can be found and undone.
  *
+ * A shadow pass (`options.write`) writes nothing the store sees, so the
+ * pass keeps what the store would have: its recall shows the pass's own
+ * facts and stops showing a fact one of them retired, and a retired fact
+ * cannot be superseded again. Retired means what the store means
+ * (`supersededMemoryIdsAt`): only while the successor is true now. The
+ * overlay is the pass's alone: a later pass does not see an earlier
+ * pass's shadow facts, as it would in write mode.
+ *
  * No forget, no pin: forgetting what a pass wrote undoes all of it.
  */
 export const createMemoryPassTools = (
@@ -112,14 +131,58 @@ export const createMemoryPassTools = (
   const shown = new Map<string, TrustLevel>((state.handed ?? []).map((fact) => [fact.id, fact.trust]));
   let saved = 0;
   let superseded = 0;
+  const now = options.now ?? (() => new Date());
+  /** A shadow pass's own facts, oldest first, as its recall shows them. */
+  const own: MemoryEntry[] = [];
+  /** What the pass's own facts retire now, as the store would compute it. */
+  const retiredNow = (): Set<string> => supersededMemoryIdsAt(own, now());
+
+  /**
+   * The store's answer, less what this pass retired, plus a shadow pass's
+   * own facts placed as the store ranks: one holding every word ahead of
+   * the store's (it is the newest), one holding some of them after, and
+   * only under a ranked search, since `recency` needs every word. The
+   * store is asked for as many more as are retired, so a retired match
+   * does not take the place of a live one past the limit.
+   */
+  const overlaid: Pick<AgentMemoryStore, 'search'> = options.write === undefined ? store : {
+    async search(agentId, query, searchOptions) {
+      if (own.length === 0) {
+        return store.search(agentId, query, searchOptions);
+      }
+      const retired = retiredNow();
+      const limit = clampMemoryRecallLimit(searchOptions?.limit);
+      const result = await store.search(agentId, query, { ...searchOptions, limit: limit + retired.size });
+      const tokens = tokenizeMemoryText(query);
+      const ranked = result.strategy !== undefined && result.strategy !== 'recency';
+      const every: MemoryEntry[] = [];
+      const some: { entry: MemoryEntry; hits: number }[] = [];
+      for (const entry of [...own].reverse()) {
+        if (retired.has(entry.id) || entry.agentId !== agentId) {
+          continue;
+        }
+        const have = new Set(memoryEntryTokens(entry));
+        const hits = tokens.filter((token) => have.has(token)).length;
+        if (tokens.length > 0 && hits === tokens.length) {
+          every.push(entry);
+        } else if (ranked && hits > 0) {
+          some.push({ entry, hits });
+        }
+      }
+      some.sort((a, b) => b.hits - a.hits);
+      const ownIds = new Set(own.map((entry) => entry.id));
+      const kept = result.entries.filter((entry) => !retired.has(entry.id) && !ownIds.has(entry.id));
+      const bounded = boundRankedMemoryRead([...every, ...kept, ...some.map((found) => found.entry)], limit);
+      return { ...result, entries: bounded.entries, truncated: result.truncated || bounded.truncated };
+    },
+  };
 
   // Filtered before the recall tool sees the result, so a fact with another
   // label never reaches the model or lowers the pass session's label.
   const only = state.recallOnly;
-  const now = options.now ?? (() => new Date());
-  const searched: Pick<AgentMemoryStore, 'search'> = only === undefined ? store : {
+  const searched: Pick<AgentMemoryStore, 'search'> = only === undefined ? overlaid : {
     async search(agentId, query, searchOptions) {
-      const result = await store.search(agentId, query, searchOptions);
+      const result = await overlaid.search(agentId, query, searchOptions);
       const at = now();
       return {
         ...result,
@@ -202,7 +265,13 @@ export const createMemoryPassTools = (
       }
       /** The tainted labels the facts it replaces have now: the new fact is never more trusted than one of them. */
       const lowered: TrustLevel[] = [];
+      // The store refuses a fact that is no longer live; a shadow pass's
+      // own facts are not in it, so the pass refuses for it.
+      const retired = options.write === undefined ? undefined : retiredNow();
       for (const replaced of replaces ?? []) {
+        if (retired?.has(replaced) === true) {
+          throw new Error(`${replaced} was already superseded in this pass, and a fact is superseded once. Nothing was stored.`);
+        }
         const label = shown.get(replaced);
         if (label === undefined) {
           throw new Error(`${replaced} is not a fact this pass was handed or memory.recall has shown in it, so it cannot be superseded. Nothing was stored.`);
@@ -226,8 +295,9 @@ export const createMemoryPassTools = (
         ...(state.sourceSessionId !== undefined ? { sessionId: state.sourceSessionId } : {}),
         ...(taintedBy !== undefined ? { taintedBy } : {}),
       };
+      const metadata = { [MEMORY_PASS_METADATA_KEY]: { id: state.passId, kind: state.kind } };
       const written = await write(agentId, fact, {
-        metadata: { [MEMORY_PASS_METADATA_KEY]: { id: state.passId, kind: state.kind } },
+        metadata,
         provenance: { trust: leastTrusted(state.trust, sessionWriteTrust(session), ...lowered), origin },
         ...fields,
         ...supersedes,
@@ -238,6 +308,18 @@ export const createMemoryPassTools = (
       });
       saved += 1;
       superseded += replaces?.length ?? 0;
+      if (options.write !== undefined) {
+        own.push({
+          id: written.id,
+          agentId,
+          content: fact,
+          createdAt: now().toISOString(),
+          trust: written.trust,
+          ...memoryEntryFields(fields),
+          ...supersedes,
+          metadata,
+        });
+      }
       return { remembered: true, id: written.id, trust: written.trust, ...supersedes };
     },
   };
