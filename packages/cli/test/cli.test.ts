@@ -16981,7 +16981,7 @@ test('concurrentScheduledTurns is read from the operator\'s config only, and a b
     await loadServeConcurrentScheduledTurns({ homeDir: home, cwd: home, processEnv: {} }, undefined, (line) => warnings.push(line)),
     { atlas: 2 },
   );
-  assert.deepEqual(warnings, []);
+  assert.equal(warnings.length, 0, warnings.join('\n'));
 
   // A cloned repository cannot raise how many turns an agent runs at once.
   await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo', concurrentScheduledTurns: { atlas: 8, nova: 8 } }));
