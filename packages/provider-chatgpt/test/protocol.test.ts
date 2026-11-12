@@ -351,6 +351,20 @@ test('a refused code exchange maps to a fresh sign-in, an outage to a temporary 
   );
 });
 
+test('a signing-key outage fails before the single-use code is spent, so the same callback can be retried', async () => {
+  const attempt = firstAttempt();
+  const outage = createFakeAuthServer({ jwks: { status: 503 }, token: [tokenReply(signJwt(idTokenClaims(attempt)))] });
+  await rejectsWithCode(
+    completeSignIn({ endpoints, attempt, callback: callbackFor(attempt), fetch: outage.fetch, now: () => NOW }),
+    'temporary',
+  );
+  assert.equal(outage.requests.some((request) => request.url === endpoints.tokenEndpoint), false, 'the code was not exchanged');
+
+  const recovered = createFakeAuthServer({ token: [tokenReply(signJwt(idTokenClaims(attempt)))] });
+  const signIn = await completeSignIn({ endpoints, attempt, callback: callbackFor(attempt), fetch: recovered.fetch, now: () => NOW });
+  assert.equal(signIn.subject, 'user-sub-1');
+});
+
 test('refreshTokens sends the issued client ID and resource without scope, and returns the replacement', async () => {
   const server = createFakeAuthServer({ token: [tokenReply(undefined, { access_token: 'access-2', refresh_token: 'refresh-2' })] });
   const tokens = await refreshTokens({ endpoints, clientId: ISSUED_CLIENT_ID, refreshToken: 'refresh-1', fetch: server.fetch, now: () => NOW });

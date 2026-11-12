@@ -434,14 +434,18 @@ export interface CompleteSignInOptions extends RequestOptions {
 }
 
 /**
- * Turns a callback into a validated sign-in: checks the callback, exchanges
- * the code, and validates the ID token (signature against OpenAI's published
- * keys, issuer, audience, expiry, nonce) before anything is returned.
+ * Turns a callback into a validated sign-in: checks the callback, loads
+ * OpenAI's signing keys, exchanges the code, and validates the ID token
+ * (signature, issuer, audience, expiry, nonce) before anything is returned.
  */
 export const completeSignIn = async (options: CompleteSignInOptions): Promise<ChatGPTSignIn> => {
   const { attempt, endpoints } = options;
   const now = options.now ?? Date.now;
   const { code, clientId } = readCallback(attempt, options.callback);
+  // The keys come first: the code is single-use, so a key outage after the
+  // exchange would throw away a good sign-in, and before it the caller can
+  // retry with the same callback.
+  const keys = await fetchSigningKeys(endpoints, options);
   const tokens = await exchangeCode({
     ...options,
     clientId,
@@ -455,7 +459,7 @@ export const completeSignIn = async (options: CompleteSignInOptions): Promise<Ch
   }
   const claims = verifyIdToken({
     token: tokens.idToken,
-    keys: await fetchSigningKeys(endpoints, options),
+    keys,
     issuer: endpoints.issuer,
     audience: clientId,
     nonce: attempt.nonce,
