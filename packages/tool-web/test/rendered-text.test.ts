@@ -41,9 +41,6 @@ test('htmlToText shows the text Chromium shows and hides the text it hides', () 
     if (entry === undefined) continue;
     const text = htmlToText(page.html);
     for (const marker of markersOf(page.html)) {
-      // An element still open at the end of the page keeps its text on
-      // purpose, so what Chromium hides inside one is not held either way.
-      if (entry.openAtEnd?.includes(marker) === true) continue;
       if (KEPT_ON_PURPOSE.has(marker)) {
         if (!text.includes(marker)) failures.push(`${page.id}: ${marker} is no longer kept; update KEPT_ON_PURPOSE`);
         continue;

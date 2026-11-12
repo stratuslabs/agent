@@ -1000,6 +1000,17 @@ const scanTags = (html: string): ScannedTag[] => {
 const FOREIGN_ROOTS = new Set(['svg', 'math']);
 
 /**
+ * Dropped elements a browser never shows either: a template's content is
+ * not rendered, and a canvas's fallback is not while scripts run. Closed,
+ * they are cut out by name with the rest of DROPPED_ELEMENTS; one the page
+ * ends inside has no end tag to pair, so the visibility pass drops it to
+ * the end, as it does a hidden element. The rest of DROPPED_ELEMENTS are
+ * either raw text, which `openAtEnd` already cuts, or page furniture a
+ * browser shows, and those keep their text when the page ends inside one.
+ */
+const NEVER_RENDERED = new Set(['template', 'canvas']);
+
+/**
  * The svg and MathML elements inside which the tree builder may read HTML
  * again: `foreignObject`, an svg `title` or `desc`, MathML's text elements
  * and an `annotation-xml`. Named without regard to which of svg or math
@@ -1253,7 +1264,9 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     parent: TreeNode | undefined,
     id = nextId++,
   ): OpenElement => {
-    if (attributes.has('hidden') || attributes.has('style') || attributes.has('aria-hidden')) mayHide = true;
+    if (attributes.has('hidden') || attributes.has('style') || attributes.has('aria-hidden') || NEVER_RENDERED.has(name)) {
+      mayHide = true;
+    }
     return { id, name, attributes, node: { id, name, attributes, parent } };
   };
   /**
@@ -1599,9 +1612,20 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     return result;
   };
 
-  // Whether a node is dropped: it, or a node it is in, is hidden and was
-  // closed. Read once the page is done, since nodes move until then;
-  // remembered per node, so a page costs its nodes once.
+  // What is open at the end inside svg or math. There the tree builder
+  // leaves for HTML at a tag such as `p`, which this pass does not follow:
+  // in `<svg style="display:none"><p>shown` the paragraph is the body's in
+  // a browser, and here it is still the svg's. So these hide nothing to the
+  // end of the page, and their text is kept rather than guessed at.
+  const foreignAt = stack.findIndex((open) => FOREIGN_ROOTS.has(open.name));
+  const openInForeign = new Set(foreignAt === -1 ? [] : stack.slice(foreignAt).map((open) => open.id));
+
+  // Whether a node is dropped: it, or a node it is in, is hidden, or is a
+  // template or canvas the page ends inside. A browser keeps an element
+  // open to the end of the page, so one still open here hides the rest, as
+  // a closed one hides what it held. Read once the page is done, since
+  // nodes move until then; remembered per node, so a page costs its nodes
+  // once.
   const dropped = new Map<TreeNode, boolean>();
   const isDropped = (node: TreeNode | undefined): boolean => {
     const chain: TreeNode[] = [];
@@ -1615,7 +1639,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       chain.push(at);
     }
     for (const at of chain.reverse()) {
-      result = result || (closed.has(at.id) && judge(at).hidden);
+      result = result || (!openInForeign.has(at.id) && (judge(at).hidden || (NEVER_RENDERED.has(at.name) && !closed.has(at.id))));
       dropped.set(at, result);
     }
     return result;
