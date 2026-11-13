@@ -67,6 +67,11 @@ with no dependencies beyond Node's own `crypto` and `http` and Stratus's
   a token. `signOutOfChatGPT` revokes the refresh token under the lock, then
   clears the access, refresh and ID tokens even when OpenAI doesn't confirm,
   and keeps the account and host ID for signing in again.
+- `listChatGPTModels` reads the signed-in account's own model list
+  (`GET /v1/models` on its access token) for setup's picker: the models
+  OpenAI marks to be shown, in its order, each with the slug to run and the
+  name to show. A refusal fails in the same words a turn would use, and the
+  list gives up after 15 seconds.
 
 Every failure is a `ChatGPTAuthError` with a stable `code`: `temporary` keeps
 the tokens, `signin_required` means the refresh token is dead and the user

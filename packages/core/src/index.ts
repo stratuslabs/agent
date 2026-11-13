@@ -1088,6 +1088,7 @@ export {
   SAID_TO_YOU_MARK,
   SILENT_REACTIONS,
   type SilentReaction,
+  startsTurn,
   TURN_LIMIT_NOTE,
   turnFailureFor,
   turnFilesFor,

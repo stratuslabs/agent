@@ -47,6 +47,8 @@ export type {
 } from './protocol.ts';
 export { CHATGPT_TOOL_NAMESPACE, CHATGPT_USAGE_URL, DEFAULT_DISCOVERY_TIMEOUT_MS, createChatGPTProvider } from './provider.ts';
 export type { ChatGPTProviderOptions } from './provider.ts';
+export { DEFAULT_MODEL_LIST_TIMEOUT_MS, listChatGPTModels } from './models.ts';
+export type { ChatGPTModel, ListChatGPTModelsOptions } from './models.ts';
 export { DEFAULT_REFRESH_BEFORE_MS, createChatGPTTokenSource, sessionFromSignIn } from './session.ts';
 export type { ChatGPTSession, ChatGPTSessionStore, ChatGPTTokenSource, ChatGPTTokenSourceOptions } from './session.ts';
 export { createChatGPTSessionStore, ensureChatGPTHostId, parseChatGPTSession } from './session-file.ts';

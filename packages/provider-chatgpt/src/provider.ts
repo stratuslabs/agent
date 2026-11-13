@@ -88,23 +88,23 @@ const ADMISSION_ERRORS: Readonly<Record<number, string>> = {
 };
 
 /**
- * The error in words a person can act on when it is one of the plan's own,
- * keeping what OpenAI said, the status and the request ID (which OpenAI asks
- * to be kept); anything else as it came.
+ * What to tell a person when `error` is one of the plan's own errors: by its
+ * code, or by status for a refusal at admission. Undefined for any other.
  */
-const describePlanError = (error: unknown): unknown => {
-  if (!(error instanceof ResponsesApiError)) {
-    return error;
-  }
+export const planErrorLead = (error: ResponsesApiError): string | undefined => {
   const explain = error.code !== undefined ? PLAN_ERRORS[error.code] : undefined;
-  const lead = explain !== undefined
+  return explain !== undefined
     ? explain(error.param)
     : error.code === undefined && error.detail !== undefined && error.status !== undefined
       ? ADMISSION_ERRORS[error.status]
       : undefined;
-  if (lead === undefined) {
-    return error;
-  }
+};
+
+/**
+ * `error` led by `lead`, keeping what OpenAI said, the status and the request
+ * ID (which OpenAI asks to be kept).
+ */
+export const withLead = (error: ResponsesApiError, lead: string): ResponsesApiError => {
   const facts = [
     `OpenAI: ${error.message}`,
     ...(error.status !== undefined ? [`HTTP ${error.status}`] : []),
@@ -115,6 +115,18 @@ const describePlanError = (error: unknown): unknown => {
     { status: error.status, code: error.code, param: error.param, requestId: error.requestId },
     { cause: error },
   );
+};
+
+/**
+ * The error in words a person can act on when it is one of the plan's own;
+ * anything else as it came.
+ */
+const describePlanError = (error: unknown): unknown => {
+  if (!(error instanceof ResponsesApiError)) {
+    return error;
+  }
+  const lead = planErrorLead(error);
+  return lead === undefined ? error : withLead(error, lead);
 };
 
 /**
