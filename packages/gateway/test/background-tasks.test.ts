@@ -222,7 +222,7 @@ const taskGateway = async (options: {
               return {
                 parts: [{
                   type: 'tool-call',
-                  call: { id: `${session.id}:${session.messages.length}`, toolName: 'agent.delegate', input: { agent: ask.to, prompt: ask.prompt, ...(ask.background !== undefined ? { background: ask.background } : {}) } },
+                  call: { id: `${session.id}:${session.messages.length}`, toolName: 'agent.delegate', input: { agent: ask.to ?? '', prompt: ask.prompt ?? '', ...(ask.background !== undefined ? { background: ask.background } : {}) } },
                 }],
               };
             },

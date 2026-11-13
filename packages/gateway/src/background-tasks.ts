@@ -17,8 +17,8 @@ import {
 } from '@stratusagent/agents';
 
 import type { ShardedSessionStore } from './sessions.ts';
-import { createTaskSettler, TASK_CUT_OFF_ERROR, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
-import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from './tasks.ts';
+import { createTaskSettler, deriveTaskOutcome, TASK_CUT_OFF_ERROR, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
+import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow, type TaskStatus } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
 // Background tasks in the gateway (AGT-211, agent-plans
@@ -41,8 +41,12 @@ export const TASKS_LIST_FINISHED_LIMIT = 10;
 export type TaskCancelResult =
   /** No such task, or not the asking agent's. */
   | { kind: 'missing' }
-  /** It had already ended, or its worker's turn had: nothing was written or stopped. Settling reports how it ended. */
-  | { kind: 'finished'; task: TaskRow }
+  /**
+   * It had already ended, or its worker's turn had: nothing was written or
+   * stopped. `status` is how it ended: the row's once settled, else what
+   * the worker session says, which settling is about to write.
+   */
+  | { kind: 'finished'; task: TaskRow; status: TaskStatus }
   /**
    * The stop is recorded and the task's turn is being stopped; settling
    * reports it `cancelled`. `already` when an earlier cancel recorded it
@@ -301,17 +305,22 @@ export const createBackgroundTasks = ({
       return { kind: 'missing' };
     }
     if (!isOpenTaskStatus(row.status)) {
-      return { kind: 'finished', task: row };
+      return { kind: 'finished', task: row, status: row.status };
     }
     const worker = await store.get(row.workerSessionId);
     if (worker !== undefined && turnMessageOf(worker) !== undefined && worker.status !== 'running' && worker.status !== 'pending_approval') {
-      return { kind: 'finished', task: tasks.get(taskId) ?? row };
+      const latest = tasks.get(taskId) ?? row;
+      return {
+        kind: 'finished',
+        task: latest,
+        status: isOpenTaskStatus(latest.status) ? deriveTaskOutcome(latest, worker)?.status ?? latest.status : latest.status,
+      };
     }
     const recorded = tasks.recordStop(taskId, stoppedBy, new Date().toISOString());
     const current = tasks.get(taskId) ?? row;
     if (!isOpenTaskStatus(current.status) || current.stoppedBy === undefined) {
       // Settling wrote a final status while this read the worker session.
-      return { kind: 'finished', task: current };
+      return { kind: 'finished', task: current, status: current.status };
     }
     const why = taskStoppedError(taskId, current.stoppedBy);
     const controller = controllers.get(taskId);
@@ -348,9 +357,14 @@ export const createBackgroundTasks = ({
     },
     async cancel(taskId, agentId) {
       const result = await cancel(taskId, { stoppedBy: 'agent', agentId });
-      return result.kind === 'missing'
-        ? result
-        : { kind: result.kind, status: result.task.status, ...(result.kind === 'stopping' && result.already === true ? { already: true } : {}) };
+      switch (result.kind) {
+        case 'missing':
+          return result;
+        case 'finished':
+          return { kind: 'finished', status: result.status };
+        case 'stopping':
+          return { kind: 'stopping', status: result.task.status, ...(result.already === true ? { already: true } : {}) };
+      }
     },
   };
 

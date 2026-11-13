@@ -278,6 +278,8 @@ test('cancel after the worker\'s turn finished, before settling: "already finish
 
     const result = await f.tasks.cancel(row.id, { stoppedBy: 'cli' });
     assert.equal(result.kind, 'finished');
+    assert.equal(result.kind === 'finished' ? result.status : undefined, 'completed', 'how it ended, from the worker, though the row still says running');
+    assert.deepEqual(await f.tasks.toolsHost!.cancel(row.id, 'ava'), { kind: 'finished', status: 'completed' });
     assert.equal(f.rows.get(row.id)?.stoppedBy, undefined, 'no stop was written');
     assert.deepEqual(f.aborted, [], 'nothing was aborted');
 
