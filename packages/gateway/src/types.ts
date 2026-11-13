@@ -600,8 +600,8 @@ export interface GatewayOptions {
   subAgents?: { maxConcurrentPerTurn?: number };
   /**
    * Background tasks (AGT-211): `agent.delegate` with `background: true`.
-   * Off unless `enabled` is true; then the tool offers `background`. The
-   * task table in `fleet.db` is kept either way, for the restart sweep.
+   * On unless `enabled` is false; while on, the tool offers `background`.
+   * The task table in `fleet.db` is kept either way, for the restart sweep.
    * `maxRunningPerAgent` caps the open tasks one agent has started, keyed
    * by agent id (`{ "atlas": 5 }`), 3 for an agent it doesn't name; each
    * entry must be a whole number of at least 1, or `createGateway` throws.

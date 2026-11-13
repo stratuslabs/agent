@@ -28,9 +28,9 @@ import type { DispatchInput, GatewayOptions } from './types.ts';
 // waiting for it, and settles the task on that chain when the worker's
 // turn ends. A cancel (`cancel`) records its stop before it aborts
 // anything, so settling reports it whatever happens next. Starting tasks is
-// off unless `tasks.enabled`. The restart sweep
-// runs either way: rows a process left before tasks were turned off still
-// get settled, and their workers failed as cut off, never left running.
+// on unless `tasks.enabled` is false. The restart sweep runs either way:
+// rows a process left before tasks were turned off still get settled, and
+// their workers failed as cut off, never left running.
 
 /** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` names it. */
 export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
@@ -183,12 +183,12 @@ export const createBackgroundTasks = ({
   /** One agent's cap. Own keys only: an agent id like `constructor` doesn't pick up an inherited property. */
   const capFor = (agentId: string): number =>
     Object.hasOwn(limits, agentId) ? limits[agentId]! : DEFAULT_MAX_RUNNING_TASKS_PER_AGENT;
-  const enabled = options.tasks?.enabled === true;
+  const enabled = options.tasks?.enabled !== false;
   const named = Object.entries(limits).map(([agentId, limit]) => `${agentId} ${limit}`).join(', ');
-  /** The startup line: whether agents may start tasks, and each cap. Nothing when the config says nothing. */
+  /** The startup line: whether agents may start tasks, and each cap. */
   const summary = enabled
     ? `background tasks: on, up to ${DEFAULT_MAX_RUNNING_TASKS_PER_AGENT} running per agent${named.length > 0 ? ` (${named})` : ''}`
-    : options.tasks?.enabled === false ? 'background tasks: off (tasks.enabled is false)' : undefined;
+    : 'background tasks: off (tasks.enabled is false)';
 
   // Its own connection to fleet.db, like the schedule and event stores.
   // Opened whether or not tasks are on, for the restart sweep.

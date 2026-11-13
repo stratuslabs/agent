@@ -17234,7 +17234,9 @@ test('serve says whether background tasks are on, and each agent\'s cap', async 
   assert.match(await ran({ enabled: true, maxRunningPerAgent: { atlas: 5 } }), /background tasks: on, up to 3 running per agent \(atlas 5\)/);
   assert.match(await ran({ enabled: true }), /background tasks: on, up to 3 running per agent\n/);
   assert.match(await ran({ enabled: false }), /background tasks: off \(tasks\.enabled is false\)/);
-  assert.doesNotMatch(await ran(undefined), /background tasks/);
+  // On unless the config says otherwise.
+  assert.match(await ran(undefined), /background tasks: on, up to 3 running per agent\n/);
+  assert.match(await ran({ maxRunningPerAgent: { atlas: 5 } }), /background tasks: on, up to 3 running per agent \(atlas 5\)/);
 
   // A cap that isn't one: the daemon doesn't start, and says which entry.
   const refused = await run({ enabled: true, maxRunningPerAgent: { atlas: 0 } });

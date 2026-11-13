@@ -70,7 +70,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `agentMaxTurns` | Per-agent replacements for `maxTurns`, keyed by agent id. Trusted configs only |
 | `autoContinue` | Agents that keep working past their budget instead of stopping to ask, keyed by agent id: `true` (no cap) or a number of extra budgets per message. Off for agents not listed. Trusted configs only. See [how many turns one message may spend](#how-many-turns-one-message-may-spend) |
 | `concurrentScheduledTurns` | How many of an agent's schedules may run a firing at once, keyed by agent id: `{ "atlas": 2 }`. 1 for agents not listed; one schedule never overlaps itself whatever the number. Trusted configs only. See [Schedules](../guides/schedules.md#limits) |
-| `tasks` | Background tasks: `enabled` (default `false`) lets an agent's `agent.delegate` call pass `background: true`, and `maxRunningPerAgent` caps how many one agent has running at once, keyed by agent id: `{ "atlas": 5 }`, 3 for agents not listed. Trusted configs only. See [Background tasks](#background-tasks) |
+| `tasks` | Background tasks: `enabled` (default `true`) lets an agent's `agent.delegate` call pass `background: true`, and `maxRunningPerAgent` caps how many one agent has running at once, keyed by agent id: `{ "atlas": 5 }`, 3 for agents not listed. Trusted configs only. See [Background tasks](#background-tasks) |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -277,14 +277,15 @@ setting — see [Tools](../guides/tools.md).
 
 ## Background tasks
 
-With `tasks.enabled`, an agent that may delegate can pass
-`background: true` to `agent.delegate`. The call returns a task id at once
-instead of waiting, the work runs as its own delegated session, and its
-outcome is added to the conversation that started it, once, when it ends.
+An agent that may delegate can pass `background: true` to
+`agent.delegate`. The call returns a task id at once instead of waiting,
+the work runs as its own delegated session, and its outcome is added to the
+conversation that started it, once, when it ends. Tasks are on unless
+`tasks.enabled` is `false`.
 
 ```json
 {
-  "tasks": { "enabled": true, "maxRunningPerAgent": { "atlas": 5 } }
+  "tasks": { "maxRunningPerAgent": { "atlas": 5 } }
 }
 ```
 
@@ -313,12 +314,14 @@ outcome is added to the conversation that started it, once, when it ends.
   operator token or a dashboard sign-in. A cancel with the token is named
   "from the CLI" in the notice, and one from a dashboard sign-in "from the
   dashboard".
-- **Off.** `enabled: false`, or no `tasks` block, refuses `background: true`
-  with an error saying so. Tasks a previous run left are still settled at
-  startup, and `stratus tasks` still lists them.
+- **Off.** `enabled: false` refuses `background: true` with an error
+  saying so, and agents no longer get `agent.tasks` or `agent.cancelTask`.
+  Tasks a previous run left are still settled at startup, and `stratus
+  tasks` still lists them.
 
 `stratus serve` names the setting when it starts (`background tasks: on,
-up to 3 running per agent (atlas 5)`). A project-local
+up to 3 running per agent (atlas 5)`, or `background tasks: off
+(tasks.enabled is false)`). A project-local
 `stratus.config.json` can't set `tasks`. A value that isn't one (a cap of
 0, `"enabled": "yes"`) is refused when the config loads, so the daemon
 doesn't start on it, and the error names the entry.
