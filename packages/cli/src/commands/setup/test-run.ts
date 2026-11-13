@@ -11,7 +11,10 @@ import { readFile } from 'node:fs/promises';
 import { parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import {
   DEFAULT_OPENAI_BASE_URL,
+  chatgptSignInLocation,
+  hasChatGPTSignIn,
   isRegisteredProviderName,
+  openChatGPTSignInFile,
   languageFor,
   readNonEmptyString,
   type CredentialProviderName,
@@ -36,7 +39,12 @@ export const createTestRunSetup = ({
 }: Pick<SetupBase, 'state' | 'processEnv' | 'streams' | 'env' | 'prompter' | 'recentNotices'> & Pick<ProviderSetup, 'defaultKeyEnvFor' | 'credentialProviderOf' | 'builtInDefaultModel'>) => {
   // Mirror the saved config's fallback so option 4 exercises the same
   // failover a real run would perform.
-  const buildTestFallback = (soul?: ParsedSoul): FallbackRuntime | undefined => {
+  // Whether the install's ChatGPT sign-in can serve a run, as
+  // resolveRuntimeConfig asks it; a file that can't be read can't.
+  const chatgptSignedIn = (): Promise<boolean> =>
+    hasChatGPTSignIn(openChatGPTSignInFile(chatgptSignInLocation(env))).catch(() => false);
+
+  const buildTestFallback = async (soul?: ParsedSoul): Promise<FallbackRuntime | undefined> => {
     if (!state.fallbackModel || state.provider === 'demo') {
       return undefined;
     }
@@ -45,6 +53,12 @@ export const createTestRunSetup = ({
       // A contributed fallback brings its own sign-in, as a contributed
       // primary does; the test run selects it by name and no more.
       return { provider: selectedFallback, model: state.fallbackModel };
+    }
+    if (selectedFallback === 'chatgpt') {
+      // Its own sign-in file, and skipped without one, as a real run does.
+      return await chatgptSignedIn()
+        ? { provider: 'chatgpt', model: state.fallbackModel, signIn: chatgptSignInLocation(env) }
+        : undefined;
     }
     const fallbackProvider = selectedFallback as CredentialProviderName;
     const envKey = (fallbackProvider === state.provider
@@ -132,7 +146,7 @@ export const createTestRunSetup = ({
       // model; the test run selects it and no more, exactly as a real run
       // resolves it — the configured fallback included, so the test
       // exercises the failover the saved config would perform.
-      const fallback = buildTestFallback(soul);
+      const fallback = await buildTestFallback(soul);
       return {
         provider: state.provider,
         ...(state.model ? { model: state.model } : {}),
@@ -144,6 +158,25 @@ export const createTestRunSetup = ({
     }
     const model = state.model ?? builtInDefaultModel(state.provider);
 
+    if (state.provider === 'chatgpt') {
+      // Setup can't sign in with ChatGPT yet; a config that already names
+      // chatgpt is tested on the sign-in the file holds.
+      if (!await chatgptSignedIn()) {
+        writeLine(streams.stdout, 'You are not signed in with ChatGPT on this install, so there is nothing to test yet.');
+        return undefined;
+      }
+      const fallback = await buildTestFallback(soul);
+      return {
+        provider: 'chatgpt',
+        model,
+        signIn: chatgptSignInLocation(env),
+        ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
+        ...(env.fetch ? { fetch: env.fetch } : {}),
+        ...(soul ? { soul } : {}),
+        ...(fallback ? { fallback } : {}),
+      };
+    }
+
     if (state.provider === 'anthropic') {
       const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
       const authToken = credential?.type === 'oauth_token' ? credential.value : undefined;
@@ -151,7 +184,7 @@ export const createTestRunSetup = ({
         writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export ANTHROPIC_API_KEY).');
         return undefined;
       }
-      const fallback = buildTestFallback(soul);
+      const fallback = await buildTestFallback(soul);
       const anthropicUrl = boundUrl ?? state.baseUrl;
       return {
         provider: 'anthropic',
@@ -184,7 +217,7 @@ export const createTestRunSetup = ({
         writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export CODEX_API_KEY).');
         return undefined;
       }
-      const fallback = buildTestFallback(soul);
+      const fallback = await buildTestFallback(soul);
       return {
         provider: 'codex',
         model,
@@ -201,7 +234,7 @@ export const createTestRunSetup = ({
       writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export OPENAI_API_KEY).');
       return undefined;
     }
-    const fallback = buildTestFallback(soul);
+    const fallback = await buildTestFallback(soul);
     return {
       provider: 'openai',
       model,

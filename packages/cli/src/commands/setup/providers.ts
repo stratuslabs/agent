@@ -55,10 +55,11 @@ export const createProviderSetup = ({
    * The sign-in a selection is stored under, or nothing: the demo provider
    * has none, and a provider a plugin registered brings its own through
    * its plugin's config and credentials — setup neither stores nor checks
-   * one for it.
+   * one for it. Nor for chatgpt: its sign-in is a file of its own
+   * (`~/.stratus/chatgpt-sign-in.json`), not a stored credential.
    */
   const credentialProviderOf = (provider: CliProviderName): CredentialProviderName | undefined =>
-    provider === 'demo' || isRegisteredProviderName(provider) ? undefined : provider;
+    provider === 'demo' || provider === 'chatgpt' || isRegisteredProviderName(provider) ? undefined : provider;
 
   const credentialLabel = (provider: CredentialProviderName, credential: StoredCredential): string =>
     credential.type === 'oauth_token'
@@ -109,6 +110,9 @@ export const createProviderSetup = ({
     }
     if (isRegisteredProviderName(state.provider)) {
       return `served by the plugin that registers ${registeredProviderNameOf(state.provider)}, on its own sign-in`;
+    }
+    if (state.provider === 'chatgpt') {
+      return 'on the ChatGPT sign-in in ~/.stratus/chatgpt-sign-in.json';
     }
     const credential = state.credentials[state.provider];
     if (credential) {

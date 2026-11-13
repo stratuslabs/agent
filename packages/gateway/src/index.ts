@@ -1577,6 +1577,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     (fallback.provider === 'anthropic' && Boolean(fallback.apiKey || fallback.authToken))
     // The codex harness streams item snapshots in every auth mode.
     || fallback.provider === 'codex'
+    // A ChatGPT sign-in runs on the Responses API, which streams.
+    || fallback.provider === 'chatgpt'
     // A contributed fallback says for itself, exactly as a contributed
     // primary does below; a session that switched to one must not lose
     // the watchdog the plugin declared it could have.
@@ -1592,6 +1594,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // call would abort every long turn.
     (config.provider === 'anthropic' && Boolean(config.apiKey || config.authToken))
     || config.provider === 'codex'
+    // A ChatGPT sign-in runs on the Responses API, which streams.
+    || config.provider === 'chatgpt'
     || (isRegisteredProviderName(config.provider)
       && providerContributions.get(registeredProviderNameOf(config.provider))?.streams === true);
 

@@ -2,6 +2,7 @@ import type { EffortLevel, JsonObject } from '@stratusagent/core';
 import type { ParsedSoul } from '@stratusagent/agents';
 import type { ClaudeCodeTransport, CodexTransport } from '@stratusagent/providers';
 import type { ReviewRule } from '@stratusagent/permissions';
+import type { ChatGPTSignInLocation } from './chatgpt-sign-in.ts';
 import {
   type RegisteredProviderName,
   type StratusProviderName,
@@ -490,7 +491,7 @@ export interface StratusConfigFile {
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
 export interface FallbackRuntime {
-  provider: 'anthropic' | 'openai' | 'codex' | RegisteredProviderName;
+  provider: 'anthropic' | 'openai' | 'codex' | 'chatgpt' | RegisteredProviderName;
   model: string;
   baseUrl?: string;
   apiKey?: string;
@@ -519,6 +520,12 @@ export interface FallbackRuntime {
    * fallback without one is skipped, not discovered broken mid-rescue.
    */
   codexSubscription?: true;
+  /**
+   * Where a chatgpt fallback's sign-in is kept. Set only when the file held
+   * one at resolution: like a codex fallback without its marker, one with
+   * none is skipped rather than discovered signed out mid-rescue.
+   */
+  signIn?: ChatGPTSignInLocation;
   /**
    * The primary's caching settings, carried so an Anthropic fallback honors
    * them too. Without this an operator who turned caching off would still
@@ -662,6 +669,25 @@ type RuntimeConfigVariant =
       fallback?: FallbackRuntime;
     }
   | {
+      provider: 'chatgpt';
+      model: string;
+      /**
+       * Where the install's ChatGPT sign-in is kept. Paths, not tokens: the
+       * provider reads the tokens on each request and refreshes them in that
+       * file, so a refresh never changes this config or the runner built
+       * from it. No key and no endpoint ride here: a ChatGPT sign-in is sent
+       * only to OpenAI.
+       */
+      signIn: ChatGPTSignInLocation;
+      systemPrompt?: string;
+      /** The transport seam, as on the openai variant: the Responses calls and the sign-in's own. */
+      fetch?: typeof fetch;
+      soul?: ParsedSoul;
+      /** Absolute path the soul was loaded from, for callers that re-read it. */
+      soulPath?: string;
+      fallback?: FallbackRuntime;
+    }
+  | {
       /**
        * A provider a plugin registered. No key, endpoint, or transport
        * rides here: a contributed provider takes its settings from its own
@@ -697,15 +723,16 @@ export type RuntimeConfig = RuntimeConfigVariant & {
 
 /**
  * A runtime served by a built-in provider that carries a sign-in of its
- * own — every variant but `demo` and a plugin's. What the surfaces that
- * explain credentials (`doctor`, the control API's credential source, the
- * override warning) narrow on, so a contributed provider reads as "its
- * plugin's business" there rather than as a missing key.
+ * own — every variant but `demo`, a plugin's, and `chatgpt`, whose sign-in
+ * is a file of its own rather than a key or token on the config. What the
+ * surfaces that explain credentials (`doctor`, the control API's credential
+ * source, the override warning) narrow on, so a contributed provider reads
+ * as "its plugin's business" there rather than as a missing key.
  */
 export type SignedInRuntimeConfig = Extract<RuntimeConfig, { provider: CredentialProviderName }>;
 
 export const isSignedInRuntime = (config: RuntimeConfig): config is SignedInRuntimeConfig =>
-  isBuiltinProviderName(config.provider) && config.provider !== 'demo';
+  isBuiltinProviderName(config.provider) && config.provider !== 'demo' && config.provider !== 'chatgpt';
 
 /**
  * The provider/model/config selection for one run — the subset of a CLI

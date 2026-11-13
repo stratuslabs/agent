@@ -76,11 +76,52 @@ const refuseLinkedFile = async (filePath: string): Promise<void> => {
   }
 };
 
+/**
+ * Where an install's ChatGPT sign-in and its lock are: paths only, never
+ * what is in the file. A runtime config carries this rather than tokens, so
+ * a refresh, which rewrites the file, never changes the config it runs on.
+ */
+export interface ChatGPTSignInLocation {
+  readonly path: string;
+  readonly lockPath: string;
+}
+
+export const chatgptSignInLocation = (env: StateEnvironment): ChatGPTSignInLocation => ({
+  path: chatgptSignInPath(env),
+  lockPath: chatgptSignInLockPath(env),
+});
+
 export const createChatGPTSignInFile = (
   env: StateEnvironment,
   options: { lockWaitMs?: number } = {},
+): ChatGPTSignInFile => openChatGPTSignInFile(chatgptSignInLocation(env), options);
+
+const filledString = (value: unknown): boolean => typeof value === 'string' && value !== '';
+
+/**
+ * Whether the file holds a sign-in a turn can run on: an account (client ID
+ * and subject) with a token. Only that much is read here, so a run is refused
+ * up front, like any other provider's missing key; what the tokens are worth
+ * is the provider's question, asked on the turn. A sign-in that ended (its
+ * tokens cleared by a refused refresh) reads as none. Throws as `read` does
+ * for a file that isn't a JSON object.
+ */
+export const hasChatGPTSignIn = async (file: Pick<ChatGPTSignInFile, 'read'>): Promise<boolean> => {
+  const session = (await file.read())?.session;
+  if (typeof session !== 'object' || session === null || Array.isArray(session)) {
+    return false;
+  }
+  const record = session as Record<string, unknown>;
+  return filledString(record.clientId)
+    && filledString(record.subject)
+    && (filledString(record.refreshToken) || filledString(record.accessToken));
+};
+
+export const openChatGPTSignInFile = (
+  location: ChatGPTSignInLocation,
+  options: { lockWaitMs?: number } = {},
 ): ChatGPTSignInFile => {
-  const filePath = chatgptSignInPath(env);
+  const filePath = location.path;
   return {
     read: async () => {
       let raw: string;
@@ -110,7 +151,7 @@ export const createChatGPTSignInFile = (
       await replaceOwnerOnlyFile(filePath, `${JSON.stringify(contents, null, 2)}\n`);
     },
     withLock: (work) =>
-      serializeFileWrite(chatgptSignInLockPath(env), async () => {
+      serializeFileWrite(location.lockPath, async () => {
         // Here as well as in the write, so a refresh is never sent whose
         // replacement token the write would then refuse to save.
         await refuseLinkedFile(filePath);
