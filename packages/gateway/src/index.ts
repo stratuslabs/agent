@@ -1776,8 +1776,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // provider await, so the timer arms only when a streaming provider is
     // actually the thing being waited on (never during tool phases,
     // post-switch silent fallbacks, or turn wrap-up).
+    // A background task's start or end names the conversation that started
+    // it (AGT-357), but it isn't this turn's provider doing anything: heard
+    // as activity, every task ending would give a stalled provider a fresh
+    // window. Both subscriptions pass it by.
     const unsubscribeObserver = bus.subscribe((event: StratusEvent) => {
-      if (!('sessionId' in event) || event.sessionId !== sessionId) {
+      if (!('sessionId' in event) || event.sessionId !== sessionId || event.type.startsWith('task.')) {
         return;
       }
       if (event.type === 'provider.delta') {
@@ -1834,7 +1838,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }, { prepend: true });
 
     const unsubscribeDrain = bus.subscribe((event: StratusEvent) => {
-      if (!('sessionId' in event) || event.sessionId !== sessionId) {
+      if (!('sessionId' in event) || event.sessionId !== sessionId || event.type.startsWith('task.')) {
         return;
       }
       if (

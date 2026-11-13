@@ -507,6 +507,57 @@ test('the watchdog aborts a stalled streaming turn and fails the session cleanly
   }
 });
 
+test('a background task ending on the conversation is not activity for the watchdog of the turn running there', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: anthropic\nmodel: model-slow\n---\n\nYou stall.\n');
+  const warnings: string[] = [];
+  let gateway: ReturnType<typeof createGateway> | undefined;
+  // Once the provider is waited on, tasks this conversation started end
+  // every 50 ms for 3 s while it says nothing (AGT-357). None of that is
+  // the provider working, so the turn is still aborted about 1 s in.
+  const ids = { sessionId: 'stalled-2', agentId: 'slow', workerSessionId: 'stalled-2:delegate:slow:1:t_x', workerAgentId: 'slow' };
+  let sent = 0;
+  let ending: NodeJS.Timeout | undefined;
+  let waitedOnAt = 0;
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      if (init?.signal?.aborted) {
+        reject(new DOMException('aborted', 'AbortError'));
+        return;
+      }
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      if (ending === undefined) {
+        waitedOnAt = Date.now();
+        ending = setInterval(() => {
+          if (sent >= 60) {
+            clearInterval(ending);
+            return;
+          }
+          sent += 1;
+          void gateway?.bus.emit({ type: 'task.completed', ...ids, taskId: `t_${sent}` });
+        }, 50);
+      }
+    })) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  gateway = createGateway({ env, idleTimeoutMs: 1_000, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'stalled-2', agentId: 'slow', userMessage: 'hang' }),
+      (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
+    );
+    const waited = Date.now() - waitedOnAt;
+    assert.ok(waitedOnAt > 0, 'the provider was waited on');
+    assert.ok(waited < 2_500, `the watchdog fired ${waited}ms into the provider wait, not about 1000ms`);
+    assert.ok(sent >= 2, `task events were sent during the stall (${sent})`);
+    const line = warnings.find((warning) => warning.startsWith('watchdog:'));
+    assert.doesNotMatch(line ?? '', /last heard: task\./);
+  } finally {
+    clearInterval(ending);
+    await gateway.stop();
+  }
+});
+
 test('the idle watchdog stays off for non-streaming providers', async () => {
   const home = await newHome();
   await writeSoul(home, 'steady.md', '---\nname: Steady\nprovider: openai\nmodel: model-a\n---\n\nYou take your time.\n');
