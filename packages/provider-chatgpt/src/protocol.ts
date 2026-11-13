@@ -6,6 +6,7 @@
 // (setup and the runtime) owns both.
 import { createHash, randomBytes, randomUUID, type JsonWebKey } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { redactSecrets } from '@stratusagent/core';
 import { ChatGPTAuthError } from './errors.ts';
 import { idTokenKeyId, verifyIdToken, type JsonWebKeySet } from './id-token.ts';
 
@@ -280,7 +281,7 @@ export const send = async (
       throw new ChatGPTAuthError('cancelled', `${what} was cancelled.`, { cause: error });
     }
     const quoted = error instanceof Error ? error.message : String(error);
-    const reason = withoutCredentials(quoted, init.headers);
+    const reason = redactSecrets(quoted, credentialsIn(init.headers));
     // A failure can quote the request's own header (Node's fetch does, for a
     // value it can't send). Then the token comes out of the message, and the
     // original error, which still holds it, isn't kept as the cause.
@@ -292,8 +293,8 @@ export const send = async (
   }
 };
 
-/** `text` with the request's `authorization` value, and the token in it, taken out. */
-const withoutCredentials = (text: string, headers: RequestInit['headers']): string => {
+/** The request's `authorization` value, and the token in it, for redaction. */
+const credentialsIn = (headers: RequestInit['headers']): string[] => {
   const entries: Array<[string, string]> = headers === undefined
     ? []
     : headers instanceof Headers
@@ -301,11 +302,9 @@ const withoutCredentials = (text: string, headers: RequestInit['headers']): stri
       : Array.isArray(headers)
         ? headers.map(([name, value]) => [String(name), String(value)])
         : Object.entries(headers).flatMap(([name, value]): Array<[string, string]> => (value === undefined ? [] : [[name, String(value)]]));
-  const secrets = entries
+  return entries
     .filter(([name]) => name.toLowerCase() === 'authorization')
-    .flatMap(([, value]) => [value, value.replace(/^\S+\s+/, '')])
-    .filter((secret) => secret.trim() !== '');
-  return secrets.reduce((hidden, secret) => hidden.split(secret).join('[redacted]'), text);
+    .flatMap(([, value]) => [value, value.replace(/^\S+\s+/, '')]);
 };
 
 const postForm = (options: RequestOptions, url: string, form: Record<string, string>, what: string) =>
