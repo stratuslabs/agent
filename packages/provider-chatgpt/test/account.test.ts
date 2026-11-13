@@ -550,6 +550,7 @@ test('a declined, failed or cancelled sign-in leaves the saved one as it was and
           },
           signal: controller.signal,
           ports: [port],
+          timeoutMs: 10_000,
           now: () => NOW,
         });
       },
@@ -608,6 +609,7 @@ test('a declined, failed or cancelled sign-in leaves the saved one as it was and
         throw new Error('no browser here');
       },
       ports: [port],
+      timeoutMs: 10_000,
       now: () => NOW,
     }),
     /no browser here/,

@@ -166,9 +166,6 @@ export const signInWithChatGPT = async (options: SignInWithChatGPTOptions): Prom
       ...(signal !== undefined ? { signal } : {}),
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     });
-    // If opening the page throws, closing the listener rejects this wait,
-    // and nobody is left to see it.
-    callback.catch(() => undefined);
     // Opening the page runs alongside the wait: one that fails ends the
     // sign-in, and one that never settles (a browser process still open)
     // holds up neither the callback nor a timeout or cancel.
