@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   AgentRegistry,
   SENDER_TRUST_METADATA_KEY,
@@ -207,10 +209,11 @@ export const createDelegateTool = ({
   const runDelegated: DelegateDispatch = dispatch ?? ((input) => runner.run(input));
   // Sub-session ids must be unique even when one orchestrator delegates to
   // the same target repeatedly, and must stay unique across tool rebuilds
-  // sharing one SessionStore — so a counter alone is not enough.
+  // sharing one SessionStore — so a counter alone is not enough. The random
+  // half is the platform's, as the gateway's sub-agent ids are.
   let delegationCount = 0;
   const uniqueSuffix = (): string =>
-    `${delegationCount}-${Math.random().toString(36).slice(2, 10)}`;
+    `${delegationCount}-${randomUUID().slice(0, 8)}`;
 
   return {
   name: DELEGATE_TOOL_NAME,
