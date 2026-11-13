@@ -279,9 +279,33 @@ export const send = async (
     if (options.signal?.aborted === true) {
       throw new ChatGPTAuthError('cancelled', `${what} was cancelled.`, { cause: error });
     }
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new ChatGPTAuthError('temporary', `Couldn't reach ${what} (${clip(reason)}). Check the connection and try again.`, { cause: error });
+    const quoted = error instanceof Error ? error.message : String(error);
+    const reason = withoutCredentials(quoted, init.headers);
+    // A failure can quote the request's own header (Node's fetch does, for a
+    // value it can't send). Then the token comes out of the message, and the
+    // original error, which still holds it, isn't kept as the cause.
+    throw new ChatGPTAuthError(
+      'temporary',
+      `Couldn't reach ${what} (${clip(reason)}). Check the connection and try again.`,
+      reason === quoted ? { cause: error } : undefined,
+    );
   }
+};
+
+/** `text` with the request's `authorization` value, and the token in it, taken out. */
+const withoutCredentials = (text: string, headers: RequestInit['headers']): string => {
+  const entries: Array<[string, string]> = headers === undefined
+    ? []
+    : headers instanceof Headers
+      ? [...headers.entries()]
+      : Array.isArray(headers)
+        ? headers.map(([name, value]) => [String(name), String(value)])
+        : Object.entries(headers).flatMap(([name, value]): Array<[string, string]> => (value === undefined ? [] : [[name, String(value)]]));
+  const secrets = entries
+    .filter(([name]) => name.toLowerCase() === 'authorization')
+    .flatMap(([, value]) => [value, value.replace(/^\S+\s+/, '')])
+    .filter((secret) => secret.trim() !== '');
+  return secrets.reduce((hidden, secret) => hidden.split(secret).join('[redacted]'), text);
 };
 
 const postForm = (options: RequestOptions, url: string, form: Record<string, string>, what: string) =>

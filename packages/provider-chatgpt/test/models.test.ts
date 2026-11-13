@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { inspect } from 'node:util';
 
 import { ResponsesApiError } from '@stratusagent/providers';
 import { CHATGPT_USAGE_URL, ChatGPTAuthError, listChatGPTModels } from '../src/index.ts';
@@ -199,6 +200,36 @@ test('a request that can\'t reach OpenAI fails as temporary', async () => {
     listChatGPTModels({ accessToken: token(), fetch }),
     (error: unknown) => error instanceof ChatGPTAuthError && error.code === 'temporary' && /model list/.test(error.message),
   );
+});
+
+test('a request that fails quoting its authorization header doesn\'t carry the token, in the message or the cause', async () => {
+  // Codex's case: a fetch (or a wrapper around it) whose error quotes the
+  // request's header, here only the token in it.
+  const quoting = fakeFetch(({ init }) => {
+    const header = new Headers(init?.headers).get('authorization') ?? '';
+    throw new TypeError(`could not send credential ${header.slice('Bearer '.length)}`);
+  });
+  await assert.rejects(listChatGPTModels({ accessToken: token('secret-access-1'), fetch: quoting.fetch }), (error: unknown) => {
+    assert.ok(error instanceof ChatGPTAuthError);
+    assert.equal(error.code, 'temporary');
+    assert.match(error.message, /\[redacted\]/);
+    assert.doesNotMatch(inspect(error, { depth: 10 }), /secret-access-1/);
+    return true;
+  });
+});
+
+test('Node\'s own fetch quotes a token it can\'t send, and the token comes out of that too', async () => {
+  // A token with a character no header may hold (a damaged sign-in file).
+  // Node's fetch refuses it before connecting, quoting the whole header;
+  // the request goes to a closed local port in case it ever does connect.
+  const local = (async (_input: string | URL | Request, init?: RequestInit) =>
+    globalThis.fetch('http://127.0.0.1:9/', init)) as typeof fetch;
+  await assert.rejects(listChatGPTModels({ accessToken: token('secret-access-1\nX'), fetch: local }), (error: unknown) => {
+    assert.ok(error instanceof ChatGPTAuthError);
+    assert.equal(error.code, 'temporary');
+    assert.doesNotMatch(inspect(error, { depth: 10 }), /secret-access-1/);
+    return true;
+  });
 });
 
 test('gives up after its timeout, and says so', async () => {
