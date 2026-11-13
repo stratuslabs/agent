@@ -3648,6 +3648,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return backgroundTasks.cancel(taskId, { stoppedBy });
     },
 
+    stopTasks(sessionId, stoppedBy) {
+      return backgroundTasks.stopTasks(sessionId, stoppedBy);
+    },
+
     pendingApprovals() {
       return listPendingApprovals();
     },

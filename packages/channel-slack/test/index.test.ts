@@ -14945,6 +14945,10 @@ test('a stop from someone who is not an approver never asks the gateway to abort
     asked += 1;
     return 1;
   };
+  gateway.stopTasks = () => {
+    asked += 1;
+    return { open: 1, stopped: Promise.resolve(['t_A']) };
+  };
   const { socket, adapter } = stopAdapter(['U-DYLAN']);
   await adapter.start(gateway);
 
@@ -14966,6 +14970,106 @@ test('a stop the gateway finds nothing running for is an ordinary message to the
   await socket.settled();
   assert.equal(gateway.dispatches.length, 1);
   await adapter.stop();
+});
+
+// AGT-357: Stop also stops the background tasks the conversation started
+// (decision 3 of agent-plans roadmap/952-background-tasks.md), and says
+// which.
+
+test("an approver's stop with no turn running stops the thread's background tasks and names them in one line", async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  const asked: Array<[string, string]> = [];
+  gateway.stopTasks = (sessionId, stoppedBy) => {
+    asked.push([sessionId, stoppedBy]);
+    return { open: 2, stopped: Promise.resolve(['t_A', 't_B']) };
+  };
+  const { socket, web, adapter, logs } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.settled();
+  await until(() => web.posts.length === 1);
+  await adapter.stop();
+
+  assert.equal(gateway.dispatches.length, 0, 'the stop is not a turn');
+  assert.deepEqual(asked, [['slack:ava:T1:C1:100.1', 'U-DYLAN']]);
+  assert.deepEqual(web.posts.map((post) => [post.channel, post.text, post.thread_ts]), [['C1', 'Stopped by <@U-DYLAN>: background tasks `t_A`, `t_B`.', '100.1']]);
+  assert.ok(logs.some((line) => line.includes('U-DYLAN stopped 0 turn(s) and 2 background task(s) of ava in C1')), JSON.stringify(logs));
+});
+
+test("an approver's stop stops the running turn and the thread's background task, and says each", async () => {
+  const { gateway, signals } = stoppableGateway();
+  gateway.stopTasks = () => ({ open: 1, stopped: Promise.resolve(['t_A']) });
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+  await until(() => signals.length === 1);
+  await socket.deliver('message', channelMessage({ text: 'stop', ts: '100.2', thread: '100.1' }));
+  await socket.settled();
+  await until(() => web.posts.some((post) => post.text?.includes('background task') === true));
+
+  assert.equal(signals.length, 1, 'the stop is not a turn');
+  assert.equal(signals[0]?.aborted, true);
+  assert.ok(web.updates.some((update) => update.text === 'Stopped by <@U-DYLAN>.'));
+  assert.deepEqual(
+    web.posts.filter((post) => post.text?.includes('background task') === true).map((post) => [post.text, post.thread_ts]),
+    [['Stopped by <@U-DYLAN>: background task `t_A`.', '100.1']],
+  );
+  await adapter.stop();
+});
+
+test('a stop while the thread\'s tasks are still winding down from an earlier one is a stop, and names nothing again', async () => {
+  // The gateway counts a task until it settles, the way it counts a stopped
+  // turn, so a second stop is not queued as a turn that answers "stop".
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  gateway.stopTasks = () => ({ open: 1, stopped: Promise.resolve([]) });
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.3', thread_ts: '100.1' }));
+  await socket.settled();
+  await adapter.stop();
+  assert.equal(gateway.dispatches.length, 0);
+  assert.deepEqual(web.posts, []);
+});
+
+test('a stop whose task cancels fail says nothing about tasks and logs why', async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  gateway.stopTasks = () => ({ open: 1, stopped: Promise.reject(new Error('fleet.db is locked')) });
+  const { socket, web, adapter, logs } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.settled();
+  await until(() => logs.some((line) => line.includes('fleet.db is locked')));
+  await adapter.stop();
+  assert.equal(gateway.dispatches.length, 0);
+  assert.deepEqual(web.posts, []);
+});
+
+test("an approver's stop in a DM stops the tasks that DM started and says so there", async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  const asked: string[] = [];
+  gateway.stopTasks = (sessionId) => {
+    asked.push(sessionId);
+    return { open: 1, stopped: Promise.resolve(['t_A']) };
+  };
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('message', mention('stop', { type: 'message', ts: '300.2', channel: 'D1', channel_type: 'im' }));
+  await socket.settled();
+  await until(() => web.posts.length === 1);
+  await adapter.stop();
+
+  assert.equal(gateway.dispatches.length, 0);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(web.posts.map((post) => [post.channel, post.text, post.thread_ts]), [['D1', 'Stopped by <@U-DYLAN>: background task `t_A`.', undefined]]);
 });
 
 test('in the default final reply mode a stopped turn posts who stopped it in the thread', async () => {

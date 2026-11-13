@@ -10,7 +10,7 @@ import { fleetDbIn } from '@stratusagent/state';
 import { createBackgroundTasks, liveTaskStatus } from '../src/background-tasks.ts';
 import { ShardedSessionStore } from '../src/sessions.ts';
 import { taskOutcomeKey } from '../src/task-settle.ts';
-import { SqliteTaskStore, type TaskRow } from '../src/tasks.ts';
+import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from '../src/tasks.ts';
 import type { DispatchInput, GatewayOptions } from '../src/types.ts';
 
 // AGT-357: cancelling a background task, at each point spec test 8 names.
@@ -22,6 +22,7 @@ import type { DispatchInput, GatewayOptions } from '../src/types.ts';
 // are in background-tasks.test.ts.
 
 const ORIGIN = 'fixture:ava:C1';
+const OTHER = 'fixture:ava:C2';
 const AVA = { id: 'ava', name: 'Ava', instructions: '', tools: [], skills: [], delegates: [] } as unknown as AgentDefinition;
 
 let counter = 0;
@@ -57,13 +58,15 @@ const fixture = async (
   const stateDir = path.join(home, '.stratus');
   await mkdir(stateDir, { recursive: true });
   const store = new ShardedSessionStore({ stateDir });
-  await store.create({
-    id: ORIGIN,
-    agent: { id: 'ava', name: 'Ava' },
-    status: 'completed',
-    metadata: { channel: 'fixture' },
-    messages: [message('user', 'start a job'), message('assistant', 'Started it.')],
-  } as unknown as Session);
+  for (const id of [ORIGIN, OTHER]) {
+    await store.create({
+      id,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      metadata: { channel: 'fixture' },
+      messages: [message('user', 'start a job'), message('assistant', 'Started it.')],
+    } as unknown as Session);
+  }
 
   const chains = new Map<string, Promise<unknown>>();
   const onChain = <T>(sessionId: string, work: () => Promise<T>): Promise<T> => {
@@ -82,9 +85,9 @@ const fixture = async (
   const warnings: string[] = [];
 
   const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
-    if (input.sessionId === ORIGIN) {
+    if (input.sessionId === ORIGIN || input.sessionId === OTHER) {
       // The outcome notice: a keyed turn the origin answers.
-      const origin = (await store.get(ORIGIN))!;
+      const origin = (await store.get(input.sessionId))!;
       origin.messages.push(message('user', input.userMessage, { idempotencyKey: input.idempotencyKey! }));
       origin.messages.push(message('assistant', 'noted'));
       origin.status = 'completed';
@@ -166,12 +169,12 @@ const fixture = async (
   });
   const rows = new SqliteTaskStore(fleetDbIn(stateDir), { stateHome: stateDir });
 
-  const start = async (prompt = 'WORK'): Promise<TaskRow> => {
+  const start = async (prompt = 'WORK', originId = ORIGIN): Promise<TaskRow> => {
     const started = await tasks.start!({
-      origin: (await store.get(ORIGIN))!,
+      origin: (await store.get(originId))!,
       agent: AVA,
       prompt,
-      workerSessionId: (id) => `${ORIGIN}:delegate:ava:1:${id}`,
+      workerSessionId: (id) => `${originId}:delegate:ava:1:${id}`,
       metadata: {},
     });
     return rows.get(started.task)!;
@@ -180,8 +183,8 @@ const fixture = async (
     const row = rows.get(taskId);
     return row !== undefined && row.delivery !== 'pending';
   }).then(() => rows.get(taskId)!);
-  const notice = async (taskId: string): Promise<string | undefined> =>
-    (await store.get(ORIGIN))?.messages.find((candidate) => candidate.idempotencyKey === taskOutcomeKey(taskId))?.content;
+  const notice = async (taskId: string, originId = ORIGIN): Promise<string | undefined> =>
+    (await store.get(originId))?.messages.find((candidate) => candidate.idempotencyKey === taskOutcomeKey(taskId))?.content;
 
   return {
     tasks,
@@ -403,4 +406,110 @@ test('a task\'s live status: the row\'s once final, else what its worker session
   assert.equal(liveTaskStatus({ status: 'running' }, worker('failed', [start], 'rate limited')), 'failed');
   assert.equal(liveTaskStatus({ status: 'running', stoppedBy: 'cli' }, worker('failed', [start], 'stopped')), 'cancelled');
   assert.equal(liveTaskStatus({ status: 'running', stoppedBy: 'cli' }, worker('running', [start])), 'running', 'still winding down; its stop shows in stoppedBy');
+});
+
+// AGT-357 PR 3: a person's Stop in a conversation reaches the tasks it
+// started (decision 3), through the same cancel.
+
+test('stopping a conversation\'s tasks: each one it started that is running here is counted at once, cancelled as the person, and named once its stop is written', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const first = await f.start('FIRST');
+    const second = await f.start('SECOND');
+    const elsewhere = await f.start('ELSEWHERE', OTHER);
+    await until('the workers to start', async () =>
+      (await Promise.all([first, second, elsewhere].map((row) => f.store.get(row.workerSessionId)))).every((worker) => worker?.status === 'running'));
+
+    const stop = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.equal(stop.open, 2, 'counted before anything is awaited');
+    assert.deepEqual(await stop.stopped, [first.id, second.id], 'oldest first');
+    for (const row of [first, second]) {
+      const final = await f.settled(row.id);
+      assert.deepEqual([final.status, final.stoppedBy], ['cancelled', 'U-DYLAN']);
+      assert.match((await f.notice(row.id)) ?? '', /was stopped by U-DYLAN/);
+    }
+    assert.deepEqual(f.aborted.map((call) => call.sessionId).sort(), [first.workerSessionId, second.workerSessionId].sort());
+    assert.deepEqual([f.rows.get(elsewhere.id)?.status, f.rows.get(elsewhere.id)?.stoppedBy], ['running', undefined], 'another conversation\'s task keeps running');
+  } finally {
+    await f.close();
+  }
+});
+
+test('a second stop while the first is winding down counts the task again but names nothing, and the first stopper is kept', async () => {
+  const f = await fixture('pre-turn', { holdWorkerLink: true });
+  try {
+    const row = await f.start();
+    const first = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.deepEqual([first.open, await first.stopped], [1, [row.id]]);
+    const second = f.tasks.stopTasks(ORIGIN, 'U-OTHER');
+    assert.deepEqual([second.open, await second.stopped], [1, []]);
+    assert.equal(f.rows.get(row.id)?.stoppedBy, 'U-DYLAN');
+
+    f.openWorkerLink();
+    assert.equal((await f.settled(row.id)).status, 'cancelled');
+    const after = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.deepEqual([after.open, await after.stopped], [0, []], 'once it has ended there is nothing to stop');
+  } finally {
+    await f.close();
+  }
+});
+
+test('a task whose worker has already finished is counted until it settles, but nothing is written and it is not named', async () => {
+  const f = await fixture('finish-then-hold');
+  try {
+    const row = await f.start();
+    await until('the worker turn to finish', async () => (await f.store.get(row.workerSessionId))?.status === 'completed');
+    const stop = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.deepEqual([stop.open, await stop.stopped], [1, []]);
+    assert.equal(f.rows.get(row.id)?.stoppedBy, undefined);
+    assert.deepEqual(f.aborted, []);
+    f.release();
+    assert.equal((await f.settled(row.id)).status, 'completed');
+  } finally {
+    await f.close();
+  }
+});
+
+test('an open row no worker of this process is running (the last process left it) is neither counted nor stopped: the restart sweep settles it', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const id = newTaskId();
+    f.rows.claim({
+      id,
+      agentId: 'ava',
+      workerAgentId: 'ava',
+      originSessionId: ORIGIN,
+      workerSessionId: `${ORIGIN}:delegate:ava:1:${id}`,
+      promptDigest: taskPromptDigest('ava', 'LEFT'),
+    }, 3, new Date().toISOString());
+    const stop = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.deepEqual([stop.open, await stop.stopped], [0, []]);
+    assert.equal(f.rows.get(id)?.stoppedBy, undefined);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a cancel that fails is logged with its task id and left out, and the stop never rejects', async () => {
+  let failReads = false;
+  const f = await fixture('mid-turn', {
+    onRead: (sessionId) => {
+      if (failReads && sessionId.includes(':delegate:')) {
+        throw new Error('disk gone');
+      }
+    },
+  });
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+    failReads = true;
+    const stop = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.equal(stop.open, 1);
+    assert.deepEqual(await stop.stopped, []);
+    failReads = false;
+    assert.ok(f.warnings.some((line) => line.includes(row.id) && line.includes('disk gone')), JSON.stringify(f.warnings));
+    assert.equal(f.rows.get(row.id)?.stoppedBy, undefined, 'nothing was written, so nothing claims it stopped');
+  } finally {
+    await f.close();
+  }
 });

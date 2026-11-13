@@ -985,6 +985,30 @@ test('cancel: a crash after the stop was written and before the abort ends cance
   }
 });
 
+test('stop: gateway.stopTasks cancels the tasks a conversation started, as the person, and no other conversation\'s', async () => {
+  const fixture = await taskGateway({ tasks: { enabled: true } });
+  try {
+    const origin = 'fixture:ava:C42';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'ava', prompt: 'STUBBORN-2', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => fixture.blockedCount() === 1);
+
+    assert.deepEqual(fixture.gateway.stopTasks('fixture:ava:C43', 'U123').open, 0, 'another conversation has nothing to stop');
+    const stop = fixture.gateway.stopTasks(origin, 'U123');
+    assert.equal(stop.open, 1);
+    assert.deepEqual(await stop.stopped, [task]);
+    fixture.release();
+
+    const row = await fixture.settled(task);
+    assert.deepEqual([row.status, row.stoppedBy], ['cancelled', 'U123']);
+    const notices = keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(task));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.content, /was stopped by U123/);
+  } finally {
+    fixture.release();
+    await fixture.stop();
+  }
+});
+
 // AGT-357 PR 2: the agent's own tools for its tasks.
 
 test('agent.tasks and agent.cancelTask are offered only while tasks are on', async () => {

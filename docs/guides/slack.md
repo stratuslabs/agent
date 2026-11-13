@@ -417,6 +417,12 @@ waiting on is cancelled and its card says so. A tool that doesn't stop when
 asked (usually a plugin's) gets 2 seconds, then the turn ends without it.
 Its result says it was left behind and may still be running.
 
+The same `stop` ends the [background tasks](../reference/config.md#background-tasks)
+that conversation started, and one more line names them: "Stopped by @you:
+background task `t_…`." Each task's outcome then arrives in the
+conversation as cancelled. With only tasks running, `stop` still stops them
+rather than reaching the agent as a message.
+
 Only the agent's approvers (`approvals.slackApprovers`) can stop it. From
 anyone else, or when nothing is running, `stop` is an ordinary message. An
 untagged `stop` goes to the agent that holds the thread, including one that

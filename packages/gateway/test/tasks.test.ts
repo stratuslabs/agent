@@ -238,6 +238,26 @@ test('an agent\'s list: every open or undelivered task, newest first, then its m
   tasks.close();
 });
 
+test('a conversation\'s open tasks: only the ones it started that are still running or waiting, oldest first', async () => {
+  const tasks = new SqliteTaskStore(await newDb());
+  const make = (offsetMs: number, overrides: Partial<NewTask> = {}): string => {
+    const task = newTask({ promptDigest: taskPromptDigest('atlas', `job ${offsetMs}`), ...overrides });
+    assert.equal(tasks.claim(task, 100, at(offsetMs)).kind, 'started');
+    return task.id;
+  };
+  const here = 'slack:atlas:T1:C1:1794.1';
+  const waiting = make(0, { originSessionId: here });
+  tasks.setStatus(waiting, 'waiting_approval', at(500));
+  const running = make(1_000, { originSessionId: here });
+  const finished = make(2_000, { originSessionId: here });
+  tasks.setStatus(finished, 'completed', at(2_500));
+  make(3_000, { originSessionId: 'slack:atlas:T1:C1:1794.2' });
+
+  assert.deepEqual(tasks.openForOrigin(here).map((row) => row.id), [waiting, running]);
+  assert.deepEqual(tasks.openForOrigin('slack:atlas:T1:C9:1'), []);
+  tasks.close();
+});
+
 test('pruning removes delivered and dropped rows past retention, and never an open or undelivered one', async () => {
   const store = new SqliteTaskStore(await newDb());
   const ended = (status: 'completed' | 'cancelled', delivery: 'delivered' | 'dropped' | undefined, base: number): string => {
