@@ -2915,9 +2915,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
-    if (backgroundTasks.summary !== undefined) {
-      log(backgroundTasks.summary);
-    }
+    log(backgroundTasks.summary);
 
     // Read before anything can dispatch, so this is exactly what the
     // last process left running and not a turn of ours caught in flight.

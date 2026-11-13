@@ -292,8 +292,24 @@ const taskGateway = async (options: {
   };
 };
 
-test('tasks are off by default: background: true is refused and nothing runs or is written', async () => {
+test('tasks are on by default: with no tasks block, background: true starts a task and its outcome lands once', async () => {
   const fixture = await taskGateway();
+  try {
+    const origin = 'fixture:ava:C0';
+    const started = fixture.delegated(await fixture.ask(origin, { to: 'ava', prompt: 'WORK-0', background: true }));
+    assert.equal(started.ok, true, started.error);
+    const task = (started.output as { task: string }).task;
+    const row = await fixture.settled(task);
+    assert.deepEqual([row.status, row.delivery], ['completed', 'delivered']);
+    const conversation = await fixture.gateway.store.get(origin);
+    assert.equal(conversation!.messages.filter((message) => carriesKey(message, taskOutcomeKey(task))).length, 1);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('tasks.enabled: false refuses background: true and nothing runs or is written', async () => {
+  const fixture = await taskGateway({ tasks: { enabled: false } });
   try {
     const session = await fixture.ask('fixture:ava:C1', { to: 'ava', prompt: 'WORK', background: true });
     const result = fixture.delegated(session);
@@ -786,7 +802,7 @@ test('restart: a worker whose row is gone is left to the abandoned-turn sweep', 
 test('restart: the sweep settles what the last process left even with tasks turned off since', async () => {
   const origin = 'fixture:ava:C29';
   const crashed = await crashedMidTask(origin);
-  const fixture = await taskGateway({ home: crashed.home });
+  const fixture = await taskGateway({ home: crashed.home, tasks: { enabled: false } });
   try {
     const row = await fixture.settled(crashed.task);
     assert.deepEqual([row.status, row.delivery], ['interrupted', 'delivered']);
@@ -1011,9 +1027,9 @@ test('stop: gateway.stopTasks cancels the tasks a conversation started, as the p
 
 // AGT-357 PR 2: the agent's own tools for its tasks.
 
-test('agent.tasks and agent.cancelTask are offered only while tasks are on', async () => {
-  const off = await taskGateway();
-  const on = await taskGateway({ tasks: { enabled: true } });
+test('agent.tasks and agent.cancelTask are offered unless tasks.enabled is false', async () => {
+  const off = await taskGateway({ tasks: { enabled: false } });
+  const on = await taskGateway();
   try {
     const names = (fixture: typeof off) => fixture.gateway.tools().map((tool) => tool.name);
     assert.equal(names(off).includes('agent.tasks'), false);
@@ -1127,7 +1143,7 @@ test('gateway.tasks still lists what a run with tasks on left once tasks are off
   } finally {
     await on.stop();
   }
-  const off = await taskGateway({ home: on.home });
+  const off = await taskGateway({ home: on.home, tasks: { enabled: false } });
   try {
     assert.deepEqual((await off.gateway.tasks()).map((entry) => [entry.id, entry.status, entry.delivery]), [[task, 'completed', 'delivered']]);
     const again = await off.gateway.cancelTask(task, 'cli');
