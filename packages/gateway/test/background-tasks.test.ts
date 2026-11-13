@@ -106,6 +106,7 @@ const taskGateway = async (options: {
   /** Written into the state directory before the gateway starts. */
   seed?: (stateDir: string) => Promise<void>;
   held?: boolean;
+  stopDrainTimeoutMs?: number;
 } = {}) => {
   const home = options.home ?? await newHome();
   if (options.home === undefined) {
@@ -121,6 +122,17 @@ const taskGateway = async (options: {
   const calls: string[] = [];
   const posts: Array<{ agentId: string; to: string; thread?: string; speaker?: unknown; text: string }> = [];
   const blocked: Array<() => void> = [];
+  /** Ordinary turns waiting (a message of WAIT), released by `releaseOrdinary`. */
+  const waiting: Array<() => void> = [];
+  /** Wait for `release`, or end with the signal's reason when the turn is aborted first, as a provider does. */
+  const hold = (into: Array<() => void>, signal: AbortSignal | undefined): Promise<void> => new Promise<void>((resolve, reject) => {
+    into.push(resolve);
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
   const workerSignals: AbortSignal[] = [];
   const host = await hostFor({
     'stratus-plugin-fixture-chan': {
@@ -166,7 +178,7 @@ const taskGateway = async (options: {
                   if (signal) {
                     workerSignals.push(signal);
                   }
-                  await new Promise<void>((resolve) => blocked.push(resolve));
+                  await hold(blocked, signal);
                 }
                 return { parts: [{ type: 'text', text: `did ${said}` }] };
               }
@@ -175,6 +187,10 @@ const taskGateway = async (options: {
                   throw new Error('the provider is down');
                 }
                 return { parts: [{ type: 'text', text: 'noted' }] };
+              }
+              if (said === 'WAIT') {
+                await hold(waiting, signal);
+                return { parts: [{ type: 'text', text: 'waited' }] };
               }
               const last = session.messages.at(-1);
               if (last?.role === 'tool') {
@@ -202,6 +218,7 @@ const taskGateway = async (options: {
     approvals: new AllowAllApprovalPolicy(),
     ...(options.tasks !== undefined ? { tasks: options.tasks } : {}),
     ...(options.held === true ? { held: true } : {}),
+    ...(options.stopDrainTimeoutMs !== undefined ? { stopDrainTimeoutMs: options.stopDrainTimeoutMs } : {}),
     log: () => {},
     warn: (line) => warnings.push(line),
   });
@@ -240,6 +257,12 @@ const taskGateway = async (options: {
       }
     },
     blockedCount: () => blocked.length,
+    waitingCount: () => waiting.length,
+    releaseOrdinary: () => {
+      for (const resolve of waiting.splice(0)) {
+        resolve();
+      }
+    },
     async stop() {
       rows.close();
       await gateway.stop();
@@ -768,5 +791,86 @@ test('restart: the sweep prunes settled rows past retention and keeps the rest',
     assert.equal(fixture.rows.get(ids.recent)?.delivery, 'delivered');
   } finally {
     await fixture.stop();
+  }
+});
+
+// AGT-356 PR 5b: the drain. A stop or restart doesn't wait for background
+// tasks: once the ordinary turns have drained, every running worker is cut
+// off with the fixed error, so it reads `interrupted`, and its notice, refused
+// while stopping, is delivered by the next start's sweep.
+
+test('drain: a stop does not wait for a running background task; the worker is cut off and reported interrupted once, at the next start', async () => {
+  const origin = 'fixture:ava:C40';
+  const first = await taskGateway({ tasks: { enabled: true }, stopDrainTimeoutMs: 5_000 });
+  let task: string;
+  let workerSessionId: string;
+  try {
+    task = (first.delegated(await first.ask(origin, { to: 'ava', prompt: 'BLOCK-D', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => first.blockedCount() === 1);
+    workerSessionId = first.rows.get(task)!.workerSessionId;
+  } finally {
+    first.rows.close();
+  }
+  const began = Date.now();
+  await first.gateway.stop();
+  assert.ok(Date.now() - began < 2_500, `the stop waited ${Date.now() - began}ms, as if for the task`);
+
+  const second = await taskGateway({ tasks: { enabled: true }, home: first.home });
+  try {
+    const worker = await second.gateway.store.get(workerSessionId);
+    assert.equal(worker?.status, 'failed');
+    assert.equal(worker?.lastError, TASK_CUT_OFF_ERROR);
+    const row = await second.settled(task);
+    assert.deepEqual([row.status, row.delivery], ['interrupted', 'delivered']);
+    const notices = keyed(await second.gateway.store.get(origin), taskOutcomeKey(task));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.content, /was interrupted after .*: a restart cut it off, and it was not run again\.\]$/);
+    assert.equal(second.calls.includes(workerSessionId), false, 'the worker was not run again');
+  } finally {
+    await second.stop();
+  }
+});
+
+test('drain: the workers are cut off only once the ordinary turns have drained', async () => {
+  const first = await taskGateway({ tasks: { enabled: true }, stopDrainTimeoutMs: 5_000 });
+  try {
+    const task = (first.delegated(await first.ask('fixture:ava:C41', { to: 'ava', prompt: 'BLOCK-E', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => first.blockedCount() === 1);
+    const ordinary = first.gateway.dispatch({ sessionId: 'fixture:ava:C42', agentId: 'ava', userMessage: 'WAIT' });
+    await until('the ordinary turn to start', () => first.waitingCount() === 1);
+    const stopped = first.gateway.stop();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(first.workerSignals[0]?.aborted, false, 'the task is not cut off while an ordinary turn still drains');
+    first.releaseOrdinary();
+    assert.equal((await ordinary).messages.at(-1)?.content, 'waited');
+    await stopped;
+    assert.equal(first.workerSignals[0]?.aborted, true);
+    const worker = await new ShardedSessionStore({ stateDir: stateOf(first.home) }).get(first.rows.get(task)!.workerSessionId);
+    assert.equal(worker?.lastError, TASK_CUT_OFF_ERROR);
+  } finally {
+    first.rows.close();
+  }
+});
+
+test('drain: when the window runs out on an ordinary turn, the workers still end with the cut-off error, not the shutdown\'s', async () => {
+  const first = await taskGateway({ tasks: { enabled: true }, stopDrainTimeoutMs: 300 });
+  try {
+    const task = (first.delegated(await first.ask('fixture:ava:C43', { to: 'ava', prompt: 'BLOCK-F', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => first.blockedCount() === 1);
+    const ordinary = first.gateway.dispatch({ sessionId: 'fixture:ava:C44', agentId: 'ava', userMessage: 'WAIT' }).catch((error: unknown) => error);
+    await until('the ordinary turn to start', () => first.waitingCount() === 1);
+    await first.gateway.stop();
+    await ordinary;
+    const sessions = new ShardedSessionStore({ stateDir: stateOf(first.home) });
+    try {
+      assert.equal((await sessions.get(first.rows.get(task)!.workerSessionId))?.lastError, TASK_CUT_OFF_ERROR);
+      assert.notEqual((await sessions.get('fixture:ava:C44'))?.lastError, TASK_CUT_OFF_ERROR, 'an ordinary turn keeps the shutdown\'s error');
+    } finally {
+      sessions.close();
+    }
+    assert.equal(first.rows.get(task)?.status, 'interrupted');
+    assert.equal(first.rows.get(task)?.delivery, 'pending', 'the notice waits for the next start');
+  } finally {
+    first.rows.close();
   }
 });

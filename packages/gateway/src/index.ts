@@ -1424,6 +1424,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     bus,
     dispatchInternal: (input) => dispatchInternal(input),
     onSessionChain: (sessionId, work) => onSessionChain(sessionId, work),
+    onWorkerChain: (sessionId, work) => onSessionChain(sessionId, work, undefined, { background: true }),
     settleRepeat: (sessionId, idempotencyKey, agentId) => settleRepeat(sessionId, idempotencyKey, agentId, undefined, undefined),
     observe: (input) => observer.observe(input),
     // Through the seams a channel already has: which conversation the
@@ -1881,6 +1882,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const waitingDispatches = new Map<string, number>();
   const inflight = new Set<Promise<unknown>>();
+  /** The links in `inflight` that are background task workers: the drain cuts these off instead of waiting for them. */
+  const backgroundLinks = new WeakSet<Promise<unknown>>();
   let stopping = false;
   // Open until `startServing` reads what the last process left, which it
   // does before any channel or the scheduler can deliver work.
@@ -2293,6 +2296,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     work: () => Promise<T>,
     /** True once this work no longer counts as queued: a batch steered into the turn ahead (`takeSteered` released it). */
     released?: () => boolean,
+    { background = false }: { background?: boolean } = {},
   ): Promise<T> => {
     const previous = sessionChains.get(sessionId) ?? Promise.resolve();
     queuedWork.set(sessionId, (queuedWork.get(sessionId) ?? 0) + 1);
@@ -2307,6 +2311,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const settled = turn.catch(() => {});
     sessionChains.set(sessionId, settled);
     inflight.add(settled);
+    if (background) {
+      backgroundLinks.add(settled);
+    }
     void settled.finally(() => {
       inflight.delete(settled);
       if (sessionChains.get(sessionId) === settled) {
@@ -3206,6 +3213,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Connected, it is refused with `GatewayStoppingError`, which the
       // channel can answer and keep for the next daemon. Until the set stays
       // empty: a turn queued behind one that finished joins it.
+      // Background task workers aren't waited for: once the rest is done
+      // they are cut off, and then waited for, which is quick.
+      const ordinary = (): Promise<unknown>[] => [...inflight].filter((link) => !backgroundLinks.has(link));
+      while (ordinary().length > 0) {
+        await Promise.allSettled(ordinary());
+      }
+      const cut = backgroundTasks.cutOff();
+      if (cut > 0) {
+        log(`${kind}: cut off ${cut} running background task(s); each is reported interrupted at the next start`);
+      }
       while (inflight.size > 0) {
         await Promise.allSettled([...inflight]);
       }
@@ -3245,6 +3262,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // starts as soon as that one settles, is aborted the same way.
       abortingWith = kind === 'stop' ? STOPPING_TURN_ERROR : RESTARTING_TURN_ERROR;
       stopReviews.abort(new Error('The daemon is stopping.'));
+      // The workers first, so each worker's turn ends with the cut-off
+      // error, not the shutdown's.
+      backgroundTasks.cutOff();
       for (const running of turnControllers.values()) {
         for (const controller of running) {
           controller.abort(shutdownAbort());
