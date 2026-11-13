@@ -26,6 +26,10 @@ import {
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   signedInProviders,
   CREDENTIAL_PROVIDER_NAMES,
+  chatgptSignInLocation,
+  describeChatGPTSignIn,
+  openChatGPTSignInFile,
+  type ChatGPTSignInSummary,
   type CredentialProviderName,
   type RosterEntry,
   type RuntimeConfig,
@@ -181,7 +185,7 @@ export interface DoctorReport {
   agent?: string;
   /** The model a failing run retries on, when one is configured. */
   fallback?: { provider: string; model: string };
-  signIns: Array<{ provider: CredentialProviderName; status: string }>;
+  signIns: Array<{ provider: CredentialProviderName | 'chatgpt'; status: string }>;
   /**
    * With `--live` only: what each provider a run uses said about its key.
    * `accepted`/`rejected` are the provider's answer; `unreachable` means no
@@ -414,6 +418,36 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     ...(typeof health.startedAt === 'string' ? { startedAt: health.startedAt } : {}),
     ...(configPath !== undefined ? { configPath } : {}),
   };
+};
+
+/**
+ * Minutes, in UTC, as doctor prints an expiry: `2026-11-13 03:00 UTC`. Split
+ * at the `T`, since a year past 9999 is written `+010000`.
+ */
+const utcMinute = (epochMs: number): string => {
+  const [date, time] = new Date(epochMs).toISOString().split('T');
+  return `${date} ${String(time).slice(0, 5)} UTC`;
+};
+
+/**
+ * The chatgpt Sign-ins line: whose sign-in, whether it may use the plan,
+ * and when the access token runs out. A run renews an expired access token
+ * on the refresh token, so expiry alone is not a problem.
+ */
+const chatgptSignInLine = (signIn: ChatGPTSignInSummary, now: number): string => {
+  if (signIn.status === 'none') {
+    return signIn.account === undefined ? 'not signed in' : `signed out (${signIn.account})`;
+  }
+  const who = `ChatGPT sign-in (${signIn.account})`;
+  if (signIn.status === 'plan_usage_not_granted') {
+    return `${who} without plan usage, so no run can use it`;
+  }
+  if (signIn.expiresAt === undefined) {
+    return `${who}, plan usage allowed`;
+  }
+  return signIn.expiresAt > now
+    ? `${who}, plan usage allowed; access token valid until ${utcMinute(signIn.expiresAt)}, renewed as it runs out`
+    : `${who}, plan usage allowed; access token expired ${utcMinute(signIn.expiresAt)}, the next run renews it`;
 };
 
 /**
@@ -729,6 +763,20 @@ export const collectDoctorReport = async (
       continue;
     }
     signIns.push({ provider: target, status: 'not signed in' });
+  }
+
+  // chatgpt's sign-in is a file of its own, not a credentials.json entry,
+  // and no environment variable stands in for it. Read as a run reads it.
+  try {
+    const signIn = await describeChatGPTSignIn(openChatGPTSignInFile(chatgptSignInLocation(env)));
+    const used = resolved?.provider === 'chatgpt' || fallback?.provider === 'chatgpt';
+    const line = chatgptSignInLine(signIn, Date.now());
+    signIns.push({
+      provider: 'chatgpt',
+      status: signIn.status === 'ready' && !used ? `${line} (unused — ${resolved ? resolved.provider : 'nothing'} serves your runs)` : line,
+    });
+  } catch (error) {
+    signIns.push({ provider: 'chatgpt', status: `unreadable: ${error instanceof Error ? error.message : String(error)}` });
   }
 
   // A fallback the resolver dropped is the quiet failure: the config still
