@@ -308,7 +308,32 @@ export type StratusEvent =
    * `session.continued`, because the daemon log records it; the summary is
    * the turn's reply.
    */
-  | { type: 'session.stopped-early'; sessionId: string; reason: StoppedEarlyReason; continuations: number };
+  | { type: 'session.stopped-early'; sessionId: string; reason: StoppedEarlyReason; continuations: number }
+  /**
+   * A background task started, or ended (AGT-211): `agent.delegate` with
+   * `background: true` wrote it, or settling wrote how it ended. Ids only,
+   * never what the task was asked or answered, which stay in its two
+   * sessions. `sessionId` and `agentId` are the conversation and agent that
+   * started it, where its outcome goes; `workerSessionId` and
+   * `workerAgentId` are the ones doing the work, which may be the same
+   * agent. Its end is sent once it is written, before the outcome is added
+   * to the conversation, and a task ends once: only a restored home that
+   * shows a task the row called finished was cut off sends
+   * `task.interrupted` after it.
+   */
+  | {
+      type: TaskEventType;
+      sessionId: string;
+      agentId: string;
+      taskId: string;
+      workerSessionId: string;
+      workerAgentId: string;
+    };
+
+/** The background task events: one when a task starts, one for how it ended. */
+export type TaskEventType = 'task.started' | 'task.completed' | 'task.failed' | 'task.cancelled' | 'task.interrupted';
+
+export type TaskEvent = Extract<StratusEvent, { type: TaskEventType }>;
 
 export type EventHandler = (event: StratusEvent) => void | Promise<void>;
 

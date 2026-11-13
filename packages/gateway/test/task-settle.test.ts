@@ -4,7 +4,15 @@ import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { SESSION_TRUST_METADATA_KEY, recordTurnFailure, type Message, type Session, type TrustLevel } from '@stratusagent/core';
+import {
+  SESSION_TRUST_METADATA_KEY,
+  recordTurnFailure,
+  type Message,
+  type Session,
+  type TaskEvent,
+  type TaskEventType,
+  type TrustLevel,
+} from '@stratusagent/core';
 import { SqliteTaskStore, newTaskId, taskPromptDigest, type NewTask, type TaskRow } from '../src/tasks.ts';
 import {
   TASK_CUT_OFF_ERROR,
@@ -75,6 +83,8 @@ interface Fake {
   posted: TaskNotice[];
   cutOff: string[];
   warnings: string[];
+  /** The task events settling sent, in order. */
+  events: TaskEvent[];
   /** What the origin's keyed turn does when a notice is dispatched. */
   outcomeTurn: OutcomeTurn;
   dispatchThrows: boolean;
@@ -94,6 +104,7 @@ const fakeHost = (tasks: SqliteTaskStore): Fake => {
     posted: [],
     cutOff: [],
     warnings: [],
+    events: [],
     outcomeTurn: 'reply',
     dispatchThrows: false,
     appendThrows: false,
@@ -152,6 +163,9 @@ const fakeHost = (tasks: SqliteTaskStore): Fake => {
       if (fake.postThrows) {
         throw new Error('slack said no');
       }
+    },
+    emit: async (event) => {
+      fake.events.push(event);
     },
     now: () => T0,
     warn: (line) => {
@@ -520,4 +534,85 @@ test('a row already settled is left alone, and an unknown id is missing', async 
   assert.equal(tasks.get(task.id)?.status, 'completed');
   assert.equal(tasks.get(task.id)?.delivery, 'delivered');
   assert.deepEqual(await settler.settle('t_nope'), { kind: 'missing' });
+});
+
+// ---- task events -------------------------------------------------------------
+
+/** The event for `task` ending as `type`: ids only. */
+const ended = (task: NewTask, type: TaskEventType): TaskEvent => ({
+  type,
+  sessionId: ORIGIN,
+  agentId: 'atlas',
+  taskId: task.id,
+  workerSessionId: task.workerSessionId,
+  workerAgentId: 'atlas',
+});
+
+test('settling sends how the task ended once, ids only, before its notice goes out', async () => {
+  const { fake, task } = await setup();
+  fake.sessions.set(task.workerSessionId, finishedWorker(task, 'Merged it.'));
+  let sentBeforeNotice: TaskEvent[] | undefined;
+  fake.duringDispatch = async () => {
+    sentBeforeNotice = [...fake.events];
+  };
+  const settler = createTaskSettler(fake.host);
+  await settler.settle(task.id);
+  // Settled again, at a turn's end or by a sweep: nothing more is sent.
+  await settler.settle(task.id);
+  await settler.settle(task.id, { startup: true });
+  assert.deepEqual(fake.events, [ended(task, 'task.completed')]);
+  assert.deepEqual(sentBeforeNotice, [ended(task, 'task.completed')]);
+});
+
+test('a failed, a stopped and a never-started task end as task.failed, task.cancelled and task.interrupted', async () => {
+  const failed = await setup();
+  const broken = finishedWorker(failed.task, 'partial');
+  recordTurnFailure(broken, 'provider exploded');
+  failed.fake.sessions.set(failed.task.workerSessionId, broken);
+  await createTaskSettler(failed.fake.host).settle(failed.task.id);
+  assert.deepEqual(failed.fake.events, [ended(failed.task, 'task.failed')]);
+
+  const stopped = await setup();
+  const halted = finishedWorker(stopped.task, 'partial');
+  recordTurnFailure(halted, 'Stopped.');
+  stopped.fake.sessions.set(stopped.task.workerSessionId, halted);
+  stopped.tasks.recordStop(stopped.task.id, 'U123', T0);
+  await createTaskSettler(stopped.fake.host).settle(stopped.task.id);
+  assert.deepEqual(stopped.fake.events, [ended(stopped.task, 'task.cancelled')]);
+
+  const never = await setup();
+  await createTaskSettler(never.fake.host).settle(never.task.id);
+  assert.equal(never.tasks.get(never.task.id)?.status, 'interrupted');
+  assert.deepEqual(never.fake.events, [ended(never.task, 'task.interrupted')]);
+});
+
+test('a worker still in flight at a turn\'s end sends nothing, and the startup sweep that cuts it off sends task.interrupted', async () => {
+  const { fake, task } = await setup();
+  const worker = finishedWorker(task, 'half', 2);
+  worker.status = 'running';
+  fake.sessions.set(task.workerSessionId, worker);
+  const settler = createTaskSettler(fake.host);
+  assert.equal((await settler.settle(task.id)).kind, 'open');
+  assert.deepEqual(fake.events, []);
+  await settler.settle(task.id, { startup: true });
+  assert.deepEqual(fake.events, [ended(task, 'task.interrupted')]);
+});
+
+test('a notice sent again after a crash sends no second end, and a restore that finds a finished task cut off sends task.interrupted', async () => {
+  // The row ended before the crash; only its notice was still pending.
+  const resent = await setup();
+  resent.fake.sessions.set(resent.task.workerSessionId, finishedWorker(resent.task, 'done'));
+  resent.tasks.setStatus(resent.task.id, 'completed', T0);
+  await createTaskSettler(resent.fake.host).settle(resent.task.id, { startup: true });
+  assert.equal(resent.fake.dispatched.length, 1);
+  assert.deepEqual(resent.fake.events, []);
+
+  // The row said completed, but the restored worker was caught mid-turn.
+  const restored = await setup();
+  const worker = finishedWorker(restored.task, 'half', 2);
+  worker.status = 'running';
+  restored.fake.sessions.set(restored.task.workerSessionId, worker);
+  restored.tasks.setStatus(restored.task.id, 'completed', T0);
+  await createTaskSettler(restored.fake.host).settle(restored.task.id, { startup: true });
+  assert.deepEqual(restored.fake.events, [ended(restored.task, 'task.interrupted')]);
 });

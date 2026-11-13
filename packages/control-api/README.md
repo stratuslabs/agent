@@ -657,6 +657,14 @@ retry, a compaction, a message boundary — so a client draws nothing for it.
 message ended in a wrap-up instead of finishing, sent just before its
 `session.completed`, with `reason` and `continuations` and no content. The
 session's `stoppedEarly` says the same until its next message starts.
+`task.started`, `task.completed`, `task.failed`, `task.cancelled` and
+`task.interrupted` joined it with background tasks: a task started, or
+ended, on the conversation that started it (`sessionId`, `agentId`), with
+`taskId`, `workerSessionId` and `workerAgentId` and never what the task was
+asked or answered. A task outlives the turn that started it, so these carry
+no `turnId`. Its end goes out before its outcome is added to the
+conversation, and once: only a restored home that finds a task it had
+called finished was cut off sends `task.interrupted` after it.
 `permission.decided` joined it with decisions you can see: why a call was
 allowed or refused, sent just before that call's `tool.called` or
 `tool.denied` with the same `callId`: `toolName`, `risk`, `allowed`,

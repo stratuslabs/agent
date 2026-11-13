@@ -7,6 +7,8 @@ import {
   turnReplyFor,
   workItemState,
   type Session,
+  type TaskEvent,
+  type TaskEventType,
   type TrustLevel,
 } from '@stratusagent/core';
 
@@ -234,6 +236,8 @@ export interface TaskSettleHost {
   appendFallback(notice: TaskNotice): Promise<unknown>;
   /** Post the fallback to the origin conversation, once, best-effort. Rejects when the channel refused it. */
   postFallback(notice: TaskNotice): Promise<void>;
+  /** Send a task event on the gateway's bus. */
+  emit(event: TaskEvent): Promise<void>;
   now?(): string;
   warn(line: string): void;
 }
@@ -264,6 +268,23 @@ const outcomeIn = (origin: Session, taskId: string): 'delivered' | 'needs-fallba
 };
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+const ENDED_EVENT: Record<FinalTaskStatus, TaskEventType> = {
+  completed: 'task.completed',
+  failed: 'task.failed',
+  cancelled: 'task.cancelled',
+  interrupted: 'task.interrupted',
+};
+
+/** A task event for `row`: ids only, never what it was asked or answered. */
+export const taskEvent = (type: TaskEventType, row: TaskRow): TaskEvent => ({
+  type,
+  sessionId: row.originSessionId,
+  agentId: row.agentId,
+  taskId: row.id,
+  workerSessionId: row.workerSessionId,
+  workerAgentId: row.workerAgentId,
+});
 
 /**
  * The settle function, one per gateway. Single-flight per task: a turn's
@@ -300,8 +321,13 @@ export const createTaskSettler = (host: TaskSettleHost) => {
       host.warn(`task ${taskId}: its worker turn is still in flight after the startup sweep failed it; left for the next start.`);
       return { kind: 'open', task: row };
     }
-    host.tasks.setStatus(taskId, outcome.status, now());
+    const ended = host.tasks.setStatus(taskId, outcome.status, now());
     row = host.tasks.get(taskId) ?? row;
+    // Only when this write ended it: a notice sent again after a crash is
+    // the same end, already announced.
+    if (ended) {
+      await host.emit(taskEvent(ENDED_EVENT[outcome.status], row));
+    }
     if (row.delivery !== 'pending') {
       return { kind: 'settled', task: row, delivery: row.delivery };
     }

@@ -14,6 +14,7 @@ import {
   type PluginContext,
   type ProviderResponse,
   type Session,
+  type StratusEvent,
 } from '@stratusagent/core';
 import { TASK_ID_METADATA_KEY } from '@stratusagent/agents';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
@@ -110,6 +111,8 @@ const taskGateway = async (options: {
   seed?: (stateDir: string) => Promise<void>;
   held?: boolean;
   stopDrainTimeoutMs?: number;
+  /** Subscribed to the bus before the gateway starts, so the startup sweep's events are heard too. */
+  onEvent?: (event: StratusEvent) => void;
 } = {}) => {
   const home = options.home ?? await newHome();
   if (options.home === undefined) {
@@ -244,6 +247,9 @@ const taskGateway = async (options: {
     log: () => {},
     warn: (line) => warnings.push(line),
   });
+  if (options.onEvent !== undefined) {
+    gateway.bus.subscribe(options.onEvent);
+  }
   await gateway.start();
   const rows = new SqliteTaskStore(fleetDbIn(stateDir), { stateHome: stateDir });
   const ask = async (sessionId: string, request: Ask): Promise<Session> => gateway.dispatch({
@@ -1151,5 +1157,70 @@ test('gateway.tasks still lists what a run with tasks on left once tasks are off
     assert.equal(off.rows.get(task)?.stoppedBy, undefined, 'nothing is written for a finished task');
   } finally {
     await off.stop();
+  }
+});
+
+// ---- task events (AGT-357 PR 6) ----------------------------------------------
+
+const taskEvents = (events: StratusEvent[]): StratusEvent[] => events.filter((event) => event.type.startsWith('task.'));
+
+test('events: a task\'s start and its end each go out once on the bus, ids only, the start before its worker\'s turn', async () => {
+  const events: StratusEvent[] = [];
+  const fixture = await taskGateway({ tasks: { enabled: true }, onEvent: (event) => events.push(event) });
+  try {
+    const origin = 'fixture:ava:C70';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'BLOCK-E', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => fixture.blockedCount() === 1);
+    // The same job again is the running task: no second start.
+    const again = fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'BLOCK-E', background: true }));
+    assert.equal((again.output as { existing?: boolean }).existing, true);
+    fixture.release();
+    const row = await fixture.settled(task);
+    assert.equal(row.status, 'completed');
+
+    const ids = { sessionId: origin, agentId: 'ava', taskId: task, workerSessionId: row.workerSessionId, workerAgentId: 'mia' };
+    assert.deepEqual(taskEvents(events), [{ type: 'task.started', ...ids }, { type: 'task.completed', ...ids }]);
+    const started = events.findIndex((event) => event.type === 'task.started');
+    const workerCreated = events.findIndex((event) => event.type === 'session.created' && event.sessionId === row.workerSessionId);
+    assert.ok(workerCreated > started, 'task.started goes out before the worker\'s session exists');
+    // Nothing a task was asked or answered rides on its events.
+    assert.doesNotMatch(JSON.stringify(taskEvents(events)), /BLOCK-E|did /);
+  } finally {
+    fixture.release();
+    await fixture.stop();
+  }
+});
+
+test('events: a cancelled task ends with task.cancelled, and one a restart cut off with task.interrupted from the startup sweep', async () => {
+  const events: StratusEvent[] = [];
+  const fixture = await taskGateway({ tasks: { enabled: true }, onEvent: (event) => events.push(event) });
+  try {
+    const task = (fixture.delegated(await fixture.ask('fixture:ava:C71', { to: 'ava', prompt: 'BLOCK-X', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => fixture.blockedCount() === 1);
+    assert.equal((await fixture.gateway.cancelTask(task, 'cli')).kind, 'stopping');
+    assert.equal((await fixture.settled(task)).status, 'cancelled');
+    assert.deepEqual(taskEvents(events).map((event) => event.type), ['task.started', 'task.cancelled']);
+  } finally {
+    fixture.release();
+    await fixture.stop();
+  }
+
+  const origin = 'fixture:ava:C72';
+  const crashed = await crashedMidTask(origin);
+  const after: StratusEvent[] = [];
+  const restarted = await taskGateway({ tasks: { enabled: true }, home: crashed.home, onEvent: (event) => after.push(event) });
+  try {
+    assert.equal((await restarted.settled(crashed.task)).status, 'interrupted');
+    // The restart ends the task; it never starts it again.
+    assert.deepEqual(taskEvents(after), [{
+      type: 'task.interrupted',
+      sessionId: origin,
+      agentId: 'ava',
+      taskId: crashed.task,
+      workerSessionId: crashed.workerSessionId,
+      workerAgentId: 'ava',
+    }]);
+  } finally {
+    await restarted.stop();
   }
 });

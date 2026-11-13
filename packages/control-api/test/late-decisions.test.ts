@@ -202,3 +202,21 @@ test('a memory pass\'s completion reaches its agent\'s subscribers, though they 
   ]);
   assert.deepEqual(forBo, []);
 });
+
+// AGT-357: a background task outlives the turn that started it, so none of
+// its events is that turn's or whichever turn its conversation runs when it
+// ends.
+test('a background task\'s events carry no turn id, whatever its conversation is running', async () => {
+  const { bus, frames, turn } = harness();
+  const ids = { sessionId: 's1', agentId: 'ava', taskId: 't_01', workerSessionId: 's1:delegate:ava:1:t_01', workerAgentId: 'ava' };
+  turn('turn-that-started-it');
+  await bus.emit({ type: 'task.started', ...ids });
+  turn('a-later-turn');
+  await bus.emit({ type: 'task.completed', ...ids });
+  await bus.emit({ type: 'session.updated', sessionId: 's1', status: 'running' });
+  assert.deepEqual(frames.map((frame) => [frame.event.type, frame.turnId]), [
+    ['task.started', undefined],
+    ['task.completed', undefined],
+    ['session.updated', 'a-later-turn'],
+  ]);
+});
