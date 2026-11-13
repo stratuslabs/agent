@@ -3856,6 +3856,62 @@ test('the inline test run fails over on the configured fallback', async () => {
   assert.doesNotMatch(output.stdout, /Test run failed/);
 });
 
+test('the inline test run runs a chatgpt config on its sign-in, and refuses one with a base URL as a run would', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'chatgpt', model: 'gpt-5.4' }));
+  await writeFile(path.join(home, '.stratus', 'chatgpt-sign-in.json'), JSON.stringify({
+    hostId: 'urn:uuid:host-1',
+    session: {
+      clientId: 'oaiapp_issued123',
+      subject: 'user-sub-1',
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      expiresAt: Date.now() + 3_600_000,
+      scopes: ['openid', 'chatgpt.tokens.use.direct'],
+      savedAt: Date.now(),
+    },
+  }));
+  const testRun = async (processEnv: NodeJS.ProcessEnv) => {
+    const sent: Array<{ url: string; authorization: string | null }> = [];
+    const { streams, output } = createStreams();
+    await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv,
+        fetch: (async (url: any, init?: RequestInit) => {
+          sent.push({ url: String(url), authorization: new Headers(init?.headers).get('authorization') });
+          const event = {
+            type: 'response.completed',
+            response: {
+              id: 'resp_1',
+              status: 'completed',
+              model: 'gpt-5.4',
+              output: [{ id: 'msg_1', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'ChatGPT says hello.' }] }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            },
+          };
+          return new Response(`event: response.completed\ndata: ${JSON.stringify(event)}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+        }) as typeof fetch,
+        serviceRunner: stubServiceRunner,
+        setupInput: Readable.from(['8\n', '9\n']),
+      },
+    });
+    return { sent, output };
+  };
+
+  const signedIn = await testRun({});
+  assert.match(signedIn.output.stdout, /\[assistant\] ChatGPT says hello\./);
+  assert.deepEqual(signedIn.sent, [{ url: 'https://api.openai.com/v1/responses', authorization: 'Bearer access-1' }]);
+
+  const redirected = await testRun({ STRATUS_BASE_URL: 'https://proxy.local/v1' });
+  assert.match(redirected.output.stdout, /provider=chatgpt does not use a custom base URL, so a run with https:\/\/proxy\.local\/v1 is refused/);
+  assert.deepEqual(redirected.sent, []);
+});
+
 test('setup warns when a project config shadows the global file it wrote', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));

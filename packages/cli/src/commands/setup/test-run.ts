@@ -160,7 +160,14 @@ export const createTestRunSetup = ({
 
     if (state.provider === 'chatgpt') {
       // Setup can't sign in with ChatGPT yet; a config that already names
-      // chatgpt is tested on the sign-in the file holds.
+      // chatgpt is tested on the sign-in the file holds. A base URL refuses
+      // the test as resolveRuntimeConfig refuses the run: the sign-in goes
+      // only to OpenAI.
+      const namedBaseUrl = readNonEmptyString(processEnv.STRATUS_BASE_URL) ?? state.baseUrl;
+      if (namedBaseUrl !== undefined) {
+        writeLine(streams.stdout, `provider=chatgpt does not use a custom base URL, so a run with ${namedBaseUrl} is refused. Remove the base URL to test it.`);
+        return undefined;
+      }
       if (!await chatgptSignedIn()) {
         writeLine(streams.stdout, 'You are not signed in with ChatGPT on this install, so there is nothing to test yet.');
         return undefined;
