@@ -1429,12 +1429,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     onWorkerChain: (sessionId, work) => onSessionChain(sessionId, work, undefined, { background: true }),
     settleRepeat: (sessionId, idempotencyKey, agentId) => settleRepeat(sessionId, idempotencyKey, agentId, undefined, undefined),
     observe: (input) => observer.observe(input),
+    abortTurns: (sessionId, reason) => abortTurns(sessionId, reason),
     // Through the seams a channel already has: which conversation the
     // origin session is (`sessionConversation`), its thread from the
     // session's own conversation record, and the addressable outbound
     // post, speaking as the origin session so the channel doesn't hear the
     // notice back into the transcript that already holds it.
-    abortTurns: (sessionId, reason) => abortTurns(sessionId, reason),
     postToOrigin: async (notice) => {
       const origin = await store.get(notice.sessionId);
       const kind = origin?.metadata?.channel;
