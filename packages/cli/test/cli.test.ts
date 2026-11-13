@@ -18265,3 +18265,161 @@ test('stratus memory list and audit name every fact a merge replaced, and the ev
   });
   assert.deepEqual(merged, { tool: 'memory.remember', ok: true, entry: 'ava:memory:3', supersedes: ['ava:memory:1', 'ava:memory:2'] });
 });
+
+// AGT-357 PR 4: `stratus tasks`, a thin client of the control API's task routes.
+
+test('parseCommand reads stratus tasks and stratus tasks cancel', () => {
+  assert.deepEqual(parseCommand(['tasks']), { command: 'tasks', action: 'list', format: 'text' });
+  assert.deepEqual(
+    parseCommand(['tasks', '--agent', 'ava', '--format', 'json', '--gateway', 'http://10.0.0.5:4123', '--token', 't']),
+    { command: 'tasks', action: 'list', agentId: 'ava', format: 'json', gateway: 'http://10.0.0.5:4123', token: 't' },
+  );
+  assert.deepEqual(parseCommand(['tasks', 'cancel', 't_01ABC']), { command: 'tasks', action: 'cancel', taskId: 't_01ABC', format: 'text' });
+  assert.deepEqual(
+    parseCommand(['tasks', 'cancel', '--format', 'json', 't_01ABC']),
+    { command: 'tasks', action: 'cancel', taskId: 't_01ABC', format: 'json' },
+  );
+  assert.throws(() => parseCommand(['tasks', 'cancel']), /tasks cancel needs the task id/);
+  assert.throws(() => parseCommand(['tasks', 'cancel', 't_1', 't_2']), /Unexpected argument: t_2/);
+  assert.throws(() => parseCommand(['tasks', 'cancel', 't_1', '--agent', 'ava']), /Unknown option: --agent/);
+  assert.throws(() => parseCommand(['tasks', 'list']), /Unexpected argument: list/);
+  assert.throws(() => parseCommand(['tasks', '--format', 'yaml']), /Unsupported format: yaml/);
+  assert.deepEqual(parseCommand(['tasks', '--help']), { command: 'help' });
+});
+
+test('stratus tasks lists the daemon\'s tasks: who, when, steps, id, and whether the outcome is in the conversation', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-tasks-list-'));
+  const base = { originSessionId: 'slack:ava:C1:1.1', updatedAt: '2026-11-13T10:00:00.000Z' };
+  // Newest first, the order GET /api/v1/tasks answers in.
+  const rows = [
+    { ...base, id: 't_RUN', agentId: 'ava', workerAgentId: 'mia', workerSessionId: 'w1', status: 'running', delivery: 'pending', steps: 3, createdAt: '2026-11-13T10:04:00.000Z' },
+    { ...base, id: 't_STOP', agentId: 'ava', workerAgentId: 'ava', workerSessionId: 'w2', status: 'running', delivery: 'pending', stoppedBy: 'U123', steps: 1, createdAt: '2026-11-13T10:03:00.000Z' },
+    { ...base, id: 't_OWED', agentId: 'ava', workerAgentId: 'ava', workerSessionId: 'w3', status: 'failed', delivery: 'pending', steps: 2, createdAt: '2026-11-13T10:02:00.000Z', endedAt: '2026-11-13T10:02:30.000Z' },
+    { ...base, id: 't_DONE', agentId: 'bea', workerAgentId: 'bea', workerSessionId: 'w4', status: 'cancelled', delivery: 'delivered', stoppedBy: 'cli', steps: 0, createdAt: '2026-11-13T10:01:00.000Z', endedAt: '2026-11-13T10:01:30.000Z' },
+    { ...base, id: 't_GONE', agentId: 'bea', workerAgentId: 'bea', workerSessionId: 'w5', status: 'completed', delivery: 'dropped', steps: 4, createdAt: '2026-11-13T10:00:00.000Z', endedAt: '2026-11-13T10:00:30.000Z' },
+  ];
+  const asked: string[] = [];
+  const fetchStub = (async (input: string | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    asked.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}`);
+    const agent = url.searchParams.get('agent');
+    return new Response(JSON.stringify({ tasks: rows.filter((row) => agent === null || row.agentId === agent) }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: {}, fetch: fetchStub };
+  const run = async (argv: string[]) => {
+    const streams = createStreams();
+    const code = await runCli({ argv: ['tasks', '--gateway', 'http://127.0.0.1:9', '--token', 't', ...argv], streams: streams.streams, env });
+    return { code, ...streams.output };
+  };
+
+  const all = await run([]);
+  assert.equal(all.code, 0, all.stderr);
+  assert.equal(asked.at(-1), 'GET /api/v1/tasks');
+  assert.deepEqual(all.stdout.split('\n'), [
+    'running    ava → mia  2026-11-13T10:04:00.000Z  3 steps  t_RUN',
+    'running    ava        2026-11-13T10:03:00.000Z  1 step   t_STOP  stopped by U123, stopping',
+    'failed     ava        2026-11-13T10:02:00.000Z  2 steps  t_OWED  not in the conversation yet',
+    'cancelled  bea        2026-11-13T10:01:00.000Z  0 steps  t_DONE  stopped from the CLI; in the conversation',
+    'completed  bea        2026-11-13T10:00:00.000Z  4 steps  t_GONE  dropped: its conversation is gone',
+    '',
+  ]);
+
+  const bea = await run(['--agent', 'bea', '--format', 'json']);
+  assert.equal(asked.at(-1), 'GET /api/v1/tasks?agent=bea');
+  assert.deepEqual(JSON.parse(bea.stdout), { tasks: [rows[3], rows[4]] });
+
+  const none = await run(['--agent', 'cy']);
+  assert.equal(none.stdout, 'No background tasks started by cy.\n');
+});
+
+test('stratus tasks cancel asks the daemon to stop one, and says what happened', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-tasks-cancel-'));
+  const answers: Record<string, { status: number; body: unknown }> = {
+    t_RUN: { status: 200, body: { task: 't_RUN', stopped: true } },
+    t_AGAIN: { status: 200, body: { task: 't_AGAIN', stopped: true, already: true, stoppedBy: 'dashboard' } },
+    t_DONE: { status: 200, body: { task: 't_DONE', stopped: false, status: 'completed' } },
+    t_NOPE: { status: 404, body: { error: { code: 'task_not_found', message: 'No task with id t_NOPE. `stratus tasks` lists them.' } } },
+  };
+  const asked: string[] = [];
+  const fetchStub = (async (input: string | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    asked.push(`${init?.method ?? 'GET'} ${url.pathname}`);
+    const id = /^\/api\/v1\/tasks\/([^/]+)\/cancel$/.exec(url.pathname)?.[1] ?? '';
+    const answer = answers[decodeURIComponent(id)] ?? { status: 500, body: {} };
+    return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: {}, fetch: fetchStub };
+  const run = async (argv: string[]) => {
+    const streams = createStreams();
+    const code = await runCli({ argv: ['tasks', 'cancel', '--gateway', 'http://127.0.0.1:9', '--token', 't', ...argv], streams: streams.streams, env });
+    return { code, ...streams.output };
+  };
+
+  const stopping = await run(['t_RUN']);
+  assert.equal(stopping.code, 0, stopping.stderr);
+  assert.equal(asked.at(-1), 'POST /api/v1/tasks/t_RUN/cancel');
+  assert.equal(stopping.stdout, 'Stopping t_RUN. Its conversation gets a notice that it was cancelled.\n');
+
+  assert.equal((await run(['t_AGAIN'])).stdout, 't_AGAIN is already stopping (stopped from the dashboard).\n');
+  const done = await run(['t_DONE']);
+  assert.equal(done.code, 0);
+  assert.equal(done.stdout, 't_DONE had already ended (completed), so nothing was stopped.\n');
+  assert.deepEqual(JSON.parse((await run(['t_DONE', '--format', 'json'])).stdout), answers.t_DONE!.body);
+
+  const missing = await run(['t_NOPE']);
+  assert.equal(missing.code, 1);
+  assert.equal(missing.stdout, '');
+  assert.equal(missing.stderr, 'Error: No task with id t_NOPE. `stratus tasks` lists them.\n');
+
+  // An id is a path segment, so one with a slash can't reach another route.
+  await run(['t_1/../../sessions']);
+  assert.equal(asked.at(-1), 'POST /api/v1/tasks/t_1%2F..%2F..%2Fsessions/cancel');
+});
+
+test('stratus tasks and stratus tasks cancel reach the running daemon\'s tasks', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-tasks-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: ava\nid: ava\nprovider: demo\n---\n\nYou are ava.\n');
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const cli = async (argv: string[]) => {
+    const streams = createStreams();
+    const code = await runCli({ argv, streams: streams.streams, env });
+    return { code, ...streams.output };
+  };
+
+  await withServedApi(home, async () => {
+    assert.equal((await cli(['tasks'])).stdout, 'No background tasks.\n');
+
+    // A row as the gateway's task store writes it, after the daemon's start
+    // so its restart sweep leaves it alone: a task whose worker this
+    // process isn't running.
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(fleetDbPath({ homeDir: home }));
+    try {
+      db.prepare(`
+        INSERT INTO tasks (id, agent_id, worker_agent_id, origin_session_id, worker_session_id, prompt_digest, status, delivery, created_at, updated_at)
+        VALUES ('t_LIVE', 'ava', 'ava', 'o-1', 'o-1:delegate:ava:1:t_LIVE', 'd', 'running', 'pending', '2026-11-13T10:00:00.000Z', '2026-11-13T10:00:00.000Z')
+      `).run();
+    } finally {
+      db.close();
+    }
+
+    const listed = await cli(['tasks']);
+    assert.equal(listed.code, 0, listed.stderr);
+    assert.equal(listed.stdout, 'running  ava  2026-11-13T10:00:00.000Z  0 steps  t_LIVE\n');
+
+    const cancelled = await cli(['tasks', 'cancel', 't_LIVE']);
+    assert.equal(cancelled.code, 0, cancelled.stderr);
+    assert.equal(cancelled.stdout, 'Stopping t_LIVE. Its conversation gets a notice that it was cancelled.\n');
+    const after = await cli(['tasks', '--format', 'json']);
+    assert.deepEqual((JSON.parse(after.stdout) as { tasks: Array<{ id: string; stoppedBy?: string }> }).tasks.map((task) => [task.id, task.stoppedBy]), [['t_LIVE', 'cli']]);
+
+    const missing = await cli(['tasks', 'cancel', 't_NOPE']);
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /^Error: No task with id t_NOPE\./);
+  });
+
+  const down = await cli(['tasks']);
+  assert.equal(down.code, 1);
+  assert.match(down.stderr, /^Error: no running daemon found/);
+});

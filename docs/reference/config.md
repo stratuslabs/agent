@@ -299,10 +299,23 @@ outcome is added to the conversation that started it, once, when it ends.
   tasks that conversation started, and a line there names them
   ([stopping a turn](../guides/slack.md#stopping-a-turn)). Each task's
   outcome then arrives as cancelled. An agent stops its own with
-  `agent.cancelTask`.
+  `agent.cancelTask`, and the operator any task with `stratus tasks
+  cancel <id>`.
+- **Seeing them.** `stratus tasks` lists the running daemon's tasks: every
+  one running or whose outcome isn't in its conversation yet, newest
+  first, then the 20 most recently finished, with the status, agent,
+  steps, task id, and whether the outcome is in the conversation.
+  `--agent <id>` narrows it to the tasks one agent started, and
+  `--format json` adds the conversation and worker session ids. It never
+  shows what a task was asked or answered: that stays in the two sessions.
+  The control API has the same list at `GET /api/v1/tasks` (`?agent=<id>`)
+  and the cancel at `POST /api/v1/tasks/<id>/cancel`; both need the
+  operator token or a dashboard sign-in. A cancel with the token is named
+  "from the CLI" in the notice, and one from a dashboard sign-in "from the
+  dashboard".
 - **Off.** `enabled: false`, or no `tasks` block, refuses `background: true`
   with an error saying so. Tasks a previous run left are still settled at
-  startup.
+  startup, and `stratus tasks` still lists them.
 
 `stratus serve` names the setting when it starts (`background tasks: on,
 up to 3 running per agent (atlas 5)`). A project-local

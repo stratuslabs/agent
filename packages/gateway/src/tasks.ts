@@ -242,26 +242,27 @@ export class SqliteTaskStore {
   }
 
   /**
-   * One agent's tasks, for its own list: every one still open or still owed
-   * a delivery, newest first, then up to `finished` of the rest, most
-   * recently ended first. The first part is bounded by the agent's cap and
-   * by settling; the second by `finished`, so the list stays short however
-   * long the agent has run.
+   * One agent's tasks, for its own list, or every agent's (`undefined`) for
+   * the operator's: every one still open or still owed a delivery, newest
+   * first, then up to `finished` of the rest, most recently ended first. The
+   * first part is bounded by the caps and by settling; the second by
+   * `finished`, so the list stays short however long the fleet has run.
    */
-  listForAgent(agentId: string, finished: number): TaskRow[] {
+  list(agentId: string | undefined, finished: number): TaskRow[] {
+    const agent = agentId ?? null;
     const owed = this.db
       .prepare(`
-        SELECT * FROM tasks WHERE agent_id = ? AND (status IN (${OPEN_SQL}) OR delivery = 'pending')
+        SELECT * FROM tasks WHERE (? IS NULL OR agent_id = ?) AND (status IN (${OPEN_SQL}) OR delivery = 'pending')
         ORDER BY created_at DESC, rowid DESC
       `)
-      .all(agentId) as unknown as TaskRowRaw[];
+      .all(agent, agent) as unknown as TaskRowRaw[];
     const done = this.db
       .prepare(`
-        SELECT * FROM tasks WHERE agent_id = ? AND status NOT IN (${OPEN_SQL}) AND delivery != 'pending'
+        SELECT * FROM tasks WHERE (? IS NULL OR agent_id = ?) AND status NOT IN (${OPEN_SQL}) AND delivery != 'pending'
         ORDER BY CASE WHEN ended_at = '' THEN updated_at ELSE ended_at END DESC, rowid DESC
         LIMIT ?
       `)
-      .all(agentId, Math.max(0, Math.floor(finished))) as unknown as TaskRowRaw[];
+      .all(agent, agent, Math.max(0, Math.floor(finished))) as unknown as TaskRowRaw[];
     return [...owed, ...done].map(taskFrom);
   }
 

@@ -33,6 +33,7 @@ import { runSessionRollover } from './commands/session.ts';
 import { runSessions } from './commands/sessions.ts';
 import { runSetup } from './commands/setup.ts';
 import { runSkillAdd, runSkillValidate, runSkillReload, runSkills } from './commands/skills.ts';
+import { runTasks } from './commands/tasks.ts';
 import { runTemplateAdd } from './commands/template.ts';
 import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
@@ -255,6 +256,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
 
     if (command.command === 'sessions') {
       return await runSessions(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'tasks') {
+      return await runTasks(command, streams, resolvedEnv);
     }
 
     if (command.command === 'doctor') {

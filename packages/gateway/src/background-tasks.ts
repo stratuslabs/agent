@@ -19,7 +19,7 @@ import {
 
 import type { ShardedSessionStore } from './sessions.ts';
 import { createTaskSettler, deriveTaskOutcome, TASK_CUT_OFF_ERROR, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
-import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow, type TaskStatus } from './tasks.ts';
+import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
 // Background tasks in the gateway (AGT-211, agent-plans
@@ -37,6 +37,36 @@ export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
 
 /** Finished tasks `agent.tasks` shows after the open and undelivered ones. */
 export const TASKS_LIST_FINISHED_LIMIT = 10;
+
+/** Finished tasks the operator's list (`stratus tasks`, `GET /api/v1/tasks`) shows after the open and undelivered ones. */
+export const TASKS_OPERATOR_FINISHED_LIMIT = 20;
+
+/**
+ * One task as the operator sees it (`stratus tasks`, `GET /api/v1/tasks`):
+ * ids, who, where and how it stands, never what was asked or answered (the
+ * prompt and result stay in the two sessions). `status` is read live from
+ * the worker session (`liveTaskStatus`).
+ */
+export interface TaskListing {
+  id: string;
+  /** The agent that started it. */
+  agentId: string;
+  /** The agent doing the work; may be the same. */
+  workerAgentId: string;
+  /** The conversation its outcome goes back to. */
+  originSessionId: string;
+  workerSessionId: string;
+  status: TaskStatus;
+  /** Whether the outcome is in that conversation's transcript: `pending`, `delivered`, or `dropped` once it is gone. */
+  delivery: TaskDelivery;
+  /** Who asked for a stop, once someone did. */
+  stoppedBy?: string;
+  /** Responses the worker's turn has taken so far. */
+  steps: number;
+  createdAt: string;
+  updatedAt: string;
+  endedAt?: string;
+}
 
 /** What a cancel did. */
 export type TaskCancelResult =
@@ -387,6 +417,12 @@ export const createBackgroundTasks = ({
     return { open: running.length, stopped };
   };
 
+  /** A row's status and steps as its worker session tells them now. */
+  const liveOf = async (row: TaskRow): Promise<{ status: TaskStatus; steps: number }> => {
+    const worker = await store.get(row.workerSessionId);
+    return { status: liveTaskStatus(row, worker), steps: worker === undefined ? 0 : taskSteps(worker) };
+  };
+
   /**
    * What `agent.tasks` and `agent.cancelTask` reach, scoped to the calling
    * agent. A listed task's status is read live from its worker session
@@ -395,16 +431,16 @@ export const createBackgroundTasks = ({
    */
   const toolsHost: TaskToolsHost = {
     async list(agentId) {
-      const rows = tasks.listForAgent(agentId, TASKS_LIST_FINISHED_LIMIT);
+      const rows = tasks.list(agentId, TASKS_LIST_FINISHED_LIMIT);
       return Promise.all(rows.map(async (row): Promise<TaskSummary> => {
-        const worker = await store.get(row.workerSessionId);
+        const { status, steps } = await liveOf(row);
         return {
           task: row.id,
-          status: liveTaskStatus(row, worker),
+          status,
           worker: row.workerAgentId,
           startedAt: row.createdAt,
           ...(row.endedAt !== undefined ? { endedAt: row.endedAt } : {}),
-          steps: worker === undefined ? 0 : taskSteps(worker),
+          steps,
           delivery: row.delivery,
           ...(row.stoppedBy !== undefined ? { stoppedBy: row.stoppedBy } : {}),
         };
@@ -423,9 +459,34 @@ export const createBackgroundTasks = ({
     },
   };
 
+  /**
+   * The operator's list, one agent's or the fleet's: every task open or
+   * owed a delivery, then the most recently finished. Read whether or not
+   * tasks are on, so rows an earlier run left stay visible.
+   */
+  const list = async (agentId?: string): Promise<TaskListing[]> =>
+    Promise.all(tasks.list(agentId, TASKS_OPERATOR_FINISHED_LIMIT).map(async (row): Promise<TaskListing> => {
+      const { status, steps } = await liveOf(row);
+      return {
+        id: row.id,
+        agentId: row.agentId,
+        workerAgentId: row.workerAgentId,
+        originSessionId: row.originSessionId,
+        workerSessionId: row.workerSessionId,
+        status,
+        delivery: row.delivery,
+        ...(row.stoppedBy !== undefined ? { stoppedBy: row.stoppedBy } : {}),
+        steps,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        ...(row.endedAt !== undefined ? { endedAt: row.endedAt } : {}),
+      };
+    }));
+
   return {
     start: enabled ? startTask : undefined,
     cancel,
+    list,
     stopTasks,
     /** The agent's task tools' host; offered only while tasks are on. */
     toolsHost: enabled ? toolsHost : undefined,

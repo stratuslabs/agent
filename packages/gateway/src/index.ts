@@ -193,7 +193,7 @@ export {
   type RefusedEventDelivery,
 } from './events.ts';
 export { type MemoryPassDetail } from './memory-passes.ts';
-export { type TaskCancelInput, type TaskCancelResult } from './background-tasks.ts';
+export { TASKS_OPERATOR_FINISHED_LIMIT, type TaskCancelInput, type TaskCancelResult, type TaskListing } from './background-tasks.ts';
 export { type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
 // The review posture's fixed prompt and case, for the review-step eval
 // (`packages/cli/eval/review-step`), which measures the prompt production
@@ -3646,6 +3646,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     cancelTask(taskId, stoppedBy) {
       return backgroundTasks.cancel(taskId, { stoppedBy });
+    },
+
+    tasks(agentId) {
+      return backgroundTasks.list(agentId);
     },
 
     stopTasks(sessionId, stoppedBy) {
