@@ -28,6 +28,7 @@
     "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
+    "@stratusagent/state": "workspace:*",
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },

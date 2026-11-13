@@ -17,6 +17,7 @@ export { BUILTIN_PROVIDER_NAMES, type BuiltinProviderName } from '@stratusagent/
 export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/core';
 
 export { syncDirectory, writeFileSynced } from './durable-write.ts';
+export { CHATGPT_SIGN_IN_LOCK_WAIT_MS, type ChatGPTSignInFile, createChatGPTSignInFile } from './chatgpt-sign-in.ts';
 export { createFileMemoryStore, createShardedFileMemoryStore, type FileMemoryStoreOptions } from './memory.ts';
 export {
   MEMORY_PASSES_FILENAME,
@@ -87,6 +88,8 @@ export {
   backupsDirPath,
   credentialsPath,
   credentialAuditPath,
+  chatgptSignInPath,
+  chatgptSignInLockPath,
   agentsDirPath,
   legacyMemoryFilePath,
   legacyMemoryFileIn,

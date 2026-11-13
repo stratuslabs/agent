@@ -385,6 +385,31 @@ test('a store or lock that fails comes back as storage_failed with the cause, no
   await rejectsWithCode(sourceFor(unknownError.store, refreshServer(['network-error'])).source.accessToken(undefined), 'temporary');
 });
 
+test("a lock that can't be taken in time leaves the current token in use until it runs out", async () => {
+  // Another process holding the lock past the wait, say on a refresh that
+  // hangs. The token in hand still has minutes left, so the turn goes on
+  // with it, and the next call tries the lock again.
+  const lockError = new Error('chatgpt-sign-in.lock is held by another process.');
+  let attempts = 0;
+  const busyLock = { taken: 0, withSessionLock: async <T>(_work: () => Promise<T>): Promise<T> => {
+    attempts += 1;
+    return Promise.reject(lockError);
+  } };
+  const due = memoryStore(savedSession({ expiresAt: NOW + 2 * MINUTE }));
+  const server = refreshServer([]);
+  const { source } = sourceFor(due.store, server, busyLock);
+  assert.equal(await source.accessToken(undefined), 'access-1');
+  assert.equal(await source.accessToken(undefined), 'access-1');
+  assert.equal(attempts, 2);
+  assert.equal(server.requests.length, 0);
+  assert.equal(due.writes.length, 0);
+
+  // Once it has run out, the lock failure is the answer.
+  const expired = memoryStore(savedSession({ expiresAt: NOW - 1 }));
+  const failure = await rejectsWithCode(sourceFor(expired.store, refreshServer([]), busyLock).source.accessToken(undefined), 'storage_failed');
+  assert.equal(failure.cause, lockError);
+});
+
 test('sessionFromSignIn saves the account and its tokens, and the ID token from the validated sign-in', () => {
   const signIn: ChatGPTSignIn = {
     clientId: CLIENT_ID,

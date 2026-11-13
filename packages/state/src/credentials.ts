@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, readFile, rename, rm } from 'node:fs/promises';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { credentialVariableProblem, isValidAgentId } from '@stratusagent/agents';
 import {
@@ -16,7 +15,7 @@ import {
   CREDENTIAL_PROVIDER_NAMES,
   type CredentialProviderName,
 } from './provider-names.ts';
-import { syncDirectory, writeFileSynced } from './durable-write.ts';
+import { replaceOwnerOnlyFile } from './durable-write.ts';
 
 /**
  * A stored sign-in for a provider, kept in ~/.stratus/credentials.json.
@@ -106,25 +105,8 @@ const loadRawCredentialsFile = async (env: StateEnvironment): Promise<Record<str
 // still lose one another's update, which is why the daemon's writers
 // serialize through `withCredentialsFileLock`. Atomicity is about what a
 // *reader* can observe.
-const writeRawCredentialsFile = async (env: StateEnvironment, contents: Record<string, unknown>): Promise<void> => {
-  const filePath = credentialsPath(env);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  // Unique per write, so two writers never share a temporary file.
-  const temporary = `${filePath}.${randomUUID()}.tmp`;
-  try {
-    await writeFileSynced(temporary, `${JSON.stringify(contents, null, 2)}\n`, { mode: 0o600 });
-    // Before the rename rather than after: the destination must never exist
-    // at a looser mode, even briefly. `writeFile`'s mode applies only when
-    // it creates the file, so the explicit chmod stays.
-    await chmod(temporary, 0o600);
-    await rename(temporary, filePath);
-    await syncDirectory(path.dirname(filePath));
-  } catch (error) {
-    // A failed write must not leave a file holding credentials behind.
-    await rm(temporary, { force: true });
-    throw error;
-  }
-};
+const writeRawCredentialsFile = async (env: StateEnvironment, contents: Record<string, unknown>): Promise<void> =>
+  replaceOwnerOnlyFile(credentialsPath(env), `${JSON.stringify(contents, null, 2)}\n`);
 
 // Credentials never live in a project directory or a shell profile — they
 // are written once by `stratus setup` and read on every run, 0600 so only
