@@ -277,19 +277,17 @@ export const send = async (
     }
     return { response, body, text };
   } catch (error) {
-    if (options.signal?.aborted === true) {
-      throw new ChatGPTAuthError('cancelled', `${what} was cancelled.`, { cause: error });
-    }
+    // A failure can quote the request's own header (Node's fetch does, for a
+    // value it can't send, and a wrapper may on abort). Then the token comes
+    // out of the message, and the original error, which still holds it,
+    // isn't kept as the cause.
     const quoted = error instanceof Error ? error.message : String(error);
     const reason = redactSecrets(quoted, credentialsIn(init.headers));
-    // A failure can quote the request's own header (Node's fetch does, for a
-    // value it can't send). Then the token comes out of the message, and the
-    // original error, which still holds it, isn't kept as the cause.
-    throw new ChatGPTAuthError(
-      'temporary',
-      `Couldn't reach ${what} (${clip(reason)}). Check the connection and try again.`,
-      reason === quoted ? { cause: error } : undefined,
-    );
+    const cause = reason === quoted ? { cause: error } : undefined;
+    if (options.signal?.aborted === true) {
+      throw new ChatGPTAuthError('cancelled', `${what} was cancelled.`, cause);
+    }
+    throw new ChatGPTAuthError('temporary', `Couldn't reach ${what} (${clip(reason)}). Check the connection and try again.`, cause);
   }
 };
 
