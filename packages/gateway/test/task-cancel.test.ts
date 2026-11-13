@@ -4,7 +4,7 @@ import { mkdir, mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { recordTurnFailure, type AgentDefinition, type Message, type Session } from '@stratusagent/core';
+import { recordTurnFailure, type AgentDefinition, type Message, type Session, type StratusEvent } from '@stratusagent/core';
 import { fleetDbIn } from '@stratusagent/state';
 
 import { createBackgroundTasks, liveTaskStatus } from '../src/background-tasks.ts';
@@ -83,6 +83,7 @@ const fixture = async (
   const workerDispatches: Array<{ abortedAtStart: boolean }> = [];
   const aborted: Array<{ sessionId: string; reason: string }> = [];
   const warnings: string[] = [];
+  const events: StratusEvent[] = [];
 
   const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
     if (input.sessionId === ORIGIN || input.sessionId === OTHER) {
@@ -148,7 +149,7 @@ const fixture = async (
     fleetDb: fleetDbIn(stateDir),
     stateHome: stateDir,
     store: seen,
-    bus: { emit: async () => {} },
+    bus: { emit: async (event) => { events.push(event); } },
     dispatchInternal,
     onSessionChain: onChain,
     onWorkerChain: async (sessionId, work) => {
@@ -196,6 +197,7 @@ const fixture = async (
     workerDispatches,
     aborted,
     warnings,
+    events,
     openWorkerLink: () => openWorkerLink(),
     release: () => release(),
     async close() {
@@ -400,7 +402,10 @@ test('a task\'s live status: the row\'s once final, else what its worker session
   // Open rows read the worker.
   assert.equal(liveTaskStatus({ status: 'running' }, undefined), 'running', 'a start still on its way');
   assert.equal(liveTaskStatus({ status: 'running' }, worker('idle', [])), 'running', 'a worker session with no turn yet is not "never started"');
-  assert.equal(liveTaskStatus({ status: 'waiting_approval' }, worker('running', [start])), 'running', 'an answered approval');
+  // The broker marks the row while a question is out and puts it back once
+  // answered (AGT-358). A provider that runs its own loop never parks the
+  // session, so the row is what says it waits.
+  assert.equal(liveTaskStatus({ status: 'waiting_approval' }, worker('running', [start])), 'waiting_approval', 'a question out on a provider that runs its own loop');
   assert.equal(liveTaskStatus({ status: 'running' }, worker('pending_approval', [start])), 'waiting_approval');
   assert.equal(liveTaskStatus({ status: 'running' }, done), 'completed', 'finished, not yet settled');
   assert.equal(liveTaskStatus({ status: 'running' }, worker('failed', [start], 'rate limited')), 'failed');
@@ -509,6 +514,41 @@ test('a cancel that fails is logged with its task id and left out, and the stop 
     failReads = false;
     assert.ok(f.warnings.some((line) => line.includes(row.id) && line.includes('disk gone')), JSON.stringify(f.warnings));
     assert.equal(f.rows.get(row.id)?.stoppedBy, undefined, 'nothing was written, so nothing claims it stopped');
+  } finally {
+    await f.close();
+  }
+});
+
+test('approval waits: questions out at once mark the task once, only the last answer puts it back to running, and an ended task stays ended', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const row = await f.start();
+    await until('the worker\'s turn to start', async () => (await f.store.get(row.workerSessionId)) !== undefined);
+    assert.equal(await f.tasks.approvalWait(ORIGIN), undefined, 'the conversation that started it is not its worker');
+    assert.equal(await f.tasks.approvalWait(`${row.workerSessionId}:delegate:ava:2:x`), undefined, 'nor is a session under it');
+
+    const first = await f.tasks.approvalWait(row.workerSessionId);
+    const second = await f.tasks.approvalWait(row.workerSessionId);
+    assert.deepEqual([first?.taskId, second?.taskId], [row.id, row.id]);
+    assert.equal(f.rows.get(row.id)?.status, 'waiting_approval');
+    const types = (): string[] => f.events.map((event) => event.type);
+    assert.deepEqual(types(), ['task.started', 'task.waiting-approval'], 'one wait, however many questions');
+    first!.release();
+    first!.release();
+    assert.equal(f.rows.get(row.id)?.status, 'waiting_approval', 'a second release of the same question counts once; one is still out');
+    second!.release();
+    assert.equal(f.rows.get(row.id)?.status, 'running');
+
+    // A later question is a new wait.
+    const third = await f.tasks.approvalWait(row.workerSessionId);
+    assert.deepEqual(types(), ['task.started', 'task.waiting-approval', 'task.waiting-approval']);
+    // Stopped while it is out: the answer that follows leaves it ended.
+    assert.equal((await f.tasks.cancel(row.id, { stoppedBy: 'cli' })).kind, 'stopping');
+    assert.equal((await f.settled(row.id)).status, 'cancelled');
+    third!.release();
+    assert.equal(f.rows.get(row.id)?.status, 'cancelled');
+    assert.equal(await f.tasks.approvalWait(row.workerSessionId), undefined, 'a worker whose turn ended is no task\'s');
+    assert.deepEqual(types(), ['task.started', 'task.waiting-approval', 'task.waiting-approval', 'task.cancelled']);
   } finally {
     await f.close();
   }

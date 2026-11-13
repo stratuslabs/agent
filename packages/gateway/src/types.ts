@@ -403,6 +403,8 @@ export interface PendingApproval {
   delegatedFrom?: ApprovalDelegationOrigin;
   /** Where a scheduled firing's schedule reports — see the event. */
   scheduleDestination?: ApprovalScheduleDestination;
+  /** The background task asking, for a task's worker — see the event. */
+  taskId?: string;
 }
 
 export interface ResolveApprovalInput {

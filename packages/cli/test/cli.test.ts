@@ -11044,10 +11044,24 @@ test('a background task\'s start and end are a line in the console and ids in th
   assert.deepEqual(eventDetail(started), { taskId: 't_01', workerSessionId: ids.workerSessionId, workerAgentId: 'mia' });
   const own = { type: 'task.cancelled', ...ids, workerAgentId: 'ava' } as const;
   assert.equal(formatEvent(own), '• task.cancelled t_01 (ava)');
-  for (const type of ['task.completed', 'task.failed', 'task.interrupted'] as const) {
+  for (const type of ['task.waiting-approval', 'task.completed', 'task.failed', 'task.interrupted'] as const) {
     assert.equal(formatEvent({ ...own, type }), `• ${type} t_01 (ava)`);
     assert.deepEqual(eventDetail({ ...own, type }), { taskId: 't_01', workerSessionId: ids.workerSessionId, workerAgentId: 'ava' });
   }
+});
+
+test('a background task\'s approval question names its task in the console and the log', () => {
+  const event = {
+    type: 'tool.approval-requested',
+    sessionId: 'slack:ava:T1:C1:1.1:delegate:mia:1:t_01',
+    agentId: 'mia',
+    requestId: 'req-1',
+    call: { id: 'c1', toolName: 'shell.run', input: { command: 'ls' } },
+    risk: 'gated',
+    taskId: 't_01',
+  } as const;
+  assert.equal(formatEvent(event), '• tool.approval-requested shell.run (gated) for mia, task t_01');
+  assert.deepEqual(eventDetail(event), { tool: 'shell.run', risk: 'gated', requestId: 'req-1', taskId: 't_01' });
 });
 
 test('approval events are visible in the console and in the audit log', async () => {

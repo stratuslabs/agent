@@ -45,6 +45,12 @@ export interface ParkedCall {
   pending: PendingApproval;
 }
 
+/** A background task's worker waiting on a person, until `release` runs. */
+export interface TaskApprovalWait {
+  taskId: string;
+  release: () => void;
+}
+
 /** What the approval broker closes over in `createGateway`. */
 export interface ApprovalBrokerDeps {
   warn: (line: string) => void;
@@ -53,6 +59,12 @@ export interface ApprovalBrokerDeps {
   scheduler: SchedulerRuntime;
   effectiveApprovalTimeoutMs: number;
   isStopping: () => boolean;
+  /**
+   * The background task a session is the running worker of, marked waiting
+   * on a person (AGT-358); undefined for any other session. Late-bound:
+   * background tasks are made after the broker.
+   */
+  taskApprovalWait: (sessionId: string) => Promise<TaskApprovalWait | undefined>;
 }
 
 export const createApprovalBroker = ({
@@ -62,6 +74,7 @@ export const createApprovalBroker = ({
   scheduler,
   effectiveApprovalTimeoutMs,
   isStopping,
+  taskApprovalWait,
 }: ApprovalBrokerDeps) => {
   const pendingApprovals = new Map<string, ParkedCall>();
 
@@ -149,12 +162,27 @@ export const createApprovalBroker = ({
       return { answer: 'deny' };
     }
     const delegatedFrom = await delegationOriginOf(request.session);
-    return requestApprovalFrom(request, delegatedFrom);
+    // A background task's worker (AGT-358): the question names its task,
+    // and the task waits on the person until it is answered, whatever the
+    // answer. Not for a request denied before anyone is asked: during a
+    // shutdown, or for a turn already stopped.
+    const taskWait = isStopping() || request.signal?.aborted === true
+      ? undefined
+      : await taskApprovalWait(hostIdOf(request.session));
+    if (taskWait === undefined) {
+      return requestApprovalFrom(request, delegatedFrom);
+    }
+    try {
+      return await requestApprovalFrom(request, delegatedFrom, taskWait.taskId);
+    } finally {
+      taskWait.release();
+    }
   };
 
   const requestApprovalFrom = (
     request: GatewayApprovalRequest,
     delegatedFrom: ApprovalDelegationOrigin | undefined,
+    taskId?: string,
   ): Promise<ApprovalOutcome> => new Promise<ApprovalOutcome>((resolve) => {
     // A shutdown denies what is parked once, at the top of stop(). Turns
     // already running keep going through the drain, though, and one of them
@@ -270,6 +298,7 @@ export const createApprovalBroker = ({
         ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
         ...(delegatedFrom ? { delegatedFrom } : {}),
         ...(scheduleDestination ? { scheduleDestination } : {}),
+        ...(taskId !== undefined ? { taskId } : {}),
       },
     });
 
@@ -323,6 +352,7 @@ export const createApprovalBroker = ({
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
       ...(delegatedFrom ? { delegatedFrom } : {}),
       ...(scheduleDestination ? { scheduleDestination } : {}),
+      ...(taskId !== undefined ? { taskId } : {}),
       ...(expiresAt ? { expiresAt } : {}),
     });
     // Drained at shutdown alongside the resolutions: a channel that has not

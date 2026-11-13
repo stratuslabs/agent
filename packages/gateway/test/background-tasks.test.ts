@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import {
   AllowAllApprovalPolicy,
   carriesKey,
+  latestTurnReply,
   PENDING_APPROVAL_METADATA_KEY,
   type JsonObject,
   type PluginContext,
@@ -17,10 +18,11 @@ import {
   type StratusEvent,
 } from '@stratusagent/core';
 import { TASK_ID_METADATA_KEY } from '@stratusagent/agents';
+import { createPermissionPolicy } from '@stratusagent/permissions';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 import { fleetDbIn } from '@stratusagent/state';
 
-import { ABANDONED_TURN_ERROR, createGateway } from '../src/index.ts';
+import { ABANDONED_TURN_ERROR, createGateway, type ApprovalTransport } from '../src/index.ts';
 import { ShardedSessionStore } from '../src/sessions.ts';
 import { TASK_CUT_OFF_ERROR, taskFallbackKey, taskOutcomeKey } from '../src/task-settle.ts';
 import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from '../src/tasks.ts';
@@ -113,6 +115,8 @@ const taskGateway = async (options: {
   stopDrainTimeoutMs?: number;
   /** Subscribed to the bus before the gateway starts, so the startup sweep's events are heard too. */
   onEvent?: (event: StratusEvent) => void;
+  /** Gated calls are asked through the gateway's approval broker, as `stratus serve` does, instead of allowed. */
+  approvals?: 'remote';
 } = {}) => {
   const home = options.home ?? await newHome();
   if (options.home === undefined) {
@@ -120,7 +124,7 @@ const taskGateway = async (options: {
       '---', 'name: Ava', 'id: ava', 'provider: scripted', 'tools: [agent.delegate, agent.tasks, agent.cancelTask]', 'delegates: [mia]',
       '---', '', 'You are Ava.', '',
     ].join('\n'));
-    await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: scripted\ntools: []\n---\n\nYou are Mia.\n');
+    await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: scripted\ntools: [fixture.gated]\n---\n\nYou are Mia.\n');
   }
   const stateDir = path.join(home, '.stratus');
   await options.seed?.(stateDir);
@@ -170,8 +174,9 @@ const taskGateway = async (options: {
       }),
     },
     'stratus-plugin-scripted': {
-      manifest: manifest({ providers: [{ name: 'scripted' }] }),
+      manifest: manifest({ providers: [{ name: 'scripted' }], tools: [{ name: 'fixture.gated', risk: 'gated' }] }),
       module: plugin('scripted', (context) => {
+        context.tools.register({ name: 'fixture.gated', risk: 'gated', async execute() { return 'gated ran'; } });
         context.providers!.register({
           name: 'scripted',
           create: () => ({
@@ -185,6 +190,16 @@ const taskGateway = async (options: {
                     workerSignals.push(signal);
                   }
                   await hold(blocked, signal);
+                }
+                if (said.startsWith('GATED')) {
+                  // One gated call, then the answer it got.
+                  const last = session.messages.at(-1);
+                  if (last?.role === 'tool') {
+                    return { parts: [{ type: 'text', text: `gated said: ${JSON.stringify(last.toolResult ?? null)}` }] };
+                  }
+                  return {
+                    parts: [{ type: 'tool-call', call: { id: `${session.id}:${session.messages.length}`, toolName: 'fixture.gated', input: {} } }],
+                  };
                 }
                 if (said.startsWith('STUBBORN')) {
                   // A provider that doesn't heed the abort: once let go it
@@ -240,7 +255,12 @@ const taskGateway = async (options: {
     idleTimeoutMs: 0,
     plugins: { 'stratus-plugin-fixture-chan': {}, 'stratus-plugin-scripted': {} },
     pluginHost: host,
-    approvals: new AllowAllApprovalPolicy(),
+    ...(options.approvals === 'remote'
+      ? {
+          approvals: (transport: ApprovalTransport) =>
+            createPermissionPolicy({ mode: 'remote', request: transport.request, destinations: transport.destinations }),
+        }
+      : { approvals: new AllowAllApprovalPolicy() }),
     ...(options.tasks !== undefined ? { tasks: options.tasks } : {}),
     ...(options.held === true ? { held: true } : {}),
     ...(options.stopDrainTimeoutMs !== undefined ? { stopDrainTimeoutMs: options.stopDrainTimeoutMs } : {}),
@@ -1222,5 +1242,110 @@ test('events: a cancelled task ends with task.cancelled, and one a restart cut o
     }]);
   } finally {
     await restarted.stop();
+  }
+});
+
+// AGT-358: a worker's approval question goes to the conversation that
+// started the task, with the task id, and the task waits on it.
+
+test('approvals: a worker\'s gated call is asked in the conversation that started the task, with its task id, and the task waits on the answer', async () => {
+  const events: StratusEvent[] = [];
+  const fixture = await taskGateway({ approvals: 'remote', onEvent: (event) => events.push(event) });
+  try {
+    const origin = 'fixture:ava:C80';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'GATED-80', background: true })).output as { task: string }).task;
+    await until('the worker to ask', () => fixture.gateway.pendingApprovals().length === 1);
+    const row = fixture.rows.get(task)!;
+    const [pending] = fixture.gateway.pendingApprovals();
+    assert.ok(pending);
+    assert.equal(pending.sessionId, row.workerSessionId);
+    assert.equal(pending.agentId, 'mia');
+    assert.equal(pending.taskId, task);
+    assert.equal(pending.delegatedFrom?.agentId, 'ava');
+    assert.equal(pending.delegatedFrom?.sessionId, origin);
+    assert.equal(pending.delegatedFrom?.metadata?.channel, 'fixture');
+    const requested = events.findIndex((event) => event.type === 'tool.approval-requested');
+    const request = events[requested] as Extract<StratusEvent, { type: 'tool.approval-requested' }>;
+    assert.equal(request.taskId, task);
+    assert.equal(request.requestId, pending.requestId);
+
+    // The task waits on the person: in its row, its listing and the bus,
+    // which hears it before the question goes out.
+    assert.equal(fixture.rows.get(task)?.status, 'waiting_approval');
+    assert.deepEqual((await fixture.gateway.tasks()).map((entry) => [entry.id, entry.status]), [[task, 'waiting_approval']]);
+    const ids = { sessionId: origin, agentId: 'ava', taskId: task, workerSessionId: row.workerSessionId, workerAgentId: 'mia' };
+    assert.deepEqual(taskEvents(events), [{ type: 'task.started', ...ids }, { type: 'task.waiting-approval', ...ids }]);
+    assert.ok(events.findIndex((event) => event.type === 'task.waiting-approval') < requested);
+
+    // Answered, the worker goes on from the call and the task ends once.
+    assert.equal(fixture.gateway.resolveApproval({ requestId: pending.requestId, answer: 'once', actor: 'U1' }), true);
+    const settled = await fixture.settled(task);
+    assert.equal(settled.status, 'completed');
+    assert.match(latestTurnReply((await fixture.gateway.store.get(row.workerSessionId))!) ?? '', /gated said: .*"ok":true,"output":"gated ran"/, 'the call ran once it was approved');
+    assert.deepEqual(taskEvents(events).map((event) => event.type), ['task.started', 'task.waiting-approval', 'task.completed']);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('approvals: a task is running again once its question is answered, denied or not', async () => {
+  const fixture = await taskGateway({ approvals: 'remote' });
+  try {
+    const origin = 'fixture:ava:C81';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'GATED-81', background: true })).output as { task: string }).task;
+    await until('the worker to ask', () => fixture.gateway.pendingApprovals().length === 1);
+    assert.equal(fixture.rows.get(task)?.status, 'waiting_approval');
+    const seen: Array<string | undefined> = [];
+    // What the row says the moment the worker's call gets its answer, before the turn goes on.
+    const unsubscribe = fixture.gateway.bus.subscribe((event) => {
+      if (event.type === 'tool.approval-resolved') {
+        seen.push(fixture.rows.get(task)?.status);
+      }
+    });
+    fixture.gateway.resolveApproval({ requestId: fixture.gateway.pendingApprovals()[0]!.requestId, answer: 'deny', actor: 'U1' });
+    const settled = await fixture.settled(task);
+    unsubscribe();
+    assert.equal(settled.status, 'completed', 'a denied call is an answer the worker goes on from');
+    assert.deepEqual(seen, ['running']);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('approvals: a task stopped while it waits on a person ends cancelled, and its question is withdrawn', async () => {
+  const events: StratusEvent[] = [];
+  const fixture = await taskGateway({ approvals: 'remote', onEvent: (event) => events.push(event) });
+  try {
+    const origin = 'fixture:ava:C82';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'GATED-82', background: true })).output as { task: string }).task;
+    await until('the worker to ask', () => fixture.gateway.pendingApprovals().length === 1);
+    const stopped = await fixture.gateway.cancelTask(task, 'cli');
+    assert.equal(stopped.kind, 'stopping');
+    const settled = await fixture.settled(task);
+    assert.equal(settled.status, 'cancelled');
+    assert.equal(fixture.gateway.pendingApprovals().length, 0);
+    const resolved = events.find((event) => event.type === 'tool.approval-resolved');
+    assert.equal(resolved?.type === 'tool.approval-resolved' ? resolved.reason : undefined, 'cancelled');
+    assert.deepEqual(taskEvents(events).map((event) => event.type), ['task.started', 'task.waiting-approval', 'task.cancelled']);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('approvals: an ordinary session\'s question carries no task id and touches no task', async () => {
+  const events: StratusEvent[] = [];
+  const fixture = await taskGateway({ approvals: 'remote', onEvent: (event) => events.push(event) });
+  try {
+    const turn = fixture.ask('fixture:ava:C83', { tool: 'agent.cancelTask', input: { task: 't_none' } });
+    await until('the turn to ask', () => fixture.gateway.pendingApprovals().length === 1);
+    const [pending] = fixture.gateway.pendingApprovals();
+    assert.equal(pending?.taskId, undefined);
+    const request = events.find((event) => event.type === 'tool.approval-requested');
+    assert.ok(request && !('taskId' in request));
+    fixture.gateway.resolveApproval({ requestId: pending!.requestId, answer: 'deny' });
+    await turn;
+    assert.deepEqual(taskEvents(events), []);
+  } finally {
+    await fixture.stop();
   }
 });
