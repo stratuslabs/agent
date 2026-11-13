@@ -200,8 +200,12 @@ export const createBackgroundTasks = ({
   const controllers = new Map<string, AbortController>();
   /** The task each running worker session is doing, while its turn runs: what an approval question names. */
   const workers = new Map<string, string>();
-  /** Questions out per task: the first marks it waiting on a person, the last answer marks it running. */
-  const approvalWaits = new Map<string, number>();
+  /**
+   * Each task with questions out: how many, and its mark as waiting on a
+   * person, which every question awaits before it is asked. The first
+   * question makes the mark and the last answer clears it.
+   */
+  const approvalWaits = new Map<string, { out: number; marked: Promise<void> }>();
 
   const settler = createTaskSettler({
     tasks,
@@ -436,28 +440,35 @@ export const createBackgroundTasks = ({
    * `task.waiting-approval` sent before the question goes out. Only a
    * worker this process is running asks: the restart sweep fails a parked
    * worker rather than asking again. With several questions out at once,
-   * the first marks the task and the last answer puts it back to running;
-   * a task settling has ended since stays ended (`setStatus` never reopens
-   * a final row). A row that can't be written is logged and the question
-   * is still asked.
+   * the first marks the task, each waits for that mark to be announced (so
+   * no question goes out before its task says it waits), and the last
+   * answer puts it back to running; a task settling has ended since stays
+   * ended (`setStatus` never reopens a final row). A row that can't be
+   * written is logged and the question is still asked.
    */
   const approvalWait = async (workerSessionId: string): Promise<TaskApprovalWait | undefined> => {
     const taskId = workers.get(workerSessionId);
     if (taskId === undefined) {
       return undefined;
     }
-    const out = approvalWaits.get(taskId) ?? 0;
-    approvalWaits.set(taskId, out + 1);
-    if (out === 0) {
-      try {
-        const row = tasks.setStatus(taskId, 'waiting_approval', new Date().toISOString()) ? tasks.get(taskId) : undefined;
-        if (row !== undefined) {
-          await bus.emit(taskEvent('task.waiting-approval', row));
+    let wait = approvalWaits.get(taskId);
+    if (wait === undefined) {
+      const mark = async (): Promise<void> => {
+        try {
+          const row = tasks.setStatus(taskId, 'waiting_approval', new Date().toISOString()) ? tasks.get(taskId) : undefined;
+          if (row !== undefined) {
+            await bus.emit(taskEvent('task.waiting-approval', row));
+          }
+        } catch (error) {
+          warn(`task ${taskId}: could not mark it waiting on an approval: ${reason(error)}`);
         }
-      } catch (error) {
-        warn(`task ${taskId}: could not mark it waiting on an approval: ${reason(error)}`);
-      }
+      };
+      wait = { out: 0, marked: mark() };
+      approvalWaits.set(taskId, wait);
     }
+    const entry = wait;
+    entry.out += 1;
+    await entry.marked;
     let released = false;
     return {
       taskId,
@@ -466,9 +477,8 @@ export const createBackgroundTasks = ({
           return;
         }
         released = true;
-        const left = (approvalWaits.get(taskId) ?? 1) - 1;
-        if (left > 0) {
-          approvalWaits.set(taskId, left);
+        entry.out -= 1;
+        if (entry.out > 0) {
           return;
         }
         approvalWaits.delete(taskId);

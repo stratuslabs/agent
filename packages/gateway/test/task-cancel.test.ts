@@ -52,7 +52,11 @@ type WorkerMode =
 
 const fixture = async (
   mode: WorkerMode,
-  { holdWorkerLink = false, onRead }: { holdWorkerLink?: boolean; onRead?: (sessionId: string) => void } = {},
+  {
+    holdWorkerLink = false,
+    onRead,
+    onEmit,
+  }: { holdWorkerLink?: boolean; onRead?: (sessionId: string) => void; onEmit?: (event: StratusEvent) => Promise<void> } = {},
 ) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-task-cancel-'));
   const stateDir = path.join(home, '.stratus');
@@ -149,7 +153,12 @@ const fixture = async (
     fleetDb: fleetDbIn(stateDir),
     stateHome: stateDir,
     store: seen,
-    bus: { emit: async (event) => { events.push(event); } },
+    bus: {
+      emit: async (event) => {
+        events.push(event);
+        await onEmit?.(event);
+      },
+    },
     dispatchInternal,
     onSessionChain: onChain,
     onWorkerChain: async (sessionId, work) => {
@@ -550,6 +559,32 @@ test('approval waits: questions out at once mark the task once, only the last an
     assert.equal(await f.tasks.approvalWait(row.workerSessionId), undefined, 'a worker whose turn ended is no task\'s');
     assert.deepEqual(types(), ['task.started', 'task.waiting-approval', 'task.waiting-approval', 'task.cancelled']);
   } finally {
+    await f.close();
+  }
+});
+
+test('approval waits: a question asked while the first is still being announced waits for that announcement too', async () => {
+  let openEmit: () => void = () => {};
+  const held = new Promise<void>((resolve) => { openEmit = resolve; });
+  const f = await fixture('mid-turn', { onEmit: (event) => (event.type === 'task.waiting-approval' ? held : Promise.resolve()) });
+  try {
+    const row = await f.start();
+    await until('the worker\'s turn to start', async () => (await f.store.get(row.workerSessionId)) !== undefined);
+    const returned: string[] = [];
+    const first = f.tasks.approvalWait(row.workerSessionId).then((wait) => { returned.push('first'); return wait; });
+    const second = f.tasks.approvalWait(row.workerSessionId).then((wait) => { returned.push('second'); return wait; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A copy: the reporter would print the array as it is after `finally`.
+    assert.deepEqual([...returned], [], 'neither question goes out before the task is announced as waiting');
+    openEmit();
+    const [one, two] = await Promise.all([first, second]);
+    assert.deepEqual(returned.toSorted(), ['first', 'second']);
+    assert.deepEqual(f.events.filter((event) => event.type === 'task.waiting-approval').length, 1);
+    one!.release();
+    two!.release();
+    assert.equal(f.rows.get(row.id)?.status, 'running');
+  } finally {
+    openEmit();
     await f.close();
   }
 });
