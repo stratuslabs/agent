@@ -18,10 +18,12 @@ export { BUILTIN_EXECUTOR_NAME, BUILTIN_MEMORY_STORE_NAME } from '@stratusagent/
 
 export { syncDirectory, writeFileSynced } from './durable-write.ts';
 export {
+  CHATGPT_PLAN_SCOPE,
   CHATGPT_SIGN_IN_LOCK_WAIT_MS,
   type ChatGPTSignInFile,
   type ChatGPTSignInLocation,
   chatgptSignInLocation,
+  chatgptSignInStatus,
   createChatGPTSignInFile,
   hasChatGPTSignIn,
   openChatGPTSignInFile,

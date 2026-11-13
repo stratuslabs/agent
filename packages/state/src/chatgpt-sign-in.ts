@@ -99,25 +99,47 @@ export const createChatGPTSignInFile = (
 const filledString = (value: unknown): boolean => typeof value === 'string' && value !== '';
 
 /**
- * Whether the file holds a sign-in a turn can run on: an account (client ID
- * and subject) with both its tokens, the record provider-chatgpt's token
- * source accepts. Only that much is read here, so a run is refused up front,
- * like any other provider's missing key; what the tokens are worth is the
- * provider's question, asked on the turn. A sign-in that ended (its tokens
- * cleared by a refused refresh) reads as none. Throws as `read` does for a
- * file that isn't a JSON object.
+ * The scope that lets a sign-in use the ChatGPT plan. Restated from
+ * `@stratusagent/provider-chatgpt` (its `CHATGPT_PLAN_SCOPE`) rather than
+ * imported, since state loads that package only when a turn runs on it; a
+ * state test holds the two equal.
  */
-export const hasChatGPTSignIn = async (file: Pick<ChatGPTSignInFile, 'read'>): Promise<boolean> => {
+export const CHATGPT_PLAN_SCOPE = 'chatgpt.tokens.use.direct';
+
+/**
+ * What the saved sign-in can do for a run, by the rule provider-chatgpt's
+ * token source applies before it hands out a token: `none` without an
+ * account (client ID and subject) and both its tokens, as after a refused
+ * refresh cleared them; `plan_usage_not_granted` when the person didn't
+ * allow the ChatGPT plan to be used (OpenAI: no inference then); otherwise
+ * `ready`. Read here so a run is refused up front, like any other provider's
+ * missing key, and a fallback without one is left out. What the tokens are
+ * worth is the provider's question, asked on the turn. A state test holds
+ * this rule to the token source's. Throws as `read` does for a file that
+ * isn't a JSON object.
+ */
+export const chatgptSignInStatus = async (
+  file: Pick<ChatGPTSignInFile, 'read'>,
+): Promise<'none' | 'plan_usage_not_granted' | 'ready'> => {
   const session = (await file.read())?.session;
   if (typeof session !== 'object' || session === null || Array.isArray(session)) {
-    return false;
+    return 'none';
   }
   const record = session as Record<string, unknown>;
-  return filledString(record.clientId)
-    && filledString(record.subject)
-    && filledString(record.accessToken)
-    && filledString(record.refreshToken);
+  if (!filledString(record.clientId)
+    || !filledString(record.subject)
+    || !filledString(record.accessToken)
+    || !filledString(record.refreshToken)) {
+    return 'none';
+  }
+  return Array.isArray(record.scopes) && record.scopes.includes(CHATGPT_PLAN_SCOPE)
+    ? 'ready'
+    : 'plan_usage_not_granted';
 };
+
+/** Whether the saved sign-in can serve a run now (`chatgptSignInStatus` is `ready`). */
+export const hasChatGPTSignIn = async (file: Pick<ChatGPTSignInFile, 'read'>): Promise<boolean> =>
+  (await chatgptSignInStatus(file)) === 'ready';
 
 export const openChatGPTSignInFile = (
   location: ChatGPTSignInLocation,

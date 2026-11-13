@@ -7,7 +7,9 @@ import path from 'node:path';
 import type { ProviderRequest } from '@stratusagent/core';
 import {
   type RuntimeConfig,
+  CHATGPT_PLAN_SCOPE,
   DEFAULT_CHATGPT_MODEL,
+  hasChatGPTSignIn,
   PROVIDER_PACKAGE_NAMES,
   createRuntimeProvider,
   openChatGPTSignInFile,
@@ -117,6 +119,14 @@ test('provider chatgpt with no sign-in, or a sign-in that ended, refuses with wh
     await assert.rejects(() => resolveRuntimeConfig({}, envFor(damaged)), /Missing sign-in for provider=chatgpt/);
   }
 
+  // A sign-in that doesn't allow using the plan is refused in the provider's
+  // own words, before the run rather than on its first turn.
+  const noPlan = await homeWith({ config: { provider: 'chatgpt' }, signIn: signedIn({ scopes: ['openid'] }) });
+  await assert.rejects(
+    () => resolveRuntimeConfig({}, envFor(noPlan)),
+    /doesn't allow Stratus Agent to use your ChatGPT plan\. Sign in with ChatGPT again in `stratus setup` and allow it/,
+  );
+
   // A file that isn't a sign-in says so, without quoting it.
   const garbled = await homeWith({ config: { provider: 'chatgpt' }, signIn: '{"session": "access-secret-1' });
   await assert.rejects(
@@ -164,6 +174,8 @@ test('a chatgpt fallback stands on the sign-in file, and is left out without one
   assert.equal(fallbackOf(await resolveRuntimeConfig({}, envFor(without))), undefined);
   const half = await homeWith({ config, credentials, signIn: signedIn({ refreshToken: undefined }) });
   assert.equal(fallbackOf(await resolveRuntimeConfig({}, envFor(half))), undefined);
+  const noPlan = await homeWith({ config, credentials, signIn: signedIn({ scopes: ['openid'] }) });
+  assert.equal(fallbackOf(await resolveRuntimeConfig({}, envFor(noPlan))), undefined);
 
   // An unreadable file leaves the fallback out rather than failing the run.
   const garbled = await homeWith({ config, credentials, signIn: 'not json' });
@@ -188,6 +200,34 @@ test('a chatgpt primary keeps a fallback on another provider\'s own sign-in', as
   const same = await resolveRuntimeConfig({}, envFor(implicit));
   assert.equal(fallbackOf(same)?.provider, 'chatgpt');
   assert.equal(fallbackOf(same)?.model, 'gpt-5.4-mini');
+});
+
+test('resolution accepts exactly the sign-ins provider-chatgpt\'s token source serves', async () => {
+  const chatgpt = await import('@stratusagent/provider-chatgpt');
+  assert.equal(CHATGPT_PLAN_SCOPE, chatgpt.CHATGPT_PLAN_SCOPE);
+  const variants: Record<string, object | undefined> = {
+    complete: session(),
+    'no client ID': session({ clientId: undefined }),
+    'empty client ID': session({ clientId: '' }),
+    'no subject': session({ subject: undefined }),
+    'no access token': session({ accessToken: undefined }),
+    'no refresh token': session({ refreshToken: undefined }),
+    'empty refresh token': session({ refreshToken: '' }),
+    'no scopes': session({ scopes: undefined }),
+    'scopes without plan usage': session({ scopes: ['openid', 'email'] }),
+    'scopes not a list': session({ scopes: 'chatgpt.tokens.use.direct' }),
+    'no session': undefined,
+  };
+  for (const [name, value] of Object.entries(variants)) {
+    const document = { read: async () => (value === undefined ? { hostId: 'urn:uuid:host-1' } : { hostId: 'urn:uuid:host-1', session: value }) };
+    const source = chatgpt.createChatGPTTokenSource({
+      endpoints: discovery as never,
+      store: chatgpt.createChatGPTSessionStore({ ...document, write: async () => undefined }),
+      withSessionLock: (work) => work(),
+    });
+    const served = await source.accessToken(undefined).then(() => true, () => false);
+    assert.equal(await hasChatGPTSignIn(document), served, `${name}: resolution and the token source disagree`);
+  }
 });
 
 test('providerPackagesUsedBy names provider-chatgpt for a chatgpt runtime or fallback', () => {

@@ -9,7 +9,7 @@ import type {
   RuntimeSelection,
 } from './config.ts';
 import { hasAgentSignInEntry, loadAgentSignIns, loadCredentials, type StoredCredential } from './credentials.ts';
-import { chatgptSignInLocation, hasChatGPTSignIn, openChatGPTSignInFile } from './chatgpt-sign-in.ts';
+import { chatgptSignInLocation, chatgptSignInStatus, hasChatGPTSignIn, openChatGPTSignInFile } from './chatgpt-sign-in.ts';
 import { credentialsPath } from './paths.ts';
 import { type StateEnvironment, readProcessEnv, readNonEmptyString } from './environment.ts';
 import {
@@ -508,8 +508,16 @@ export const resolveRuntimeConfig = async (
         `provider=chatgpt does not use a custom base URL: a ChatGPT sign-in is sent only to OpenAI, never to ${String(namedBaseUrl)}. Remove the base URL to run on chatgpt.`,
       );
     }
-    if (!await hasChatGPTSignIn(openChatGPTSignInFile(chatgptLocation))) {
+    const signInStatus = await chatgptSignInStatus(openChatGPTSignInFile(chatgptLocation));
+    if (signInStatus === 'none') {
       throw new Error('Missing sign-in for provider=chatgpt. Sign in with ChatGPT in `stratus setup`.');
+    }
+    if (signInStatus === 'plan_usage_not_granted') {
+      // The provider's own words for it, said before the run instead of on
+      // its first turn.
+      throw new Error(
+        "This ChatGPT sign-in doesn't allow Stratus Agent to use your ChatGPT plan. Sign in with ChatGPT again in `stratus setup` and allow it, or use an OpenAI API key.",
+      );
     }
     const chatgptModel = selection.model
       ?? readNonEmptyString(processEnv.STRATUS_MODEL)
