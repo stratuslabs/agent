@@ -80,7 +80,10 @@ const stepsOf = (worker: Pick<Session, 'messages'>): number => {
 
 /**
  * Step 1 of settling: the outcome the worker session says, or undefined
- * while its turn is still in flight. In the spec's order: a turn that
+ * while a turn nobody stopped is still in flight. A stopped one in flight
+ * is already `cancelled`: the stop was written before any abort, so a
+ * crash before the abort took effect still reads as the stop it was. In
+ * the spec's order: a turn that
  * finished is `completed` even when a stop was recorded (it lost the race);
  * anything else with a stop recorded is `cancelled`, a start that never
  * landed included; no start message is `interrupted`, never started; the
