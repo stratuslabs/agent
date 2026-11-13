@@ -2273,6 +2273,25 @@ test('concurrentScheduledTurns parses per agent as a whole number, and refuses a
   }
 });
 
+test('tasks parses enabled and a per-agent cap, and refuses anything else', async () => {
+  const configPath = await writeConfig('tasks.json', { tasks: { enabled: false, maxRunningPerAgent: { atlas: 5, nova: 1 } } });
+  const config = await loadConfigFile(configPath);
+  assert.deepEqual(config.tasks, { enabled: false, maxRunningPerAgent: { atlas: 5, nova: 1 } });
+  assert.deepEqual((await loadConfigFile(await writeConfig('tasks-empty.json', { tasks: {} }))).tasks, {});
+  for (const [name, value, message] of [
+    ['list', ['atlas'], /Invalid tasks in config/],
+    ['flag', true, /Invalid tasks in config/],
+    ['enabled text', { enabled: 'yes' }, /Invalid tasks\.enabled .*Use true or false/],
+    ['cap number', { maxRunningPerAgent: 5 }, /Invalid tasks\.maxRunningPerAgent in config .*like \{ "atlas": 5 \}/],
+    ['cap zero', { maxRunningPerAgent: { atlas: 0 } }, /Invalid tasks\.maxRunningPerAgent\.atlas .*: 0\. Use a whole number/],
+    ['cap fraction', { maxRunningPerAgent: { atlas: 1.5 } }, /Invalid tasks\.maxRunningPerAgent\.atlas/],
+    ['cap text', { maxRunningPerAgent: { atlas: '5' } }, /Invalid tasks\.maxRunningPerAgent\.atlas/],
+  ] as const) {
+    const bad = await writeConfig(`tasks-${name.replace(' ', '-')}.json`, { tasks: value });
+    await assert.rejects(loadConfigFile(bad), message, name);
+  }
+});
+
 test('agentMaxTurns parses per agent and refuses a budget that is not one', async () => {
   const configPath = await writeConfig('agent-max-turns.json', { maxTurns: 40, agentMaxTurns: { atlas: 300, nova: 120 } });
   const config = await loadConfigFile(configPath);

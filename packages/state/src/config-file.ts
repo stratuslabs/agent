@@ -23,6 +23,7 @@ import {
   type PluginConfigBlock,
   type PluginsConfig,
   type StratusConfigFile,
+  type TasksConfig,
 } from './config.ts';
 import { normalizeTrustedDomain, parseReviewRule, trustedDomainProblem, type ReviewRule } from '@stratusagent/permissions';
 
@@ -237,6 +238,10 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
     }
     resolved.concurrentScheduledTurns = { ...(limits as Record<string, number>) };
   }
+  const tasks = parseTasksConfig(config.tasks, configPath);
+  if (tasks) {
+    resolved.tasks = tasks;
+  }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
     resolved.approvals = approvals;
@@ -448,6 +453,47 @@ export const bindsLoopback = async (host: string, lookup: HostLookup = lookupHos
   } catch {
     return false;
   }
+};
+
+/**
+ * The `tasks` block. Refused, not dropped, when a value is wrong: an
+ * operator who wrote `"enabled": "no"` or a cap of 0 and silently got the
+ * default would find out from tasks that run, or are refused, with nothing
+ * to say why. Keys it doesn't know are left alone, as in the other blocks,
+ * so a config written for a newer build still loads on this one.
+ */
+const parseTasksConfig = (raw: unknown, configPath: string): TasksConfig | undefined => {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid tasks in config ${configPath}: expected an object like { "enabled": true, "maxRunningPerAgent": { "atlas": 5 } }.`);
+  }
+  const source = raw as Record<string, unknown>;
+  const tasks: TasksConfig = {};
+  if (source.enabled !== undefined) {
+    if (typeof source.enabled !== 'boolean') {
+      throw new Error(`Invalid tasks.enabled in config ${configPath}: ${JSON.stringify(source.enabled)}. Use true or false.`);
+    }
+    tasks.enabled = source.enabled;
+  }
+  if (source.maxRunningPerAgent !== undefined) {
+    const limits = source.maxRunningPerAgent;
+    if (typeof limits !== 'object' || limits === null || Array.isArray(limits)) {
+      throw new Error(
+        `Invalid tasks.maxRunningPerAgent in config ${configPath}: expected agent ids mapped to a number of running tasks, like { "atlas": 5 }.`,
+      );
+    }
+    for (const [agentId, limit] of Object.entries(limits as Record<string, unknown>)) {
+      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
+        throw new Error(
+          `Invalid tasks.maxRunningPerAgent.${agentId} in config ${configPath}: ${JSON.stringify(limit)}. Use a whole number of running tasks, 1 or more.`,
+        );
+      }
+    }
+    tasks.maxRunningPerAgent = { ...(limits as Record<string, number>) };
+  }
+  return tasks;
 };
 
 const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {

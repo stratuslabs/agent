@@ -57,6 +57,7 @@ test('a config using every key the loader accepts reports nothing', () => {
     agentMaxTurns: { ava: 100 },
     autoContinue: { ava: true },
     concurrentScheduledTurns: { ava: 2 },
+    tasks: { enabled: false, maxRunningPerAgent: { ava: 5 } },
     approvals: { mode: 'headless' },
     principals: { slackUsers: ['U01OPERATOR'] },
     slack: { replies: 'final' },

@@ -24,7 +24,7 @@ import type { DispatchInput, GatewayOptions } from './types.ts';
 // runs either way: rows a process left before tasks were turned off still
 // get settled, and their workers failed as cut off, never left running.
 
-/** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` says otherwise. */
+/** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` names it. */
 export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
 
 /** What background tasks close over in `createGateway`. */
@@ -73,13 +73,26 @@ export const createBackgroundTasks = ({
   log,
   warn,
 }: BackgroundTasksDeps) => {
-  const cap = options.tasks?.maxRunningPerAgent ?? DEFAULT_MAX_RUNNING_TASKS_PER_AGENT;
+  const limits = options.tasks?.maxRunningPerAgent ?? {};
   // Checked whether or not tasks are on, so a bad value is found when it is
   // written, not on the day someone turns tasks on.
-  if (!Number.isInteger(cap) || cap < 1) {
-    throw new Error(`tasks.maxRunningPerAgent must be a whole number of at least 1 (got ${String(cap)}).`);
+  if (typeof limits !== 'object' || limits === null || Array.isArray(limits)) {
+    throw new Error(`tasks.maxRunningPerAgent must map agent ids to a number of running tasks, like { "atlas": 5 } (got ${JSON.stringify(limits)}).`);
   }
+  for (const [agentId, limit] of Object.entries(limits)) {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error(`tasks.maxRunningPerAgent.${agentId} must be a whole number of at least 1 (got ${String(limit)}).`);
+    }
+  }
+  /** One agent's cap. Own keys only: an agent id like `constructor` doesn't pick up an inherited property. */
+  const capFor = (agentId: string): number =>
+    Object.hasOwn(limits, agentId) ? limits[agentId]! : DEFAULT_MAX_RUNNING_TASKS_PER_AGENT;
   const enabled = options.tasks?.enabled === true;
+  const named = Object.entries(limits).map(([agentId, limit]) => `${agentId} ${limit}`).join(', ');
+  /** The startup line: whether agents may start tasks, and each cap. Nothing when the config says nothing. */
+  const summary = enabled
+    ? `background tasks: on, up to ${DEFAULT_MAX_RUNNING_TASKS_PER_AGENT} running per agent${named.length > 0 ? ` (${named})` : ''}`
+    : options.tasks?.enabled === false ? 'background tasks: off (tasks.enabled is false)' : undefined;
 
   // Its own connection to fleet.db, like the schedule and event stores.
   // Opened whether or not tasks are on, for the restart sweep.
@@ -177,7 +190,7 @@ export const createBackgroundTasks = ({
       originSessionId: origin.id,
       workerSessionId: workerSessionId(id),
       promptDigest: taskPromptDigest(agent.id, prompt),
-    }, cap, new Date().toISOString());
+    }, capFor(origin.agent.id), new Date().toISOString());
     if (claim.kind === 'full') {
       throw new Error(
         `${origin.agent.id} already has ${claim.running} background tasks running, the most it may `
@@ -223,6 +236,7 @@ export const createBackgroundTasks = ({
 
   return {
     start: enabled ? startTask : undefined,
+    summary,
     /**
      * What the last process left for settling, read before the channels
      * start, the way the abandoned and parked lists are: nothing of this

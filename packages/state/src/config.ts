@@ -486,6 +486,20 @@ export interface StratusConfigFile {
    * Trusted config only, like `maxTurns`: it spends the operator's tokens.
    */
   concurrentScheduledTurns?: Record<string, number>;
+  /**
+   * Background tasks (`agent.delegate` with `background: true`). `enabled`
+   * turns starting them on or off; `maxRunningPerAgent` raises or lowers
+   * how many one agent may have running at once, keyed by agent id:
+   * `{ "atlas": 5 }`, 3 for any agent not listed. Trusted config only, like
+   * `maxTurns`: a task is unattended work that spends the operator's tokens.
+   */
+  tasks?: TasksConfig;
+}
+
+/** The `tasks` block of a config file. */
+export interface TasksConfig {
+  enabled?: boolean;
+  maxRunningPerAgent?: Record<string, number>;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */

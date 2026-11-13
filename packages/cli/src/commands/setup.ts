@@ -160,6 +160,7 @@ export const runSetup = async (
     ...(existing.agentMaxTurns !== undefined ? { agentMaxTurns: existing.agentMaxTurns } : {}),
     ...(existing.autoContinue !== undefined ? { autoContinue: existing.autoContinue } : {}),
     ...(existing.concurrentScheduledTurns !== undefined ? { concurrentScheduledTurns: existing.concurrentScheduledTurns } : {}),
+    ...(existing.tasks !== undefined ? { tasks: existing.tasks } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -494,6 +495,9 @@ export const runSetup = async (
     }
     if (state.concurrentScheduledTurns !== undefined) {
       config.concurrentScheduledTurns = state.concurrentScheduledTurns;
+    }
+    if (state.tasks !== undefined) {
+      config.tasks = state.tasks;
     }
 
     await saveConfigFile(configPath, config);
