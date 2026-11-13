@@ -280,7 +280,11 @@ setting — see [Tools](../guides/tools.md).
 An agent that may delegate can pass `background: true` to
 `agent.delegate`. The call returns a task id at once instead of waiting,
 the work runs as its own delegated session, and its outcome is added to the
-conversation that started it, once, when it ends. Tasks are on unless
+conversation that started it, once, when it ends, as a new turn: in
+Slack, the agent's reply to it is a new message in the thread. The work
+can be the agent's own, which needs no `delegates:` entry, or a
+teammate's that `delegates:` allows. Only one level: a delegated session,
+a task's worker included, can't start a task. Tasks are on unless
 `tasks.enabled` is `false`.
 
 ```json
@@ -292,7 +296,8 @@ conversation that started it, once, when it ends. Tasks are on unless
 - **Cap.** Each agent may have 3 tasks running, or the number
   `maxRunningPerAgent` gives it. A start past the cap is refused with an
   error the agent can pass on; nothing queues. Asking again for the same
-  job from the same conversation returns the task already running.
+  worker and prompt from the same conversation returns the task already
+  running.
 - **Restarts.** A stop or restart doesn't wait for a running task: it cuts
   it off, and the next start reports it interrupted in its conversation.
   It is never run again.
@@ -308,7 +313,8 @@ conversation that started it, once, when it ends. Tasks are on unless
   outcome then arrives as cancelled. An agent stops its own with
   `agent.cancelTask`, and the operator any task with `stratus tasks
   cancel <id>`.
-- **Seeing them.** `stratus tasks` lists the running daemon's tasks: every
+- **Seeing them.** An agent lists its own with `agent.tasks`.
+  `stratus tasks` lists the running daemon's tasks: every
   one running or whose outcome isn't in its conversation yet, newest
   first, then the 20 most recently finished, with the status, agent,
   steps, task id, and whether the outcome is in the conversation.

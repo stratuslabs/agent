@@ -19,6 +19,11 @@ Stratus agents are designed to work like a teammate, not a stateless bot:
   its sessions, memory, and credentials stay on disk under that id. The
   registry refuses the id too, so a definition built in code cannot put
   it on the roster either.
+  With `background: true` the work runs as a
+  [background task](../reference/config.md#background-tasks) instead: the
+  call returns a task id at once, the conversation stays free, and the
+  result arrives in it as a new message when the task ends. An agent can
+  start a task as itself, which needs no `delegates:` entry.
 - **Routing.** `createAgentRouter` maps inbound work (a channel, a mention,
   a message) to the right agent, so the same person consistently answers in
   the same places.
