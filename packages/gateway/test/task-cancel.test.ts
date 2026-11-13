@@ -49,7 +49,10 @@ type WorkerMode =
   /** Its turn finishes and is saved, then the dispatch waits for `release` before it resolves: finished, not settled. */
   | 'finish-then-hold';
 
-const fixture = async (mode: WorkerMode, { holdWorkerLink = false } = {}) => {
+const fixture = async (
+  mode: WorkerMode,
+  { holdWorkerLink = false, onRead }: { holdWorkerLink?: boolean; onRead?: (sessionId: string) => void } = {},
+) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-task-cancel-'));
   const stateDir = path.join(home, '.stratus');
   await mkdir(stateDir, { recursive: true });
@@ -127,11 +130,21 @@ const fixture = async (mode: WorkerMode, { holdWorkerLink = false } = {}) => {
     return worker;
   };
 
+  // The host's reads go through here, so a case can act between a read and
+  // what follows it.
+  const seen = {
+    get: async (sessionId: string) => {
+      const session = await store.get(sessionId);
+      onRead?.(sessionId);
+      return session;
+    },
+    save: (session: Session) => store.save(session),
+  } as unknown as ShardedSessionStore;
   const tasks = createBackgroundTasks({
     options: { tasks: { enabled: true } } as GatewayOptions,
     fleetDb: fleetDbIn(stateDir),
     stateHome: stateDir,
-    store,
+    store: seen,
     bus: { emit: async () => {} },
     dispatchInternal,
     onSessionChain: onChain,
@@ -185,6 +198,8 @@ const fixture = async (mode: WorkerMode, { holdWorkerLink = false } = {}) => {
     async close() {
       release();
       openWorkerLink();
+      // A worker still waiting on its signal (a failed case) ends here.
+      tasks.cutOff();
       await Promise.allSettled([...chains.values()]);
       rows.close();
       tasks.close();
@@ -317,6 +332,29 @@ test('a second cancel while the first is stopping keeps the first stopper and ab
     assert.match(f.aborted[0]?.reason ?? '', /was stopped by U123\.$/);
     const final = await f.settled(row.id);
     assert.deepEqual([final.status, final.stoppedBy], ['cancelled', 'U123']);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a task that settles while the cancel reads its worker is reported finished, with nothing written or aborted', async () => {
+  let settleNow: ((sessionId: string) => void) | undefined;
+  const f = await fixture('mid-turn', { onRead: (sessionId) => settleNow?.(sessionId) });
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+    // Settling writes a final status after the cancel read the worker
+    // session as running and before it records the stop.
+    settleNow = (sessionId) => {
+      if (sessionId === row.workerSessionId) {
+        settleNow = undefined;
+        f.rows.setStatus(row.id, 'failed', new Date().toISOString());
+      }
+    };
+    const result = await f.tasks.cancel(row.id, { stoppedBy: 'cli' });
+    assert.equal(result.kind, 'finished');
+    assert.equal(f.rows.get(row.id)?.stoppedBy, undefined, 'no stop on a final row');
+    assert.deepEqual(f.aborted, [], 'nothing was aborted');
   } finally {
     await f.close();
   }
