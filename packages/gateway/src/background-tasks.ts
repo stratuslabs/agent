@@ -9,10 +9,15 @@ import {
   type ObserveInput,
   type Session,
 } from '@stratusagent/core';
-import { type DelegateBackgroundStart, TASK_ID_METADATA_KEY } from '@stratusagent/agents';
+import {
+  type DelegateBackgroundStart,
+  TASK_ID_METADATA_KEY,
+  type TaskSummary,
+  type TaskToolsHost,
+} from '@stratusagent/agents';
 
 import type { ShardedSessionStore } from './sessions.ts';
-import { createTaskSettler, TASK_CUT_OFF_ERROR, taskStoppedError, type TaskNotice } from './task-settle.ts';
+import { createTaskSettler, TASK_CUT_OFF_ERROR, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
 import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
@@ -28,6 +33,9 @@ import type { DispatchInput, GatewayOptions } from './types.ts';
 
 /** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` names it. */
 export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
+
+/** Finished tasks `agent.tasks` shows after the open and undelivered ones. */
+export const TASKS_LIST_FINISHED_LIMIT = 10;
 
 /** What a cancel did. */
 export type TaskCancelResult =
@@ -314,9 +322,43 @@ export const createBackgroundTasks = ({
     return { kind: 'stopping', task: current, ...(recorded ? {} : { already: true }) };
   };
 
+  /**
+   * What `agent.tasks` and `agent.cancelTask` reach, scoped to the calling
+   * agent. A listed task's status is the row's, except that an open one
+   * whose worker is parked on a person reads `waiting_approval`: the row
+   * learns that only when settling runs.
+   */
+  const toolsHost: TaskToolsHost = {
+    async list(agentId) {
+      const rows = tasks.listForAgent(agentId, TASKS_LIST_FINISHED_LIMIT);
+      return Promise.all(rows.map(async (row): Promise<TaskSummary> => {
+        const worker = await store.get(row.workerSessionId);
+        const parked = isOpenTaskStatus(row.status) && worker?.status === 'pending_approval';
+        return {
+          task: row.id,
+          status: parked ? 'waiting_approval' : row.status,
+          worker: row.workerAgentId,
+          startedAt: row.createdAt,
+          ...(row.endedAt !== undefined ? { endedAt: row.endedAt } : {}),
+          steps: worker === undefined ? 0 : taskSteps(worker),
+          delivery: row.delivery,
+          ...(row.stoppedBy !== undefined ? { stoppedBy: row.stoppedBy } : {}),
+        };
+      }));
+    },
+    async cancel(taskId, agentId) {
+      const result = await cancel(taskId, { stoppedBy: 'agent', agentId });
+      return result.kind === 'missing'
+        ? result
+        : { kind: result.kind, status: result.task.status, ...(result.kind === 'stopping' && result.already === true ? { already: true } : {}) };
+    },
+  };
+
   return {
     start: enabled ? startTask : undefined,
     cancel,
+    /** The agent's task tools' host; offered only while tasks are on. */
+    toolsHost: enabled ? toolsHost : undefined,
     summary,
     /**
      * What the last process left for settling, read before the channels

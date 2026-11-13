@@ -4539,6 +4539,8 @@ test('GATEWAY_ONLY_TOOL_NAMES is exactly what a gateway adds over a plain host',
   const gateway = createGateway({
     env: { homeDir: home, cwd: home, processEnv: {} },
     idleTimeoutMs: 0,
+    // The agent's task tools are offered only while tasks are on.
+    tasks: { enabled: true },
   });
   await gateway.start();
   try {

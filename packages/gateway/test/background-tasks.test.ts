@@ -10,6 +10,7 @@ import {
   AllowAllApprovalPolicy,
   carriesKey,
   PENDING_APPROVAL_METADATA_KEY,
+  type JsonObject,
   type PluginContext,
   type ProviderResponse,
   type Session,
@@ -66,11 +67,13 @@ const plugin = (name: string, setup: (context: PluginContext) => void | Promise<
   createPlugin: () => ({ name, setup }),
 });
 
-/** What an origin turn asks for: one `agent.delegate` call. */
+/** What an origin turn asks for: one `agent.delegate` call, or one call of `tool` with `input`. */
 interface Ask {
-  to: string;
-  prompt: string;
+  to?: string;
+  prompt?: string;
   background?: boolean;
+  tool?: string;
+  input?: Record<string, unknown>;
 }
 
 const lastUser = (session: Session): string => {
@@ -111,7 +114,7 @@ const taskGateway = async (options: {
   const home = options.home ?? await newHome();
   if (options.home === undefined) {
     await writeSoul(home, 'ava.md', [
-      '---', 'name: Ava', 'id: ava', 'provider: scripted', 'tools: [agent.delegate]', 'delegates: [mia]',
+      '---', 'name: Ava', 'id: ava', 'provider: scripted', 'tools: [agent.delegate, agent.tasks, agent.cancelTask]', 'delegates: [mia]',
       '---', '', 'You are Ava.', '',
     ].join('\n'));
     await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: scripted\ntools: []\n---\n\nYou are Mia.\n');
@@ -211,6 +214,11 @@ const taskGateway = async (options: {
                 return { parts: [{ type: 'text', text: `tool said: ${JSON.stringify(last.toolResult ?? null)}` }] };
               }
               const ask = JSON.parse(said) as Ask;
+              if (ask.tool !== undefined) {
+                return {
+                  parts: [{ type: 'tool-call', call: { id: `${session.id}:${session.messages.length}`, toolName: ask.tool, input: (ask.input ?? {}) as JsonObject } }],
+                };
+              }
               return {
                 parts: [{
                   type: 'tool-call',
@@ -973,6 +981,59 @@ test('cancel: a crash after the stop was written and before the abort ends cance
     assert.match(notices[0]!.content, /was stopped by U123/);
     assert.doesNotMatch(notices[0]!.content, /interrupted/);
   } finally {
+    await fixture.stop();
+  }
+});
+
+// AGT-357 PR 2: the agent's own tools for its tasks.
+
+test('agent.tasks and agent.cancelTask are offered only while tasks are on', async () => {
+  const off = await taskGateway();
+  const on = await taskGateway({ tasks: { enabled: true } });
+  try {
+    const names = (fixture: typeof off) => fixture.gateway.tools().map((tool) => tool.name);
+    assert.equal(names(off).includes('agent.tasks'), false);
+    assert.equal(names(off).includes('agent.cancelTask'), false);
+    assert.ok(names(on).includes('agent.tasks'));
+    assert.ok(names(on).includes('agent.cancelTask'));
+  } finally {
+    await off.stop();
+    await on.stop();
+  }
+});
+
+test('an agent lists its tasks with agent.tasks and stops one with agent.cancelTask, from any of its conversations', async () => {
+  const fixture = await taskGateway({ tasks: { enabled: true } });
+  try {
+    const origin = 'fixture:ava:C50';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'ava', prompt: 'BLOCK-50', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => fixture.blockedCount() === 1);
+
+    const listed = fixture.delegated(await fixture.ask(origin, { tool: 'agent.tasks' }));
+    assert.equal(listed.ok, true, listed.error);
+    const rows = (listed.output as { tasks: Array<Record<string, unknown>> }).tasks;
+    assert.deepEqual(rows.map((row) => [row.task, row.status, row.worker, row.steps, row.delivery]), [[task, 'running', 'ava', 0, 'pending']]);
+    assert.equal(typeof rows[0]!.age, 'string');
+    assert.equal(JSON.stringify(rows).includes('BLOCK-50'), false, 'the list carries no prompt');
+
+    const cancelled = fixture.delegated(await fixture.ask('fixture:ava:C51', { tool: 'agent.cancelTask', input: { task } }));
+    assert.equal(cancelled.ok, true, cancelled.error);
+    assert.equal((cancelled.output as { stopped: boolean }).stopped, true);
+
+    const row = await fixture.settled(task);
+    assert.deepEqual([row.status, row.stoppedBy], ['cancelled', 'agent']);
+    const notices = keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(task));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.content, /was stopped by the agent/);
+
+    const after = (fixture.delegated(await fixture.ask(origin, { tool: 'agent.tasks' })).output as { tasks: Array<Record<string, unknown>> }).tasks;
+    assert.deepEqual(after.map((entry) => [entry.task, entry.status, entry.delivery, entry.stoppedBy]), [[task, 'cancelled', 'delivered', 'agent']]);
+
+    const again = fixture.delegated(await fixture.ask(origin, { tool: 'agent.cancelTask', input: { task } }));
+    assert.equal(again.ok, true, again.error);
+    assert.deepEqual([(again.output as { stopped: boolean }).stopped, (again.output as { status: string }).status], [false, 'cancelled']);
+  } finally {
+    fixture.release();
     await fixture.stop();
   }
 });

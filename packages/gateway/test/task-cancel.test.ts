@@ -363,3 +363,23 @@ test('a task that settles while the cancel reads its worker is reported finished
     await f.close();
   }
 });
+
+test('the agent\'s list reads a task parked on a person as waiting_approval, with its steps, before settling has said so', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+    const worker = (await f.store.get(row.workerSessionId))!;
+    worker.messages.push(message('assistant', '', { toolCalls: [{ id: 'c1', toolName: 'fs.write', input: {} }] }));
+    worker.status = 'pending_approval';
+    await f.store.save(worker);
+
+    const listed = await f.tasks.toolsHost!.list('ava');
+    assert.deepEqual(listed.map((entry) => [entry.task, entry.status, entry.steps, entry.worker]), [[row.id, 'waiting_approval', 1, 'ava']]);
+    assert.equal(f.rows.get(row.id)?.status, 'running', 'the row itself is unchanged');
+    assert.deepEqual(await f.tasks.toolsHost!.list('mia'), [], 'another agent sees none of them');
+    assert.deepEqual(await f.tasks.toolsHost!.cancel(row.id, 'mia'), { kind: 'missing' });
+  } finally {
+    await f.close();
+  }
+});

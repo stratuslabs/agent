@@ -67,6 +67,7 @@ import {
   createRecallTool,
   createRememberTool,
   createScheduleTools,
+  createTaskTools,
   DELEGATED_SESSION_ID_MARKER,
   isDelegatedSession,
   MESSAGE_SEND_TOOL_NAME,
@@ -1458,6 +1459,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     log,
     warn,
   });
+
+  // The agent's view of its own tasks, offered only while tasks are on
+  // (`tasks.enabled: false` hides them). Rows already there stay readable
+  // to the operator.
+  if (backgroundTasks.toolsHost !== undefined) {
+    for (const taskTool of createTaskTools(backgroundTasks.toolsHost)) {
+      tools.register(taskTool);
+    }
+  }
 
   // dispatchInternal and onSessionChain are declared further down: late-bound.
   const { bindToolCalls, subAgents } = createSubAgents({
