@@ -3776,6 +3776,44 @@ test('signing into a second provider keeps a STRATUS_API_KEY-powered default', a
   assert.equal(config.provider, 'anthropic');
 });
 
+test('signing into a second provider keeps a chatgpt default that has a sign-in, and replaces one that has none', async () => {
+  const run = async (signedIn: boolean): Promise<string> => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+    await mkdir(path.join(home, '.stratus'), { recursive: true });
+    await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'chatgpt' }));
+    if (signedIn) {
+      await writeFile(path.join(home, '.stratus', 'chatgpt-sign-in.json'), JSON.stringify({
+        hostId: 'urn:uuid:host-1',
+        session: {
+          clientId: 'oaiapp_issued123',
+          subject: 'user-sub-1',
+          accessToken: 'access-1',
+          refreshToken: 'refresh-1',
+          expiresAt: Date.now() + 3_600_000,
+          scopes: ['openid', 'chatgpt.tokens.use.direct'],
+          savedAt: Date.now(),
+        },
+      }));
+    }
+    const { streams } = createStreams();
+    await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+        homeDir: home,
+        processEnv: {},
+        fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
+        serviceRunner: stubServiceRunner,
+        setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '9\n']),
+      },
+    });
+    return JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')).provider;
+  };
+  assert.equal(await run(true), 'chatgpt');
+  assert.equal(await run(false), 'openai');
+});
+
 test('the inline test run fails over on the configured fallback', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

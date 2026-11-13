@@ -110,6 +110,13 @@ test('provider chatgpt with no sign-in, or a sign-in that ended, refuses with wh
   const noAccount = await homeWith({ config: { provider: 'chatgpt' }, signIn: signedIn({ clientId: '' }) });
   await assert.rejects(() => resolveRuntimeConfig({}, envFor(noAccount)), /Missing sign-in for provider=chatgpt/);
 
+  // Nor is half a pair: the provider needs both tokens, so a run on one
+  // would only fail on its first turn.
+  for (const half of [{ accessToken: undefined }, { refreshToken: undefined }]) {
+    const damaged = await homeWith({ config: { provider: 'chatgpt' }, signIn: signedIn(half) });
+    await assert.rejects(() => resolveRuntimeConfig({}, envFor(damaged)), /Missing sign-in for provider=chatgpt/);
+  }
+
   // A file that isn't a sign-in says so, without quoting it.
   const garbled = await homeWith({ config: { provider: 'chatgpt' }, signIn: '{"session": "access-secret-1' });
   await assert.rejects(
@@ -155,6 +162,8 @@ test('a chatgpt fallback stands on the sign-in file, and is left out without one
 
   const without = await homeWith({ config, credentials });
   assert.equal(fallbackOf(await resolveRuntimeConfig({}, envFor(without))), undefined);
+  const half = await homeWith({ config, credentials, signIn: signedIn({ refreshToken: undefined }) });
+  assert.equal(fallbackOf(await resolveRuntimeConfig({}, envFor(half))), undefined);
 
   // An unreadable file leaves the fallback out rather than failing the run.
   const garbled = await homeWith({ config, credentials, signIn: 'not json' });

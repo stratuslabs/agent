@@ -9,12 +9,15 @@
 import { readFile } from 'node:fs/promises';
 import { parseSoul } from '@stratusagent/agents';
 import {
+  chatgptSignInLocation,
   collectAvailableModels as collectModels,
   defaultApiKeyEnvName,
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   defaultModelFor as builtInModelDefault,
+  hasChatGPTSignIn,
   isRegisteredProviderName,
+  openChatGPTSignInFile,
   readNonEmptyString,
   registeredProviderNameOf,
   type BuiltinProviderName,
@@ -337,9 +340,13 @@ export const createProviderSetup = ({
   // credential source a real run would consider: the stored sign-in, the
   // generic STRATUS_API_KEY, a configured apiKeyEnv, or the provider's own
   // env var.
-  const providerUsable = (provider: CliProviderName): boolean => {
+  const providerUsable = async (provider: CliProviderName): Promise<boolean> => {
     if (provider === 'demo') {
       return true;
+    }
+    if (provider === 'chatgpt') {
+      // Its sign-in is a file of its own, read as a run would read it.
+      return hasChatGPTSignIn(openChatGPTSignInFile(chatgptSignInLocation(env))).catch(() => false);
     }
     const keyEnvSelector = provider === state.provider
       ? readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
@@ -360,7 +367,7 @@ export const createProviderSetup = ({
   // Signing in makes that provider the default only when the current
   // default cannot actually run (demo, or a provider with no usable key).
   const maybeSwitchDefault = async (provider: CredentialProviderName): Promise<void> => {
-    if (state.provider === 'demo' || (state.provider !== provider && !providerUsable(state.provider))) {
+    if (state.provider === 'demo' || (state.provider !== provider && !(await providerUsable(state.provider)))) {
       await switchDefaultProvider(provider);
     }
   };

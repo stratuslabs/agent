@@ -100,11 +100,12 @@ const filledString = (value: unknown): boolean => typeof value === 'string' && v
 
 /**
  * Whether the file holds a sign-in a turn can run on: an account (client ID
- * and subject) with a token. Only that much is read here, so a run is refused
- * up front, like any other provider's missing key; what the tokens are worth
- * is the provider's question, asked on the turn. A sign-in that ended (its
- * tokens cleared by a refused refresh) reads as none. Throws as `read` does
- * for a file that isn't a JSON object.
+ * and subject) with both its tokens, the record provider-chatgpt's token
+ * source accepts. Only that much is read here, so a run is refused up front,
+ * like any other provider's missing key; what the tokens are worth is the
+ * provider's question, asked on the turn. A sign-in that ended (its tokens
+ * cleared by a refused refresh) reads as none. Throws as `read` does for a
+ * file that isn't a JSON object.
  */
 export const hasChatGPTSignIn = async (file: Pick<ChatGPTSignInFile, 'read'>): Promise<boolean> => {
   const session = (await file.read())?.session;
@@ -114,7 +115,8 @@ export const hasChatGPTSignIn = async (file: Pick<ChatGPTSignInFile, 'read'>): P
   const record = session as Record<string, unknown>;
   return filledString(record.clientId)
     && filledString(record.subject)
-    && (filledString(record.refreshToken) || filledString(record.accessToken));
+    && filledString(record.accessToken)
+    && filledString(record.refreshToken);
 };
 
 export const openChatGPTSignInFile = (
