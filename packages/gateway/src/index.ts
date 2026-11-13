@@ -100,6 +100,7 @@ import {
 } from './schedules.ts';
 import { ShardedSessionStore } from './sessions.ts';
 import { createSubAgents } from './sub-agents.ts';
+import { createBackgroundTasks } from './background-tasks.ts';
 import { createSteering } from './steering.ts';
 import { createTurnDispatch } from './turn-dispatch.ts';
 import {
@@ -1411,6 +1412,46 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
 
 
+  // Background tasks (AGT-211), when `tasks.enabled`. Everything they
+  // reach is declared further down: late-bound.
+  const backgroundTasks = createBackgroundTasks({
+    options,
+    fleetDb: fleetDbIn(stateDir),
+    stateHome: stateDir,
+    store,
+    bus,
+    dispatchInternal: (input) => dispatchInternal(input),
+    onSessionChain: (sessionId, work) => onSessionChain(sessionId, work),
+    settleRepeat: (sessionId, idempotencyKey, agentId) => settleRepeat(sessionId, idempotencyKey, agentId, undefined, undefined),
+    observe: (input) => observer.observe(input),
+    // Through the seams a channel already has: which conversation the
+    // origin session is (`sessionConversation`), its thread from the
+    // session's own conversation record, and the addressable outbound
+    // post, speaking as the origin session so the channel doesn't hear the
+    // notice back into the transcript that already holds it.
+    postToOrigin: async (notice) => {
+      const origin = await store.get(notice.sessionId);
+      const kind = origin?.metadata?.channel;
+      if (origin === undefined || typeof kind !== 'string') {
+        throw new Error(`${notice.sessionId} is not a channel conversation, so there is nowhere to post it`);
+      }
+      const { adapter } = channelCarrying(kind, notice.agentId, (candidate) => candidate.sessionConversation !== undefined);
+      if (!adapter?.sessionConversation) {
+        throw new Error(`no running '${kind}' channel carrying ${notice.agentId} can say which conversation ${notice.sessionId} is`);
+      }
+      const to = adapter.sessionConversation(notice.agentId, notice.sessionId);
+      if (to === undefined) {
+        throw new Error(`the running '${kind}' channel can't say which conversation ${notice.sessionId} is`);
+      }
+      const thread = conversationContextFrom(origin.metadata)?.threadRoot;
+      const connection = await outboundFor(notice.agentId, { channel: kind, to }, thread, { sessionId: notice.sessionId, trust: notice.trust });
+      await connection.post(notice.text);
+    },
+    isStopping: () => stopping,
+    refusal: () => refusal(),
+    warn,
+  });
+
   // dispatchInternal and onSessionChain are declared further down: late-bound.
   const { bindToolCalls, subAgents } = createSubAgents({
     options,
@@ -1424,6 +1465,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     idAtFirstCall,
     hostIdOf,
     isHostSubAgent,
+    ...(backgroundTasks.start !== undefined ? { background: backgroundTasks.start } : {}),
   });
 
 
@@ -3018,6 +3060,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     storesClosed = true;
     scheduleStore.close();
     eventStore?.close();
+    backgroundTasks.close();
     store.close();
   };
 

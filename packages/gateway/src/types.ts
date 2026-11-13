@@ -596,6 +596,14 @@ export interface GatewayOptions {
    */
   subAgents?: { maxConcurrentPerTurn?: number };
   /**
+   * Background tasks (AGT-211): `agent.delegate` with `background: true`.
+   * Off unless `enabled` is true; then the tool offers `background` and the
+   * daemon keeps a task table in `fleet.db`. `maxRunningPerAgent` (default
+   * 3) caps the open tasks one agent has started; it must be a whole
+   * number of at least 1, or `createGateway` throws.
+   */
+  tasks?: { enabled?: boolean; maxRunningPerAgent?: number };
+  /**
    * Which store backs agent memory, by registered name (`file`, or absent,
    * is the built-in). Same trust rule and same refusal as `executor`: a
    * daemon writing memories into a store the operator did not select is a
