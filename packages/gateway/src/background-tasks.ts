@@ -417,18 +417,18 @@ export const createBackgroundTasks = ({
     return { open: running.length, stopped };
   };
 
-  /**
-   * What `agent.tasks` and `agent.cancelTask` reach, scoped to the calling
-   * agent. A listed task's status is read live from its worker session
-   * (`liveTaskStatus`): the row learns a parked worker or a finished turn
-   * only when settling runs.
-   */
   /** A row's status and steps as its worker session tells them now. */
   const liveOf = async (row: TaskRow): Promise<{ status: TaskStatus; steps: number }> => {
     const worker = await store.get(row.workerSessionId);
     return { status: liveTaskStatus(row, worker), steps: worker === undefined ? 0 : taskSteps(worker) };
   };
 
+  /**
+   * What `agent.tasks` and `agent.cancelTask` reach, scoped to the calling
+   * agent. A listed task's status is read live from its worker session
+   * (`liveTaskStatus`): the row learns a parked worker or a finished turn
+   * only when settling runs.
+   */
   const toolsHost: TaskToolsHost = {
     async list(agentId) {
       const rows = tasks.list(agentId, TASKS_LIST_FINISHED_LIMIT);
