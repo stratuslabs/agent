@@ -62,7 +62,7 @@ const inFlight = (session: Pick<Session, 'status'>): boolean =>
  * Responses the worker's turn took: each run of assistant messages after
  * its start message, since one response's parts are saved together.
  */
-const stepsOf = (worker: Pick<Session, 'messages'>): number => {
+export const taskSteps = (worker: Pick<Session, 'messages'>): number => {
   const start = worker.messages.findIndex(startsTurn);
   if (start < 0) {
     return 0;
@@ -95,7 +95,7 @@ export const deriveTaskOutcome = (
   worker: Pick<Session, 'status' | 'messages' | 'lastError'> | undefined,
 ): TaskOutcome | undefined => {
   const start = worker === undefined ? undefined : turnMessageOf(worker);
-  const steps = worker === undefined ? 0 : stepsOf(worker);
+  const steps = worker === undefined ? 0 : taskSteps(worker);
   if (worker !== undefined && start !== undefined && (worker.status === 'completed' || worker.status === 'idle')) {
     const reply = latestTurnReply(worker);
     return {

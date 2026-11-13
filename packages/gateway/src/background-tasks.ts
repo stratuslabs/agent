@@ -9,11 +9,16 @@ import {
   type ObserveInput,
   type Session,
 } from '@stratusagent/core';
-import { type DelegateBackgroundStart, TASK_ID_METADATA_KEY } from '@stratusagent/agents';
+import {
+  type DelegateBackgroundStart,
+  TASK_ID_METADATA_KEY,
+  type TaskSummary,
+  type TaskToolsHost,
+} from '@stratusagent/agents';
 
 import type { ShardedSessionStore } from './sessions.ts';
-import { createTaskSettler, TASK_CUT_OFF_ERROR, taskStoppedError, type TaskNotice } from './task-settle.ts';
-import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from './tasks.ts';
+import { createTaskSettler, deriveTaskOutcome, TASK_CUT_OFF_ERROR, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
+import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow, type TaskStatus } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
 // Background tasks in the gateway (AGT-211, agent-plans
@@ -29,12 +34,19 @@ import type { DispatchInput, GatewayOptions } from './types.ts';
 /** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` names it. */
 export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
 
+/** Finished tasks `agent.tasks` shows after the open and undelivered ones. */
+export const TASKS_LIST_FINISHED_LIMIT = 10;
+
 /** What a cancel did. */
 export type TaskCancelResult =
   /** No such task, or not the asking agent's. */
   | { kind: 'missing' }
-  /** It had already ended, or its worker's turn had: nothing was written or stopped. Settling reports how it ended. */
-  | { kind: 'finished'; task: TaskRow }
+  /**
+   * It had already ended, or its worker's turn had: nothing was written or
+   * stopped. `status` is how it ended: the row's once settled, else what
+   * the worker session says, which settling is about to write.
+   */
+  | { kind: 'finished'; task: TaskRow; status: TaskStatus }
   /**
    * The stop is recorded and the task's turn is being stopped; settling
    * reports it `cancelled`. `already` when an earlier cancel recorded it
@@ -79,6 +91,34 @@ export interface BackgroundTasksDeps {
 }
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/**
+ * A task's status as its worker session tells it now, for what the agent
+ * and the operator are shown. The row's once it is final. For an open row,
+ * the row is a cache settling refreshes only at the turn's end, so: a
+ * worker in flight is `running`, or `waiting_approval` while parked on a
+ * person; a worker whose turn has ended reads how it ended, which settling
+ * is about to write; a worker with no turn yet (a start still on its way)
+ * keeps the row's status.
+ */
+export const liveTaskStatus = (
+  row: Pick<TaskRow, 'status' | 'stoppedBy'>,
+  worker: Pick<Session, 'status' | 'messages' | 'lastError'> | undefined,
+): TaskStatus => {
+  if (!isOpenTaskStatus(row.status) || worker === undefined) {
+    return row.status;
+  }
+  if (worker.status === 'pending_approval') {
+    return 'waiting_approval';
+  }
+  if (worker.status === 'running') {
+    return 'running';
+  }
+  if (turnMessageOf(worker) === undefined) {
+    return row.status;
+  }
+  return deriveTaskOutcome(row, worker)?.status ?? row.status;
+};
 
 export const createBackgroundTasks = ({
   options,
@@ -293,17 +333,18 @@ export const createBackgroundTasks = ({
       return { kind: 'missing' };
     }
     if (!isOpenTaskStatus(row.status)) {
-      return { kind: 'finished', task: row };
+      return { kind: 'finished', task: row, status: row.status };
     }
     const worker = await store.get(row.workerSessionId);
     if (worker !== undefined && turnMessageOf(worker) !== undefined && worker.status !== 'running' && worker.status !== 'pending_approval') {
-      return { kind: 'finished', task: tasks.get(taskId) ?? row };
+      const latest = tasks.get(taskId) ?? row;
+      return { kind: 'finished', task: latest, status: liveTaskStatus(latest, worker) };
     }
     const recorded = tasks.recordStop(taskId, stoppedBy, new Date().toISOString());
     const current = tasks.get(taskId) ?? row;
     if (!isOpenTaskStatus(current.status) || current.stoppedBy === undefined) {
       // Settling wrote a final status while this read the worker session.
-      return { kind: 'finished', task: current };
+      return { kind: 'finished', task: current, status: current.status };
     }
     const why = taskStoppedError(taskId, current.stoppedBy);
     const controller = controllers.get(taskId);
@@ -314,9 +355,47 @@ export const createBackgroundTasks = ({
     return { kind: 'stopping', task: current, ...(recorded ? {} : { already: true }) };
   };
 
+  /**
+   * What `agent.tasks` and `agent.cancelTask` reach, scoped to the calling
+   * agent. A listed task's status is read live from its worker session
+   * (`liveTaskStatus`): the row learns a parked worker or a finished turn
+   * only when settling runs.
+   */
+  const toolsHost: TaskToolsHost = {
+    async list(agentId) {
+      const rows = tasks.listForAgent(agentId, TASKS_LIST_FINISHED_LIMIT);
+      return Promise.all(rows.map(async (row): Promise<TaskSummary> => {
+        const worker = await store.get(row.workerSessionId);
+        return {
+          task: row.id,
+          status: liveTaskStatus(row, worker),
+          worker: row.workerAgentId,
+          startedAt: row.createdAt,
+          ...(row.endedAt !== undefined ? { endedAt: row.endedAt } : {}),
+          steps: worker === undefined ? 0 : taskSteps(worker),
+          delivery: row.delivery,
+          ...(row.stoppedBy !== undefined ? { stoppedBy: row.stoppedBy } : {}),
+        };
+      }));
+    },
+    async cancel(taskId, agentId) {
+      const result = await cancel(taskId, { stoppedBy: 'agent', agentId });
+      switch (result.kind) {
+        case 'missing':
+          return result;
+        case 'finished':
+          return { kind: 'finished', status: result.status };
+        case 'stopping':
+          return { kind: 'stopping', status: result.task.status, ...(result.already === true ? { already: true } : {}) };
+      }
+    },
+  };
+
   return {
     start: enabled ? startTask : undefined,
     cancel,
+    /** The agent's task tools' host; offered only while tasks are on. */
+    toolsHost: enabled ? toolsHost : undefined,
     summary,
     /**
      * What the last process left for settling, read before the channels

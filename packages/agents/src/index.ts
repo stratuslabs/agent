@@ -119,6 +119,15 @@ export {
 } from './tools/delegate.ts';
 
 export {
+  TASKS_TOOL_NAME,
+  CANCEL_TASK_TOOL_NAME,
+  createTaskTools,
+  type TaskCancelAnswer,
+  type TaskSummary,
+  type TaskToolsHost,
+} from './tools/tasks.ts';
+
+export {
   SCHEDULE_EVERY_TOOL_NAME,
   SCHEDULE_AT_TOOL_NAME,
   SCHEDULE_ON_TOOL_NAME,
