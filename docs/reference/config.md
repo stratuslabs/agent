@@ -296,6 +296,12 @@ conversation that started it, once, when it ends. Tasks are on unless
 - **Restarts.** A stop or restart doesn't wait for a running task: it cuts
   it off, and the next start reports it interrupted in its conversation.
   It is never run again.
+- **Approvals.** A task's gated call is asked in the conversation that
+  started it, as any delegated call is, and the request carries the task
+  id (`taskId` on `tool.approval-requested` and on `GET /api/v1/approvals`
+  rows). The task shows `waiting_approval` until someone answers. With
+  nobody answering, the approval timeout (15 minutes by default) denies the
+  call and the task goes on from there.
 - **Stop.** An approver's `stop` in a Slack conversation also stops the
   tasks that conversation started, and a line there names them
   ([stopping a turn](../guides/slack.md#stopping-a-turn)). Each task's
@@ -315,7 +321,8 @@ conversation that started it, once, when it ends. Tasks are on unless
   "from the CLI" in the notice, and one from a dashboard sign-in "from the
   dashboard". Each task's start and end is also an event, `task.started`
   and then `task.completed`, `task.failed`, `task.cancelled` or
-  `task.interrupted`, in the daemon log and on the control API's event
+  `task.interrupted`, with `task.waiting-approval` each time it starts
+  waiting on an approval, in the daemon log and on the control API's event
   stream, with ids only.
 - **Off.** `enabled: false` refuses `background: true` with an error
   saying so, and agents no longer get `agent.tasks` or `agent.cancelTask`.
