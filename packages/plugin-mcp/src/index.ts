@@ -55,7 +55,7 @@ import {
  * package.json, because nothing else fails when a release bumps the
  * manifest and leaves the literal behind.
  */
-export const PLUGIN_MCP_VERSION = '0.14.16';
+export const PLUGIN_MCP_VERSION = '0.14.17';
 
 export {
   BRIDGED_DESCRIPTION_MAX_LENGTH,
