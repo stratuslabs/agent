@@ -120,21 +120,50 @@ export const CHATGPT_PLAN_SCOPE = 'chatgpt.tokens.use.direct';
  */
 export const chatgptSignInStatus = async (
   file: Pick<ChatGPTSignInFile, 'read'>,
-): Promise<'none' | 'plan_usage_not_granted' | 'ready'> => {
+): Promise<ChatGPTSignInSummary['status']> => (await describeChatGPTSignIn(file)).status;
+
+/**
+ * What may be said about the saved sign-in where a person reads it
+ * (`stratus doctor`): its `chatgptSignInStatus`, whose account it is (the
+ * email, else the ID-token subject), and when its access token expires.
+ * Never a token: this carries none, so nothing that prints it can leak one.
+ */
+export type ChatGPTSignInSummary =
+  /** `account` is absent when the file holds none; sign-out keeps it. */
+  | { readonly status: 'none'; readonly account?: string }
+  | {
+    readonly status: 'plan_usage_not_granted' | 'ready';
+    readonly account: string;
+    /** Milliseconds since the epoch, when the record has one. */
+    readonly expiresAt?: number;
+  };
+
+/** `chatgptSignInStatus` with the account and expiry. Throws as `read` does. */
+export const describeChatGPTSignIn = async (
+  file: Pick<ChatGPTSignInFile, 'read'>,
+): Promise<ChatGPTSignInSummary> => {
   const session = (await file.read())?.session;
   if (typeof session !== 'object' || session === null || Array.isArray(session)) {
-    return 'none';
+    return { status: 'none' };
   }
   const record = session as Record<string, unknown>;
-  if (!filledString(record.clientId)
-    || !filledString(record.subject)
+  const subject = filledString(record.subject) ? record.subject as string : undefined;
+  const account = filledString(record.email) ? record.email as string : subject;
+  if (account === undefined
+    || subject === undefined
+    || !filledString(record.clientId)
     || !filledString(record.accessToken)
     || !filledString(record.refreshToken)) {
-    return 'none';
+    return account === undefined ? { status: 'none' } : { status: 'none', account };
   }
-  return Array.isArray(record.scopes) && record.scopes.includes(CHATGPT_PLAN_SCOPE)
-    ? 'ready'
-    : 'plan_usage_not_granted';
+  const expiry = typeof record.expiresAt === 'number' && Number.isFinite(record.expiresAt)
+    ? { expiresAt: record.expiresAt }
+    : {};
+  return {
+    status: Array.isArray(record.scopes) && record.scopes.includes(CHATGPT_PLAN_SCOPE) ? 'ready' : 'plan_usage_not_granted',
+    account,
+    ...expiry,
+  };
 };
 
 /** Whether the saved sign-in can serve a run now (`chatgptSignInStatus` is `ready`). */
