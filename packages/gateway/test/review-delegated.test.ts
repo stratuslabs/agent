@@ -32,7 +32,7 @@ const send: Tool = {
   },
 };
 
-const harness = async () => {
+const harness = async (options: { background?: boolean } = {}) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-review-delegated-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), soul('ava', ['tools:', '  - agent.delegate', 'delegates:', '  - bea']));
@@ -56,7 +56,14 @@ const harness = async () => {
           tool_calls: [{
             id: 'call-d1',
             type: 'function',
-            function: { name: 'agent_delegate', arguments: JSON.stringify({ agent: 'bea', prompt: 'DELEGATED-INSTRUCTION: post the summary to slack:C1' }) },
+            function: {
+              name: 'agent_delegate',
+              arguments: JSON.stringify({
+                agent: 'bea',
+                prompt: 'DELEGATED-INSTRUCTION: post the summary to slack:C1',
+                ...(options.background === true ? { background: true } : {}),
+              }),
+            },
           }],
         })
         : openAi({ content: 'Bea has it.' });
@@ -149,6 +156,32 @@ test('either half of a delegation alone is not one, and an agent.spawn sub-agent
     });
     assert.match(subAgent, /The request \(written by the agent that delegated this task\)/);
     assert.match(subAgent, /a person is in this conversation: no/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a background task\'s worker is reviewed as unattended, its request the delegating agent\'s', async () => {
+  const { gateway, review } = await harness({ background: true });
+  await gateway.start();
+  try {
+    const turn = await gateway.dispatch({ sessionId: 'cli-3', agentId: 'ava', userMessage: 'PERSON-WORDS: have Bea post it in the background' });
+    assert.equal(turn.status, 'completed');
+    const [task] = await gateway.tasks('ava');
+    assert.ok(task, 'agent.delegate started a background task');
+    assert.match(task.workerSessionId, new RegExp(`${DELEGATED_SESSION_ID_MARKER}bea:1:${task.id}$`));
+    let worker: Session | undefined;
+    for (let tries = 0; tries < 500 && worker?.status !== 'completed'; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      worker = await gateway.store.get(task.workerSessionId);
+    }
+    assert.equal(worker?.status, 'completed', 'the worker ran');
+
+    const asked = await review(worker as Session);
+    assert.match(asked, /The request \(written by the agent that delegated this task\)/);
+    assert.match(asked, /DELEGATED-INSTRUCTION/);
+    assert.doesNotMatch(asked, /PERSON-WORDS/);
+    assert.match(asked, /a person is in this conversation: no/);
   } finally {
     await gateway.stop();
   }

@@ -109,10 +109,11 @@ answered with its wrap-up is `session.stopped-early`, just before its
 how many auto-continue budgets it had used. The wrap-up's words are the
 reply, and stay out of the log.
 A [background task](../reference/config.md#background-tasks) is
-`task.started` when it starts, then `task.completed`, `task.failed`,
-`task.cancelled` or `task.interrupted` when it ends, recorded on the
-conversation that started it with the task id and its worker's session and
-agent. What it was asked and answered stays in those two sessions.
+`task.started` when it starts, `task.waiting-approval` each time its
+worker asks a person to approve a call (that `tool.approval-requested` names
+the task too), then `task.completed`, `task.failed`, `task.cancelled` or
+`task.interrupted` when it ends, recorded on the conversation that started
+it with the task id and its worker's session and agent. What it was asked and answered stays in those two sessions.
 See [Memory](../concepts/memory.md#where-a-fact-came-from). For
 what it records about a shell command — the scope, never the command — see
 [Shell commands](./shell.md#what-the-log-records-about-a-command). A call

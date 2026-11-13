@@ -17,6 +17,7 @@ import {
   type TaskToolsHost,
 } from '@stratusagent/agents';
 
+import type { TaskApprovalWait } from './approvals.ts';
 import type { ShardedSessionStore } from './sessions.ts';
 import { createTaskSettler, deriveTaskOutcome, TASK_CUT_OFF_ERROR, taskEvent, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
 import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
@@ -126,11 +127,13 @@ const reason = (error: unknown): string => (error instanceof Error ? error.messa
 /**
  * A task's status as its worker session tells it now, for what the agent
  * and the operator are shown. The row's once it is final. For an open row,
- * the row is a cache settling refreshes only at the turn's end, so: a
- * worker in flight is `running`, or `waiting_approval` while parked on a
- * person; a worker whose turn has ended reads how it ended, which settling
- * is about to write; a worker with no turn yet (a start still on its way)
- * keeps the row's status.
+ * the row is a cache settling refreshes at the turn's end, so: a worker in
+ * flight is `running`, or `waiting_approval` while parked on a person,
+ * which the session says for a kernel-loop provider and the row says for
+ * any (the broker writes it while the question is out, `approvalWait`); a
+ * worker whose turn has ended reads how it ended, which settling is about
+ * to write; a worker with no turn yet (a start still on its way) keeps the
+ * row's status.
  */
 export const liveTaskStatus = (
   row: Pick<TaskRow, 'status' | 'stoppedBy'>,
@@ -143,7 +146,7 @@ export const liveTaskStatus = (
     return 'waiting_approval';
   }
   if (worker.status === 'running') {
-    return 'running';
+    return row.status === 'waiting_approval' ? 'waiting_approval' : 'running';
   }
   if (turnMessageOf(worker) === undefined) {
     return row.status;
@@ -195,6 +198,14 @@ export const createBackgroundTasks = ({
   const tasks = new SqliteTaskStore(fleetDb, { stateHome });
   /** Each running task's own stop, for a cancel (AGT-357) and the drain (`cutOff`). */
   const controllers = new Map<string, AbortController>();
+  /** The task each running worker session is doing, while its turn runs: what an approval question names. */
+  const workers = new Map<string, string>();
+  /**
+   * Each task with questions out: how many, and its mark as waiting on a
+   * person, which every question awaits before it is asked. The first
+   * question makes the mark and the last answer clears it.
+   */
+  const approvalWaits = new Map<string, { out: number; marked: Promise<void> }>();
 
   const settler = createTaskSettler({
     tasks,
@@ -301,6 +312,7 @@ export const createBackgroundTasks = ({
 
     const task = claim.task;
     controllers.set(task.id, controller);
+    workers.set(task.workerSessionId, task.id);
     // Before the worker is dispatched, so a consumer hears the start before
     // anything the worker does, and before its end.
     await bus.emit(taskEvent('task.started', task));
@@ -326,6 +338,7 @@ export const createBackgroundTasks = ({
         warn(`task ${task.id}: the worker's turn ended with an error: ${reason(error)}`);
       } finally {
         controllers.delete(task.id);
+        workers.delete(task.workerSessionId);
       }
       await settleQuietly(task.id);
     }).catch((error: unknown) => {
@@ -421,6 +434,63 @@ export const createBackgroundTasks = ({
     return { open: running.length, stopped };
   };
 
+  /**
+   * A worker's approval question (AGT-358): the task its session is
+   * running, marked `waiting_approval` until `release`, with
+   * `task.waiting-approval` sent before the question goes out. Only a
+   * worker this process is running asks: the restart sweep fails a parked
+   * worker rather than asking again. With several questions out at once,
+   * the first marks the task, each waits for that mark to be announced (so
+   * no question goes out before its task says it waits), and the last
+   * answer puts it back to running; a task settling has ended since stays
+   * ended (`setStatus` never reopens a final row). A row that can't be
+   * written is logged and the question is still asked.
+   */
+  const approvalWait = async (workerSessionId: string): Promise<TaskApprovalWait | undefined> => {
+    const taskId = workers.get(workerSessionId);
+    if (taskId === undefined) {
+      return undefined;
+    }
+    let wait = approvalWaits.get(taskId);
+    if (wait === undefined) {
+      const mark = async (): Promise<void> => {
+        try {
+          const row = tasks.setStatus(taskId, 'waiting_approval', new Date().toISOString()) ? tasks.get(taskId) : undefined;
+          if (row !== undefined) {
+            await bus.emit(taskEvent('task.waiting-approval', row));
+          }
+        } catch (error) {
+          warn(`task ${taskId}: could not mark it waiting on an approval: ${reason(error)}`);
+        }
+      };
+      wait = { out: 0, marked: mark() };
+      approvalWaits.set(taskId, wait);
+    }
+    const entry = wait;
+    entry.out += 1;
+    await entry.marked;
+    let released = false;
+    return {
+      taskId,
+      release: () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        entry.out -= 1;
+        if (entry.out > 0) {
+          return;
+        }
+        approvalWaits.delete(taskId);
+        try {
+          tasks.setStatus(taskId, 'running', new Date().toISOString());
+        } catch (error) {
+          warn(`task ${taskId}: could not mark it running again after its approval: ${reason(error)}`);
+        }
+      },
+    };
+  };
+
   /** A row's status and steps as its worker session tells them now. */
   const liveOf = async (row: TaskRow): Promise<{ status: TaskStatus; steps: number }> => {
     const worker = await store.get(row.workerSessionId);
@@ -492,6 +562,7 @@ export const createBackgroundTasks = ({
     cancel,
     list,
     stopTasks,
+    approvalWait,
     /** The agent's task tools' host; offered only while tasks are on. */
     toolsHost: enabled ? toolsHost : undefined,
     summary,

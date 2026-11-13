@@ -552,6 +552,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     scheduler,
     effectiveApprovalTimeoutMs,
     isStopping: () => stopping,
+    taskApprovalWait: (sessionId) => backgroundTasks.approvalWait(sessionId),
   });
 
 

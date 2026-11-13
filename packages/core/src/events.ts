@@ -137,6 +137,14 @@ export type StratusEvent =
        */
       scheduleDestination?: ApprovalScheduleDestination;
       /**
+       * The background task asking, when this call is a task's worker
+       * (AGT-211): a renderer names it beside the call, so the person knows
+       * which job is asking. Such a call is a delegated one too, asked where
+       * `delegatedFrom` says. Set by the gateway from the workers it is
+       * running, never from session metadata a caller could write.
+       */
+      taskId?: string;
+      /**
        * When the request gives up and denies itself, ISO-8601. Absent when
        * it never will — a deadline of "now" would be a worse lie than
        * saying nothing.
@@ -310,8 +318,11 @@ export type StratusEvent =
    */
   | { type: 'session.stopped-early'; sessionId: string; reason: StoppedEarlyReason; continuations: number }
   /**
-   * A background task started, or ended (AGT-211): `agent.delegate` with
-   * `background: true` wrote it, or settling wrote how it ended. Ids only,
+   * A background task started, began waiting on a person, or ended
+   * (AGT-211): `agent.delegate` with `background: true` wrote it, its
+   * worker asked for an approval (`task.waiting-approval`, sent before the
+   * question; the task is running again once it is answered, which sends
+   * nothing), or settling wrote how it ended. Ids only,
    * never what the task was asked or answered, which stay in its two
    * sessions. `sessionId` and `agentId` are the conversation and agent that
    * started it, where its outcome goes; `workerSessionId` and
@@ -330,8 +341,14 @@ export type StratusEvent =
       workerAgentId: string;
     };
 
-/** The background task events: one when a task starts, one for how it ended. */
-export type TaskEventType = 'task.started' | 'task.completed' | 'task.failed' | 'task.cancelled' | 'task.interrupted';
+/** The background task events: one when a task starts, one each time it starts waiting on a person, one for how it ended. */
+export type TaskEventType =
+  | 'task.started'
+  | 'task.waiting-approval'
+  | 'task.completed'
+  | 'task.failed'
+  | 'task.cancelled'
+  | 'task.interrupted';
 
 export type TaskEvent = Extract<StratusEvent, { type: TaskEventType }>;
 
