@@ -27,6 +27,14 @@ export const ROOT_SESSION_ID_METADATA_KEY = 'rootSessionId';
 export const DELEGATION_DEPTH_METADATA_KEY = 'delegationDepth';
 
 /**
+ * The background task a worker session runs for (AGT-211): the id of its
+ * row in the host's task table. Written only by the host that starts the
+ * task, beside the delegation keys above. The host's task sweep keys on it,
+ * and its generic restart sweeps leave such a session to that sweep.
+ */
+export const TASK_ID_METADATA_KEY = 'taskId';
+
+/**
  * The segment `agent.delegate` mints into every sub-session's id —
  * `<parent>:delegate:<agent>:<depth>:<suffix>`. The second half of what
  * identifies a sub-session, beside the metadata above: the gateway refuses
@@ -141,10 +149,45 @@ export type DelegateDispatch = (input: {
   signal?: AbortSignal;
 }) => Promise<Session>;
 
+/**
+ * Starts a background delegation (AGT-211): the host records the task,
+ * starts the worker without waiting for it, and resolves once the start is
+ * recorded. It owns the task table, the worker's abort handle, and getting
+ * the outcome into `origin` when the worker ends. It rejects, with an error
+ * the agent can act on, when it won't start one (a cap, or tasks turned off).
+ */
+export type DelegateBackgroundStart = (input: {
+  /** The session whose turn asked: the conversation the outcome goes back to. */
+  origin: Session;
+  /** The agent doing the work, which may be the caller itself. */
+  agent: AgentDefinition;
+  prompt: string;
+  /**
+   * The worker sub-session's id for a task id, named the way a foreground
+   * delegation names one (`<origin>:delegate:<worker>:<depth>:<task id>`), so
+   * every check that knows delegated sessions knows the worker.
+   */
+  workerSessionId: (taskId: string) => string;
+  /** Delegation metadata for the worker session. The host adds the task id key. */
+  metadata: JsonObject;
+}) => Promise<DelegateBackgroundStarted>;
+
+export interface DelegateBackgroundStarted {
+  task: string;
+  status: string;
+  /** The same job was already running from this conversation, and this is that task. */
+  existing?: boolean;
+}
+
 export type DelegateToolOptions = {
   registry: AgentRegistry;
   /** Maximum delegation depth to stop orchestrator loops. Default 3. */
   maxDepth?: number;
+  /**
+   * How this host starts a background delegation. Without it, the tool
+   * offers no `background` option and refuses `background: true`.
+   */
+  background?: DelegateBackgroundStart;
 } & ({ runner: AgentRunner; dispatch?: never } | { dispatch: DelegateDispatch; runner?: never });
 
 export const DEFAULT_MAX_DELEGATION_DEPTH = 3;
@@ -159,6 +202,7 @@ export const createDelegateTool = ({
   runner,
   dispatch,
   maxDepth = DEFAULT_MAX_DELEGATION_DEPTH,
+  background,
 }: DelegateToolOptions): Tool => {
   const runDelegated: DelegateDispatch = dispatch ?? ((input) => runner.run(input));
   // Sub-session ids must be unique even when one orchestrator delegates to
@@ -170,7 +214,11 @@ export const createDelegateTool = ({
 
   return {
   name: DELEGATE_TOOL_NAME,
-  description: 'Delegate a task to another agent by name and get their reply back.',
+  description: background
+    ? 'Delegate a task to another agent by name and get their reply back. With background: true, start it as a '
+      + 'background task instead (the agent may be yourself) and get a task id at once; the result arrives in this '
+      + 'conversation as a new message when the task ends.'
+    : 'Delegate a task to another agent by name and get their reply back.',
   // Safe in a clean conversation, and the call is arguable enough to
   // record why. Delegation spends provider tokens and starts work as
   // another agent, which reads like `gated` — but the money argument
@@ -197,6 +245,15 @@ export const createDelegateTool = ({
     properties: {
       agent: { type: 'string', description: 'Name or id of the agent to delegate to.' },
       prompt: { type: 'string', description: 'The task or question for that agent.' },
+      // Offered only where the host runs background tasks.
+      ...(background
+        ? {
+          background: {
+            type: 'boolean',
+            description: 'Start the work as a background task and return at once with its id, instead of waiting for the reply.',
+          },
+        }
+        : {}),
     },
     required: ['agent', 'prompt'],
   },
@@ -205,6 +262,28 @@ export const createDelegateTool = ({
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
     if (!targetRef || !prompt) {
       throw new Error('agent.delegate requires "agent" and "prompt" strings.');
+    }
+    if (input.background !== undefined && typeof input.background !== 'boolean') {
+      throw new Error('agent.delegate: "background" must be true or false.');
+    }
+    const inBackground = input.background === true;
+    if (inBackground && !background) {
+      // Never quietly run it in the foreground: the caller expects to get
+      // its turn back at once, and would hold the conversation instead.
+      throw new Error(
+        'Background delegation isn\'t available here: this daemon has background tasks turned off, or its host '
+        + 'doesn\'t run them. Call agent.delegate without background to wait for the reply.',
+      );
+    }
+    // Phase 1 keeps one level: a worker, or any session another agent
+    // delegated to, waits on its own work and can't fan out into tasks
+    // nobody is watching. The task id key alone is enough, since only the
+    // host writes it.
+    if (inBackground && (isDelegatedSession(session) || session.metadata?.[TASK_ID_METADATA_KEY] !== undefined)) {
+      throw new Error(
+        'A delegated session, a background task\'s worker included, can\'t start background tasks. '
+        + 'Call agent.delegate without background, or do the work in this turn.',
+      );
     }
 
     const depth = typeof session.metadata?.[DELEGATION_DEPTH_METADATA_KEY] === 'number'
@@ -218,40 +297,75 @@ export const createDelegateTool = ({
     if (!target) {
       throw new Error(`Agent not found: ${targetRef}`);
     }
-    if (target.id === session.agent.id) {
-      throw new Error('An agent cannot delegate to itself.');
+    const self = target.id === session.agent.id;
+    // A background task of one's own is the common case: the agent keeps
+    // the conversation while the work runs. In the foreground it would
+    // only be the same turn waiting on itself.
+    if (self && !inBackground) {
+      throw new Error(
+        background
+          ? 'An agent cannot delegate to itself and wait. Pass background: true to start the work as a background task of your own.'
+          : 'An agent cannot delegate to itself.',
+      );
     }
     // Judged on the session's frozen copy of the agent, as the tool
     // allowlist is: the target is model-chosen input, and without this
     // list any agent holding this tool could run a turn as any other —
     // under the other's tools, credentials, and memory — which is the
-    // lateral move a prompt-injected agent would take.
-    if (!isDelegateAllowed(session.agent, target.id)) {
+    // lateral move a prompt-injected agent would take. Running as itself
+    // is no such move, so it needs no entry.
+    if (!self && !isDelegateAllowed(session.agent, target.id)) {
       throw new Error(
         `Agent ${session.agent.id} may not delegate to ${target.id}. `
         + `Add ${suggestedDelegatesEdit(target.id)} to its soul, or delegates: ['*'] for any agent on the roster.`,
       );
     }
 
+    const workerSessionPrefix = `${session.id}${DELEGATED_SESSION_ID_MARKER}${target.id}:${depth + 1}:`;
+    const metadata: JsonObject = {
+      [DELEGATION_DEPTH_METADATA_KEY]: depth + 1,
+      [DELEGATED_BY_METADATA_KEY]: session.agent.id,
+      [ROOT_SESSION_ID_METADATA_KEY]: typeof session.metadata?.[ROOT_SESSION_ID_METADATA_KEY] === 'string'
+        ? session.metadata[ROOT_SESSION_ID_METADATA_KEY]
+        : session.id,
+      // Outbound: the prompt is the parent's text, and the parent is its
+      // "sender" — a tainted parent must not hand attacker text to a
+      // teammate whose session has seen nothing. At most `agent`: the
+      // prompt is something an agent wrote, whoever it was talking to.
+      [SENDER_TRUST_METADATA_KEY]: sessionWriteTrust(session),
+    };
+
+    if (inBackground) {
+      // Not tied to this turn's signal: the task outlives the turn that
+      // started it, and stopping it is the host's cancel, not this turn's.
+      // The result is the runtime's own (an id and a status), so it marks
+      // nothing; the outcome notice carries the worker's label later.
+      const started = await background!({
+        origin: session,
+        agent: target,
+        prompt,
+        workerSessionId: (taskId) => `${workerSessionPrefix}${taskId}`,
+        metadata,
+      });
+      return {
+        task: started.task,
+        status: started.status,
+        agent: target.name,
+        ...(started.existing === true ? { existing: true } : {}),
+        note: started.existing === true
+          ? 'The same job was already running from this conversation, so this is that task, not a new one.'
+          : 'Started. Its result arrives as a new message in this conversation when it ends.',
+      };
+    }
+
     delegationCount += 1;
     let result;
     try {
       result = await runDelegated({
-      sessionId: `${session.id}${DELEGATED_SESSION_ID_MARKER}${target.id}:${depth + 1}:${uniqueSuffix()}`,
+      sessionId: `${workerSessionPrefix}${uniqueSuffix()}`,
       agent: target,
       userMessage: prompt,
-      metadata: {
-        [DELEGATION_DEPTH_METADATA_KEY]: depth + 1,
-        [DELEGATED_BY_METADATA_KEY]: session.agent.id,
-        [ROOT_SESSION_ID_METADATA_KEY]: typeof session.metadata?.[ROOT_SESSION_ID_METADATA_KEY] === 'string'
-          ? session.metadata[ROOT_SESSION_ID_METADATA_KEY]
-          : session.id,
-        // Outbound: the prompt is the parent's text, and the parent is its
-        // "sender" — a tainted parent must not hand attacker text to a
-        // teammate whose session has seen nothing. At most `agent`: the
-        // prompt is something an agent wrote, whoever it was talking to.
-        [SENDER_TRUST_METADATA_KEY]: sessionWriteTrust(session),
-      },
+      metadata,
       // A cancelled parent turn cancels the delegated run with it —
       // otherwise the parent cannot settle until the target gives up.
       ...(context?.signal ? { signal: context.signal } : {}),
