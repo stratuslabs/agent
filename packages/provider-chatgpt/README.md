@@ -50,9 +50,26 @@ with no dependencies beyond Node's own `crypto` and `http` and Stratus's
   errors (a usage limit, an account that isn't eligible, a refused admission)
   fail the turn in words that say what to do, with OpenAI's text, the HTTP
   status and the request ID kept; none is retried or sent another way.
+- `signInWithChatGPT` joins these for setup: it makes and saves the host ID,
+  opens the callback listener, hands the browser URL to the caller's
+  `openUrl` (which opens or prints it; the URL can carry the saved ID token, so
+  it is never logged), validates the sign-in and saves it under the session
+  lock. It signs the saved account in again with its issued client ID, or
+  registers a first one. One account per install for now: `account: 'new'`
+  replaces the saved account only once it is signed out, and a sign-in that
+  finds the saved account changed when it saves (another setup finished first)
+  is refused rather than overwriting it. Opening the page runs alongside the
+  wait, so an `openUrl` that never settles holds up neither the callback nor a
+  timeout or cancel.
+  It returns the account, whether plan usage was allowed and the expiry, never
+  a token. `signOutOfChatGPT` revokes the refresh token under the lock, then
+  clears the access, refresh and ID tokens even when OpenAI doesn't confirm,
+  and keeps the account and host ID for signing in again.
 
 Every failure is a `ChatGPTAuthError` with a stable `code`: `temporary` keeps
 the tokens, `signin_required` means the refresh token is dead and the user
 signs in again, `plan_usage_not_granted` means the sign-in is valid but the
-user didn't allow plan usage, and `storage_failed` means the saved sign-in or its lock
+user didn't allow plan usage, `signed_in` means another account is signed in
+here, `account_changed` means another sign-in changed the saved account
+first, and `storage_failed` means the saved sign-in or its lock
 failed on this machine. No message quotes a token.
