@@ -205,6 +205,39 @@ test('unsettled lists every open row and every final row still owed a delivery, 
 
 // ---- retention -------------------------------------------------------------
 
+test('an agent\'s list: every open or undelivered task, newest first, then its most recent finished ones up to the limit', async () => {
+  const tasks = new SqliteTaskStore(await newDb());
+  const make = (offsetMs: number, overrides: Partial<NewTask> = {}): string => {
+    const task = newTask({ promptDigest: taskPromptDigest('atlas', `job ${offsetMs}`), ...overrides });
+    assert.equal(tasks.claim(task, 100, at(offsetMs)).kind, 'started');
+    return task.id;
+  };
+  const finish = (id: string, offsetMs: number, delivery: 'delivered' | 'dropped' | 'pending' = 'delivered'): void => {
+    tasks.setStatus(id, 'completed', at(offsetMs));
+    if (delivery !== 'pending') {
+      tasks.setDelivery(id, delivery, at(offsetMs));
+    }
+  };
+  const doneEarly = make(0);
+  finish(doneEarly, 10_000);
+  const doneLate = make(1_000);
+  finish(doneLate, 20_000, 'dropped');
+  const doneMiddle = make(2_000);
+  finish(doneMiddle, 15_000);
+  const owed = make(3_000);
+  finish(owed, 4_000, 'pending');
+  const running = make(5_000);
+  const waiting = make(6_000);
+  tasks.setStatus(waiting, 'waiting_approval', at(6_500));
+  const othersId = make(7_000, { agentId: 'blair' });
+
+  assert.deepEqual(tasks.listForAgent('atlas', 2).map((row) => row.id), [waiting, running, owed, doneLate, doneMiddle]);
+  assert.deepEqual(tasks.listForAgent('atlas', 0).map((row) => row.id), [waiting, running, owed], 'open and owed rows are never cut');
+  assert.deepEqual(tasks.listForAgent('blair', 10).map((row) => row.id), [othersId]);
+  assert.deepEqual(tasks.listForAgent('nobody', 10), []);
+  tasks.close();
+});
+
 test('pruning removes delivered and dropped rows past retention, and never an open or undelivered one', async () => {
   const store = new SqliteTaskStore(await newDb());
   const ended = (status: 'completed' | 'cancelled', delivery: 'delivered' | 'dropped' | undefined, base: number): string => {

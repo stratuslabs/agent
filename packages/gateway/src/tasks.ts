@@ -242,6 +242,30 @@ export class SqliteTaskStore {
   }
 
   /**
+   * One agent's tasks, for its own list: every one still open or still owed
+   * a delivery, newest first, then up to `finished` of the rest, most
+   * recently ended first. The first part is bounded by the agent's cap and
+   * by settling; the second by `finished`, so the list stays short however
+   * long the agent has run.
+   */
+  listForAgent(agentId: string, finished: number): TaskRow[] {
+    const owed = this.db
+      .prepare(`
+        SELECT * FROM tasks WHERE agent_id = ? AND (status IN (${OPEN_SQL}) OR delivery = 'pending')
+        ORDER BY created_at DESC, rowid DESC
+      `)
+      .all(agentId) as unknown as TaskRowRaw[];
+    const done = this.db
+      .prepare(`
+        SELECT * FROM tasks WHERE agent_id = ? AND status NOT IN (${OPEN_SQL}) AND delivery != 'pending'
+        ORDER BY CASE WHEN ended_at = '' THEN updated_at ELSE ended_at END DESC, rowid DESC
+        LIMIT ?
+      `)
+      .all(agentId, Math.max(0, Math.floor(finished))) as unknown as TaskRowRaw[];
+    return [...owed, ...done].map(taskFrom);
+  }
+
+  /**
    * Write the status settling derived from the worker session. True when the
    * row changed. A final row may move to another final status (a restore can
    * show a worker the row called completed was cut off), but never back to
