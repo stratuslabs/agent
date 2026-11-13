@@ -19,6 +19,10 @@ export type ChatGPTAuthErrorCode =
   | 'id_token_invalid'
   /** A returning sign-in validated as a different ChatGPT account. */
   | 'account_mismatch'
+  /** Another ChatGPT account is signed in here; sign it out before adding a new one. */
+  | 'signed_in'
+  /** Another sign-in changed the saved account while this one was open; this one wasn't saved. */
+  | 'account_changed'
   /** The refresh token can't be used again; the user signs in again. */
   | 'signin_required'
   /**

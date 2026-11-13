@@ -2489,7 +2489,7 @@ test('setup demo path can test run inline before saving', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '8\n', '9\n']),
+      setupInput: Readable.from(['1\n', '5\n', '8\n', '9\n']),
     },
   });
 
@@ -2598,7 +2598,7 @@ test('setup warns when exported env vars override the saved config', async () =>
       homeDir: home,
       processEnv: { STRATUS_PROVIDER: 'openai' },
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+      setupInput: Readable.from(['1\n', '5\n', '9\n']),
     },
   });
 
@@ -2621,7 +2621,7 @@ test('setup still reads the settings back when an exported variable is overridde
       homeDir: home,
       processEnv: { STRATUS_PROVIDER: 'openai', STRATUS_SOUL: missingSoul },
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+      setupInput: Readable.from(['1\n', '5\n', '9\n']),
     },
   });
 
@@ -2907,7 +2907,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+      setupInput: Readable.from(['1\n', '5\n', '9\n']),
     },
   });
   assert.match(viaFlag.output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
@@ -3350,7 +3350,7 @@ Be warm.
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+      setupInput: Readable.from(['1\n', '5\n', '9\n']),
     },
   });
 
@@ -3926,7 +3926,7 @@ test('setup warns when a project config shadows the global file it wrote', async
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+      setupInput: Readable.from(['1\n', '5\n', '9\n']),
     },
   });
 
@@ -7791,7 +7791,7 @@ test('setup on Linux without systemd saves cleanly and leaves starting stratusd 
       serviceSystemdBooted: false,
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
       // Providers > Demo, then Save & finish with Always on left at its default.
-      setupInput: Readable.from(['1\n', '4\n', '9\n']),
+      setupInput: Readable.from(['1\n', '5\n', '9\n']),
     },
   });
 

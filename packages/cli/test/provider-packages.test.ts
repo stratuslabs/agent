@@ -530,7 +530,7 @@ test('setup\'s test run on the demo provider installs nothing', async () => {
         return { ok: true, message: '' };
       },
       // Providers → Demo, then Test run, then save & finish.
-      setupInput: Readable.from(['1\n', '4\n', '8\n', '9\n']),
+      setupInput: Readable.from(['1\n', '5\n', '8\n', '9\n']),
     },
   });
   assert.equal(exitCode, 0, `${output.stdout}\n${output.stderr}`);

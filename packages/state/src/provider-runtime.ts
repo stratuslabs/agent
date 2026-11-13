@@ -30,8 +30,9 @@ import { ContextOverflowError, HostRefusalError } from '@stratusagent/core';
 // with none of them.
 import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
 import type { CodexRunTurn } from '@stratusagent/provider-codex';
-import { openChatGPTSignInFile } from './chatgpt-sign-in.ts';
+import { chatgptSignInLocation, openChatGPTSignInFile } from './chatgpt-sign-in.ts';
 import type { RuntimeConfig } from './config.ts';
+import type { StateEnvironment } from './environment.ts';
 import { packageOnDisk } from './package-on-disk.ts';
 import { registeredProviderNameOf } from './provider-names.ts';
 
@@ -521,6 +522,81 @@ const loadProviderPackage = async <P extends ProviderPackage>(pkg: P): Promise<P
   } catch (error) {
     throw providerPackageNotInstalledError(pkg, error) ?? error;
   }
+};
+
+/** How long a ChatGPT sign-in waits for the browser to come back. */
+export const CHATGPT_SIGN_IN_TIMEOUT_MS = 5 * 60_000;
+
+export interface ChatGPTSignInRequest {
+  /**
+   * `saved` signs the saved account in again, or a first one when there is
+   * none; `new` adds another account, refused while the saved one is
+   * signed in.
+   */
+  readonly account: 'saved' | 'new';
+  /**
+   * Shows the person the sign-in page. A returning sign-in's URL carries
+   * the saved ID token as a hint, so never log it.
+   */
+  readonly openUrl: (url: string) => void | Promise<void>;
+  readonly fetch?: typeof fetch;
+}
+
+export interface ChatGPTSignInResult {
+  readonly email?: string;
+  /** Whether the person let Stratus Agent use their ChatGPT plan; no turn runs on the sign-in without it. */
+  readonly planUsage: boolean;
+}
+
+export interface ChatGPTSignOutResult {
+  /** False when there was no sign-in to end. */
+  readonly signedOut: boolean;
+  readonly email?: string;
+  /** Present when there was a refresh token to revoke; the tokens are cleared even when OpenAI didn't confirm. */
+  readonly revocation?: { readonly confirmed: boolean; readonly reason?: string };
+}
+
+/**
+ * Signs this install in with ChatGPT in the browser (provider-chatgpt's
+ * flow) and saves it in the sign-in file every run on it reads, under that
+ * file's lock. Here rather than in the CLI, which never imports a provider
+ * adapter: the package loads the way a turn loads it, and a missing one
+ * throws the error that says how to install it. Throws provider-chatgpt's
+ * errors as they are; their messages are written for the person signing in
+ * and carry no token.
+ */
+export const runChatGPTSignIn = async (env: StateEnvironment, request: ChatGPTSignInRequest): Promise<ChatGPTSignInResult> => {
+  const chatgpt = await loadProviderPackage('chatgpt');
+  const file = openChatGPTSignInFile(chatgptSignInLocation(env));
+  const outcome = await chatgpt.signInWithChatGPT({
+    document: file,
+    withSessionLock: (work) => file.withLock(work),
+    account: request.account,
+    openUrl: request.openUrl,
+    timeoutMs: CHATGPT_SIGN_IN_TIMEOUT_MS,
+    ...(request.fetch ? { fetch: request.fetch } : {}),
+  });
+  return { ...(outcome.email !== undefined ? { email: outcome.email } : {}), planUsage: outcome.planUsage };
+};
+
+/**
+ * Signs this install out of ChatGPT: under the sign-in file's lock,
+ * provider-chatgpt revokes the refresh token, then clears the tokens
+ * whether or not OpenAI confirmed. The account stays, for signing in again.
+ */
+export const runChatGPTSignOut = async (env: StateEnvironment, request: { readonly fetch?: typeof fetch } = {}): Promise<ChatGPTSignOutResult> => {
+  const chatgpt = await loadProviderPackage('chatgpt');
+  const file = openChatGPTSignInFile(chatgptSignInLocation(env));
+  const outcome = await chatgpt.signOutOfChatGPT({
+    document: file,
+    withSessionLock: (work) => file.withLock(work),
+    ...(request.fetch ? { fetch: request.fetch } : {}),
+  });
+  return {
+    signedOut: outcome.signedOut,
+    ...(outcome.email !== undefined ? { email: outcome.email } : {}),
+    ...(outcome.revocation !== undefined ? { revocation: outcome.revocation } : {}),
+  };
 };
 
 /**

@@ -202,6 +202,8 @@ export const runSetup = async (
     providersSummary,
     modelsSummary,
     signInSummary,
+    refreshChatGPTAccount,
+    chatgptReady,
     chooseProviders,
     chooseModels,
   } = createProviderSetup({ state, processEnv, prompter, streams, env });
@@ -734,6 +736,17 @@ export const runSetup = async (
       if (!failedReadBack()) {
         writeLine(streams.stdout, 'STRATUS_API_KEY is exported and takes precedence over your saved sign-in. You are ready to go. Try:');
       }
+    } else if (state.provider === 'chatgpt') {
+      // Its sign-in is a file of its own, not a key an environment variable
+      // could stand in for.
+      await refreshChatGPTAccount();
+      if (chatgptReady()) {
+        if (!failedReadBack()) {
+          writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
+        }
+      } else {
+        writeLine(streams.stdout, 'You are NOT signed in with ChatGPT yet — re-run `stratus setup`, choose Providers, then ChatGPT. Then try:');
+      }
     } else if (isRegisteredProviderName(state.provider) || state.credentials[credentialProviderOf(state.provider) ?? 'anthropic']) {
       if (!failedReadBack()) {
         writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
@@ -787,6 +800,9 @@ export const runSetup = async (
       // corrupts every redraw after the first arrow key. Wrapping is not
       // the cosmetic cost I took it for when I let this line grow.
       const approvals = fitMenuRow((await approvalsSummary()).join('; '));
+      // The ChatGPT sign-in is a file of its own, which another setup or a
+      // refresh may have changed since the last menu.
+      await refreshChatGPTAccount();
       const channelKinds = (await pluginChannelKinds()).map((entry) => entry.kind);
       const choice = await prompter.select('', [
         `Providers            ${providersSummary()}`,
