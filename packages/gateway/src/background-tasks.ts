@@ -284,6 +284,10 @@ export const createBackgroundTasks = ({
    * finished.
    */
   const cancel = async (taskId: string, { stoppedBy, agentId }: TaskCancelInput): Promise<TaskCancelResult> => {
+    // The row keeps '' for "no stop", so an empty stopper would read as none.
+    if (typeof stoppedBy !== 'string' || stoppedBy.trim() === '') {
+      throw new Error('A task cancel must say who asked for it (stoppedBy), like "cli" or a person\'s chat id.');
+    }
     const row = tasks.get(taskId);
     if (row === undefined || (agentId !== undefined && row.agentId !== agentId)) {
       return { kind: 'missing' };

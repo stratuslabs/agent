@@ -299,6 +299,10 @@ test('a task already final, an unknown id, and another agent\'s task: nothing is
     await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
 
     assert.deepEqual(await f.tasks.cancel('t_unknown', { stoppedBy: 'cli' }), { kind: 'missing' });
+    // The row's empty stopper means "no stop", so one is refused, not written.
+    for (const stoppedBy of ['', '  ']) {
+      await assert.rejects(f.tasks.cancel(row.id, { stoppedBy }), /must say who asked for it/);
+    }
     assert.deepEqual(await f.tasks.cancel(row.id, { stoppedBy: 'agent', agentId: 'mia' }), { kind: 'missing' }, 'an agent cancels only its own tasks');
     assert.equal(f.rows.get(row.id)?.stoppedBy, undefined);
     assert.deepEqual(f.aborted, []);
