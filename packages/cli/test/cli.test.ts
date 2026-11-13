@@ -6333,6 +6333,40 @@ test('doctor keeps the provider taken from the only sign-in when that run then f
   assert.match(output.stdout, /No run can start/);
 });
 
+test('doctor counts a ChatGPT sign-in as the only provider signed in, also when that run then fails', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Synthetic values only.
+  await writeFile(path.join(home, '.stratus', 'chatgpt-sign-in.json'), JSON.stringify({
+    hostId: 'urn:uuid:host-1',
+    session: {
+      clientId: 'oaiapp_issued123',
+      subject: 'user-sub-1',
+      accessToken: 'synthetic-access',
+      refreshToken: 'synthetic-refresh',
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      scopes: ['openid', 'chatgpt.tokens.use.direct'],
+    },
+  }), { mode: 0o600 });
+  const ok = createStreams();
+  await runCli({ argv: ['doctor'], streams: ok.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.match(ok.output.stdout, /provider {2}chatgpt/);
+  assert.match(ok.output.stdout, /the only provider signed in — nothing set one/);
+
+  // A base URL refuses every chatgpt run; doctor still names the provider
+  // the run would have taken.
+  const refused = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams: refused.streams,
+    env: { cwd, homeDir: home, processEnv: { STRATUS_BASE_URL: 'https://proxy.local/v1' } },
+  });
+  assert.equal(exitCode, 1);
+  assert.match(refused.output.stdout, /provider {2}chatgpt \(unreachable\)/);
+  assert.match(refused.output.stdout, /the only provider signed in — nothing set one/);
+});
+
 test('doctor names the project config that outranks the global one', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
