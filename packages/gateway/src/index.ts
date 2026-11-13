@@ -101,6 +101,7 @@ import {
 import { ShardedSessionStore } from './sessions.ts';
 import { createSubAgents } from './sub-agents.ts';
 import { createBackgroundTasks } from './background-tasks.ts';
+import type { TaskRow } from './tasks.ts';
 import { createSteering } from './steering.ts';
 import { createTurnDispatch } from './turn-dispatch.ts';
 import {
@@ -1412,8 +1413,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
 
 
-  // Background tasks (AGT-211), when `tasks.enabled`. Everything they
-  // reach is declared further down: late-bound.
+  // Background tasks (AGT-211): started only when `tasks.enabled`; the
+  // restart sweep runs either way. Everything they reach is declared
+  // further down: late-bound.
   const backgroundTasks = createBackgroundTasks({
     options,
     fleetDb: fleetDbIn(stateDir),
@@ -1449,6 +1451,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
     isStopping: () => stopping,
     refusal: () => refusal(),
+    log,
     warn,
   });
 
@@ -1889,7 +1892,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     : { ...intakeState });
   let heldState = options.held === true;
   /** What a held start left for `promote()`: the channels it did not start, and the sweeps it did not run. */
-  let deferredStart: { adapters: GatewayChannelAdapter[]; orphaned: ReadonlySet<string>; abandoned: string[] } | undefined;
+  let deferredStart: {
+    adapters: GatewayChannelAdapter[];
+    orphaned: ReadonlySet<string>;
+    abandoned: string[];
+    tasks: TaskRow[];
+  } | undefined;
   // Pause and resume run one at a time, each writing the file and then the
   // state, so the two always agree: overlapping, a pause's write could land
   // after a resume removed the file, leaving the daemon paused in memory
@@ -2021,6 +2029,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const openBatches = new Map<string, MergeBatch>();
   /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
   let orphanedAtStart: ReadonlySet<string> = new Set();
+  /** The worker sessions of the tasks the last process left unsettled: the task sweep's, which the generic sweeps skip. */
+  let taskWorkersAtStart: ReadonlySet<string> = new Set();
 
   /**
    * The runtime one agent would run on right now — config snapshot, soul
@@ -2201,6 +2211,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     activeTurns,
     onTurnRuntime,
     getOrphanedAtStart: () => orphanedAtStart,
+    getTaskWorkersAtStart: () => taskWorkersAtStart,
     runtimeForAgent,
     watchdogStreamsFor,
     reachesHarness,
@@ -2878,7 +2889,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Read before anything can dispatch, so this is exactly what the
     // last process left running and not a turn of ours caught in flight.
     // Applied further down, once there is somewhere for the failure to
-    // be heard.
+    // be heard. The background tasks first: their workers are the task
+    // sweep's, and the two lists below are judged without them.
+    const tasksLeft = backgroundTasks.unsettledAtStart();
+    taskWorkersAtStart = new Set(tasksLeft.map((task) => task.workerSessionId));
     const abandoned = await listAbandonedTurns();
     // Likewise: which parked sub-sessions have a parent still inside its
     // agent.delegate call is only answerable while nothing can resume that
@@ -2899,12 +2913,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Held: only the operator's surface comes up, and everything that
       // would touch work waits for promote(), in the same order.
       await startChannels(adapters.filter((adapter) => adapter.servesWhileHeld === true));
-      deferredStart = { adapters: adapters.filter((adapter) => adapter.servesWhileHeld !== true), orphaned, abandoned };
+      deferredStart = { adapters: adapters.filter((adapter) => adapter.servesWhileHeld !== true), orphaned, abandoned, tasks: tasksLeft };
       log('stratusd is held: answering health only, until promoted');
       return;
     }
     await startChannels(adapters);
-    await beginWork(orphaned, abandoned);
+    await beginWork(orphaned, abandoned, tasksLeft);
   };
 
   const startChannels = async (adapters: GatewayChannelAdapter[]): Promise<void> => {
@@ -2960,6 +2974,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const beginWork = async (
     orphaned: ReadonlySet<string>,
     abandoned: string[],
+    tasksLeft: TaskRow[],
   ): Promise<void> => {
     // After the channels, so a catch-up firing has somewhere to report and
     // the missed-window log lines land in a gateway whose surfaces are
@@ -2981,6 +2996,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     void failAbandonedTurns(abandoned).catch((error) => {
       warn(`failing abandoned turns failed: ${error instanceof Error ? error.message : String(error)}`);
     });
+
+    // Not awaited either: a task's notice is a turn in its origin
+    // conversation, queued behind whatever that conversation is doing. The
+    // two sweeps above skip these workers; an origin one of them is
+    // settling gets the notice after it, on that origin's chain.
+    void backgroundTasks.sweep(tasksLeft);
   };
 
   let promoting: Promise<void> | undefined;
@@ -3023,7 +3044,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // start (a newer build stamped the home meanwhile) must leave the
       // daemon held, reporting so, and a retry able to try again.
       try {
-        await beginWork(pending.orphaned, pending.abandoned);
+        await beginWork(pending.orphaned, pending.abandoned, pending.tasks);
       } catch (error) {
         promotionFailure = new Error(
           `This daemon could not begin its work and stays held until it is restarted: ${error instanceof Error ? error.message : String(error)}`,

@@ -83,6 +83,13 @@ export interface RecoveryDeps {
     work: () => Promise<T>,
   ) => Promise<T>;
   getOrphanedAtStart: () => ReadonlySet<string>;
+  /**
+   * The worker sessions of the background tasks the last process left
+   * unsettled, read before the channels start. The task sweep owns them, so
+   * these sweeps skip them: failing one as abandoned would report it
+   * `failed`, and re-asking its parked approval would run it again.
+   */
+  getTaskWorkersAtStart: () => ReadonlySet<string>;
   runtimeForAgent: (source: AgentSource) => Promise<RuntimeConfig>;
   watchdogStreamsFor: (
     session: Pick<Session, 'metadata'> | undefined,
@@ -111,6 +118,7 @@ export const createRecovery = ({
   activeTurns,
   onTurnRuntime,
   getOrphanedAtStart,
+  getTaskWorkersAtStart,
   runtimeForAgent,
   watchdogStreamsFor,
   reachesHarness,
@@ -133,7 +141,8 @@ export const createRecovery = ({
     if (!store.listIdsByStatus) {
       return;
     }
-    const parked = await store.listIdsByStatus('pending_approval');
+    const taskWorkers = getTaskWorkersAtStart();
+    const parked = (await store.listIdsByStatus('pending_approval')).filter((id) => !taskWorkers.has(id));
     if (parked.length === 0) {
       return;
     }
@@ -396,7 +405,9 @@ export const createRecovery = ({
    * the parked sweep above would re-ask that daemon's approvals for the
    * same reason — and no check here would make it supported.
    */
-  const failAbandonedTurns = async (abandoned: string[]): Promise<void> => {
+  const failAbandonedTurns = async (all: string[]): Promise<void> => {
+    const taskWorkers = getTaskWorkersAtStart();
+    const abandoned = all.filter((id) => !taskWorkers.has(id));
     if (abandoned.length === 0) {
       return;
     }

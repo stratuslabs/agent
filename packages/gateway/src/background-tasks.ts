@@ -1,5 +1,6 @@
 import {
   carriesKey,
+  PENDING_APPROVAL_METADATA_KEY,
   recordTurnFailure,
   SENDER_TRUST_METADATA_KEY,
   type EventBus,
@@ -10,7 +11,7 @@ import { type DelegateBackgroundStart, TASK_ID_METADATA_KEY } from '@stratusagen
 
 import type { ShardedSessionStore } from './sessions.ts';
 import { createTaskSettler, type TaskNotice } from './task-settle.ts';
-import { newTaskId, SqliteTaskStore, taskPromptDigest } from './tasks.ts';
+import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
 // Background tasks in the gateway (AGT-211, agent-plans
@@ -18,9 +19,9 @@ import type { DispatchInput, GatewayOptions } from './types.ts';
 // It claims the row, starts the worker on its own session chain without
 // waiting for it, and settles the task on that chain when the worker's
 // turn ends, so a stop recorded later (AGT-357) can't interleave with
-// settling. Off unless `tasks.enabled`: until the restart sweep lands
-// (AGT-356 PR 5), a restart would leave a running row counting against the
-// cap with nobody to settle it.
+// settling. Starting tasks is off unless `tasks.enabled`. The restart sweep
+// runs either way: rows a process left before tasks were turned off still
+// get settled, and their workers failed as cut off, never left running.
 
 /** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` says otherwise. */
 export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
@@ -43,6 +44,7 @@ export interface BackgroundTasksDeps {
   postToOrigin: (notice: TaskNotice) => Promise<void>;
   isStopping: () => boolean;
   refusal: () => Error;
+  log: (line: string) => void;
   warn: (line: string) => void;
 }
 
@@ -61,6 +63,7 @@ export const createBackgroundTasks = ({
   postToOrigin,
   isStopping,
   refusal,
+  log,
   warn,
 }: BackgroundTasksDeps) => {
   const cap = options.tasks?.maxRunningPerAgent ?? DEFAULT_MAX_RUNNING_TASKS_PER_AGENT;
@@ -69,11 +72,10 @@ export const createBackgroundTasks = ({
   if (!Number.isInteger(cap) || cap < 1) {
     throw new Error(`tasks.maxRunningPerAgent must be a whole number of at least 1 (got ${String(cap)}).`);
   }
-  if (options.tasks?.enabled !== true) {
-    return { start: undefined, close: (): void => {} };
-  }
+  const enabled = options.tasks?.enabled === true;
 
   // Its own connection to fleet.db, like the schedule and event stores.
+  // Opened whether or not tasks are on, for the restart sweep.
   const tasks = new SqliteTaskStore(fleetDb, { stateHome });
   /** Each running task's own stop, for a cancel (AGT-357) and the drain (PR 5). */
   const controllers = new Map<string, AbortController>();
@@ -81,12 +83,19 @@ export const createBackgroundTasks = ({
   const settler = createTaskSettler({
     tasks,
     getSession: (sessionId) => store.get(sessionId),
-    // The startup sweep's (PR 5), which settles on the worker's chain
-    // already, so this doesn't queue on it again.
+    // The startup sweep's, which settles on the worker's chain already, so
+    // this doesn't queue on it again. A parked worker's checkpoint is spent
+    // with it, as the parked-turn sweep spends one it fails: nothing may
+    // pick that call up again.
     async failCutOffTurn(sessionId, error) {
       const worker = await store.get(sessionId);
       if (worker === undefined || (worker.status !== 'running' && worker.status !== 'pending_approval')) {
         return;
+      }
+      if (worker.metadata?.[PENDING_APPROVAL_METADATA_KEY] !== undefined) {
+        const metadata = { ...worker.metadata };
+        delete metadata[PENDING_APPROVAL_METADATA_KEY];
+        worker.metadata = metadata;
       }
       recordTurnFailure(worker, error);
       await store.save(worker);
@@ -146,7 +155,7 @@ export const createBackgroundTasks = ({
     }
   };
 
-  const start: DelegateBackgroundStart = async ({ origin, agent, prompt, workerSessionId, metadata }) => {
+  const startTask: DelegateBackgroundStart = async ({ origin, agent, prompt, workerSessionId, metadata }) => {
     if (isStopping()) {
       throw refusal();
     }
@@ -206,7 +215,43 @@ export const createBackgroundTasks = ({
   };
 
   return {
-    start,
+    start: enabled ? startTask : undefined,
+    /**
+     * What the last process left for settling, read before the channels
+     * start, the way the abandoned and parked lists are: nothing of this
+     * process's is in it yet. Settled rows past retention are pruned first.
+     */
+    unsettledAtStart(): TaskRow[] {
+      const pruned = tasks.prune(new Date().toISOString());
+      if (pruned > 0) {
+        log(`pruned ${pruned} settled background task(s) past retention`);
+      }
+      return tasks.unsettled();
+    },
+    /**
+     * The restart sweep, after the channels are up: each row settled on its
+     * worker's chain with `startup`, the one caller that may fail a worker
+     * turn the last process left in flight. It goes through the settle
+     * function a turn's end uses, so a finished worker is reported with its
+     * result and a notice that already landed isn't sent again. Never
+     * rejects; a row it can't settle is left for the next start.
+     */
+    async sweep(rows: readonly TaskRow[]): Promise<void> {
+      if (rows.length === 0) {
+        return;
+      }
+      log(`settling ${rows.length} background task(s) the last stratusd left`);
+      await Promise.allSettled(rows.map((row) => onSessionChain(row.workerSessionId, async () => {
+        if (isStopping()) {
+          return;
+        }
+        try {
+          await settler.settle(row.id, { startup: true });
+        } catch (error) {
+          warn(`task ${row.id}: settling it after the restart failed; the next start tries again (${reason(error)}).`);
+        }
+      })));
+    },
     close(): void {
       tasks.close();
     },

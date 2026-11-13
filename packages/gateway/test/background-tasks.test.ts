@@ -1,18 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
-import { AllowAllApprovalPolicy, carriesKey, type PluginContext, type ProviderResponse, type Session } from '@stratusagent/core';
+import {
+  AllowAllApprovalPolicy,
+  carriesKey,
+  PENDING_APPROVAL_METADATA_KEY,
+  type PluginContext,
+  type ProviderResponse,
+  type Session,
+} from '@stratusagent/core';
 import { TASK_ID_METADATA_KEY } from '@stratusagent/agents';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 import { fleetDbIn } from '@stratusagent/state';
 
-import { createGateway } from '../src/index.ts';
-import { taskFallbackKey, taskOutcomeKey } from '../src/task-settle.ts';
-import { SqliteTaskStore, type TaskRow } from '../src/tasks.ts';
+import { ABANDONED_TURN_ERROR, createGateway } from '../src/index.ts';
+import { ShardedSessionStore } from '../src/sessions.ts';
+import { TASK_CUT_OFF_ERROR, taskFallbackKey, taskOutcomeKey } from '../src/task-settle.ts';
+import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from '../src/tasks.ts';
 
 // AGT-356 PR 4b: the gateway's side of `agent.delegate`'s background mode.
 // The row is claimed against the cap, the worker runs on its own session
@@ -92,13 +101,24 @@ const taskGateway = async (options: {
   noticeTurn?: 'answers' | 'fails';
   /** The fixture channel refuses posts. */
   postRefused?: boolean;
+  /** A home the last process left behind (`crashCopy`), instead of a new one. */
+  home?: string;
+  /** Written into the state directory before the gateway starts. */
+  seed?: (stateDir: string) => Promise<void>;
+  held?: boolean;
 } = {}) => {
-  const home = await newHome();
-  await writeSoul(home, 'ava.md', [
-    '---', 'name: Ava', 'id: ava', 'provider: scripted', 'tools: [agent.delegate]', 'delegates: [mia]',
-    '---', '', 'You are Ava.', '',
-  ].join('\n'));
-  await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: scripted\ntools: []\n---\n\nYou are Mia.\n');
+  const home = options.home ?? await newHome();
+  if (options.home === undefined) {
+    await writeSoul(home, 'ava.md', [
+      '---', 'name: Ava', 'id: ava', 'provider: scripted', 'tools: [agent.delegate]', 'delegates: [mia]',
+      '---', '', 'You are Ava.', '',
+    ].join('\n'));
+    await writeSoul(home, 'mia.md', '---\nname: Mia\nid: mia\nprovider: scripted\ntools: []\n---\n\nYou are Mia.\n');
+  }
+  const stateDir = path.join(home, '.stratus');
+  await options.seed?.(stateDir);
+  /** Every session the provider was asked to answer for, in order. */
+  const calls: string[] = [];
   const posts: Array<{ agentId: string; to: string; thread?: string; speaker?: unknown; text: string }> = [];
   const blocked: Array<() => void> = [];
   const workerSignals: AbortSignal[] = [];
@@ -139,6 +159,7 @@ const taskGateway = async (options: {
           create: () => ({
             name: 'scripted',
             async generate({ session, signal }): Promise<ProviderResponse> {
+              calls.push(session.id);
               const said = lastUser(session);
               if (session.metadata?.[TASK_ID_METADATA_KEY] !== undefined) {
                 if (said.startsWith('BLOCK')) {
@@ -180,11 +201,12 @@ const taskGateway = async (options: {
     pluginHost: host,
     approvals: new AllowAllApprovalPolicy(),
     ...(options.tasks !== undefined ? { tasks: options.tasks } : {}),
+    ...(options.held === true ? { held: true } : {}),
     log: () => {},
     warn: (line) => warnings.push(line),
   });
   await gateway.start();
-  const rows = new SqliteTaskStore(fleetDbIn(path.join(home, '.stratus')), { stateHome: path.join(home, '.stratus') });
+  const rows = new SqliteTaskStore(fleetDbIn(stateDir), { stateHome: stateDir });
   const ask = async (sessionId: string, request: Ask): Promise<Session> => gateway.dispatch({
     sessionId,
     agentId: 'ava',
@@ -202,8 +224,10 @@ const taskGateway = async (options: {
     return row !== undefined && row.delivery !== 'pending';
   }).then(() => rows.get(taskId)!);
   return {
+    home,
     gateway,
     rows,
+    calls,
     ask,
     delegated,
     settled,
@@ -407,5 +431,342 @@ test('tasks.maxRunningPerAgent must be a whole number of at least 1, whether or 
       () => createGateway({ env: { homeDir: os.tmpdir(), cwd: os.tmpdir(), processEnv: {} }, tasks }),
       /tasks\.maxRunningPerAgent must be a whole number of at least 1/,
     );
+  }
+});
+
+// AGT-356 PR 5: the restart sweep. Each crash point from spec test 7 is the
+// state on disk at that moment: a copy of a live home (`crashCopy`), taken
+// while the first process is at that point, edited only where no live
+// process can stop on the point. The second process starts on the copy.
+
+/** What a process killed right now would leave: a copy of its home. */
+const crashCopy = async (home: string): Promise<string> => {
+  const copy = await newHome();
+  await cp(home, copy, { recursive: true });
+  return copy;
+};
+
+const stateOf = (home: string): string => path.join(home, '.stratus');
+
+/** Edit the sessions a crash left, with the gateway's own store. */
+const editSessions = async (home: string, edit: (store: ShardedSessionStore) => Promise<void>): Promise<void> => {
+  const store = new ShardedSessionStore({ stateDir: stateOf(home) });
+  try {
+    await edit(store);
+  } finally {
+    store.close();
+  }
+};
+
+/** Put a row back to `delivery = 'pending'`, as a crash before `setDelivery` leaves it. */
+const undeliver = (home: string, taskId: string): void => {
+  const db = new DatabaseSync(fleetDbIn(stateOf(home)));
+  try {
+    db.prepare(`UPDATE tasks SET delivery = 'pending' WHERE id = ?`).run(taskId);
+  } finally {
+    db.close();
+  }
+};
+
+const keyed = (session: Session | undefined, key: string) => (session?.messages ?? []).filter((message) => carriesKey(message, key));
+
+/**
+ * A worker the first process had mid-turn: its home, copied while the
+ * worker waits on its provider. The first process is let go and stopped.
+ * `finished` is that worker's session once it did finish, for the crash
+ * points after the worker's turn.
+ */
+const crashedMidTask = async (origin: string) => {
+  const first = await taskGateway({ tasks: { enabled: true } });
+  try {
+    const task = (first.delegated(await first.ask(origin, { to: 'ava', prompt: 'BLOCK-R', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => first.blockedCount() === 1);
+    const home = await crashCopy(first.home);
+    const workerSessionId = first.rows.get(task)!.workerSessionId;
+    first.release();
+    await first.settled(task);
+    const finished = (await first.gateway.store.get(workerSessionId))!;
+    return { home, task, workerSessionId, finished };
+  } finally {
+    first.release();
+    await first.stop();
+  }
+};
+
+/** A task the first process settled all the way, and a copy of its home taken then. */
+const crashedAfterSettling = async (origin: string, noticeTurn: 'answers' | 'fails' = 'answers') => {
+  const first = await taskGateway({ tasks: { enabled: true }, noticeTurn });
+  try {
+    const task = (first.delegated(await first.ask(origin, { to: 'ava', prompt: 'WORK-R', background: true })).output as { task: string }).task;
+    await first.settled(task);
+    return { home: await crashCopy(first.home), task, posted: first.posts.length };
+  } finally {
+    await first.stop();
+  }
+};
+
+test('restart: a row written before its worker was dispatched is reported as never started, once', async () => {
+  const origin = 'fixture:ava:C20';
+  const task = newTaskId();
+  const fixture = await taskGateway({
+    tasks: { enabled: true },
+    async seed(stateDir) {
+      const sessions = new ShardedSessionStore({ stateDir });
+      await sessions.create({
+        id: origin,
+        agent: { id: 'ava', name: 'Ava' },
+        status: 'idle',
+        metadata: { channel: 'fixture', conversation: { kind: 'public', thread: true, threadRoot: '1700.1' } },
+        messages: [{ id: 'u1', role: 'user', content: 'start it', createdAt: new Date().toISOString() }],
+      });
+      sessions.close();
+      const rows = new SqliteTaskStore(fleetDbIn(stateDir), { stateHome: stateDir });
+      rows.claim({
+        id: task,
+        agentId: 'ava',
+        workerAgentId: 'ava',
+        originSessionId: origin,
+        workerSessionId: `${origin}:delegate:ava:1:${task}`,
+        promptDigest: taskPromptDigest('ava', 'WORK'),
+      }, 3, new Date().toISOString());
+      rows.close();
+    },
+  });
+  try {
+    const row = await fixture.settled(task);
+    assert.deepEqual([row.status, row.delivery], ['interrupted', 'delivered']);
+    const notices = keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(task));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.content, /never started: its turn did not begin\. It was not run\.\]$/);
+    assert.equal(await fixture.gateway.store.get(row.workerSessionId), undefined, 'no worker turn was started');
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: a worker cut off mid-turn is failed by the task sweep, not the abandoned-turn sweep, and is not run again', async () => {
+  const origin = 'fixture:ava:C21';
+  const crashed = await crashedMidTask(origin);
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.deepEqual([row.status, row.delivery], ['interrupted', 'delivered']);
+    const worker = await fixture.gateway.store.get(crashed.workerSessionId);
+    assert.equal(worker?.status, 'failed');
+    assert.equal(worker?.lastError, TASK_CUT_OFF_ERROR);
+    assert.notEqual(worker?.lastError, ABANDONED_TURN_ERROR);
+    assert.equal(fixture.calls.includes(crashed.workerSessionId), false, 'the worker was not run again');
+    const notices = keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(crashed.task));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.content, /was interrupted after .*: a restart cut it off, and it was not run again\.\]$/);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: a worker parked on an approval is failed, not re-asked, and its checkpoint is spent', async () => {
+  const origin = 'fixture:ava:C22';
+  const crashed = await crashedMidTask(origin);
+  await editSessions(crashed.home, async (store) => {
+    const worker = (await store.get(crashed.workerSessionId))!;
+    const now = new Date().toISOString();
+    const call = { id: 'park-1', toolName: 'agent.delegate', input: { agent: 'mia', prompt: 'gated' } };
+    worker.messages.push({ id: 'park-a', role: 'assistant', content: '', createdAt: now, toolCalls: [call] });
+    worker.status = 'pending_approval';
+    worker.metadata = { ...worker.metadata, [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], parkedAt: now } };
+    await store.save(worker);
+  });
+  // Allow-all approvals: re-asked, the parked call would run and the worker
+  // carry on to `completed`, so the provider call and the status both show it.
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.deepEqual([row.status, row.delivery], ['interrupted', 'delivered']);
+    const worker = await fixture.gateway.store.get(crashed.workerSessionId);
+    assert.equal(worker?.status, 'failed');
+    assert.equal(worker?.lastError, TASK_CUT_OFF_ERROR);
+    assert.equal(worker?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined);
+    assert.equal(fixture.calls.includes(crashed.workerSessionId), false, 'the worker was not re-asked or run again');
+    assert.equal(keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(crashed.task)).length, 1);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: a worker that finished before the row said so is reported completed with its result', async () => {
+  const origin = 'fixture:ava:C23';
+  const crashed = await crashedMidTask(origin);
+  await editSessions(crashed.home, (store) => store.save(crashed.finished));
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.deepEqual([row.status, row.delivery], ['completed', 'delivered']);
+    const notices = keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(crashed.task));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.content, /completed after 1 step\.\nResult: did BLOCK-R\]$/);
+    assert.equal(fixture.calls.includes(crashed.workerSessionId), false);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: a final row whose notice never went out gets it once', async () => {
+  const origin = 'fixture:ava:C24';
+  const crashed = await crashedMidTask(origin);
+  await editSessions(crashed.home, (store) => store.save(crashed.finished));
+  const rows = new SqliteTaskStore(fleetDbIn(stateOf(crashed.home)), { stateHome: stateOf(crashed.home) });
+  rows.setStatus(crashed.task, 'completed', new Date().toISOString());
+  rows.close();
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.deepEqual([row.status, row.delivery], ['completed', 'delivered']);
+    assert.equal(keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(crashed.task)).length, 1);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: a notice that landed before delivery was set is not sent again', async () => {
+  const origin = 'fixture:ava:C25';
+  const crashed = await crashedAfterSettling(origin);
+  undeliver(crashed.home, crashed.task);
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.equal(row.delivery, 'delivered');
+    const conversation = await fixture.gateway.store.get(origin);
+    assert.equal(keyed(conversation, taskOutcomeKey(crashed.task)).length, 1);
+    assert.equal(conversation?.messages.filter((message) => message.role === 'assistant' && message.content === 'noted').length, 1);
+    assert.equal(fixture.calls.includes(origin), false, 'no second outcome turn ran');
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: an outcome turn the crash cut off is finished once, never sent twice', async () => {
+  const origin = 'fixture:ava:C26';
+  const crashed = await crashedAfterSettling(origin);
+  undeliver(crashed.home, crashed.task);
+  await editSessions(crashed.home, async (store) => {
+    const conversation = (await store.get(origin))!;
+    const at = conversation.messages.findIndex((message) => carriesKey(message, taskOutcomeKey(crashed.task)));
+    conversation.messages = conversation.messages.slice(0, at + 1);
+    conversation.status = 'running';
+    await store.save(conversation);
+  });
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.equal(row.delivery, 'delivered');
+    await until('the outcome turn to finish', async () => (await fixture.gateway.store.get(origin))?.status !== 'running');
+    const conversation = await fixture.gateway.store.get(origin);
+    assert.equal(keyed(conversation, taskOutcomeKey(crashed.task)).length, 1);
+    assert.equal(conversation?.messages.filter((message) => message.role === 'assistant' && message.content === 'noted').length, 1);
+    assert.deepEqual(fixture.calls.filter((id) => id === origin), [origin], 'the cut-off outcome turn ran once more, to finish');
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: a fallback already written is not written or posted again', async () => {
+  // Written and posted, or written and not yet posted: the disk is the same,
+  // because nothing records what a channel took. Either way it is not posted
+  // again (spec: posted at most once).
+  const origin = 'fixture:ava:C27';
+  const crashed = await crashedAfterSettling(origin, 'fails');
+  assert.equal(crashed.posted, 1);
+  undeliver(crashed.home, crashed.task);
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.equal(row.delivery, 'delivered');
+    const conversation = await fixture.gateway.store.get(origin);
+    assert.equal(keyed(conversation, taskFallbackKey(crashed.task)).length, 1);
+    assert.equal(keyed(conversation, taskOutcomeKey(crashed.task)).length, 1);
+    assert.deepEqual(fixture.posts, []);
+    assert.equal(fixture.calls.includes(origin), false);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: a worker whose row is gone is left to the abandoned-turn sweep', async () => {
+  // Only the task sweep's own rows are skipped by the generic sweeps; a
+  // worker with no row (a fleet.db restored from before it) is failed as
+  // any abandoned turn, not left running for good.
+  const origin = 'fixture:ava:C28';
+  const crashed = await crashedMidTask(origin);
+  const db = new DatabaseSync(fleetDbIn(stateOf(crashed.home)));
+  db.prepare('DELETE FROM tasks WHERE id = ?').run(crashed.task);
+  db.close();
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    await until('the worker to be failed', async () => (await fixture.gateway.store.get(crashed.workerSessionId))?.status === 'failed');
+    assert.equal((await fixture.gateway.store.get(crashed.workerSessionId))?.lastError, ABANDONED_TURN_ERROR);
+    assert.equal(fixture.calls.includes(crashed.workerSessionId), false);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: the sweep settles what the last process left even with tasks turned off since', async () => {
+  const origin = 'fixture:ava:C29';
+  const crashed = await crashedMidTask(origin);
+  const fixture = await taskGateway({ home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.deepEqual([row.status, row.delivery], ['interrupted', 'delivered']);
+    assert.equal((await fixture.gateway.store.get(crashed.workerSessionId))?.lastError, TASK_CUT_OFF_ERROR);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: a held daemon sweeps nothing until it is promoted', async () => {
+  const origin = 'fixture:ava:C30';
+  const crashed = await crashedMidTask(origin);
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home, held: true });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(fixture.rows.get(crashed.task)?.status, 'running');
+    assert.equal((await fixture.gateway.store.get(crashed.workerSessionId))?.status, 'running');
+    await fixture.gateway.promote();
+    const row = await fixture.settled(crashed.task);
+    assert.deepEqual([row.status, row.delivery], ['interrupted', 'delivered']);
+    assert.equal((await fixture.gateway.store.get(crashed.workerSessionId))?.lastError, TASK_CUT_OFF_ERROR);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('restart: the sweep prunes settled rows past retention and keeps the rest', async () => {
+  const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString();
+  const recent = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
+  const ids = { old: newTaskId(), recent: newTaskId() };
+  const fixture = await taskGateway({
+    tasks: { enabled: true },
+    async seed(stateDir) {
+      const rows = new SqliteTaskStore(fleetDbIn(stateDir), { stateHome: stateDir });
+      for (const [id, at] of [[ids.old, old], [ids.recent, recent]] as const) {
+        rows.claim({
+          id,
+          agentId: 'ava',
+          workerAgentId: 'ava',
+          originSessionId: `fixture:ava:C31-${id}`,
+          workerSessionId: `fixture:ava:C31-${id}:delegate:ava:1:${id}`,
+          promptDigest: taskPromptDigest('ava', id),
+        }, 3, at);
+        rows.setStatus(id, 'completed', at);
+        rows.setDelivery(id, 'delivered', at);
+      }
+      rows.close();
+    },
+  });
+  try {
+    assert.equal(fixture.rows.get(ids.old), undefined);
+    assert.equal(fixture.rows.get(ids.recent)?.delivery, 'delivered');
+  } finally {
+    await fixture.stop();
   }
 });
