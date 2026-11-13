@@ -299,9 +299,10 @@ conversation that started it, once, when it ends. Tasks are on unless
 - **Approvals.** A task's gated call is asked in the conversation that
   started it, as any delegated call is, and the request carries the task
   id (`taskId` on `tool.approval-requested` and on `GET /api/v1/approvals`
-  rows). The task shows `waiting_approval` until someone answers. With
-  nobody answering, the approval timeout (15 minutes by default) denies the
-  call and the task goes on from there.
+  rows), so a Slack prompt says which task is asking. The task shows
+  `waiting_approval` until someone answers. With nobody answering, the
+  approval timeout (15 minutes by default) denies the call and the task
+  goes on from there.
 - **Stop.** An approver's `stop` in a Slack conversation also stops the
   tasks that conversation started, and a line there names them
   ([stopping a turn](../guides/slack.md#stopping-a-turn)). Each task's

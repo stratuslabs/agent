@@ -142,6 +142,8 @@ export const approvalBlocks = (
   always: AlwaysMeans | undefined,
   /** Why the review posture is asking: shown as plain text, so it can't mention or format. */
   reviewNote?: string,
+  /** The background task whose worker is asking, so the person knows which job it is. */
+  taskId?: string,
 ): SlackBlock[] => {
   const invocation = renderInvocation(input);
   const offer = oneShot ? undefined : alwaysOffer(always, agentName);
@@ -156,7 +158,8 @@ export const approvalBlocks = (
         // **Always allow** widens exactly that site, so an approver who was
         // not shown it is being asked to grant something they cannot see.
         text: `*${escapeSlackText(agentName)}* wants to run \`${escapeSlackText(toolName)}\` (${risk})`
-          + `${origin ? ` on \`${escapeSlackText(origin)}\`` : ''}.`,
+          + `${origin ? ` on \`${escapeSlackText(origin)}\`` : ''}`
+          + `${taskId ? ` for background task \`${escapeSlackText(taskId)}\`` : ''}.`,
       },
     },
     ...(invocation.detail
