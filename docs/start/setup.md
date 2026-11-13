@@ -32,7 +32,17 @@ digits to jump, Esc to go back.
   codex's tokens) or paste an OpenAI API key, verified against the platform
   and passed to codex as `CODEX_API_KEY`. Runs route through the Codex
   harness with its native shell and web tools disabled, so it is the same
-  agent under the same kernel policy as every other provider.
+  agent under the same kernel policy as every other provider. **ChatGPT**
+  signs in with your ChatGPT account, so agents run on your ChatGPT plan
+  through the Responses API with no API key and no Codex CLI: choose
+  **Continue with ChatGPT** and finish in the browser. If you didn't allow
+  Stratus Agent to use your plan there, the sign-in is kept but no agent runs
+  on it until you sign in again and allow it. Over SSH, on Linux without a
+  desktop session, or when no browser opens, setup prints the link instead,
+  plus the `ssh -L` command that forwards the sign-in's callback port (1455
+  unless it's taken) from the computer you open it on. **Sign out** revokes the sign-in at OpenAI, then clears its
+  tokens here even if OpenAI doesn't confirm. Signing in and out takes effect
+  at once, saved in `~/.stratus/chatgpt-sign-in.json`, not at Save & finish.
 - **Models** — pick a **default** and a **fallback**, listed live from the
   provider APIs where possible (subscription sign-ins and offline setups fall
   back to the known Claude lineup, and codex always lists its known harness

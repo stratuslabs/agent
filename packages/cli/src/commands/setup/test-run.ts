@@ -159,8 +159,8 @@ export const createTestRunSetup = ({
     const model = state.model ?? builtInDefaultModel(state.provider);
 
     if (state.provider === 'chatgpt') {
-      // Setup can't sign in with ChatGPT yet; a config that already names
-      // chatgpt is tested on the sign-in the file holds. A base URL refuses
+      // Tested on the sign-in the file holds, which Providers > ChatGPT
+      // saves (or an earlier setup did). A base URL refuses
       // the test as resolveRuntimeConfig refuses the run: the sign-in goes
       // only to OpenAI.
       const namedBaseUrl = readNonEmptyString(processEnv.STRATUS_BASE_URL) ?? state.baseUrl;
