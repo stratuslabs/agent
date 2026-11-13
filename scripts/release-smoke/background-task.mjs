@@ -8,7 +8,8 @@
 // The token comes from the environment, so it is not on a command line.
 //
 // The agent's turn calls agent.delegate with background: true on itself. It
-// must come back at once with a task id; then, with no one waiting on it,
+// must come back with a task id while the worker is still on its prompt
+// (held 3 seconds by `SMOKE_WAIT`); then, with no one waiting on it,
 // the worker's turn runs, the task ends `completed`, its outcome is
 // `delivered` to the conversation that started it, and that conversation
 // answers it in a new turn. No model and no network beyond the daemon.
@@ -18,7 +19,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const [api, agent] = process.argv.slice(2);
 const token = process.env.SMOKE_TOKEN;
-const PROMPT = 'Background smoke task.';
+// The worker answers 3 seconds late, so the start has to come back first.
+const PROMPT = 'SMOKE_WAIT 3000 Background smoke task.';
 const WAIT_MS = 60_000;
 
 const fail = (message) => {
@@ -88,7 +90,17 @@ const taskId = output?.task;
 if (typeof taskId !== 'string' || !taskId.startsWith('t_')) {
   fail(`agent.delegate returned no task id: ${started.text.slice(0, 500)}`);
 }
-console.log(`started ${taskId} (${output.status})`);
+if (output.status !== 'running') {
+  fail(`agent.delegate returned ${taskId} as ${output.status}, not running`);
+}
+// Read right after the start's answer, inside the worker's 3-second hold:
+// a start that waited for the worker would find it finished.
+const { tasks: atStart } = await call('GET', `/tasks?agent=${encodeURIComponent(agent)}`);
+const rowAtStart = atStart.find((entry) => entry.id === taskId);
+if (rowAtStart?.status !== 'running') {
+  fail(`${taskId} was ${rowAtStart?.status ?? 'not listed'} when the start answered, not running: the start waited for the work`);
+}
+console.log(`started ${taskId}, still running when agent.delegate answered`);
 
 console.log('--- it ends completed, and its outcome is delivered');
 const task = await until(`${taskId} did not end completed and delivered`, async () => {
