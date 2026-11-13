@@ -176,7 +176,10 @@ export const taskNoticeText = (row: Pick<TaskRow, 'id' | 'workerAgentId'>, outco
     }
     case 'interrupted':
       if (outcome.why === 'never-started') {
-        return `[${head} never started: the daemon stopped before its turn began. It was not run.]`;
+        // A restart before the turn began, or a start that failed in this
+        // process (the agent gone, its provider unset): the row can't tell
+        // which, and nothing of the task ran either way.
+        return `[${head} never started: its turn did not begin. It was not run.]`;
       }
       return outcome.why === 'lost-in-restore'
         ? `[${head} was interrupted after ${stepsText(outcome.steps)}: its result was lost in a restore, and it was not run again.]`
