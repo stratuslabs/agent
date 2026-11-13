@@ -68,6 +68,7 @@ import {
   createRememberTool,
   createScheduleTools,
   DELEGATED_SESSION_ID_MARKER,
+  isDelegatedSession,
   MESSAGE_SEND_TOOL_NAME,
   reportsToHint,
   type ParsedSoul,
@@ -2408,7 +2409,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...(request.origin !== undefined ? { origin: request.origin } : {}),
       ...(request.destination !== undefined ? { destination: request.destination } : {}),
       ...(firing !== undefined ? { firing } : {}),
-      delegated: isSubAgentSession(request.session),
+      // Both kinds of run another agent started: an `agent.spawn` sub-agent
+      // and an `agent.delegate` sub-session. Each one's request is the
+      // delegating agent's instruction, and nobody is in it.
+      delegated: isSubAgentSession(request.session) || isDelegatedSession(request.session),
     });
     if (stopReviews.signal.aborted) {
       return { failed: 'cancelled' };
