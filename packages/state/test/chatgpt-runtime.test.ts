@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import type { ProviderRequest } from '@stratusagent/core';
 import {
+  type RuntimeConfig,
   DEFAULT_CHATGPT_MODEL,
   PROVIDER_PACKAGE_NAMES,
   createRuntimeProvider,
@@ -52,6 +53,9 @@ const session = (overrides: object = {}) => ({
 });
 
 const signedIn = (overrides: object = {}) => ({ hostId: 'urn:uuid:host-1', session: session(overrides) });
+
+// Every variant but demo's can carry a fallback.
+const fallbackOf = (config: RuntimeConfig) => ('fallback' in config ? config.fallback : undefined);
 
 const envFor = (home: string, processEnv: NodeJS.ProcessEnv = {}) => ({ homeDir: home, cwd: home, processEnv });
 
@@ -140,7 +144,7 @@ test('a chatgpt fallback stands on the sign-in file, and is left out without one
 
   const withSignIn = await homeWith({ config, credentials, signIn: signedIn() });
   const resolved = await resolveRuntimeConfig({}, envFor(withSignIn, { ANTHROPIC_API_KEY: 'sk-ant-env' }));
-  assert.deepEqual(resolved.fallback, {
+  assert.deepEqual(fallbackOf(resolved), {
     provider: 'chatgpt',
     model: 'gpt-5.4',
     signIn: {
@@ -150,7 +154,7 @@ test('a chatgpt fallback stands on the sign-in file, and is left out without one
   });
 
   const without = await homeWith({ config, credentials });
-  assert.equal((await resolveRuntimeConfig({}, envFor(without))).fallback, undefined);
+  assert.equal(fallbackOf(await resolveRuntimeConfig({}, envFor(without))), undefined);
 
   // An unreadable file leaves the fallback out rather than failing the run.
   const garbled = await homeWith({ config, credentials, signIn: 'not json' });
@@ -173,8 +177,8 @@ test('a chatgpt primary keeps a fallback on another provider\'s own sign-in', as
   // Implicit (no fallbackProvider): written for chatgpt, a chatgpt fallback.
   const implicit = await homeWith({ config: { provider: 'chatgpt', fallbackModel: 'gpt-5.4-mini' }, signIn: signedIn() });
   const same = await resolveRuntimeConfig({}, envFor(implicit));
-  assert.equal(same.fallback?.provider, 'chatgpt');
-  assert.equal(same.fallback?.model, 'gpt-5.4-mini');
+  assert.equal(fallbackOf(same)?.provider, 'chatgpt');
+  assert.equal(fallbackOf(same)?.model, 'gpt-5.4-mini');
 });
 
 test('providerPackagesUsedBy names provider-chatgpt for a chatgpt runtime or fallback', () => {
