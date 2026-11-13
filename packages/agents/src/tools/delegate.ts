@@ -343,6 +343,13 @@ export const createDelegateTool = ({
       // started it, and stopping it is the host's cancel, not this turn's.
       // The result is the runtime's own (an id and a status), so it marks
       // nothing; the outcome notice carries the worker's label later.
+      // A turn already stopped starts nothing. Checked with nothing awaited
+      // between here and the host writing the row, so a Stop that lands
+      // while this call is on its way either refused it here or finds the
+      // task to stop (AGT-357).
+      if (context?.signal?.aborted) {
+        throw context.signal.reason;
+      }
       const started = await background!({
         origin: session,
         agent: target,
