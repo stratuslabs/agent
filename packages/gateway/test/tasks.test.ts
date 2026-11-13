@@ -205,7 +205,7 @@ test('unsettled lists every open row and every final row still owed a delivery, 
 
 // ---- retention -------------------------------------------------------------
 
-test('an agent\'s list: every open or undelivered task, newest first, then its most recent finished ones up to the limit', async () => {
+test('a list: every open or undelivered task, newest first, then the most recent finished ones up to the limit, for one agent or all', async () => {
   const tasks = new SqliteTaskStore(await newDb());
   const make = (offsetMs: number, overrides: Partial<NewTask> = {}): string => {
     const task = newTask({ promptDigest: taskPromptDigest('atlas', `job ${offsetMs}`), ...overrides });
@@ -231,10 +231,13 @@ test('an agent\'s list: every open or undelivered task, newest first, then its m
   tasks.setStatus(waiting, 'waiting_approval', at(6_500));
   const othersId = make(7_000, { agentId: 'blair' });
 
-  assert.deepEqual(tasks.listForAgent('atlas', 2).map((row) => row.id), [waiting, running, owed, doneLate, doneMiddle]);
-  assert.deepEqual(tasks.listForAgent('atlas', 0).map((row) => row.id), [waiting, running, owed], 'open and owed rows are never cut');
-  assert.deepEqual(tasks.listForAgent('blair', 10).map((row) => row.id), [othersId]);
-  assert.deepEqual(tasks.listForAgent('nobody', 10), []);
+  assert.deepEqual(tasks.list('atlas', 2).map((row) => row.id), [waiting, running, owed, doneLate, doneMiddle]);
+  assert.deepEqual(tasks.list('atlas', 0).map((row) => row.id), [waiting, running, owed], 'open and owed rows are never cut');
+  assert.deepEqual(tasks.list('blair', 10).map((row) => row.id), [othersId]);
+  assert.deepEqual(tasks.list('nobody', 10), []);
+  // The operator's list: every agent's, the finished limit across them all.
+  assert.deepEqual(tasks.list(undefined, 2).map((row) => row.id), [othersId, waiting, running, owed, doneLate, doneMiddle]);
+  assert.deepEqual(tasks.list(undefined, 10).map((row) => row.id), [othersId, waiting, running, owed, doneLate, doneMiddle, doneEarly]);
   tasks.close();
 });
 

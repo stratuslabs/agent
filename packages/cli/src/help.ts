@@ -30,6 +30,8 @@ Usage:
   stratus sessions --status failed
   stratus schedules
   stratus schedules cancel <id>
+  stratus tasks
+  stratus tasks cancel <id>
   stratus grants blair
   stratus grants revoke blair --tool web.fetch
   stratus people
@@ -156,6 +158,13 @@ Commands:
                    pending_approval|completed|failed|stopped-early>,
                    --limit <n> (default 20), --format json
                    (also: stratus session list)
+  tasks            The running daemon's background tasks: every one running
+                   or not yet in its conversation, newest first, then the 20
+                   most recently finished. Status, agent (and worker), start,
+                   steps, id, and whether the outcome is in the
+                   conversation; never what a task was asked or answered.
+                   --agent <id>, --format json. "stratus tasks cancel <id>"
+                   stops one, and its conversation gets a notice
   credential set   Store a named credential an agent can resolve — a search
                    backend asks for search.apiKey. The value is read from
                    stdin, never from a flag, so it stays out of your shell

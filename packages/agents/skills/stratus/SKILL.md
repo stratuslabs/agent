@@ -222,6 +222,7 @@ When a stored key "isn't found", check in this order:
 | `stratus channel set` / `stratus channel remove` / `stratus channel list` | Store (values prompted without echo, or one per stdin line) or remove a channel's secrets for one agent; list which agents have them. A channel's secrets are never yours to read, and a running daemon picks them up at its next start |
 | `stratus grants <id>` / `stratus grants revoke <id>` | An agent's standing approvals, and taking one back |
 | `stratus schedules` / `stratus schedules cancel <id>` | Scheduled turns, and cancelling one |
+| `stratus tasks` / `stratus tasks cancel <id>` | The running daemon's background tasks: every one running or whose outcome isn't in its conversation yet, newest first, then the 20 most recently finished. Each line has the status, agent (and worker), start time, steps, task id, and whether the outcome is in the conversation; never what the task was asked or answered. `--agent <id>` (the agent that started them), `--format json`. `cancel` stops one from the CLI, and its conversation gets a notice that it was cancelled |
 | `stratus memory list` / `stratus memory search` / `stratus memory audit` | An agent's live memories with their trust labels, searched as the agent does, and every entry ever written |
 | `stratus memory forget` / `stratus memory pin` / `stratus memory unpin` | Retire entries, or keep them in the agent's instructions every turn |
 | `stratus memory export` / `stratus memory import` | Move an agent's memories to and from JSONL |

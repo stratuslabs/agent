@@ -58,6 +58,7 @@ import type {
   SchedulerLimits,
   ShardedSessionStore,
   TaskCancelResult,
+  TaskListing,
 } from './index.ts';
 
 /**
@@ -929,6 +930,14 @@ export interface Gateway {
    * that notice. Works whether or not `tasks.enabled` is on.
    */
   cancelTask(taskId: string, stoppedBy: string): Promise<TaskCancelResult>;
+  /**
+   * The background tasks one agent started, or the whole fleet's, for the
+   * operator (`stratus tasks`, `GET /api/v1/tasks`): every one open or owed
+   * a delivery, newest first, then the 20 most recently finished. Ids and
+   * status only, never a prompt or a result. Works whether or not
+   * `tasks.enabled` is on.
+   */
+  tasks(agentId?: string): Promise<TaskListing[]>;
   /**
    * A person's Stop in a conversation, for the background tasks it started
    * (AGT-357): cancels each one running in this process through

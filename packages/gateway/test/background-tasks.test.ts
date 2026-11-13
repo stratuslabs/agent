@@ -1061,3 +1061,79 @@ test('an agent lists its tasks with agent.tasks and stops one with agent.cancelT
     await fixture.stop();
   }
 });
+
+// AGT-357 PR 4: the operator's list and cancel, behind `stratus tasks` and
+// the control API.
+
+test('gateway.tasks lists every agent\'s tasks with their live status and no prompt, and gateway.cancelTask stops one from the CLI', async () => {
+  const fixture = await taskGateway({ tasks: { enabled: true } });
+  try {
+    const origin = 'fixture:ava:C60';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'BLOCK-60', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => fixture.blockedCount() === 1);
+
+    const listed = await fixture.gateway.tasks();
+    assert.deepEqual(
+      listed.map((entry) => [entry.id, entry.status, entry.agentId, entry.workerAgentId, entry.originSessionId, entry.workerSessionId, entry.delivery, entry.steps]),
+      [[task, 'running', 'ava', 'mia', origin, `${origin}:delegate:mia:1:${task}`, 'pending', 0]],
+    );
+    assert.equal(JSON.stringify(listed).includes('BLOCK-60'), false, 'the list carries no prompt');
+    assert.equal(Object.hasOwn(listed[0]!, 'promptDigest'), false);
+    assert.deepEqual(await fixture.gateway.tasks('ava'), listed);
+    assert.deepEqual(await fixture.gateway.tasks('mia'), [], 'a task is listed under the agent that started it');
+
+    const cancelled = await fixture.gateway.cancelTask(task, 'cli');
+    assert.equal(cancelled.kind, 'stopping');
+    const row = await fixture.settled(task);
+    assert.deepEqual([row.status, row.stoppedBy], ['cancelled', 'cli']);
+    assert.match(keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(task))[0]!.content, /was stopped from the CLI/);
+
+    const after = await fixture.gateway.tasks();
+    assert.deepEqual(after.map((entry) => [entry.id, entry.status, entry.delivery, entry.stoppedBy]), [[task, 'cancelled', 'delivered', 'cli']]);
+    assert.equal(typeof after[0]!.endedAt, 'string');
+  } finally {
+    fixture.release();
+    await fixture.stop();
+  }
+});
+
+test('gateway.tasks shows a parked worker as waiting_approval before the row knows it', async () => {
+  const fixture = await taskGateway({ tasks: { enabled: true } });
+  try {
+    const origin = 'fixture:ava:C62';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'ava', prompt: 'BLOCK-62', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => fixture.blockedCount() === 1);
+    const row = fixture.rows.get(task)!;
+    // What a worker parked on a person looks like in its session; the row
+    // learns it only when settling runs.
+    const worker = (await fixture.gateway.store.get(row.workerSessionId))!;
+    worker.status = 'pending_approval';
+    await fixture.gateway.store.save(worker);
+    assert.equal(fixture.rows.get(task)?.status, 'running', 'the row is a cache settling refreshes');
+    assert.deepEqual((await fixture.gateway.tasks()).map((entry) => [entry.id, entry.status]), [[task, 'waiting_approval']]);
+  } finally {
+    fixture.release();
+    await fixture.stop();
+  }
+});
+
+test('gateway.tasks still lists what a run with tasks on left once tasks are off, and a cancel finds it finished', async () => {
+  const on = await taskGateway({ tasks: { enabled: true } });
+  const origin = 'fixture:ava:C61';
+  let task: string;
+  try {
+    task = (on.delegated(await on.ask(origin, { to: 'ava', prompt: 'WORK-61', background: true })).output as { task: string }).task;
+    await on.settled(task);
+  } finally {
+    await on.stop();
+  }
+  const off = await taskGateway({ home: on.home });
+  try {
+    assert.deepEqual((await off.gateway.tasks()).map((entry) => [entry.id, entry.status, entry.delivery]), [[task, 'completed', 'delivered']]);
+    const again = await off.gateway.cancelTask(task, 'cli');
+    assert.deepEqual(again.kind === 'finished' ? [again.kind, again.status] : [again.kind], ['finished', 'completed']);
+    assert.equal(off.rows.get(task)?.stoppedBy, undefined, 'nothing is written for a finished task');
+  } finally {
+    await off.stop();
+  }
+});
