@@ -19,6 +19,7 @@ import {
   defaultModelFor as builtInModelDefault,
   hasChatGPTSignIn,
   isRegisteredProviderName,
+  listChatGPTSignInModels,
   openChatGPTSignInFile,
   PROVIDER_PACKAGE_NAMES,
   readNonEmptyString,
@@ -658,15 +659,45 @@ export const createProviderSetup = ({
     env,
   );
 
+  /** A model the picker offers: a stored sign-in's, or the ChatGPT account's. */
+  type PickerModel = { provider: CredentialProviderName | 'chatgpt'; id: string; label?: string };
+
+  // The ChatGPT account's own models, as OpenAI lists them for it, when the
+  // sign-in can serve a run. First, because the list is short and chosen by
+  // OpenAI, where an API key's can run past the 30 shown. A list that fails
+  // says why and leaves a model to be typed.
+  const collectChatGPTModels = async (): Promise<PickerModel[]> => {
+    await refreshChatGPTAccount();
+    if (chatgptAccount.status !== 'ready') {
+      return [];
+    }
+    try {
+      const models = await listChatGPTSignInModels(env, env.fetch ? { fetch: env.fetch } : {});
+      return models.map(({ slug, displayName }) => ({
+        provider: 'chatgpt' as const,
+        id: slug,
+        ...(displayName !== slug ? { label: `${slug} — chatgpt (${displayName})` } : {}),
+      }));
+    } catch (error) {
+      // provider-chatgpt's errors never carry a token.
+      writeLine(
+        streams.stdout,
+        `Couldn't list your ChatGPT account's models: ${error instanceof Error ? error.message : String(error)} Type chatgpt:<model> to name one.`,
+      );
+      return [];
+    }
+  };
+
   const pickModel = async (kind: 'default' | 'fallback'): Promise<void> => {
-    const available = await collectAvailableModels();
-    if (available.length === 0) {
+    const available: PickerModel[] = [...await collectChatGPTModels(), ...await collectAvailableModels()];
+    // A ChatGPT sign-in whose list failed can still take a typed model.
+    if (available.length === 0 && chatgptAccount.status !== 'ready') {
       writeLine(streams.stdout, 'No models available yet — sign in to a provider first (menu 1).');
       return;
     }
 
     const shown = available.slice(0, 30);
-    const labels = shown.map((entry) => `${entry.id} — ${entry.provider}`);
+    const labels = shown.map((entry) => entry.label ?? `${entry.id} — ${entry.provider}`);
     const typeItOption = labels.length;
     labels.push('Type a model id…');
     const footnote = available.length > shown.length
@@ -681,26 +712,32 @@ export const createProviderSetup = ({
       return;
     }
 
-    const parseTyped = (typed: string): { provider: CredentialProviderName; id: string } | undefined => {
+    const parseTyped = (typed: string): PickerModel | undefined => {
       if (typed.includes(':')) {
         const [providerPart, ...idParts] = typed.split(':');
         const id = idParts.join(':').trim();
-        if ((providerPart === 'anthropic' || providerPart === 'openai' || providerPart === 'codex') && id) {
+        if ((providerPart === 'anthropic' || providerPart === 'openai' || providerPart === 'codex' || providerPart === 'chatgpt') && id) {
           return { provider: providerPart, id };
         }
-        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5-5 or codex:gpt-5.5.');
+        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5-5, codex:gpt-5.5 or chatgpt:gpt-5.5.');
         return undefined;
       }
       // A typed id that appears in the collected list belongs to that
-      // provider, wherever the default currently points.
-      const listed = available.find((entry) => entry.id === typed);
+      // provider, wherever the default currently points. ChatGPT and Codex
+      // list some of the same ids, so the default provider's entry wins.
+      const listed = available.find((entry) => entry.id === typed && entry.provider === state.provider)
+        ?? available.find((entry) => entry.id === typed);
       const inferred = listed?.provider
-        ?? credentialProviderOf(state.provider)
-        ?? available[0]!.provider;
+        ?? (state.provider === 'chatgpt' ? 'chatgpt' : credentialProviderOf(state.provider))
+        ?? available[0]?.provider;
+      if (inferred === undefined) {
+        writeLine(streams.stdout, 'Use provider:model, e.g. chatgpt:gpt-5.5.');
+        return undefined;
+      }
       return { provider: inferred, id: typed };
     };
 
-    let choice: { provider: CredentialProviderName; id: string } | undefined;
+    let choice: PickerModel | undefined;
     if (answer.kind === 'text') {
       choice = parseTyped(answer.text);
     } else if (answer.index === typeItOption) {

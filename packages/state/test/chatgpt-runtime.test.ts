@@ -8,8 +8,10 @@ import type { ProviderRequest } from '@stratusagent/core';
 import {
   type RuntimeConfig,
   CHATGPT_PLAN_SCOPE,
+  chatgptSignInLocation,
   DEFAULT_CHATGPT_MODEL,
   hasChatGPTSignIn,
+  listChatGPTSignInModels,
   PROVIDER_PACKAGE_NAMES,
   createRuntimeProvider,
   openChatGPTSignInFile,
@@ -384,4 +386,81 @@ test('a chatgpt provider whose sign-in ends after resolution fails the turn with
   // Signed out from another process between resolution and the turn.
   await writeFile(path.join(home, '.stratus', 'chatgpt-sign-in.json'), JSON.stringify({ hostId: 'urn:uuid:host-1' }));
   await assert.rejects(() => createRuntimeProvider(resolved).generate(helloRequest()), /not signed in with ChatGPT/);
+});
+
+// ---- the account's model list, for setup's picker -------------------------
+
+const MODELS_URL = 'https://api.openai.com/v1/models';
+
+const listingFetch = (sent: Sent[], refreshed?: { access: string; refresh: string }) => {
+  const network = recordingFetch(sent, refreshed);
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input) === MODELS_URL) {
+      sent.push({ url: MODELS_URL, authorization: new Headers(init?.headers).get('authorization'), body: '' });
+      return new Response(JSON.stringify({
+        models: [
+          { slug: 'gpt-5.5', display_name: 'GPT-5.5', visibility: 'list' },
+          { slug: 'gpt-5.5-mini', display_name: 'GPT-5.5 mini', visibility: 'list' },
+        ],
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    return network(input, init);
+  }) as typeof fetch;
+};
+
+test('listChatGPTSignInModels lists the install\'s ChatGPT account\'s models on the sign-in file\'s token', async () => {
+  const home = await homeWith({ signIn: signedIn() });
+  const sent: Sent[] = [];
+  const models = await listChatGPTSignInModels(envFor(home), { fetch: listingFetch(sent) });
+  assert.deepEqual(models, [
+    { slug: 'gpt-5.5', displayName: 'GPT-5.5' },
+    { slug: 'gpt-5.5-mini', displayName: 'GPT-5.5 mini' },
+  ]);
+  assert.deepEqual(sent.map((request) => request.url), [MODELS_URL]);
+  assert.equal(sent[0]?.authorization, 'Bearer access-secret-1');
+});
+
+test('listChatGPTSignInModels refreshes a token due to expire in the sign-in file first, under its lock', async () => {
+  const home = await homeWith({ signIn: signedIn({ expiresAt: Date.now() + 60_000 }) });
+  const sent: Sent[] = [];
+  await listChatGPTSignInModels(envFor(home), { fetch: listingFetch(sent, { access: 'access-secret-2', refresh: 'refresh-secret-2' }) });
+  assert.deepEqual(sent.map((request) => request.url), [`${ISSUER}/.well-known/openid-configuration`, discovery.token_endpoint, MODELS_URL]);
+  assert.equal(sent.at(-1)?.authorization, 'Bearer access-secret-2');
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'chatgpt-sign-in.json'), 'utf8')) as { session: { refreshToken: string } };
+  assert.equal(saved.session.refreshToken, 'refresh-secret-2', 'the replacement refresh token reaches the file');
+});
+
+test('listChatGPTSignInModels waits for a write already holding the sign-in lock, and lists on what it saved', async () => {
+  const home = await homeWith({ signIn: signedIn({ expiresAt: Date.now() + 60_000 }) });
+  const sent: Sent[] = [];
+  // Another writer (a turn's refresh in the daemon, say) holds the lock and
+  // saves a fresh token. The list's refresh must wait for it, read the file
+  // again inside the lock, and find nothing left to do.
+  const file = openChatGPTSignInFile(chatgptSignInLocation(envFor(home)));
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const otherWriter = file.withLock(async () => {
+    await held;
+    await file.write(signedIn({ accessToken: 'access-secret-3', refreshToken: 'refresh-secret-3', expiresAt: Date.now() + HOUR }));
+  });
+  const listing = listChatGPTSignInModels(envFor(home), { fetch: listingFetch(sent, { access: 'access-wrong', refresh: 'refresh-wrong' }) });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(sent.filter((request) => request.url !== `${ISSUER}/.well-known/openid-configuration`), [], 'nothing is sent while the lock is held');
+  release();
+  await Promise.all([otherWriter, listing]);
+  assert.equal(sent.find((request) => request.url === discovery.token_endpoint), undefined, 'no second refresh');
+  assert.equal(sent.at(-1)?.authorization, 'Bearer access-secret-3');
+});
+
+test('listChatGPTSignInModels with no sign-in fails asking for one, and sends nothing', async () => {
+  const home = await homeWith();
+  const sent: Sent[] = [];
+  await assert.rejects(
+    listChatGPTSignInModels(envFor(home), { fetch: listingFetch(sent) }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'signin_required');
+      return true;
+    },
+  );
+  assert.equal(sent.length, 0);
 });

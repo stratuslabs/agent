@@ -6,7 +6,7 @@ import type { ModelProvider } from '@stratusagent/core';
 import { ResponsesApiError, createOpenAIResponsesProvider } from '@stratusagent/providers';
 import { ChatGPTAuthError } from './errors.ts';
 import { CHATGPT_RESOURCE, discoverEndpoints, type ChatGPTEndpoints } from './protocol.ts';
-import { createChatGPTTokenSource, type ChatGPTSessionStore } from './session.ts';
+import { createChatGPTTokenSource, type ChatGPTSessionStore, type ChatGPTTokenSource } from './session.ts';
 
 export interface ChatGPTProviderOptions {
   /** A model slug the signed-in account lists (`GET /v1/models`). */
@@ -129,13 +129,18 @@ const describePlanError = (error: unknown): unknown => {
   return lead === undefined ? error : withLead(error, lead);
 };
 
+/** What the token source shared by a provider and the model list is built from. */
+export type SignedInTokenSourceOptions = Pick<
+  ChatGPTProviderOptions,
+  'store' | 'withSessionLock' | 'endpoints' | 'discoveryTimeoutMs' | 'fetch' | 'now'
+>;
+
 /**
- * A model provider that runs on the ChatGPT sign-in in `store`. Each request
- * asks the token source for the access token, so a turn that outlives the
- * hour-long token sends the refreshed one; a missing or ended sign-in fails
- * the turn with a `ChatGPTAuthError` before anything is sent.
+ * The token source on a saved sign-in, as a turn and setup's model list both
+ * use it: OpenAI's sign-in endpoints are looked up only when a refresh needs
+ * them, with a timeout of their own, and kept once found.
  */
-export const createChatGPTProvider = (options: ChatGPTProviderOptions): ModelProvider => {
+export const createSignedInTokenSource = (options: SignedInTokenSourceOptions): ChatGPTTokenSource => {
   const discoveryTimeoutMs = options.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS;
   // The lookup runs inside the session lock, so it stops at its own timeout
   // and when the turn is cancelled: a GET spends nothing, unlike the refresh
@@ -174,13 +179,23 @@ export const createChatGPTProvider = (options: ChatGPTProviderOptions): ModelPro
     });
     return discovered;
   });
-  const tokens = createChatGPTTokenSource({
+  return createChatGPTTokenSource({
     endpoints,
     store: options.store,
     withSessionLock: options.withSessionLock,
     ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
   });
+};
+
+/**
+ * A model provider that runs on the ChatGPT sign-in in `store`. Each request
+ * asks the token source for the access token, so a turn that outlives the
+ * hour-long token sends the refreshed one; a missing or ended sign-in fails
+ * the turn with a `ChatGPTAuthError` before anything is sent.
+ */
+export const createChatGPTProvider = (options: ChatGPTProviderOptions): ModelProvider => {
+  const tokens = createSignedInTokenSource(options);
   const adapter = createOpenAIResponsesProvider({
     name: 'chatgpt',
     model: options.model,

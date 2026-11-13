@@ -71,7 +71,9 @@ with no dependencies beyond Node's own `crypto` and `http` and Stratus's
   (`GET /v1/models` on its access token) for setup's picker: the models
   OpenAI marks to be shown, in its order, each with the slug to run and the
   name to show. A refusal fails in the same words a turn would use, and the
-  list gives up after 15 seconds.
+  list gives up after 15 seconds. `listSignedInChatGPTModels` asks it on a
+  saved sign-in through the token source a turn uses, refreshing a token
+  about to run out under the session lock first.
 
 Every failure is a `ChatGPTAuthError` with a stable `code`: `temporary` keeps
 the tokens, `signin_required` means the refresh token is dead and the user
