@@ -5,7 +5,8 @@
 // One ChatGPT account per install for now. OpenAI's rule for several is that
 // a sign-in never overwrites another account registration's credentials, so
 // a new account replaces the saved one only once it is signed out, and a
-// sign-in that finds a different account signed in when it saves is refused.
+// sign-in that finds the saved account changed (or signed in again, for a new
+// account) when it saves is refused.
 import { ChatGPTAuthError } from './errors.ts';
 import { listenForCallback } from './loopback.ts';
 import {
@@ -98,6 +99,12 @@ const alreadySignedIn = (session: ChatGPTSession): ChatGPTAuthError =>
     `This install is signed in with ChatGPT as ${session.email ?? 'another account'}. Sign out first to use a different account.`,
   );
 
+const accountChanged = (current: ChatGPTSession | undefined): ChatGPTAuthError =>
+  new ChatGPTAuthError(
+    'account_changed',
+    `Another sign-in changed the saved ChatGPT account${current?.email !== undefined ? ` (now ${current.email})` : ''} while this one was open, so this one wasn't saved. Start the sign-in again.`,
+  );
+
 const cancelled = (signal: AbortSignal): ChatGPTAuthError =>
   new ChatGPTAuthError('cancelled', 'The ChatGPT sign-in was cancelled.', { cause: signal.reason });
 
@@ -162,8 +169,12 @@ export const signInWithChatGPT = async (options: SignInWithChatGPTOptions): Prom
     // If opening the page throws, closing the listener rejects this wait,
     // and nobody is left to see it.
     callback.catch(() => undefined);
-    await options.openUrl(attempt.url);
-    signIn = await completeSignIn({ ...requestOptions(options), endpoints, attempt, callback: await callback, now });
+    // Opening the page runs alongside the wait: one that fails ends the
+    // sign-in, and one that never settles (a browser process still open)
+    // holds up neither the callback nor a timeout or cancel.
+    const opened = Promise.resolve().then(() => options.openUrl(attempt.url));
+    const params = await Promise.race([callback, opened.then(() => callback)]);
+    signIn = await completeSignIn({ ...requestOptions(options), endpoints, attempt, callback: params, now });
   } finally {
     await listener.close();
   }
@@ -171,9 +182,12 @@ export const signInWithChatGPT = async (options: SignInWithChatGPTOptions): Prom
   const session = sessionFromSignIn(signIn);
   await local('save the ChatGPT sign-in', () =>
     withSessionLock(async () => {
-      // Another setup may have signed a different account in while the
-      // browser was open. Its tokens are never overwritten.
+      // Another setup may have changed the saved account while the browser
+      // was open, or signed it in again. Neither is overwritten.
       const current = await store.read();
+      if (saved === undefined ? current !== undefined : current === undefined || !sameRegistration(current, saved)) {
+        throw accountChanged(current);
+      }
       if (current !== undefined && holdsTokens(current) && !sameRegistration(current, session)) {
         throw alreadySignedIn(current);
       }

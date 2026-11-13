@@ -384,31 +384,132 @@ test('a new account after sign-out registers a new client and takes the saved ac
   assert.equal(saved.session.subject, 'user-sub-2');
 });
 
-test('a sign-in never replaces a different account that signed in while the browser was open', async () => {
-  const openai = createFakeOpenAI();
-  const doc = memoryDocument({ hostId: HOST_ID });
-  const other = { ...signedInSession, clientId: OTHER_CLIENT_ID, subject: 'user-sub-2', email: 'other@example.com' };
-  const user = browser(openai);
-  const error = await rejectsWithCode(
+test('a sign-in never overwrites a saved account that another sign-in changed while the browser was open', async () => {
+  const otherSignedIn = { ...signedInSession, clientId: OTHER_CLIENT_ID, subject: 'user-sub-2', email: 'other@example.com' };
+  const { idToken: _i, accessToken: _a, refreshToken: _r, expiresAt: _e, ...otherSignedOut } = otherSignedIn;
+  const cases = [
+    { label: 'first sign-in; another account signed in meanwhile', start: undefined, meanwhile: otherSignedIn, account: 'saved' },
+    { label: 'first sign-in; another account signed in and out meanwhile', start: undefined, meanwhile: otherSignedOut, account: 'saved' },
+    { label: 'returning sign-in; another account replaced it and signed out', start: signedOutSession, meanwhile: otherSignedOut, account: 'saved' },
+    { label: 'new account; another account replaced the saved one', start: signedOutSession, meanwhile: otherSignedIn, account: 'new' },
+  ] as const;
+  for (const { label, start, meanwhile, account } of cases) {
+    const openai = createFakeOpenAI();
+    const doc = memoryDocument(start === undefined ? { hostId: HOST_ID } : { hostId: HOST_ID, session: start });
+    const user = browser(openai, (authorize) => ({
+      code: 'auth-code-4',
+      ...(authorize.searchParams.get('client_id') === DYNAMIC_CLIENT_ID ? { client_id: 'oaiapp_third789' } : {}),
+    }));
+    const error = await rejectsWithCode(
+      signInWithChatGPT({
+        document: doc.document,
+        withSessionLock: (work) => work(),
+        endpoints,
+        fetch: openai.fetch,
+        openUrl: async (url) => {
+          // Another setup finishes first.
+          doc.replace({ hostId: HOST_ID, session: meanwhile });
+          await user.openUrl(url);
+        },
+        account,
+        ports: [0],
+        timeoutMs: 10_000,
+        now: () => NOW,
+      }),
+      'account_changed',
+    );
+    assert.match(error.message, /other@example\.com/, label);
+    assert.deepEqual(doc.current(), { hostId: HOST_ID, session: meanwhile }, label);
+  }
+});
+
+test('a new account is refused at save when the saved account was signed in again meanwhile', async () => {
+  const openai = createFakeOpenAI({ subject: 'user-sub-2' });
+  const doc = memoryDocument({ hostId: HOST_ID, session: signedOutSession });
+  const user = browser(openai, () => ({ code: 'auth-code-5', client_id: OTHER_CLIENT_ID }));
+  await rejectsWithCode(
     signInWithChatGPT({
       document: doc.document,
       withSessionLock: (work) => work(),
       endpoints,
       fetch: openai.fetch,
       openUrl: async (url) => {
-        // Another setup finishes its sign-in first.
-        doc.replace({ hostId: HOST_ID, session: other });
+        doc.replace({ hostId: HOST_ID, session: signedInSession });
         await user.openUrl(url);
       },
+      account: 'new',
       ports: [0],
-      // Bounded, so a sign-in that never sees its callback fails the test fast.
       timeoutMs: 10_000,
       now: () => NOW,
     }),
     'signed_in',
   );
-  assert.match(error.message, /other@example\.com/);
-  assert.deepEqual(doc.current(), { hostId: HOST_ID, session: other });
+  assert.deepEqual(doc.current(), { hostId: HOST_ID, session: signedInSession });
+});
+
+test('an openUrl that never settles holds up neither the callback nor a timeout or cancel', async () => {
+  const never = new Promise<void>(() => undefined);
+  // A sign-in held up by openUrl would hang here, so each one gets 5 s.
+  const within = <T>(promise: Promise<T>): Promise<T> => {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('the sign-in waited on openUrl')), 5000);
+    });
+    return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+  };
+
+  const openai = createFakeOpenAI();
+  const user = browser(openai);
+  const doc = memoryDocument({ hostId: HOST_ID });
+  const outcome = await within(signInWithChatGPT({
+    document: doc.document,
+    withSessionLock: (work) => work(),
+    endpoints,
+    fetch: openai.fetch,
+    openUrl: async (url) => {
+      await user.openUrl(url);
+      // The browser came back, but the process that opened it hasn't exited.
+      return never;
+    },
+    ports: [0],
+    timeoutMs: 10_000,
+    now: () => NOW,
+  }));
+  assert.equal(outcome.registered, true);
+  assert.equal((doc.current() as { session: { clientId: string } }).session.clientId, ISSUED_CLIENT_ID);
+
+  await rejectsWithCode(
+    within(signInWithChatGPT({
+      document: memoryDocument({ hostId: HOST_ID }).document,
+      withSessionLock: (work) => work(),
+      endpoints,
+      fetch: createFakeOpenAI().fetch,
+      openUrl: () => never,
+      ports: [0],
+      timeoutMs: 50,
+      now: () => NOW,
+    })),
+    'timeout',
+  );
+
+  const controller = new AbortController();
+  await rejectsWithCode(
+    within(signInWithChatGPT({
+      document: memoryDocument({ hostId: HOST_ID }).document,
+      withSessionLock: (work) => work(),
+      endpoints,
+      fetch: createFakeOpenAI().fetch,
+      openUrl: () => {
+        setImmediate(() => controller.abort());
+        return never;
+      },
+      signal: controller.signal,
+      ports: [0],
+      timeoutMs: 10_000,
+      now: () => NOW,
+    })),
+    'cancelled',
+  );
 });
 
 test('a declined, failed or cancelled sign-in leaves the saved one as it was and frees the callback port', async () => {
