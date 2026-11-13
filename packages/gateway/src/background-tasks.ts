@@ -92,6 +92,34 @@ export interface BackgroundTasksDeps {
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/**
+ * A task's status as its worker session tells it now, for what the agent
+ * and the operator are shown. The row's once it is final. For an open row,
+ * the row is a cache settling refreshes only at the turn's end, so: a
+ * worker in flight is `running`, or `waiting_approval` while parked on a
+ * person; a worker whose turn has ended reads how it ended, which settling
+ * is about to write; a worker with no turn yet (a start still on its way)
+ * keeps the row's status.
+ */
+export const liveTaskStatus = (
+  row: Pick<TaskRow, 'status' | 'stoppedBy'>,
+  worker: Pick<Session, 'status' | 'messages' | 'lastError'> | undefined,
+): TaskStatus => {
+  if (!isOpenTaskStatus(row.status) || worker === undefined) {
+    return row.status;
+  }
+  if (worker.status === 'pending_approval') {
+    return 'waiting_approval';
+  }
+  if (worker.status === 'running') {
+    return 'running';
+  }
+  if (turnMessageOf(worker) === undefined) {
+    return row.status;
+  }
+  return deriveTaskOutcome(row, worker)?.status ?? row.status;
+};
+
 export const createBackgroundTasks = ({
   options,
   fleetDb,
@@ -310,11 +338,7 @@ export const createBackgroundTasks = ({
     const worker = await store.get(row.workerSessionId);
     if (worker !== undefined && turnMessageOf(worker) !== undefined && worker.status !== 'running' && worker.status !== 'pending_approval') {
       const latest = tasks.get(taskId) ?? row;
-      return {
-        kind: 'finished',
-        task: latest,
-        status: isOpenTaskStatus(latest.status) ? deriveTaskOutcome(latest, worker)?.status ?? latest.status : latest.status,
-      };
+      return { kind: 'finished', task: latest, status: liveTaskStatus(latest, worker) };
     }
     const recorded = tasks.recordStop(taskId, stoppedBy, new Date().toISOString());
     const current = tasks.get(taskId) ?? row;
@@ -333,19 +357,18 @@ export const createBackgroundTasks = ({
 
   /**
    * What `agent.tasks` and `agent.cancelTask` reach, scoped to the calling
-   * agent. A listed task's status is the row's, except that an open one
-   * whose worker is parked on a person reads `waiting_approval`: the row
-   * learns that only when settling runs.
+   * agent. A listed task's status is read live from its worker session
+   * (`liveTaskStatus`): the row learns a parked worker or a finished turn
+   * only when settling runs.
    */
   const toolsHost: TaskToolsHost = {
     async list(agentId) {
       const rows = tasks.listForAgent(agentId, TASKS_LIST_FINISHED_LIMIT);
       return Promise.all(rows.map(async (row): Promise<TaskSummary> => {
         const worker = await store.get(row.workerSessionId);
-        const parked = isOpenTaskStatus(row.status) && worker?.status === 'pending_approval';
         return {
           task: row.id,
-          status: parked ? 'waiting_approval' : row.status,
+          status: liveTaskStatus(row, worker),
           worker: row.workerAgentId,
           startedAt: row.createdAt,
           ...(row.endedAt !== undefined ? { endedAt: row.endedAt } : {}),

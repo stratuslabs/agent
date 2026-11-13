@@ -7,7 +7,7 @@ import path from 'node:path';
 import { recordTurnFailure, type AgentDefinition, type Message, type Session } from '@stratusagent/core';
 import { fleetDbIn } from '@stratusagent/state';
 
-import { createBackgroundTasks } from '../src/background-tasks.ts';
+import { createBackgroundTasks, liveTaskStatus } from '../src/background-tasks.ts';
 import { ShardedSessionStore } from '../src/sessions.ts';
 import { taskOutcomeKey } from '../src/task-settle.ts';
 import { SqliteTaskStore, type TaskRow } from '../src/tasks.ts';
@@ -280,6 +280,7 @@ test('cancel after the worker\'s turn finished, before settling: "already finish
     assert.equal(result.kind, 'finished');
     assert.equal(result.kind === 'finished' ? result.status : undefined, 'completed', 'how it ended, from the worker, though the row still says running');
     assert.deepEqual(await f.tasks.toolsHost!.cancel(row.id, 'ava'), { kind: 'finished', status: 'completed' });
+    assert.deepEqual((await f.tasks.toolsHost!.list('ava')).map((entry) => entry.status), ['completed'], 'the list reads it from the worker too');
     assert.equal(f.rows.get(row.id)?.stoppedBy, undefined, 'no stop was written');
     assert.deepEqual(f.aborted, [], 'nothing was aborted');
 
@@ -384,4 +385,22 @@ test('the agent\'s list reads a task parked on a person as waiting_approval, wit
   } finally {
     await f.close();
   }
+});
+
+test('a task\'s live status: the row\'s once final, else what its worker session says now', () => {
+  const start = message('user', 'Do the job.');
+  const worker = (status: Session['status'], messages: Message[], lastError?: string) =>
+    ({ status, messages, ...(lastError !== undefined ? { lastError } : {}) }) as Pick<Session, 'status' | 'messages' | 'lastError'>;
+  const done = worker('completed', [start, message('assistant', 'done')]);
+  // Final rows are what settling wrote, whatever the worker says.
+  assert.equal(liveTaskStatus({ status: 'failed' }, done), 'failed');
+  // Open rows read the worker.
+  assert.equal(liveTaskStatus({ status: 'running' }, undefined), 'running', 'a start still on its way');
+  assert.equal(liveTaskStatus({ status: 'running' }, worker('idle', [])), 'running', 'a worker session with no turn yet is not "never started"');
+  assert.equal(liveTaskStatus({ status: 'waiting_approval' }, worker('running', [start])), 'running', 'an answered approval');
+  assert.equal(liveTaskStatus({ status: 'running' }, worker('pending_approval', [start])), 'waiting_approval');
+  assert.equal(liveTaskStatus({ status: 'running' }, done), 'completed', 'finished, not yet settled');
+  assert.equal(liveTaskStatus({ status: 'running' }, worker('failed', [start], 'rate limited')), 'failed');
+  assert.equal(liveTaskStatus({ status: 'running', stoppedBy: 'cli' }, worker('failed', [start], 'stopped')), 'cancelled');
+  assert.equal(liveTaskStatus({ status: 'running', stoppedBy: 'cli' }, worker('running', [start])), 'running', 'still winding down; its stop shows in stoppedBy');
 });
