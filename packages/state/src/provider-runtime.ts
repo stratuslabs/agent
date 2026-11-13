@@ -30,6 +30,7 @@ import { ContextOverflowError, HostRefusalError } from '@stratusagent/core';
 // with none of them.
 import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
 import type { CodexRunTurn } from '@stratusagent/provider-codex';
+import { openChatGPTSignInFile } from './chatgpt-sign-in.ts';
 import type { RuntimeConfig } from './config.ts';
 import { packageOnDisk } from './package-on-disk.ts';
 import { registeredProviderNameOf } from './provider-names.ts';
@@ -420,7 +421,7 @@ export const describeRuntimeEffort = (config: RuntimeConfig): string | undefined
  * one is not installed fails the turn that needs it, with the fix, rather
  * than failing to start.
  */
-export type ProviderPackage = 'anthropic' | 'claude-code' | 'codex';
+export type ProviderPackage = 'anthropic' | 'claude-code' | 'codex' | 'chatgpt';
 
 const PROVIDER_PACKAGES: Record<ProviderPackage, { specifier: string; label: string }> = {
   anthropic: {
@@ -435,6 +436,10 @@ const PROVIDER_PACKAGES: Record<ProviderPackage, { specifier: string; label: str
     specifier: '@stratusagent/provider-codex',
     label: 'the Codex runtime',
   },
+  chatgpt: {
+    specifier: '@stratusagent/provider-chatgpt',
+    label: 'a ChatGPT sign-in',
+  },
 };
 
 /** The package that carries each provider, for whoever has to install one. */
@@ -442,6 +447,7 @@ export const PROVIDER_PACKAGE_NAMES: Readonly<Record<ProviderPackage, string>> =
   anthropic: PROVIDER_PACKAGES.anthropic.specifier,
   'claude-code': PROVIDER_PACKAGES['claude-code'].specifier,
   codex: PROVIDER_PACKAGES.codex.specifier,
+  chatgpt: PROVIDER_PACKAGES.chatgpt.specifier,
 };
 
 /**
@@ -453,6 +459,7 @@ export const PROVIDER_PACKAGE_NAMES: Readonly<Record<ProviderPackage, string>> =
 export const providerPackagesUsedBy = (config: RuntimeConfig): ProviderPackage[] => {
   const of = (runtime: { provider: string; apiKey?: string | undefined; authToken?: string | undefined }): ProviderPackage | undefined => {
     if (runtime.provider === 'codex') return 'codex';
+    if (runtime.provider === 'chatgpt') return 'chatgpt';
     if (runtime.provider !== 'anthropic') return undefined;
     return runsOnHarness(runtime) ? 'claude-code' : 'anthropic';
   };
@@ -491,13 +498,16 @@ type ProviderModules = {
   anthropic: typeof import('@stratusagent/provider-anthropic');
   'claude-code': typeof import('@stratusagent/provider-claude-code');
   codex: typeof import('@stratusagent/provider-codex');
+  chatgpt: typeof import('@stratusagent/provider-chatgpt');
 };
 
 type ProviderOptions<P extends ProviderPackage> = P extends 'anthropic'
   ? Parameters<ProviderModules['anthropic']['createAnthropicProvider']>[0]
   : P extends 'claude-code'
     ? Parameters<ProviderModules['claude-code']['createClaudeCodeProvider']>[0]
-    : Parameters<ProviderModules['codex']['createCodexProvider']>[0];
+    : P extends 'codex'
+      ? Parameters<ProviderModules['codex']['createCodexProvider']>[0]
+      : Parameters<ProviderModules['chatgpt']['createChatGPTProvider']>[0];
 
 const loadProviderPackage = async <P extends ProviderPackage>(pkg: P): Promise<ProviderModules[P]> => {
   // Disk first: Node 24+ remembers a failed import for the life of the
@@ -631,6 +641,27 @@ export const createRuntimeProvider = (
       ...(maxTurns !== undefined ? { maxTurns } : {}),
     };
     return createDeferredProvider('codex', async () => (await loadProviderPackage('codex')).createCodexProvider(options));
+  }
+
+  if (config.provider === 'chatgpt') {
+    // The Responses API on the install's ChatGPT sign-in. The provider reads
+    // the tokens from the file on each request and refreshes them there,
+    // under the file's lock, which every process that refreshes shares.
+    const { model, signIn } = config;
+    const systemPrompt = config.systemPrompt;
+    const fetchFn = config.fetch;
+    return createDeferredProvider('chatgpt', async () => {
+      const chatgpt = await loadProviderPackage('chatgpt');
+      const file = openChatGPTSignInFile(signIn);
+      const options: ProviderOptions<'chatgpt'> = {
+        model,
+        store: chatgpt.createChatGPTSessionStore(file),
+        withSessionLock: (work) => file.withLock(work),
+        ...(systemPrompt ? { systemPrompt } : {}),
+        ...(fetchFn ? { fetch: fetchFn } : {}),
+      };
+      return chatgpt.createChatGPTProvider(options);
+    });
   }
 
   if (config.provider === 'openai') {

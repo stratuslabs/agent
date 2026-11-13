@@ -11,16 +11,16 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // The daemon and a foreground `stratus run` share one ChatGPT sign-in, and
-// its refresh token works once. Two real processes, the real sign-in file
-// from @stratusagent/state and its lock, and a token endpoint that refuses a
-// spent refresh token, as OpenAI's does.
+// its refresh token works once. Two real processes, this package's sign-in
+// file and its lock, provider-chatgpt's refresh, and a token endpoint that
+// refuses a spent refresh token, as OpenAI's does.
 
 const packageDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const sourceUrl = pathToFileURL(path.join(packageDir, 'src', 'index.ts')).href;
 
 const CHILD = `
-import { createChatGPTSignInFile } from '@stratusagent/state';
-import { createChatGPTSessionStore, createChatGPTTokenSource } from ${JSON.stringify(sourceUrl)};
+import { createChatGPTSignInFile } from ${JSON.stringify(sourceUrl)};
+import { createChatGPTSessionStore, createChatGPTTokenSource } from '@stratusagent/provider-chatgpt';
 const file = createChatGPTSignInFile({ homeDir: process.env.TEST_HOME });
 const issuer = process.env.TEST_ISSUER;
 const source = createChatGPTTokenSource({

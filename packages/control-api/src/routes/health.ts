@@ -27,6 +27,10 @@ const credentialSource = (runtime: RuntimeConfig): string => {
     // serves the run — the harness holds those tokens itself.
     return 'subscription';
   }
+  if (runtime.provider === 'chatgpt') {
+    // The install's ChatGPT sign-in, in a file of its own.
+    return 'subscription';
+  }
   if (!isSignedInRuntime(runtime)) {
     // A contributed provider: its plugin's config and manifest-declared
     // credentials, which nothing here resolves.

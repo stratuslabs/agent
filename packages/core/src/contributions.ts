@@ -35,7 +35,7 @@ import type {
  * meaning the first-party adapter, and a plugin that could shadow it would
  * be a plugin that could receive every key the operator stored for it.
  */
-export const BUILTIN_PROVIDER_NAMES = ['demo', 'openai', 'anthropic', 'codex'] as const;
+export const BUILTIN_PROVIDER_NAMES = ['demo', 'openai', 'anthropic', 'codex', 'chatgpt'] as const;
 export type BuiltinProviderName = (typeof BUILTIN_PROVIDER_NAMES)[number];
 
 /**

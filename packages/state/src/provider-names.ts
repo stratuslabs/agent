@@ -76,17 +76,27 @@ export const withoutTrailingSlashes = (value: string): string => {
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
 
 /**
+ * The model a ChatGPT sign-in runs when nothing names one: codex's, since a
+ * ChatGPT plan serves the codex lineup. Setup's picker offers what the
+ * signed-in account lists instead; whether a plan serves this one through
+ * the Responses API is checked live (AGT-45), not known here.
+ */
+export const DEFAULT_CHATGPT_MODEL = DEFAULT_CODEX_MODEL;
+
+/**
  * The model a built-in provider runs when no flag, environment variable,
  * soul or config names one. The one table resolution, the roster, setup,
  * `agent new` and the help text read. A provider a plugin registered has
  * its own default, which nothing here knows.
  */
-export const defaultModelFor = (provider: CredentialProviderName): string =>
+export const defaultModelFor = (provider: CredentialProviderName | 'chatgpt'): string =>
   provider === 'anthropic'
     ? DEFAULT_ANTHROPIC_MODEL
     : provider === 'codex'
       ? DEFAULT_CODEX_MODEL
-      : DEFAULT_OPENAI_MODEL;
+      : provider === 'chatgpt'
+        ? DEFAULT_CHATGPT_MODEL
+        : DEFAULT_OPENAI_MODEL;
 
 /**
  * Read a provider selection into its resolved form. A built-in name is
@@ -106,7 +116,7 @@ export const parseProviderName = (value: string, label: string): StratusProvider
   }
 
   throw new Error(
-    `Unsupported provider in ${label}: ${value}. Use demo, anthropic, openai, codex, or the name a plugin registers (lowercase, hyphens).`,
+    `Unsupported provider in ${label}: ${value}. Use demo, anthropic, openai, codex, chatgpt, or the name a plugin registers (lowercase, hyphens).`,
   );
 };
 

@@ -1,11 +1,12 @@
 # @stratusagent/provider-chatgpt
 
 Sign in with ChatGPT for Stratus Agent, so agents can run on a ChatGPT plan
-through the OpenAI Responses API. **Not wired up yet, and not published:**
-this package holds the sign-in protocol, the refresh logic and the model
-provider. Where the
-sign-in is saved, the lock shared between processes, and the setup and doctor
-screens come next.
+through the OpenAI Responses API. **Not published yet, and setup can't sign
+in yet:** this package holds the sign-in protocol, the refresh logic and the
+model provider. Stratus runs it for `provider: chatgpt`, on the sign-in saved
+in `~/.stratus/chatgpt-sign-in.json` under a lock every process shares
+(`@stratusagent/state`'s `createChatGPTSignInFile`). Signing in and out in
+`stratus setup`, and the account in `stratus doctor`, come next.
 
 It follows OpenAI's documentation for open-source hosts
 ([ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source)),

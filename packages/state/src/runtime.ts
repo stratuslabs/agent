@@ -9,6 +9,7 @@ import type {
   RuntimeSelection,
 } from './config.ts';
 import { hasAgentSignInEntry, loadAgentSignIns, loadCredentials, type StoredCredential } from './credentials.ts';
+import { chatgptSignInLocation, chatgptSignInStatus, hasChatGPTSignIn, openChatGPTSignInFile } from './chatgpt-sign-in.ts';
 import { credentialsPath } from './paths.ts';
 import { type StateEnvironment, readProcessEnv, readNonEmptyString } from './environment.ts';
 import {
@@ -289,6 +290,17 @@ export const resolveRuntimeConfig = async (
     || (fileConfig.fallbackModel !== undefined && (fileConfig.fallbackProvider ?? (fileConfigApplies ? provider : undefined)) === 'anthropic');
   const agentSignIn = anthropicInPlay && agentId !== undefined ? await resolveAgentSignIn(env, agentId) : undefined;
 
+  // The install's ChatGPT sign-in, read only when a chatgpt fallback could
+  // serve the run (a chatgpt primary reads it on its own path below). A file
+  // that can't be read leaves the fallback out rather than failing a run it
+  // exists to rescue.
+  const chatgptLocation = chatgptSignInLocation(env);
+  const fallbackProviderInPlay = fileConfig.fallbackModel !== undefined
+    ? fileConfig.fallbackProvider ?? (fileConfigApplies ? provider : undefined)
+    : undefined;
+  const chatgptFallbackSignedIn = fallbackProviderInPlay === 'chatgpt'
+    && await hasChatGPTSignIn(openChatGPTSignInFile(chatgptLocation)).catch(() => false);
+
   /**
    * A configured fallback model kicks in when the default model errors
    * mid-run. It needs its own working sign-in; without one the fallback is
@@ -331,6 +343,14 @@ export const resolveRuntimeConfig = async (
       // brings its own. Selected by name, and looked up when the provider
       // is built, like a contributed primary.
       return { provider: fallbackProvider, model: fileConfig.fallbackModel };
+    }
+    if (fallbackProvider === 'chatgpt') {
+      // A ChatGPT sign-in is a file of its own, not a key: nothing to
+      // inherit from a primary, and no variable or endpoint to read for it.
+      // Left out, like any fallback without a sign-in, when there is none.
+      return chatgptFallbackSignedIn
+        ? { provider: 'chatgpt', model: fileConfig.fallbackModel, signIn: chatgptLocation }
+        : undefined;
     }
     const sameAsPrimary = primary !== undefined && fallbackProvider === primary.provider;
     // Same precedence as the primary sign-in: environment keys outrank
@@ -473,6 +493,54 @@ export const resolveRuntimeConfig = async (
       registered.fallback = fallback;
     }
     return registered;
+  }
+
+  if (provider === 'chatgpt') {
+    // A ChatGPT sign-in is sent only to OpenAI. A named endpoint can't be
+    // honored, and running on OpenAI's instead would send the prompt
+    // somewhere other than where its owner said, so the run is refused,
+    // as codex refuses one.
+    const namedBaseUrl = selection.baseUrl
+      ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
+      ?? (fileConfigApplies ? fileConfig.baseUrl : undefined);
+    if (namedBaseUrl !== undefined) {
+      throw new Error(
+        `provider=chatgpt does not use a custom base URL: a ChatGPT sign-in is sent only to OpenAI, never to ${String(namedBaseUrl)}. Remove the base URL to run on chatgpt.`,
+      );
+    }
+    const signInStatus = await chatgptSignInStatus(openChatGPTSignInFile(chatgptLocation));
+    if (signInStatus === 'none') {
+      throw new Error('Missing sign-in for provider=chatgpt. Sign in with ChatGPT in `stratus setup`.');
+    }
+    if (signInStatus === 'plan_usage_not_granted') {
+      // The provider's own words for it, said before the run instead of on
+      // its first turn.
+      throw new Error(
+        "This ChatGPT sign-in doesn't allow Stratus Agent to use your ChatGPT plan. Sign in with ChatGPT again in `stratus setup` and allow it, or use an OpenAI API key.",
+      );
+    }
+    const chatgptModel = selection.model
+      ?? readNonEmptyString(processEnv.STRATUS_MODEL)
+      ?? (soulModelApplies ? readNonEmptyString(soul?.model) : undefined)
+      ?? (fileConfigApplies ? fileConfig.model : undefined)
+      ?? defaultModelFor('chatgpt');
+    const chatgpt: RuntimeConfig = {
+      provider: 'chatgpt',
+      model: String(chatgptModel),
+      signIn: chatgptLocation,
+      ...(systemPrompt ? { systemPrompt: String(systemPrompt) } : {}),
+      ...(env.fetch ? { fetch: env.fetch } : {}),
+      ...(soul ? { soul } : {}),
+      ...(soulPath ? { soulPath } : {}),
+      ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+      ...(language !== undefined ? { language } : {}),
+    };
+    // Nothing for a fallback to inherit: the primary holds no key.
+    const fallback = fallbackProviderInPlay !== undefined ? resolveFallback(fallbackProviderInPlay, undefined) : undefined;
+    if (fallback) {
+      chatgpt.fallback = fallback;
+    }
+    return chatgpt;
   }
 
   const model = selection.model

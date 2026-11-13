@@ -122,6 +122,9 @@ importers:
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic
+      '@stratusagent/provider-chatgpt':
+        specifier: workspace:*
+        version: link:../provider-chatgpt
       '@stratusagent/provider-claude-code':
         specifier: workspace:*
         version: link:../provider-claude-code
@@ -325,9 +328,6 @@ importers:
         specifier: workspace:*
         version: link:../providers
     devDependencies:
-      '@stratusagent/state':
-        specifier: workspace:*
-        version: link:../state
       '@types/node':
         specifier: ^24.6.0
         version: 24.19.2
@@ -432,6 +432,9 @@ importers:
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic
+      '@stratusagent/provider-chatgpt':
+        specifier: workspace:*
+        version: link:../provider-chatgpt
       '@stratusagent/provider-claude-code':
         specifier: workspace:*
         version: link:../provider-claude-code

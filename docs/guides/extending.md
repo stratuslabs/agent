@@ -77,7 +77,7 @@ serving the run. A soul naming a provider no loaded plugin registers is
 refused when its first turn is built, naming what *is* registered:
 
 ```
-No provider named ollama is registered (plugins registered: fixture). Built in: demo, openai, anthropic, codex. Enable the plugin that contributes ollama in the plugins block of a trusted config, or select another provider.
+No provider named ollama is registered (plugins registered: fixture). Built in: demo, openai, anthropic, codex, chatgpt. Enable the plugin that contributes ollama in the plugins block of a trusted config, or select another provider.
 ```
 
 A plugin provider works as a **fallback target** too: `fallbackProvider:
