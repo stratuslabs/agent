@@ -89,6 +89,20 @@ test('doctor says an expired access token is renewed by the next run', async () 
   );
 });
 
+test('doctor prints an expiry past the year 9999 whole', async () => {
+  // 10000-01-01T00:00:00Z; toISOString writes the year as +010000.
+  const { line } = await doctor({ config: { provider: 'chatgpt' }, signIn: { session: session({ expiresAt: 253_402_300_800_000 }) } });
+  assert.equal(
+    line,
+    '  chatgpt   ChatGPT sign-in (person@example.com), plan usage allowed; access token valid until +010000-01-01 00:00 UTC, renewed as it runs out',
+  );
+});
+
+test('doctor calls a sign-in with an expiry no Date can hold signed in, without the expiry', async () => {
+  const { line } = await doctor({ config: { provider: 'chatgpt' }, signIn: { session: session({ expiresAt: Number.MAX_VALUE }) } });
+  assert.equal(line, '  chatgpt   ChatGPT sign-in (person@example.com), plan usage allowed');
+});
+
 test('doctor leaves the expiry out when the sign-in has none', async () => {
   const { line } = await doctor({ config: { provider: 'chatgpt' }, signIn: { session: session({ expiresAt: undefined }) } });
   assert.equal(line, '  chatgpt   ChatGPT sign-in (person@example.com), plan usage allowed');

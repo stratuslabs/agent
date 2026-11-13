@@ -420,10 +420,13 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   };
 };
 
-/** Minutes, in UTC, as doctor prints an expiry: `2026-11-13 03:00 UTC`. */
+/**
+ * Minutes, in UTC, as doctor prints an expiry: `2026-11-13 03:00 UTC`. Split
+ * at the `T`, since a year past 9999 is written `+010000`.
+ */
 const utcMinute = (epochMs: number): string => {
-  const iso = new Date(epochMs).toISOString();
-  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+  const [date, time] = new Date(epochMs).toISOString().split('T');
+  return `${date} ${String(time).slice(0, 5)} UTC`;
 };
 
 /**

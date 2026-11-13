@@ -54,12 +54,15 @@ test('no file, no session or a session that is not an object is not signed in, w
   }
 });
 
-test('an expiry that is not a finite number is left out', async () => {
-  for (const expiresAt of ['4102444800000', Number.NaN, Number.POSITIVE_INFINITY, undefined]) {
+test('an expiry that is not a time a Date can hold is left out', async () => {
+  // A Date holds up to 8.64e15 ms either side of the epoch.
+  for (const expiresAt of ['4102444800000', Number.NaN, Number.POSITIVE_INFINITY, undefined, Number.MAX_VALUE, 8.64e15 + 1, -8.64e15 - 1]) {
     const summary = await describeChatGPTSignIn(fileHolding({ session: session({ expiresAt }) }));
     assert.equal(summary.status, 'ready');
     assert.equal('expiresAt' in summary, false, `expiresAt ${String(expiresAt)} was kept`);
   }
+  const latest = await describeChatGPTSignIn(fileHolding({ session: session({ expiresAt: 8.64e15 }) }));
+  assert.equal(latest.status === 'ready' ? latest.expiresAt : undefined, 8.64e15);
 });
 
 test('the summary\'s status is the status a run is resolved by', async () => {

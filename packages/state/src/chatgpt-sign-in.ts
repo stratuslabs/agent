@@ -134,7 +134,7 @@ export type ChatGPTSignInSummary =
   | {
     readonly status: 'plan_usage_not_granted' | 'ready';
     readonly account: string;
-    /** Milliseconds since the epoch, when the record has one. */
+    /** Milliseconds since the epoch, when the record has one a Date can hold. */
     readonly expiresAt?: number;
   };
 
@@ -156,7 +156,9 @@ export const describeChatGPTSignIn = async (
     || !filledString(record.refreshToken)) {
     return account === undefined ? { status: 'none' } : { status: 'none', account };
   }
-  const expiry = typeof record.expiresAt === 'number' && Number.isFinite(record.expiresAt)
+  // Only a time a Date can hold (8.64e15 ms either side of the epoch), so
+  // whoever prints it can.
+  const expiry = typeof record.expiresAt === 'number' && Number.isFinite(new Date(record.expiresAt).getTime())
     ? { expiresAt: record.expiresAt }
     : {};
   return {
