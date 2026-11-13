@@ -180,6 +180,20 @@ const taskGateway = async (options: {
                   }
                   await hold(blocked, signal);
                 }
+                if (said.startsWith('STUBBORN')) {
+                  // A provider that doesn't heed the abort: once let go it
+                  // answers with a tool call, a foreground delegation to mia.
+                  if (session.messages.at(-1)?.role === 'tool') {
+                    return { parts: [{ type: 'text', text: 'side done' }] };
+                  }
+                  await hold(blocked, undefined);
+                  return {
+                    parts: [{
+                      type: 'tool-call',
+                      call: { id: `${session.id}:${session.messages.length}`, toolName: 'agent.delegate', input: { agent: 'mia', prompt: 'SIDE' } },
+                    }],
+                  };
+                }
                 return { parts: [{ type: 'text', text: `did ${said}` }] };
               }
               if (said.startsWith('[Background task')) {
@@ -900,5 +914,65 @@ test('drain: when the window runs out on an ordinary turn, the workers still end
     assert.equal(first.rows.get(task)?.delivery, 'pending', 'the notice waits for the next start');
   } finally {
     first.rows.close();
+  }
+});
+
+// AGT-357: cancelling a task through the gateway. Each point of spec test 8
+// is in task-cancel.test.ts on stand-ins; these are the two that need the
+// real turn and a real restart.
+
+test('cancel: a worker stopped mid-turn runs no tool call after the cancel, and settles cancelled once', async () => {
+  const fixture = await taskGateway({ tasks: { enabled: true } });
+  try {
+    const origin = 'fixture:ava:C40';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'ava', prompt: 'STUBBORN-1', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => fixture.blockedCount() === 1);
+    const workerSessionId = fixture.rows.get(task)!.workerSessionId;
+
+    const result = await fixture.gateway.cancelTask(task, 'cli');
+    assert.equal(result.kind, 'stopping');
+    assert.equal(fixture.rows.get(task)?.stoppedBy, 'cli', 'the stop is written before the turn ends');
+    // The provider answers only now, after the cancel, with a tool call.
+    fixture.release();
+
+    const row = await fixture.settled(task);
+    assert.deepEqual([row.status, row.stoppedBy, row.delivery], ['cancelled', 'cli', 'delivered']);
+    const worker = await fixture.gateway.store.get(workerSessionId);
+    assert.equal(worker?.status, 'failed');
+    assert.equal(worker?.messages.some((message) => message.role === 'tool'), false, 'no tool ran in the worker');
+    assert.equal((await fixture.gateway.store.list()).some((item) => item.id.startsWith(`${workerSessionId}:delegate:mia:`)), false, 'the delegation the provider asked for after the cancel never ran');
+    assert.equal(fixture.calls.some((id) => id.includes(':delegate:mia:')), false);
+    const notices = keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(task));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.content, /was stopped from the CLI (before its first step finished|after 1 step)\.\]$/);
+
+    assert.equal((await fixture.gateway.cancelTask(task, 'cli')).kind, 'finished', 'a cancel of a settled task changes nothing');
+    assert.deepEqual(await fixture.gateway.cancelTask('t_nope', 'cli'), { kind: 'missing' });
+  } finally {
+    fixture.release();
+    await fixture.stop();
+  }
+});
+
+test('cancel: a crash after the stop was written and before the abort ends cancelled at the next start, not interrupted', async () => {
+  const origin = 'fixture:ava:C41';
+  const crashed = await crashedMidTask(origin);
+  // The copy is the moment the worker was mid-turn; the stop is written into
+  // it as a cancel would before its abort, then the process is gone.
+  const stopped = new SqliteTaskStore(fleetDbIn(stateOf(crashed.home)), { stateHome: stateOf(crashed.home) });
+  assert.equal(stopped.recordStop(crashed.task, 'U123', new Date().toISOString()), true);
+  stopped.close();
+
+  const fixture = await taskGateway({ tasks: { enabled: true }, home: crashed.home });
+  try {
+    const row = await fixture.settled(crashed.task);
+    assert.deepEqual([row.status, row.stoppedBy, row.delivery], ['cancelled', 'U123', 'delivered']);
+    assert.equal(fixture.calls.includes(crashed.workerSessionId), false, 'the worker was not run again');
+    const notices = keyed(await fixture.gateway.store.get(origin), taskOutcomeKey(crashed.task));
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.content, /was stopped by U123/);
+    assert.doesNotMatch(notices[0]!.content, /interrupted/);
+  } finally {
+    await fixture.stop();
   }
 });

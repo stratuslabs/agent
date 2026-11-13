@@ -192,6 +192,8 @@ export {
   type RefusedEventDelivery,
 } from './events.ts';
 export { type MemoryPassDetail } from './memory-passes.ts';
+export { type TaskCancelInput, type TaskCancelResult } from './background-tasks.ts';
+export { type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
 // The review posture's fixed prompt and case, for the review-step eval
 // (`packages/cli/eval/review-step`), which measures the prompt production
 // sends rather than a copy of it.
@@ -1432,6 +1434,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // session's own conversation record, and the addressable outbound
     // post, speaking as the origin session so the channel doesn't hear the
     // notice back into the transcript that already holds it.
+    abortTurns: (sessionId, reason) => abortTurns(sessionId, reason),
     postToOrigin: async (notice) => {
       const origin = await store.get(notice.sessionId);
       const kind = origin?.metadata?.channel;
@@ -1928,6 +1931,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     } else {
       turnControllers.set(sessionId, new Set([controller]));
     }
+  };
+  /** The gateway's `abortTurns`, also a background task cancel's backstop. */
+  const abortTurns = (sessionId: string, reason: string): number => {
+    const running = turnControllers.get(sessionId) ?? new Set<AbortController>();
+    for (const controller of running) {
+      if (!controller.signal.aborted) {
+        controller.abort(new RunAbortedError(reason));
+      }
+    }
+    return running.size;
   };
   const untrackTurn = (sessionId: string, controller: AbortController): void => {
     const running = turnControllers.get(sessionId);
@@ -3619,14 +3632,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return sideRuns.has(sessionId);
     },
 
-    abortTurns(sessionId, reason) {
-      const running = turnControllers.get(sessionId) ?? new Set<AbortController>();
-      for (const controller of running) {
-        if (!controller.signal.aborted) {
-          controller.abort(new RunAbortedError(reason));
-        }
-      }
-      return running.size;
+    abortTurns,
+
+    cancelTask(taskId, stoppedBy) {
+      return backgroundTasks.cancel(taskId, { stoppedBy });
     },
 
     pendingApprovals() {
