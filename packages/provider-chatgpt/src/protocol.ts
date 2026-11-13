@@ -6,6 +6,7 @@
 // (setup and the runtime) owns both.
 import { createHash, randomBytes, randomUUID, type JsonWebKey } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { redactSecrets } from '@stratusagent/core';
 import { ChatGPTAuthError } from './errors.ts';
 import { idTokenKeyId, verifyIdToken, type JsonWebKeySet } from './id-token.ts';
 
@@ -122,10 +123,10 @@ export interface SignInAttempt {
   readonly codeVerifier: string;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const clip = (text: string): string => (text.length > 300 ? `${text.slice(0, 300)}…` : text);
+export const clip = (text: string): string => (text.length > 300 ? `${text.slice(0, 300)}…` : text);
 
 const randomToken = (): string => randomBytes(32).toString('base64url');
 
@@ -253,7 +254,17 @@ export const readCallback = (attempt: SignInAttempt, params: URLSearchParams): C
   return { code, clientId: attempt.clientId };
 };
 
-const send = async (options: RequestOptions, url: string, init: RequestInit, what: string): Promise<{ response: Response; body: unknown }> => {
+/**
+ * One request to OpenAI: the response, its body as JSON (undefined when it
+ * isn't) and as text. A failure to get an answer is `cancelled` when the
+ * caller's signal ended it, and `temporary` otherwise.
+ */
+export const send = async (
+  options: RequestOptions,
+  url: string,
+  init: RequestInit,
+  what: string,
+): Promise<{ response: Response; body: unknown; text: string }> => {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   try {
     const response = await fetchImpl(url, { ...init, ...(options.signal !== undefined ? { signal: options.signal } : {}) });
@@ -264,14 +275,34 @@ const send = async (options: RequestOptions, url: string, init: RequestInit, wha
     } catch {
       body = undefined;
     }
-    return { response, body };
+    return { response, body, text };
   } catch (error) {
+    // A failure can quote the request's own header (Node's fetch does, for a
+    // value it can't send, and a wrapper may on abort). Then the token comes
+    // out of the message, and the original error, which still holds it,
+    // isn't kept as the cause.
+    const quoted = error instanceof Error ? error.message : String(error);
+    const reason = redactSecrets(quoted, credentialsIn(init.headers));
+    const cause = reason === quoted ? { cause: error } : undefined;
     if (options.signal?.aborted === true) {
-      throw new ChatGPTAuthError('cancelled', `${what} was cancelled.`, { cause: error });
+      throw new ChatGPTAuthError('cancelled', `${what} was cancelled.`, cause);
     }
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new ChatGPTAuthError('temporary', `Couldn't reach ${what} (${clip(reason)}). Check the connection and try again.`, { cause: error });
+    throw new ChatGPTAuthError('temporary', `Couldn't reach ${what} (${clip(reason)}). Check the connection and try again.`, cause);
   }
+};
+
+/** The request's `authorization` value, and the token in it, for redaction. */
+const credentialsIn = (headers: RequestInit['headers']): string[] => {
+  const entries: Array<[string, string]> = headers === undefined
+    ? []
+    : headers instanceof Headers
+      ? [...headers.entries()]
+      : Array.isArray(headers)
+        ? headers.map(([name, value]) => [String(name), String(value)])
+        : Object.entries(headers).flatMap(([name, value]): Array<[string, string]> => (value === undefined ? [] : [[name, String(value)]]));
+  return entries
+    .filter(([name]) => name.toLowerCase() === 'authorization')
+    .flatMap(([, value]) => [value, value.replace(/^\S+\s+/, '')]);
 };
 
 const postForm = (options: RequestOptions, url: string, form: Record<string, string>, what: string) =>

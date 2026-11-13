@@ -349,9 +349,11 @@ export {
   PROVIDER_PACKAGE_NAMES,
   type ProviderPackage,
   CHATGPT_SIGN_IN_TIMEOUT_MS,
+  listChatGPTSignInModels,
   runChatGPTSignIn,
   runChatGPTSignOut,
   type ChatGPTSignInRequest,
+  type ChatGPTModelChoice,
   type ChatGPTSignInResult,
   type ChatGPTSignOutResult,
 } from './provider-runtime.ts';

@@ -599,6 +599,35 @@ export const runChatGPTSignOut = async (env: StateEnvironment, request: { readon
   };
 };
 
+/** One model the install's ChatGPT account may run: the slug to pass, and the name to show. */
+export interface ChatGPTModelChoice {
+  readonly slug: string;
+  readonly displayName: string;
+}
+
+/**
+ * The models the install's ChatGPT account may run, as OpenAI lists them for
+ * it, for setup's picker. The token comes from the sign-in file through the
+ * token source a turn uses, so one about to run out is refreshed there,
+ * under the file's lock, first. Throws provider-chatgpt's errors as they
+ * are (no sign-in that allows plan usage sends nothing), and the error that
+ * says how to install it when it's missing. None carries a token.
+ */
+export const listChatGPTSignInModels = async (
+  env: StateEnvironment,
+  request: { readonly fetch?: typeof fetch; readonly signal?: AbortSignal } = {},
+): Promise<ChatGPTModelChoice[]> => {
+  const chatgpt = await loadProviderPackage('chatgpt');
+  const file = openChatGPTSignInFile(chatgptSignInLocation(env));
+  const models = await chatgpt.listSignedInChatGPTModels({
+    store: chatgpt.createChatGPTSessionStore(file),
+    withSessionLock: (work) => file.withLock(work),
+    ...(request.fetch ? { fetch: request.fetch } : {}),
+    ...(request.signal ? { signal: request.signal } : {}),
+  });
+  return models.map(({ slug, displayName }) => ({ slug, displayName }));
+};
+
 /**
  * A provider whose adapter is built on its first request. `createRuntimeProvider`
  * stays synchronous for its callers, and the provider module is loaded only
