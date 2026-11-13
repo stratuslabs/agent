@@ -2,6 +2,7 @@ import {
   carriesKey,
   PENDING_APPROVAL_METADATA_KEY,
   recordTurnFailure,
+  RunAbortedError,
   SENDER_TRUST_METADATA_KEY,
   type EventBus,
   type ObserveInput,
@@ -10,7 +11,7 @@ import {
 import { type DelegateBackgroundStart, TASK_ID_METADATA_KEY } from '@stratusagent/agents';
 
 import type { ShardedSessionStore } from './sessions.ts';
-import { createTaskSettler, type TaskNotice } from './task-settle.ts';
+import { createTaskSettler, TASK_CUT_OFF_ERROR, type TaskNotice } from './task-settle.ts';
 import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
@@ -36,6 +37,11 @@ export interface BackgroundTasksDeps {
   bus: Pick<EventBus, 'emit'>;
   dispatchInternal: (input: DispatchInput) => Promise<Session>;
   onSessionChain: <T>(sessionId: string, work: () => Promise<T>) => Promise<T>;
+  /**
+   * The same chain, for a worker's turn: work a shutdown's drain doesn't
+   * wait for, because `cutOff` ends it once the ordinary turns are done.
+   */
+  onWorkerChain: <T>(sessionId: string, work: () => Promise<T>) => Promise<T>;
   /** The keyed-dispatch check the public door makes: the finished or settled turn a key already names, else undefined. */
   settleRepeat: (sessionId: string, idempotencyKey: string, agentId: string | undefined) => Promise<Session | undefined>;
   /** The runner's own observe (not the channel-facing one): it takes the key. */
@@ -58,6 +64,7 @@ export const createBackgroundTasks = ({
   bus,
   dispatchInternal,
   onSessionChain,
+  onWorkerChain,
   settleRepeat,
   observe,
   postToOrigin,
@@ -77,7 +84,7 @@ export const createBackgroundTasks = ({
   // Its own connection to fleet.db, like the schedule and event stores.
   // Opened whether or not tasks are on, for the restart sweep.
   const tasks = new SqliteTaskStore(fleetDb, { stateHome });
-  /** Each running task's own stop, for a cancel (AGT-357) and the drain (PR 5). */
+  /** Each running task's own stop, for a cancel (AGT-357) and the drain (`cutOff`). */
   const controllers = new Map<string, AbortController>();
 
   const settler = createTaskSettler({
@@ -185,9 +192,9 @@ export const createBackgroundTasks = ({
     const task = claim.task;
     controllers.set(task.id, controller);
     // Not awaited: the turn that asked gets its task id now. On the
-    // worker's own chain, so the drain waits for it like any turn, and the
-    // settle after it is on the same chain.
-    void onSessionChain(task.workerSessionId, async () => {
+    // worker's own chain, so the settle after it is on the same chain. A
+    // shutdown doesn't wait for it: it cuts it off (`cutOff`).
+    void onWorkerChain(task.workerSessionId, async () => {
       try {
         // Dispatched once, by the call that wrote the row, and with no
         // idempotency key: the generic abandoned-turn sweep fails an
@@ -251,6 +258,22 @@ export const createBackgroundTasks = ({
           warn(`task ${row.id}: settling it after the restart failed; the next start tries again (${reason(error)}).`);
         }
       })));
+    },
+    /**
+     * A stop's or restart's end for every running task, once the ordinary
+     * turns have drained: each task's own signal aborted with the fixed
+     * cut-off error, so the worker's turn fails with it and settling reports
+     * `interrupted` (`cancelled` when a stop was recorded first). A start
+     * still queued is refused by the same abort and reads as never started.
+     * The notice is refused while stopping, so it stays `pending` for the
+     * next start's sweep. Not resumable: a worker is never continued.
+     */
+    cutOff(): number {
+      const running = [...controllers.values()].filter((controller) => !controller.signal.aborted);
+      for (const controller of running) {
+        controller.abort(new RunAbortedError(TASK_CUT_OFF_ERROR));
+      }
+      return running.length;
     },
     close(): void {
       tasks.close();
