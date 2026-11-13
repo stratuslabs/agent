@@ -11037,6 +11037,19 @@ test('a message that stopped early is a line in the console and counts in the lo
   assert.deepEqual(eventDetail(event), { reason: 'turn-limit', continuations: 2 });
 });
 
+test('a background task\'s start and end are a line in the console and ids in the log', () => {
+  const ids = { sessionId: 'slack:ava:T1:C1:1.1', agentId: 'ava', taskId: 't_01', workerSessionId: 'slack:ava:T1:C1:1.1:delegate:mia:1:t_01' };
+  const started = { type: 'task.started', ...ids, workerAgentId: 'mia' } as const;
+  assert.equal(formatEvent(started), '• task.started t_01 (ava → mia)');
+  assert.deepEqual(eventDetail(started), { taskId: 't_01', workerSessionId: ids.workerSessionId, workerAgentId: 'mia' });
+  const own = { type: 'task.cancelled', ...ids, workerAgentId: 'ava' } as const;
+  assert.equal(formatEvent(own), '• task.cancelled t_01 (ava)');
+  for (const type of ['task.completed', 'task.failed', 'task.interrupted'] as const) {
+    assert.equal(formatEvent({ ...own, type }), `• ${type} t_01 (ava)`);
+    assert.deepEqual(eventDetail({ ...own, type }), { taskId: 't_01', workerSessionId: ids.workerSessionId, workerAgentId: 'ava' });
+  }
+});
+
 test('approval events are visible in the console and in the audit log', async () => {
   // A granted approval produces no `onDecision` warning — only refusals do
   // — so without these two records an "Always allow" that widened what an

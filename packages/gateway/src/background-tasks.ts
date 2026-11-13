@@ -18,7 +18,7 @@ import {
 } from '@stratusagent/agents';
 
 import type { ShardedSessionStore } from './sessions.ts';
-import { createTaskSettler, deriveTaskOutcome, TASK_CUT_OFF_ERROR, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
+import { createTaskSettler, deriveTaskOutcome, TASK_CUT_OFF_ERROR, taskEvent, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
 import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
@@ -256,6 +256,7 @@ export const createBackgroundTasks = ({
       });
     },
     postFallback: (notice) => postToOrigin(notice),
+    emit: (event) => bus.emit(event),
     warn,
   });
 
@@ -300,6 +301,9 @@ export const createBackgroundTasks = ({
 
     const task = claim.task;
     controllers.set(task.id, controller);
+    // Before the worker is dispatched, so a consumer hears the start before
+    // anything the worker does, and before its end.
+    await bus.emit(taskEvent('task.started', task));
     // Not awaited: the turn that asked gets its task id now. On the
     // worker's own chain, so the settle after it is on the same chain. A
     // shutdown doesn't wait for it: it cuts it off (`cutOff`).

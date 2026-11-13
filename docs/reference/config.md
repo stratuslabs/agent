@@ -313,7 +313,10 @@ conversation that started it, once, when it ends. Tasks are on unless
   and the cancel at `POST /api/v1/tasks/<id>/cancel`; both need the
   operator token or a dashboard sign-in. A cancel with the token is named
   "from the CLI" in the notice, and one from a dashboard sign-in "from the
-  dashboard".
+  dashboard". Each task's start and end is also an event, `task.started`
+  and then `task.completed`, `task.failed`, `task.cancelled` or
+  `task.interrupted`, in the daemon log and on the control API's event
+  stream, with ids only.
 - **Off.** `enabled: false` refuses `background: true` with an error
   saying so, and agents no longer get `agent.tasks` or `agent.cancelTask`.
   Tasks a previous run left are still settled at startup, and `stratus

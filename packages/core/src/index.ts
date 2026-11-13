@@ -1196,6 +1196,8 @@ export {
   type EventHandler,
   type StratusEvent,
   type SubscribeOptions,
+  type TaskEvent,
+  type TaskEventType,
 } from './events.ts';
 
 // Approval answers and what an approval request carries, in their own
