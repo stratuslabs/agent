@@ -51,7 +51,7 @@ export interface TaskOutcome {
   error?: string;
   /** Who stopped it: a cancelled task, or a completed one whose stop came after it finished. */
   stoppedBy?: string;
-  /** Why an interrupted task ended. */
+  /** Why an interrupted task ended, or that a cancelled one never started. */
   why?: 'never-started' | 'cut-off' | 'lost-in-restore';
 }
 
@@ -106,7 +106,7 @@ export const deriveTaskOutcome = (
     };
   }
   if (row.stoppedBy !== undefined) {
-    return { status: 'cancelled', steps, stoppedBy: row.stoppedBy };
+    return { status: 'cancelled', steps, stoppedBy: row.stoppedBy, ...(start === undefined ? { why: 'never-started' as const } : {}) };
   }
   if (worker === undefined || start === undefined) {
     return { status: 'interrupted', steps: 0, why: 'never-started' };
@@ -156,6 +156,14 @@ const stopper = (stoppedBy: string): string => {
 const stepsText = (steps: number): string => (steps === 1 ? '1 step' : `${steps} steps`);
 
 /**
+ * What a stopped worker's turn fails with: the abort reason a cancel gives
+ * its signal and its running turn. Settling reads the stop from the row,
+ * not from this text; it is what the worker session says.
+ */
+export const taskStoppedError = (taskId: string, stoppedBy: string): string =>
+  `Background task ${taskId} was stopped ${stopper(stoppedBy)}.`;
+
+/**
  * The runtime notice for an outcome, from the row and the outcome alone, so
  * settling after a crash builds the same text again.
  */
@@ -170,8 +178,11 @@ export const taskNoticeText = (row: Pick<TaskRow, 'id' | 'workerAgentId'>, outco
       return `[${head} failed after ${stepsText(outcome.steps)}.\nError: ${capped(outcome.error ?? 'The task failed.')}]`;
     case 'cancelled': {
       const by = stopper(outcome.stoppedBy ?? 'agent');
+      if (outcome.why === 'never-started') {
+        return `[${head} was stopped ${by} before it started.]`;
+      }
       return outcome.steps === 0
-        ? `[${head} was stopped ${by} before it started.]`
+        ? `[${head} was stopped ${by} before its first step finished.]`
         : `[${head} was stopped ${by} after ${stepsText(outcome.steps)}.]`;
     }
     case 'interrupted':
@@ -280,7 +291,11 @@ export const createTaskSettler = (host: TaskSettleHost) => {
       await host.failCutOffTurn(row.workerSessionId, TASK_CUT_OFF_ERROR);
       worker = await host.getSession(row.workerSessionId);
     }
-    const outcome = deriveTaskOutcome(row, worker);
+    // The row read again, with nothing awaited between this and the status
+    // write: a stop a cancel recorded while this settle waited on the
+    // sessions counts, so the row never ends `interrupted` or `failed` with
+    // a stop on it, and a cancel after this write finds the row final.
+    const outcome = deriveTaskOutcome(host.tasks.get(taskId) ?? row, worker);
     if (outcome === undefined) {
       host.warn(`task ${taskId}: its worker turn is still in flight after the startup sweep failed it; left for the next start.`);
       return { kind: 'open', task: row };

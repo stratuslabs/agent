@@ -4,6 +4,7 @@ import {
   recordTurnFailure,
   RunAbortedError,
   SENDER_TRUST_METADATA_KEY,
+  turnMessageOf,
   type EventBus,
   type ObserveInput,
   type Session,
@@ -11,21 +12,42 @@ import {
 import { type DelegateBackgroundStart, TASK_ID_METADATA_KEY } from '@stratusagent/agents';
 
 import type { ShardedSessionStore } from './sessions.ts';
-import { createTaskSettler, TASK_CUT_OFF_ERROR, type TaskNotice } from './task-settle.ts';
-import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from './tasks.ts';
+import { createTaskSettler, TASK_CUT_OFF_ERROR, taskStoppedError, type TaskNotice } from './task-settle.ts';
+import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
 // Background tasks in the gateway (AGT-211, agent-plans
 // roadmap/952-background-tasks.md): `agent.delegate`'s background hook.
 // It claims the row, starts the worker on its own session chain without
 // waiting for it, and settles the task on that chain when the worker's
-// turn ends, so a stop recorded later (AGT-357) can't interleave with
-// settling. Starting tasks is off unless `tasks.enabled`. The restart sweep
+// turn ends. A cancel (`cancel`) records its stop before it aborts
+// anything, so settling reports it whatever happens next. Starting tasks is
+// off unless `tasks.enabled`. The restart sweep
 // runs either way: rows a process left before tasks were turned off still
 // get settled, and their workers failed as cut off, never left running.
 
 /** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` names it. */
 export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
+
+/** What a cancel did. */
+export type TaskCancelResult =
+  /** No such task, or not the asking agent's. */
+  | { kind: 'missing' }
+  /** It had already ended, or its worker's turn had: nothing was written or stopped. Settling reports how it ended. */
+  | { kind: 'finished'; task: TaskRow }
+  /**
+   * The stop is recorded and the task's turn is being stopped; settling
+   * reports it `cancelled`. `already` when an earlier cancel recorded it
+   * (its stopper is kept); the abort is repeated either way.
+   */
+  | { kind: 'stopping'; task: TaskRow; already?: boolean };
+
+export interface TaskCancelInput {
+  /** Who asked: `cli`, `dashboard`, `agent`, or a person's chat id. Kept on the row and named in the notice. */
+  stoppedBy: string;
+  /** Only this agent's tasks: what an agent's own tool passes. Omitted, any task (the operator's authority). */
+  agentId?: string;
+}
 
 /** What background tasks close over in `createGateway`. */
 export interface BackgroundTasksDeps {
@@ -48,6 +70,8 @@ export interface BackgroundTasksDeps {
   observe: (input: ObserveInput) => Promise<Session>;
   /** Post a fallback notice to the origin's conversation, once. Rejects when there is nowhere to post it or the channel refused. */
   postToOrigin: (notice: TaskNotice) => Promise<void>;
+  /** The gateway's `abortTurns`: aborts every turn running on a session with `reason`. */
+  abortTurns: (sessionId: string, reason: string) => number;
   isStopping: () => boolean;
   refusal: () => Error;
   log: (line: string) => void;
@@ -68,6 +92,7 @@ export const createBackgroundTasks = ({
   settleRepeat,
   observe,
   postToOrigin,
+  abortTurns,
   isStopping,
   refusal,
   log,
@@ -234,8 +259,64 @@ export const createBackgroundTasks = ({
     return { task: task.id, status: task.status };
   };
 
+  /**
+   * Cancel one task: the one function every way of stopping a task calls
+   * (the agent's tool, a person's Stop, the CLI, the control API).
+   *
+   * 1. Re-read the worker session. If its turn already reached a final
+   *    state, the task already finished: nothing is written, and settling
+   *    reports its result.
+   * 2. Record the stop on the row if it is still open. That write is durable
+   *    before anything is aborted, so settling reports `cancelled` whatever
+   *    happens next, a crash before the abort included. The one exception is
+   *    a turn that finishes on its own before the abort reaches it, which
+   *    reports its result.
+   * 3. Abort the task's own signal, which refuses a start that hasn't begun
+   *    its turn and stops one that has, then the worker session's running
+   *    turns, as a backstop.
+   *
+   * Not queued on the worker session's chain: the worker's turn holds that
+   * chain until it ends, so a cancel queued there would wait for the turn
+   * it means to stop. It needs no lock either. Settling derives the status
+   * from a fresh read of the row and writes it with nothing awaited in
+   * between, and `recordStop` writes only an open row, so a stop lands
+   * either before that write, and counts, or after it, and finds the task
+   * finished.
+   */
+  const cancel = async (taskId: string, { stoppedBy, agentId }: TaskCancelInput): Promise<TaskCancelResult> => {
+    // The row keeps '' for "no stop", so an empty stopper would read as none.
+    if (typeof stoppedBy !== 'string' || stoppedBy.trim() === '') {
+      throw new Error('A task cancel must say who asked for it (stoppedBy), like "cli" or a person\'s chat id.');
+    }
+    const row = tasks.get(taskId);
+    if (row === undefined || (agentId !== undefined && row.agentId !== agentId)) {
+      return { kind: 'missing' };
+    }
+    if (!isOpenTaskStatus(row.status)) {
+      return { kind: 'finished', task: row };
+    }
+    const worker = await store.get(row.workerSessionId);
+    if (worker !== undefined && turnMessageOf(worker) !== undefined && worker.status !== 'running' && worker.status !== 'pending_approval') {
+      return { kind: 'finished', task: tasks.get(taskId) ?? row };
+    }
+    const recorded = tasks.recordStop(taskId, stoppedBy, new Date().toISOString());
+    const current = tasks.get(taskId) ?? row;
+    if (!isOpenTaskStatus(current.status) || current.stoppedBy === undefined) {
+      // Settling wrote a final status while this read the worker session.
+      return { kind: 'finished', task: current };
+    }
+    const why = taskStoppedError(taskId, current.stoppedBy);
+    const controller = controllers.get(taskId);
+    if (controller !== undefined && !controller.signal.aborted) {
+      controller.abort(new RunAbortedError(why));
+    }
+    abortTurns(row.workerSessionId, why);
+    return { kind: 'stopping', task: current, ...(recorded ? {} : { already: true }) };
+  };
+
   return {
     start: enabled ? startTask : undefined,
+    cancel,
     summary,
     /**
      * What the last process left for settling, read before the channels

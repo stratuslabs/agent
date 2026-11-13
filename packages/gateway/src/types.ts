@@ -56,6 +56,7 @@ import type {
   RestartStatus,
   SchedulerLimits,
   ShardedSessionStore,
+  TaskCancelResult,
 } from './index.ts';
 
 /**
@@ -916,6 +917,17 @@ export interface Gateway {
    * nothing.
    */
   abortTurns(sessionId: string, reason: string): number;
+  /**
+   * Cancels a background task (AGT-211) with the operator's authority, for
+   * any agent's task: the stop is written on the task's row before anything
+   * is aborted, then the task's own signal and its worker's running turn are
+   * aborted. `finished` when the task, or its worker's turn, had already
+   * ended (nothing is written), `missing` for an unknown id. Settling
+   * reports a stopped task `cancelled` in its conversation. `stoppedBy` is
+   * who asked (`cli`, `dashboard`, or a person's chat id) and is named in
+   * that notice. Works whether or not `tasks.enabled` is on.
+   */
+  cancelTask(taskId: string, stoppedBy: string): Promise<TaskCancelResult>;
   /** Every call parked on a human right now, oldest first. */
   pendingApprovals(): PendingApproval[];
   /**

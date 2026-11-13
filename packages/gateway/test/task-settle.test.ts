@@ -207,7 +207,11 @@ test('a recorded stop makes anything but a finished worker cancelled, a start th
   const failed = finishedWorker(task, 'partial', 2);
   recordTurnFailure(failed, 'Stopped by U123.');
   assert.deepEqual(deriveTaskOutcome({ status: 'running', stoppedBy: 'U123' }, failed), { status: 'cancelled', steps: 2, stoppedBy: 'U123' });
-  assert.deepEqual(deriveTaskOutcome({ status: 'running', stoppedBy: 'cli' }, undefined), { status: 'cancelled', steps: 0, stoppedBy: 'cli' });
+  assert.deepEqual(deriveTaskOutcome({ status: 'running', stoppedBy: 'cli' }, undefined), { status: 'cancelled', steps: 0, stoppedBy: 'cli', why: 'never-started' });
+  // Started, stopped before its first response was saved: not "never started".
+  const early = session(task.workerSessionId, 'running', [message('user', 'Do the job.')]);
+  recordTurnFailure(early, 'Stopped by U123.');
+  assert.deepEqual(deriveTaskOutcome({ status: 'running', stoppedBy: 'U123' }, early), { status: 'cancelled', steps: 0, stoppedBy: 'U123' });
   const cutOff = finishedWorker(task, 'partial', 2);
   recordTurnFailure(cutOff, TASK_CUT_OFF_ERROR);
   assert.equal(deriveTaskOutcome({ status: 'running', stoppedBy: 'dashboard' }, cutOff)?.status, 'cancelled');
@@ -261,7 +265,8 @@ test('the notice says how the task ended, built from the row and the outcome alo
     '[Background task t_1 (atlas) failed after 2 steps.\nError: rate limited]',
   );
   assert.equal(taskNoticeText(row, { status: 'cancelled', steps: 5, stoppedBy: 'U123' }), '[Background task t_1 (atlas) was stopped by U123 after 5 steps.]');
-  assert.equal(taskNoticeText(row, { status: 'cancelled', steps: 0, stoppedBy: 'dashboard' }), '[Background task t_1 (atlas) was stopped from the dashboard before it started.]');
+  assert.equal(taskNoticeText(row, { status: 'cancelled', steps: 0, stoppedBy: 'dashboard', why: 'never-started' }), '[Background task t_1 (atlas) was stopped from the dashboard before it started.]');
+  assert.equal(taskNoticeText(row, { status: 'cancelled', steps: 0, stoppedBy: 'agent' }), '[Background task t_1 (atlas) was stopped by the agent before its first step finished.]');
   assert.match(taskNoticeText(row, { status: 'interrupted', steps: 0, why: 'never-started' }), /never started.*It was not run\.\]$/s);
   assert.match(taskNoticeText(row, { status: 'interrupted', steps: 4, why: 'cut-off' }), /interrupted after 4 steps: a restart cut it off, and it was not run again\.\]$/);
   assert.match(taskNoticeText(row, { status: 'interrupted', steps: 4, why: 'lost-in-restore' }), /result was lost in a restore, and it was not run again\.\]$/);
@@ -348,6 +353,23 @@ test('a stop recorded before a crash still settles cancelled at startup', async 
   assert.deepEqual(fake.cutOff, [task.workerSessionId]);
   assert.equal(tasks.get(task.id)?.status, 'cancelled');
   assert.match(fake.dispatched[0]?.text ?? '', /was stopped by U123 after 2 steps/);
+});
+
+test('a stop recorded while the startup sweep fails the worker counts: cancelled, not interrupted', async () => {
+  const { tasks, fake, task } = await setup();
+  const worker = finishedWorker(task, 'half', 2);
+  worker.status = 'running';
+  fake.sessions.set(task.workerSessionId, worker);
+  const failCutOffTurn = fake.host.failCutOffTurn;
+  fake.host.failCutOffTurn = async (id, error) => {
+    // A cancel landing while the sweep waits on the worker session.
+    tasks.recordStop(task.id, 'cli', T0);
+    await failCutOffTurn(id, error);
+  };
+  await createTaskSettler(fake.host).settle(task.id, { startup: true });
+  assert.equal(tasks.get(task.id)?.status, 'cancelled');
+  assert.equal(tasks.get(task.id)?.stoppedBy, 'cli');
+  assert.match(fake.dispatched[0]?.text ?? '', /was stopped from the CLI after 2 steps/);
 });
 
 test('a restored row that says completed over a worker caught mid-turn becomes interrupted, lost in the restore', async () => {
