@@ -46,6 +46,7 @@ import {
   loadSlackPeople,
   loadServeSlack,
   loadServeConcurrentScheduledTurns,
+  loadServeTasks,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
@@ -17178,6 +17179,70 @@ test('concurrentScheduledTurns is read from the operator\'s config only, and a b
   assert.deepEqual(await loadServeConcurrentScheduledTurns({ homeDir: home, cwd: home, processEnv: {} }, undefined, () => {}), {});
 });
 
+test('tasks is read from the operator\'s config only, and a bad one leaves background tasks off', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-tasks-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-tasks-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ tasks: { enabled: true, maxRunningPerAgent: { atlas: 5 } } }));
+  const warnings: string[] = [];
+  assert.deepEqual(
+    await loadServeTasks({ homeDir: home, cwd: home, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { enabled: true, maxRunningPerAgent: { atlas: 5 } },
+  );
+  assert.equal(warnings.length, 0, warnings.join('\n'));
+
+  // A cloned repository can neither raise the cap nor turn tasks on or off.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo', tasks: { enabled: false, maxRunningPerAgent: { atlas: 50 } } }));
+  assert.deepEqual(
+    await loadServeTasks({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { enabled: true, maxRunningPerAgent: { atlas: 5 } },
+  );
+  assert.match(warnings[0] ?? '', /ignoring tasks in .*stratus\.config\.json: a project-local config cannot decide .*Using ~\/\.stratus\/config\.json instead/);
+
+  // A value that is not one: the config file refuses it, and the daemon
+  // starts no background tasks rather than guessing what was meant.
+  warnings.length = 0;
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ tasks: { enabled: true, maxRunningPerAgent: { atlas: 0 } } }));
+  assert.deepEqual(await loadServeTasks({ homeDir: home, cwd: home, processEnv: {} }, undefined, (line) => warnings.push(line)), { enabled: false });
+  assert.match(warnings[0] ?? '', /ignoring tasks \(.*Invalid tasks\.maxRunningPerAgent\.atlas .*: 0\..*background tasks stay off/);
+
+  // No block anywhere: the gateway's defaults.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await loadServeTasks({ homeDir: home, cwd: home, processEnv: {} }, undefined, () => {}), {});
+});
+
+test('serve says whether background tasks are on, and each agent\'s cap', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-tasks-'));
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  const run = async (tasks: unknown) => {
+    await writeFile(path.join(serveHome, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', tasks }));
+    const { streams, output } = createStreams();
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 150);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--no-api'],
+      streams,
+      env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+    });
+    return { code, ...output };
+  };
+  const ran = async (tasks: unknown): Promise<string> => {
+    const { code, stdout, stderr } = await run(tasks);
+    assert.equal(code, 0, stderr);
+    return stdout;
+  };
+  assert.match(await ran({ enabled: true, maxRunningPerAgent: { atlas: 5 } }), /background tasks: on, up to 3 running per agent \(atlas 5\)/);
+  assert.match(await ran({ enabled: true }), /background tasks: on, up to 3 running per agent\n/);
+  assert.match(await ran({ enabled: false }), /background tasks: off \(tasks\.enabled is false\)/);
+  assert.doesNotMatch(await ran(undefined), /background tasks/);
+
+  // A cap that isn't one: the daemon doesn't start, and says which entry.
+  const refused = await run({ enabled: true, maxRunningPerAgent: { atlas: 0 } });
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.stderr, /Invalid tasks\.maxRunningPerAgent\.atlas/);
+  assert.doesNotMatch(refused.stdout, /stratusd ready/);
+});
+
 test('a project config that shadows the global one does not suppress the global principals policy', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-project-'));
@@ -17527,7 +17592,7 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
-    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24, agentMaxTurns: { atlas: 300 }, autoContinue: { nova: true }, concurrentScheduledTurns: { atlas: 2 } })}\n`,
+    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24, agentMaxTurns: { atlas: 300 }, autoContinue: { nova: true }, concurrentScheduledTurns: { atlas: 2 }, tasks: { enabled: true, maxRunningPerAgent: { atlas: 5 } } })}\n`,
   );
   const { streams } = createStreams();
   await runCli({
@@ -17548,6 +17613,7 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
   assert.deepEqual(config.agentMaxTurns, { atlas: 300 });
   assert.deepEqual(config.autoContinue, { nova: true });
   assert.deepEqual(config.concurrentScheduledTurns, { atlas: 2 });
+  assert.deepEqual(config.tasks, { enabled: true, maxRunningPerAgent: { atlas: 5 } });
 });
 
 test('a provider nobody registered is refused by name, with what is registered', async () => {

@@ -97,7 +97,7 @@ const until = async (what: string, check: () => Promise<boolean> | boolean, ms =
  * `noted`, or fails when `noticeTurn` is 'fails'.
  */
 const taskGateway = async (options: {
-  tasks?: { enabled?: boolean; maxRunningPerAgent?: number };
+  tasks?: { enabled?: boolean; maxRunningPerAgent?: Record<string, number> };
   noticeTurn?: 'answers' | 'fails';
   /** The fixture channel refuses posts. */
   postRefused?: boolean;
@@ -339,7 +339,7 @@ test('a task for another agent runs as that agent, and the notice names it', asy
 });
 
 test('the cap: past maxRunningPerAgent a start is refused, and the same job again is the running task', async () => {
-  const fixture = await taskGateway({ tasks: { enabled: true, maxRunningPerAgent: 1 } });
+  const fixture = await taskGateway({ tasks: { enabled: true, maxRunningPerAgent: { ava: 1 } } });
   try {
     const first = fixture.delegated(await fixture.ask('fixture:ava:C3', { to: 'ava', prompt: 'BLOCK-A', background: true }));
     assert.equal(first.ok, true, first.error);
@@ -448,11 +448,39 @@ test('taskId is the daemon\'s own key: a dispatch or an observe that supplies it
   }
 });
 
-test('tasks.maxRunningPerAgent must be a whole number of at least 1, whether or not tasks are on', () => {
-  for (const tasks of [{ maxRunningPerAgent: 0 }, { enabled: true, maxRunningPerAgent: 1.5 }, { maxRunningPerAgent: Number.NaN }]) {
+test('an agent tasks.maxRunningPerAgent doesn\'t list keeps the default of 3', async () => {
+  const fixture = await taskGateway({ tasks: { enabled: true, maxRunningPerAgent: { mia: 1 } } });
+  try {
+    const started: string[] = [];
+    for (const [conversation, prompt] of [['C5', 'BLOCK-D'], ['C6', 'BLOCK-E'], ['C7', 'BLOCK-F']] as const) {
+      const result = fixture.delegated(await fixture.ask(`fixture:ava:${conversation}`, { to: 'ava', prompt, background: true }));
+      assert.equal(result.ok, true, result.error);
+      started.push((result.output as { task: string }).task);
+    }
+    await until('three workers to start', () => fixture.blockedCount() === 3);
+    const fourth = fixture.delegated(await fixture.ask('fixture:ava:C8', { to: 'ava', prompt: 'BLOCK-G', background: true }));
+    assert.equal(fourth.ok, false);
+    assert.match(fourth.error ?? '', /already has 3 background tasks running.*tasks\.maxRunningPerAgent is 3/);
+    fixture.release();
+    for (const task of started) {
+      await fixture.settled(task);
+    }
+  } finally {
+    fixture.release();
+    await fixture.stop();
+  }
+});
+
+test('each tasks.maxRunningPerAgent entry must be a whole number of at least 1, whether or not tasks are on', () => {
+  for (const tasks of [
+    { maxRunningPerAgent: { ava: 0 } },
+    { enabled: true, maxRunningPerAgent: { ava: 1.5 } },
+    { maxRunningPerAgent: { ava: Number.NaN } },
+    { maxRunningPerAgent: 3 as unknown as Record<string, number> },
+  ]) {
     assert.throws(
       () => createGateway({ env: { homeDir: os.tmpdir(), cwd: os.tmpdir(), processEnv: {} }, tasks }),
-      /tasks\.maxRunningPerAgent must be a whole number of at least 1/,
+      /tasks\.maxRunningPerAgent/,
     );
   }
 });

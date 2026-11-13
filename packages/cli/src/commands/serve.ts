@@ -89,6 +89,7 @@ import {
   loadServeAgentMaxTurns,
   loadServeAutoContinue,
   loadServeConcurrentScheduledTurns,
+  loadServeTasks,
   loadServeMaxTurns,
 } from '../trusted-config.ts';
 
@@ -382,6 +383,7 @@ const serveHeldHome = async (
   const agentMaxTurns = await loadServeAgentMaxTurns(env, command.configPath, warn);
   const autoContinue = await loadServeAutoContinue(env, command.configPath, warn);
   const concurrentScheduledTurns = await loadServeConcurrentScheduledTurns(env, command.configPath, warn);
+  const tasks = await loadServeTasks(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -928,6 +930,7 @@ const serveHeldHome = async (
     ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
     ...(Object.keys(autoContinue).length > 0 ? { autoContinueFor: (agentId: string) => autoContinue[agentId] } : {}),
     ...(Object.keys(concurrentScheduledTurns).length > 0 ? { schedules: { maxConcurrentByAgent: concurrentScheduledTurns } } : {}),
+    tasks,
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at

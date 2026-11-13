@@ -8,6 +8,7 @@ import {
   type PrincipalsConfig,
   type PluginsConfig,
   type SlackConfig,
+  type TasksConfig,
 } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 import type { CliApprovalMode } from './parse.ts';
@@ -533,6 +534,35 @@ export const loadServeConcurrentScheduledTurns = async (
     }
   }
   return limits;
+};
+
+/**
+ * Background tasks (`tasks: { enabled, maxRunningPerAgent }`), under
+ * `concurrentScheduledTurns`'s trust rule and for its reason: a task is a
+ * turn nobody watches, spending the operator's tokens, and a clone must not
+ * decide how many of those run. The config file has already refused a bad
+ * value, so the block that comes back is the one to use. When the
+ * operator's config can't be read, tasks are off: nothing starts unattended
+ * work on a policy nobody could read.
+ */
+export const loadServeTasks = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<TasksConfig> => {
+  let block = await readTrustedConfigBlock('tasks', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring tasks in ${block.path}: a project-local config cannot decide whether agents start background tasks `
+      + 'or how many run at once. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('tasks', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring tasks (${block.error instanceof Error ? block.error.message : String(block.error)}); background tasks stay off`);
+    return { enabled: false };
+  }
+  return block.status === 'present' ? block.value : {};
 };
 
 /**
