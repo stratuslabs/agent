@@ -45,6 +45,8 @@ export interface PendingApprovalPost {
   oneShot: boolean;
   /** What `always` would grant, from the request, for the same reason. */
   always?: AlwaysMeans;
+  /** The background task whose worker asked, kept so the settled line names it too. */
+  taskId?: string;
   agentId: string;
   /** Bound at render time, so a later config change cannot widen a live request. */
   approvers: Set<string>;
