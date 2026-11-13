@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/tool-browser",
-  "version": "0.14.18",
+  "version": "0.14.19",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
