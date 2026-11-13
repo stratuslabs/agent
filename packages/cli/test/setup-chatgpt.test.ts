@@ -254,8 +254,11 @@ test('over SSH, setup prints the sign-in link and how to forward the callback po
       processEnv: { SSH_CONNECTION: '10.0.0.2 52000 10.0.0.1 22' },
       serviceRunner: stubServiceRunner,
       fetch: openai.fetch,
-      openExternal: () => {
+      // A browser here would be the wrong machine's. Still finish the
+      // sign-in from it, so a setup that opens one fails below, not by hanging.
+      openExternal: async (url) => {
         openedHere += 1;
+        await person.visit(url);
       },
       setupInput: Readable.from([PROVIDERS, CHATGPT, '1\n', SAVE]),
     },
@@ -411,6 +414,35 @@ test('after a sign-out, setup offers the saved account again and signs it back i
   assert.match(output.stdout, /Use a different ChatGPT account/);
   assert.equal(person.opened[0]?.searchParams.get('client_id'), ISSUED_CLIENT_ID);
   assert.equal((await readJson(home, 'chatgpt-sign-in.json')).session.accessToken, 'synthetic-access-1');
+});
+
+test('after a sign-out, a different ChatGPT account registers a new client and replaces the saved one', async () => {
+  const { accessToken: _a, refreshToken: _r, idToken: _i, expiresAt: _e, ...account } = signedInSession();
+  const home = await newHome({ 'chatgpt-sign-in.json': { hostId: 'urn:uuid:host-1', session: account } });
+  const openai = createFakeOpenAI({ email: 'other@example.com' });
+  const person = browser(openai);
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { DISPLAY: ':0' },
+      serviceRunner: stubServiceRunner,
+      fetch: openai.fetch,
+      openExternal: person.visit,
+      setupInput: Readable.from([PROVIDERS, CHATGPT, '2\n', SAVE]),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.equal(person.opened[0]?.searchParams.get('client_id'), DYNAMIC_CLIENT_ID);
+  assert.match(output.stdout, /✓ Signed in with ChatGPT as other@example\.com\./);
+  const saved = await readJson(home, 'chatgpt-sign-in.json');
+  assert.equal(saved.session.email, 'other@example.com');
+  assert.equal(saved.hostId, 'urn:uuid:host-1');
 });
 
 test('setup installs the ChatGPT provider package before signing in when it is missing, and stops if that fails', async () => {
