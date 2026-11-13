@@ -8,6 +8,7 @@ import {
   type EventBus,
   type ObserveInput,
   type Session,
+  type TasksStop,
 } from '@stratusagent/core';
 import {
   type DelegateBackgroundStart,
@@ -356,6 +357,37 @@ export const createBackgroundTasks = ({
   };
 
   /**
+   * A person's Stop in a conversation, for the tasks that conversation
+   * started (decision 3): each one running in this process is cancelled
+   * through `cancel`, as `stoppedBy`. `open` is counted before anything is
+   * awaited, so a channel can tell at once whether there was anything to
+   * stop. It includes a task an earlier stop reached that is still winding
+   * down, the way `abortTurns` counts a stopped turn until it ends. A row no
+   * worker here is running (one the last process left) isn't counted or
+   * stopped: the restart sweep settles it. `stopped` names the tasks whose
+   * stop this call wrote, and never rejects.
+   */
+  const stopTasks = (originSessionId: string, stoppedBy: string): TasksStop => {
+    let running: TaskRow[];
+    try {
+      running = tasks.openForOrigin(originSessionId).filter((row) => controllers.has(row.id));
+    } catch (error) {
+      warn(`background tasks: could not read the tasks ${originSessionId} started, so a stop there reached none: ${reason(error)}`);
+      return { open: 0, stopped: Promise.resolve([]) };
+    }
+    const stopped = Promise.all(running.map(async (row) => {
+      try {
+        const result = await cancel(row.id, { stoppedBy });
+        return result.kind === 'stopping' && result.already !== true ? row.id : undefined;
+      } catch (error) {
+        warn(`task ${row.id}: the stop from ${stoppedBy} could not be recorded, so it keeps running: ${reason(error)}`);
+        return undefined;
+      }
+    })).then((ids) => ids.filter((id): id is string => id !== undefined));
+    return { open: running.length, stopped };
+  };
+
+  /**
    * What `agent.tasks` and `agent.cancelTask` reach, scoped to the calling
    * agent. A listed task's status is read live from its worker session
    * (`liveTaskStatus`): the row learns a parked worker or a finished turn
@@ -394,6 +426,7 @@ export const createBackgroundTasks = ({
   return {
     start: enabled ? startTask : undefined,
     cancel,
+    stopTasks,
     /** The agent's task tools' host; offered only while tasks are on. */
     toolsHost: enabled ? toolsHost : undefined,
     summary,

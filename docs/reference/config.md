@@ -295,8 +295,11 @@ outcome is added to the conversation that started it, once, when it ends.
 - **Restarts.** A stop or restart doesn't wait for a running task: it cuts
   it off, and the next start reports it interrupted in its conversation.
   It is never run again.
-- **Stop.** Stopping a conversation doesn't reach the tasks it started
-  yet; a restart is the way to end one early.
+- **Stop.** An approver's `stop` in a Slack conversation also stops the
+  tasks that conversation started, and a line there names them
+  ([stopping a turn](../guides/slack.md#stopping-a-turn)). Each task's
+  outcome then arrives as cancelled. An agent stops its own with
+  `agent.cancelTask`.
 - **Off.** `enabled: false`, or no `tasks` block, refuses `background: true`
   with an error saying so. Tasks a previous run left are still settled at
   startup.

@@ -84,6 +84,22 @@ test('background: true hands the start to the host and returns the task id at on
   });
 });
 
+test('a turn already stopped starts no task, so a Stop that lands while the call is on its way misses nothing', async () => {
+  // AGT-357: a Stop reaches the tasks a conversation started by reading
+  // them when it lands. A start checked here, with nothing awaited before
+  // the host writes its row, is either refused or already there to stop.
+  const { starts, background } = recordingHost();
+  const tool = createDelegateTool({ registry: registry(), dispatch: refuseForeground, background });
+  const stopped = new AbortController();
+  stopped.abort(new Error('Stopped from Slack by U1'));
+
+  await assert.rejects(
+    tool.execute({ agent: 'Blair', prompt: 'get #512 merged', background: true }, sessionOf(ATLAS), { signal: stopped.signal }),
+    /Stopped from Slack by U1/,
+  );
+  assert.equal(starts.length, 0);
+});
+
 test('a background task may be the caller itself, without listing itself in delegates', async () => {
   const { starts, background } = recordingHost();
   const tool = createDelegateTool({ registry: registry(), dispatch: refuseForeground, background });

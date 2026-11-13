@@ -266,6 +266,19 @@ export class SqliteTaskStore {
   }
 
   /**
+   * The tasks one conversation started that are still open, oldest first:
+   * what a person's Stop there reaches (AGT-357). Bounded by the agent's cap.
+   */
+  openForOrigin(originSessionId: string): TaskRow[] {
+    return (this.db
+      .prepare(`
+        SELECT * FROM tasks WHERE origin_session_id = ? AND status IN (${OPEN_SQL})
+        ORDER BY created_at ASC, rowid ASC
+      `)
+      .all(originSessionId) as unknown as TaskRowRaw[]).map(taskFrom);
+  }
+
+  /**
    * Write the status settling derived from the worker session. True when the
    * row changed. A final row may move to another final status (a restore can
    * show a worker the row called completed was cut off), but never back to

@@ -19,6 +19,7 @@ import type {
   JsonObject,
   ObserveEntry,
   Session,
+  TasksStop,
   Tool,
   ToolCall,
   ToolRisk,
@@ -928,6 +929,14 @@ export interface Gateway {
    * that notice. Works whether or not `tasks.enabled` is on.
    */
   cancelTask(taskId: string, stoppedBy: string): Promise<TaskCancelResult>;
+  /**
+   * A person's Stop in a conversation, for the background tasks it started
+   * (AGT-357): cancels each one running in this process through
+   * `cancelTask`, as `stoppedBy`. `open` says at once how many there were;
+   * `stopped` names the ones this call stopped. See `TasksStop` in
+   * `@stratusagent/core`.
+   */
+  stopTasks(sessionId: string, stoppedBy: string): TasksStop;
   /** Every call parked on a human right now, oldest first. */
   pendingApprovals(): PendingApproval[];
   /**

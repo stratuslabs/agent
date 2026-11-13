@@ -814,6 +814,7 @@ export {
   type OutboundMessageRef,
   type SenderPolicy,
   type SessionRouting,
+  type TasksStop,
 } from './channels.ts';
 
 // The memory contract, its in-memory store and the memory block's
