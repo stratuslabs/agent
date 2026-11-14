@@ -7605,7 +7605,7 @@ test('the launchd plist runs the daemon by absolute path and starts at login', a
   // refused with "service already loaded" and the new unit never takes
   // effect. Then it asks whether the daemon is actually running before
   // saying so.
-  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
+  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print', 'launchctl print']);
   assert.equal(calls[2]?.args[1], 'gui/501');
   // The login-vs-power-on distinction is stated, not left to be discovered
   // after a reboot leaves the roster silent.
@@ -7680,6 +7680,8 @@ test('the systemd unit restarts on failure and enables at login', async () => {
     'systemctl --user daemon-reload',
     'systemctl --user enable --now stratusd.service',
     'systemctl --user restart stratusd.service',
+    'systemctl --user is-active stratusd.service',
+    // Asked again once the daemon has published its address.
     'systemctl --user is-active stratusd.service',
   ]);
 });
@@ -7871,7 +7873,7 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
     }),
   });
   assert.equal(replaced.ok, true);
-  assert.deepEqual(loadedHere, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
+  assert.deepEqual(loadedHere, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print', 'launchctl print']);
 
   const fresh = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const nothingLoaded: string[] = [];
@@ -7891,7 +7893,7 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
     }),
   });
   assert.equal(installed.ok, true);
-  assert.deepEqual(nothingLoaded, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
+  assert.deepEqual(nothingLoaded, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print', 'launchctl print']);
 });
 
 test('setup enables a plugin and writes the setting it is useless without', async () => {
@@ -9933,6 +9935,8 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
     'systemctl --user disable stratusd.service',
     'systemctl --user start stratusd.service',
     'systemctl --user restart stratusd.service',
+    'systemctl --user is-active stratusd.service',
+    // Asked again once the daemon has published its address.
     'systemctl --user is-active stratusd.service',
   ]);
 });

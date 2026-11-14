@@ -118,6 +118,24 @@ test('service start reports started as soon as the new daemon publishes its addr
   assert.equal(slept.length, 0, 'nothing left to wait for');
 });
 
+test('service start does not take a published address from a daemon that died after publishing it', async () => {
+  // gateway.json outlives a crash in a later startup step (a channel, the
+  // scheduler), so the manager is asked again after the file is seen.
+  const home = await installedHome();
+  const result = await startService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    sleep: async () => {},
+    run: launchd('kickstart', [running, exited], async () => {
+      await writeFile(gatewayInfoOf(home), JSON.stringify({ url: 'http://127.0.0.1:7777', pid: 4242, startedAt: new Date().toISOString() }));
+    }),
+  });
+
+  assert.equal(result.running, false);
+  assert.match(result.messages.join('\n'), /launchd started stratusd, but it exited during startup/);
+});
+
 test('service start keeps watching a daemon that has not published an address, and calls it started if it stays up', async () => {
   // A daemon with no control API never writes gateway.json, and the file a
   // dead one left behind says nothing about this start.

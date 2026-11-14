@@ -535,12 +535,18 @@ const confirmStarted = async (env: ServiceEnvironment, platform: ServicePlatform
   }
   const sleep = env.sleep ?? defaultSleep;
   for (let check = 0; check < SETTLE_CHECKS; check += 1) {
-    if (await publishedSince(env, mark)) {
-      return confirmed;
+    // The file outlives a daemon that published it and then died in a
+    // later startup step, so publication is taken only with a "running"
+    // asked after it was seen.
+    const published = await publishedSince(env, mark);
+    if (!published) {
+      await sleep(START_CHECK_INTERVAL_MS);
     }
-    await sleep(START_CHECK_INTERVAL_MS);
     const answer = await askRunning(env, platform);
     if (answer.running === true) {
+      if (published) {
+        return answer;
+      }
       continue;
     }
     if (answer.running === undefined && !answer.transitional) {
