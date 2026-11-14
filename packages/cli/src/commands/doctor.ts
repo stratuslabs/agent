@@ -39,7 +39,7 @@ import {
   probeProviderModel,
   withoutTrailingSlashes,
 } from '@stratusagent/state';
-import { readServiceCommand } from '../service.ts';
+import { homebrewNodeLink, readServiceCommand } from '../service.ts';
 import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
 import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
@@ -893,6 +893,22 @@ export const collectDoctorReport = async (
       `The service unit points at a node interpreter that no longer exists (${unitCommand.execPath}), so stratusd cannot start. `
       + 'Run `stratus update` (or `stratus service install`) to rewrite it with current paths.',
     );
+  } else if (unitCommand?.execPath !== undefined) {
+    // The same failure before it happens: a unit written before install
+    // named Homebrew's stable link still pins the versioned keg, and a
+    // `brew upgrade` plus cleanup takes that interpreter away.
+    const brew = await homebrewNodeLink(unitCommand.execPath);
+    if (brew?.current) {
+      problems.push(
+        `The service unit pins node to a versioned Homebrew path (${unitCommand.execPath}). The next \`brew upgrade\` of node replaces it and \`brew cleanup\` deletes it, which stops stratusd. `
+        + `Run \`stratus update\` (or \`stratus service install\`) to rewrite it with ${brew.link}.`,
+      );
+    } else if (brew !== undefined) {
+      problems.push(
+        `The service unit runs a Homebrew node that is no longer linked (${unitCommand.execPath}; ${brew.link} now points at another version). It may already fail to load the upgraded libraries, and \`brew cleanup\` deletes it, which stops stratusd. `
+        + 'Run `stratus update` (or `stratus service install`) to rewrite it with current paths.',
+      );
+    }
   }
   if (unitCommand?.scriptPath !== undefined && !(await pathExists(unitCommand.scriptPath))) {
     problems.push(

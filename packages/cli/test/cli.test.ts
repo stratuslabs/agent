@@ -78,6 +78,7 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
+import { stableNodePath } from '../src/service.ts';
 import {
   agentMemoryFilePath,
   agentMemoryPassesFileIn,
@@ -10056,7 +10057,8 @@ test('service install writes the PATH of the shell it was run from into the syst
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
   const line = /^Environment=(.*)$/m.exec(unit)?.[1];
   // Quoted, and `%` doubled so systemd does not read it as a specifier.
-  assert.equal(line, JSON.stringify(`PATH=${path.dirname(process.execPath)}:/home/ava/.local/bin:/home/ava/100%%/bin:/usr/bin`));
+  // Node's directory as the unit names it: Homebrew's stable link where there is one.
+  assert.equal(line, JSON.stringify(`PATH=${path.dirname(await stableNodePath(process.execPath))}:/home/ava/.local/bin:/home/ava/100%%/bin:/usr/bin`));
   const command = await readServiceCommand({ platform: 'linux', homeDir: home });
   assert.equal(command?.argv.at(-2), 'serve');
 });

@@ -230,6 +230,43 @@ const servicePathEntry = (env: ServiceEnvironment): { path?: string } => {
   return daemonPath !== undefined ? { path: daemonPath } : {};
 };
 
+/**
+ * For a node binary inside a Homebrew keg (`<prefix>/Cellar/<formula>/<version>/bin/node`),
+ * the formula's stable link (`<prefix>/opt/<formula>/bin/node`), and
+ * whether that link still resolves to this same binary. undefined for a
+ * node anywhere else, or one whose formula has no link.
+ *
+ * Node reports its own path with symlinks resolved, so on a Homebrew Mac
+ * `process.execPath` is the versioned keg. A unit naming it breaks on the
+ * next `brew upgrade`: the old binary can no longer load the upgraded
+ * libraries, and `brew cleanup` deletes it. The opt link is the path brew
+ * keeps pointing at whichever version is installed.
+ */
+export const homebrewNodeLink = async (execPath: string): Promise<{ link: string; current: boolean } | undefined> => {
+  const keg = /^(.+)\/Cellar\/([^/]+)\/[^/]+\/bin\/node$/.exec(execPath);
+  if (!keg?.[1] || !keg[2]) {
+    return undefined;
+  }
+  const link = path.join(keg[1], 'opt', keg[2], 'bin', 'node');
+  let linked: string;
+  try {
+    linked = await realpath(link);
+  } catch {
+    return undefined;
+  }
+  const current = await realpath(execPath).then((own) => own === linked, () => false);
+  return { link, current };
+};
+
+/**
+ * The node path a unit should name for this interpreter: Homebrew's stable
+ * link when it resolves to the same binary, else the path as given.
+ */
+export const stableNodePath = async (execPath: string): Promise<string> => {
+  const brew = await homebrewNodeLink(execPath);
+  return brew?.current ? brew.link : execPath;
+};
+
 export const serviceDefinition = (
   env: ServiceEnvironment,
   runAtLogin: boolean,
@@ -678,7 +715,10 @@ export const installService = async (
   }
   const runAtLogin = options.runAtLogin ?? true;
   const unitPath = serviceUnitPath(env);
-  const definition = serviceDefinition(env, runAtLogin, options.configPath);
+  // The interpreter by the path that survives its upgrades, where there is
+  // one; the daemon's PATH is built from the same value.
+  const execPath = await stableNodePath(env.execPath ?? process.execPath);
+  const definition = serviceDefinition({ ...env, execPath }, runAtLogin, options.configPath);
   await mkdir(path.dirname(unitPath), { recursive: true });
   await mkdir(definition.logDir, { recursive: true, mode: 0o700 });
   await writeFile(

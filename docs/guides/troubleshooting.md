@@ -127,7 +127,10 @@ a problem.
   the service unit.
 - **The agents stopped answering after a node upgrade** — the service unit
   points at an interpreter that no longer exists. `stratus update` repairs
-  it; [Updating](./updating.md) explains why.
+  it; [Updating](./updating.md) explains why. With Homebrew's node this
+  happens on `brew upgrade` itself (the old version can no longer load the
+  upgraded libraries, and `brew cleanup` deletes it); a unit rewritten by
+  0.14.20 or later names the stable link and survives it.
 - **Slack replies arrive full of `**` and `##`, or some other companion
   behaves like an older build** — the optional packages are global installs
   of their own, so one can lag the CLI loading it. `stratus update --check`

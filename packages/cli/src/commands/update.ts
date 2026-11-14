@@ -20,6 +20,7 @@ import {
   readServiceCommand,
   readServiceStatus,
   serviceUnitPath,
+  stableNodePath,
   startService,
   stopService,
   type ServiceActionResult,
@@ -231,10 +232,14 @@ const runUpdateSteps = async (
   const unit = status?.installed ? await readServiceCommand(serviceEnv) : undefined;
   const unitNotes: string[] = [];
   if (status?.installed && unit?.execPath !== undefined) {
+    // Held to the path a rewrite would write, not process.execPath: on a
+    // Homebrew node that is the stable opt link, and the raw keg path would
+    // call every unit this same node just installed a mismatch.
+    const shellNode = await stableNodePath(process.execPath);
     if (!(await pathExists(unit.execPath))) {
       unitNotes.push(`the unit's interpreter no longer exists: ${unit.execPath} — stratusd cannot start until the unit is rewritten`);
-    } else if (unit.execPath !== process.execPath) {
-      unitNotes.push(`the unit runs ${unit.execPath}; this shell runs ${process.execPath}`);
+    } else if (unit.execPath !== shellNode) {
+      unitNotes.push(`the unit runs ${unit.execPath}; this shell runs ${shellNode}`);
     }
     if (unit.scriptPath !== undefined && !(await pathExists(unit.scriptPath))) {
       unitNotes.push(`the unit's entrypoint no longer exists: ${unit.scriptPath}`);
