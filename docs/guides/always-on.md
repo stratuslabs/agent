@@ -35,9 +35,15 @@ stratus service uninstall
 
 `install` and `start` ask the service manager afterwards whether the daemon
 is actually running, for up to about ten seconds, and say so only when it
-is. Otherwise they print the manager's reason and the log path, and exit
-non-zero: launchd can load a LaunchAgent without ever starting it, and
-systemd calls a unit started the moment it forks. `status` explains a
+is. Then they keep asking for about five more seconds, and a daemon that
+dies in that time counts as a failed start: a dyld error, a native module
+built for another Node, or a channel or the scheduler failing to start.
+Either way they print the manager's reason, the end of what the daemon
+wrote since the start (`~/.stratus/logs/stratusd.err.log` on macOS, the
+journal on Linux) and the log path, and exit non-zero: launchd can load a
+LaunchAgent without ever starting it, reports a job running the moment it
+spawns, and systemd calls a unit started the moment it forks.
+`status` explains a
 loaded LaunchAgent that is not running: `runs = 0` means launchd has not
 started it since it was loaded (seen after a reboot), and a last exit code
 points at `~/.stratus/logs/stratusd.err.log`.

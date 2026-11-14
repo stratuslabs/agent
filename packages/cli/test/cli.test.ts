@@ -118,6 +118,14 @@ const stubServiceRunner = async (command: string, args: string[]) => ({
   stderr: '',
 });
 
+// The pause between a manager's answers, skipped: after the manager says
+// running, install and start keep asking for about five seconds (AGT-363).
+const noServiceWait = async (): Promise<void> => {};
+
+// The status asks after a start: the one that said running, then ten more
+// over the startup watch.
+const afterStart = (ask: string): string[] => Array.from({ length: 11 }, () => ask);
+
 const createStreams = () => {
   let stdout = '';
   let stderr = '';
@@ -2306,7 +2314,7 @@ test('setup signs into Claude with a pasted API key, verifies it, and saves cred
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '9\n']),
       fetch: (async (url: any, init?: any) => {
         const headers: Record<string, string> = {};
@@ -2350,7 +2358,7 @@ test('setup reads the saved settings back and does not call a run that cannot st
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { STRATUS_SOUL: missingSoul },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '9\n']),
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
     },
@@ -2376,7 +2384,7 @@ test('setup reads the settings back before calling an environment key ready', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'env-key', STRATUS_SOUL: missingSoul },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: () => true,
       setupInput: Readable.from(['9\n']),
     },
@@ -2399,7 +2407,7 @@ test('setup stores a Claude subscription setup token', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '9\n']),
     },
   });
@@ -2424,7 +2432,7 @@ test('setup refuses a rejected API key and saves nothing', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '1\n', '2\n', 'bad-key\n', '9\n']),
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
     },
@@ -2447,7 +2455,7 @@ test('setup creates an agent whose soul lives in ~/.stratus/agents', async () =>
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '9\n']),
     },
   });
@@ -2490,7 +2498,7 @@ test('setup demo path can test run inline before saving', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '4\n', '8\n', '9\n']),
     },
   });
@@ -2533,7 +2541,7 @@ test('setup test run writes in the language the saved config would run in', asyn
       homeDir: home,
       processEnv: { OPENAI_API_KEY: 'sk-test' },
       fetch: fetchImpl,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['8\n', '9\n']),
     },
   });
@@ -2579,7 +2587,7 @@ test('setup test run carries the soul effort the saved config would run at (Code
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'test-key' },
       fetch: fetchImpl,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['8\n', '9\n']),
     },
   });
@@ -2599,7 +2607,7 @@ test('setup warns when exported env vars override the saved config', async () =>
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { STRATUS_PROVIDER: 'openai' },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
@@ -2622,7 +2630,7 @@ test('setup still reads the settings back when an exported variable is overridde
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { STRATUS_PROVIDER: 'openai', STRATUS_SOUL: missingSoul },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
@@ -2664,7 +2672,7 @@ test('setup offers the Slack package its own choices imply, and nothing for the 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Nothing optional is installed on this machine.
       packageResolver: () => false,
       packageInstaller: async (packages: string[]) => {
@@ -2699,7 +2707,7 @@ test('setup never offers the dashboard, and still points at the command that doe
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Nothing optional is installed on this machine, and no Slack tokens
       // are stored: setup has nothing of its own to offer.
       packageResolver: () => false,
@@ -2736,7 +2744,7 @@ test('a Slack package setup could not install is reported, and setup still saves
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: () => false,
       packageInstaller: async () => ({ ok: false, message: 'npm exited with code 243' }),
       // Save & finish, then accept the one offer.
@@ -2768,6 +2776,7 @@ test('setup exits non-zero when the always-on install it ran failed', async () =
         processEnv: {},
         serviceSystemdBooted: true,
         serviceRunner,
+        serviceSleep: noServiceWait,
         packageResolver: () => true,
         // Save & finish.
         setupInput: Readable.from(['9\n']),
@@ -2802,7 +2811,7 @@ test('setup skips the offer for packages that are already installed', async () =
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: () => true,
       packageInstaller: async () => {
         throw new Error('nothing was missing, so nothing should have been installed');
@@ -2832,7 +2841,7 @@ test('declining the offer prints the command instead of running it', async () =>
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: () => false,
       packageInstaller: async () => {
         throw new Error('the offer was declined, so npm should not have run');
@@ -2864,7 +2873,7 @@ test('a failed Slack package install names the same pinned command to run by han
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: () => false,
       packageInstaller: async () => ({ ok: false, message: 'EACCES' }),
       // Save & finish, then "Install it now".
@@ -2892,7 +2901,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       cwd: tempDir,
       homeDir: home,
       processEnv: { STRATUS_CONFIG: envConfigPath },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['9\n']),
     },
   });
@@ -2908,7 +2917,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       cwd: tempDir,
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
@@ -2950,7 +2959,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
       cwd: tempDir,
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['9\n']),
     },
   });
@@ -3036,7 +3045,7 @@ test('setup Models menu picks default and fallback from live available models', 
       homeDir: home,
       processEnv: {},
       fetch: routedFetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',      // Providers → Claude → API key
         '1\n', '2\n', 'https://local.test/v1\n', 'sk-openai-key\n', // Providers → OpenAI → custom base URL → key
@@ -3170,7 +3179,7 @@ test('switching the default provider clears settings chosen for the old one', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '9\n']),
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
     },
@@ -3206,7 +3215,7 @@ test('creating an agent never claims an id another soul already declares', async
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '9\n']),
     },
   });
@@ -3249,7 +3258,7 @@ test('creating an agent never claims the configured soul\'s id', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '9\n']),
     },
   });
@@ -3288,7 +3297,7 @@ test('a broken configured soul does not discard the roster\'s claims', async () 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '9\n']),
     },
   });
@@ -3313,7 +3322,7 @@ test('creating an agent never claims the reserved built-in id', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['3\n', '1\n', 'Stratus\n', 'Be kind and brief.\n', '9\n']),
     },
   });
@@ -3351,7 +3360,7 @@ Be warm.
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
@@ -3370,7 +3379,7 @@ test('setup saves a key when the endpoint has no /models to verify against', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '9\n']),
       fetch: (async () => new Response('not found', { status: 404 })) as typeof fetch,
     },
@@ -3404,7 +3413,7 @@ test('the inline test run uses the same env-over-stored key precedence as real r
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'env-key' },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['8\n', '9\n']),
       fetch: (async (_url: any, init?: any) => {
         const headers: Record<string, string> = {};
@@ -3447,7 +3456,7 @@ test('a typed model id resolves to the provider that lists it', async () => {
         }
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',
         '1\n', '2\n', '\n', 'sk-openai-key\n',
@@ -3551,7 +3560,7 @@ Be warm.
       fetch: (async () => new Response(JSON.stringify({
         data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }],
       }), { status: 200 })) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['2\n', '1\n', '2\n', '9\n']),
     },
   });
@@ -3590,7 +3599,7 @@ test('model discovery uses the same credential a real run would use', async () =
         }
         return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
@@ -3669,7 +3678,7 @@ test('a secondary openai sign-in keeps its endpoint with the credential', async 
         }
         return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',
         '1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n',
@@ -3769,7 +3778,7 @@ test('signing into a second provider keeps a STRATUS_API_KEY-powered default', a
       // into openai must not steal the default.
       processEnv: { STRATUS_API_KEY: 'generic-key' },
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '9\n']),
     },
   });
@@ -3808,7 +3817,7 @@ test('the inline test run fails over on the configured fallback', async () => {
           choices: [{ message: { content: 'Fallback says hello.' } }],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['8\n', '9\n']),
     },
   });
@@ -3833,7 +3842,7 @@ test('setup warns when a project config shadows the global file it wrote', async
       cwd: project,
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
@@ -3880,7 +3889,7 @@ test('model discovery keeps a bound stored key on its own endpoint', async () =>
         });
         return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
@@ -3920,7 +3929,7 @@ test('discovery never sends the generic STRATUS_API_KEY to a secondary provider'
         byHost.openai = headers.authorization;
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
@@ -4005,7 +4014,7 @@ test('anthropic discovery, fallback, and save all honor a configured endpoint', 
         listUrls.push(String(url));
         return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
@@ -4052,7 +4061,7 @@ test('the model picker hides non-chat models and leads with chat ones', async ()
         ],
       }), { status: 200 })) as typeof fetch,
       // Accept the advertised default (empty answer picks entry #1).
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['2\n', '1\n', '\n', '9\n']),
     },
   });
@@ -4097,7 +4106,7 @@ test('the inline test run keeps a bound stored key on its own endpoint', async (
         }
         return new Response(JSON.stringify({ data: [] }), { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['8\n', '9\n']),
     },
   });
@@ -4128,7 +4137,7 @@ test('anthropic keys bind to the endpoint they were verified against', async () 
         verifyUrls.push(String(url));
         return new Response('{}', { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-proxy\n', '9\n']),
     },
   });
@@ -4176,7 +4185,7 @@ test('an anthropic key verified against the official endpoint with trailing slas
       homeDir: home,
       processEnv: {},
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-official\n', '9\n']),
     },
   });
@@ -4207,7 +4216,7 @@ test('the inline test run honors the STRATUS_API_KEY_ENV selector', async () => 
       // The selector redirects the effective key to MY_KEY, exactly as a
       // real run would resolve it.
       processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', MY_KEY: 'selector-key' },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['8\n', '9\n']),
       fetch: (async (_url: any, init?: any) => {
         const headers: Record<string, string> = {};
@@ -4256,7 +4265,7 @@ test('a rejected replacement sign-in leaves the previous endpoint untouched', as
       processEnv: {},
       // The replacement key for the new endpoint is rejected.
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '9\n']),
     },
   });
@@ -4297,7 +4306,7 @@ test('discovery honors a secondary anthropic credential bound endpoint', async (
         }
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
@@ -4636,7 +4645,7 @@ test('setup re-asks for a malformed member ID and warns when nobody is listed', 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Ava → tokens → a display name (refused) → Enter (skip) → Back → Save & finish
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', 'dylan\n', '\n', '3\n', '9\n']),
       fetch: slackOkFetch,
@@ -4666,7 +4675,7 @@ test('setup treats a separators-only answer as no answer, and names the agent\'s
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', ', ,\n', '3\n', '9\n']),
       fetch: slackOkFetch,
     },
@@ -4694,7 +4703,7 @@ test('setup leaves an existing principals list alone when connecting another age
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // No agent on Slack confirms which workspace U0OPS is in, so Ava is
       // asked (Codex P2 4310305742); Enter keeps the inherited list.
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
@@ -4734,7 +4743,7 @@ const connectAvaBesideBea = async (beaTeam: string, answers: string[]) => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '3\n', '9\n']),
       fetch: slackTeamsFetch(beaTeam),
     },
@@ -4771,7 +4780,7 @@ test('setup keeps a first list to the agent when another Slack agent is in a dif
         cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
         homeDir: home,
         processEnv: {},
-        serviceRunner: stubServiceRunner,
+        serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
         setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', 'U0AVA\n', '3\n', '9\n']),
         fetch: slackTeamsFetch(beaTeam),
       },
@@ -4806,7 +4815,7 @@ const reconnectAva = async (oldTeam: string, answers: string[]) => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Ava → Replace the tokens → new tokens → answers → Back → Save & finish
       setupInput: Readable.from(['5\n', '2\n', '1\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '3\n', '9\n']),
       fetch: fetchImpl,
@@ -4950,7 +4959,7 @@ test('setup asks for nobody when the agent already admits anyone', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
       fetch: slackOkFetch,
     },
@@ -4981,7 +4990,7 @@ test('setup connects an agent to Slack without touching any file by hand', async
       processEnv: {},
       // Channels → Ava (2; the built-in Stratus agent is 1) → paste both
       // tokens → Back → Save & finish
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0DYLAN\n', '3\n', '9\n']),
       fetch: (async (url: any, init?: any) => {
         slackCalls.push({
@@ -5044,7 +5053,7 @@ test('setup keeps a later agent\'s Slack list to that agent when another agent h
       homeDir: home,
       processEnv: {},
       // Channels → Bea (3) → paste both tokens → member ID → Back → Save & finish
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '3\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0BEA\n', '4\n', '9\n']),
       fetch: (async (url: any) => {
         if (String(url).endsWith('/auth.test')) {
@@ -5075,7 +5084,7 @@ test('setup refuses to store Slack tokens the API rejects', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-bad\n', '3\n', '9\n']),
       // Slack answers 200 with ok:false for a bad token.
       fetch: (async () => new Response(JSON.stringify({ ok: false, error: 'invalid_auth' }), { status: 200 })) as typeof fetch,
@@ -5103,7 +5112,7 @@ test('setup rejects malformed Slack tokens before calling the API', async () => 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', 'xoxb-wrong-kind\n', '3\n', '9\n']),
       fetch: (async () => { called += 1; return new Response('{}', { status: 200 }); }) as typeof fetch,
     },
@@ -5136,7 +5145,7 @@ test('setup disconnects an agent from Slack', async () => {
       homeDir: home,
       processEnv: {},
       // Channels → Ava (connected) → Disconnect → Back → Save & finish
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', '2\n', '3\n', '9\n']),
     },
   });
@@ -5173,7 +5182,7 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → fixture → Stratus → Store secrets → "token" → value →
       // Back → Back → Save & finish
       setupInput: Readable.from(['5\n', '2\n', '1\n', '1\n', 'token\n', 'fixture-token-1\n', '3\n', '3\n', '9\n']),
@@ -5218,7 +5227,7 @@ test('setup ends with the serve line for plugin channel secrets it leaves stored
         processEnv: {},
         servicePlatform: 'linux',
         serviceSystemdBooted: false,
-        serviceRunner: stubServiceRunner,
+        serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
         setupInput: Readable.from(input.map((line) => `${line}\n`)),
       },
     });
@@ -5265,7 +5274,7 @@ test('setup counts an agent bound by any plugin carrying the channel kind, not o
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → fixture → Back → Back → Save & finish
       setupInput: Readable.from(['5\n', '2\n', '3\n', '3\n', '9\n']),
     },
@@ -5287,7 +5296,7 @@ test('setup with no channel plugin opens Slack\'s channel menu directly, as it a
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Back → Save & finish
       setupInput: Readable.from(['5\n', '2\n', '9\n']),
     },
@@ -5328,7 +5337,7 @@ test('the Channels menu offers a default soul that lives outside the roster', as
       homeDir: home,
       processEnv: {},
       // Channels → Nova → tokens → Back → Save & finish
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
@@ -5366,7 +5375,7 @@ test('a configured soul outranks a same-id roster file in the Channels menu', as
       cwd: project,
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '3\n', '9\n']),
     },
   });
@@ -5392,7 +5401,7 @@ test('setup suggests serve with the same --config it was run with', async () => 
       homeDir: home,
       processEnv: {},
       serviceSystemdBooted: true,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
@@ -5426,7 +5435,7 @@ test('setup ends by saying how to bring Slack online when nothing will run strat
       cwd: project,
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Ava → tokens → no member ID → Back → Always on → "Do not run it for me" → Save.
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '7\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
@@ -5465,7 +5474,7 @@ test('setup on Linux without systemd ends by saying how to bring Slack online', 
       processEnv: {},
       servicePlatform: 'linux',
       serviceSystemdBooted: false,
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Ava → tokens → no member ID → Back → Save.
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
@@ -5497,7 +5506,7 @@ test('setup reloads a running daemon once the channel secrets are written, and s
       cwd: project,
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
       fetch: (async (url: any) => {
         if (String(url).endsWith('/api/v1/roster/reload')) {
@@ -5538,7 +5547,7 @@ test('the Channels menu refuses a roster with a duplicate id instead of picking 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '3\n', '9\n']),
     },
   });
@@ -5573,7 +5582,7 @@ test('the Channels menu follows STRATUS_SOUL over the configured soul', async ()
       homeDir: home,
       // `stratus serve` would resolve this soul, not the configured one.
       processEnv: { STRATUS_SOUL: overridden },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '3\n', '9\n']),
     },
   });
@@ -7474,7 +7483,7 @@ test('the Channels menu connects the built-in agent on a fresh install', async (
       // dispatches as the built-in Stratus agent, so it has to be
       // connectable here — otherwise Slack is unreachable until you
       // create an agent you may not want.
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '2\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
@@ -7508,7 +7517,7 @@ test('a roster file claiming the built-in id is skipped in the Channels menu', a
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', '9\n']),
     },
   });
@@ -7543,7 +7552,7 @@ test('the Channels menu can clear orphaned tokens with no soul files present', a
       homeDir: home,
       processEnv: {},
       // Channels → the orphan (2, after the built-in) → Remove → Back → Save
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', '1\n', '3\n', '9\n']),
     },
   });
@@ -7565,6 +7574,7 @@ test('the launchd plist runs the daemon by absolute path and starts at login', a
     scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
     uid: 501,
     run: async (command, args) => { calls.push({ command, args }); return stubServiceRunner(command, args); },
+    sleep: noServiceWait,
   });
 
   assert.equal(result.ok, true);
@@ -7583,7 +7593,7 @@ test('the launchd plist runs the daemon by absolute path and starts at login', a
   // refused with "service already loaded" and the new unit never takes
   // effect. Then it asks whether the daemon is actually running before
   // saying so.
-  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
+  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', ...afterStart('launchctl print')]);
   assert.equal(calls[2]?.args[1], 'gui/501');
   // The login-vs-power-on distinction is stated, not left to be discovered
   // after a reboot leaves the roster silent.
@@ -7638,6 +7648,7 @@ test('the systemd unit restarts on failure and enables at login', async () => {
     execPath: '/usr/bin/node',
     scriptPath: '/usr/lib/node_modules/@stratusagent/cli/dist/bin.js',
     run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+    sleep: noServiceWait,
   });
 
   assert.equal(result.ok, true);
@@ -7658,7 +7669,7 @@ test('the systemd unit restarts on failure and enables at login', async () => {
     'systemctl --user daemon-reload',
     'systemctl --user enable --now stratusd.service',
     'systemctl --user restart stratusd.service',
-    'systemctl --user is-active stratusd.service',
+    ...afterStart('systemctl --user is-active stratusd.service'),
   ]);
 });
 
@@ -7674,7 +7685,7 @@ test('Linux without systemd running has no service manager: nothing is written o
     platform: 'linux',
     systemdBooted: false,
     homeDir: home,
-    run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+    run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }, sleep: noServiceWait,
   });
 
   assert.equal(result.ok, false);
@@ -7697,7 +7708,7 @@ test('setup on Linux without systemd saves cleanly and leaves starting stratusd 
       processEnv: {},
       servicePlatform: 'linux',
       serviceSystemdBooted: false,
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }, serviceSleep: noServiceWait,
       // Providers > Demo, then Save & finish with Always on left at its default.
       setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
@@ -7713,7 +7724,7 @@ test('setup on Linux without systemd saves cleanly and leaves starting stratusd 
   assert.equal(await runCli({
     argv: ['service', 'status'],
     streams: status.streams,
-    env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceSystemdBooted: false, serviceRunner: stubServiceRunner },
+    env: { cwd: home, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceSystemdBooted: false, serviceRunner: stubServiceRunner, serviceSleep: noServiceWait },
   }), 1);
   assert.match(status.output.stdout, /systemd isn't running on this machine/);
 });
@@ -7841,6 +7852,7 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
     platform: 'darwin',
     homeDir: link,
     uid: 501,
+    sleep: noServiceWait,
     run: async (command, args) => {
       loadedHere.push(`${command} ${args[0]}`);
       return command === 'launchctl' && args[0] === 'print'
@@ -7849,7 +7861,7 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
     },
   });
   assert.equal(replaced.ok, true);
-  assert.deepEqual(loadedHere, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
+  assert.deepEqual(loadedHere, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', ...afterStart('launchctl print')]);
 
   const fresh = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const nothingLoaded: string[] = [];
@@ -7858,6 +7870,7 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
     platform: 'darwin',
     homeDir: fresh,
     uid: 501,
+    sleep: noServiceWait,
     run: async (command, args) => {
       nothingLoaded.push(`${command} ${args[0]}`);
       if (command === 'launchctl' && args[0] === 'bootstrap') {
@@ -7869,7 +7882,7 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
     },
   });
   assert.equal(installed.ok, true);
-  assert.deepEqual(nothingLoaded, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print']);
+  assert.deepEqual(nothingLoaded, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', ...afterStart('launchctl print')]);
 });
 
 test('setup enables a plugin and writes the setting it is useless without', async () => {
@@ -7884,7 +7897,7 @@ test('setup enables a plugin and writes the setting it is useless without', asyn
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes, ~/work\n', '7\n', '9\n']),
     },
@@ -7928,7 +7941,7 @@ test('setup says a plugin grants nothing yet when every soul has a tools list', 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
     },
@@ -7959,7 +7972,7 @@ test('setup does not count a soul with no tools list as able to call a plugin, a
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
     },
@@ -7995,7 +8008,7 @@ test('on a home an older build set up, setup counts a soul with no tools list as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
     },
@@ -8019,7 +8032,7 @@ test('setup names the browser tool-browser needs but cannot install', async () =
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-browser (4) → Enable it (1) → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '4\n', '1\n', '7\n', '9\n']),
     },
@@ -8054,7 +8067,7 @@ test('setup claims nothing about who can call a plugin when the roster will not 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '7\n', '9\n']),
     },
@@ -8090,7 +8103,7 @@ test('setup does not count a per-agent override for an agent that is gone', asyn
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
@@ -8115,7 +8128,7 @@ test('setup does not write an enabled plugin block without the setting that make
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Same path, but no roots typed. tool-fs loads fine with none and
       // then fails every call — the "installed, enabled, and useless"
       // state this menu exists to keep anyone from reaching by accident.
@@ -8155,7 +8168,7 @@ test('setup keeps the settings it never asked about when a plugin is switched of
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Disable it (2) → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '2\n', '7\n', '9\n']),
     },
@@ -8184,7 +8197,7 @@ test('setup does not offer to enable a plugin whose required settings it cannot 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → plugin-mcp (5) → Enter → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '5\n', '\n', '7\n', '9\n']),
     },
@@ -8218,7 +8231,7 @@ test('setup sets the approval mode and the approvers for a connected agent', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → Ask in Slack (2) → approvers for ava (3) → ids →
       // fallback channel → Back (4) → Save (9)
       setupInput: Readable.from(['6\n', '2\n', '3\n', 'U01ABCDEF, U02GHIJKL\n', 'C0123456\n', '4\n', '9\n']),
@@ -8262,7 +8275,7 @@ test('setup does not revoke inherited approvers when the answer is left blank', 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
       setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
     },
@@ -8298,7 +8311,7 @@ test('setup says who cannot be asked when approvers have no fallback channel', a
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → Ask in Slack (2) → approvers (3) → ids → skip the
       // channel → Back (4) → Save (9)
       setupInput: Readable.from(['6\n', '2\n', '3\n', 'U01ABCDEF\n', '\n', '4\n', '9\n']),
@@ -8338,7 +8351,7 @@ test('setup enables a plugin whose roots are configured per agent', async () => 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
@@ -8383,7 +8396,7 @@ test('setup reports the entry a soul granted, not the namespace it overlaps', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '5\n', '1\n', '7\n', '9\n']),
     },
@@ -8424,7 +8437,7 @@ test('setup counts a soul whose explicit tools list already names the plugin', a
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
@@ -8461,7 +8474,7 @@ test('setup names every skill a plugin contributes, and no tools: advice', async
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → the config's own key (6) → Enable it (1) → Back (8)
       // → Save (9)
       setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
@@ -8503,7 +8516,7 @@ test('setup spells the skill wildcard from the manifest, not the config key', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → the config's own key (6) → Enable it (1) → Back (8)
       // → Save (9)
       setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
@@ -8535,7 +8548,7 @@ test('setup refuses a configured package that is not a plugin at all', async () 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → the config's own key (6) → Enable it (1) → Back (8)
       // → Save (9)
       setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
@@ -8573,7 +8586,7 @@ test('setup does not call a plugin callable by an agent its required setting mis
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
@@ -8609,7 +8622,7 @@ test('setup enables a plugin after the roots prompt repairs the value that was w
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → type real roots → Back
       // (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '7\n', '9\n']),
@@ -8644,7 +8657,7 @@ test('setup will not enable a plugin whose toolRisks override a daemon would ref
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-shell (2) → Enable it (1) → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '2\n', '1\n', '7\n', '9\n']),
     },
@@ -8678,7 +8691,7 @@ test('setup says an already-enabled block stays enabled when its settings fail p
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Change roots (1) → new roots → Back (7)
       // → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '7\n', '9\n']),
@@ -8718,7 +8731,7 @@ test('setup will not enable a plugin whose preserved settings fail its manifest'
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-shell (2) → Enable it (1) → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '2\n', '1\n', '7\n', '9\n']),
     },
@@ -8754,7 +8767,7 @@ test('setup refuses to enable a plugin whose preserved settings a daemon would r
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → plugin-mcp (5) → Enter to return → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '5\n', '\n', '7\n', '9\n']),
     },
@@ -8790,7 +8803,7 @@ test('setup says what it did not check when enabling a plugin it could not have 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '5\n', '1\n', '7\n', '9\n']),
     },
@@ -8835,7 +8848,7 @@ test('setup does not offer to remove a fallback channel an agent only inherits',
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → Ask in Slack (2) → approvers (3) → ava → keep → keep
       // → Back (4) → Save (9)
       setupInput: Readable.from(['6\n', '2\n', '3\n', '\n', '\n', '4\n', '9\n']),
@@ -8867,7 +8880,7 @@ test('setup will not offer to install a plugins key that carries a version', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → the config's own key (6) → Back (1, the only action)
       // → Back (8) → Save (9)
       setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
@@ -8898,7 +8911,7 @@ test('setup will not offer to install a plugins key npm could never install', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → the config's own key (6) → Back (1, the only action)
       // → Back (8) → Save (9)
       setupInput: Readable.from(['4\n', '6\n', '1\n', '8\n', '9\n']),
@@ -8977,7 +8990,7 @@ test('setup does not treat per-agent roots of the wrong type as configured', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '7\n', '9\n']),
     },
@@ -9017,7 +9030,7 @@ test('setup can re-enable a configured plugin it would not have enabled from scr
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '5\n', '1\n', '7\n', '9\n']),
     },
@@ -9054,7 +9067,7 @@ test('setup does not freeze an inherited fallback channel onto one agent', async
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → approvers for ava (3) → keep both prefills → Back (4) → Save (9)
       setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
     },
@@ -9098,7 +9111,7 @@ test('setup keeps an agent excluded from the top-level approvers', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
       setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
     },
@@ -9142,7 +9155,7 @@ test('setup does not offer approvers for a Slack token whose agent has left the 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → Back (4: two modes, one agent, Back) → Save (9)
       setupInput: Readable.from(['6\n', '4\n', '9\n']),
     },
@@ -9190,7 +9203,7 @@ test('setup does not claim every agent is covered when one is excluded', async (
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['9\n']),
     },
   });
@@ -9227,7 +9240,7 @@ test('setup keeps an exclusion that no top-level list makes visible yet', async 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
       setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
     },
@@ -9255,7 +9268,7 @@ test('setup does not say headless refuses a call an existing grant already cover
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['9\n']),
     },
   });
@@ -9287,7 +9300,7 @@ test('setup says a gated call parks for good when the approval timeout is zero',
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
       setupInput: Readable.from(['9\n']),
     },
@@ -9324,7 +9337,7 @@ test('setup can set approvers before the Slack adapter is installed', async () =
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: (specifier: string) => specifier !== '@stratusagent/channel-slack',
       // Approvals (6) → approvers for ava (3) → ids → channel → Back (4) → Save (9)
       setupInput: Readable.from(['6\n', '3\n', 'U01ABCDEF\n', 'C0123456\n', '4\n', '9\n']),
@@ -9366,7 +9379,7 @@ test('setup does not report a flat denial when the control API answers for anoth
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['9\n']),
     },
   });
@@ -9403,7 +9416,7 @@ test('setup puts the whole approval verdict on the screen that sets it', async (
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → Back → Save (9)
       setupInput: Readable.from(['6\n', '4\n', '9\n']),
     },
@@ -9445,7 +9458,7 @@ test('setup withholds the approval verdict when the roster will not load', async
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['9\n']),
     },
   });
@@ -9474,7 +9487,7 @@ test('setup can switch off a plugin whose package is no longer installed', async
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: (specifier: string) => specifier !== '@stratusagent/tool-fs',
       // Plugins (4) → tool-fs (1) → Switch it off (2) → Back (7) → Save (9)
       setupInput: Readable.from(['4\n', '1\n', '2\n', '7\n', '9\n']),
@@ -9503,7 +9516,7 @@ test('setup asks npm for more plugins only when More plugins is picked', async (
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // The main Plugins menu works offline; the registry is asked only
       // from the row that says it checks npm.
       pluginIndexReader: async () => {
@@ -9536,7 +9549,7 @@ test('setup offers the index plugins whose latest release works here, and instal
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       pluginIndexReader: async () => ({
         schemaVersion: 1,
         plugins: [
@@ -9596,7 +9609,7 @@ test('setup falls back to the index it shipped with when npm has none', async ()
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       pluginIndexReader: async () => undefined,
       pluginReleaseReader: async (name: string) => {
         looked.push(name);
@@ -9628,7 +9641,7 @@ test('setup says remote approvals deny everything while no agent is connected to
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → Ask in Slack (2) → Back (3) → Save (9)
       setupInput: Readable.from(['6\n', '2\n', '3\n', '9\n']),
     },
@@ -9660,7 +9673,7 @@ test('setup says remote approvals are denied when nothing can answer them at all
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // No Slack app and no control API: now the denial really is the end
       // of it, and only now may the summary say so.
       //
@@ -9707,7 +9720,7 @@ test('setup does not count an agent with no fallback channel as fully covered', 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Approvals (6) → Back (4) → Save (9): the per-agent rows only exist
       // on the screen that sets them.
       setupInput: Readable.from(['6\n', '4\n', '9\n']),
@@ -9743,7 +9756,7 @@ test('setup does not offer approvers when the Slack channel package is not insta
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Stored tokens with nothing to render them: `runServe` starts
       // without the Slack channel, so these are not a route.
       packageResolver: (specifier: string) => specifier !== '@stratusagent/channel-slack',
@@ -9776,7 +9789,7 @@ test('setup installs the always-on service when it saves', async () => {
       homeDir: home,
       processEnv: {},
       serviceSystemdBooted: true,
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }, serviceSleep: noServiceWait,
       // Straight to Save & finish: the service is on by default, because a
       // runtime you have to remember to start is not always-on.
       setupInput: Readable.from(['9\n']),
@@ -9837,7 +9850,7 @@ test('the managed daemon is pinned to the config setup wrote', async () => {
       homeDir: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['9\n']),
     },
   });
@@ -9859,7 +9872,7 @@ test('service install can pin the daemon to a config of its own', async () => {
   await runCli({
     argv: ['service', 'install', '--config', './team.json'],
     streams: createStreams().streams,
-    env: { cwd: project, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: stubServiceRunner },
+    env: { cwd: project, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: stubServiceRunner, serviceSleep: noServiceWait },
   });
 
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
@@ -9875,7 +9888,7 @@ test('a --no-login LaunchAgent does not smuggle RunAtLoad back in', async () => 
       platform: 'darwin',
       homeDir: home,
       uid: 501,
-      run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+      run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }, sleep: noServiceWait,
     },
     { runAtLogin: false },
   );
@@ -9899,7 +9912,7 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
 
   const calls: string[] = [];
   await installService(
-    { platform: 'linux', homeDir: home, run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); } },
+    { platform: 'linux', homeDir: home, run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }, sleep: noServiceWait },
     { runAtLogin: false },
   );
 
@@ -9911,7 +9924,7 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
     'systemctl --user disable stratusd.service',
     'systemctl --user start stratusd.service',
     'systemctl --user restart stratusd.service',
-    'systemctl --user is-active stratusd.service',
+    ...afterStart('systemctl --user is-active stratusd.service'),
   ]);
 });
 
@@ -9984,7 +9997,7 @@ test('the unit runs where it was installed, so relative config paths still work'
   await runCli({
     argv: ['service', 'install'],
     streams: createStreams().streams,
-    env: { cwd: project, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: stubServiceRunner },
+    env: { cwd: project, homeDir: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: stubServiceRunner, serviceSleep: noServiceWait },
   });
 
   // A config's `soul` resolves against the process working directory, so
@@ -10049,7 +10062,7 @@ test('service install writes the PATH of the shell it was run from into the syst
       cwd: home,
       homeDir: home,
       processEnv: { PATH: '/home/ava/.local/bin:/home/ava/100%/bin:/usr/bin' },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       servicePlatform: 'linux',
     },
   });
@@ -10280,7 +10293,9 @@ test('service install says stratusd is running only once launchd reports it runn
 
   assert.equal(result.ok, true);
   assert.equal(result.running, true);
-  assert.equal(slept.length, 2, 'it waited between asks until launchd said running');
+  // Twice until launchd said running, then ten more over about five
+  // seconds, in case it dies in startup.
+  assert.equal(slept.length, 12, 'it waited between asks until launchd said running');
   assert.ok(result.messages.some((message) => /stratusd is running, and will start again when you log in/.test(message)), result.messages.join('\n'));
 });
 
@@ -10539,7 +10554,7 @@ test('service install pins the config STRATUS_CONFIG selected', async () => {
       // can come up on a different roster.
       processEnv: { STRATUS_CONFIG: './team.json' },
       servicePlatform: 'linux',
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
     },
   });
 
@@ -10733,7 +10748,7 @@ test('a demo setup still installs, since it needs no credential at all', async (
       homeDir: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }, serviceSleep: noServiceWait,
     },
   });
 
@@ -10831,7 +10846,7 @@ test('a service install that throws is reported, not crashed through, and setup 
       homeDir: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['9\n']),
     },
   });
@@ -10887,7 +10902,7 @@ test('a failed removal is reported, not crashed through, and setup still saves',
       homeDir: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Always on → "Do not run it for me" → Save & finish.
       setupInput: Readable.from(['7\n', '3\n', '9\n']),
     },
@@ -11215,7 +11230,7 @@ test('a roster that will not load never offers to delete Slack tokens', async ()
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '2\n', '9\n']),
     },
   });
@@ -11258,7 +11273,7 @@ test('a configured soul from a colliding pair is not offered a Slack app', async
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['5\n', '1\n', '9\n']),
     },
   });
@@ -15411,7 +15426,7 @@ test('re-running setup carries a configured vision switch through the save', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       setupInput: Readable.from(['8\n']),
     },
   });
@@ -17603,7 +17618,7 @@ test('re-running setup keeps the executor and memoryStore selections it has no m
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: () => true,
       setupInput: Readable.from(['9\n']),
     },
@@ -17633,7 +17648,7 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: () => true,
       setupInput: Readable.from(['9\n']),
     },
