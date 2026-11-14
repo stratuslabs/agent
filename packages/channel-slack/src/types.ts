@@ -88,8 +88,9 @@ export interface SlackAgentConfig {
    * to the named team agents. Never any other bot. What a team agent says
    * is labelled `unknown`, below a principal, since nothing here can see
    * what its words were built from; it can't stop a turn or answer an
-   * approval, and a thread stops taking agent mentions at
-   * `AGENT_MENTION_HOP_LIMIT` until a person speaks there.
+   * approval, and it answers at most `AGENT_MENTION_HOP_LIMIT` agent
+   * mentions per thread in any 30 minutes, unless a person it admits
+   * speaks there in between.
    */
   agentMentions?: { team?: Record<string, string>; only?: string[] };
 }
@@ -474,7 +475,8 @@ export interface SlackAdapterOptions {
    * Test injection: the clock, in milliseconds, that an upload's place in
    * the thread is read from (`ReplyOutcome.spokeAt`) when the upload's
    * answer carries no share ts, and that dates `start()`, after which every
-   * claim in a thread is seen live. Defaults to `Date.now`.
+   * claim in a thread is seen live, and that times how long an answered
+   * agent mention counts toward the hop limit. Defaults to `Date.now`.
    */
   now?: () => number;
   /**

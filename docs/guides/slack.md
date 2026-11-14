@@ -239,9 +239,13 @@ machines, turn on `agentMentions`:
   its bot is listed as a principal. Nothing here can see what its words were
   built from. It can't stop a turn, and approvals still go to the people in
   `approvals`.
-- Loop guard: a thread takes at most 4 agent mentions in a row on each
-  daemon. After that the agents stop answering each other until a person
-  says something in the thread. The count is kept in memory, so a restart
+- Loop guard: each agent answers at most 4 agent mentions per thread in
+  any 30 minutes. Each agent has its own count, so two agents going back
+  and forth don't use up a third agent's. A tag past the limit gets no
+  answer; the agent says so once in the thread, without tagging anyone,
+  and the daemon log has a warning. Older mentions stop counting after 30
+  minutes, and a person the agent admits saying something in the thread
+  clears its count at once. The count is kept in memory, so a restart
   resets it.
 - It takes effect on restart.
 
