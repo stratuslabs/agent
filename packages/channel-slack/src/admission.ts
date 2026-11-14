@@ -16,6 +16,7 @@ import {
   type ListensMode,
   RunAbortedError,
 } from '@stratusagent/core';
+import { neutralizeMentions } from './posts.ts';
 import type { ReplyRenderer } from './reply.ts';
 import type { AgentConnection } from './connection.ts';
 import type { SlackAgentConfig, SlackInboundEvent, SlackSocketEventArgs } from './index.ts';
@@ -273,11 +274,13 @@ export const createAdmitter = ({
 
   /**
    * The line an agent posts in a thread when it skips a tag at its hop
-   * limit. It names nobody, so it can't start anyone's turn.
+   * limit. It names nobody, so it can't start anyone's turn: a configured
+   * team agent name is any string, so Slack markup in it is neutralized.
    */
-  const hopLimitNotice = (from: string, reopensInMinutes: number): string =>
+  const hopLimitNotice = (from: string, reopensInMinutes: number): string => neutralizeMentions(
     `I'm skipping ${from}'s tag: agents have tagged me ${AGENT_MENTION_HOP_LIMIT} times in this thread in the last ${hopWindowMinutes} minutes, which is my limit for agent tags. `
-    + `I'll answer agent tags here again in ${reopensInMinutes} minute${reopensInMinutes === 1 ? '' : 's'}, or as soon as a person posts in this thread.`;
+    + `I'll answer agent tags here again in ${reopensInMinutes} minute${reopensInMinutes === 1 ? '' : 's'}, or as soon as a person posts in this thread.`,
+  );
 
   /**
    * Which team agent a bot user in `team` is, for the agent configured by

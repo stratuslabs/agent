@@ -15837,6 +15837,20 @@ test('a skipped agent tag is said once a window in the thread, untagged, and a p
   assert.equal(notices(webAva).length, 2);
 });
 
+test('a team agent name with Slack markup is neutralized in the skipped-tag line, so it notifies nobody (AGT-366)', async () => {
+  const { socketBea, webBea, gateway, adapter, notices } = hopAdapter({ agentMentions: { team: { '<!channel> <@U-DYLAN>': 'U-NOVA' } } });
+  await adapter.start(gateway);
+  for (let round = 1; round <= 5; round += 1) {
+    await socketBea.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-BEA> round ${round}`, ts: `225.${round}`, thread: '225.0' }));
+  }
+  await adapter.stop();
+  assert.equal(gateway.dispatches.filter((dispatch) => dispatch.agentId === 'bea').length, 4);
+  assert.equal(notices(webBea).length, 1, webBea.posts.map((post) => post.text).join('\n'));
+  const text = String(notices(webBea)[0]?.text);
+  assert.doesNotMatch(text, /<[@!]/);
+  assert.match(text, /&lt;!channel&gt; &lt;@U-DYLAN&gt;'s tag/);
+});
+
 test('a person resets only the agent-tag counts of agents that admit them (AGT-366)', async () => {
   const { socketAva, socketBea, gateway, adapter, heard } = hopAdapter({ admit: 'principals', principals: ['U-DYLAN'] });
   await adapter.start(gateway);
