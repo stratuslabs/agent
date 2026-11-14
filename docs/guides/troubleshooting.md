@@ -289,3 +289,10 @@ example a tool result of several megabytes. There is no earlier history to
 give up, so the turn fails saying exactly that. Cut what the call returns — `maxBytes` on
 `fs.read`, `maxOutputBytes` on `shell.run`, see [Tools](./tools.md) — or
 move that agent to a model with a bigger context window.
+
+## Still stuck
+
+[Open an issue](https://github.com/stratuslabs/agent/issues/new/choose) with
+the bug template. It asks for the version, how you run Stratus and the
+`stratus doctor` or `stratus logs` lines that show the problem. Security
+problems go privately, as [`SECURITY.md`](../../SECURITY.md) describes.

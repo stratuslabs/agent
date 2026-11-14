@@ -99,6 +99,13 @@ More in [Agents](docs/concepts/agents.md).
 
 Everything else is in [`docs/`](docs/README.md).
 
+## Get help
+
+- **A bug or a feature request:** [open an issue](https://github.com/stratuslabs/agent/issues/new/choose).
+- **A security problem:** report it privately, as [`SECURITY.md`](SECURITY.md)
+  describes, not in a public issue.
+- **Anything else you'd rather not post in public:** hey@stratuslabs.com.
+
 ## From source
 
 ```bash
