@@ -1,7 +1,7 @@
 import './home-guard.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -19,6 +19,7 @@ import {
   type ServiceRunner,
 } from '../src/index.ts';
 import { defaultUpdateContinuation } from '../src/commands/update.ts';
+import { stableNodePath } from '../src/service.ts';
 import {
   AGENTS_FOLDER_RECORD,
   AGENTS_HOME_MARKER,
@@ -376,7 +377,8 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
   // The unit now names this process's interpreter, and kept its config pin.
   const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner });
   assert.ok(rewritten);
-  assert.equal(rewritten.execPath, process.execPath);
+  // By its stable link where Homebrew has one (see stableNodePath).
+  assert.equal(rewritten.execPath, await stableNodePath(process.execPath));
   assert.equal(rewritten.configPath, configPath);
   assert.ok(!(await readFile(serviceUnitPath({ homeDir: home }), 'utf8')).includes(staleNode));
 
@@ -421,7 +423,7 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
   assert.match(output.stdout, /1 behind/);
   assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/channel-slack/);
   const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner });
-  assert.equal(rewritten?.execPath, process.execPath);
+  assert.equal(rewritten?.execPath, await stableNodePath(process.execPath));
 });
 
 test('a home upgraded from 0.14.1 says once which agents lost task notes to the 14-day default', async () => {
@@ -1058,6 +1060,145 @@ test('doctor names a unit whose interpreter no longer exists', async () => {
     report.problems.some((problem) => problem.includes('interpreter that no longer exists')),
     `expected a stale-interpreter problem, got: ${JSON.stringify(report.problems)}`,
   );
+});
+
+// A Homebrew-shaped node install: the binary really lives in a versioned
+// keg (Cellar/node/<version>), and brew repoints opt/node at each upgrade.
+// process.execPath is already resolved through the symlinks, so it is the
+// keg path a shell's `node` reports.
+const homebrewNode = async (home: string, versions: string[], linked: string | undefined) => {
+  const prefix = path.join(home, 'brew');
+  const kegNode = (version: string) => path.join(prefix, 'Cellar', 'node', version, 'bin', 'node');
+  for (const version of versions) {
+    await mkdir(path.dirname(kegNode(version)), { recursive: true });
+    await writeFile(kegNode(version), '#!/bin/sh\n');
+    await chmod(kegNode(version), 0o755);
+  }
+  const link = path.join(prefix, 'opt', 'node');
+  const linkTo = async (version: string) => {
+    await mkdir(path.dirname(link), { recursive: true });
+    await rm(link, { force: true });
+    await symlink(path.join('..', 'Cellar', 'node', version), link);
+  };
+  if (linked !== undefined) {
+    await linkTo(linked);
+  }
+  return { kegNode, stableNode: path.join(link, 'bin', 'node'), stableBin: path.join(link, 'bin'), linkTo };
+};
+
+test('service install names Homebrew\'s stable node link, not the versioned keg a brew upgrade deletes', async () => {
+  const home = await freshHome();
+  const brew = await homebrewNode(home, ['26.1.0'], '26.1.0');
+  const installed = await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('26.1.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], path: '/usr/bin:/bin', systemdBooted: true, run: runningServiceRunner },
+    {},
+  );
+  assert.equal(installed.ok, true, installed.messages.join('\n'));
+
+  const unit = await readServiceCommand({ homeDir: home, cwd: home, systemdBooted: true, run: runningServiceRunner });
+  assert.equal(unit?.execPath, brew.stableNode);
+  // The daemon's PATH leads with the same stable directory, so an agent's
+  // `node` or `npx` does not vanish with the keg either.
+  const contents = await readFile(serviceUnitPath({ homeDir: home, systemdBooted: true }), 'utf8');
+  assert.ok(contents.includes(`${brew.stableBin}${path.delimiter}/usr/bin`), contents);
+  assert.ok(!contents.includes('Cellar'), contents);
+});
+
+test('service install keeps a keg path that Homebrew does not link as the formula\'s node', async () => {
+  const home = await freshHome();
+  // This shell runs 25.0.0 from its keg while opt/node points at 26.1.0:
+  // the link would name a different interpreter than the one installing.
+  const brew = await homebrewNode(home, ['25.0.0', '26.1.0'], '26.1.0');
+  await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('25.0.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    {},
+  );
+  const unit = await readServiceCommand({ homeDir: home, cwd: home, systemdBooted: true, run: runningServiceRunner });
+  assert.equal(unit?.execPath, brew.kegNode('25.0.0'));
+});
+
+const doctorProblems = async (home: string): Promise<string[]> => {
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor', '--format', 'json'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, serviceSystemdBooted: true, serviceRunner: runningServiceRunner },
+  });
+  return (JSON.parse(output.stdout) as { problems: string[] }).problems;
+};
+
+test('doctor names a unit pinned to a versioned Homebrew node before an upgrade deletes it', async () => {
+  const home = await freshHome();
+  // A unit written before install named the stable link: the keg path.
+  const brew = await homebrewNode(home, ['26.1.0'], undefined);
+  await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('26.1.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    {},
+  );
+  assert.equal((await readServiceCommand({ homeDir: home, cwd: home, systemdBooted: true, run: runningServiceRunner }))?.execPath, brew.kegNode('26.1.0'));
+  await brew.linkTo('26.1.0');
+
+  const problems = await doctorProblems(home);
+  const pinned = problems.filter((problem) => problem.includes(brew.kegNode('26.1.0')));
+  assert.equal(pinned.length, 1, JSON.stringify(problems));
+  assert.match(pinned[0] ?? '', /versioned Homebrew path/);
+  assert.ok(pinned[0]?.includes(brew.stableNode), pinned[0]);
+  assert.ok(!problems.some((problem) => problem.includes('interpreter that no longer exists')), JSON.stringify(problems));
+});
+
+test('doctor names a unit still running a Homebrew node that an upgrade has unlinked', async () => {
+  const home = await freshHome();
+  const brew = await homebrewNode(home, ['26.1.0'], undefined);
+  await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('26.1.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    {},
+  );
+  // `brew upgrade` installed 26.2.0 and moved the link; cleanup has not run.
+  await homebrewNode(home, ['26.2.0'], '26.2.0');
+
+  const problems = await doctorProblems(home);
+  const pinned = problems.filter((problem) => problem.includes(brew.kegNode('26.1.0')));
+  assert.equal(pinned.length, 1, JSON.stringify(problems));
+  assert.match(pinned[0] ?? '', /no longer linked/);
+});
+
+test('doctor says nothing about a unit that names Homebrew\'s stable node link', async () => {
+  const home = await freshHome();
+  const brew = await homebrewNode(home, ['26.1.0'], '26.1.0');
+  await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('26.1.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    {},
+  );
+  const problems = await doctorProblems(home);
+  assert.ok(!problems.some((problem) => problem.includes('Homebrew') || problem.includes('interpreter')), JSON.stringify(problems));
+});
+
+test('update --check does not call a unit written by this shell\'s node a mismatch', async () => {
+  // Discriminating only where the suite itself runs on a Homebrew node:
+  // there, process.execPath is the keg path and install names the opt link,
+  // so comparing the two raw would flag every fresh install.
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home });
+  const entrypoint = process.argv[1];
+  assert.ok(entrypoint !== undefined);
+  await installService(
+    { homeDir: home, cwd: home, scriptPath: entrypoint, execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    {},
+  );
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['update', '--check'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceSystemdBooted: true,
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.doesNotMatch(output.stdout, /this shell runs/);
 });
 
 test('a registry answer older than this build does not become the target its companions are held to', async () => {

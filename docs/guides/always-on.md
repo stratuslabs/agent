@@ -73,6 +73,11 @@ puts `stratus` on your `PATH`. It stops with SIGTERM and waits 75 seconds
 before SIGKILL (`ExitTimeOut` in the plist, `TimeoutStopSec` in the unit),
 so the gateway's drain, and the abort at the end of it, actually run. (Upgrading node moves those absolute paths — see
 [Updating](./updating.md) for why `stratus update` rewrites the unit.)
+Homebrew's node is the exception: node reports its versioned keg
+(`/opt/homebrew/Cellar/node/<version>/bin/node`), which `brew cleanup`
+deletes after an upgrade, so the unit names the formula's stable link
+(`/opt/homebrew/opt/node/bin/node`) instead, as long as that link resolves
+to the same binary.
 
 For the same reason the unit carries a **`PATH`**: the one in the shell
 you installed from, with node's own directory first and relative entries
