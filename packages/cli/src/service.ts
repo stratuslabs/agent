@@ -468,8 +468,7 @@ const confirmRunning = async (env: ServiceEnvironment, platform: ServicePlatform
 
 /**
  * How many more times a start the manager reported running is checked on,
- * at START_CHECK_INTERVAL_MS, while the daemon has not yet said it is
- * serving: about five seconds.
+ * at START_CHECK_INTERVAL_MS: about five seconds.
  */
 const SETTLE_CHECKS = 10;
 
@@ -477,7 +476,7 @@ const SETTLE_CHECKS = 10;
 const STARTUP_OUTPUT_LINES = 20;
 const STARTUP_OUTPUT_BYTES = 8192;
 
-/** Where a start began, so only that start's evidence counts. */
+/** Where a start began, so only that start's output is shown. */
 interface StartMark {
   at: number;
   /** How long the error log already was; what follows is this start's. */
@@ -496,20 +495,6 @@ const markStart = async (env: ServiceEnvironment): Promise<StartMark> => {
   return { at, errorLogBytes };
 };
 
-/**
- * Whether a daemon started since `mark` has published its control API
- * address: it got through startup and is serving. A file a dead daemon
- * left behind carries its own, earlier, startedAt.
- */
-const publishedSince = async (env: ServiceEnvironment, mark: StartMark): Promise<boolean> => {
-  try {
-    const info = JSON.parse(await readFile(path.join(homeOf(env), '.stratus', 'gateway.json'), 'utf8')) as { startedAt?: unknown };
-    return typeof info.startedAt === 'string' && Date.parse(info.startedAt) >= mark.at;
-  } catch {
-    return false;
-  }
-};
-
 interface StartAnswer extends RunningAnswer {
   /** The manager reported it running, then not: it died during startup. */
   exited?: boolean;
@@ -521,32 +506,25 @@ interface StartAnswer extends RunningAnswer {
  * The manager's first "running" is not enough: launchd reports a process
  * running from the moment it spawns, before dyld or node has loaded
  * anything, and Products printed "started" over a daemon that had already
- * died (AGT-363). So after that answer it keeps asking until the daemon
- * publishes its address (written once its control API is bound), or for
- * about five seconds when it does not (a daemon serving no API never
- * will). Neither manager restarts a crashed daemon inside that window
- * (launchd throttles respawns to ten seconds, the unit says RestartSec=5),
- * so a death shows up as a "no", or systemd's activating (auto-restart).
+ * died (AGT-363). So after that answer it keeps asking for about five
+ * seconds. Nothing the daemon writes marks the end of its startup:
+ * gateway.json appears once the control API is bound, before the other
+ * channels and the scheduler start, and either can still fail and stop
+ * it. Neither manager restarts a crashed daemon inside the window (launchd
+ * throttles respawns to ten seconds, the unit says RestartSec=5), so a
+ * death shows up as a "no", or systemd's activating (auto-restart). One
+ * later than the window still goes unseen.
  */
-const confirmStarted = async (env: ServiceEnvironment, platform: ServicePlatform, mark: StartMark): Promise<StartAnswer> => {
+const confirmStarted = async (env: ServiceEnvironment, platform: ServicePlatform): Promise<StartAnswer> => {
   const confirmed = await confirmRunning(env, platform);
   if (confirmed.running !== true) {
     return confirmed;
   }
   const sleep = env.sleep ?? defaultSleep;
   for (let check = 0; check < SETTLE_CHECKS; check += 1) {
-    // The file outlives a daemon that published it and then died in a
-    // later startup step, so publication is taken only with a "running"
-    // asked after it was seen.
-    const published = await publishedSince(env, mark);
-    if (!published) {
-      await sleep(START_CHECK_INTERVAL_MS);
-    }
+    await sleep(START_CHECK_INTERVAL_MS);
     const answer = await askRunning(env, platform);
     if (answer.running === true) {
-      if (published) {
-        return answer;
-      }
       continue;
     }
     if (answer.running === undefined && !answer.transitional) {
@@ -901,14 +879,14 @@ export const installService = async (
       if (started.code !== 0) {
         return { ok: false, messages: [...messages, `launchctl kickstart failed: ${started.stderr.trim() || started.stdout.trim()}`] };
       }
-      const confirmed = await confirmStarted(env, platform, mark);
+      const confirmed = await confirmStarted(env, platform);
       if (confirmed.running !== true) {
         return { ok: true, running: confirmed.running, messages: [...messages, ...await notRunningMessages(env, platform, confirmed, mark)] };
       }
       messages.push('stratusd is running. It will not start at login, and will not be restarted if it crashes.');
       return { ok: true, running: true, messages };
     }
-    const confirmed = await confirmStarted(env, platform, mark);
+    const confirmed = await confirmStarted(env, platform);
     messages.push(...(confirmed.running === true
       ? ['stratusd is running, and will start again when you log in.']
       : await notRunningMessages(env, platform, confirmed, mark)));
@@ -949,7 +927,7 @@ export const installService = async (
   if (restart.code !== 0) {
     return { ok: false, messages: [...messages, `systemctl restart failed: ${restart.stderr.trim() || restart.stdout.trim()}`] };
   }
-  const confirmed = await confirmStarted(env, platform, mark);
+  const confirmed = await confirmStarted(env, platform);
   if (confirmed.running !== true) {
     messages.push(...await notRunningMessages(env, platform, confirmed, mark));
   } else {
@@ -998,7 +976,7 @@ export const uninstallService = async (env: ServiceEnvironment = {}): Promise<Se
 };
 
 const startedResult = async (env: ServiceEnvironment, platform: ServicePlatform, mark: StartMark): Promise<ServiceActionResult> => {
-  const confirmed = await confirmStarted(env, platform, mark);
+  const confirmed = await confirmStarted(env, platform);
   return confirmed.running === true
     ? { ok: true, running: true, messages: ['stratusd started.'] }
     : { ok: true, running: confirmed.running, messages: await notRunningMessages(env, platform, confirmed, mark) };

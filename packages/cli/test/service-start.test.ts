@@ -100,47 +100,8 @@ test('stratus service start exits 1 and shows what stratusd wrote when it dies r
   assert.ok(shown.every((line) => line === `  ${dyld}` || /^ {2}noise \d+$/.test(line)), output.stderr);
 });
 
-test('service start reports started as soon as the new daemon publishes its address', async () => {
+test('service start calls a daemon started once it has stayed up through the watch', async () => {
   const home = await installedHome();
-  const slept: number[] = [];
-  const result = await startService({
-    platform: 'darwin',
-    homeDir: home,
-    uid: 501,
-    sleep: async (ms) => { slept.push(ms); },
-    run: launchd('kickstart', [running], async () => {
-      await writeFile(gatewayInfoOf(home), JSON.stringify({ url: 'http://127.0.0.1:7777', pid: 4242, startedAt: new Date().toISOString() }));
-    }),
-  });
-
-  assert.equal(result.running, true);
-  assert.deepEqual(result.messages, ['stratusd started.']);
-  assert.equal(slept.length, 0, 'nothing left to wait for');
-});
-
-test('service start does not take a published address from a daemon that died after publishing it', async () => {
-  // gateway.json outlives a crash in a later startup step (a channel, the
-  // scheduler), so the manager is asked again after the file is seen.
-  const home = await installedHome();
-  const result = await startService({
-    platform: 'darwin',
-    homeDir: home,
-    uid: 501,
-    sleep: async () => {},
-    run: launchd('kickstart', [running, exited], async () => {
-      await writeFile(gatewayInfoOf(home), JSON.stringify({ url: 'http://127.0.0.1:7777', pid: 4242, startedAt: new Date().toISOString() }));
-    }),
-  });
-
-  assert.equal(result.running, false);
-  assert.match(result.messages.join('\n'), /launchd started stratusd, but it exited during startup/);
-});
-
-test('service start keeps watching a daemon that has not published an address, and calls it started if it stays up', async () => {
-  // A daemon with no control API never writes gateway.json, and the file a
-  // dead one left behind says nothing about this start.
-  const home = await installedHome();
-  await writeFile(gatewayInfoOf(home), JSON.stringify({ url: 'http://127.0.0.1:7777', pid: 1, startedAt: new Date(Date.now() - 3_600_000).toISOString() }));
   const slept: number[] = [];
   const result = await startService({
     platform: 'darwin',
@@ -153,6 +114,25 @@ test('service start keeps watching a daemon that has not published an address, a
   assert.equal(result.running, true);
   assert.deepEqual(result.messages, ['stratusd started.']);
   assert.equal(slept.length, 10, 'about five seconds of asking');
+});
+
+test('service start keeps watching after the daemon publishes its address', async () => {
+  // gateway.json is written once the control API is bound, before the other
+  // channels and the scheduler start; either can still fail and stop it.
+  const home = await installedHome();
+  const result = await startService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    sleep: async () => {},
+    run: launchd('kickstart', [running, running, running, exited], async () => {
+      await mkdir(path.dirname(gatewayInfoOf(home)), { recursive: true });
+      await writeFile(gatewayInfoOf(home), JSON.stringify({ url: 'http://127.0.0.1:7777', pid: 4242, startedAt: new Date().toISOString() }));
+    }),
+  });
+
+  assert.equal(result.running, false);
+  assert.match(result.messages.join('\n'), /launchd started stratusd, but it exited during startup/);
 });
 
 test('service install does not call a LaunchAgent that exits during startup running, and says when it wrote nothing', async () => {

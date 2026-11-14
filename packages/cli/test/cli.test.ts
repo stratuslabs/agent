@@ -118,26 +118,13 @@ const stubServiceRunner = async (command: string, args: string[]) => ({
   stderr: '',
 });
 
-// The pause between a manager's answers, skipped. After the manager says
-// running, install and start keep asking for about five seconds until the
-// daemon publishes gateway.json, and no daemon here ever does (AGT-363).
+// The pause between a manager's answers, skipped: after the manager says
+// running, install and start keep asking for about five seconds (AGT-363).
 const noServiceWait = async (): Promise<void> => {};
 
-type StubRunner = (command: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
-
-// A healthy daemon: once the manager starts it, it publishes its address,
-// so install and start stop asking after the manager's first "running".
-const servingAfterStart = (home: string, run: StubRunner): StubRunner => async (command, args) => {
-  const result = await run(command, args);
-  const starts = command === 'launchctl'
-    ? args[0] === 'bootstrap' || args[0] === 'kickstart'
-    : command === 'systemctl' && args.some((arg) => arg === '--now' || arg === 'start' || arg === 'restart');
-  if (starts) {
-    await mkdir(path.join(home, '.stratus'), { recursive: true });
-    await writeFile(path.join(home, '.stratus', 'gateway.json'), JSON.stringify({ url: 'http://127.0.0.1:9', pid: process.pid, startedAt: new Date().toISOString() }));
-  }
-  return result;
-};
+// The status asks after a start: the one that said running, then ten more
+// over the startup watch.
+const afterStart = (ask: string): string[] => Array.from({ length: 11 }, () => ask);
 
 const createStreams = () => {
   let stdout = '';
@@ -7586,7 +7573,8 @@ test('the launchd plist runs the daemon by absolute path and starts at login', a
     execPath: '/opt/homebrew/bin/node',
     scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
     uid: 501,
-    run: servingAfterStart(home, async (command, args) => { calls.push({ command, args }); return stubServiceRunner(command, args); }),
+    run: async (command, args) => { calls.push({ command, args }); return stubServiceRunner(command, args); },
+    sleep: noServiceWait,
   });
 
   assert.equal(result.ok, true);
@@ -7605,7 +7593,7 @@ test('the launchd plist runs the daemon by absolute path and starts at login', a
   // refused with "service already loaded" and the new unit never takes
   // effect. Then it asks whether the daemon is actually running before
   // saying so.
-  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print', 'launchctl print']);
+  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', ...afterStart('launchctl print')]);
   assert.equal(calls[2]?.args[1], 'gui/501');
   // The login-vs-power-on distinction is stated, not left to be discovered
   // after a reboot leaves the roster silent.
@@ -7659,7 +7647,8 @@ test('the systemd unit restarts on failure and enables at login', async () => {
     homeDir: home,
     execPath: '/usr/bin/node',
     scriptPath: '/usr/lib/node_modules/@stratusagent/cli/dist/bin.js',
-    run: servingAfterStart(home, async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }),
+    run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); },
+    sleep: noServiceWait,
   });
 
   assert.equal(result.ok, true);
@@ -7680,9 +7669,7 @@ test('the systemd unit restarts on failure and enables at login', async () => {
     'systemctl --user daemon-reload',
     'systemctl --user enable --now stratusd.service',
     'systemctl --user restart stratusd.service',
-    'systemctl --user is-active stratusd.service',
-    // Asked again once the daemon has published its address.
-    'systemctl --user is-active stratusd.service',
+    ...afterStart('systemctl --user is-active stratusd.service'),
   ]);
 });
 
@@ -7865,15 +7852,16 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
     platform: 'darwin',
     homeDir: link,
     uid: 501,
-    run: servingAfterStart(link, async (command, args) => {
+    sleep: noServiceWait,
+    run: async (command, args) => {
       loadedHere.push(`${command} ${args[0]}`);
       return command === 'launchctl' && args[0] === 'print'
         ? { code: 0, stdout: `\tpath = ${ownPlist}\n\tstate = running\n`, stderr: '' }
         : { code: 0, stdout: '', stderr: '' };
-    }),
+    },
   });
   assert.equal(replaced.ok, true);
-  assert.deepEqual(loadedHere, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print', 'launchctl print']);
+  assert.deepEqual(loadedHere, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', ...afterStart('launchctl print')]);
 
   const fresh = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const nothingLoaded: string[] = [];
@@ -7882,7 +7870,8 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
     platform: 'darwin',
     homeDir: fresh,
     uid: 501,
-    run: servingAfterStart(fresh, async (command, args) => {
+    sleep: noServiceWait,
+    run: async (command, args) => {
       nothingLoaded.push(`${command} ${args[0]}`);
       if (command === 'launchctl' && args[0] === 'bootstrap') {
         bootstrapped = true;
@@ -7890,10 +7879,10 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
       return command === 'launchctl' && args[0] === 'print' && !bootstrapped
         ? { code: 113, stdout: '', stderr: 'Bad request.\nCould not find service "com.stratusagent.stratusd" in domain for user gui: 501\n' }
         : { code: 0, stdout: command === 'launchctl' && args[0] === 'print' ? '\tstate = running\n' : '', stderr: '' };
-    }),
+    },
   });
   assert.equal(installed.ok, true);
-  assert.deepEqual(nothingLoaded, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', 'launchctl print', 'launchctl print']);
+  assert.deepEqual(nothingLoaded, ['launchctl print', 'launchctl bootout', 'launchctl bootstrap', ...afterStart('launchctl print')]);
 });
 
 test('setup enables a plugin and writes the setting it is useless without', async () => {
@@ -9923,7 +9912,7 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
 
   const calls: string[] = [];
   await installService(
-    { platform: 'linux', homeDir: home, run: servingAfterStart(home, async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }) },
+    { platform: 'linux', homeDir: home, run: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }, sleep: noServiceWait },
     { runAtLogin: false },
   );
 
@@ -9935,9 +9924,7 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
     'systemctl --user disable stratusd.service',
     'systemctl --user start stratusd.service',
     'systemctl --user restart stratusd.service',
-    'systemctl --user is-active stratusd.service',
-    // Asked again once the daemon has published its address.
-    'systemctl --user is-active stratusd.service',
+    ...afterStart('systemctl --user is-active stratusd.service'),
   ]);
 });
 
@@ -10301,12 +10288,14 @@ test('service install says stratusd is running only once launchd reports it runn
     sleep: async (ms) => { slept.push(ms); },
     // The first answer is to install's own question, whose job is loaded,
     // before it boots anything out; no path in it changes nothing.
-    run: servingAfterStart(home, managerAnswering(['', loadedNeverStarted, loadedNeverStarted, '\tstate = running\n\truns = 1\n\tpid = 4242\n'])),
+    run: managerAnswering(['', loadedNeverStarted, loadedNeverStarted, '\tstate = running\n\truns = 1\n\tpid = 4242\n']),
   });
 
   assert.equal(result.ok, true);
   assert.equal(result.running, true);
-  assert.equal(slept.length, 2, 'it waited between asks until launchd said running');
+  // Twice until launchd said running, then ten more over about five
+  // seconds, in case it dies in startup.
+  assert.equal(slept.length, 12, 'it waited between asks until launchd said running');
   assert.ok(result.messages.some((message) => /stratusd is running, and will start again when you log in/.test(message)), result.messages.join('\n'));
 });
 
