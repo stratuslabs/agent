@@ -89,7 +89,12 @@ since a restart is what applies the daemon-level settings in it. No daemon found
 needs none; doctor says `none found (no control API published)` because a
 daemon started with its API off publishes no address either. A damaged
 `gateway.json`, or a daemon that published its address and does not answer, is
-a problem.
+a problem. So is an installed service (`stratus service install`) that
+launchd or systemd says is not running while no daemon answers, and doctor
+lists it first, since the rest waits on it: the manager's reason, then the
+last lines the daemon wrote (`~/.stratus/logs/stratusd.err.log` on macOS,
+the journal on Linux). A manager that does not answer is not taken to mean
+stopped.
 
 ## The usual suspects
 

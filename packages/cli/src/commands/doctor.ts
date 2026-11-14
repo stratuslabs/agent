@@ -39,7 +39,7 @@ import {
   probeProviderModel,
   withoutTrailingSlashes,
 } from '@stratusagent/state';
-import { homebrewNodeLink, readServiceCommand } from '../service.ts';
+import { homebrewNodeLink, readServiceCommand, readServiceStatus, recentServiceOutput, type ServiceEnvironment } from '../service.ts';
 import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
 import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
@@ -414,6 +414,27 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     ...(typeof health.startedAt === 'string' ? { startedAt: health.startedAt } : {}),
     ...(configPath !== undefined ? { configPath } : {}),
   };
+};
+
+/**
+ * An installed service the manager says is stopped, with why and the end of
+ * what it wrote, as one finding. Undefined when there is no unit (a daemon
+ * run by hand, or none at all, is not a fault) or when the manager did not
+ * answer, which is not the same as saying it stopped.
+ */
+const serviceDownProblem = async (env: ServiceEnvironment): Promise<string | undefined> => {
+  const status = await readServiceStatus(env);
+  if (status === undefined || !status.installed || status.running !== false) {
+    return undefined;
+  }
+  const manager = status.platform === 'launchd' ? 'launchd' : 'systemd';
+  const reason = status.reason ?? (manager === 'launchd' ? 'launchd has the job loaded but not running.' : 'systemd reports the unit inactive.');
+  return [
+    `The stratusd service is installed (${status.unitPath}), but ${manager} says it is not running. ${reason}`,
+    ...await recentServiceOutput(env, status.platform),
+    // Some reasons already end with it.
+    ...(reason.includes('`stratus service start`') ? [] : ['`stratus service start` starts it again, and says why if it fails.']),
+  ].join('\n    ');
 };
 
 /**
@@ -954,6 +975,15 @@ export const collectDoctorReport = async (
   }
 
   const daemon = await inspectDaemon(env, problems);
+  // With no daemon answering, a stopped service is the finding the rest
+  // wait on, so it goes first. A doctor run on a host whose daemon was down
+  // led with a stray-souls warning instead (AGT-364).
+  if (daemon.state !== 'running') {
+    const down = await serviceDownProblem(serviceEnvFor(env));
+    if (down !== undefined) {
+      problems.unshift(down);
+    }
+  }
   const keyChecks = command.live && resolved ? await checkKeys(resolved, env, problems) : undefined;
 
   return {

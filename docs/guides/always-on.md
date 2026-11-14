@@ -48,6 +48,18 @@ loaded LaunchAgent that is not running: `runs = 0` means launchd has not
 started it since it was loaded (seen after a reboot), and a last exit code
 points at `~/.stratus/logs/stratusd.err.log`.
 
+On macOS, `install` boots out the job loaded under the label before it
+loads the new unit. launchd answers `Bootstrap failed: 5: Input/output
+error` while it still has a job under that label, such as an old daemon
+still on its way out. On that error `install` boots the job out again,
+waits until launchd no longer has it (at most the 75-second stop timeout
+plus five seconds), and loads the unit once more before it reports a
+failure.
+
+With no daemon answering, `stratus doctor` lists an installed service that
+is not running as its first problem, with the manager's reason and the
+last lines the daemon wrote.
+
 `stratus setup` installs it for you at Save & finish unless you opt out, so
 most people never run these by hand. (On a server nobody logs in to, run it
 as a system service or in Docker instead — [Deployment](./deployment.md).)
