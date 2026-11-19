@@ -523,6 +523,22 @@ const hangingOpenAi = (answerAfterMs?: number): typeof fetch => ((_url: unknown,
     }, { once: true });
   })) as typeof fetch;
 
+/**
+ * A request that never answers and takes `ms` to give up once stopped, as a
+ * tool in its grace period does. One made under a signal already stopped
+ * gives up the same way, so a client that tries again can't hang a test.
+ */
+const slowToGiveUp = (ms: number): typeof fetch => ((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+  const giveUp = (): void => {
+    setTimeout(() => reject(new DOMException('aborted', 'AbortError')), ms);
+  };
+  if (init?.signal?.aborted) {
+    giveUp();
+    return;
+  }
+  init?.signal?.addEventListener('abort', giveUp, { once: true });
+})) as typeof fetch;
+
 test('the time limit stops a turn whose provider never answers, and the session says why', async () => {
   const home = await newHome();
   await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
@@ -606,11 +622,7 @@ test('a turn stopped near its limit isn\'t reported as past it while the stop ta
   await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
   // A provider that takes 300ms to give up once told to stop, as a tool in
   // its grace period does: the limit passes inside that window.
-  const slowToStop = ((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-    init?.signal?.addEventListener('abort', () => {
-      setTimeout(() => reject(new DOMException('aborted', 'AbortError')), 300);
-    }, { once: true });
-  })) as typeof fetch;
+  const slowToStop = slowToGiveUp(300);
   const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: slowToStop };
   const warnings: string[] = [];
   const gateway = createGateway({ env, idleTimeoutMs: 0, turnTimeLimitMs: 200, warn: (line) => warnings.push(line) });
@@ -633,11 +645,7 @@ test('a streaming turn its time limit stops isn\'t then reported by the idle wat
   await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: anthropic\nmodel: model-slow\n---\n\nYou stall.\n');
   // Silent, and 400ms slow to give up once stopped: the 300ms idle
   // deadline passes after the 100ms limit has already ended the turn.
-  const slowToStop = ((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-    init?.signal?.addEventListener('abort', () => {
-      setTimeout(() => reject(new DOMException('aborted', 'AbortError')), 400);
-    }, { once: true });
-  })) as typeof fetch;
+  const slowToStop = slowToGiveUp(400);
   const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: slowToStop };
   const warnings: string[] = [];
   const gateway = createGateway({ env, idleTimeoutMs: 300, turnTimeLimitMs: 100, warn: (line) => warnings.push(line) });
