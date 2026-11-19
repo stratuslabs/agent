@@ -43,5 +43,7 @@ export { DEFAULT_MODEL_LIST_TIMEOUT_MS, listChatGPTModels } from './models.ts';
 export type { ChatGPTModel, ListChatGPTModelsOptions } from './models.ts';
 export { DEFAULT_REFRESH_BEFORE_MS, createChatGPTTokenSource, sessionFromSignIn } from './session.ts';
 export type { ChatGPTSession, ChatGPTSessionStore, ChatGPTTokenSource, ChatGPTTokenSourceOptions } from './session.ts';
+export { createChatGPTSessionStore, ensureChatGPTHostId, parseChatGPTSession } from './session-file.ts';
+export type { ChatGPTSignInDocument } from './session-file.ts';
 export { DEFAULT_CALLBACK_TIMEOUT_MS, PREFERRED_CALLBACK_PORT, listenForCallback } from './loopback.ts';
 export type { CallbackListener, ListenForCallbackOptions, WaitForCallbackOptions } from './loopback.ts';
