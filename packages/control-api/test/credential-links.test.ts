@@ -71,7 +71,7 @@ test('a request no channel can show a form for gets a one-time link that adds th
     // No channel started this turn, so there is nowhere to show a form.
     const session = await gateway.dispatch({ sessionId: 'kai-link-1', agentId: 'kai', userMessage: 'open a PR' });
     const { link, local } = linkFrom(session, api.url ?? '');
-    assert.match(link, /^https:\/\/mac-mini\.example\.ts\.net\/api\/v1\/credential-links\/[A-Za-z0-9_-]{51}$/, 'built on api.publicUrl');
+    assert.match(link, /^https:\/\/mac-mini\.example\.ts\.net\/api\/v1\/credential-links\/[A-Za-z0-9_-]{55}$/, 'built on api.publicUrl');
     const output = JSON.stringify(session.messages.find((message) => message.role === 'tool')?.toolResult?.output);
     assert.match(output, /not in a channel that can show your operator a form/);
     assert.match(output, /works once, and expires at/);
@@ -263,12 +263,18 @@ test('a refused link token gets the real reason: used, closed, from before a res
   const before = createCredentialLinkStore().mint(KAI_REQUEST).token;
   assert.equal(links.get(before), undefined);
   assert.deepEqual(links.refusal(before), { reason: 'restarted' });
-  // A link from a build before reasons were kept: always another process.
-  assert.deepEqual(links.refusal('A'.repeat(43)), { reason: 'restarted' });
+  // A link from a build before the check: it can't be told from one cut
+  // short, so it isn't claimed to be a restart.
+  assert.deepEqual(links.refusal('A'.repeat(43)), { reason: 'unrecognized' });
+  assert.deepEqual(links.refusal('A'.repeat(55)), { reason: 'unrecognized' });
 
   // Cut short, run on, or reformatted in a chat app.
   const live = links.mint({ ...KAI_REQUEST, requestId: 'r3' }).token;
   assert.deepEqual(links.refusal(live.slice(0, -1)), { reason: 'unrecognized' });
+  assert.deepEqual(links.refusal(live.slice(0, -4)), { reason: 'unrecognized' }, 'cut by the length of the check');
+  assert.deepEqual(links.refusal(live.slice(0, -12)), { reason: 'unrecognized' }, 'cut to the length of an old token');
+  assert.deepEqual(links.refusal(`${live[0] === 'A' ? 'B' : 'A'}${live.slice(1)}`), { reason: 'unrecognized' }, 'its run id changed');
+  assert.deepEqual(links.refusal(`${before[0] === 'A' ? 'B' : 'A'}${before.slice(1)}`), { reason: 'unrecognized' }, 'another run\'s, changed');
   assert.deepEqual(links.refusal(`${live}>`), { reason: 'unrecognized' });
   assert.deepEqual(links.refusal(`${live.slice(0, -1)}${live.endsWith('A') ? 'B' : 'A'}`), { reason: 'unrecognized' });
   assert.deepEqual(links.refusal(''), { reason: 'unrecognized' });

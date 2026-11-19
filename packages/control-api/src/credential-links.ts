@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 
 import type { CredentialScope } from '@stratusagent/core';
@@ -51,7 +51,12 @@ const KEEP_ENDED = 1_000;
 const RUN_ID_LENGTH = 8;
 /** Characters of the 256 random bits after it, as base64url. */
 const SECRET_LENGTH = 43;
+/** Characters of the check that ends it: 3 bytes of a hash of the rest. */
+const CHECK_LENGTH = 4;
+const TOKEN_LENGTH = RUN_ID_LENGTH + SECRET_LENGTH + CHECK_LENGTH;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
+/** Not a secret and not a signature: it only shows the token arrived as it was minted. */
+const checkOf = (body: string): string => createHash('sha256').update(body).digest().subarray(0, 3).toString('base64url');
 
 /**
  * The tokens behind credential links, in memory only.
@@ -63,10 +68,12 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
  * random bits, is spent the moment an answer is final, and dies on its own
  * after `CREDENTIAL_LINK_TTL_MS`.
  *
- * Every token starts with a random id for this store, so one this store
- * never issued can be told apart from one it issued and forgot: a link from
- * before a restart (or from another daemon) is a different refusal from a
- * link a chat app cut short. The id says nothing but "same run or not".
+ * Every token starts with a random id for this store and ends with a short
+ * check of everything before it, so a token this store never issued can be
+ * told apart from one it issued and forgot, and from one that changed on
+ * the way: a link from before a restart (or from another daemon) is a
+ * different refusal from a link a chat app cut short. The id says nothing
+ * but "same run or not".
  * A spent or expired token is remembered with its reason (the newest
  * `keepEnded` of them); it can never open a form again either way.
  */
@@ -102,7 +109,8 @@ export const createCredentialLinkStore = (
   return {
     mint(record) {
       sweep();
-      const token = `${runId}${randomBytes(32).toString('base64url')}`;
+      const body = `${runId}${randomBytes(32).toString('base64url')}`;
+      const token = `${body}${checkOf(body)}`;
       const expiresAt = now() + ttlMs;
       links.set(token, { ...record, expiresAt });
       return { token, expiresAt };
@@ -117,15 +125,13 @@ export const createCredentialLinkStore = (
       if (known !== undefined) {
         return { ...known };
       }
-      // Whole and well formed, but not this run's: issued before the
-      // daemon restarted, or by another one. A token without the prefix is
-      // from a build before it, so from another run too.
-      const whole = BASE64URL.test(token)
-        && (token.length === SECRET_LENGTH || token.length === RUN_ID_LENGTH + SECRET_LENGTH);
-      if (whole && !(token.length === RUN_ID_LENGTH + SECRET_LENGTH && token.startsWith(runId))) {
-        return { reason: 'restarted' };
-      }
-      return { reason: 'unrecognized' };
+      // Arrived as minted (its check holds), but not this run's: issued
+      // before the daemon restarted, or by another one. Anything whose
+      // check fails was cut short or changed on the way, and so is a link
+      // from a build before the check, which can't be told from one.
+      const body = token.slice(0, -CHECK_LENGTH);
+      const intact = token.length === TOKEN_LENGTH && BASE64URL.test(token) && checkOf(body) === token.slice(-CHECK_LENGTH);
+      return intact && !body.startsWith(runId) ? { reason: 'restarted' } : { reason: 'unrecognized' };
     },
     retire(token, reason) {
       // Only a live token, or one that ran out while its answer was being
