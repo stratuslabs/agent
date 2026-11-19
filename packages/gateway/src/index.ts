@@ -1959,6 +1959,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     };
     const clock = { pause: stopLimitClock, resume: startLimitClock };
     turnClocks.set(sessionId, clock);
+    // Whatever stops the turn first stops the clock: a stop, a restart or
+    // the idle timer can take a moment to land (a tool's grace period), and
+    // the limit passing inside it isn't what ended the turn.
+    controller.signal.addEventListener('abort', stopLimitClock, { once: true });
     if ((approvalWaits.get(sessionId) ?? 0) === 0) {
       startLimitClock();
     }
@@ -1968,6 +1972,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     } finally {
       suspendTimer();
       stopLimitClock();
+      controller.signal.removeEventListener('abort', stopLimitClock);
       if (turnClocks.get(sessionId) === clock) {
         turnClocks.delete(sessionId);
       }

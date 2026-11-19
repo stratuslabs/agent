@@ -601,6 +601,33 @@ test('a turn stopped before its time limit fails with the stop, and the limit ne
   }
 });
 
+test('a turn stopped near its limit isn\'t reported as past it while the stop takes effect', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
+  // A provider that takes 300ms to give up once told to stop, as a tool in
+  // its grace period does: the limit passes inside that window.
+  const slowToStop = ((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => {
+      setTimeout(() => reject(new DOMException('aborted', 'AbortError')), 300);
+    }, { once: true });
+  })) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: slowToStop };
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, turnTimeLimitMs: 200, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  try {
+    const controller = new AbortController();
+    const turn = gateway.dispatch({ sessionId: 'near-1', agentId: 'slow', userMessage: 'hang', signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort(new RunAbortedError('Stopped from the test'));
+    await assert.rejects(() => turn, (error: Error) => error.message === 'Stopped from the test');
+    assert.equal((await gateway.store.get('near-1'))?.lastError, 'Stopped from the test');
+    assert.deepEqual(warnings.filter((line) => line.startsWith('time limit:')), []);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a daemon stop that cuts off a turn leaves no time limit running behind it', async () => {
   const home = await newHome();
   await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
