@@ -187,6 +187,53 @@ test('fallback stickiness is per session, never per pooled provider', async () =
   assert.equal((flakyAgain.parts[0] as { text: string }).text, 'fallback');
 });
 
+test('the fallback notice hears the switching session and is awaited before the fallback answers', async () => {
+  // The daemon masks the primary's error against the session's stored
+  // secrets before it logs it, which is an async read: the wrapper has to
+  // hand it the session and wait for it, and a notice that fails must not
+  // cost the session its fallback.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const makeSession = (id: string): Session => ({
+    id,
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  });
+  const order: string[] = [];
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      order.push('fallback answered');
+      return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+    },
+  };
+
+  const heard: Array<{ message: string; sessionId: string }> = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, async (error, session) => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    heard.push({ message: (error as Error).message, sessionId: session.id });
+    order.push('notice done');
+  });
+  const answer = await wrapped.generate({ session: makeSession('switching') } as never);
+  assert.equal((answer.parts[0] as { text: string }).text, 'fallback');
+  assert.deepEqual(heard, [{ message: 'primary down', sessionId: 'switching' }]);
+  assert.deepEqual(order, ['notice done', 'fallback answered']);
+
+  const failingNotice = createFallbackWrappedProvider(primary as never, fallback as never, async () => {
+    throw new Error('could not read the credentials file');
+  });
+  const stillServed = await failingNotice.generate({ session: makeSession('notice-failed') } as never);
+  assert.equal((stillServed.parts[0] as { text: string }).text, 'fallback');
+});
+
 test('an overflowing transcript reaches the runner instead of spending the fallback switch', async () => {
   // The wrapper catches every provider failure and switches the session to
   // the fallback model for good. A context overflow is the one rejection

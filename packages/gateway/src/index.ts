@@ -33,6 +33,7 @@ import {
   latestTurnReply,
   conversationContextFrom,
   STRATUS_SKILL_ID,
+  redactSecrets,
   type AgentDefinition,
   type AgentRuntimeContext,
   type AgentMemoryStore,
@@ -1549,9 +1550,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the runner built just below — late-bound because the runner needs
     // the provider first.
     let hostedRunner: AgentRunner | undefined;
+    // One set for both places a provider's error text leaves the runner:
+    // the switch warning below and a failed turn.
+    const secretsOf = async (session: Session): Promise<string[]> => [...runtimeKeysOf(config), ...await failureSecrets(session)];
     const provider = createRuntimeProvider(
       config,
-      (error) => warn(`default model failed (${error instanceof Error ? error.message : String(error)}); using the fallback model`),
+      async (error, session) => {
+        // Masked like a failed turn's text, since the primary's error can
+        // quote any stored secret. When the store can't be read, the
+        // runtime's own keys are still masked.
+        const secrets = await secretsOf(session).catch(() => runtimeKeysOf(config));
+        warn(`default model failed (${redactSecrets(error instanceof Error ? error.message : String(error), secrets)}); using the fallback model`);
+      },
       async (session, call, context) => {
         if (!hostedRunner) {
           throw new Error('The Stratus runtime is not ready to execute tools yet.');
@@ -1588,7 +1598,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ? { autoContinue, waitingInput: (sessionId: string) => (waitingDispatches.get(sessionId) ?? 0) > 0 }
         : {}),
       providerCallGuards,
-      failureSecrets: async (session) => [...runtimeKeysOf(config), ...await failureSecrets(session)],
+      failureSecrets: secretsOf,
     });
     hostedRunner = runner;
     runners.set(key, runner);
