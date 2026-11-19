@@ -556,7 +556,7 @@ test('the time limit stops a turn whose provider never answers, and the session 
       (error: Error) => error instanceof RunAbortedError && /time limit of 300ms/.test(error.message) && !error.resumable,
     );
     assert.ok(Date.now() - startedAt >= 290, 'not before the limit');
-    const expected = 'Stopped: this turn ran past its time limit of 300ms. Raise turnMinutes in ~/.stratus/config.json '
+    const expected = 'Stopped: this turn ran past its time limit of 300ms. Raise turnMinutes in the daemon\'s config file '
       + '(or agentTurnMinutes for one agent) for agents that do long work, or reply to carry on from where it got to.';
     const stored = await gateway.store.get('limited-1');
     assert.equal(stored?.status, 'failed');

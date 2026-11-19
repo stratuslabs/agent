@@ -297,10 +297,11 @@ const limitText = (ms: number): string => {
 /**
  * What a turn its time limit stopped fails with. Names the settings,
  * because the person reading it is the one who can raise them, and says
- * the work isn't lost: the session keeps every step it took.
+ * the work isn't lost: the session keeps every step it took. Not a path:
+ * `--config` or `STRATUS_CONFIG` may have chosen another file.
  */
 const turnTimeLimitError = (limitMs: number): string =>
-  `Stopped: this turn ran past its time limit of ${limitText(limitMs)}. Raise turnMinutes in ~/.stratus/config.json `
+  `Stopped: this turn ran past its time limit of ${limitText(limitMs)}. Raise turnMinutes in the daemon's config file `
   + '(or agentTurnMinutes for one agent) for agents that do long work, or reply to carry on from where it got to.';
 /**
  * How long a parked call waits for a person. Long enough to survive a
