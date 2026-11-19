@@ -71,3 +71,33 @@ test('review decisions log their verdict and code; shadow ones are marked and ne
   // An ordinary allowed call still logs nothing.
   assert.equal(decisionLogLine({ ...base, allowed: true, layer: 'risk', reason: 'notes.add runs without asking (approvals.posture is open)' }), undefined);
 });
+
+test('a shadow review line carries the reviewer\'s reason as one quoted field; enforced lines never do', () => {
+  const base = { mode: 'headless', risk: 'gated', toolName: 'notes.add', sessionId: 'sess-1', agentId: 'ava' } as const;
+  const shadow: PermissionDecision = {
+    ...base,
+    allowed: false,
+    layer: 'review',
+    verdict: 'ask',
+    reviewCode: 'unclear',
+    shadow: true,
+    reason: 'notes.add was asked about by the reviewer (unclear)',
+    reviewReason: 'not sure the person wanted "C999"\nsecond line',
+  };
+  assert.equal(
+    decisionLogLine(shadow)?.line,
+    'ava: shadow [review] notes.add was asked about by the reviewer (unclear) verdict=ask code=unclear why="not sure the person wanted \\"C999\\" second line" (session sess-1)',
+  );
+  // Capped, even from an emitter that didn't cut it.
+  const long = decisionLogLine({ ...shadow, reviewReason: 'x'.repeat(400) })?.line ?? '';
+  assert.ok(long.includes(`why="${'x'.repeat(300)}…"`));
+  assert.equal(long.includes('x'.repeat(301)), false);
+  // Blank adds nothing.
+  assert.equal(decisionLogLine({ ...shadow, reviewReason: '  ' })?.line.includes('why='), false);
+  // An enforced decision that somehow carries one logs without it.
+  const enforced: PermissionDecision = { ...shadow, shadow: false };
+  assert.equal(
+    decisionLogLine(enforced)?.line,
+    'ava: [review] notes.add was asked about by the reviewer (unclear) verdict=ask code=unclear (session sess-1)',
+  );
+});

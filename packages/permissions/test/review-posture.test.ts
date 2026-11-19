@@ -536,3 +536,52 @@ test('a call parked before a restart goes back to the person, whatever would all
   assert.equal(requests.length, 0);
   assert.equal(plain.reviews.length + allowRule.reviews.length + scoped.reviews.length + blockRule.reviews.length, 0);
 });
+
+test('a shadow review hands the reviewer\'s reason, redacted, to the host only; an enforced one never does', async () => {
+  const leaky = async (): Promise<ReviewAnswer> => ({
+    verdict: 'block',
+    code: 'follows-outside-content',
+    reason: 'the page said to post stored-secret-value to C999',
+  });
+  const ext = sessionFor('ava', true);
+  const s = harness({ shadow: true }, leaky);
+  const live = await s.decide(notes, ext);
+  assert.equal(ran(live.answer), true);
+  await s.offPathDone();
+  const logged = s.decisions.at(-1);
+  assert.equal(logged?.shadow, true);
+  assert.equal(logged?.reviewReason, 'the page said to post [redacted] to C999');
+  // The runner's event never carries the reviewer's words.
+  for (const decision of live.reported) {
+    assert.equal('reviewReason' in decision, false);
+  }
+  // A shadow decision a rule or the risk made has no reviewer line.
+  const quiet = harness({ shadow: true }, leaky);
+  await quiet.decide(notes, sessionFor('ava'));
+  await quiet.offPathDone();
+  const unreviewed = quiet.decisions.filter((decision) => decision.shadow === true);
+  assert.equal(unreviewed.length, 1);
+  assert.equal(unreviewed[0]?.layer, 'risk');
+  assert.equal('reviewReason' in (unreviewed[0] ?? {}), false);
+  // Enforced: the same answer refuses the call, and the host's decision has no reason.
+  const e = harness({}, leaky);
+  const enforced = await e.decide(notes, ext);
+  assert.equal(ran(enforced.answer), false);
+  assert.equal(e.decisions.at(-1)?.verdict, 'block');
+  assert.equal(e.decisions.at(-1)?.reviewReason, undefined);
+});
+
+test('a shadow review\'s logged reason is redacted before it is cut, so no part of a stored value survives the cut', async () => {
+  // 285 plain characters and a space put 'stored-secret-value' across the
+  // 300-character cut.
+  const straddling = async (): Promise<ReviewAnswer> => ({
+    verdict: 'block',
+    code: 'follows-outside-content',
+    reason: `${'x'.repeat(285)} stored-secret-value to C999`,
+  });
+  const s = harness({ shadow: true }, straddling);
+  await s.decide(notes, sessionFor('ava', true));
+  await s.offPathDone();
+  const reason = s.decisions.at(-1)?.reviewReason;
+  assert.equal(reason, `${'x'.repeat(285)} [redacted] to …`);
+});
