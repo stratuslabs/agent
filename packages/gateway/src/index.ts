@@ -1873,7 +1873,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     };
 
     const armTimer = (): void => {
-      if (effectiveIdleMs <= 0) {
+      // Never once the turn is stopped: whatever stopped it (a stop, a
+      // restart, its time limit) is why it ended, and the events a stopping
+      // turn still emits must not start a silence it would then report.
+      if (effectiveIdleMs <= 0 || controller.signal.aborted) {
         return;
       }
       suspendTimer();
@@ -1980,6 +1983,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     });
 
     suspendWatchdog.set(sessionId, suspendTimer);
+    controller.signal.addEventListener('abort', suspendTimer, { once: true });
 
     if (streamingActive) {
       armTimer();
@@ -1991,6 +1995,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return await run(controller.signal);
     } finally {
       suspendTimer();
+      controller.signal.removeEventListener('abort', suspendTimer);
       disposeLimit();
       unsubscribeObserver();
       unsubscribeDrain();

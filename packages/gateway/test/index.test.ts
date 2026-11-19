@@ -628,6 +628,32 @@ test('a turn stopped near its limit isn\'t reported as past it while the stop ta
   }
 });
 
+test('a streaming turn its time limit stops isn\'t then reported by the idle watchdog too', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: anthropic\nmodel: model-slow\n---\n\nYou stall.\n');
+  // Silent, and 400ms slow to give up once stopped: the 300ms idle
+  // deadline passes after the 100ms limit has already ended the turn.
+  const slowToStop = ((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => {
+      setTimeout(() => reject(new DOMException('aborted', 'AbortError')), 400);
+    }, { once: true });
+  })) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: slowToStop };
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 300, turnTimeLimitMs: 100, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'both-1', agentId: 'slow', userMessage: 'hang' }),
+      (error: Error) => error instanceof RunAbortedError && /time limit of 100ms/.test(error.message),
+    );
+    assert.equal(warnings.filter((line) => line.startsWith('time limit:')).length, 1);
+    assert.deepEqual(warnings.filter((line) => line.startsWith('watchdog:')), []);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 /** An approval policy that never answers: it waits until the turn is stopped, as a policy must. */
 const hangingPolicy = () => ({
   approve: ({ signal }: { signal?: AbortSignal }) => new Promise<boolean>((_resolve, reject) => {
