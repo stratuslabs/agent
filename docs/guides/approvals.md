@@ -37,6 +37,10 @@ That default is `approvals.posture: "open"`:
   each gated call, and a person is asked only when they can't tell. See
   [The review posture](#the-review-posture).
 
+`stratus setup` asks a new install which one to use, with open preselected,
+and writes the answer; an existing config is never asked. See
+[Setup](../start/setup.md).
+
 A config that can't be read leaves the daemon guarded rather than open. A
 project-local config that tries to set `approvals` is ignored, with a
 warning, and `~/.stratus/config.json`'s approvals apply instead. The daemon

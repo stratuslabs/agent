@@ -71,7 +71,7 @@ test('a new install at a terminal is asked for a posture, with open preselected,
   await setup.offerPosture(true);
 
   assert.equal(asked.length, 1);
-  const [question] = asked;
+  const question = asked[0]!;
   assert.equal(question.defaultIndex ?? 0, 0);
   assert.equal(question.options.length, 3);
   assert.match(question.options[0]!, /^Open \(default\) +run them without asking$/);
