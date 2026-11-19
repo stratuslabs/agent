@@ -20,15 +20,16 @@ Each item links to the page that has the full story.
   content and holds tools that write or send, use `guarded`, `review`, or
   `externalContent: "gate"`.
   [After an agent reads the web](../guides/approvals.md#after-an-agent-reads-the-web)
-- **`review` is a model's judgment, not a boundary.** It changes nothing
-  until a conversation reads outside content (shell output doesn't count).
-  After that, your rules, a few built-in rules and a reviewer model decide
-  each gated call. The built-in rules catch obvious cases only: a script
-  file gets around the `curl … | sh` rule, and a command rule doesn't
-  understand variables, `eval` or encoded text. The reviewer never sees tool
-  output or fetched pages, it can be wrong, and each review is a model call
-  on your account. Keep the shell sandbox on with it, and run it in shadow
-  mode first. [The review posture](../guides/approvals.md#the-review-posture)
+- **`review` is a model's judgment, not a boundary.** Your own rules
+  (`approvals.rules`) hold in every conversation. Apart from them, it
+  changes nothing until a conversation reads outside content (shell output
+  doesn't count). After that, a few built-in rules and a reviewer model
+  decide each gated call too. The built-in rules catch obvious cases only:
+  a script file gets around the `curl … | sh` rule, and a command rule
+  doesn't understand variables, `eval` or encoded text. The reviewer never
+  sees tool output or fetched pages, it can be wrong, and each review is a
+  model call on your account. Keep the shell sandbox on with it, and run it
+  in shadow mode first. [The review posture](../guides/approvals.md#the-review-posture)
 
 ## Where commands run
 
