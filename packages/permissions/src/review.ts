@@ -573,7 +573,11 @@ export interface ReviewRequest {
   signal: AbortSignal;
 }
 
-/** The reviewer's answer. `reason` is one line for the agent and the approver, never logged. */
+/**
+ * The reviewer's answer. `reason` is one line for the agent and the approver.
+ * It is logged only for a shadow review (`PermissionDecision.reviewReason`),
+ * where nobody else sees it, and never put on an event.
+ */
 export interface ReviewAnswer {
   verdict: ApprovalVerdict;
   code: ReviewCode;

@@ -210,17 +210,21 @@ Each decision is a `permission.decided` event with its verdict, the check
 that made it (`rule`, `review`, or the usual layers) and a fixed code for
 the reviewer's reason (`asked-for`, `not-asked-for`,
 `follows-outside-content`, `sends-secret`, `new-destination`, `unclear`,
-`review-failed`). The reviewer's own words go only to the agent and to the
-approver, since they can echo the call's input. The dashboard's live view
+`review-failed`). The reviewer's own words never go on an event, since they
+can echo the call's input: on an enforced review they go only to the agent
+and to the approver. The dashboard's live view
 shows each decision beside its call, and a shadow one as `would have
 blocked` beside it, drawn dashed, even when the review finishes after the
 turn has. The daemon log gets one line per review
-decision with `verdict=` and `code=` (a shadow one starts with `shadow`),
-which is what to count:
+decision with `verdict=` and `code=`, which is what to count. A shadow one
+starts with `shadow` and also carries the reviewer's one-line reason as
+`why="…"`, with stored credential values redacted, so a shadow run can show
+why review would have asked or blocked. That line can paraphrase the
+conversation, so treat the log as private while shadow is on:
 
 ```text
 approvals: posture review for atlas (model claude-haiku-5-5, shadow: reviewed and logged, never enforced)
-atlas: shadow [review] message.send was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for (session slack:atlas:…)
+atlas: shadow [review] message.send was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for why="nobody here asked to post in C0123" (session slack:atlas:…)
 ```
 
 To turn it off, set `posture` back to `open` or `guarded`; your rules stay
