@@ -66,6 +66,7 @@ export interface RecoveryDeps {
   runnerFor: (config: RuntimeConfig, agentId: string, subAgent?: boolean) => AgentRunner;
   withWatchdog: <T>(
     sessionId: string,
+    agentId: string,
     external: AbortSignal | undefined,
     idleEnabled: boolean,
     fallbackStreams: boolean,
@@ -523,7 +524,7 @@ export const createRecovery = ({
     session.agent = source.definition;
     await store.save(session);
     const runner = runnerFor(config, source.definition.id);
-    return onTurnRuntime(session.id, { source, config }, () => withWatchdog(session.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
+    return onTurnRuntime(session.id, { source, config }, () => withWatchdog(session.id, source.definition.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
       await runner.continueTurn(session.id, {
         runtime: runtimeContextFor(source, config, switchedToFallback, session.metadata),
         signal,

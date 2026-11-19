@@ -55,6 +55,8 @@ test('a config using every key the loader accepts reports nothing', () => {
     language: 'en-US',
     maxTurns: 50,
     agentMaxTurns: { ava: 100 },
+    turnMinutes: 90,
+    agentTurnMinutes: { ava: 0 },
     autoContinue: { ava: true },
     concurrentScheduledTurns: { ava: 2 },
     tasks: { enabled: false, maxRunningPerAgent: { ava: 5 } },

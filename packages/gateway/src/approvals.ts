@@ -401,11 +401,24 @@ export const createApprovalBroker = ({
    */
   const approvalWaits = new Map<string, number>();
 
+  /**
+   * How a running turn's time limit (AGT-371) stops and starts its clock,
+   * registered while the turn runs. Time spent waiting on a person is not
+   * the turn's to spend, so the clock stops when the session's first wait
+   * opens and starts again when its last one closes, from the same
+   * balanced counter, for the reason that counter is one.
+   */
+  const turnClocks = new Map<string, { pause(): void; resume(): void }>();
+
   const holdApprovalWait = (sessionId: string): (() => void) => {
-    approvalWaits.set(sessionId, (approvalWaits.get(sessionId) ?? 0) + 1);
+    const waits = (approvalWaits.get(sessionId) ?? 0) + 1;
+    approvalWaits.set(sessionId, waits);
     // Stop any clock already running: this wait produces no events, so
     // nothing else would.
     suspendWatchdog.get(sessionId)?.();
+    if (waits === 1) {
+      turnClocks.get(sessionId)?.pause();
+    }
     let released = false;
     return () => {
       if (released) {
@@ -417,6 +430,7 @@ export const createApprovalBroker = ({
         approvalWaits.set(sessionId, remaining);
       } else {
         approvalWaits.delete(sessionId);
+        turnClocks.get(sessionId)?.resume();
       }
     };
   };
@@ -432,6 +446,7 @@ export const createApprovalBroker = ({
     resolveApproval,
     suspendWatchdog,
     approvalWaits,
+    turnClocks,
     holdApprovalWait,
   };
 };

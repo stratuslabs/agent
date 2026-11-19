@@ -68,6 +68,8 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
 | `maxTurns` | How many tool turns one message may take before the agent stops and reports where it got to. Default `40` — trusted configs only, see below |
 | `agentMaxTurns` | Per-agent replacements for `maxTurns`, keyed by agent id. Trusted configs only |
+| `turnMinutes` | The longest one turn may run, in minutes, before it is stopped and fails saying why. Time spent waiting on an approval doesn't count. `0` means no limit. Default `120` — trusted configs only, see [how long one turn may run](#how-long-one-turn-may-run) |
+| `agentTurnMinutes` | Per-agent replacements for `turnMinutes`, keyed by agent id: `{ "atlas": 240 }`, `0` for no limit on that agent. Trusted configs only |
 | `autoContinue` | Agents that keep working past their budget instead of stopping to ask, keyed by agent id: `true` (no cap) or a number of extra budgets per message. Off for agents not listed. Trusted configs only. See [how many turns one message may spend](#how-many-turns-one-message-may-spend) |
 | `concurrentScheduledTurns` | How many of an agent's schedules may run a firing at once, keyed by agent id: `{ "atlas": 2 }`. 1 for agents not listed; one schedule never overlaps itself whatever the number. Trusted configs only. See [Schedules](../guides/schedules.md#limits) |
 | `tasks` | Background tasks: `enabled` (default `true`) lets an agent's `agent.delegate` call pass `background: true`, and `maxRunningPerAgent` caps how many one agent has running at once, keyed by agent id: `{ "atlas": 5 }`, 3 for agents not listed. Trusted configs only. See [Background tasks](#background-tasks) |
@@ -203,9 +205,10 @@ log names the agents it is on for. It applies to the built-in model loop
 (Anthropic and OpenAI-compatible providers) and to the `claude-code`
 runtime, which carries on in the same Claude Code session with a fresh
 budget. The `codex` runtime is not covered yet and wraps up as before. With
-`true` there is no ceiling, and a message that joins the turn mid-task
+`true` there is no step ceiling, and a message that joins the turn mid-task
 (below) doesn't end it, so a runaway turn ends with
-[`stop` in Slack](../guides/slack.md#stopping-a-turn) or a daemon restart.
+[`stop` in Slack](../guides/slack.md#stopping-a-turn), a daemon restart, or
+its [time limit](#how-long-one-turn-may-run).
 
 **A message sent mid-task shares the budget.** On Slack, a message sent
 while the agent works [joins the running turn](../guides/slack.md#how-replies-appear) at its
@@ -275,6 +278,46 @@ parent's: `agent.delegate` starts a separate dispatch, and each dispatch is
 held to this ceiling. The bound on delegation *depth* is a different
 setting — see [Tools](../guides/tools.md).
 
+## How long one turn may run
+
+`maxTurns` counts steps; `turnMinutes` is the clock. A turn that runs
+longer than 2 hours is stopped, however many steps it has left. It catches
+what the step budget and the idle watchdog can't: a provider that doesn't
+stream (the watchdog only watches streaming ones), a tool that never
+returns, an `autoContinue: true` loop.
+
+```json
+{
+  "turnMinutes": 60,
+  "agentTurnMinutes": { "atlas": 240, "nova": 0 }
+}
+```
+
+`agentTurnMinutes` replaces `turnMinutes` for the agents it names, and `0`
+turns the limit off, for everyone or for one agent. Both follow the trust
+rule of `maxTurns`: a project-local config can neither lift the limit nor
+cut the operator's agents off. A daemon restart picks them up, and the
+startup log says the limit and each agent with its own: `turn time limit:
+2 hours per turn (atlas 4 hours, nova none)`.
+
+- **What counts.** Wall-clock time from when the turn starts, tool calls
+  and provider calls alike. Time the turn spends waiting on a person's
+  [approval](../guides/approvals.md) doesn't: the clock stops when the
+  question goes out and goes on, with the time already spent, once it is
+  answered. A turn that delegates keeps its clock running while the
+  delegated session works, and that session has a clock of its own.
+- **What happens.** The turn is stopped the way a `stop` stops it: the
+  call in flight is cancelled, the session keeps every step it finished,
+  and the turn fails with `Stopped: this turn ran past its time limit of 2
+  hours`, naming these settings. Slack posts it in the thread as the
+  turn's failure. Replying carries on from where it got to, with a fresh
+  clock.
+- **Background tasks.** A task is one turn of its worker, so the worker
+  agent's limit is the task's. A task past it ends `failed`, its outcome
+  in the conversation that started it says why, and its slot is free.
+- **Restarts.** A turn a restart continues starts a fresh clock. A turn
+  the limit stopped is failed, never continued.
+
 ## Background tasks
 
 An agent that may delegate can pass `background: true` to
@@ -301,6 +344,11 @@ a task's worker included, can't start a task. Tasks are on unless
 - **Restarts.** A stop or restart doesn't wait for a running task: it cuts
   it off, and the next start reports it interrupted in its conversation.
   It is never run again.
+- **Time limit.** A task runs for at most its worker agent's
+  [turn time limit](#how-long-one-turn-may-run), 2 hours unless
+  `turnMinutes` or `agentTurnMinutes` says otherwise. Past it the task
+  ends `failed`, saying it ran past its time limit, and frees its slot.
+  Time waiting on an approval doesn't count.
 - **Approvals.** A task's gated call is asked in the conversation that
   started it, as any delegated call is, and the request carries the task
   id (`taskId` on `tool.approval-requested` and on `GET /api/v1/approvals`

@@ -117,6 +117,8 @@ const taskGateway = async (options: {
   onEvent?: (event: StratusEvent) => void;
   /** Gated calls are asked through the gateway's approval broker, as `stratus serve` does, instead of allowed. */
   approvals?: 'remote';
+  /** Each agent's turn time limit (AGT-371); the shared default for the rest. */
+  turnTimeLimitMsFor?: (agentId: string) => number | undefined;
 } = {}) => {
   const home = options.home ?? await newHome();
   if (options.home === undefined) {
@@ -191,6 +193,23 @@ const taskGateway = async (options: {
                   }
                   await hold(blocked, signal);
                 }
+                if (said.startsWith('SLOW-GATED')) {
+                  // GATED's call with 400ms of work before it and after it.
+                  await new Promise<void>((resolve, reject) => {
+                    const timer = setTimeout(resolve, 400);
+                    signal?.addEventListener('abort', () => {
+                      clearTimeout(timer);
+                      reject(signal.reason);
+                    }, { once: true });
+                  });
+                  const last = session.messages.at(-1);
+                  if (last?.role === 'tool') {
+                    return { parts: [{ type: 'text', text: 'slow gated done' }] };
+                  }
+                  return {
+                    parts: [{ type: 'tool-call', call: { id: `${session.id}:${session.messages.length}`, toolName: 'fixture.gated', input: {} } }],
+                  };
+                }
                 if (said.startsWith('GATED')) {
                   // One gated call, then the answer it got.
                   const last = session.messages.at(-1);
@@ -264,6 +283,7 @@ const taskGateway = async (options: {
     ...(options.tasks !== undefined ? { tasks: options.tasks } : {}),
     ...(options.held === true ? { held: true } : {}),
     ...(options.stopDrainTimeoutMs !== undefined ? { stopDrainTimeoutMs: options.stopDrainTimeoutMs } : {}),
+    ...(options.turnTimeLimitMsFor !== undefined ? { turnTimeLimitMsFor: options.turnTimeLimitMsFor } : {}),
     log: () => {},
     warn: (line) => warnings.push(line),
   });
@@ -1345,6 +1365,88 @@ test('approvals: an ordinary session\'s question carries no task id and touches 
     fixture.gateway.resolveApproval({ requestId: pending!.requestId, answer: 'deny' });
     await turn;
     assert.deepEqual(taskEvents(events), []);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+// AGT-371: a background task is one worker turn, so the worker agent's turn
+// time limit is the task's. Past it, the task fails saying so, its slot is
+// free, and a wait on a person doesn't count against it.
+
+test('time limit: a task past its worker\'s time limit ends failed saying why, and frees its slot', async () => {
+  const fixture = await taskGateway({
+    tasks: { maxRunningPerAgent: { ava: 1 } },
+    turnTimeLimitMsFor: (agentId) => (agentId === 'mia' ? 200 : undefined),
+  });
+  try {
+    const origin = 'fixture:ava:C90';
+    const started = fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'BLOCK-90', background: true }));
+    assert.equal(started.ok, true, started.error);
+    const task = (started.output as { task: string }).task;
+    const row = await fixture.settled(task);
+    assert.deepEqual([row.status, row.delivery], ['failed', 'delivered']);
+    const worker = await fixture.gateway.store.get(row.workerSessionId);
+    assert.match(worker?.lastError ?? '', /^Stopped: this turn ran past its time limit of 200ms\./);
+    const conversation = await fixture.gateway.store.get(origin);
+    const notice = conversation?.messages.find((message) => typeof message.content === 'string' && message.content.startsWith(`[Background task ${task}`));
+    assert.match(String(notice?.content), new RegExp(`^\\[Background task ${task} \\(mia\\) failed after 0 steps\\.\\nError: Stopped: this turn ran past its time limit of 200ms\\.`));
+    // The one slot ava has is free again.
+    const next = fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'WORK-90', background: true }));
+    assert.equal(next.ok, true, next.error);
+    assert.equal((await fixture.settled((next.output as { task: string }).task)).status, 'completed');
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('time limit: a task waiting on a person\'s answer isn\'t spending its time', async () => {
+  const fixture = await taskGateway({ approvals: 'remote', turnTimeLimitMsFor: (agentId) => (agentId === 'mia' ? 1_000 : undefined) });
+  try {
+    const origin = 'fixture:ava:C91';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'GATED-91', background: true })).output as { task: string }).task;
+    await until('the worker to ask', () => fixture.gateway.pendingApprovals().length === 1);
+    // Half as long again as the limit, spent waiting on the answer.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(fixture.rows.get(task)?.status, 'waiting_approval');
+    assert.equal(fixture.gateway.resolveApproval({ requestId: fixture.gateway.pendingApprovals()[0]!.requestId, answer: 'once', actor: 'U1' }), true);
+    const settled = await fixture.settled(task);
+    assert.equal(settled.status, 'completed');
+    assert.deepEqual(fixture.warnings.filter((line) => line.startsWith('time limit:')), []);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('time limit: the time a task spent before its wait on a person still counts after the answer', async () => {
+  const fixture = await taskGateway({ approvals: 'remote', turnTimeLimitMsFor: (agentId) => (agentId === 'mia' ? 700 : undefined) });
+  try {
+    const origin = 'fixture:ava:C93';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'SLOW-GATED-93', background: true })).output as { task: string }).task;
+    await until('the worker to ask', () => fixture.gateway.pendingApprovals().length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    fixture.gateway.resolveApproval({ requestId: fixture.gateway.pendingApprovals()[0]!.requestId, answer: 'once', actor: 'U1' });
+    // 400ms before the question and 400ms after it is past 700, and the
+    // 600ms between was the person's.
+    const settled = await fixture.settled(task);
+    assert.equal(settled.status, 'failed');
+    assert.match((await fixture.gateway.store.get(settled.workerSessionId))?.lastError ?? '', /time limit of 700ms/);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test('time limit: a task stopped before its limit ends cancelled, and the limit never fires after it', async () => {
+  const fixture = await taskGateway({ turnTimeLimitMsFor: (agentId) => (agentId === 'mia' ? 300 : undefined) });
+  try {
+    const origin = 'fixture:ava:C92';
+    const task = (fixture.delegated(await fixture.ask(origin, { to: 'mia', prompt: 'BLOCK-92', background: true })).output as { task: string }).task;
+    await until('the worker to start', () => fixture.blockedCount() === 1);
+    const cancelled = await fixture.gateway.cancelTask(task, 'U1');
+    assert.equal(cancelled.kind, 'stopping');
+    assert.equal((await fixture.settled(task)).status, 'cancelled');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.deepEqual(fixture.warnings.filter((line) => line.startsWith('time limit:')), []);
   } finally {
     await fixture.stop();
   }

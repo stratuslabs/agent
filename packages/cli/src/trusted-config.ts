@@ -450,6 +450,42 @@ export const loadServeAgentMaxTurns = async (
 };
 
 /**
+ * How long one turn may run (`turnMinutes`, and `agentTurnMinutes: {
+ * "<id>": n }` for one agent's own), in minutes, 0 for no limit. Trusted
+ * config only, for `maxTurns`'s reason: a clone must not lift the limit on
+ * the operator's agents, nor cut them off. Values are already checked when
+ * the file loads (a bad one makes it unreadable, warned here), so an
+ * unreadable file leaves the gateway's default for every agent.
+ */
+export const loadServeTurnMinutes = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<{ turnMinutes?: number; agentTurnMinutes: Record<string, number> }> => {
+  const read = async <K extends 'turnMinutes' | 'agentTurnMinutes'>(key: K) => {
+    let block = await readTrustedConfigBlock(key, env, configPath);
+    if (block.status === 'untrusted') {
+      warn(
+        `ignoring ${key} in ${block.path}: a project-local config cannot decide how long this daemon's turns may run. `
+        + 'Using ~/.stratus/config.json instead.',
+      );
+      block = await readGlobalConfigBlock(key, env);
+    }
+    if (block.status === 'unreadable') {
+      warn(`ignoring ${key} (${block.error instanceof Error ? block.error.message : String(block.error)}); using the default`);
+      return undefined;
+    }
+    return block.status === 'present' ? block.value : undefined;
+  };
+  const turnMinutes = await read('turnMinutes');
+  const agentTurnMinutes = await read('agentTurnMinutes');
+  return {
+    ...(turnMinutes !== undefined ? { turnMinutes } : {}),
+    agentTurnMinutes: { ...(agentTurnMinutes ?? {}) },
+  };
+};
+
+/**
  * Which agents keep working past their budget (`autoContinue: { "<id>":
  * true | n }`), under `agentMaxTurns`'s trust rule and for its reason: it
  * spends the operator's tokens, and a soul can come from someone else's

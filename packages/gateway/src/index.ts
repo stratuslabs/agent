@@ -274,6 +274,35 @@ import {
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
 /**
+ * The longest one turn may run before it is stopped (AGT-371). Long enough
+ * for real work (a coding turn that spends its whole step budget on builds
+ * and tests), short enough that a turn stuck where the idle watchdog can't
+ * see it (a provider that doesn't stream, a tool that never returns, an
+ * auto-continue loop with no cap) gives its session and its task slot back
+ * the same afternoon.
+ */
+const DEFAULT_TURN_TIME_LIMIT_MS = 2 * 60 * 60_000;
+
+/** A time limit as a person reads it: hours or minutes when it is whole ones. */
+const limitText = (ms: number): string => {
+  if (ms > 0 && ms % 3_600_000 === 0) {
+    return ms === 3_600_000 ? '1 hour' : `${ms / 3_600_000} hours`;
+  }
+  if (ms > 0 && ms % 60_000 === 0) {
+    return ms === 60_000 ? '1 minute' : `${ms / 60_000} minutes`;
+  }
+  return `${ms}ms`;
+};
+
+/**
+ * What a turn its time limit stopped fails with. Names the settings,
+ * because the person reading it is the one who can raise them, and says
+ * the work isn't lost: the session keeps every step it took.
+ */
+const turnTimeLimitError = (limitMs: number): string =>
+  `Stopped: this turn ran past its time limit of ${limitText(limitMs)}. Raise turnMinutes in ~/.stratus/config.json `
+  + '(or agentTurnMinutes for one agent) for agents that do long work, or reply to carry on from where it got to.';
+/**
  * How long a parked call waits for a person. Long enough to survive a
  * meeting, short enough that a request nobody saw does not hold a turn (and
  * the Slack thread it is answering) open indefinitely.
@@ -308,6 +337,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const log = options.log ?? (() => {});
   const warn = options.warn ?? (() => {});
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  const turnTimeLimitMs = options.turnTimeLimitMs ?? DEFAULT_TURN_TIME_LIMIT_MS;
+  // Refused, not absorbed, as `approvalTimeoutMs` is: a negative or NaN
+  // limit would read as "no limit", the last thing a bad number meant.
+  if (!Number.isFinite(turnTimeLimitMs) || turnTimeLimitMs < 0) {
+    throw new Error(
+      `turnTimeLimitMs must be a non-negative number of milliseconds (0 for no limit); received ${String(options.turnTimeLimitMs)}.`,
+    );
+  }
+  /**
+   * An agent's turn time limit: its own when it has a usable one, else the
+   * shared one, clamped to Node's timer range (past it, a delay becomes
+   * 1ms, which would stop every turn at once). 0 is no limit.
+   */
+  const turnTimeLimitFor = (agentId: string): number => {
+    const own = options.turnTimeLimitMsFor?.(agentId);
+    const limit = own !== undefined && Number.isFinite(own) && own >= 0 ? own : turnTimeLimitMs;
+    return Math.min(limit, MAX_TIMER_DELAY_MS);
+  };
 
   const bus = new EventBus({
     onError: (error) => warn(`event handler failed: ${error instanceof Error ? error.message : String(error)}`),
@@ -545,6 +592,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     resolveApproval,
     suspendWatchdog,
     approvalWaits,
+    turnClocks,
     holdApprovalWait,
   } = createApprovalBroker({
     warn,
@@ -1683,13 +1731,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const withWatchdog = async <T>(
     sessionId: string,
+    agentId: string,
     external: AbortSignal | undefined,
     idleEnabled: boolean,
     fallbackStreams: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> => {
     const effectiveIdleMs = idleEnabled || fallbackStreams ? idleTimeoutMs : 0;
-    if (effectiveIdleMs <= 0 && !external) {
+    const limitMs = turnTimeLimitFor(agentId);
+    if (effectiveIdleMs <= 0 && !external && limitMs <= 0) {
       // No watchdog and nobody outside to cancel it — but still a turn an
       // announced restart must be able to cut short at the window.
       const idle = new AbortController();
@@ -1869,10 +1919,58 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       armTimer();
     }
 
+    /**
+     * The turn's time limit (AGT-371): wall clock, not progress, so it
+     * ends what the idle timer above can't see, a provider that doesn't
+     * stream or a tool that never returns. Its clock stops while the turn
+     * waits on a person (`turnClocks`, driven by the approval broker's
+     * balanced wait counter) and starts again with the time already spent.
+     * Stopping goes through the same abort as a person's stop, with the
+     * reason on the signal, so the runner records it on the session and
+     * `session.failed`, and a task's worker settles as failed saying why.
+     * Not resumable: a restart must not continue a turn its limit ended.
+     *
+     * Unref'd, unlike the idle timer: it runs for hours, and a turn really
+     * in flight has its own handles keeping the process up, so the clock
+     * must not be the thing that keeps a finished host alive.
+     */
+    let limitTimer: NodeJS.Timeout | undefined;
+    let limitSpentMs = 0;
+    let limitSince: number | undefined;
+    const startLimitClock = (): void => {
+      if (limitMs <= 0 || limitSince !== undefined || controller.signal.aborted) {
+        return;
+      }
+      limitSince = Date.now();
+      limitTimer = setTimeout(() => {
+        warn(`time limit: session ${sessionId} (${agentId}) ran past its time limit of ${limitText(limitMs)}; stopping the turn`);
+        controller.abort(new RunAbortedError(turnTimeLimitError(limitMs)));
+      }, Math.max(0, limitMs - limitSpentMs));
+      limitTimer.unref();
+    };
+    const stopLimitClock = (): void => {
+      if (limitSince === undefined) {
+        return;
+      }
+      clearTimeout(limitTimer);
+      limitTimer = undefined;
+      limitSpentMs += Date.now() - limitSince;
+      limitSince = undefined;
+    };
+    const clock = { pause: stopLimitClock, resume: startLimitClock };
+    turnClocks.set(sessionId, clock);
+    if ((approvalWaits.get(sessionId) ?? 0) === 0) {
+      startLimitClock();
+    }
+
     try {
       return await run(controller.signal);
     } finally {
       suspendTimer();
+      stopLimitClock();
+      if (turnClocks.get(sessionId) === clock) {
+        turnClocks.delete(sessionId);
+      }
       unsubscribeObserver();
       unsubscribeDrain();
       suspendWatchdog.delete(sessionId);
@@ -2931,6 +3029,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
     log(backgroundTasks.summary);
+    {
+      // Said at every start: a limit that stops turns should never be a
+      // surprise, and an agent with its own says so here.
+      const limitOrNone = (ms: number): string => (ms > 0 ? limitText(ms) : 'none');
+      const shared = Math.min(turnTimeLimitMs, MAX_TIMER_DELAY_MS);
+      const own = registry.list()
+        .filter((agent) => turnTimeLimitFor(agent.id) !== shared)
+        .map((agent) => `${agent.id} ${limitOrNone(turnTimeLimitFor(agent.id))}`);
+      log(`turn time limit: ${shared > 0 ? `${limitText(shared)} per turn` : 'none'}${own.length > 0 ? ` (${own.join(', ')})` : ''}`);
+    }
 
     // Read before anything can dispatch, so this is exactly what the
     // last process left running and not a turn of ours caught in flight.
