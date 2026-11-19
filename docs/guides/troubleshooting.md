@@ -237,6 +237,10 @@ stopped.
   names the size the server sent; raise that server's `maxResultChars` if
   it is legitimately that large, or narrow the call. See
   [MCP](./mcp.md#the-posture).
+- **An agent's `xcodebuild test` hangs, then says `test runner hung
+  before establishing connection`** — Xcode's test runner can't start
+  inside the shell sandbox on macOS, whatever paths it allows. Run app
+  tests in CI; see [macOS app tests](./shell.md#macos-app-tests).
 - **An agent has forgotten the start of a long conversation** — see below.
 
 ## A conversation that outgrows the model
