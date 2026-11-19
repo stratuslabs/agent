@@ -542,9 +542,13 @@ that's set. That message runs a turn in its thread, labelled `unknown`
 whatever `principals` says, since the other agent's words carry whatever its
 own session was exposed to. It can't stop a turn or answer an approval. It
 doesn't take the thread for the holder rule, and an untagged bot message
-stays nothing. A thread admits at most `AGENT_MENTION_HOP_LIMIT` (4) agent
-mentions in a row per daemon, until a person speaks there again. A refused
-team mention is logged once, with the reason.
+stays nothing. Each agent answers at most `AGENT_MENTION_HOP_LIMIT` (4)
+agent mentions per thread in any 30 minutes, counted per agent, and a person
+that agent admits speaking in the thread clears its count. A mention past
+the limit is a warning in the log, and the agent posts one untagged line in
+the thread saying it skipped it and when it answers again, at most once
+every 30 minutes. Any other refused team mention is logged once, with the
+reason.
 
 ## Reading a channel
 
