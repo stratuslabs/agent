@@ -9694,6 +9694,33 @@ test('setup says remote approvals are denied when nothing can answer them at all
   assert.doesNotMatch(output.stdout, /the control API is the only way/);
 });
 
+test('a piped setup on a new install is not asked for a posture and writes none', async () => {
+  // AGT-334 asks for a posture only at a terminal. A script that drives
+  // setup through piped input gets the menus it always got, in the same
+  // order, and the config it always got: no approvals block.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'env-key' },
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
+      packageResolver: () => true,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  assert.doesNotMatch(output.stdout, /should your agents ask/);
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(saved.approvals, undefined);
+});
+
 test('setup does not count an agent with no fallback channel as fully covered', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
