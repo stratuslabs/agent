@@ -336,9 +336,10 @@ jobs:
 
 An agent with a GitHub token in its shell (see
 [stored credentials](../../packages/tool-shell/README.md#stored-credentials-in-the-environment))
-pushes its branch, then starts a run: opening a pull request does, and so
-does `gh workflow run mac-tests.yml --ref <branch>` without one (a push
-alone doesn't, since the workflow has no `push` trigger). It finds the run
+pushes its branch, then starts a run: opening a pull request does, and
+once the workflow is on the default branch, so does
+`gh workflow run mac-tests.yml --ref <branch>` without one. A push alone
+doesn't, since the workflow has no `push` trigger. It finds the run
 with `gh run list --branch <branch> --workflow mac-tests.yml` and checks it
 in a later call with `gh run view <id>`, since a test run usually outlasts
 one command's timeout. `gh run view <id> --log-failed` prints the failing
