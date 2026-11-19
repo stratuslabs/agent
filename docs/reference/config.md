@@ -304,7 +304,8 @@ startup log says the limit and each agent with its own: `turn time limit:
   and provider calls alike. Time the turn spends waiting on a person's
   [approval](../guides/approvals.md) doesn't: the clock stops when the
   question goes out and goes on, with the time already spent, once it is
-  answered. A turn that delegates keeps its clock running while the
+  answered or expires. Deciding whether to ask (rules, the review model, a
+  custom policy) is the turn's own time. A turn that delegates keeps its clock running while the
   delegated session works, and that session has a clock of its own.
 - **What happens.** The turn is stopped the way a `stop` stops it: the
   call in flight is cancelled, the session keeps every step it finished,
@@ -315,8 +316,9 @@ startup log says the limit and each agent with its own: `turn time limit:
 - **Background tasks.** A task is one turn of its worker, so the worker
   agent's limit is the task's. A task past it ends `failed`, its outcome
   in the conversation that started it says why, and its slot is free.
-- **Restarts.** A turn a restart continues starts a fresh clock. A turn
-  the limit stopped is failed, never continued.
+- **Restarts.** A turn a restart continues starts a fresh clock, and so
+  does one a restart finds parked on an approval, once it is asked again.
+  A turn the limit stopped is failed, never continued.
 
 ## Background tasks
 

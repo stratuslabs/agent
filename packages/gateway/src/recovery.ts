@@ -72,6 +72,8 @@ export interface RecoveryDeps {
     fallbackStreams: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ) => Promise<T>;
+  /** A turn's time limit on its controller, until the returned dispose (AGT-371). */
+  armTurnTimeLimit: (sessionId: string, agentId: string, controller: AbortController) => () => void;
   isStopping: () => boolean;
   trackTurn: (sessionId: string, controller: AbortController) => void;
   untrackTurn: (sessionId: string, controller: AbortController) => void;
@@ -111,6 +113,7 @@ export const createRecovery = ({
   runtimeContextFor,
   runnerFor,
   withWatchdog,
+  armTurnTimeLimit,
   isStopping,
   trackTurn,
   untrackTurn,
@@ -296,11 +299,15 @@ export const createRecovery = ({
       // outcome. A stop sent during the reads above finds nothing running
       // and reaches the session as an ordinary message, queued behind it.
       const controller = new AbortController();
+      // And its time limit, from now: a fresh clock, as a continued turn
+      // gets, stopped again while the re-asked call waits on a person.
+      let disposeLimit = (): void => {};
       if (record) {
         trackTurn(sessionId, controller);
         if (getAbortingWith() !== undefined) {
           controller.abort(shutdownAbort());
         }
+        disposeLimit = armTurnTimeLimit(sessionId, source.definition.id, controller);
       }
       try {
         await onTurnRuntime(sessionId, { source, config: recoveredConfig }, () => runner.recoverPendingApproval(sessionId, {
@@ -309,6 +316,7 @@ export const createRecovery = ({
           signal: controller.signal,
         }));
       } finally {
+        disposeLimit();
         untrackTurn(sessionId, controller);
         // A recovered firing's row outlived the process that would have
         // retired it, and the firing is over either way — a recovery that

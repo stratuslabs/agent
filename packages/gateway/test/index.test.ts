@@ -628,6 +628,81 @@ test('a turn stopped near its limit isn\'t reported as past it while the stop ta
   }
 });
 
+/** An approval policy that never answers: it waits until the turn is stopped, as a policy must. */
+const hangingPolicy = () => ({
+  approve: ({ signal }: { signal?: AbortSignal }) => new Promise<boolean>((_resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  }),
+});
+
+test('a policy that never answers is the turn\'s own time, not a person\'s, and the limit stops it', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const fetchImpl = (async () => openAiToolCall('demo_echo', { text: 'hi' })) as typeof fetch;
+  const asked: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+    turnTimeLimitMs: 300,
+    approvals: { approve: (context) => { asked.push(context.call.toolName); return hangingPolicy().approve(context); } },
+  });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'policy-1', agentId: 'ava', userMessage: 'echo' }),
+      (error: Error) => error instanceof RunAbortedError && /time limit of 300ms/.test(error.message),
+    );
+    assert.deepEqual(asked, ['demo.echo'], 'the policy was asked, and it is what hung');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a turn recovered from a parked approval after a restart has a time limit too', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, 'state');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const seed = new ShardedSessionStore({ stateDir });
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'parked-limited',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: { call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }, remaining: [], parkedAt: now },
+    },
+  });
+  seed.close();
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    stateDir,
+    selection: { provider: 'demo' },
+    turnTimeLimitMs: 300,
+    approvals: () => hangingPolicy(),
+    warn: (line) => warnings.push(line),
+  });
+  const failed = nextEvent(gateway.bus, 'session.failed');
+  await gateway.start();
+  try {
+    const event = await settles(failed, 'the recovered turn to fail');
+    assert.equal(event.sessionId, 'parked-limited');
+    assert.match(event.error, /^Stopped: this turn ran past its time limit of 300ms\./);
+    assert.ok(warnings.some((line) => line.startsWith('time limit: session parked-limited (ava)')), warnings.join('\n'));
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a daemon stop that cuts off a turn leaves no time limit running behind it', async () => {
   const home = await newHome();
   await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');

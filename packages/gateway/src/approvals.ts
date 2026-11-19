@@ -145,6 +145,39 @@ export const createApprovalBroker = ({
   const isHostSubAgent = (session: Session): boolean =>
     liveSubAgentIds.has(hostIdOf(session)) || isSubAgentSession(session);
 
+  /**
+   * How a running turn's time limit (AGT-371) stops and starts its clock,
+   * registered while the turn runs, and the requests each session has
+   * parked on a person. Only that wait stops the clock: an approval policy
+   * or a channel's preflight is work that can hang like any other (they
+   * hold `approvalWaits`, which only quiets the idle watchdog). A balanced
+   * counter, opened when a request parks and closed when it settles, so
+   * the clock stops at the first and starts again after the last.
+   */
+  const turnClocks = new Map<string, { pause(): void; resume(): void }>();
+  const personWaits = new Map<string, number>();
+  const holdPersonWait = (sessionId: string): (() => void) => {
+    const waits = (personWaits.get(sessionId) ?? 0) + 1;
+    personWaits.set(sessionId, waits);
+    if (waits === 1) {
+      turnClocks.get(sessionId)?.pause();
+    }
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      const remaining = (personWaits.get(sessionId) ?? 1) - 1;
+      if (remaining > 0) {
+        personWaits.set(sessionId, remaining);
+      } else {
+        personWaits.delete(sessionId);
+        turnClocks.get(sessionId)?.resume();
+      }
+    };
+  };
+
   const requestApproval: ApprovalRequester = async (request) => {
     // A sub-agent asks no one (roadmap 24): its parent turn is the one a
     // person is accountable for, and that turn gets the refusal back as a
@@ -207,6 +240,8 @@ export const createApprovalBroker = ({
 
     let timer: NodeJS.Timeout | undefined;
     const onAbort = (): void => settle('deny', 'cancelled');
+    /** Closes this request's wait on a person; set once it parks. */
+    let releasePersonWait = (): void => {};
 
     /**
      * Settles once the request has finished being announced.
@@ -251,6 +286,7 @@ export const createApprovalBroker = ({
         return;
       }
       pendingApprovals.delete(requestId);
+      releasePersonWait();
       if (timer) {
         clearTimeout(timer);
       }
@@ -301,6 +337,9 @@ export const createApprovalBroker = ({
         ...(taskId !== undefined ? { taskId } : {}),
       },
     });
+    // Parked from here until `settle`, every ending included, so the turn's
+    // time limit doesn't count what a person takes to answer.
+    releasePersonWait = holdPersonWait(hostIdOf(request.session));
 
     if (effectiveApprovalTimeoutMs > 0 && remainingTimeoutMs <= 0) {
       // Nothing left to wait with. Settled here rather than armed with a
@@ -401,24 +440,11 @@ export const createApprovalBroker = ({
    */
   const approvalWaits = new Map<string, number>();
 
-  /**
-   * How a running turn's time limit (AGT-371) stops and starts its clock,
-   * registered while the turn runs. Time spent waiting on a person is not
-   * the turn's to spend, so the clock stops when the session's first wait
-   * opens and starts again when its last one closes, from the same
-   * balanced counter, for the reason that counter is one.
-   */
-  const turnClocks = new Map<string, { pause(): void; resume(): void }>();
-
   const holdApprovalWait = (sessionId: string): (() => void) => {
-    const waits = (approvalWaits.get(sessionId) ?? 0) + 1;
-    approvalWaits.set(sessionId, waits);
+    approvalWaits.set(sessionId, (approvalWaits.get(sessionId) ?? 0) + 1);
     // Stop any clock already running: this wait produces no events, so
     // nothing else would.
     suspendWatchdog.get(sessionId)?.();
-    if (waits === 1) {
-      turnClocks.get(sessionId)?.pause();
-    }
     let released = false;
     return () => {
       if (released) {
@@ -430,7 +456,6 @@ export const createApprovalBroker = ({
         approvalWaits.set(sessionId, remaining);
       } else {
         approvalWaits.delete(sessionId);
-        turnClocks.get(sessionId)?.resume();
       }
     };
   };
@@ -447,6 +472,7 @@ export const createApprovalBroker = ({
     suspendWatchdog,
     approvalWaits,
     turnClocks,
+    personWaits,
     holdApprovalWait,
   };
 };

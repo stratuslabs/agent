@@ -593,6 +593,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     suspendWatchdog,
     approvalWaits,
     turnClocks,
+    personWaits,
     holdApprovalWait,
   } = createApprovalBroker({
     warn,
@@ -1717,6 +1718,69 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       && providerContributions.get(registeredProviderNameOf(config.provider))?.streams === true);
 
   /**
+   * A turn's time limit (AGT-371), on the controller that stops the turn,
+   * until the returned dispose runs. Wall clock, not progress, so it ends
+   * what the idle watchdog can't see: a provider that doesn't stream, a
+   * tool that never returns. Its clock stops while the turn has a request
+   * parked on a person (`turnClocks`, driven by the approval broker) and
+   * starts again with the time already spent. Whatever stops the turn
+   * first stops the clock too: a stop, a restart or the idle timer can take
+   * a moment to land (a tool's grace period), and the limit passing inside
+   * it isn't what ended the turn.
+   *
+   * Stopping goes through the same abort as a person's stop, with the
+   * reason on the signal, so the runner records it on the session and
+   * `session.failed`, and a task's worker settles as failed saying why.
+   * Not resumable: a restart must not continue a turn its limit ended.
+   *
+   * Unref'd, unlike the idle timer: it runs for hours, and a turn really in
+   * flight has its own handles keeping the process up, so the clock must
+   * not be the thing that keeps a finished host alive.
+   */
+  const armTurnTimeLimit = (sessionId: string, agentId: string, controller: AbortController): (() => void) => {
+    const limitMs = turnTimeLimitFor(agentId);
+    if (limitMs <= 0) {
+      return () => {};
+    }
+    let timer: NodeJS.Timeout | undefined;
+    let spentMs = 0;
+    let since: number | undefined;
+    const start = (): void => {
+      if (since !== undefined || controller.signal.aborted) {
+        return;
+      }
+      since = Date.now();
+      timer = setTimeout(() => {
+        warn(`time limit: session ${sessionId} (${agentId}) ran past its time limit of ${limitText(limitMs)}; stopping the turn`);
+        controller.abort(new RunAbortedError(turnTimeLimitError(limitMs)));
+      }, Math.max(0, limitMs - spentMs));
+      timer.unref();
+    };
+    const stop = (): void => {
+      if (since === undefined) {
+        return;
+      }
+      clearTimeout(timer);
+      timer = undefined;
+      spentMs += Date.now() - since;
+      since = undefined;
+    };
+    const clock = { pause: stop, resume: start };
+    turnClocks.set(sessionId, clock);
+    controller.signal.addEventListener('abort', stop, { once: true });
+    if ((personWaits.get(sessionId) ?? 0) === 0) {
+      start();
+    }
+    return () => {
+      stop();
+      controller.signal.removeEventListener('abort', stop);
+      if (turnClocks.get(sessionId) === clock) {
+        turnClocks.delete(sessionId);
+      }
+    };
+  };
+
+  /**
    * Progress-based abort, armed only while the turn is actually awaiting a
    * streaming provider — the one phase where silence means a stall. Tool
    * executions and approval waits emit no deltas (executor timeouts cover
@@ -1738,18 +1802,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> => {
     const effectiveIdleMs = idleEnabled || fallbackStreams ? idleTimeoutMs : 0;
-    const limitMs = turnTimeLimitFor(agentId);
-    if (effectiveIdleMs <= 0 && !external && limitMs <= 0) {
+    if (effectiveIdleMs <= 0 && !external) {
       // No watchdog and nobody outside to cancel it — but still a turn an
-      // announced restart must be able to cut short at the window.
+      // announced restart must be able to cut short at the window, and
+      // one its time limit stops.
       const idle = new AbortController();
       trackTurn(sessionId, idle);
       if (abortingWith !== undefined) {
         idle.abort(shutdownAbort());
       }
+      const disposeLimit = armTurnTimeLimit(sessionId, agentId, idle);
       try {
         return await run(idle.signal);
       } finally {
+        disposeLimit();
         untrackTurn(sessionId, idle);
       }
     }
@@ -1919,63 +1985,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       armTimer();
     }
 
-    /**
-     * The turn's time limit (AGT-371): wall clock, not progress, so it
-     * ends what the idle timer above can't see, a provider that doesn't
-     * stream or a tool that never returns. Its clock stops while the turn
-     * waits on a person (`turnClocks`, driven by the approval broker's
-     * balanced wait counter) and starts again with the time already spent.
-     * Stopping goes through the same abort as a person's stop, with the
-     * reason on the signal, so the runner records it on the session and
-     * `session.failed`, and a task's worker settles as failed saying why.
-     * Not resumable: a restart must not continue a turn its limit ended.
-     *
-     * Unref'd, unlike the idle timer: it runs for hours, and a turn really
-     * in flight has its own handles keeping the process up, so the clock
-     * must not be the thing that keeps a finished host alive.
-     */
-    let limitTimer: NodeJS.Timeout | undefined;
-    let limitSpentMs = 0;
-    let limitSince: number | undefined;
-    const startLimitClock = (): void => {
-      if (limitMs <= 0 || limitSince !== undefined || controller.signal.aborted) {
-        return;
-      }
-      limitSince = Date.now();
-      limitTimer = setTimeout(() => {
-        warn(`time limit: session ${sessionId} (${agentId}) ran past its time limit of ${limitText(limitMs)}; stopping the turn`);
-        controller.abort(new RunAbortedError(turnTimeLimitError(limitMs)));
-      }, Math.max(0, limitMs - limitSpentMs));
-      limitTimer.unref();
-    };
-    const stopLimitClock = (): void => {
-      if (limitSince === undefined) {
-        return;
-      }
-      clearTimeout(limitTimer);
-      limitTimer = undefined;
-      limitSpentMs += Date.now() - limitSince;
-      limitSince = undefined;
-    };
-    const clock = { pause: stopLimitClock, resume: startLimitClock };
-    turnClocks.set(sessionId, clock);
-    // Whatever stops the turn first stops the clock: a stop, a restart or
-    // the idle timer can take a moment to land (a tool's grace period), and
-    // the limit passing inside it isn't what ended the turn.
-    controller.signal.addEventListener('abort', stopLimitClock, { once: true });
-    if ((approvalWaits.get(sessionId) ?? 0) === 0) {
-      startLimitClock();
-    }
+    const disposeLimit = armTurnTimeLimit(sessionId, agentId, controller);
 
     try {
       return await run(controller.signal);
     } finally {
       suspendTimer();
-      stopLimitClock();
-      controller.signal.removeEventListener('abort', stopLimitClock);
-      if (turnClocks.get(sessionId) === clock) {
-        turnClocks.delete(sessionId);
-      }
+      disposeLimit();
       unsubscribeObserver();
       unsubscribeDrain();
       suspendWatchdog.delete(sessionId);
@@ -2347,6 +2363,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     runtimeContextFor,
     runnerFor,
     withWatchdog,
+    armTurnTimeLimit,
     isStopping: () => stopping,
     trackTurn,
     untrackTurn,
