@@ -355,7 +355,9 @@ export const createApprovalSetup = ({
       ],
       {
         defaultIndex: 0,
-        footnote: 'A dangerous tool asks under every posture. Change this later with approvals.posture in the config file.',
+        // Short enough for an 80-column terminal: a footnote may wrap, but
+        // a terminal wraps mid-word.
+        footnote: 'Dangerous tools always ask. Change it later with approvals.posture.',
       },
     );
     if (choice.kind !== 'index') {
@@ -366,9 +368,15 @@ export const createApprovalSetup = ({
       return;
     }
     state.approvals = { ...(state.approvals ?? {}), posture };
-    writeLine(streams.stdout, posture === 'open'
-      ? 'Posture open: tools run without asking. Change it later with approvals.posture in the config file.'
-      : `Posture ${posture}. Until Approvals below asks in Slack, the daemon refuses what it would ask about; stratus chat and run ask you at the terminal.`);
+    // Carried onto the menu screen as notices, one per line, each short
+    // enough not to wrap at 80 columns.
+    writeLine(streams.stdout, `Posture ${posture}. Change it later with approvals.posture in the config file.`);
+    if (posture !== 'open') {
+      // A new install is always headless at this point: nothing has set a
+      // mode yet. `stratus chat` and `stratus run` still ask at the terminal.
+      writeLine(streams.stdout, 'Approvals is headless, so the daemon refuses what it would ask about.');
+      writeLine(streams.stdout, 'Choose Ask in Slack under Approvals to be asked there instead.');
+    }
   };
 
   return { approvalsSummary, chooseApprovals, offerPosture };
