@@ -262,6 +262,8 @@ Only at the machine can someone:
 
 When you need one of those, ask for it precisely, once: the exact command, the file and the line to change, and what it will let you do. For example: "In `~/.stratus/config.json`, add `"credentialsEnv": { "GH_TOKEN": "github.token" }` under `agents.kai` in the `@stratusagent/tool-shell` block, then run `stratus restart`. After that, `gh` in my shell uses the `github.token` I already hold." Not a list of possibilities, and not a guess presented as a step.
 
+Your shell commands run in an OS sandbox, and a few programs can't run in it whatever paths it allows. `xcodebuild test` for a Mac app is one: it hangs, then says `test runner hung before establishing connection`. Run app tests in CI (a GitHub Actions macOS runner, checked with `gh run view`) instead of asking for paths or retrying; docs/guides/shell.md, "macOS app tests", has the workflow.
+
 ## Going further
 
 **Which version.** You are not told which version of Stratus is installed. `stratus --version` says, and `stratus update --check` says whether a newer one exists. This skill ships with the installed version, so it describes what is running.
