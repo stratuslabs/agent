@@ -2339,6 +2339,23 @@ test('tasks parses enabled and a per-agent cap, and refuses anything else', asyn
   }
 });
 
+test('turnMinutes and agentTurnMinutes parse, 0 included, and refuse what is not a number of minutes', async () => {
+  const configPath = await writeConfig('turn-minutes.json', { turnMinutes: 90, agentTurnMinutes: { atlas: 240, nova: 0 } });
+  const config = await loadConfigFile(configPath);
+  assert.equal(config.turnMinutes, 90);
+  assert.deepEqual(config.agentTurnMinutes, { atlas: 240, nova: 0 });
+  assert.equal((await loadConfigFile(await writeConfig('turn-minutes-off.json', { turnMinutes: 0 }))).turnMinutes, 0);
+
+  for (const [name, value] of [['negative', -1], ['fraction', 1.5], ['text', '120'], ['past the timer range', 35_792]] as const) {
+    const bad = await writeConfig(`turn-minutes-${name.replaceAll(' ', '-')}.json`, { turnMinutes: value });
+    await assert.rejects(loadConfigFile(bad), /Invalid turnMinutes/, name);
+  }
+  for (const [name, value] of [['list', [240]], ['negative', { atlas: -5 }], ['fraction', { atlas: 2.5 }], ['text', { atlas: '240' }]] as const) {
+    const bad = await writeConfig(`agent-turn-minutes-${name}.json`, { agentTurnMinutes: value });
+    await assert.rejects(loadConfigFile(bad), /Invalid agentTurnMinutes/, name);
+  }
+});
+
 test('agentMaxTurns parses per agent and refuses a budget that is not one', async () => {
   const configPath = await writeConfig('agent-max-turns.json', { maxTurns: 40, agentMaxTurns: { atlas: 300, nova: 120 } });
   const config = await loadConfigFile(configPath);

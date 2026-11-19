@@ -164,6 +164,8 @@ export const runSetup = async (
     // Carried for the same reason: setup has no screen for it, and a save
     // that dropped it would put every agent back on the shared budget.
     ...(existing.agentMaxTurns !== undefined ? { agentMaxTurns: existing.agentMaxTurns } : {}),
+    ...(existing.turnMinutes !== undefined ? { turnMinutes: existing.turnMinutes } : {}),
+    ...(existing.agentTurnMinutes !== undefined ? { agentTurnMinutes: existing.agentTurnMinutes } : {}),
     ...(existing.autoContinue !== undefined ? { autoContinue: existing.autoContinue } : {}),
     ...(existing.concurrentScheduledTurns !== undefined ? { concurrentScheduledTurns: existing.concurrentScheduledTurns } : {}),
     ...(existing.tasks !== undefined ? { tasks: existing.tasks } : {}),
@@ -495,6 +497,12 @@ export const runSetup = async (
     }
     if (state.agentMaxTurns !== undefined) {
       config.agentMaxTurns = state.agentMaxTurns;
+    }
+    if (state.turnMinutes !== undefined) {
+      config.turnMinutes = state.turnMinutes;
+    }
+    if (state.agentTurnMinutes !== undefined) {
+      config.agentTurnMinutes = state.agentTurnMinutes;
     }
     if (state.autoContinue !== undefined) {
       config.autoContinue = state.autoContinue;

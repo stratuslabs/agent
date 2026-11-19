@@ -47,6 +47,7 @@ import {
   loadServeSlack,
   loadServeConcurrentScheduledTurns,
   loadServeTasks,
+  loadServeTurnMinutes,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
@@ -17316,6 +17317,61 @@ test('serve says whether background tasks are on, and each agent\'s cap', async 
   assert.doesNotMatch(refused.stdout, /stratusd ready/);
 });
 
+test('turnMinutes and agentTurnMinutes are read from the operator\'s config only, and a bad one leaves the default', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-turn-minutes-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-turn-minutes-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ turnMinutes: 90, agentTurnMinutes: { atlas: 240, nova: 0 } }));
+  const warnings: string[] = [];
+  assert.deepEqual(
+    await loadServeTurnMinutes({ homeDir: home, cwd: home, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { turnMinutes: 90, agentTurnMinutes: { atlas: 240, nova: 0 } },
+  );
+  assert.equal(warnings.length, 0, warnings.join('\n'));
+
+  // A cloned repository can neither lift the limit nor cut the operator's agents off.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo', turnMinutes: 0, agentTurnMinutes: { atlas: 1 } }));
+  assert.deepEqual(
+    await loadServeTurnMinutes({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { turnMinutes: 90, agentTurnMinutes: { atlas: 240, nova: 0 } },
+  );
+  assert.match(warnings[0] ?? '', /ignoring turnMinutes in .*stratus\.config\.json: a project-local config cannot decide how long .*Using ~\/\.stratus\/config\.json instead/);
+  assert.match(warnings[1] ?? '', /ignoring agentTurnMinutes in .*stratus\.config\.json/);
+
+  // A value that is not one: the file refuses it, and every agent keeps the gateway's default.
+  warnings.length = 0;
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ turnMinutes: -1 }));
+  assert.deepEqual(await loadServeTurnMinutes({ homeDir: home, cwd: home, processEnv: {} }, undefined, (line) => warnings.push(line)), { agentTurnMinutes: {} });
+  assert.match(warnings[0] ?? '', /ignoring turnMinutes \(.*Invalid turnMinutes .*: -1\. Use a whole number of minutes/);
+
+  // No block anywhere: the gateway's default.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await loadServeTurnMinutes({ homeDir: home, cwd: home, processEnv: {} }, undefined, () => {}), { agentTurnMinutes: {} });
+});
+
+test('serve says each turn\'s time limit, and the agents with their own', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-turn-minutes-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(serveHome, '.stratus', 'agents', 'nova.md'), '---\nname: Nova\nid: nova\n---\n\nYou are Nova.\n');
+  const ran = async (limits: Record<string, unknown>): Promise<string> => {
+    await writeFile(path.join(serveHome, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', ...limits }));
+    const { streams, output } = createStreams();
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 150);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--no-api'],
+      streams,
+      env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+    });
+    assert.equal(code, 0, output.stderr);
+    return output.stdout;
+  };
+  assert.match(await ran({}), /turn time limit: 2 hours per turn\n/);
+  assert.match(await ran({ turnMinutes: 90 }), /turn time limit: 90 minutes per turn\n/);
+  assert.match(await ran({ turnMinutes: 0, agentTurnMinutes: { nova: 30 } }), /turn time limit: none \(nova 30 minutes\)\n/);
+  assert.match(await ran({ agentTurnMinutes: { nova: 0 } }), /turn time limit: 2 hours per turn \(nova none\)\n/);
+});
+
 test('a project config that shadows the global one does not suppress the global principals policy', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-project-'));
@@ -17665,7 +17721,7 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
-    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24, agentMaxTurns: { atlas: 300 }, autoContinue: { nova: true }, concurrentScheduledTurns: { atlas: 2 }, tasks: { enabled: true, maxRunningPerAgent: { atlas: 5 } } })}\n`,
+    `${JSON.stringify({ provider: 'demo', maxTokens: 4096, maxTurns: 24, agentMaxTurns: { atlas: 300 }, turnMinutes: 90, agentTurnMinutes: { atlas: 0 }, autoContinue: { nova: true }, concurrentScheduledTurns: { atlas: 2 }, tasks: { enabled: true, maxRunningPerAgent: { atlas: 5 } } })}\n`,
   );
   const { streams } = createStreams();
   await runCli({
@@ -17684,6 +17740,8 @@ test('re-running setup keeps the output and turn bounds it has no menu for', asy
   assert.equal(config.maxTokens, 4096);
   assert.equal(config.maxTurns, 24);
   assert.deepEqual(config.agentMaxTurns, { atlas: 300 });
+  assert.equal(config.turnMinutes, 90);
+  assert.deepEqual(config.agentTurnMinutes, { atlas: 0 });
   assert.deepEqual(config.autoContinue, { nova: true });
   assert.deepEqual(config.concurrentScheduledTurns, { atlas: 2 });
   assert.deepEqual(config.tasks, { enabled: true, maxRunningPerAgent: { atlas: 5 } });

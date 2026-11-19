@@ -553,6 +553,22 @@ export interface GatewayOptions {
    */
   idleTimeoutMs?: number;
   /**
+   * The longest one turn may run, wall clock, before it is stopped and
+   * fails saying so (AGT-371). A background task is one worker turn, so
+   * this is also how long a task may run. Time a turn spends waiting on a
+   * person's approval doesn't count. A turn continued after a restart
+   * starts a fresh clock. 0 means no limit. Default 2 hours. `stratus serve`
+   * fills it from the trusted config's `turnMinutes`.
+   */
+  turnTimeLimitMs?: number;
+  /**
+   * One agent's own time limit, replacing `turnTimeLimitMs` for its turns
+   * and the tasks it runs as a worker; 0 is no limit for that agent.
+   * Undefined means the shared one. `stratus serve` fills it from the
+   * trusted config's `agentTurnMinutes`.
+   */
+  turnTimeLimitMsFor?: (agentId: string) => number | undefined;
+  /**
    * The events listener's sources and body limit (card 590), from the
    * trusted config's `events` block. With no sources the event store is
    * never opened, and every delivery is to an unknown source.
