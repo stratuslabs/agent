@@ -53,6 +53,7 @@ import {
   describeReviewRule,
   matchReviewRule,
   readReviewAnswer,
+  reviewReasonLine,
   type ReviewCode,
   ReviewFailure,
 } from './review.ts';
@@ -275,7 +276,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     context: ApprovalContext,
     timeoutMs: number,
     resolved: { command?: string; origin?: string; destination?: string },
-  ): Promise<{ answer: ReturnType<typeof readReviewAnswer> & object } | { failed: string } | typeof ABORTED> => {
+  ): Promise<{ answer: ReturnType<typeof readReviewAnswer> & object; said: string } | { failed: string } | typeof ABORTED> => {
     if (context.signal?.aborted) {
       return ABORTED;
     }
@@ -308,7 +309,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }).then(
         (raw) => {
           const answer = readReviewAnswer(raw);
-          return answer === undefined ? { failed: 'unparseable' } : { answer };
+          // `said` is the reason as the reviewer wrote it, before the cut,
+          // for a shadow review's logged line (redacted, then cut).
+          return answer === undefined
+            ? { failed: 'unparseable' }
+            : { answer, said: (raw as { reason: string }).reason };
         },
         (error: unknown) => ({ failed: error instanceof ReviewFailure ? error.kind : 'error' }),
       );
@@ -903,10 +908,13 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           reviewAsk = { layer: 'review', reason, told: reason, note: `the review couldn't run: ${outcome.failed}` };
         } else {
           const { answer } = outcome;
+          // Redacted before it is cut: a stored value across the cut would
+          // otherwise leave its first characters in the log.
+          const logged = shadowRun ? reviewReasonLine(redactSecrets(outcome.said, storedSecrets)) : undefined;
           reviewNotes.set(context, {
             verdict: answer.verdict,
             reviewCode: answer.code,
-            ...(shadowRun ? { reviewReason: redactSecrets(answer.reason, storedSecrets) } : {}),
+            ...(logged === undefined ? {} : { reviewReason: logged }),
           });
           if (answer.verdict === 'allow') {
             // The review took time, and a page can move in it: a yes given

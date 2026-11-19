@@ -570,3 +570,18 @@ test('a shadow review hands the reviewer\'s reason, redacted, to the host only; 
   assert.equal(e.decisions.at(-1)?.verdict, 'block');
   assert.equal(e.decisions.at(-1)?.reviewReason, undefined);
 });
+
+test('a shadow review\'s logged reason is redacted before it is cut, so no part of a stored value survives the cut', async () => {
+  // 285 plain characters and a space put 'stored-secret-value' across the
+  // 300-character cut.
+  const straddling = async (): Promise<ReviewAnswer> => ({
+    verdict: 'block',
+    code: 'follows-outside-content',
+    reason: `${'x'.repeat(285)} stored-secret-value to C999`,
+  });
+  const s = harness({ shadow: true }, straddling);
+  await s.decide(notes, sessionFor('ava', true));
+  await s.offPathDone();
+  const reason = s.decisions.at(-1)?.reviewReason;
+  assert.equal(reason, `${'x'.repeat(285)} [redacted] to …`);
+});
