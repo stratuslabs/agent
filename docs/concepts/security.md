@@ -78,7 +78,10 @@ Found a way around one of these? Report it privately, as
   only, with the same approver checks, and only where it's stored: a shared
   key needs the agent to have asked with `scope: "shared"`. Each add or
   replace from chat or a link appends a names-only line to
-  `~/.stratus/credential-audit.log`.
+  `~/.stratus/credential-audit.log`. Once the conversation has read
+  external content, the request itself is judged as a gated call before
+  anyone sees a form, so a page can't have the agent ask for a key
+  unchecked ([Approvals](../guides/approvals.md#after-an-agent-reads-the-web)).
   ([Slack](../guides/slack.md#adding-a-credential-from-slack))
 - **A form can make one key readable by one agent's shell, and says so
   before anything is typed.** A request with `env` (`GH_TOKEN`) shows "Kai's
