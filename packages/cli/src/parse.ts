@@ -39,11 +39,14 @@ import {
   type ParsedChannelCommand,
   type ParsedCredentialCommand,
   type ParsedGrantsCommand,
+  type ParsedPeopleCommand,
   type ParsedSignInCommand,
   parseGrantsCommand,
+  parsePeopleCommand,
   parseSignInCommand,
 } from './parse/access.ts';
 import { type ParsedMemoryCommand, parseMemoryCommand } from './parse/memory.ts';
+import { type ParsedTasksCommand, parseTasksCommand } from './parse/tasks.ts';
 import {
   type ParsedSessionCommand,
   type ParsedSessionsCommand,
@@ -99,9 +102,11 @@ export type ParsedCommand =
   | ParsedEventsCommand
   | ParsedSchedulesCommand
   | ParsedGrantsCommand
+  | ParsedPeopleCommand
   | ParsedMemoryCommand
   | ParsedSessionCommand
   | ParsedSessionsCommand
+  | ParsedTasksCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
   | ParsedUpdateCommand
@@ -194,6 +199,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     return parseGrantsCommand(rest);
   }
 
+  if (command === 'people') {
+    return parsePeopleCommand(rest);
+  }
+
   if (command === 'memory') {
     return parseMemoryCommand(rest);
   }
@@ -204,6 +213,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
   if (command === 'session') {
     return parseSessionCommand(rest);
+  }
+
+  if (command === 'tasks') {
+    return parseTasksCommand(rest);
   }
 
   if (command === 'restart') {
@@ -268,6 +281,7 @@ export {
   type ParsedChannelCommand,
   type ParsedCredentialCommand,
   type ParsedGrantsCommand,
+  type ParsedPeopleCommand,
   type ParsedSignInCommand,
 } from './parse/access.ts';
 
@@ -282,6 +296,8 @@ export {
   SESSION_STATUSES,
   STOPPED_EARLY_FILTER,
 } from './parse/sessions.ts';
+
+export { type ParsedTasksCommand } from './parse/tasks.ts';
 
 export {
   type ParsedEventsCommand,

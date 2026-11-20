@@ -94,6 +94,29 @@ destination, because that is what is being approved. See
   on from, so a run that read a web page can't pass that page's text on at
   the schedule's own label. A one-shot has no next firing and isn't
   resumed.
+- **A report that never arrived is said where it should have gone.** A
+  firing's reply goes nowhere; only `message.send` reaches anyone. When the
+  channel rejects a firing's send (a wrong id, a thread that isn't there),
+  or the approval policy refuses one (headless, to a destination the
+  schedule wasn't approved for), the error ends by naming where its
+  schedule reports
+  (`This scheduled run reports to slack:C0123456789, in thread …`), so the
+  agent can retry there. The log and `permission.decided` keep the
+  policy's own reason. If the run still completes with a `message.send`
+  that failed or was refused and none that reached the schedule's
+  destination, the daemon posts one notice there (under the report thread,
+  if it has one): the agent, the first line of the error, the schedule id
+  and the session id. It never posts the run's reply, which was written for nobody. A run
+  that never tried to send, or sent only somewhere else, posts nothing, as
+  before, but the daemon log gets one warning naming the schedule and the
+  session (`schedule <id>: session <session> finished without posting to its
+  destination …`), so a report that was expected and never came leaves a
+  trace. A run that posts only when it has news logs that line on its quiet
+  firings. Nothing is posted or logged for a schedule cancelled while its
+  run went on. The notice follows the turn, so a daemon stopping at that
+  moment can lose it, and the log says so. Event triggers work the same
+  way, judged on the firing's own turn: firings for one subject share a
+  session, and an earlier turn's post or failed send isn't this one's.
 - **A schedule never overlaps itself.** Its next slot waits while its
   previous firing is still running or waiting on a person, so each firing
   reads a finished predecessor. With the default per-agent cap of one this
@@ -120,7 +143,31 @@ destination, because that is what is being approved. See
   a firing that would exceed it waits, tick by tick, for the running turn
   to finish, and fires late once it has; if its whole window passes first
   it is skipped with a log line that says the cap deferred it, the same
-  rule as a window missed while the daemon was down).
+  rule as a window missed while the daemon was down). See [Limits](#limits)
+  to raise the cap for one agent.
+
+## Limits
+
+An agent whose schedules are separate work loops can run more than one at
+once. Set it per agent in `~/.stratus/config.json` (or a file named by
+`--config`), and restart the daemon:
+
+```json
+{
+  "concurrentScheduledTurns": { "atlas": 2 }
+}
+```
+
+- Only **different** schedules share the extra room. One schedule never
+  starts a firing while its previous one is still running or waiting on an
+  approval, whatever the number.
+- Agents not listed keep one at a time.
+- Event triggers have their own cap of one per agent, apart from this one,
+  and it doesn't change.
+- Two turns at once can spend twice as fast, and both work in the same
+  workspace, so give an agent room only when its loops touch different
+  things. A project-local `stratus.config.json` can't set it, and the
+  startup log names each agent that has a limit of its own.
 
 ## The operator's view
 

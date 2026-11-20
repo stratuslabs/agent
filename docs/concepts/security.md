@@ -3,6 +3,9 @@
 The one-page map of what protects what. Each rule is deliberate; the pages
 linked own the full story.
 
+Found a way around one of these? Report it privately, as
+[SECURITY.md](../../SECURITY.md) describes, not in a public issue.
+
 ## Secrets on disk
 
 - `~/.stratus/credentials.json` is `0600` (owner-read-only), and so are
@@ -238,9 +241,12 @@ little a steered agent can do. For an agent that browses or searches:
   session ids, memory entry ids, and — when a session's trust label drops —
   the label and the name of what lowered it; never prompts, replies, tool
   inputs, shell command text, or the content that did the tainting. The one
-  qualification: a failed session records the provider's error text
-  verbatim, and providers quote the failing request — so skim a log before
-  sharing it. ([Logs](../guides/logs.md))
+  qualification: a failed session records the error text it failed with,
+  and the warning written when the default model fails and the fallback
+  takes over carries that model's error. Stored keys and tokens, the
+  credentials the agent's soul lists, and its model key are masked in both,
+  but providers quote the failing request, so skim a log before sharing it.
+  ([Logs](../guides/logs.md))
 - **No control API endpoint returns a secret.** Credential reads report
   presence, type, and bound endpoint; session reads strip the Anthropic
   raw-turn cache. Named credentials are not on that API at all yet — the

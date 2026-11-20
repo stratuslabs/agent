@@ -10,13 +10,17 @@ import { markersOf, renderedPages } from '../scripts/rendered-pages.ts';
 interface Recorded {
   sha: string;
   hidden: string[];
-  openAtEnd?: string[];
 }
 const recorded = JSON.parse(readFileSync(new URL('./rendered-in-chromium.json', import.meta.url), 'utf8')) as {
   chromium: string;
   pages: Record<string, Recorded>;
 };
 const pages = renderedPages();
+// Pages that leave svg or math for HTML before a script the page ends
+// inside. Chromium drops the script; htmlToText keeps it on purpose, as it
+// always did, rather than follow the tree builder back into HTML and risk
+// cutting a page short (see readMarkup). Kept, so a change is noticed.
+const KEPT_ON_PURPOSE = new Set(['LEAKO', 'LEAKR', 'LEAKS']);
 const REGENERATE = 'Regenerate the record with pnpm --filter @stratusagent/tool-web render-in-chromium.';
 
 test('the Chromium record covers exactly the pages the generator builds', () => {
@@ -36,9 +40,10 @@ test('htmlToText shows the text Chromium shows and hides the text it hides', () 
     if (entry === undefined) continue;
     const text = htmlToText(page.html);
     for (const marker of markersOf(page.html)) {
-      // An element still open at the end of the page keeps its text on
-      // purpose, so what Chromium hides inside one is not held either way.
-      if (entry.openAtEnd?.includes(marker) === true) continue;
+      if (KEPT_ON_PURPOSE.has(marker)) {
+        if (!text.includes(marker)) failures.push(`${page.id}: ${marker} is no longer kept; update KEPT_ON_PURPOSE`);
+        continue;
+      }
       const hidden = entry.hidden.includes(marker);
       if (text.includes(marker) === hidden) {
         failures.push(`${page.id}: ${marker} is ${hidden ? 'hidden in Chromium but kept' : 'shown in Chromium but dropped'} — ${JSON.stringify(page.html)}`);

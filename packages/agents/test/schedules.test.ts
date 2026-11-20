@@ -873,3 +873,53 @@ test('message.send names its session as the speaker, at the label its words carr
   await tool.execute({ destination: { channel: 'slack', to: 'C9' }, text: 'report', thread: '1.2' }, tainted);
   assert.deepEqual(sends[1]?.speaker, { sessionId: 'schedule:abc:2', trust: 'external' });
 });
+
+test('a failed send inside a firing names where its schedule reports, so the agent can retry there (AGT-335)', async () => {
+  const REPORT_THREAD = '1791400000.000100';
+  const tool = createMessageSendTool(async (input) => {
+    throw new Error(`slack: ${input.destination.to} has no thread ${input.thread ?? '-'}, so nothing was posted.`);
+  }, {
+    // The host binds both the same way: a live firing, its own schedule.
+    defaultThread: (session, destination) => (session.id.startsWith('schedule:') && destination.to === 'C-AGENTS' ? REPORT_THREAD : undefined),
+    reportsTo: (session) => (session.id.startsWith('schedule:')
+      ? { channel: 'slack', to: 'C-AGENTS', thread: REPORT_THREAD }
+      : undefined),
+  });
+  const firing = sessionFor('quinn', 'schedule:abc:1');
+
+  // Quinn's run: the right thread, the wrong channel.
+  const error = await tool.execute(
+    { destination: { channel: 'slack', to: 'C-OTHER' }, text: 'report', thread: REPORT_THREAD },
+    firing,
+  ).then(() => undefined, (caught: unknown) => caught as Error);
+  assert.ok(error instanceof Error, 'the failed send still fails');
+  assert.match(error.message, /^slack: C-OTHER has no thread 1791400000\.000100, so nothing was posted\./, 'the channel\'s own words come first');
+  assert.match(error.message, /This scheduled run reports to slack:C-AGENTS, in thread 1791400000\.000100\./);
+
+  // The right channel, a made-up thread: the hint still says which thread.
+  await assert.rejects(
+    () => tool.execute({ destination: { channel: 'slack', to: 'C-AGENTS' }, text: 'report', thread: '1.2' }, firing),
+    /no thread 1\.2, so nothing was posted\. This scheduled run reports to slack:C-AGENTS, in thread 1791400000\.000100\./,
+  );
+
+  // Already sending exactly there (the report thread by default): the
+  // place was right, so nothing is added.
+  const there = await tool.execute({ destination: { channel: 'slack', to: 'C-AGENTS' }, text: 'report' }, firing)
+    .then(() => undefined, (caught: unknown) => caught as Error);
+  assert.equal(there?.message, 'slack: C-AGENTS has no thread 1791400000.000100, so nothing was posted.');
+
+  // Not a firing: the error is the channel's, untouched.
+  const ordinary = await tool.execute({ destination: { channel: 'slack', to: 'C-OTHER' }, text: 'x' }, sessionFor('quinn'))
+    .then(() => undefined, (caught: unknown) => caught as Error);
+  assert.equal(ordinary?.message, 'slack: C-OTHER has no thread -, so nothing was posted.');
+});
+
+test('a firing whose schedule reports top-level is pointed at the conversation alone (AGT-335)', async () => {
+  const tool = createMessageSendTool(async () => {
+    throw new Error('slack: ava\'s app is not a member of C-EXEC — invite it there before it can post.');
+  }, { reportsTo: () => ({ channel: 'slack', to: 'C-ENG' }) });
+  await assert.rejects(
+    () => tool.execute({ destination: { channel: 'slack', to: 'C-EXEC' }, text: 'x' }, sessionFor('ava', 'schedule:s:1')),
+    (error: Error) => error.message.endsWith('before it can post. This scheduled run reports to slack:C-ENG.'),
+  );
+});

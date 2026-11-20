@@ -28,7 +28,7 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• permission.decided ${event.toolName} ${event.shadow === true ? `would be ${outcome}` : outcome} (${event.layer}${review})`;
     }
     case 'tool.approval-requested':
-      return `• tool.approval-requested ${event.call.toolName} (${event.risk}) for ${event.agentId}`;
+      return `• tool.approval-requested ${event.call.toolName} (${event.risk}) for ${event.agentId}${event.taskId !== undefined ? `, task ${event.taskId}` : ''}`;
     case 'tool.approval-resolved':
       return `• tool.approval-resolved ${event.answer} (${event.reason})${event.actor ? ` by ${event.actor}` : ''}`;
     case 'credential.requested':
@@ -48,6 +48,13 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• session.continued #${event.continuation} (+${event.turns} turns)`;
     case 'session.stopped-early':
       return `• session.stopped-early ${event.reason} after ${event.continuations} continuation${event.continuations === 1 ? '' : 's'}`;
+    case 'task.started':
+    case 'task.waiting-approval':
+    case 'task.completed':
+    case 'task.failed':
+    case 'task.cancelled':
+    case 'task.interrupted':
+      return `• ${event.type} ${event.taskId} (${event.agentId}${event.workerAgentId === event.agentId ? '' : ` → ${event.workerAgentId}`})`;
     default:
       return null;
   }
@@ -117,7 +124,7 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
         ...(event.shadow === true ? { shadow: true } : {}),
       };
     case 'tool.approval-requested':
-      return { tool: event.call.toolName, risk: event.risk, requestId: event.requestId };
+      return { tool: event.call.toolName, risk: event.risk, requestId: event.requestId, ...(event.taskId !== undefined ? { taskId: event.taskId } : {}) };
     case 'tool.approval-resolved':
       return {
         requestId: event.requestId,
@@ -160,6 +167,16 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
     case 'session.stopped-early':
       // Why and how far, never the wrap-up's words: that is the reply.
       return { reason: event.reason, continuations: event.continuations };
+    case 'task.started':
+    case 'task.waiting-approval':
+    case 'task.completed':
+    case 'task.failed':
+    case 'task.cancelled':
+    case 'task.interrupted':
+      // The ids that tie the task to its worker session; the record's own
+      // session and agent are the conversation and agent that started it.
+      // Never what it was asked or answered.
+      return { taskId: event.taskId, workerSessionId: event.workerSessionId, workerAgentId: event.workerAgentId };
     default:
       return undefined;
   }

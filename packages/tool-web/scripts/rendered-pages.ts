@@ -229,6 +229,92 @@ const CORPUS: readonly string[] = [
   '<i style="display:block"><b><p><span style="display:inherit;content-visibility:hidden">MARK</span></b>AFTER</p></i>',
   '<b style="display:flex"><p>FIRST<span style="content-visibility:hidden">MARK</span></b>AFTER</p>',
   '<b hidden=until-found><p><i style="display:block;content-visibility:inherit">MARK</i></b>AFTER</p>',
+  // A `>` inside a quoted value, and markup the page ends inside: a tag,
+  // a comment, a script or a style whose end never arrives, as a page cut
+  // by the download cap ends.
+  '<p>SHOWN</p><div title="x>LEAKA">AFTER</div>',
+  '<p>SHOWN</p><time title=\'13 June 2024 > LEAKB\'>DATE</time>',
+  '<p>SHOWN</p><div title="LEAKC',
+  '<p>SHOWN</p><a href=LEAKD',
+  '<p>SHOWN</p>TAIL <bLEAKE',
+  '<p>SHOWN</p></divLEAKF',
+  '<p>SHOWN</p><div data-props="{&quot;a&quot;:1} > LEAKG',
+  '<p>SHOWN</p><!-- LEAKH',
+  '<p>SHOWN</p><!-- open > LEAKI',
+  '<p>SHOWN</p><?xml LEAKJ',
+  '<p>SHOWN</p><script>var x = "LEAKK";',
+  '<p>SHOWN</p><style>p::after { content: "LEAKL" }',
+  '<p>SHOWN</p><script>LEAKM()</script',
+  '<p>SHOWN</p>TAIL 5 < 10 AND <3',
+  // In svg and math a style or script is not raw text: it ends with its
+  // container, and the page after it is read as usual.
+  '<svg><style>SVGSTYLE</svg><p>SHOWN</p>',
+  '<svg><style/></svg><p>SHOWN</p>',
+  '<svg><script/></svg><p>SHOWN</p>',
+  '<svg x=y/><style>SVGSTYLE</svg><p>SHOWN</p>',
+  '<math><style/></math><p>SHOWN</p>',
+  '<svg/><p>SHOWN</p><script>LEAKN()',
+  '<p>SHOWN</p><svg><p>BROKE</p><script>LEAKO()',
+  '<p>SHOWN</p><svg/><script>LEAKP()',
+  '<p>SHOWN</p><svg></svg><script>LEAKQ()',
+  '<p>SHOWN</p><svg><b>BOLD<script>LEAKR()',
+  '<p>SHOWN</p><svg></p><script>LEAKS()',
+  '<p>SHOWN</p><svg><math></svg><script>LEAKT()',
+  '<p>SHOWN</p><svg></math><style>SVGSTYLE</svg><p>AFTER</p>',
+  `<p>BEFORE</p><svg><style><![CDATA[ a > b { content: "<a href='x" } ]]></style></svg><p>SHOWN</p>`,
+  '<p>SHOWN</p><![CDATA[ x > TEXT <b title="LEAKU',
+  // Comments, doctypes, processing instructions and CDATA are markup only
+  // where the tokenizer reads them: not inside a quoted value, a script or
+  // an xmp. In svg or math CDATA runs to `]]>`, and `</` before anything
+  // but a letter opens a comment to the next `>`, so a tag inside it is
+  // none. Nor is a tag in raw text, or one a `<` of text runs into once a
+  // comment is gone.
+  '<p>SHOWN</p><a href="<?php echo $u; ">LINKA</a>',
+  '<div data-tpl="<!-- x">KEPTB</div>',
+  `<a title='a<!b'>TITLEC</a><span title="x <? y">TITLED</span>`,
+  `<script>var s = '<!--';</script><p>SHOWN</p>AFTER -->`,
+  '<xmp>LITERAL <!--</xmp><p>SHOWN</p>AFTER -->',
+  '<p>BEFORE</p><svg><![CDATA[<x></svg><script>LEAKW]]></svg><p>SHOWN</p>',
+  '<math><mi><![CDATA[a <!-- b]]></mi></math><p>SHOWN</p>AFTER -->',
+  '<p>SHOWN</p>LITERAL </3 <div hidden>> AFTER',
+  '<style>a { content: "<script>" }</style><p>SHOWN</p><script>x</script><p>AFTER</p>',
+  '<xmp>LITERAL <style></xmp><p>SHOWN</p><style>x</style>',
+  '<p>SHOWN</p><<!x>div hidden>AFTER',
+  // An element the page ends inside is open to the end of it, in Chromium
+  // and here: one that hides, a template or a canvas hides the rest.
+  `<p>SHOWN</p><div hidden>INJECT <script>var s = '`,
+  '<p>SHOWN</p><div style="display:none"><p>GONE</p>ALSO',
+  '<p>SHOWN</p><template>TPLA <script>LEAKV</template>',
+  '<div><template>TPLB</div>TPLC',
+  '<p>SHOWN</p><canvas>FALLBACK',
+  '<p>SHOWN<canvas>FALLBACK<div>AFTER</div>',
+  '<template><template>TPLD</template>TPLE</template>AFTER',
+  '<template><p>TPLG<table><tr><td>TPLH</template>AFTER',
+  '<table><canvas style="display:none"><tbody>SHOWN </canvas>',
+  // What an implied end tag closes is not open at the end.
+  '<div hidden><p>GONE</div>AFTER',
+  '<div><nav>MENU</div>AFTER',
+  // Where svg or math goes back to HTML the tree here is a guess, so a
+  // page that ends inside one keeps what is open: Chromium shows these.
+  '<p>SHOWN</p><svg style="display:none"><p>BROKE',
+  '<p>SHOWN</p><h2 hidden><math><h1>BROKE',
+  '<p>SHOWN</p><svg><template>TPLF<template></template>',
+  '<p>SHOWN</p><h2 hidden><math><h1>BROKE</h1></math>AFTER',
+  '<p>SHOWN</p><template><svg><title></template>AFTER',
+  '<p>SHOWN</p><template><svg><style></template></style>AFTER',
+  '<p>SHOWN</p><div hidden><svg><title>ICON</title><path/></svg>GONE',
+  '<p>SHOWN</p><div hidden><textarea><b>TEXTX</b></textarea>GONE',
+  // Until a tag leaves svg or math, the HTML around them is still open.
+  '<p>SHOWN</p><div hidden><svg>SECRET',
+  '<p>SHOWN</p><div hidden><svg><g/>SECRET',
+  '<p>SHOWN</p><svg></svg><div hidden><p>GONE',
+  // A frameset after the page has shown text opens nothing.
+  '<p>SHOWN</p><frameset hidden>FRAMED',
+  '<p>SHOWN</p><frameset hidden>FRAMED</frameset>AFTER',
+  '<img><frameset hidden>FRAMED',
+  '<hr><frameset hidden>FRAMED',
+  '<title>title</title><frameset hidden>FRAMED',
+  '<input type=hidden><frameset hidden>FRAMED',
 ];
 
 /** mulberry32: small, fast, and the same sequence on every platform. */
@@ -259,11 +345,18 @@ const FORMATTING_TAGS = ['b', 'i', 'em', 'a', 'nobr', 'u', 'font', 's', 'p', 'di
 
 /**
  * Random tag soup: start and end tags in any order, some hidden by the
- * attribute, some by an inline style, with a marker word between them. The
- * page closes everything at the end, because an element still open there
- * keeps its text on purpose and would otherwise excuse most of the page.
+ * attribute, some by an inline style, with a marker word between them.
+ * Closed, the page ends with every tag it draws from closed, so what is
+ * checked is the misnesting; open, it ends wherever the soup does, as a
+ * page cut short by the download cap does.
  */
-const tagSoup = (tags: readonly string[], prefix: string, seed: number, count: number): RenderedPage[] => {
+const tagSoup = (
+  tags: readonly string[],
+  prefix: string,
+  seed: number,
+  count: number,
+  ending: 'closed' | 'open' = 'closed',
+): RenderedPage[] => {
   const rand = createRandom(seed);
   const pages: RenderedPage[] = [];
   for (let n = 0; n < count; n += 1) {
@@ -282,7 +375,7 @@ const tagSoup = (tags: readonly string[], prefix: string, seed: number, count: n
         marker += 1;
       }
     }
-    pages.push({ id: `${prefix}-${seed}-${n}`, html: html + CLOSE_PAGE + 'ENDQ' });
+    pages.push({ id: `${prefix}-${seed}-${n}`, html: ending === 'closed' ? html + CLOSE_PAGE + 'ENDQ' : `STARTQ ${html}` });
   }
   return pages;
 };
@@ -320,6 +413,7 @@ export const renderedPages = (): RenderedPage[] => {
     ...CORPUS.map((html, n) => ({ id: `corpus-${n}`, html })),
     ...tagSoup(SOUP_TAGS, 'soup', 1, 300),
     ...tagSoup(FORMATTING_TAGS, 'formatting', 1, 300),
+    ...tagSoup([...SOUP_TAGS, 'template', 'canvas'], 'open', 1, 300, 'open'),
     ...inlineStyles(1, 1000),
   ].map((page) => ({ id: page.id, html: `<!doctype html>${page.html}` }));
   for (const page of pages) {

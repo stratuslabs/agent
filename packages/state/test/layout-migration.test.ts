@@ -207,7 +207,7 @@ test('a run killed before the sources are renamed resumes without duplicating an
   const { rename } = await import('node:fs/promises');
   await rename(`${legacySessionDbPath(env)}.migrated`, legacySessionDbPath(env));
   await rename(`${legacyMemoryFilePath(env)}.migrated`, legacyMemoryFilePath(env));
-  const { applyPerAgentLayout } = await import('../src/layout-migration.ts');
+  const { applyPerAgentLayout } = await import('../src/migrations/layout.ts');
   await applyPerAgentLayout(env);
   await drainSharedMemory(env);
 

@@ -11,6 +11,7 @@ This package stays outside `@stratusagent/core` and focuses on small helpers for
 - deterministic static providers for local development
 - deterministic scripted providers for tests and scenario playback
 - an OpenAI-compatible chat-completions adapter for real provider wiring
+- an OpenAI Responses adapter (`createOpenAIResponsesProvider`): streamed, stateless (`store: false`, the whole transcript each request), with tool calls, images and usage. No provider name selects it yet
 
 ## Example
 

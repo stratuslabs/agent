@@ -49,7 +49,8 @@ tree is where the depth lives.
 - **`start/`** — the path from nothing to a working agent.
 - **`guides/`** — one task each: doing a thing with a running install.
 - **`reference/`** — lookup tables: every command, flag, and config key.
-- **`concepts/`** — the ideas underneath: agents, memory, plugins, security.
+- **`concepts/`** — the ideas underneath: agents, memory, plugins, and
+  security.
 - **`architecture/`** — design documents; [`plugins.md`](./architecture/plugins.md)
   is the contract the ecosystem builds against.
 

@@ -23,7 +23,7 @@ import { assertDerivedStatePath } from '@stratusagent/permissions';
 import { type StateEnvironment, readHomeDirectory, readNonEmptyString, readProcessEnv } from './environment.ts';
 import { agentStateDirPath, agentWorkspacePath, agentsDirPath, foldedAgentId, stratusHomePath } from './paths.ts';
 import { DEFAULT_STRATUS_AGENT, loadSoulFile } from './souls.ts';
-import { remapLedger } from './workspace-migration.ts';
+import { remapLedger } from './migrations/workspaces.ts';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
 
 // ---- the agents folder ----------------------------------------------------

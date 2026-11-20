@@ -279,12 +279,84 @@ test('a void or unclosed hidden element does not swallow the page', () => {
   // `</p>` around it ends, and `b` is inside it — hidden, as a browser
   // hides it — while the page after the paragraph is untouched.
   assert.equal(htmlToText('<p>a<span hidden/>b</p><p>c</p>'), 'a\n\nc');
-  // Still open at the end of the page, an element keeps its text: a
-  // closing rule this pass does not model must not erase the rest.
-  assert.equal(htmlToText('<p>a</p><section hidden>open to the end'), 'a\n\nopen to the end');
   // `li` closes at the next `li`, so a hidden one ends there and the
   // visible item after it is kept.
   assert.equal(htmlToText('<ul><li hidden>a<li>b</ul><p>c</p>'), '- b\n\nc');
+});
+
+test('an element the page ends inside hides its text to the end, as a browser does', () => {
+  // A browser keeps an element open to the end of the page, so a hidden
+  // one the page ends inside hides everything after it: a page cut short
+  // by the download cap ends this way.
+  assert.equal(htmlToText('<p>a</p><section hidden>open to the end'), 'a');
+  assert.equal(htmlToText('<p>a</p><div hidden><p>x</p>y'), 'a');
+  assert.equal(htmlToText("<p>a</p><div hidden>inject <script>var s = '"), 'a');
+  // The text after the page's last `>` is the open element's too.
+  assert.equal(htmlToText('<p>a</p><div style="display:none">tail'), 'a');
+  // A template's content is never shown, nor a canvas's fallback, so one
+  // left open drops what follows it; an end tag the template cannot see
+  // past closes nothing.
+  assert.equal(htmlToText('<p>a</p><template>t <script>x</template>'), 'a');
+  assert.equal(htmlToText('<p>a</p><div><template>t</div>y'), 'a');
+  assert.equal(htmlToText('<p>a</p><canvas>fallback'), 'a');
+  // A template or canvas the tree builder closes holds what it held, not
+  // what lies between its start tag and the next end tag of its name.
+  assert.equal(htmlToText('<p>a<canvas>fallback<div>b</div>'), 'a\nb');
+  assert.equal(htmlToText('<template><template>t</template>u</template>v'), 'v');
+  // A hidden one's tags go with it, as before, so they cannot pair with a
+  // stray end tag after a table moved its text out.
+  assert.equal(htmlToText('<table><canvas style="display:none"><tbody>shown </canvas>'), 'shown');
+  // `</template>` closes the template whatever is open inside it.
+  assert.equal(htmlToText('<template><p>t<table><tr><td>u</template>v'), 'v');
+  // A frameset after the body has content is ignored by the parser, so it
+  // hides nothing, open or closed: text turns its frameset-ok flag off, and
+  // so do elements such as an image or a rule.
+  assert.equal(htmlToText('<p>a</p><frameset hidden>shown'), 'a\nshown');
+  assert.equal(htmlToText('<p>a</p><frameset hidden>shown</frameset>after'), 'a\nshown after');
+  assert.equal(htmlToText('<img><frameset hidden>shown'), 'shown');
+  assert.equal(htmlToText('<hr><frameset hidden>shown'), 'shown');
+  // A title's text, or a hidden input, leaves it on.
+  assert.equal(htmlToText('<title>t</title><frameset hidden>gone'), 't');
+  assert.equal(htmlToText('<input type=hidden><frameset hidden>gone'), '');
+  // What an implied end tag closes is not open at the end: the text after
+  // it is shown.
+  assert.equal(htmlToText('<div hidden><p>x</div>y'), 'y');
+  assert.equal(htmlToText('<ul><li hidden>a<li>b'), '- b');
+  assert.equal(htmlToText('<div><nav>x</div>y'), 'x\ny');
+  assert.equal(htmlToText('<div><template>t</template></div>y'), 'y');
+  // Elements dropped as page furniture rather than hidden by a browser
+  // keep their text when the page ends inside one: a browser shows it, and
+  // some sites wrap the whole page in a form.
+  assert.equal(htmlToText('<p>a</p><form><p>article'), 'a\n\narticle');
+  assert.equal(htmlToText('<p>a</p><nav>menu'), 'a\nmenu');
+  // From svg or math the tree builder leaves for HTML at a tag like `p` or
+  // `h1`, which this pass does not follow, so on a page that ends inside
+  // one, what is open at the end is kept rather than guessed at. Leaving
+  // the math here closes the hidden h2, and a browser shows `shown`.
+  assert.equal(htmlToText('<p>a</p><svg style="display:none"><p>shown'), 'a\n\nshown');
+  assert.equal(htmlToText('<p>a</p><svg><g hidden><p>shown'), 'a\n\nshown');
+  assert.equal(htmlToText('<p>a</p><h2 hidden><math><h1>shown'), 'a\n\nshown');
+  // Once the page has left one for HTML, which elements are open at the end
+  // is a guess even after the svg or math is closed.
+  assert.equal(htmlToText('<p>a</p><h2 hidden><math><h1>shown</h1></math>more'), 'a\n\nshown\nmore');
+  // So it is when a title, style or script in svg held markup: there it is
+  // markup, and here it was read as text, so `</template>` closed nothing.
+  assert.equal(htmlToText('<p>a</p><template><svg><title></template>shown'), 'a\nshown');
+  assert.equal(htmlToText('<p>a</p><template><svg><style></template></style>shown'), 'a\nshown');
+  // Text alone in one is read the same either way, as is markup in an HTML
+  // textarea, so the HTML around them still hides.
+  assert.equal(htmlToText('<p>a</p><div hidden><svg><title>Icon</title><path/></svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><div hidden><textarea><b>x</b></textarea>gone'), 'a');
+  // Until a tag that leaves svg or math for HTML, the HTML around them is
+  // still open, and a hidden element there hides them.
+  assert.equal(htmlToText('<p>a</p><div hidden><svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><div hidden><math><mi>gone'), 'a');
+  // A closed svg changes nothing after it.
+  assert.equal(htmlToText('<p>a</p><div hidden><svg></svg>gone'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg></svg><div hidden><p>gone'), 'a');
+  // A template's tags stay for the cut by name, which still pairs the
+  // outer one here with the end tag of the inner one this pass dropped.
+  assert.equal(htmlToText('<p>a</p><svg><template>x<template></template>'), 'a');
 });
 
 test('the extractor reads a page at the default size limit with hidden elements throughout', () => {
@@ -348,6 +420,21 @@ test('a page of unclosed tags is extracted in one pass, not one rescan per tag',
     // Every end tag searches the open elements, so the stack must not
     // grow with the page.
     '<div>'.repeat(40_000) + '</span>'.repeat(30_000),
+    // A pass that removes a tag can take the page's last `>` with it, and
+    // leave the openers before it with none ahead: the comment here, and
+    // the raw text a textarea holds, once its noscript start tags go.
+    '<a'.repeat(5_000) + '<!---->',
+    '<textarea>' + '<noscript></noscript'.repeat(20_000),
+    '<p>x</p><xmp>' + '<li></li'.repeat(40_000),
+    // The open svg and math elements are searched by every end tag that
+    // names one, so they must not grow with the page either.
+    '<svg>'.repeat(80_000) + '</math>'.repeat(80_000),
+    // Templates and canvases are judged in the tree too, and their tags
+    // kept for the cut by name after it.
+    '<p>x</p>' + '<template><canvas>'.repeat(40_000) + '</template>'.repeat(40_000),
+    // Each comment comes out, and each `<` of text beside it is escaped,
+    // in the one walk.
+    '<p>x</p>' + '<<!x></<?y>'.repeat(50_000),
   ];
   assert.equal(await extractsWithin(pages, 10_000), true);
   for (const page of pages) {
@@ -358,12 +445,9 @@ test('a page of unclosed tags is extracted in one pass, not one rescan per tag',
 test('the linear extraction reads a page exactly as the regexes did', () => {
   // Text after the last `>` is text, and still has its entities decoded.
   assert.equal(htmlToText('<p>maths</p> 5 < 10 &amp; 20'), 'maths\n5 < 10 & 20');
-  // A script with no end tag drops the tag and keeps what follows it, as
-  // the unclosed form always did; a closed one, in any case, goes whole.
-  assert.equal(htmlToText('<p>a</p><script>b'), 'a\nb');
+  // A closed script, in any case, goes whole. (One the page ends inside
+  // is dropped to the end, below.)
   assert.equal(htmlToText('<p>a</p><SCRIPT>gone()</Script><p>c</p>'), 'a\n\nc');
-  // An unclosed comment is left to the doctype sweep, as before.
-  assert.equal(htmlToText('<p>a</p><!-- open > b'), 'a\nb');
   // A character whose lowercase is longer cannot shift where a span ends.
   assert.equal(htmlToText('<p>İİİİ</p><script>secret()</script><p>after</p>'), 'İİİİ\n\nafter');
   assert.equal(extractTitle('<title>İstanbul</title><p>x</p>'), 'İstanbul');
@@ -392,6 +476,107 @@ test('a quoted > in an attribute does not end the tag before the attribute that 
   assert.equal(htmlToText(`<div data-x='a>b' style="display:none">secret</div><p>shown</p>`), 'shown');
   // A quote is a quote only where a value starts: in a name it is a name.
   assert.equal(htmlToText('<div a"b hidden>secret</div><p>shown</p>'), 'shown');
+});
+
+test('a quoted > in an attribute does not end the tag for the passes that remove tags', () => {
+  // The visibility pass read these tags right; the passes after it cut
+  // each one at its first `>` and returned the rest of the value as text.
+  assert.equal(htmlToText('<p>a</p><div title="x>LEAK">b</div>'), 'a\n\nb');
+  assert.equal(htmlToText(`<p>On <time title='13 June 2024 > 12'>13 June</time></p>`), 'On 13 June');
+  assert.equal(htmlToText('<p>a <b data-x="1>0">bold</b> c</p>'), 'a bold c');
+  // Every pass that names an element, not only the last one.
+  assert.equal(htmlToText('<li data-x="a>LEAK">item</li>'), '- item');
+  assert.equal(htmlToText('<script data-x="a>LEAK">code()</script><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<nav title="a>LEAK">menu</nav><p>shown</p>'), 'shown');
+  // An end tag with a space before its `>` is still the end tag.
+  assert.equal(htmlToText('<nav>menu</nav ><p>shown</p>'), 'shown');
+});
+
+test('markup the page ends inside is dropped, as a browser drops it', () => {
+  // A page cut by the download cap mostly ends inside a tag. A browser
+  // drops the unfinished tag; it is not text.
+  assert.equal(htmlToText('<p>a</p><div title="LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p><a href=LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p>tail <bLEAK'), 'a\ntail');
+  assert.equal(htmlToText('<p>a</p></divLEAK'), 'a');
+  // Cut inside a quoted value holding a `>`: the page's last `>` is in the
+  // attribute, so the unfinished tag is not in the text after it.
+  assert.equal(htmlToText('<p>a</p><div data-props="{&quot;html&quot;:&quot;<b>LEAK'), 'a');
+  // A comment, a doctype or a processing instruction with no end.
+  assert.equal(htmlToText('<p>a</p><!-- LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p><!-- open > LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p><!DOCTYPE LEAK'), 'a');
+  assert.equal(htmlToText('<p>a</p><?xml LEAK'), 'a');
+  // Outside svg and math, `<![CDATA[` is a comment to the next `>`.
+  assert.equal(htmlToText('<p>a</p><![CDATA[ x > y <b title="LEAK'), 'a\ny');
+  // Only a `<` followed by a letter, `/`, `!` or `?` opens markup: prose
+  // keeps its less-than signs.
+  assert.equal(htmlToText('<p>a</p>5 < 10'), 'a\n5 < 10');
+  assert.equal(htmlToText('<p>a</p>x <3 and y </'), 'a\nx <3 and y </');
+});
+
+test('a script or style the page ends inside is dropped to the end', () => {
+  assert.equal(htmlToText('<p>a</p><script>var x = "LEAK";'), 'a');
+  assert.equal(htmlToText('<p>a</p><style>.x { content: "LEAK" }'), 'a');
+  assert.equal(htmlToText('<p>a</p><script>b'), 'a');
+  // A `>` in the script is not the end of it.
+  assert.equal(htmlToText('<p>a</p><script>if (a > b) LEAK()'), 'a');
+  // Cut inside its end tag, the script still never closed.
+  assert.equal(htmlToText('<p>a</p><script>LEAK()</script'), 'a');
+  assert.equal(htmlToText('<p>a</p><script>LEAK()</script data-x="'), 'a');
+  // A textarea's text is shown, closed or not, as it was: as text.
+  assert.equal(htmlToText('<p>a</p><textarea>kept'), 'a\nkept');
+  assert.equal(htmlToText('<p>a</p><textarea><b>kept</b>'), 'a\n<b>kept</b>');
+});
+
+test('a script or style inside svg or math is not raw text, so it does not run to the end', () => {
+  // In foreign content the tokenizer stays in data: these elements close
+  // with their container, or at once when self-closing, and the page goes on.
+  assert.equal(htmlToText('<svg><style>x</svg><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<svg><style/></svg><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<svg><script href="a.js"/></svg><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<math><style/></math><p>shown</p>'), 'shown');
+  // Closed, or self-closed, the svg is no longer foreign content around them.
+  assert.equal(htmlToText('<p>a</p><svg></svg><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg/><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg><svg></svg></svg><script>LEAK()'), 'a');
+  // An end tag closes every foreign element opened inside the one it names.
+  assert.equal(htmlToText('<p>a</p><svg><math></svg><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg><g></svg><script>LEAK()'), 'a');
+  assert.equal(htmlToText('<p>a</p><svg><math><style>x</math></svg><p>shown</p>'), 'a\n\nshown');
+  // Icons and formulas as pages write them leave foreign content cleanly.
+  assert.equal(htmlToText('<svg><g><title>Close</title><path d="M0 0"/></g></svg><p>shown</p><script>LEAK()'), 'shown');
+  assert.equal(htmlToText('<math><mi>x</mi><mo>+</mo><mn>2</mn></math><p>shown</p><script>LEAK()'), 'x + 2\nshown');
+  assert.equal(htmlToText('<p>a</p><svg><title/><path/></svg><script>LEAK()'), 'a');
+  // In svg or math, `<![CDATA[` runs to `]]>`, `>` and quotes included.
+  assert.equal(
+    htmlToText(`<p>before</p><svg><style><![CDATA[ a > b { content: "<a href='x" } ]]></style></svg><p>shown</p>`),
+    'before\n\nshown',
+  );
+  assert.match(htmlToText('<p>before</p><svg><![CDATA[<x></svg><script>]]></svg><p>shown</p>'), /shown$/);
+  // A self-closing slash inside an unquoted value is part of the value.
+  assert.equal(htmlToText('<svg x=y/><style>x</svg><p>shown</p>'), 'shown');
+});
+
+test('where svg or math goes back to HTML, the page is kept whole rather than cut short', () => {
+  // The tree builder leaves foreign content for a tag like b, a </p>, HTML
+  // inside an integration point, or an end tag naming nothing open in svg
+  // or math. The walk does not follow it there: it keeps the rest of the
+  // page, and the text a wrong guess about the tree would cut stays.
+  // Each of these lost its last paragraph when the walk guessed.
+  assert.match(htmlToText('<svg><foreignObject><p>x</p></foreignObject><style>x</svg><p>shown</p>'), /shown$/);
+  assert.match(htmlToText('<svg><svg><foreignObject><p></svg></p></foreignObject><style>x</svg><p>shown</p>'), /shown$/);
+  assert.match(htmlToText('<svg><foreignObject><section></svg></section></foreignObject><style>x</svg><p>shown</p>'), /shown$/);
+  assert.equal(htmlToText('<div><svg></div><style>a<b x="</style><p>shown</p>'), 'shown');
+  assert.equal(htmlToText('<svg><p>x</p><style>a<b x="</style><p>shown</p>'), 'x\n\nshown');
+  // So a script after it is kept, as it always was.
+  assert.equal(htmlToText('<p>a</p><svg><b>b<script>LEAK()'), 'a\nb LEAK()');
+  assert.equal(htmlToText('<p>a</p><svg></p><script>LEAK()'), 'a\n\nLEAK()');
+  assert.equal(htmlToText('<p>a</p><svg><foreignObject><div>d</div></foreignObject></svg><script>LEAK()'), 'a\nLEAK()');
+  // And what such an element holds is read as markup but never cut: it
+  // may all be text, as this xmp's is.
+  assert.equal(htmlToText('<p>a</p><svg><p>b</p><xmp>c <!-- d'), 'a\n\nb\nc <!-- d');
+  assert.equal(htmlToText('<p>a</p><svg><p>b</p><xmp>c <b title="d'), 'a\n\nb\nc <b title="d');
 });
 
 test('an end tag inside a textarea or title does not close a hidden element', () => {
@@ -874,6 +1059,34 @@ test('a comment ends where the HTML tokenizer ends it', () => {
   assert.equal(htmlToText('<div hidden>gone<!-- x > </div> --!>still hidden</div><p>shown</p>'), 'shown');
   assert.equal(htmlToText('<p>a<!-->b</p>'), 'ab');
   assert.equal(htmlToText('<p>a<!--->b</p>'), 'ab');
+});
+
+test('comments, doctypes, processing instructions and CDATA are read where the tokenizer reads them', () => {
+  // A `<!` or `<?` inside a quoted value is part of the value: the tag
+  // ends at its own `>`, and the element's text is shown.
+  assert.equal(htmlToText('<p>a</p><a href="<?php echo $u; ">link</a>'), 'a\nlink');
+  assert.equal(htmlToText('<div data-tpl="<!-- x">kept</div>'), 'kept');
+  assert.equal(htmlToText(`<a title='a<!b'>t</a><span title="x <? y">s</span>`), 'ts');
+  // Inside a script or style a `<!--` is the script's text, and opens
+  // nothing that could run on past its end tag.
+  assert.equal(htmlToText(`<script>var s = '<!--';</script><p>shown</p>-->`), 'shown\n-->');
+  // In svg or math, CDATA runs to `]]>`, and none of it is markup: it goes
+  // whole, as the svg style or script it nearly always is.
+  assert.equal(htmlToText('<p>before</p><svg><![CDATA[<x></svg><script>LEAK]]></svg><p>shown</p>'), 'before\n\nshown');
+  assert.equal(htmlToText('<p>before</p><math><mi><![CDATA[a <!-- b]]></mi></math><p>shown</p>-->'), 'before\n\nshown\n-->');
+  // A `<` that opens nothing stays text once a comment after it is gone.
+  assert.equal(htmlToText('<p>a<<!x>b hidden>c</p>'), 'a<b hidden>c');
+  // Nor is a tag in a script's, a style's or an xmp's text one for the
+  // passes that cut elements by name: each is text to its end tag.
+  assert.equal(htmlToText('<style>a { content: "<script>" }</style><p>shown</p><script>x</script><p>after</p>'), 'shown\n\nafter');
+  assert.equal(htmlToText('<xmp><b>x</b> <style>y</xmp><p>shown</p><style>z</style>'), '<b>x</b> <style>y\nshown');
+  assert.equal(htmlToText('<plaintext><b>x</b> <!-- y -->'), '<b>x</b> <!-- y -->');
+  // `</` before anything but a letter opens a comment to the next `>`,
+  // and `</>` is nothing at all.
+  assert.equal(htmlToText('<p>shown</p>literal </3 LEAK> after'), 'shown\nliteral after');
+  assert.equal(htmlToText('<p>a</>b</p>'), 'ab');
+  // A comment of any kind leaves nothing behind, a space included.
+  assert.equal(htmlToText('<p>a<!x>b<?y>c</p>'), 'abc');
 });
 
 test('web.fetch is judged by the origin of its URL', async () => {

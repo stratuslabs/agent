@@ -79,6 +79,8 @@ import {
 import {
   loadServeApprovals,
   loadServePrincipals,
+  loadSlackPeople,
+  type SlackPeople,
   loadServeSlack,
   loadServeApi,
   loadServeEvents,
@@ -86,6 +88,8 @@ import {
   loadServeRuntimeSelection,
   loadServeAgentMaxTurns,
   loadServeAutoContinue,
+  loadServeConcurrentScheduledTurns,
+  loadServeTasks,
   loadServeMaxTurns,
 } from '../trusted-config.ts';
 
@@ -378,6 +382,8 @@ const serveHeldHome = async (
   const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
   const agentMaxTurns = await loadServeAgentMaxTurns(env, command.configPath, warn);
   const autoContinue = await loadServeAutoContinue(env, command.configPath, warn);
+  const concurrentScheduledTurns = await loadServeConcurrentScheduledTurns(env, command.configPath, warn);
+  const tasks = await loadServeTasks(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -552,12 +558,14 @@ const serveHeldHome = async (
     const adapter = await loadSlackAdapter();
     if (adapter) {
       slackAdapterUp = true;
-      // One agent's Slack settings, from the config this daemon started
-      // with: a reload (card 894) changes which apps are connected, never
-      // how an agent is configured.
-      const slackAgentConfig = ([agentId, tokens]: [string, { appToken: string; botToken: string }]) => {
-        const route = resolveAgentApprovals(approvalsConfig, agentId);
-        const principals = resolveAgentPrincipals(principalsConfig, agentId);
+      // One agent's Slack settings. How it presents itself comes from the
+      // config this daemon started with; who it answers to (`principals`,
+      // and the approvers and approval channel in `approvals`) from
+      // `people`, which a reload reads again, so a teammate added or
+      // removed reaches a connected app without a restart (AGT-337).
+      const slackAgentConfig = (people: SlackPeople) => ([agentId, tokens]: [string, { appToken: string; botToken: string }]) => {
+        const route = resolveAgentApprovals(people.approvals, agentId);
+        const principals = resolveAgentPrincipals(people.principals, agentId);
         const presentation = resolveAgentSlack(slackConfig, agentId);
         const { homeChannels } = presentation;
         return {
@@ -582,11 +590,15 @@ const serveHeldHome = async (
         };
       };
       channels.push(adapter({
-        agents: slackAgents.map(slackAgentConfig),
+        agents: slackAgents.map(slackAgentConfig({ approvals: approvalsConfig, principals: principalsConfig })),
         // Read again on every roster reload, so an app stored while the
         // daemon runs (`stratus channel set`, setup, the dashboard) connects
-        // without a restart, and one removed disconnects.
-        loadAgents: async () => Object.entries((await loadChannelCredentials(env)).slack ?? {}).map(slackAgentConfig),
+        // without a restart, and one removed disconnects; and so do the
+        // people lists, from the trusted config, under the rules start used.
+        loadAgents: async () => {
+          const people = await loadSlackPeople(env, command.configPath, warn);
+          return Object.entries((await loadChannelCredentials(env)).slack ?? {}).map(slackAgentConfig(people));
+        },
         attachmentStore: (() => {
           const workspaces = createAgentWorkspaces(env);
           return { workspaces, ledger: createFileLedger((id) => workspaces.forAgent(id), (id) => workspaces.prepare(id)) };
@@ -843,6 +855,9 @@ const serveHeldHome = async (
   if (Object.keys(autoContinue).length > 0) {
     log(`autoContinue: ${Object.entries(autoContinue).map(([agentId, setting]) => `${agentId} ${setting === true ? 'no cap' : `up to ${setting} more`}`).join(', ')} (the codex runtime is not covered and wraps up as before)`);
   }
+  if (Object.keys(concurrentScheduledTurns).length > 0) {
+    log(`scheduled turns at once: ${Object.entries(concurrentScheduledTurns).map(([agentId, limit]) => `${agentId} ${limit}`).join(', ')}; 1 for the rest (concurrentScheduledTurns; one schedule still never overlaps itself)`);
+  }
   if (slackAdapterUp) {
     // Said at startup, because the failure it names is silent otherwise: a
     // daemon with no principals serves every Slack message as `unknown`,
@@ -914,6 +929,8 @@ const serveHeldHome = async (
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
     ...(Object.keys(autoContinue).length > 0 ? { autoContinueFor: (agentId: string) => autoContinue[agentId] } : {}),
+    ...(Object.keys(concurrentScheduledTurns).length > 0 ? { schedules: { maxConcurrentByAgent: concurrentScheduledTurns } } : {}),
+    tasks,
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at

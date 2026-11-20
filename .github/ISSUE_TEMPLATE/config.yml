@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/stratuslabs/agent/security/advisories/new
+    about: Report it privately. Please don't open a public issue.
+  - name: Documentation
+    url: https://github.com/stratuslabs/agent/blob/main/docs/README.md
+    about: Setup, guides and reference.

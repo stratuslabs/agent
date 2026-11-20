@@ -33,6 +33,31 @@ streaming edits, session keys) — is documented in the
 [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md),
 which is canonical for the Slack surface.
 
+### Adding and removing teammates
+
+Who may talk to an agent, and who may approve its calls, are lists of Slack
+member IDs in the trusted config (in Slack: the person's profile → ⋯ →
+Copy member ID). `stratus people` shows them for each agent and changes
+them without editing the file:
+
+```sh
+stratus people                              # each agent's admit setting, people and approvers
+stratus people add U0123ABCD                # may talk to every agent on the shared list
+stratus people add U0123ABCD --approver     # and may approve their calls
+stratus people add U0123ABCD --agent blair  # blair only
+stratus people remove U0123ABCD             # off every list, approvers included
+stratus people remove U0123ABCD --approver  # still talks to them, no longer approves
+```
+
+`--agent` on an agent that uses the shared list gives it a list of its own,
+starting as a copy of the shared one so nobody loses access. Later changes to
+the shared list don't reach it, and `stratus people add` names the agents it
+didn't reach. A running daemon applies the change at once, with no restart
+and the Slack app still connected (one from 0.14.12 or before needs
+`stratus restart`), and the command says whether it did.
+Approvers are only asked when `approvals.mode` is `remote`; the command says
+so when it isn't.
+
 ## Talking to an agent
 
 Mention it — `@Blair what's blocking the release?` — and it answers in a
@@ -203,7 +228,8 @@ machines, turn on `agentMentions`:
   messages directly above the tag, with nobody else speaking between and
   within the hour before it, read as if they were attached to the tag.
 - A tagged message from another agent may need no answer: a report, a
-  thanks. The agent is told it can stay quiet then, and posts nothing.
+  thanks. The agent is told it can stay quiet then, and posts nothing, or
+  leaves one reaction on the message instead (see **Reactions** below).
   A question or a request still gets one.
 - The reply isn't tagged automatically. The answering agent is told the
   asker's tag and includes it when the asker needs to see the answer; an
@@ -352,6 +378,34 @@ Restart the daemon to apply it. In `stream` mode the setting is made when
 the placeholder is posted; Slack's edit call takes no preview setting of its
 own.
 
+### Cards a tool posts
+
+A tool can hand the thread a finished message of its own: a card with a
+header, fields, a table, a chart and link buttons, built from Slack's
+blocks, with plain text beside it (see
+[what a tool returns](../architecture/plugins.md#what-a-tool-hands-its-conversation)).
+The agent posts it in the turn's thread, in order with the turn's words
+and files. Nothing new is needed from your Slack app: `chat:write` covers
+it.
+
+Before it goes out, the daemon checks the blocks. A card may hold headers,
+sections, context, dividers, images from a web address, Slack's tables and
+charts, and buttons that open a link. A button's id is renamed and its
+value dropped, so a card's button can't stand in for an approval or a
+credential form, and clicking it opens the link and does nothing else.
+Anything a person would fill in or pick from (inputs, menus, date pickers,
+`rich_text`), a button with no link, or a block type the daemon doesn't
+know sends the card's text alone. So does a card Slack refuses. Either
+way the log says why, without the card's content, and the text goes whole:
+a long one is split across messages, as a long reply is. Mentions and broadcasts
+in a card (`@here`, `@channel`, a mention of a person) are shown as text
+and notify nobody; the reply is where an agent mentions someone.
+
+A tool's card is never taken from a result labelled
+[`external`](tools.md), such as an MCP server's: a server's words would
+read as the agent's own. Approval and credential buttons also answer only
+from their own message: a lookalike elsewhere settles nothing.
+
 ## Stopping a turn
 
 Reply `stop` in the thread (or the DM) while the agent is working, or
@@ -362,6 +416,12 @@ is cancelled the same way a timeout cancels it, and an approval it was
 waiting on is cancelled and its card says so. A tool that doesn't stop when
 asked (usually a plugin's) gets 2 seconds, then the turn ends without it.
 Its result says it was left behind and may still be running.
+
+The same `stop` ends the [background tasks](../reference/config.md#background-tasks)
+that conversation started, and one more line names them: "Stopped by @you:
+background task `t_…`." Each task's outcome then arrives in the
+conversation as cancelled. With only tasks running, `stop` still stops them
+rather than reaching the agent as a message.
 
 Only the agent's approvers (`approvals.slackApprovers`) can stop it. From
 anyone else, or when nothing is running, `stop` is an ordinary message. An
@@ -573,6 +633,14 @@ already turns on for approval buttons; no scope is added.
   under **OAuth & Permissions** and be reinstalled; until then the read
   returns the messages and tells the agent the scope is missing. Details in
   [Reading a channel](../../packages/channel-slack/README.md#reading-a-channel).
+- **Reactions** — an agent that stays quiet on a message said to it that
+  needs no answer (a thanks, a report) may leave one reaction on it instead:
+  :+1:, :laughing:, :heart: or :tada:. Never on a message it only overheard,
+  and never in place of an answer a question or request is owed. It needs the
+  `reactions:write` scope, which the manifest asks for. An app created before
+  it should have the scope added under **OAuth & Permissions** and be
+  reinstalled; until then the agent stays silent, and the daemon log says
+  once that the scope is missing.
 - **Images in a read** — `message.read` shows the agent the images on the
   messages it reads, at most 5 and 10 MB per read, held to the same limits
   as an image someone sends it (Slack's preview for one over 5 MB). Each

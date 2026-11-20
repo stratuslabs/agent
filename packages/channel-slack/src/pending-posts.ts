@@ -49,3 +49,15 @@ export interface PendingApprovalPost {
   /** Bound at render time, so a later config change cannot widen a live request. */
   approvers: Set<string>;
 }
+
+/**
+ * Whether `actor` may decide `post`. Bound when the prompt was posted, so a
+ * later config change cannot widen a live request, and checked against the
+ * app's approvers now as well, so someone removed while the daemon runs
+ * (a reload, AGT-337) cannot decide a prompt posted while they were one.
+ */
+export const mayDecide = (
+  post: { connection: AgentConnection; approvers: Set<string> },
+  actor: string | undefined,
+): actor is string =>
+  actor !== undefined && post.approvers.has(actor) && (post.connection.config.approvers ?? []).includes(actor);

@@ -235,3 +235,122 @@ test('a fact the operator lowers while a pass runs lowers the fact that replaces
   const merged = await tools.remember.execute({ fact: 'The deploy database is Postgres.', supersedes: [handed.id, other.id] }, session) as { trust: string };
   assert.equal(merged.trust, 'external', 'never more trusted than a fact it replaces is now');
 });
+
+/** A shadow writer as the gateway's: its facts land outside the store, so the store's search never sees them. */
+type Shown = { results: { id: string; content: string; trust: string; about?: string[] }[]; truncated: boolean };
+
+const fakeShadowWriter = () => {
+  const written: { id: string; content: string; supersedes?: unknown }[] = [];
+  const write = async (_agentId: string, content: string, options: { provenance?: { trust: string }; supersedes?: unknown }) => {
+    const id = `shadow-${written.length + 1}`;
+    written.push({ id, content, ...(options.supersedes !== undefined ? { supersedes: options.supersedes } : {}) });
+    return { id, trust: (options.provenance?.trust ?? 'unknown') as 'agent' };
+  };
+  return { written, write };
+};
+
+test('a shadow pass\'s recall shows the facts it wrote this pass, so it sees its own duplicate and may supersede it', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const shadow = fakeShadowWriter();
+  const { recall, remember, tally } = createMemoryPassTools(store, stateFor(), { write: shadow.write });
+  const first = await remember.execute({ fact: 'Ava prefers short replies.', kind: 'preference', about: ['Ava'] }, passSession()) as Remembered;
+
+  const found = await recall.execute({ query: 'Ava replies' }, passSession()) as Shown;
+  assert.deepEqual(found.results.map((fact) => [fact.id, fact.content, fact.trust, fact.about]), [[first.id, 'Ava prefers short replies.', first.trust, ['Ava']]]);
+  assert.deepEqual((await recall.execute({ query: 'deploy' }, passSession()) as Recalled).results, [], 'a fact that does not match is not shown');
+
+  const second = await remember.execute({ fact: 'Ava prefers short replies, answer first.', supersedes: first.id }, passSession()) as Remembered;
+  assert.deepEqual((await recall.execute({ query: 'Ava replies' }, passSession()) as Recalled).results.map((fact) => fact.id), [second.id]);
+  assert.deepEqual(tally(), { saved: 2, superseded: 1 });
+  assert.equal((await store.list('ava')).entries.length, 0, 'the store is untouched');
+});
+
+test('a shadow pass\'s recall hides a fact it superseded, and the pass never supersedes one id twice, in either mode', async () => {
+  for (const mode of ['shadow', 'write'] as const) {
+    const store = new InMemoryAgentMemoryStore();
+    const fact = await store.append('ava', 'Ava works in Boston.');
+    const shadow = fakeShadowWriter();
+    const { recall, remember, tally } = createMemoryPassTools(store, stateFor(), mode === 'shadow' ? { write: shadow.write } : {});
+    await recall.execute({ query: 'Ava' }, passSession());
+    await remember.execute({ fact: 'Ava works in Denver.', supersedes: fact.id }, passSession());
+
+    const after = await recall.execute({ query: 'Ava' }, passSession()) as Shown;
+    assert.deepEqual(after.results.map((found) => found.content), ['Ava works in Denver.'], `${mode}: the superseded fact is hidden`);
+    await assert.rejects(
+      () => remember.execute({ fact: 'Ava works in Austin.', supersedes: fact.id }, passSession()),
+      mode === 'shadow' ? /already superseded/ : /No live memory entry/,
+      `${mode}: a second supersede of one id is refused`,
+    );
+    assert.deepEqual(tally(), { saved: 1, superseded: 1 }, mode);
+    assert.equal(shadow.written.length, mode === 'shadow' ? 1 : 0, mode);
+  }
+});
+
+test('a successor not true yet retires nothing, in either mode: the fact it names is still shown and may be superseded again', async () => {
+  for (const mode of ['shadow', 'write'] as const) {
+    const store = new InMemoryAgentMemoryStore();
+    const fact = await store.append('ava', 'Ava works in Boston.');
+    const shadow = fakeShadowWriter();
+    const { recall, remember, tally } = createMemoryPassTools(store, stateFor(), mode === 'shadow' ? { write: shadow.write } : {});
+    await recall.execute({ query: 'Ava' }, passSession());
+    await remember.execute({ fact: 'Ava works in Denver.', validFrom: '2099-01-01T00:00:00.000Z', supersedes: fact.id }, passSession());
+
+    const after = await recall.execute({ query: 'Ava' }, passSession()) as Shown;
+    assert.deepEqual(after.results.map((found) => found.content).sort(), ['Ava works in Boston.', 'Ava works in Denver.'], mode);
+    await remember.execute({ fact: 'Ava works in Austin.', supersedes: fact.id }, passSession());
+    assert.deepEqual(tally(), { saved: 2, superseded: 2 }, mode);
+  }
+});
+
+test('a shadow pass\'s recall fills the limit past a fact it retired, as a write-mode recall would', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const older = await store.append('ava', 'Ava works in Boston.');
+  const newer = await store.append('ava', 'Ava works in Chicago.');
+  const shadow = fakeShadowWriter();
+  const { recall, remember } = createMemoryPassTools(store, stateFor(), { write: shadow.write });
+  await recall.execute({ query: 'Ava works' }, passSession());
+  await remember.execute({ fact: 'Her home is Denver now.', supersedes: newer.id }, passSession());
+
+  const one = await recall.execute({ query: 'Ava works', limit: 1 }, passSession()) as Shown;
+  assert.deepEqual([one.results.map((found) => found.id), one.truncated], [[older.id], false]);
+});
+
+test('a shadow tidy recalls its merge in place of the facts it merged, and only at its own label', async () => {
+  const store = new InMemoryAgentMemoryStore();
+  const a = await store.append('ava', 'the deploy runs on Postgres', { provenance: { trust: 'agent' } });
+  const b = await store.append('ava', 'deploys go to Postgres', { provenance: { trust: 'agent' } });
+  const shadow = fakeShadowWriter();
+  const tools = createMemoryPassTools(store, {
+    passId: 'p1',
+    kind: 'tidy',
+    trust: 'agent',
+    handed: [{ id: a.id, trust: 'agent' }, { id: b.id, trust: 'agent' }],
+    recallOnly: 'agent',
+  }, { supersedesMany: true, write: shadow.write });
+  const session = { ...passSession(), metadata: { sessionTrust: 'agent' } } as Session;
+  const merged = await tools.remember.execute({ fact: 'The deploy database is Postgres.', supersedes: [a.id, b.id] }, session) as Remembered;
+  const external = await tools.remember.execute({ fact: 'Postgres is the deploy database, says a page.' }, { ...session, metadata: { sessionTrust: 'external' } } as Session) as Remembered;
+  assert.equal(external.trust, 'external');
+
+  const found = await tools.recall.execute({ query: 'Postgres' }, session) as Recalled;
+  assert.deepEqual(found.results.map((fact) => fact.id), [merged.id], 'the merged facts are hidden, and the fact at another label is not shown');
+});
+
+test('a shadow pass ranks its own facts as a hybrid store does: every word ahead of the store, some words after it', async () => {
+  class HybridStore extends InMemoryAgentMemoryStore {
+    override async search(agentId: string, query: string, options?: Parameters<InMemoryAgentMemoryStore['search']>[2]) {
+      return { ...await super.search(agentId, query, options), strategy: 'hybrid' as const };
+    }
+  }
+  const store = new HybridStore();
+  const stored = await store.append('ava', 'Ava replies before noon.');
+  const shadow = fakeShadowWriter();
+  const { recall, remember } = createMemoryPassTools(store, stateFor(), { write: shadow.write });
+  const some = await remember.execute({ fact: 'Ava lives in Denver.' }, passSession()) as Remembered;
+  const every = await remember.execute({ fact: 'Ava prefers short replies.' }, passSession()) as Remembered;
+
+  const found = await recall.execute({ query: 'Ava replies' }, passSession()) as Recalled;
+  assert.deepEqual(found.results.map((fact) => fact.id), [every.id, stored.id, some.id]);
+  const one = await recall.execute({ query: 'Ava replies', limit: 1 }, passSession()) as Shown;
+  assert.deepEqual([one.results.map((fact) => fact.id), one.truncated], [[every.id], true]);
+});

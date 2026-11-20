@@ -187,6 +187,53 @@ test('fallback stickiness is per session, never per pooled provider', async () =
   assert.equal((flakyAgain.parts[0] as { text: string }).text, 'fallback');
 });
 
+test('the fallback notice hears the switching session and is awaited before the fallback answers', async () => {
+  // The daemon masks the primary's error against the session's stored
+  // secrets before it logs it, which is an async read: the wrapper has to
+  // hand it the session and wait for it, and a notice that fails must not
+  // cost the session its fallback.
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const makeSession = (id: string): Session => ({
+    id,
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  });
+  const order: string[] = [];
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      order.push('fallback answered');
+      return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+    },
+  };
+
+  const heard: Array<{ message: string; sessionId: string }> = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, async (error, session) => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    heard.push({ message: (error as Error).message, sessionId: session.id });
+    order.push('notice done');
+  });
+  const answer = await wrapped.generate({ session: makeSession('switching') } as never);
+  assert.equal((answer.parts[0] as { text: string }).text, 'fallback');
+  assert.deepEqual(heard, [{ message: 'primary down', sessionId: 'switching' }]);
+  assert.deepEqual(order, ['notice done', 'fallback answered']);
+
+  const failingNotice = createFallbackWrappedProvider(primary as never, fallback as never, async () => {
+    throw new Error('could not read the credentials file');
+  });
+  const stillServed = await failingNotice.generate({ session: makeSession('notice-failed') } as never);
+  assert.equal((stillServed.parts[0] as { text: string }).text, 'fallback');
+});
+
 test('an overflowing transcript reaches the runner instead of spending the fallback switch', async () => {
   // The wrapper catches every provider failure and switches the session to
   // the fallback model for good. A context overflow is the one rejection
@@ -2260,6 +2307,35 @@ test('autoContinue parses per agent as true or a cap, and refuses anything else'
   for (const [name, value] of [['list', ['nova']], ['zero', { nova: 0 }], ['fraction', { nova: 1.5 }], ['text', { nova: 'yes' }], ['false', { nova: false }]] as const) {
     const bad = await writeConfig(`auto-continue-${name}.json`, { autoContinue: value });
     await assert.rejects(loadConfigFile(bad), /Invalid autoContinue/, name);
+  }
+});
+
+test('concurrentScheduledTurns parses per agent as a whole number, and refuses anything else', async () => {
+  const configPath = await writeConfig('concurrent-scheduled-turns.json', { concurrentScheduledTurns: { atlas: 2, nova: 1 } });
+  const config = await loadConfigFile(configPath);
+  assert.deepEqual(config.concurrentScheduledTurns, { atlas: 2, nova: 1 });
+  for (const [name, value] of [['list', ['atlas']], ['number', 2], ['zero', { atlas: 0 }], ['fraction', { atlas: 1.5 }], ['text', { atlas: '2' }], ['true', { atlas: true }]] as const) {
+    const bad = await writeConfig(`concurrent-scheduled-turns-${name}.json`, { concurrentScheduledTurns: value });
+    await assert.rejects(loadConfigFile(bad), /Invalid concurrentScheduledTurns/, name);
+  }
+});
+
+test('tasks parses enabled and a per-agent cap, and refuses anything else', async () => {
+  const configPath = await writeConfig('tasks.json', { tasks: { enabled: false, maxRunningPerAgent: { atlas: 5, nova: 1 } } });
+  const config = await loadConfigFile(configPath);
+  assert.deepEqual(config.tasks, { enabled: false, maxRunningPerAgent: { atlas: 5, nova: 1 } });
+  assert.deepEqual((await loadConfigFile(await writeConfig('tasks-empty.json', { tasks: {} }))).tasks, {});
+  for (const [name, value, message] of [
+    ['list', ['atlas'], /Invalid tasks in config/],
+    ['flag', true, /Invalid tasks in config/],
+    ['enabled text', { enabled: 'yes' }, /Invalid tasks\.enabled .*Use true or false/],
+    ['cap number', { maxRunningPerAgent: 5 }, /Invalid tasks\.maxRunningPerAgent in config .*like \{ "atlas": 5 \}/],
+    ['cap zero', { maxRunningPerAgent: { atlas: 0 } }, /Invalid tasks\.maxRunningPerAgent\.atlas .*: 0\. Use a whole number/],
+    ['cap fraction', { maxRunningPerAgent: { atlas: 1.5 } }, /Invalid tasks\.maxRunningPerAgent\.atlas/],
+    ['cap text', { maxRunningPerAgent: { atlas: '5' } }, /Invalid tasks\.maxRunningPerAgent\.atlas/],
+  ] as const) {
+    const bad = await writeConfig(`tasks-${name.replace(' ', '-')}.json`, { tasks: value });
+    await assert.rejects(loadConfigFile(bad), message, name);
   }
 });
 

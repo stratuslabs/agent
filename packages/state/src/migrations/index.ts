@@ -23,15 +23,15 @@ import {
 } from '@stratusagent/core';
 import { isValidAgentId } from '@stratusagent/agents';
 import { linkedDerivedComponent } from '@stratusagent/permissions';
-import { type StateEnvironment, readWorkingDirectory } from './environment.ts';
-import { createFileMemoryStore, memoryAppendNeedsNewline } from './memory.ts';
+import { type StateEnvironment, readWorkingDirectory } from '../environment.ts';
+import { createFileMemoryStore, memoryAppendNeedsNewline } from '../memory.ts';
 import {
   applyPerAgentLayout,
   createStateDirectoryNames,
   hasBracketedLegacyState,
   makeAgentStateDirectory,
-} from './layout-migration.ts';
-import { applyPerAgentWorkspaces } from './workspace-migration.ts';
+} from './layout.ts';
+import { applyPerAgentWorkspaces } from './workspaces.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -42,15 +42,15 @@ import {
   legacyMemoryFilePath,
   gatewayTokenPath,
   gatewayInfoPath,
-} from './paths.ts';
-import { syncDirectory, writeFileSynced } from './durable-write.ts';
+} from '../paths.ts';
+import { syncDirectory, writeFileSynced } from '../durable-write.ts';
 import {
   type MigrationMark,
   type StateBackup,
   backUpStateBeforeMigrating,
   markMigrationBegun,
   settleFailedMigration,
-} from './state-backup.ts';
+} from '../state-backup.ts';
 
 // Memory used to live under the working directory. Fold any such file into
 // the agents' own stores the first time a run happens from that directory,

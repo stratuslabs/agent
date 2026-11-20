@@ -58,6 +58,7 @@ stratus signin set anthropic --agent remy  # one agent's own Claude subscription
 stratus channel set imessage --agent blair apiKey  # a channel plugin's secrets for one agent, asked without echo (also `channels`, `channel remove`)
 stratus schedules                      # what the fleet has scheduled, and where it reports
 stratus grants blair                   # what blair may do unattended, and `grants revoke` to take one back
+stratus people add U0123ABCD --approver  # a Slack teammate who may talk to and approve for your agents, no restart (also `people`, `people remove`)
 stratus memory list blair              # every live fact, with its trust label, pin, and validity
 stratus memory search blair deploy pipeline             # the way the agent searches it
 stratus memory pin blair <id>...       # keep facts in the prompt every turn (also `memory unpin`)

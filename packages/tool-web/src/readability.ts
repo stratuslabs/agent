@@ -860,22 +860,116 @@ interface ScannedTag {
   name: string;
   /** Lowercased name to raw value; the first of a repeated name, as a browser keeps it. */
   attributes: Map<string, string>;
+  /** Ends in `/>`, which closes the element at once in svg and math, and nowhere else. */
+  selfClosing: boolean;
 }
 
 type AttributeState = 'beforeName' | 'name' | 'afterName' | 'beforeValue' | 'unquoted';
 
 /**
- * The page's tags, in one pass, read the way the HTML tokenizer reads them
+ * The tag that starts at `start`, read the way the HTML tokenizer reads it
  * rather than up to the first `>`. Attributes go through the tokenizer's
  * own states, because each shortcut is a page the browser reads one way
  * and this read another: a quote opens a value only where a value starts,
  * so `<div title="1>0" hidden>` is hidden; an `=` or a quote inside an
  * unquoted value is a character of it, so `<div x=a=">` ends at its `>`
- * rather than swallowing the page. A tag still open at the end of the page
- * is dropped, as a browser drops it, and nothing after it is a tag; nor is
- * anything after `<plaintext>`, which has no end tag at all. Every
- * character is visited a bounded number of times, so a hostile page costs
- * its length.
+ * rather than swallowing the page. `undefined` when the `<` there opens no
+ * tag, and `'unterminated'` when the page ends before the tag does. Every
+ * character of the tag is visited a bounded number of times.
+ */
+const readTag = (html: string, start: number): ScannedTag | 'unterminated' | undefined => {
+  let cursor = start + 1;
+  const closing = html[cursor] === '/';
+  if (closing) cursor += 1;
+  if (!/[a-zA-Z]/.test(html[cursor] ?? '')) return undefined;
+  const nameStart = cursor;
+  while (cursor < html.length && !isAsciiWhitespace(html[cursor] ?? '') && html[cursor] !== '/' && html[cursor] !== '>') {
+    cursor += 1;
+  }
+  const name = asciiLower(html.slice(nameStart, cursor));
+
+  const attributes = new Map<string, string>();
+  const keep = (attribute: string, value: string): void => {
+    if (!attributes.has(attribute)) attributes.set(attribute, value);
+  };
+  let state: AttributeState = 'beforeName';
+  let attribute = '';
+  let mark = cursor;
+  while (cursor < html.length) {
+    const char = html[cursor] ?? '';
+    if (state === 'beforeValue' && (char === '"' || char === "'")) {
+      const close = html.indexOf(char, cursor + 1);
+      if (close === -1) return 'unterminated';
+      keep(attribute, html.slice(cursor + 1, close));
+      cursor = close + 1;
+      state = 'beforeName';
+      continue;
+    }
+    if (char === '>') {
+      if (state === 'name') keep(asciiLower(html.slice(mark, cursor)), '');
+      else if (state === 'afterName' || state === 'beforeValue') keep(attribute, '');
+      else if (state === 'unquoted') keep(attribute, html.slice(mark, cursor));
+      // A `/` in an unquoted value is part of it; anywhere else it is
+      // read in the before-name state.
+      const selfClosing = state === 'beforeName' && html[cursor - 1] === '/';
+      return { start, end: cursor + 1, closing, name, attributes, selfClosing };
+    }
+    const space = isAsciiWhitespace(char);
+    if (state === 'beforeName') {
+      if (!space && char !== '/') {
+        state = 'name';
+        mark = cursor;
+      }
+    } else if (state === 'name') {
+      if (space || char === '/' || char === '=') {
+        attribute = asciiLower(html.slice(mark, cursor));
+        if (char === '=') {
+          state = 'beforeValue';
+        } else if (space) {
+          state = 'afterName';
+        } else {
+          keep(attribute, '');
+          state = 'beforeName';
+        }
+      }
+    } else if (state === 'afterName') {
+      if (char === '=') {
+        state = 'beforeValue';
+      } else if (char === '/') {
+        keep(attribute, '');
+        state = 'beforeName';
+      } else if (!space) {
+        keep(attribute, '');
+        state = 'name';
+        mark = cursor;
+      }
+    } else if (state === 'beforeValue') {
+      if (!space) {
+        state = 'unquoted';
+        mark = cursor;
+      }
+    } else if (space) {
+      keep(attribute, html.slice(mark, cursor));
+      state = 'beforeName';
+    }
+    cursor += 1;
+  }
+  return 'unterminated';
+};
+
+/** Where the end tag of the raw-text element `name` begins, from `from`; -1 if the page has none. */
+const rawTextEnd = (html: string, name: string, from: number): number => {
+  const endTag = new RegExp(`</${name}[ \\t\\n\\f\\r/>]`, 'gi');
+  endTag.lastIndex = from;
+  return endTag.exec(html)?.index ?? -1;
+};
+
+/**
+ * The page's tags, in one pass, each read by `readTag`. A tag still open
+ * at the end of the page is dropped, as a browser drops it, and nothing
+ * after it is a tag; nor is anything after `<plaintext>`, which has no end
+ * tag at all. Every character is visited a bounded number of times, so a
+ * hostile page costs its length.
  */
 const scanTags = (html: string): ScannedTag[] => {
   const tags: ScannedTag[] = [];
@@ -883,101 +977,223 @@ const scanTags = (html: string): ScannedTag[] => {
   for (;;) {
     const start = html.indexOf('<', index);
     if (start === -1) break;
-    let cursor = start + 1;
-    const closing = html[cursor] === '/';
-    if (closing) cursor += 1;
-    if (!/[a-zA-Z]/.test(html[cursor] ?? '')) {
+    const tag = readTag(html, start);
+    if (tag === undefined) {
       index = start + 1;
       continue;
     }
-    const nameStart = cursor;
-    while (cursor < html.length && !isAsciiWhitespace(html[cursor] ?? '') && html[cursor] !== '/' && html[cursor] !== '>') {
-      cursor += 1;
-    }
-    const name = asciiLower(html.slice(nameStart, cursor));
-
-    const attributes = new Map<string, string>();
-    const keep = (attribute: string, value: string): void => {
-      if (!attributes.has(attribute)) attributes.set(attribute, value);
-    };
-    let state: AttributeState = 'beforeName';
-    let attribute = '';
-    let mark = cursor;
-    let end = -1;
-    while (cursor < html.length) {
-      const char = html[cursor] ?? '';
-      if (state === 'beforeValue' && (char === '"' || char === "'")) {
-        const close = html.indexOf(char, cursor + 1);
-        if (close === -1) {
-          cursor = html.length;
-          break;
-        }
-        keep(attribute, html.slice(cursor + 1, close));
-        cursor = close + 1;
-        state = 'beforeName';
-        continue;
-      }
-      if (char === '>') {
-        if (state === 'name') keep(asciiLower(html.slice(mark, cursor)), '');
-        else if (state === 'afterName' || state === 'beforeValue') keep(attribute, '');
-        else if (state === 'unquoted') keep(attribute, html.slice(mark, cursor));
-        end = cursor;
-        break;
-      }
-      const space = isAsciiWhitespace(char);
-      if (state === 'beforeName') {
-        if (!space && char !== '/') {
-          state = 'name';
-          mark = cursor;
-        }
-      } else if (state === 'name') {
-        if (space || char === '/' || char === '=') {
-          attribute = asciiLower(html.slice(mark, cursor));
-          if (char === '=') {
-            state = 'beforeValue';
-          } else if (space) {
-            state = 'afterName';
-          } else {
-            keep(attribute, '');
-            state = 'beforeName';
-          }
-        }
-      } else if (state === 'afterName') {
-        if (char === '=') {
-          state = 'beforeValue';
-        } else if (char === '/') {
-          keep(attribute, '');
-          state = 'beforeName';
-        } else if (!space) {
-          keep(attribute, '');
-          state = 'name';
-          mark = cursor;
-        }
-      } else if (state === 'beforeValue') {
-        if (!space) {
-          state = 'unquoted';
-          mark = cursor;
-        }
-      } else if (space) {
-        keep(attribute, html.slice(mark, cursor));
-        state = 'beforeName';
-      }
-      cursor += 1;
-    }
-    if (end === -1) break;
-    tags.push({ start, end: end + 1, closing, name, attributes });
-    index = end + 1;
-    if (closing) continue;
-    if (name === 'plaintext') break;
-    if (RAW_TEXT_ELEMENTS.has(name)) {
-      const endTag = new RegExp(`</${name}[ \\t\\n\\f\\r/>]`, 'gi');
-      endTag.lastIndex = index;
-      const found = endTag.exec(html);
-      if (found === null) break;
-      index = found.index;
+    if (tag === 'unterminated') break;
+    tags.push(tag);
+    index = tag.end;
+    if (tag.closing) continue;
+    if (tag.name === 'plaintext') break;
+    if (RAW_TEXT_ELEMENTS.has(tag.name)) {
+      const found = rawTextEnd(html, tag.name, index);
+      if (found === -1) break;
+      index = found;
     }
   }
   return tags;
+};
+
+/** The elements that start foreign content. */
+const FOREIGN_ROOTS = new Set(['svg', 'math']);
+
+/**
+ * Start tags that turn the parser's frameset-ok flag off, as text in the
+ * body does; after one, a frameset start tag is ignored. An `input` does
+ * unless its type is hidden.
+ */
+const CLEARS_FRAMESET_OK = new Set([
+  'applet', 'area', 'br', 'button', 'dd', 'dt', 'embed', 'hr', 'iframe', 'image', 'img', 'input', 'keygen', 'li',
+  'listing', 'marquee', 'object', 'pre', 'select', 'table', 'textarea', 'wbr', 'xmp',
+]);
+
+/**
+ * Dropped elements a browser never shows either: a template's content is
+ * not rendered, and a canvas's fallback is not while scripts run. So the
+ * visibility pass drops what they hold where the tree builder puts it, as
+ * it does a hidden element's, before the cut by name: one the page ends
+ * inside has no end tag to pair with, and a canvas a `div` closed holds
+ * nothing after the `div`. The rest of DROPPED_ELEMENTS are either raw
+ * text, which `readMarkup` already cuts, or page furniture a browser shows,
+ * which keeps its text when the page ends inside it.
+ */
+const NEVER_RENDERED = new Set(['template', 'canvas']);
+
+/**
+ * The svg and MathML elements inside which the tree builder may read HTML
+ * again: `foreignObject`, an svg `title` or `desc`, MathML's text elements
+ * and an `annotation-xml`. Named without regard to which of svg or math
+ * they are in, which can only make the walk more careful.
+ */
+const INTEGRATION_POINTS = new Set(['foreignobject', 'desc', 'title', 'mi', 'mo', 'mn', 'ms', 'mtext', 'annotation-xml']);
+
+/**
+ * Start tags that end foreign content, from the tree builder's rules for
+ * parsing tokens in foreign content (a `font` does with a color, face or
+ * size); so do the end tags `</p>` and `</br>`.
+ */
+const FOREIGN_BREAKOUT = new Set([
+  'b', 'big', 'blockquote', 'body', 'br', 'center', 'code', 'dd', 'div', 'dl', 'dt', 'em', 'embed', 'h1', 'h2', 'h3',
+  'h4', 'h5', 'h6', 'head', 'hr', 'i', 'img', 'li', 'listing', 'menu', 'meta', 'nobr', 'ol', 'p', 'pre', 'ruby', 's',
+  'small', 'span', 'strong', 'strike', 'sub', 'sup', 'table', 'tt', 'u', 'ul', 'var',
+]);
+
+/**
+ * Where a comment ends, as the HTML tokenizer ends one: at `-->`, at
+ * `--!>`, or at once in `<!-->` and `<!--->`. Global, searched from just
+ * after the `<!--`.
+ */
+const COMMENT_END = /(?<=<!--)-?>|--!?>/g;
+
+/**
+ * The page as the HTML tokenizer leaves it for the passes below: its
+ * comments gone, the doctype, processing instructions, other bogus
+ * comments and CDATA sections with them, every `<` that is text escaped
+ * (`&lt;`, decoded again at the end), and cut where the page ends inside
+ * markup. So each `<` the passes below see opens a tag the tokenizer read,
+ * and none of them can find markup in a script's text, an xmp's, or a
+ * `<` that a removed comment left beside a word.
+ *
+ * The cut is at the `<` of a tag, comment, doctype or processing
+ * instruction with no end, or of a script, style or other dropped element
+ * whose end tag never arrives. A browser that reaches the end of the page
+ * in any of these drops what it was reading, so none of it is text. A
+ * page cut by the download cap usually ends this way: inside a tag, or a
+ * long script.
+ *
+ * The page is walked as the tokenizer walks it, so a `<` inside a comment,
+ * a quoted value or a script is not mistaken for the start of markup, and
+ * `5 < 10` is prose: only a `<` followed by a letter, `/`, `!` or `?`
+ * opens anything. Each character is visited a bounded number of times.
+ * Comments are removed in the same walk, not by a pattern run before tags
+ * are read: a `<!` or `<?` in a quoted value, or a `<!--` in a script, is
+ * no comment, and a pattern that took it for one deleted the element's
+ * text up to the next `>` or `-->`. Every kind of comment leaves nothing
+ * behind, not even a space, as in a browser.
+ *
+ * In svg or math a script or style is not raw text but an element like
+ * any other, and `<![CDATA[` is character data up to `]]>`, so the walk
+ * keeps the elements open there as the tree builder does: an end tag
+ * closes the last one of its name and everything opened inside it, and a
+ * `/>` opens nothing. It does not follow the tree builder back into HTML
+ * from inside svg or math. Where the page would go there — a tag such as
+ * `p` that breaks out, a start tag inside an integration point such as
+ * `foreignObject`, an end tag that closes nothing open in svg or math —
+ * the walk reads on as HTML, and still cuts at a tag or comment the page
+ * ends inside, which the tokenizer reads alike in svg, math and HTML. But
+ * a script or other raw-text element whose end never comes is not cut
+ * there: it may be an element of svg or math after all, so it and the rest
+ * are read as markup, and kept whole, as this extractor kept every page
+ * before the walk existed. A script left in is a lesser fault than an
+ * article cut short.
+ */
+const readMarkup = (html: string): string => {
+  let index = 0;
+  // The page up to `copied` as the passes below read it, comments gone.
+  let kept = '';
+  let copied = 0;
+  const upTo = (end: number): string => kept + html.slice(copied, end);
+  // Text as the tokenizer read it, each `<` in it escaped, so that no
+  // pattern below reads markup there; `decodeEntities` turns it back.
+  const asText = (from: number, to: number): string => html.slice(from, to).replace(/</g, '&lt;');
+  // Whether the walk has left svg or math for HTML on a guess; and then,
+  // whether a raw-text element ran to the end of the page, after which the
+  // rest is read as markup, no element as raw text, and nothing is cut: it
+  // may all be text.
+  let guessing = false;
+  let rawTextOff = false;
+  const cutAt = (start: number): string => upTo(rawTextOff ? html.length : start);
+  // The svg and math elements open, outermost first; empty in HTML.
+  const foreign: string[] = [];
+  for (;;) {
+    const start = html.indexOf('<', index);
+    if (start === -1) return upTo(html.length);
+    const next = html[start + 1] ?? '';
+    // A comment; or `<!`, `<?` or `</` before anything but a letter or the
+    // end, which the tokenizer reads as a comment to the next `>` — `</>`
+    // is nothing at all.
+    if (next === '!' || next === '?' || (next === '/' && start + 2 < html.length && !/[a-zA-Z]/.test(html[start + 2] ?? ''))) {
+      let close = -1;
+      if (foreign.length > 0 && html.startsWith('<![CDATA[', start)) {
+        // Character data in svg or math, through `]]>`, and never markup.
+        // It goes with what it holds, which is an svg style or script as
+        // pages write it; a browser shows its text only inside a MathML
+        // token element or an svg text, which are rare enough to leave out.
+        const cdataEnd = html.indexOf(']]>', start + 9);
+        if (cdataEnd !== -1) close = cdataEnd + 3;
+      } else if (html.startsWith('<!--', start)) {
+        COMMENT_END.lastIndex = start + 4;
+        const found = COMMENT_END.exec(html);
+        if (found !== null) close = found.index + found[0].length;
+      } else {
+        const gt = html.indexOf('>', start + 2);
+        if (gt !== -1) close = gt + 1;
+      }
+      if (close === -1) return cutAt(start);
+      kept = upTo(start);
+      copied = index = close;
+      continue;
+    }
+    const tag = readTag(html, start);
+    if (tag === undefined) {
+      // A `<` that opens nothing is text, and must stay text once a comment
+      // after it is gone: `<<!x>b>` is no `<b>` tag.
+      kept = upTo(start) + asText(start, start + 1);
+      copied = index = start + 1;
+      continue;
+    }
+    if (tag === 'unterminated') return cutAt(start);
+    index = tag.end;
+    if (foreign.length > 0) {
+      if (tag.closing) {
+        // Unbounded, and still linear: an end tag searches the list only as
+        // far as it then closes, or empties it.
+        const opened = foreign.lastIndexOf(tag.name);
+        if (opened !== -1) {
+          foreign.length = opened;
+          continue;
+        }
+      } else {
+        const font = tag.name === 'font' && ['color', 'face', 'size'].some((name) => tag.attributes.has(name));
+        if (!FOREIGN_BREAKOUT.has(tag.name) && !font && !INTEGRATION_POINTS.has(foreign.at(-1) ?? '')) {
+          if (!tag.selfClosing) foreign.push(tag.name);
+          continue;
+        }
+      }
+      // The tree builder goes back to HTML here, or may: the walk reads
+      // this tag and the rest as HTML from now on.
+      guessing = true;
+      foreign.length = 0;
+    }
+    if (tag.closing) continue;
+    if (FOREIGN_ROOTS.has(tag.name)) {
+      if (!tag.selfClosing) foreign.push(tag.name);
+      continue;
+    }
+    if (tag.name === 'plaintext') return upTo(index) + asText(index, html.length);
+    if (RAW_TEXT_ELEMENTS.has(tag.name) && !rawTextOff) {
+      // Raw text runs to its end tag, and the page may end before that end
+      // tag does. A dropped element's text is dropped either way; a
+      // textarea's is shown, up to an end tag the page cut short. After a
+      // guess it may be no raw text at all, so it is read as markup, and
+      // what it holds is kept: a script left in is a lesser fault than an
+      // article cut short. Either way a tag in a script's or an xmp's text
+      // is none, and no pass below may cut an element by it.
+      const found = rawTextEnd(html, tag.name, index);
+      if (found === -1 || readTag(html, found) === 'unterminated') {
+        if (guessing) {
+          rawTextOff = true;
+          continue;
+        }
+        if (DROPPED_ELEMENTS.includes(tag.name)) return upTo(start);
+        return upTo(index) + asText(index, found === -1 ? html.length : found);
+      }
+      kept = upTo(index) + asText(index, found);
+      copied = index = found;
+    }
+  }
 };
 
 /**
@@ -1010,9 +1226,14 @@ const scanTags = (html: string): ScannedTag[] => {
  * agency. Each rule here was checked against Chromium, page by page and by
  * comparing random malformed pages; foreign content (`svg`, `math`) and
  * `select`'s own rendering are not modelled. An element still open at the
- * end of the page keeps its text: a closing rule this pass does not model
- * must not erase the article behind it, and keeping is what this extractor
- * did before it read visibility at all.
+ * end of the page is open to the end of it, as in a browser, so a hidden
+ * one hides the rest; but where svg or math makes which elements are open
+ * a guess (see guessedOpen), what is open hides nothing, and the article
+ * behind it is not erased on that guess.
+ *
+ * Every tag it keeps comes back as its name alone, `<div>` or `</div>`,
+ * attributes gone, so the patterns after it end each tag where the
+ * tokenizer did.
  */
 const dropHiddenElements = (html: string, tail: string): { text: string; tail: string } => {
   // One stack of open elements, as the tree builder keeps, rather than one
@@ -1025,16 +1246,16 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // receive it — usually the top of the stack, but text or a tag a table
   // cannot hold is placed before the table, so in `<table hidden>visible`
   // the text is the table's parent's, and shown. A run is dropped when a
-  // hidden element on its ancestry was closed; one still open at the end
-  // of the page confirms nothing, and its text is kept.
+  // hidden element is on its ancestry, closed or still open at the end.
   const stack: OpenElement[] = [];
   const onStack = new Set<OpenElement>();
   // Every element closed before the end of the page, by id: a copy shares
   // its original's, so closing either closes both.
   const closed = new Set<number>();
-  // Whether any element could hide anything; a page with none is returned as it is.
+  // Whether any element could hide anything; on a page with none, nothing is dropped.
   let mayHide = false;
-  const segments: { start: number; end: number; node: TreeNode | undefined }[] = [];
+  // A run of text between tags, or one tag, and the node it lands in.
+  const segments: { start: number; end: number; node: TreeNode | undefined; tag?: ScannedTag }[] = [];
   let nextId = 0;
   // The list of active formatting elements: formatting a block closed
   // around is still in force, and the tree builder rebuilds it, `hidden`
@@ -1045,6 +1266,22 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   // The form element pointer: while a form is open, another form start tag
   // is ignored, and `</form>` removes that form alone.
   let form: OpenElement | undefined;
+  // How many svg and math elements are open, and whether the tree here
+  // stopped being the parser's while one was: a tag that leaves them for
+  // HTML arrived, which this pass does not follow, or a title, style,
+  // script or other raw-text element held markup, which in svg and math is
+  // markup and here was read as text. From then on which elements are open
+  // is a guess (see guessedOpen below). `rawFrom` is where such an
+  // element's text starts, until the tag after it.
+  let foreignOpen = 0;
+  let leftForeign = false;
+  let rawFrom = -1;
+  const MARKUP = /<[a-zA-Z/!?]/;
+  // The parser's frameset-ok flag: once off, a frameset start tag is
+  // ignored. Text in the body turns it off, but not a title's or a
+  // script's, so whether the last tag opened raw text is kept too.
+  let framesetOk = true;
+  let inRawText = false;
 
   const nearest = (names: readonly string[], stopAt: readonly string[]): number => {
     for (let index = stack.length - 1; index >= 0; index -= 1) {
@@ -1060,6 +1297,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     if (stack.length >= MAX_OPEN_ELEMENTS) return false;
     stack.push(element);
     onStack.add(element);
+    if (FOREIGN_ROOTS.has(element.name)) foreignOpen += 1;
     return true;
   };
   const clearToMarker = (): void => {
@@ -1070,6 +1308,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   const removed = (element: OpenElement): void => {
     onStack.delete(element);
     closed.add(element.id);
+    if (FOREIGN_ROOTS.has(element.name)) foreignOpen -= 1;
     if (CLEARED_ON_CLOSE.has(element.name)) clearToMarker();
   };
   const closeFrom = (index: number): void => {
@@ -1107,7 +1346,9 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     parent: TreeNode | undefined,
     id = nextId++,
   ): OpenElement => {
-    if (attributes.has('hidden') || attributes.has('style') || attributes.has('aria-hidden')) mayHide = true;
+    if (attributes.has('hidden') || attributes.has('style') || attributes.has('aria-hidden') || NEVER_RENDERED.has(name)) {
+      mayHide = true;
+    }
     return { id, name, attributes, node: { id, name, attributes, parent } };
   };
   /**
@@ -1251,12 +1492,25 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   for (const tag of scanTags(html)) {
     if (tag.start > cursor) {
       const fostered = /[^ \t\n\f\r]/.test(html.slice(cursor, tag.start));
+      if (fostered && !inRawText) framesetOk = false;
       rebuild(fostered);
       segments.push({ start: cursor, end: tag.start, node: parentFor(fostered) });
     }
     cursor = tag.end;
+    inRawText = !tag.closing && RAW_TEXT_ELEMENTS.has(tag.name);
+    if (tag.name === 'br' || (!tag.closing && CLEARS_FRAMESET_OK.has(tag.name)
+      && !(tag.name === 'input' && asciiLower(tag.attributes.get('type') ?? '') === 'hidden'))) {
+      framesetOk = false;
+    }
+    if (rawFrom !== -1 && MARKUP.test(html.slice(rawFrom, tag.start))) leftForeign = true;
+    rawFrom = foreignOpen > 0 && !tag.closing && RAW_TEXT_ELEMENTS.has(tag.name) ? tag.end : -1;
+    if (foreignOpen > 0 && (tag.closing
+      ? tag.name === 'p' || tag.name === 'br'
+      : FOREIGN_BREAKOUT.has(tag.name) || (tag.name === 'font' && ['color', 'face', 'size'].some((name) => tag.attributes.has(name))))) {
+      leftForeign = true;
+    }
     const ignore = (): void => {
-      segments.push({ start: tag.start, end: tag.end, node: parentFor(false) });
+      segments.push({ start: tag.start, end: tag.end, node: parentFor(false), tag });
     };
     // The document's own elements are never hidden or closed here: an
     // `html` or `body` hidden until a script reveals it is the whole page,
@@ -1267,6 +1521,12 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       continue;
     }
     if (!tag.closing) {
+      // A frameset once the frameset-ok flag is off is ignored, so it opens
+      // nothing and hides nothing, open or closed.
+      if (tag.name === 'frameset' && !framesetOk) {
+        ignore();
+        continue;
+      }
       // A second form while the form pointer is set is ignored before it
       // does anything else — before it closes a paragraph, too.
       if (tag.name === 'form' && form !== undefined && nearest(['template'], []) === -1) {
@@ -1356,7 +1616,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       }
       if (!INSERTED_WITHOUT_REBUILDING.has(tag.name)) rebuild(fostered);
       const opened = element(tag.name, tag.attributes, parentFor(fostered));
-      segments.push({ start: tag.start, end: tag.end, node: opened.node });
+      segments.push({ start: tag.start, end: tag.end, node: opened.node, tag });
       // A void element holds no text, but a hidden one still has an
       // effect to withhold — `one<br hidden>two` is one line — so its tag
       // is dropped, and it is closed the moment it opens.
@@ -1393,7 +1653,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     // the form in scope there, and the document's pointer stays set.
     if (tag.name === 'form' && nearest(['template'], []) !== -1) {
       const index = nearest(['form'], SCOPE_BOUNDARIES);
-      segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node ?? parentFor(false) });
+      segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node ?? parentFor(false), tag });
       if (index !== -1) closeFrom(index);
       continue;
     }
@@ -1401,7 +1661,7 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       const pointer = form;
       form = undefined;
       const index = pointer === undefined ? -1 : stack.lastIndexOf(pointer);
-      segments.push({ start: tag.start, end: tag.end, node: pointer?.node ?? parentFor(false) });
+      segments.push({ start: tag.start, end: tag.end, node: pointer?.node ?? parentFor(false), tag });
       if (pointer !== undefined && index !== -1 && inScope(index)) {
         impliedEnds();
         const [left] = stack.splice(stack.lastIndexOf(pointer), 1);
@@ -1415,7 +1675,10 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     // in their own scopes; a block in the default scope; and anything else
     // only up to the nearest special element.
     let index: number;
-    if (TABLE_PARTS.has(tag.name)) index = nearest([tag.name], TABLE_SCOPE.filter((name) => name !== tag.name));
+    // `</template>` closes the last template open, with no scope to stop it:
+    // a cell or a table open inside the template ends with it.
+    if (tag.name === 'template') index = nearest(['template'], []);
+    else if (TABLE_PARTS.has(tag.name)) index = nearest([tag.name], TABLE_SCOPE.filter((name) => name !== tag.name));
     else if (HEADINGS.includes(tag.name)) index = nearest(HEADINGS, SCOPE_BOUNDARIES);
     else if (tag.name === 'p') index = nearest(['p'], [...SCOPE_BOUNDARIES, 'button']);
     else if (tag.name === 'li') index = nearest(['li'], [...SCOPE_BOUNDARIES, 'ol', 'ul']);
@@ -1426,10 +1689,11 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       ignore();
       continue;
     }
-    segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node });
+    segments.push({ start: tag.start, end: tag.end, node: stack[index]?.node, tag });
     closeFrom(index);
     if (MARKER_ELEMENTS.has(tag.name) && !CLEARED_ON_CLOSE.has(tag.name)) clearToMarker();
   }
+  if (rawFrom !== -1 && MARKUP.test(html.slice(rawFrom) + tail)) leftForeign = true;
   if (cursor < html.length) {
     const fostered = /[^ \t\n\f\r]/.test(html.slice(cursor));
     rebuild(fostered);
@@ -1441,7 +1705,6 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
   const tailFostered = /[^ \t\n\f\r]/.test(tail);
   if (tail !== '') rebuild(tailFostered);
   const tailNode = parentFor(tailFostered);
-  if (!mayHide) return { text: html, tail };
 
   // Each node's style in the finished tree, parents first, remembered so
   // a page costs its nodes once.
@@ -1454,8 +1717,26 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
     return result;
   };
 
-  // Whether a node is dropped: it, or a node it is in, is hidden and was
-  // closed. Read once the page is done, since nodes move until then;
+  // The elements whose being open at the end is a guess. From svg or math
+  // the tree builder leaves for HTML at a tag such as `p` or `h1`, which
+  // this pass does not follow: in `<svg style="display:none"><p>shown` the
+  // paragraph is the body's in a browser and still the svg's here, and in
+  // `<h2 hidden><math><h1>shown</h1></math>more` leaving the math closes
+  // the h2. A title or style there holding markup is the same: in
+  // `<template><svg><title></template>shown` the end tag closes the
+  // template in a browser, and was text here. So once either happened,
+  // every element open at the end is a guess; otherwise those from the
+  // first svg or math open at the end on are, since a self-closing tag ends
+  // an element there. None of these hides anything to the end, and their
+  // text is kept rather than cut on that guess; the HTML elements around an
+  // svg the page ends inside are still open, and still hide it.
+  const foreignAt = stack.findIndex((open) => FOREIGN_ROOTS.has(open.name));
+  const guessedOpen = new Set((leftForeign ? stack : foreignAt === -1 ? [] : stack.slice(foreignAt)).map((open) => open.id));
+
+  // Whether a node is dropped: it, or a node it is in, is hidden, or is a
+  // template or canvas. A browser keeps an element open to the end of the
+  // page, so one still open here hides the rest, as a closed one hides what
+  // it held. Read once the page is done, since nodes move until then;
   // remembered per node, so a page costs its nodes once.
   const dropped = new Map<TreeNode, boolean>();
   const isDropped = (node: TreeNode | undefined): boolean => {
@@ -1470,25 +1751,46 @@ const dropHiddenElements = (html: string, tail: string): { text: string; tail: s
       chain.push(at);
     }
     for (const at of chain.reverse()) {
-      result = result || (closed.has(at.id) && judge(at).hidden);
+      const open = !closed.has(at.id);
+      result = result || (!(open && guessedOpen.has(at.id)) && (NEVER_RENDERED.has(at.name) || judge(at).hidden));
       dropped.set(at, result);
     }
     return result;
   };
 
-  // A dropped stretch, however many segments, becomes one space.
+  // A dropped stretch, however many segments, becomes one space. A tag
+  // that stays is written with its name alone: the passes after this one
+  // find tags by pattern, and a pattern ends a tag at its first `>`, which
+  // in `<div title="x>y">` is inside a value and would leave `y">` as
+  // text. Nothing after this reads an attribute.
+  //
+  // A template's or canvas's own tags stay unless it is hidden or what
+  // holds it is dropped, so the cut by name after this still pairs one with
+  // its end tag, as it did before this pass judged them. Inside svg or math, where
+  // this pass's tree is a guess, that cut is what keeps hidden what a
+  // browser hides: in `<svg><template>x<template></template>` the inner
+  // template is closed and dropped here, and its end tag still ends the
+  // outer one's cut, which takes `x` with it.
+  const drops = (node: TreeNode | undefined): boolean => mayHide && isDropped(node);
+  const keepsTag = ({ node, tag }: { node: TreeNode | undefined; tag?: ScannedTag }): boolean => {
+    if (tag === undefined || !NEVER_RENDERED.has(tag.name)) return false;
+    // Its own start or end tag, or a stray end tag in whatever holds it.
+    const own = node?.name === tag.name ? node : undefined;
+    return own === undefined ? !drops(node) : !drops(own.parent) && !judge(own).hidden;
+  };
   let text = '';
   let dropping = false;
   for (const segment of segments) {
-    if (isDropped(segment.node)) {
+    if (drops(segment.node) && !keepsTag(segment)) {
       if (!dropping) text += ' ';
       dropping = true;
     } else {
-      text += html.slice(segment.start, segment.end);
+      const { tag } = segment;
+      text += tag === undefined ? html.slice(segment.start, segment.end) : `<${tag.closing ? '/' : ''}${tag.name}>`;
       dropping = false;
     }
   }
-  return { text, tail: tail !== '' && isDropped(tailNode) ? ' ' : tail };
+  return { text, tail: tail !== '' && drops(tailNode) ? ' ' : tail };
 };
 
 /**
@@ -1643,6 +1945,22 @@ const removeSpans = (text: string, opener: RegExp, closer: RegExp, replacement: 
   return kept + text.slice(cursor);
 };
 
+/**
+ * `pass` run on the text before its last `>`, the rest kept as it is. Every
+ * pattern `htmlToText` removes tags with ends in `>`, so none can match
+ * past the last one, and the result is the same; but from every `<` after
+ * it a `[^>]*` scans to the end of the text and fails, and the final
+ * sweep's two quantifiers side by side then try every split as well. A
+ * pass that removes a tag can take the last `>` with it: a comment pattern
+ * run before tags were read once took the one ending `<a<a<a…<!---->`,
+ * and left four thousand characters of `<a` taking fifty seconds. So
+ * each pass finds the last `>` again.
+ */
+const beforeLastGt = (text: string, pass: (head: string) => string): string => {
+  const end = text.lastIndexOf('>') + 1;
+  return pass(text.slice(0, end)) + text.slice(end);
+};
+
 export const extractTitle = (html: string): string | undefined => {
   // Two searches rather than one lazy regex, for the reason `removeSpans`
   // gives: a page of `<title>` with no `</title>` made the regex rescan the
@@ -1659,7 +1977,13 @@ export const extractTitle = (html: string): string | undefined => {
   return title ? decodeEntities(title).trim() : undefined;
 };
 
-export const htmlToText = (html: string): string => {
+export const htmlToText = (page: string): string => {
+  // Comments go first, where the tokenizer reads them, and markup the page
+  // ends inside — a tag, comment or script the download cap cut short — is
+  // dropped, as a browser drops it (readMarkup). Left in, the patterns
+  // below have no `>` to end it at, and pass it on as text.
+  const html = readMarkup(page);
+
   // Every pattern below ends in `>`, so nothing after the page's last `>`
   // can be part of one — and that tail is where they turned from linear to
   // worse. A `[^>]*` with no `>` ahead of it scans to the end of the page
@@ -1670,17 +1994,7 @@ export const htmlToText = (html: string): string => {
   // The tail is text, and joins the rest before entities are decoded.
   const end = html.lastIndexOf('>') + 1;
   const tail = html.slice(end);
-
-  // Comments first, then the doctype and any processing instruction. These
-  // are removed by name rather than by a blanket `<[^>]*>` sweep, because
-  // that sweep reads `5 < 10 and 20 > 15` as a tag and deletes the middle
-  // of the sentence — prose about arbitrary subjects is exactly what a
-  // fetched page is.
-  // A comment ends where the HTML tokenizer ends it: at `-->`, at `--!>`,
-  // or at once in `<!-->` and `<!--->`. Read only to `-->`, a `--!>`
-  // comment ran on and the markup inside it reached the visibility pass.
-  let text = removeSpans(html.slice(0, end), /<!--/g, /(?<=<!--)-?>|--!?>/g, '');
-  text = text.replace(/<[!?][^>]*>/g, ' ');
+  let text = html.slice(0, end);
 
   // Before the dropped elements, which are cut out by name with no regard
   // for the tree: an end tag inside a `nav` closes its ancestors as much as
@@ -1692,15 +2006,16 @@ export const htmlToText = (html: string): string => {
   text = visible.text;
 
   for (const element of DROPPED_ELEMENTS) {
-    text = removeSpans(text, new RegExp(`<${element}\\b[^>]*>`, 'gi'), new RegExp(`</${element}>`, 'gi'), ' ');
+    text = beforeLastGt(text, (head) =>
+      removeSpans(head, new RegExp(`<${element}\\b[^>]*>`, 'gi'), new RegExp(`</${element}>`, 'gi'), ' '));
     // Unclosed or self-closing forms of the same elements.
-    text = text.replace(new RegExp(`<${element}\\b[^>]*/?>`, 'gi'), ' ');
+    text = beforeLastGt(text, (head) => head.replace(new RegExp(`<${element}\\b[^>]*/?>`, 'gi'), ' '));
   }
-  text = removeSpans(text, /<head\b[^>]*>/gi, /<\/head>/gi, ' ');
+  text = beforeLastGt(text, (head) => removeSpans(head, /<head\b[^>]*>/gi, /<\/head>/gi, ' '));
 
-  text = text.replace(/<li\b[^>]*>/gi, '\n- ');
+  text = beforeLastGt(text, (head) => head.replace(/<li\b[^>]*>/gi, '\n- '));
   for (const element of BLOCK_ELEMENTS) {
-    text = text.replace(new RegExp(`</?${element}\\b[^>]*>`, 'gi'), '\n');
+    text = beforeLastGt(text, (head) => head.replace(new RegExp(`</?${element}\\b[^>]*>`, 'gi'), '\n'));
   }
   // Inline formatting is removed; every other tag becomes a space.
   //
@@ -1723,14 +2038,12 @@ export const htmlToText = (html: string): string => {
   // character outside `[a-zA-Z0-9-]` reads `<a:widget>` as the inline `a`
   // and deletes it — and a namespaced element is precisely the unknown tag
   // this default exists for.
-  text = text.replace(
-    /<\/?([a-zA-Z][^\s/>]*)[^>]*>/g,
-    (_tag, rawName: string) => {
+  text = beforeLastGt(text, (head) =>
+    head.replace(/<\/?([a-zA-Z][^\s/>]*)[^>]*>/g, (_tag, rawName: string) => {
       const name = rawName.toLowerCase();
       if (name === QUOTE_ELEMENT) return '"';
       return INLINE_ELEMENTS.has(name) ? '' : ' ';
-    },
-  );
+    }));
 
   text = decodeEntities(text + visible.tail);
 

@@ -17,6 +17,7 @@ import {
   type ImageAttachment,
   isLatestTurn,
   type JsonObject,
+  latestTurnReaction,
   latestTurnReply,
   leastTrusted,
   NO_REPLY_MARKER,
@@ -26,9 +27,13 @@ import {
   type Session,
   SESSION_TRUST_METADATA_KEY,
   sessionTrustOf,
+  type SilentReaction,
+  type ToolPost,
   type TrustLevel,
   turnFailureFor,
   turnFilesFor,
+  turnPostsFor,
+  turnReactionFor,
   turnReplyFor,
 } from '@stratusagent/core';
 import { dispatchKeyFor, NO_REPLY_TEXT, type ReplyOutcome, ReplyRenderer } from './reply.ts';
@@ -46,10 +51,55 @@ import {
 } from './attachments.ts';
 import type { AgentConnection } from './connection.ts';
 import type { PendingIntake } from './pending-intake.ts';
+import { describeSlackError, slackErrorCode } from './slack-errors.ts';
 import type { SlackFileFetcher, SlackInboundFile } from './files.ts';
 import type { SlackAdapterOptions, SlackInboundEvent, SlackSocketEventArgs } from './index.ts';
 import type { ThreadTracking } from './threads.ts';
 import type { Admitter } from './admission.ts';
+
+/** Slack's name for each reaction a silent turn may leave (`SILENT_REACTIONS`). */
+const SLACK_REACTION_NAMES: Readonly<Record<SilentReaction, string>> = {
+  thumbsup: '+1',
+  laughing: 'laughing',
+  heart: 'heart',
+  tada: 'tada',
+};
+
+/**
+ * Leaves the reaction a reply-optional turn named instead of a reply on
+ * the message it was on (card 1078). Never fails the turn, which has
+ * already chosen silence: Slack answering `already_reacted` (a redelivered
+ * message) is what was wanted, a missing `reactions:write` is said once
+ * per app, and any other refusal is said and dropped.
+ */
+const addSilentReaction = async (
+  connection: AgentConnection,
+  channel: string,
+  timestamp: string,
+  reaction: SilentReaction,
+  warn: (line: string) => void,
+): Promise<void> => {
+  const reactions = connection.web.reactions;
+  if (!reactions) {
+    return;
+  }
+  try {
+    await reactions.add({ channel, timestamp, name: SLACK_REACTION_NAMES[reaction] });
+  } catch (error) {
+    const code = slackErrorCode(error);
+    if (code === 'already_reacted') {
+      return;
+    }
+    if (code === 'missing_scope') {
+      if (!connection.reactionWarned.value) {
+        connection.reactionWarned.value = true;
+        warn(`slack: ${connection.config.agentId}'s Slack app can't add reactions because it lacks the reactions:write scope, so its silent turns leave none. Add it to the app's manifest and reinstall the app.`);
+      }
+      return;
+    }
+    warn(`slack: ${connection.config.agentId} could not react to ${timestamp} in ${channel} (${describeSlackError(error)})`);
+  }
+};
 
 /** What createInbound closes over: values createSlackChannelAdapter owns. */
 export interface InboundDeps extends Pick<ThreadTracking, 'rememberAddressee' | 'threadOwner' | 'followUpWinner'>, Pick<Admitter, 'stopTurns' | 'admit'> {
@@ -161,7 +211,7 @@ export const createInbound = ({
       admitted.fromAgent === undefined &&
       (connection.config.approvers ?? []).includes(userId) &&
       isStopRequest(event.text ?? '', connection.botUserId) &&
-      stopTurns(connection, sessionId, userId, event.channel)
+      stopTurns(connection, sessionId, userId, event.channel, thread)
     ) {
       return;
     }
@@ -252,7 +302,7 @@ export const createInbound = ({
           if (
             (connection.config.approvers ?? []).includes(userId) &&
             isStopRequest(event.text ?? '', connection.botUserId) &&
-            stopTurns(connection, sessionId, userId, event.channel, true)
+            stopTurns(connection, sessionId, userId, event.channel, thread, true)
           ) {
             return undefined;
           }
@@ -626,18 +676,35 @@ export const createInbound = ({
     if (session && finished) {
       // Counted, not a set: a turn can produce one path twice, and each
       // result is an upload of its own, so one landing does not cover both.
+      // A tool's post (AGT-324) is counted by what it says, the same way.
+      const keyOf = (entry: string | ToolPost): string => (typeof entry === 'string' ? `file:${entry}` : `post:${JSON.stringify(entry)}`);
       const landed = new Map<string, number>();
-      for (const filePath of reportedAhead?.landed ?? []) {
-        landed.set(filePath, (landed.get(filePath) ?? 0) + 1);
+      for (const entry of reportedAhead?.landed ?? []) {
+        landed.set(keyOf(entry), (landed.get(keyOf(entry)) ?? 0) + 1);
       }
-      renderer.queueFiles(turnFilesFor(session, dispatchKey).filter((file) => {
-        const left = landed.get(file.path) ?? 0;
+      const unlanded = (key: string): boolean => {
+        const left = landed.get(key) ?? 0;
         if (left > 0) {
-          landed.set(file.path, left - 1);
+          landed.set(key, left - 1);
           return false;
         }
         return true;
-      }));
+      };
+      // In the order the turn produced them: by place in the transcript,
+      // not time, which two results can share to the millisecond. A file
+      // and a post from the same result keep the live order, files first
+      // (the sort is stable).
+      const outputs = [
+        ...turnFilesFor(session, dispatchKey)
+          .filter((file) => unlanded(keyOf(file.path)))
+          .map((file) => ({ position: file.position, queue: () => renderer.queueFiles([file]) })),
+        ...turnPostsFor(session, dispatchKey)
+          .filter((entry) => unlanded(keyOf(entry.post)))
+          .map((entry) => ({ position: entry.position, queue: () => renderer.queuePost(entry.post) })),
+      ].sort((a, b) => a.position - b.position);
+      for (const output of outputs) {
+        output.queue();
+      }
     }
     if (reportedAhead?.said === true) {
       noteReplayAnsweredAhead(connection, event.channel, event.ts);
@@ -689,6 +756,15 @@ export const createInbound = ({
         ? overhearReply(connection, event.channel, thread, () => renderer.spokenText(replyLanded ? reply ?? '' : ''), session, settled)
         : undefined;
       const { spoke, spokeAt } = await finalized;
+      // A reply-optional turn that said nothing may have named a reaction
+      // to leave instead (card 1078), and it goes on this message only if
+      // nothing of the turn's reached the thread.
+      if (renderer.mayStaySilent && !spoke && (reply ?? '').trim().length === 0) {
+        const reaction = finished ? turnReactionFor(session, dispatchKey) : latestTurnReaction(session);
+        if (reaction !== undefined) {
+          await addSilentReaction(connection, event.channel, event.ts, reaction, warn);
+        }
+      }
       if (spoke && threadKey !== undefined) {
         // The voice that just answered, recorded where its reply sits in
         // the thread. For a judging agent this is the only record there

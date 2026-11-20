@@ -7,11 +7,16 @@ import {
   InMemorySessionStore,
   NO_REPLY_MARKER,
   REPLY_OPTIONAL_NOTE,
+  SILENT_REACTIONS,
   UNADDRESSED_TURN_NOTE,
+  isNoReplyAnswer,
   isReplyOptionalTurn,
   isUnaddressedTurn,
+  latestTurnReaction,
   latestTurnReply,
+  noReplyAnswerOf,
   promptTextOf,
+  turnReactionFor,
   type Message,
   type ModelProvider,
   type ProviderRequest,
@@ -149,4 +154,90 @@ test('reply-optional is ignored on a turn nobody asked for: the overheard frame 
   assert.equal(session.messages[0]?.overheard, true);
   assert.equal(session.messages[0]?.replyOptional, undefined);
   assert.equal(provider.prompts[0], `(overheard, not addressed to you)\n> Dylan: Bea, go\n\n${UNADDRESSED_TURN_NOTE}`);
+});
+
+const said = (text: string): Pick<ProviderResponse, 'parts'> => ({ parts: [{ type: 'text', text }] });
+
+test('a silent answer may name one reaction from the fixed set, and anything else stays plain silence', () => {
+  assert.deepEqual([...SILENT_REACTIONS], ['thumbsup', 'laughing', 'heart', 'tada']);
+  assert.deepEqual(noReplyAnswerOf(said(NO_REPLY_MARKER)), {});
+  assert.deepEqual(noReplyAnswerOf(said('NO_REPLY thumbsup')), { reaction: 'thumbsup' });
+  assert.deepEqual(noReplyAnswerOf(said('  NO_REPLY :tada:\n')), { reaction: 'tada' });
+  assert.deepEqual(noReplyAnswerOf(said('NO_REPLY Heart')), { reaction: 'heart' });
+  // Slack's own name for the thumbs up.
+  assert.deepEqual(noReplyAnswerOf(said('NO_REPLY +1')), { reaction: 'thumbsup' });
+  assert.deepEqual(noReplyAnswerOf(said('NO_REPLY :laughing:')), { reaction: 'laughing' });
+  // Out of the set on purpose: a silent turn must not promise work that
+  // never follows. Still silence: the word is never posted as text.
+  assert.deepEqual(noReplyAnswerOf(said('NO_REPLY eyes')), {});
+  assert.deepEqual(noReplyAnswerOf(said('NO_REPLY :thinking_face:')), {});
+  // A sentence is a sentence, and the marker is the marker as written.
+  assert.equal(noReplyAnswerOf(said('NO_REPLY thanks for the update')), undefined);
+  assert.equal(noReplyAnswerOf(said('NO_REPLY, thumbsup')), undefined);
+  assert.equal(noReplyAnswerOf(said('no_reply thumbsup')), undefined);
+  assert.equal(noReplyAnswerOf(said('NO_REPLYthumbsup')), undefined);
+  assert.equal(noReplyAnswerOf({ parts: [] }), undefined);
+  assert.equal(
+    noReplyAnswerOf({ parts: [{ type: 'text', text: 'NO_REPLY tada' }, { type: 'tool-call', call: { id: 'c', toolName: 'fs.read', input: {} } }] }),
+    undefined,
+  );
+  // The older test reads the same rule.
+  assert.equal(isNoReplyAnswer(said('NO_REPLY tada')), true);
+  assert.equal(isNoReplyAnswer(said('NO_REPLY thanks for the update')), false);
+});
+
+test('the reply-optional note offers the reactions after the marker, and still opens on answering', () => {
+  assert.match(REPLY_OPTIONAL_NOTE, /^This message was said to you\. Answer it as you normally would/);
+  assert.ok(REPLY_OPTIONAL_NOTE.includes('thumbsup, laughing, heart or tada'));
+  assert.ok(REPLY_OPTIONAL_NOTE.includes(`as in ${NO_REPLY_MARKER} thumbsup`));
+  // Only the reply-optional note: a turn nobody asked for gets no reaction.
+  assert.equal(UNADDRESSED_TURN_NOTE.includes('thumbsup'), false);
+});
+
+test('a reply-optional turn that answers the marker with a reaction stores it on its silence, durably', async () => {
+  const provider = decidingProvider((prompt) => (prompt.includes(`question for you\n\n${REPLY_OPTIONAL_NOTE}`) ? 'Here you go.' : 'NO_REPLY tada'));
+  const bus = new EventBus();
+  const events: StratusEvent[] = [];
+  bus.subscribe((event) => {
+    events.push(event);
+  });
+  const store = new InMemorySessionStore();
+  const runner = new AgentRunner({ provider, bus, store });
+
+  const shipped = await runner.run({ sessionId: 's', agent: AGENT, userMessage: 'Blair: shipped it', replyOptional: true, idempotencyKey: 'k1' });
+  assert.equal(shipped.status, 'completed');
+  assert.equal(latestTurnReply(shipped), undefined);
+  assert.equal(latestTurnReaction(shipped), 'tada');
+  assert.deepEqual(shipped.messages.at(-1), { ...shipped.messages.at(-1), role: 'assistant', content: '', reaction: 'tada' });
+  assert.equal((await store.get('s'))?.messages.at(-1)?.reaction, 'tada');
+  assert.equal(JSON.stringify(events).includes(NO_REPLY_MARKER), false);
+
+  // A later turn that answers has no reaction, and the keyed turn keeps its own.
+  const asked = await runner.resume({ sessionId: 's', userMessage: 'Dylan: a question for you', replyOptional: true, idempotencyKey: 'k2' });
+  assert.equal(latestTurnReply(asked), 'Here you go.');
+  assert.equal(latestTurnReaction(asked), undefined);
+  assert.equal(turnReactionFor(asked, 'k1'), 'tada');
+  assert.equal(turnReactionFor(asked, 'k2'), undefined);
+  assert.equal(turnReactionFor(asked, 'nope'), undefined);
+});
+
+test('a reaction outside the set, or on a turn nobody asked for, is plain silence with nothing stored', async () => {
+  const unknown = new AgentRunner({ provider: decidingProvider(() => 'NO_REPLY eyes'), bus: new EventBus(), store: new InMemorySessionStore() });
+  const looked = await unknown.run({ sessionId: 'a', agent: AGENT, userMessage: 'Blair: fyi', replyOptional: true });
+  assert.equal(looked.status, 'completed');
+  assert.equal(latestTurnReply(looked), undefined);
+  assert.equal(latestTurnReaction(looked), undefined);
+  assert.equal('reaction' in (looked.messages.at(-1) ?? {}), false);
+
+  // Card 1078 covers messages said to the agent; overheard chatter gets none.
+  const overheard = new AgentRunner({ provider: decidingProvider(() => 'NO_REPLY thumbsup'), bus: new EventBus(), store: new InMemorySessionStore() });
+  const heard = await overheard.run({ sessionId: 'b', agent: AGENT, userMessage: 'Dylan: Bea, nice', addressed: false });
+  assert.equal(latestTurnReply(heard), undefined);
+  assert.equal(latestTurnReaction(heard), undefined);
+
+  // An addressed turn was never offered one: what it says is posted as said.
+  const addressed = new AgentRunner({ provider: decidingProvider(() => 'NO_REPLY thumbsup'), bus: new EventBus(), store: new InMemorySessionStore() });
+  const asked = await addressed.run({ sessionId: 'c', agent: AGENT, userMessage: 'Dylan: Ava?' });
+  assert.equal(latestTurnReply(asked), 'NO_REPLY thumbsup');
+  assert.equal(latestTurnReaction(asked), undefined);
 });

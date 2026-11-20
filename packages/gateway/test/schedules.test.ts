@@ -4,18 +4,21 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { JsonObject, Session, StratusEvent } from '@stratusagent/core';
+import type { JsonObject, Message, Session, StratusEvent } from '@stratusagent/core';
 import {
+  parseEventFilter,
   SCHEDULE_ID_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
   type ScheduleRecord,
 } from '@stratusagent/agents';
 import { createPermissionPolicy } from '@stratusagent/permissions';
-import { fleetDbPath } from '@stratusagent/state';
+import { addNamedCredential, fleetDbPath } from '@stratusagent/state';
 import {
   createGateway,
   createSchedulerRuntime,
   SqliteScheduleStore,
+  sendOutcome,
+  undeliveredSendError,
   type ApprovalTransport,
   type GatewayChannelAdapter,
   type SchedulerRuntimeOptions,
@@ -408,6 +411,116 @@ test('the per-agent cap defers a firing while one is still running', async () =>
   await secondAvaFire.promise;
   runtime.stop();
   for (const gate of avaFires) {
+    gate.resolve();
+  }
+  await runtime.drain();
+  store.close();
+});
+
+test('a per-agent limit of 2 runs two of that agent\'s schedules at once, never one schedule twice, and leaves other agents at 1', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const gates: Deferred<void>[] = [];
+  const fired: string[] = [];
+  const running = new Map<string, number>();
+  let peak = { ava: 0, bea: 0 };
+
+  const runtime = runtimeWith(store, {
+    limits: { minIntervalMs: 1, tickMs: 10, maxConcurrentPerAgent: 1, maxConcurrentByAgent: { ava: 2 } },
+    dispatch: async (input) => {
+      fired.push(String(input.metadata[SCHEDULE_ID_METADATA_KEY]));
+      const agent = input.agentId as 'ava' | 'bea';
+      running.set(agent, (running.get(agent) ?? 0) + 1);
+      peak = { ...peak, [agent]: Math.max(peak[agent], running.get(agent) ?? 0) };
+      const gate = deferred<void>();
+      gates.push(gate);
+      await gate.promise;
+      running.set(agent, (running.get(agent) ?? 1) - 1);
+    },
+  });
+
+  const now = new Date().toISOString();
+  for (const id of ['ava-one', 'ava-two', 'ava-three']) {
+    store.insert(record({ id, cadence: { kind: 'every', intervalMs: 20 }, nextFireAt: now }));
+  }
+  for (const id of ['bea-one', 'bea-two']) {
+    store.insert(record({ id, agentId: 'bea', cadence: { kind: 'every', intervalMs: 20 }, nextFireAt: now }));
+  }
+  await runtime.start();
+
+  await waitFor(() => (running.get('ava') ?? 0) === 2 && (running.get('bea') ?? 0) === 1, 'two ava firings and one bea firing');
+  // Many ticks pass with every gate held: nothing else may start.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(peak.ava, 2, 'ava runs two scheduled turns at once, and no third');
+  assert.equal(peak.bea, 1, 'an agent without its own limit keeps the default of 1');
+  const avaSchedules = fired.filter((scheduleId) => scheduleId.startsWith('ava-'));
+  assert.equal(avaSchedules.length, 2);
+  assert.equal(new Set(avaSchedules).size, 2, 'the two running ava turns are two different schedules');
+
+  runtime.stop();
+  for (const gate of gates) {
+    gate.resolve();
+  }
+  await runtime.drain();
+  store.close();
+});
+
+test('one schedule never overlaps itself under a per-agent limit above 1', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const fired: string[] = [];
+  const first = deferred<void>();
+  const runtime = runtimeWith(store, {
+    limits: { minIntervalMs: 1, tickMs: 10, maxConcurrentPerAgent: 1, maxConcurrentByAgent: { ava: 2 } },
+    dispatch: async (input) => {
+      fired.push(input.sessionId);
+      if (fired.length === 1) {
+        await first.promise;
+      }
+    },
+  });
+  store.insert(record({ id: 'ava-fast', cadence: { kind: 'every', intervalMs: 20 }, nextFireAt: new Date().toISOString() }));
+  await runtime.start();
+
+  await waitFor(() => fired.length === 1, 'the first firing');
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(fired.length, 1, 'the spare slot does not go to the same schedule\'s next firing');
+  first.resolve();
+  await waitFor(() => fired.length === 2, 'the next firing once the first settled');
+
+  runtime.stop();
+  await runtime.drain();
+  store.close();
+});
+
+test('a per-agent limit names agents by their own ids only, never by an inherited property', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const gates: Deferred<void>[] = [];
+  let peak = 0;
+  let running = 0;
+  const runtime = runtimeWith(store, {
+    limits: { minIntervalMs: 1, tickMs: 10, maxConcurrentPerAgent: 1, maxConcurrentByAgent: { ava: 2 } },
+    dispatch: async () => {
+      running += 1;
+      peak = Math.max(peak, running);
+      const gate = deferred<void>();
+      gates.push(gate);
+      await gate.promise;
+      running -= 1;
+    },
+  });
+  const now = new Date().toISOString();
+  for (const id of ['one', 'two']) {
+    store.insert(record({ id, agentId: 'constructor', cadence: { kind: 'every', intervalMs: 20 }, nextFireAt: now }));
+  }
+  await runtime.start();
+  await waitFor(() => running >= 1, 'the first firing');
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(peak, 1, 'an agent called "constructor" keeps the default of 1');
+
+  runtime.stop();
+  for (const gate of gates) {
     gate.resolve();
   }
   await runtime.drain();
@@ -901,12 +1014,12 @@ test('an approved schedule fires headless and reports to its declared destinatio
   assert.equal(firing?.metadata?.[SCHEDULED_TURN_METADATA_KEY], true);
   assert.equal(firing?.messages[0]?.content, 'check the repo and report what changed');
   // …and the undeclared destination was refused exactly as headless
-  // refuses any gated call.
+  // refuses any gated call, with where the schedule reports (AGT-336).
   const results = (firing?.messages ?? []).filter((message) => message.toolResult).map((message) => message.toolResult!);
   assert.equal(results.length, 2);
   assert.equal(results[0]?.ok, true);
   assert.equal(results[1]?.ok, false);
-  assert.equal(results[1]?.error, 'message.send is gated and nobody is available to approve it');
+  assert.equal(results[1]?.error, 'message.send is gated and nobody is available to approve it. This scheduled run reports to slack:C-ENG.');
 });
 
 test('a firing\'s report thread is bound like its grant: live firing, its agent, its conversation', async () => {
@@ -1458,4 +1571,621 @@ test('while intake is paused a one-shot waits, and fires once intake resumes', a
   await runtime.drain();
   assert.equal(dispatches, 1);
   store.close();
+});
+
+// ---- a report that never arrived (AGT-335) ------------------------------------
+
+const sendResult = (callId: string, result: { ok: true; destination: string } | { ok: false; error: string }): Message => ({
+  id: `m-${callId}`,
+  role: 'tool',
+  content: '',
+  createdAt: new Date().toISOString(),
+  toolResult: result.ok
+    ? { callId, toolName: 'message.send', ok: true, output: { sent: true, destination: result.destination } }
+    : { callId, toolName: 'message.send', ok: false, output: null, error: result.error },
+});
+
+test('a firing\'s report is undelivered when a send failed and none reached its destination', () => {
+  const eng = { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' };
+  const ran = (messages: Message[], status: Session['status'] = 'completed') => ({ status, messages });
+  const failed = sendResult('a', { ok: false, error: 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.' });
+  assert.equal(undeliveredSendError(ran([failed]), eng), 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.');
+  // A retry that got there settles it, whichever thread it went under.
+  assert.equal(undeliveredSendError(ran([failed, sendResult('b', { ok: true, destination: 'slack:C-ENG' })]), eng), undefined);
+  // Reaching somewhere else is not reaching the destination.
+  assert.equal(
+    undeliveredSendError(ran([sendResult('b', { ok: true, destination: 'slack:C-OTHER' }), failed]), eng),
+    'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.',
+  );
+  // A refusal is a failed send too: headless, nobody saw it.
+  assert.equal(
+    undeliveredSendError(ran([sendResult('c', { ok: false, error: 'message.send is gated and nobody is available to approve it' })]), eng),
+    'message.send is gated and nobody is available to approve it',
+  );
+  // A run that never tried, or whose sends all went through, owes nothing.
+  assert.equal(undeliveredSendError(ran([]), eng), undefined);
+  assert.equal(undeliveredSendError(ran([sendResult('d', { ok: true, destination: 'slack:C-OTHER' })]), eng), undefined);
+  // Still parked on an approval it may yet report; a failed run is another problem.
+  assert.equal(undeliveredSendError(ran([failed], 'pending_approval'), eng), undefined);
+  assert.equal(undeliveredSendError(ran([failed], 'failed'), eng), undefined);
+  // Another tool's failure is not a failed report.
+  const other: Message = { ...failed, toolResult: { ...failed.toolResult!, toolName: 'shell.run' } };
+  assert.equal(undeliveredSendError(ran([other]), eng), undefined);
+});
+
+test('a completed firing\'s sends against its destination come to reached, failed or none (AGT-353)', () => {
+  const eng = { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' };
+  const ran = (messages: Message[], status: Session['status'] = 'completed') => ({ status, messages });
+  const failed = sendResult('a', { ok: false, error: 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.' });
+  assert.deepEqual(sendOutcome(ran([failed, sendResult('b', { ok: true, destination: 'slack:C-ENG' })]), eng), { kind: 'reached' });
+  assert.deepEqual(sendOutcome(ran([failed]), eng), { kind: 'failed', error: 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.' });
+  // Never tried, sent only somewhere else, or failed at another tool: none.
+  assert.deepEqual(sendOutcome(ran([]), eng), { kind: 'none' });
+  assert.deepEqual(sendOutcome(ran([sendResult('c', { ok: true, destination: 'slack:C-OTHER' })]), eng), { kind: 'none' });
+  const other: Message = { ...failed, toolResult: { ...failed.toolResult!, toolName: 'shell.run' } };
+  assert.deepEqual(sendOutcome(ran([other]), eng), { kind: 'none' });
+  // A run that hasn't completed has no outcome yet.
+  assert.equal(sendOutcome(ran([], 'pending_approval'), eng), undefined);
+  assert.equal(sendOutcome(ran([], 'failed'), eng), undefined);
+});
+
+test('with a key, only the turn that key started counts: an event session\'s earlier turns are not this one\'s (AGT-353)', () => {
+  const eng = { channel: 'slack', to: 'C-ENG' };
+  const user = (key: string, extra: Partial<Message> = {}): Message => ({
+    id: `u-${key}`, role: 'user', content: 'event', createdAt: new Date().toISOString(), idempotencyKey: key, ...extra,
+  });
+  const posted = sendResult('a', { ok: true, destination: 'slack:C-ENG' });
+  const failed = sendResult('b', { ok: false, error: 'slack: C-ENG has no thread 9.9, so nothing was posted.' });
+  const session = (messages: Message[]) => ({ status: 'completed' as const, messages });
+  // The first turn posted; the second stayed quiet.
+  const two = session([user('k1'), posted, user('k2')]);
+  assert.deepEqual(sendOutcome(two, eng, 'k1'), { kind: 'reached' });
+  assert.deepEqual(sendOutcome(two, eng, 'k2'), { kind: 'none' });
+  // Without a key the whole session counts, as for a timed firing's own session.
+  assert.deepEqual(sendOutcome(two, eng), { kind: 'reached' });
+  // An earlier turn's failed send is not reported again, and a later turn's post isn't this one's.
+  assert.deepEqual(sendOutcome(session([user('k1'), failed, user('k2')]), eng, 'k2'), { kind: 'none' });
+  assert.deepEqual(sendOutcome(session([user('k1'), user('k2'), posted]), eng, 'k1'), { kind: 'none' });
+  // A message steered into the turn doesn't end it; one absorbed into it is found by its key.
+  const steered = session([user('k1'), user('mid', { steered: true }), posted]);
+  assert.deepEqual(sendOutcome(steered, eng, 'k1'), { kind: 'reached' });
+  const absorbed = session([user('k1', { absorbedKeys: ['k2'] }), posted]);
+  assert.deepEqual(sendOutcome(absorbed, eng, 'k2'), { kind: 'reached' });
+  // A key no message carries has no turn to judge.
+  assert.equal(sendOutcome(two, eng, 'k3'), undefined);
+});
+
+test('a completed firing whose send never arrived leaves a notice in its destination, and only then (AGT-335)', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const asked: Array<{ sessionId: string; destination: string }> = [];
+  const notices: Array<{ agentId: string; destination: JsonObject; text: string }> = [];
+  const settled = { reported: deferred<void>(), quiet: deferred<void>(), silent: deferred<void>() };
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      const { sessionId } = input as Fired;
+      if (sessionId.startsWith('schedule:reported:')) settled.reported.resolve();
+      if (sessionId.startsWith('schedule:quiet:')) settled.quiet.resolve();
+      if (sessionId.startsWith('schedule:silent:')) settled.silent.resolve();
+    },
+    undeliveredSend: async (sessionId, destination) => {
+      asked.push({ sessionId, destination: `${destination.channel}:${destination.to}:${destination.thread ?? '-'}` });
+      return sessionId.startsWith('schedule:reported:')
+        ? 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.'
+        : undefined;
+    },
+    notify: async (agentId, destination, text) => {
+      notices.push({ agentId, destination: { ...destination }, text });
+    },
+  });
+
+  const slot = new Date(Date.now() - 5).toISOString();
+  store.insert(record({
+    id: 'reported',
+    agentId: 'quinn',
+    cadence: { kind: 'at', at: slot },
+    nextFireAt: slot,
+    destination: { channel: 'slack', to: 'C-AGENTS', thread: '1791400000.000100' },
+  }));
+  store.insert(record({ id: 'quiet', agentId: 'ava', nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+  store.insert(record({ id: 'silent', agentId: 'bea', nextFireAt: slot }));
+  await runtime.start();
+  await Promise.all([settled.reported.promise, settled.quiet.promise, settled.silent.promise]);
+  runtime.stop();
+  await runtime.drain();
+
+  // Asked about the two that report somewhere, against the row's own
+  // destination; a schedule with none has nobody to tell.
+  assert.deepEqual(asked.map((entry) => entry.destination).sort(), ['slack:C-AGENTS:1791400000.000100', 'slack:C-ENG:-']);
+  assert.equal(notices.length, 1, 'only the firing whose report never arrived leaves a notice');
+  const [notice] = notices;
+  assert.equal(notice?.agentId, 'quinn');
+  assert.deepEqual(notice?.destination, { channel: 'slack', to: 'C-AGENTS', thread: '1791400000.000100' });
+  assert.match(notice!.text, /^quinn's scheduled run didn't report here\. A message\.send in it failed: slack: C-OTHER has no thread 1791400000\.000100, so nothing was posted\./);
+  assert.ok(notice!.text.endsWith(` Schedule reported, session schedule:reported:${slot}.`), notice!.text);
+  store.close();
+});
+
+test('no notice for a firing whose schedule was cancelled mid-run, and a notice that fails is only a warning (AGT-335)', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const release = deferred<void>();
+  const started = deferred<void>();
+  let notified = 0;
+  const warnings: string[] = [];
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      if ((input as Fired).sessionId.startsWith('schedule:doomed:')) {
+        started.resolve();
+        await release.promise;
+      }
+    },
+    undeliveredSend: async () => 'slack: C-OTHER has no thread 1.2, so nothing was posted.',
+    notify: async () => {
+      notified += 1;
+      throw new Error('slack: ava\'s app is not a member of C-ENG — invite it there before it can post.');
+    },
+    warn: (line) => warnings.push(line),
+  });
+  const slot = new Date(Date.now() - 5).toISOString();
+  store.insert(record({ id: 'doomed', nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+  await runtime.start();
+  await started.promise;
+  // The cancel took the destination grant with it: the runtime doesn't
+  // speak there on the agent's behalf either.
+  assert.equal(runtime.cancel('doomed'), true);
+  release.resolve();
+  runtime.stop();
+  await runtime.drain();
+  assert.equal(notified, 0);
+
+  store.insert(record({ id: 'unreachable', nextFireAt: new Date(Date.now() - 5).toISOString(), destination: { channel: 'slack', to: 'C-ENG' } }));
+  const again = runtimeWith(store, {
+    undeliveredSend: async () => 'slack: C-OTHER has no thread 1.2, so nothing was posted.',
+    notify: async () => {
+      notified += 1;
+      throw new Error('slack: ava\'s app is not a member of C-ENG — invite it there before it can post.');
+    },
+    warn: (line) => warnings.push(line),
+  });
+  await again.start();
+  try {
+    await waitFor(() => notified === 1, 'the notice to be tried');
+  } finally {
+    again.stop();
+    await again.drain();
+  }
+  assert.ok(
+    warnings.some((line) => line.startsWith('schedule unreachable: the notice that no send reached its destination failed') && line.includes('not a member of C-ENG')),
+    `the failed notice is said in the log: ${warnings.join(' | ')}`,
+  );
+  store.close();
+});
+
+test('end to end: a headless firing whose only send fails is told where it reports, and its destination hears so (AGT-335)', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+  const slot = new Date(Date.now() - 5).toISOString();
+  // Seeded as a human-approved row would be: a one-shot reporting to C-ENG.
+  const rows = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+  rows.insert(record({ id: 'nightly', cadence: { kind: 'at', at: slot }, nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+  rows.close();
+
+  let calls = 0;
+  const fetchFake = (async () => {
+    calls += 1;
+    // The model makes up a thread, then gives up without retrying.
+    return calls === 1
+      ? openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'nightly report', thread: '9.9' })
+      : openAiText('posted the report');
+  }) as typeof fetch;
+  const posts: Array<{ to: string; text: string; thread?: string }> = [];
+  const slack: GatewayChannelAdapter = {
+    name: 'slack',
+    async start() {},
+    async stop() {},
+    async resolveOutbound({ to, thread }) {
+      return {
+        post: async (text: string) => {
+          if (thread === '9.9') {
+            throw new Error(`slack: ${to} has no thread 9.9, so nothing was posted. Name a thread by the id of its first message, or post at the top level instead.`);
+          }
+          posts.push({ to, text, ...(thread !== undefined ? { thread } : {}) });
+          return { channel: to, ts: '2' };
+        },
+      };
+    },
+  };
+  const firingDone = deferred<string>();
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    channels: [slack],
+    approvals: (transport: ApprovalTransport) => createPermissionPolicy({ mode: 'headless', destinations: transport.destinations }),
+    warn: (line: string) => warnings.push(line),
+  });
+  gateway.bus.subscribe((event: StratusEvent) => {
+    if (event.type === 'session.completed' && event.sessionId.startsWith('schedule:nightly:')) {
+      firingDone.resolve(event.sessionId);
+    }
+  });
+  await gateway.start();
+  let sessionId = '';
+  let firing: Session | undefined;
+  try {
+    sessionId = await firingDone.promise;
+    firing = await gateway.store.get(sessionId);
+    // The notice follows the turn, so it is waited for while the channel is
+    // still up: a stop takes channels down before it drains the scheduler.
+    await waitFor(() => posts.length > 0 || warnings.some((line) => line.startsWith('schedule nightly:')), 'the notice, or the line saying it failed');
+  } finally {
+    await gateway.stop();
+  }
+
+  const result = (firing?.messages ?? []).find((message) => message.toolResult)?.toolResult;
+  assert.equal(result?.ok, false);
+  assert.match(result?.error ?? '', /no thread 9\.9, so nothing was posted\..* This scheduled run reports to slack:C-ENG\.$/);
+  assert.equal(firing?.status, 'completed', 'the run itself still completed');
+  assert.equal(posts.length, 1, `exactly one post, the notice: ${JSON.stringify(posts)} ${warnings.join(' | ')}`);
+  assert.equal(posts[0]?.to, 'C-ENG');
+  assert.equal(posts[0]?.thread, undefined, 'the schedule reports top-level, so the notice does too');
+  assert.match(posts[0]!.text, /^ava's scheduled run didn't report here\. A message\.send in it failed: slack: C-ENG has no thread 9\.9, so nothing was posted\./);
+  assert.ok(posts[0]!.text.includes(`session ${sessionId}.`));
+  assert.ok(!posts[0]!.text.includes('posted the report'), 'the final reply is not posted: it was written for nobody');
+});
+
+test('a completed firing that never posted to its destination is one warning, and only then (AGT-353)', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const asked: string[] = [];
+  const notices: string[] = [];
+  const warnings: string[] = [];
+  const settled = { quiet: deferred<void>(), posted: deferred<void>(), failed: deferred<void>(), silent: deferred<void>(), dropped: deferred<void>() };
+  // Late-bound: the dropped firing cancels its own schedule mid-run.
+  let cancel: (id: string) => boolean = () => false;
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      const { sessionId } = input as Fired;
+      if (sessionId.startsWith('schedule:dropped:')) assert.equal(cancel('dropped'), true);
+      for (const [id, done] of Object.entries(settled)) {
+        if (sessionId.startsWith(`schedule:${id}:`)) done.resolve();
+      }
+    },
+    sendOutcome: async (sessionId) => {
+      asked.push(sessionId.split(':')[1]!);
+      if (sessionId.startsWith('schedule:posted:')) return { kind: 'reached' };
+      if (sessionId.startsWith('schedule:failed:')) return { kind: 'failed', error: 'slack: C-OPS has no thread 1.2, so nothing was posted.' };
+      return { kind: 'none' };
+    },
+    notify: async (_agentId, _destination, text) => {
+      notices.push(text);
+    },
+    warn: (line) => warnings.push(line),
+  });
+  cancel = (id) => runtime.cancel(id);
+
+  const slot = new Date(Date.now() - 5).toISOString();
+  store.insert(record({
+    id: 'quiet',
+    agentId: 'quinn',
+    cadence: { kind: 'at', at: slot },
+    nextFireAt: slot,
+    destination: { channel: 'slack', to: 'C-AGENTS', thread: '1791400000.000100' },
+  }));
+  store.insert(record({ id: 'posted', agentId: 'ava', nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+  store.insert(record({ id: 'failed', agentId: 'cy', nextFireAt: slot, destination: { channel: 'slack', to: 'C-OPS' } }));
+  store.insert(record({ id: 'silent', agentId: 'bea', nextFireAt: slot }));
+  store.insert(record({ id: 'dropped', agentId: 'dee', nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+  await runtime.start();
+  await Promise.all(Object.values(settled).map((done) => done.promise));
+  runtime.stop();
+  await runtime.drain();
+
+  // A schedule with no destination owes nobody a post, and one cancelled
+  // while its run went on has none any more, so neither is asked.
+  assert.deepEqual(asked.sort(), ['failed', 'posted', 'quiet']);
+  const quiet = warnings.filter((line) => line.includes('finished without posting'));
+  assert.deepEqual(quiet, [
+    `schedule quiet: session schedule:quiet:${slot} finished without posting to its destination slack:C-AGENTS (no message.send reached it)`,
+  ], warnings.join(' | '));
+  // The warning is a log line only; the failed send keeps AGT-335's notice and its own line.
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]!, /^cy's scheduled run didn't report here\./);
+  assert.ok(warnings.some((line) => line.startsWith('schedule failed: no send reached slack:C-OPS')), warnings.join(' | '));
+  assert.equal(warnings.length, 2, warnings.join(' | '));
+  store.close();
+});
+
+test('the gateway warns when a firing completes without posting to its destination, and not when it posted (AGT-353)', async () => {
+  const run = async (id: string, replies: Array<() => Response>) => {
+    const home = await newHome();
+    await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+    const slot = new Date(Date.now() - 5).toISOString();
+    const rows = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+    rows.insert(record({ id, cadence: { kind: 'at', at: slot }, nextFireAt: slot, destination: { channel: 'slack', to: 'C-ENG' } }));
+    rows.close();
+    let calls = 0;
+    const fetchFake = (async () => replies[Math.min(calls++, replies.length - 1)]!()) as typeof fetch;
+    const channel = fakeSlackChannel();
+    const warnings: string[] = [];
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+      idleTimeoutMs: 0,
+      schedules: { tickMs: 25 },
+      channels: [channel],
+      approvals: (transport: ApprovalTransport) => createPermissionPolicy({ mode: 'headless', destinations: transport.destinations }),
+      warn: (line: string) => warnings.push(line),
+    });
+    await gateway.start();
+    try {
+      // The one-shot's row is retired only after the delivery check, so its
+      // absence means the check has run.
+      await waitFor(() => !gateway.schedules().some((row) => row.id === id), `${id}'s firing to finish`);
+    } finally {
+      await gateway.stop();
+    }
+    return { posts: channel.posts, warnings };
+  };
+
+  const quiet = await run('quiet', [() => openAiText('nothing new, so no report')]);
+  assert.equal(quiet.posts.length, 0, 'the warning is a log line, never a post');
+  const lines = quiet.warnings.filter((line) => line.startsWith('schedule quiet:'));
+  assert.equal(lines.length, 1, quiet.warnings.join(' | '));
+  assert.match(lines[0]!, /^schedule quiet: session schedule:quiet:\S+ finished without posting to its destination slack:C-ENG \(no message\.send reached it\)$/);
+
+  const posted = await run('posted', [
+    () => openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'nightly report' }),
+    () => openAiText('posted the report'),
+  ]);
+  assert.equal(posted.posts.length, 1, JSON.stringify(posted));
+  assert.equal(posted.posts[0]?.text, 'nightly report');
+  assert.deepEqual(posted.warnings.filter((line) => line.startsWith('schedule posted:')), []);
+});
+
+test('an event trigger\'s quiet firing warns even after an earlier firing in the same session posted (AGT-353)', async () => {
+  const { createHmac } = await import('node:crypto');
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+  const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' } };
+  await addNamedCredential(env, { name: 'events.board', value: secret });
+  const rows = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+  rows.insert({
+    id: 'trig',
+    agentId: 'ava',
+    cadence: { kind: 'event', source: 'board', filter: parseEventFilter({ prefix: { type: 'card.' } }) },
+    prompt: 'A card moved. Report it if it matters.',
+    destination: { channel: 'slack', to: 'C-ENG' },
+    createdAt: new Date().toISOString(),
+    trust: 'user',
+  });
+  rows.close();
+  // The first turn posts, then answers; every later call just answers.
+  const replies = [
+    () => openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'card 590 moved' }),
+    () => openAiText('reported'),
+    () => openAiText('nothing worth saying this time'),
+  ];
+  let calls = 0;
+  const fetchFake = (async () => replies[Math.min(calls++, replies.length - 1)]!()) as typeof fetch;
+  const channel = fakeSlackChannel();
+  const warnings: string[] = [];
+  const completed: string[] = [];
+  const gateway = createGateway({
+    env: { ...env, fetch: fetchFake },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    channels: [channel],
+    approvals: (transport: ApprovalTransport) => createPermissionPolicy({ mode: 'headless', destinations: transport.destinations }),
+    events: { sources: { board: { verify: 'standard-webhooks', secrets: ['events.board'] } } },
+    warn: (line: string) => warnings.push(line),
+    log: (line: string) => {
+      if (line.startsWith('event trigger trig fired')) completed.push(line);
+    },
+  });
+  const signed = (id: string) => {
+    const body = JSON.stringify({ specversion: '1.0', id, source: 'https://board.example', type: 'card.moved', subject: 'card/590' });
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = `v1,${createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${id}.${timestamp}.${body}`).digest('base64')}`;
+    return {
+      sourceId: 'board',
+      headers: { 'content-type': 'application/json', 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': signature },
+      body: Buffer.from(body),
+    };
+  };
+  const quiet = (line: string) => line.startsWith('event trigger trig:') && line.includes('finished without posting');
+  await gateway.start();
+  try {
+    assert.equal((await gateway.receiveEvent(signed('ce-1'))).body.status, 'matched');
+    await waitFor(() => completed.length === 1 && channel.posts.length === 1, 'the first firing to post and finish');
+    // Delivered only once the first turn is over, so it is a second turn in
+    // the same session rather than a batch coalesced into the first.
+    assert.equal((await gateway.receiveEvent(signed('ce-2'))).body.status, 'matched');
+    await waitFor(() => completed.length === 2 && warnings.some(quiet), 'the second firing to finish and be warned about');
+  } finally {
+    await gateway.stop();
+  }
+  const sessions = completed.map((line) => /session (\S+) completed/.exec(line)?.[1]);
+  assert.equal(sessions[0], sessions[1], 'both firings ran in the one session for card/590');
+  assert.equal(channel.posts.length, 1, 'only the first firing posted');
+  assert.deepEqual(warnings.filter(quiet), [
+    `event trigger trig: session ${sessions[1]} finished without posting to its destination slack:C-ENG (no message.send reached it)`,
+  ], warnings.join(' | '));
+});
+
+test('a headless firing whose send is refused is told where its schedule reports; any other session\'s refusal is unchanged (AGT-336)', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+  const slot = new Date(Date.now() - 5).toISOString();
+  // Seeded as a human-approved row would be: a one-shot reporting into a thread.
+  const rows = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+  rows.insert(record({
+    id: 'nightly',
+    cadence: { kind: 'at', at: slot },
+    nextFireAt: slot,
+    destination: { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' },
+  }));
+  rows.close();
+
+  let calls = 0;
+  const fetchFake = (async () => {
+    calls += 1;
+    switch (calls) {
+      // The firing sends where its schedule was never approved to speak, is
+      // refused, and follows the hint to its own destination.
+      case 1: return openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-OTHER' }, text: 'nightly report' });
+      case 2: return openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'nightly report' }, 'call-2');
+      case 3: return openAiText('posted the report');
+      // An ordinary conversation making the same send.
+      case 4: return openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-OTHER' }, text: 'hello' }, 'call-3');
+      default: return openAiText('could not post');
+    }
+  }) as typeof fetch;
+  const posts: Array<{ to: string; text: string; thread?: string }> = [];
+  const slack: GatewayChannelAdapter = {
+    name: 'slack',
+    async start() {},
+    async stop() {},
+    async resolveOutbound({ to, thread }) {
+      return {
+        post: async (text: string) => {
+          posts.push({ to, text, ...(thread !== undefined ? { thread } : {}) });
+          return { channel: to, ts: '2' };
+        },
+      };
+    },
+  };
+  const firingDone = deferred<string>();
+  const refusalsLogged: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+    idleTimeoutMs: 0,
+    schedules: { tickMs: 25 },
+    channels: [slack],
+    approvals: (transport: ApprovalTransport) => createPermissionPolicy({ mode: 'headless', destinations: transport.destinations }),
+  });
+  gateway.bus.subscribe((event: StratusEvent) => {
+    if (event.type === 'session.completed' && event.sessionId.startsWith('schedule:nightly:')) {
+      firingDone.resolve(event.sessionId);
+    }
+    if (event.type === 'permission.decided' && !event.allowed) {
+      refusalsLogged.push(event.reason);
+    }
+  });
+  await gateway.start();
+  let firing: Session | undefined;
+  let chat: Session | undefined;
+  try {
+    firing = await gateway.store.get(await firingDone.promise);
+    chat = await gateway.dispatch({ sessionId: 'ava-chat', agentId: 'ava', userMessage: 'post hello in C-OTHER' });
+  } finally {
+    await gateway.stop();
+  }
+
+  const firingResults = (firing?.messages ?? []).flatMap((message) => (message.toolResult ? [message.toolResult] : []));
+  assert.equal(firingResults.length, 2);
+  assert.equal(firingResults[0]?.ok, false);
+  assert.equal(
+    firingResults[0]?.error,
+    'message.send is gated and nobody is available to approve it. '
+      + 'This scheduled run reports to slack:C-ENG, in thread 1791400000.000100.',
+  );
+  assert.equal(firingResults[1]?.ok, true, 'the retry at the named destination went through');
+  assert.deepEqual(posts, [{ to: 'C-ENG', text: 'nightly report', thread: '1791400000.000100' }]);
+
+  // Not a firing: the refusal reads exactly as it did.
+  const chatResult = (chat?.messages ?? []).find((message) => message.toolResult)?.toolResult;
+  assert.equal(chatResult?.ok, false);
+  assert.equal(chatResult?.error, 'message.send is gated and nobody is available to approve it');
+
+  // The hint is for the agent; the decision log keeps the policy's own words.
+  assert.deepEqual(refusalsLogged, [
+    'message.send is gated and nobody is available to approve it',
+    'message.send is gated and nobody is available to approve it',
+  ]);
+});
+
+test('a cancel that lands while the delivery check reads the session still stops the notice (AGT-335)', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  let notified = 0;
+  let checked = 0;
+  // Late-bound: the check cancels through the runtime it belongs to.
+  let cancel: (id: string) => boolean = () => false;
+  const runtime = runtimeWith(store, {
+    undeliveredSend: async () => {
+      checked += 1;
+      // The operator's DELETE arrives mid-read.
+      cancel('racing');
+      return 'slack: C-OTHER has no thread 1.2, so nothing was posted.';
+    },
+    notify: async () => {
+      notified += 1;
+    },
+  });
+  cancel = (id) => runtime.cancel(id);
+  store.insert(record({ id: 'racing', nextFireAt: new Date(Date.now() - 5).toISOString(), destination: { channel: 'slack', to: 'C-ENG' } }));
+  await runtime.start();
+  try {
+    await waitFor(() => checked === 1, 'the delivery check to run');
+  } finally {
+    runtime.stop();
+    await runtime.drain();
+  }
+  assert.equal(store.get('racing'), undefined);
+  assert.equal(notified, 0, 'the revoked destination heard nothing');
+  store.close();
+});
+
+test('through the gateway: schedules.maxConcurrentByAgent lets two of one agent\'s schedules run at once, and the default keeps them in turn', async () => {
+  // Real sessions, runner and provider calls: nothing else in the gateway
+  // may hold an agent to one turn at a time once the scheduler allows two.
+  const peakWith = async (limits: { maxConcurrentByAgent?: Record<string, number> }): Promise<number> => {
+    const home = await newHome();
+    await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+    let inflight = 0;
+    let peak = 0;
+    const release = deferred<void>();
+    const fetchFake = (async () => {
+      inflight += 1;
+      peak = Math.max(peak, inflight);
+      await release.promise;
+      inflight -= 1;
+      return openAiText('done');
+    }) as typeof fetch;
+    const completed: string[] = [];
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchFake },
+      idleTimeoutMs: 0,
+      schedules: { tickMs: 25, ...limits },
+    });
+    gateway.bus.subscribe((event: StratusEvent) => {
+      if (event.type === 'session.completed' && event.sessionId.startsWith('schedule:')) {
+        completed.push(event.sessionId);
+      }
+    });
+    const store = new SqliteScheduleStore(fleetDbPath({ homeDir: home }));
+    for (const id of ['ava-one', 'ava-two']) {
+      store.insert(record({ id, cadence: { kind: 'every', intervalMs: 600_000 }, nextFireAt: new Date(Date.now() - 5).toISOString() }));
+    }
+    store.close();
+    await gateway.start();
+    try {
+      await waitFor(() => inflight >= 1, 'the first firing\'s provider call');
+      // Plenty of ticks for a second firing to start if it is allowed to.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const seen = peak;
+      release.resolve();
+      await waitFor(() => completed.length === 2, 'both firings to complete');
+      return seen;
+    } finally {
+      release.resolve();
+      await gateway.stop();
+    }
+  };
+
+  assert.equal(await peakWith({ maxConcurrentByAgent: { ava: 2 } }), 2, 'ava\'s two schedules run side by side');
+  assert.equal(await peakWith({}), 1, 'without a limit of its own, ava takes them in turn');
 });

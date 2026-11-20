@@ -35,12 +35,30 @@ stratus service uninstall
 
 `install` and `start` ask the service manager afterwards whether the daemon
 is actually running, for up to about ten seconds, and say so only when it
-is. Otherwise they print the manager's reason and the log path, and exit
-non-zero: launchd can load a LaunchAgent without ever starting it, and
-systemd calls a unit started the moment it forks. `status` explains a
+is. Then they keep asking for about five more seconds, and a daemon that
+dies in that time counts as a failed start: a dyld error, a native module
+built for another Node, or a channel or the scheduler failing to start.
+Either way they print the manager's reason, the end of what the daemon
+wrote since the start (`~/.stratus/logs/stratusd.err.log` on macOS, the
+journal on Linux) and the log path, and exit non-zero: launchd can load a
+LaunchAgent without ever starting it, reports a job running the moment it
+spawns, and systemd calls a unit started the moment it forks.
+`status` explains a
 loaded LaunchAgent that is not running: `runs = 0` means launchd has not
 started it since it was loaded (seen after a reboot), and a last exit code
 points at `~/.stratus/logs/stratusd.err.log`.
+
+On macOS, `install` boots out the job loaded under the label before it
+loads the new unit. launchd answers `Bootstrap failed: 5: Input/output
+error` while it still has a job under that label, such as an old daemon
+still on its way out. On that error `install` boots the job out again,
+waits until launchd no longer has it (at most the 75-second stop timeout
+plus five seconds), and loads the unit once more before it reports a
+failure.
+
+With no daemon answering, `stratus doctor` lists an installed service that
+is not running as its first problem, with the manager's reason and the
+last lines the daemon wrote.
 
 `stratus setup` installs it for you at Save & finish unless you opt out, so
 most people never run these by hand. (On a server nobody logs in to, run it
@@ -73,6 +91,11 @@ puts `stratus` on your `PATH`. It stops with SIGTERM and waits 75 seconds
 before SIGKILL (`ExitTimeOut` in the plist, `TimeoutStopSec` in the unit),
 so the gateway's drain, and the abort at the end of it, actually run. (Upgrading node moves those absolute paths — see
 [Updating](./updating.md) for why `stratus update` rewrites the unit.)
+Homebrew's node is the exception: node reports its versioned keg
+(`/opt/homebrew/Cellar/node/<version>/bin/node`), which `brew cleanup`
+deletes after an upgrade, so the unit names the formula's stable link
+(`/opt/homebrew/opt/node/bin/node`) instead, as long as that link resolves
+to the same binary.
 
 For the same reason the unit carries a **`PATH`**: the one in the shell
 you installed from, with node's own directory first and relative entries
@@ -153,9 +176,10 @@ The question every operator asks on their second day:
 | Tools from an MCP server that reconnects | No | Discovered on reconnect |
 | A plugin enabled, disabled, upgraded, or reconfigured | **Yes** | `stratus restart` |
 | A stored credential: a provider sign-in or API key, or a named key from `stratus credential set` or a credential form in Slack | No | A sign-in is read on every turn and a named key every time a tool asks for it, so a stored or rotated key reaches the next command. Two things still need a restart: adding or changing a variable in tool-shell's `credentialsEnv` mapping, which is plugin config (row above), and a key in the daemon's own environment |
-| A Slack app's tokens (`stratus setup` → **Channels**, `stratus channel set`, `PUT /credentials/channels/:channel`) | No, once the daemon serves Slack | Saving them reloads the running daemon, which connects a new agent's app, reconnects one whose tokens changed and drops one whose tokens were removed, leaving every other app connected. The first Slack app on a daemon that started with none still needs `stratus restart`, and so does a change to an agent's Slack settings in the config (`slack`, `approvals`, `principals`) |
+| A Slack app's tokens (`stratus setup` → **Channels**, `stratus channel set`, `PUT /credentials/channels/:channel`) | No, once the daemon serves Slack | Saving them reloads the running daemon, which connects a new agent's app, reconnects one whose tokens changed and drops one whose tokens were removed, leaving every other app connected. The first Slack app on a daemon that started with none still needs `stratus restart`, and so does a change to an agent's other Slack settings in the config (`slack`) |
+| Who a Slack app answers to: `principals.slackUsers`, `principals.admit`, `approvals.slackApprovers`, `approvals.slackChannel` | No, once the daemon serves Slack | Applied at the next reload: `PUT /config` performs one, and `POST /roster/reload` applies a hand edit. The app stays connected; someone removed is refused from their next message, and as an approver cannot answer a request already posted. See [Slack](../../packages/channel-slack/README.md#changing-who-an-agent-answers-to) |
 | Another channel's secrets (a channel plugin's, such as Discord) | **Yes** | `stratus restart`. The channel connects its apps when the daemon starts, unless its plugin implements `reload()` |
-| The `api`, `approvals`, and `maxTurns` settings | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve, what the daemon binds, and how much one message may spend, so they are not re-read live |
+| The `api`, `approvals` (apart from the people lists above), and `maxTurns` settings | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve, what the daemon binds, and how much one message may spend, so they are not re-read live |
 | The `stratus` package itself | **Yes** | `stratus update`, which stops and starts the service around the upgrade |
 
 ### `stratus restart`: announced, drained, and back

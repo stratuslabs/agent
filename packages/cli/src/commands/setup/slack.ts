@@ -7,7 +7,7 @@
 
 import { resolveAgentPrincipals, type PrincipalsConfig } from '@stratusagent/state';
 import { writeLine } from '../../io.ts';
-import { verifySlackBotToken, verifySlackAppToken, slackAppManifest } from '../../slack.ts';
+import { isSlackMemberId, verifySlackBotToken, verifySlackAppToken, slackAppManifest } from '../../slack.ts';
 import type { SetupBase } from './context.ts';
 import type { SharedSetup } from './shared.ts';
 
@@ -203,7 +203,7 @@ export const createSlackSetup = ({
         writeLine(streams.stdout, `! Nobody is listed, so ${agentName} will ignore every Slack message until ${key} names someone.`);
         return;
       }
-      const bad = ids.filter((id) => !/^[UW][A-Z0-9]{2,}$/.test(id));
+      const bad = ids.filter((id) => !isSlackMemberId(id));
       if (bad.length > 0) {
         writeLine(streams.stdout, `✗ ${bad.join(', ')} ${bad.length === 1 ? 'is not a member ID' : 'are not member IDs'} (they look like U0123ABCD). Nothing was saved.`);
         continue;

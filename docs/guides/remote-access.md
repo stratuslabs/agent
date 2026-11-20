@@ -156,6 +156,13 @@ the model, the event stream, or the daemon log.
 - **Opening it spends nothing.** Only a submission does, so a chat app
   previewing the link does not use it up, and an empty value can be
   corrected and sent again.
+- **A link that won't open says why.** The page says which of these it is:
+  it expired; it was already used; it was closed because its request can
+  no longer be answered; it is from before the daemon restarted, or from
+  another daemon; or the daemon doesn't recognize it at all, which usually
+  means it was cut short or changed on the way. "Another daemon" includes a
+  `127.0.0.1` link opened on a different machine, which reaches that
+  machine's daemon instead.
 - **It points at `api.publicUrl`.** Set that to the address you reach this
   daemon on from elsewhere, such as its Tailscale name. Without it, links
   use the address the API bound (`http://127.0.0.1:4123` by default), which

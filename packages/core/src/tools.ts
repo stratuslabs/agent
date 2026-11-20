@@ -116,6 +116,55 @@ export const filePathsOf = (result: Pick<ToolResult, 'ok' | 'output'>): string[]
   return paths;
 };
 
+/**
+ * A message a tool hands its conversation ready-made: the sibling of a
+ * result's `file` / `files`. `text` is the words, and every surface that
+ * shows the post shows at least them: a channel that cannot render a
+ * richer form, the notification, the fallback when Slack refuses the
+ * blocks. `slack.blocks` is Slack Block Kit for the same message. Core
+ * checks only that it is an array, never what is in it: what may reach a
+ * thread is the Slack channel's to decide (`channel-slack` sanitizes it),
+ * and core carries no channel's vocabulary.
+ */
+export interface ToolPost {
+  text: string;
+  slack?: { blocks: JsonValue[] };
+}
+
+const isObjectValue = (value: JsonValue | undefined): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The post a tool result carries for its conversation (AGT-324): an ok
+ * result whose object output has `post: { text, slack?: { blocks } }`,
+ * `text` holding more than whitespace. The one reading of that convention,
+ * shared by the channel that posts it, the gateway that counts a turn
+ * which posted as having spoken, and the rendering that shows the model
+ * what it posted.
+ *
+ * Never from an `external` result. An MCP server or a fetched page writing
+ * a card into the thread would put words there that read as the agent's
+ * own, and buttons a person might trust because the agent's app posted
+ * them. A result with no label, stored before provenance was tracked,
+ * reads as `unknown` everywhere else and posts here: none of those
+ * predates this convention with a post in it.
+ *
+ * Anything else named `post` (a CMS tool's blog post, a string) is not
+ * one, and the output is left exactly as the tool returned it.
+ */
+export const postOf = (result: Pick<ToolResult, 'ok' | 'output' | 'trust'>): ToolPost | undefined => {
+  if (!result.ok || result.trust === 'external' || !isObjectValue(result.output)) {
+    return undefined;
+  }
+  const post = result.output.post;
+  if (!isObjectValue(post) || typeof post.text !== 'string' || post.text.trim().length === 0) {
+    return undefined;
+  }
+  const slack = post.slack;
+  const blocks = isObjectValue(slack) && Array.isArray(slack.blocks) ? slack.blocks : undefined;
+  return { text: post.text, ...(blocks !== undefined ? { slack: { blocks } } : {}) };
+};
+
 export interface ToolResult {
   callId: string;
   toolName: string;
@@ -186,8 +235,18 @@ export const renderToolResultContent = (result: Pick<ToolResult, 'ok' | 'output'
   // model cannot tell a failing test from a typo from a missing program, so
   // it guesses or asks. A failure with no output renders exactly as before,
   // so most persisted transcripts replay byte-identical.
+  //
+  // A post (`postOf`) is shown as its text alone. Its blocks are the
+  // channel's: they are large, the model wrote the spec they came from and
+  // has that as the call's input, and replaying them on every later turn
+  // costs context for nothing. Not `posted: true` either: whether a
+  // channel showed it is the channel's to know, and the CLI shows no post.
+  const post = postOf(result);
+  const shown: JsonValue = post !== undefined && isObjectValue(result.output)
+    ? { ...result.output, post: { text: post.text } }
+    : result.output;
   const output: JsonValue = result.ok
-    ? result.output
+    ? shown
     : result.output === null || result.output === undefined
       ? { error: result.error ?? 'Tool failed' }
       : { error: result.error ?? 'Tool failed', output: result.output };

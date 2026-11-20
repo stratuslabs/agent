@@ -1030,6 +1030,58 @@ export const credentialValuesFor = async (resolver: CredentialResolver, agent: A
   return values.filter((value): value is string => typeof value === 'string' && value.length > 0);
 };
 
+/**
+ * Every secret value the credentials file holds, read now: provider keys
+ * and sign-ins, each agent's own sign-in, every named credential (shared
+ * and per agent), and every channel's transport secrets, Slack's tokens
+ * included. What a failed turn's text is masked against before it is
+ * stored, logged or posted (`AgentRunnerOptions.failureSecrets`): a
+ * provider, harness or plugin error can quote any of them, and the set is
+ * the whole file rather than what the failing agent could reach, because
+ * what an error happens to quote is not bounded by an allowlist.
+ *
+ * Values only. A `baseUrl` is an address, an `envBindings` entry names a
+ * credential rather than holding one, and codex's stored `oauth_token` is
+ * a marker (`chatgpt`), not a secret: masked, the word would vanish from
+ * every failure that mentions it. Rejects when the file can't be read or
+ * parsed, so a caller can tell nothing was read from an empty store.
+ */
+export const storedSecretValues = async (env: StateEnvironment): Promise<string[]> => {
+  const raw = await loadRawCredentialsFile(env);
+  const values: string[] = [];
+  const take = (value: unknown): void => {
+    if (typeof value === 'string' && value !== '') {
+      values.push(value);
+    }
+  };
+  for (const provider of CREDENTIAL_PROVIDER_NAMES) {
+    const entry = raw[provider];
+    if (isPlainRecord(entry) && !(provider === 'codex' && entry.type === 'oauth_token')) {
+      take(entry.value);
+    }
+  }
+  if (isPlainRecord(raw.agentSignIns)) {
+    for (const signIns of Object.values(raw.agentSignIns)) {
+      for (const entry of isPlainRecord(signIns) ? Object.values(signIns) : []) {
+        take(isPlainRecord(entry) ? entry.value : undefined);
+      }
+    }
+  }
+  const named = readNamedCredentials(raw);
+  Object.values(named.shared).forEach(take);
+  for (const names of Object.values(named.agents)) {
+    Object.values(names).forEach(take);
+  }
+  if (isPlainRecord(raw.channels)) {
+    for (const byAgent of Object.values(raw.channels)) {
+      for (const entry of isPlainRecord(byAgent) ? Object.values(byAgent) : []) {
+        Object.values(isPlainRecord(entry) ? entry : {}).forEach(take);
+      }
+    }
+  }
+  return [...new Set(values)];
+};
+
 export const createFileCredentialResolver = (
   env: StateEnvironment,
   processEnv: Record<string, string | undefined> = readProcessEnv(env),

@@ -16,13 +16,17 @@ import {
   leastTrusted,
   MAX_IDEMPOTENCY_KEY_LENGTH,
   type OutboundMessageRef,
+  postOf,
   type ProviderPart,
   type StratusEvent,
+  type ToolPost,
   type ToolResult,
   type TrustLevel,
 } from '@stratusagent/core';
 
 import { codeRunsOf, toSlackMrkdwn } from './mrkdwn.ts';
+import { neutralizeMentions, sanitizePostBlocks } from './posts.ts';
+import { slackErrorCode } from './slack-errors.ts';
 import { textingParts } from './texts.ts';
 import type {
   SlackReplyMode,
@@ -102,7 +106,10 @@ export interface HandoverClaim {
  * the thread what landed sits — the ts of the lowest message of the
  * turn's that Slack took — present exactly when `spoke` is. `refused`:
  * there was text to say and Slack refused some of it, unlike a turn that
- * decided to say nothing, which is unpublished but not refused.
+ * decided to say nothing, which is unpublished but not refused. A turn
+ * that said nothing in words is refused too when nothing of it landed and
+ * Slack refused a file or tool post it produced (AGT-133): that was its
+ * answer, not silence.
  */
 export interface ReplyOutcome {
   published: boolean;
@@ -124,12 +131,12 @@ export const dispatchKeyFor = (eventKey: string): string =>
 /**
  * What the report of a turn nobody was rendering got into the thread, part
  * by part: whether its text was said in full (or there was none to say),
- * and which of its files landed. A redelivery waiting behind the report
- * posts only what is missing from it.
+ * and which of its files (by path) and tool posts landed. A redelivery
+ * waiting behind the report posts only what is missing from it.
  */
 export interface ReportedOutcome {
   said: boolean;
-  landed: readonly string[];
+  landed: ReadonlyArray<string | ToolPost>;
 }
 
 export const NOTHING_REPORTED: ReportedOutcome = { said: false, landed: [] };
@@ -304,6 +311,66 @@ export const postPart = async (
 };
 
 /**
+ * Post a tool's ready-made message (`postOf`, AGT-324) as one message of
+ * its own: its words, converted as reply text is and with their mention
+ * markup shown as text, and its Slack blocks once `sanitizePostBlocks` has
+ * passed them. Blocks it refuses, or that Slack refuses, leave the words
+ * to go alone, so a card that cannot be shown is plain text in the thread
+ * and never silence. Only a refusal Slack answered is retried as text: a
+ * call that never got an answer may have posted, and a second message
+ * would say it twice. The warnings name a type or Slack's code, never the
+ * post's content.
+ *
+ * Words that go alone go whole, in as many messages as a reply that long
+ * would take, since they are all the thread gets. With a card they are
+ * only its notification, one message's worth. As with a recovered reply,
+ * a part Slack refuses does not stop the rest, and once any part is in the
+ * post counts as posted: posting it again would say those parts twice.
+ */
+export const postToolPost = async (
+  web: SlackWebLike,
+  target: { channel: string; thread?: string | undefined },
+  post: ToolPost,
+  warn: (line: string) => void,
+): Promise<{ ts?: string; channel?: string; message?: { ts?: string; thread_ts?: string } }> => {
+  const where = { channel: target.channel, ...(target.thread ? { thread_ts: target.thread } : {}) };
+  const checked = post.slack !== undefined ? sanitizePostBlocks(post.slack.blocks) : undefined;
+  if (checked !== undefined && 'refused' in checked) {
+    warn(`slack: a tool's post went as text alone, because its blocks held ${checked.refused}`);
+  }
+  if (checked !== undefined && 'blocks' in checked) {
+    try {
+      return await web.chat.postMessage({ ...where, text: neutralizeMentions(messageText(post.text)), blocks: checked.blocks });
+    } catch (error) {
+      const code = slackErrorCode(error);
+      if (code === undefined) {
+        throw error;
+      }
+      warn(`slack: Slack refused a tool's post with blocks (${code}), so it went as text alone`);
+    }
+  }
+  const parts = messageChunks(post.text).map(neutralizeMentions);
+  let landed: Awaited<ReturnType<SlackWebLike['chat']['postMessage']>> | undefined;
+  let failure: unknown;
+  let missed = 0;
+  for (const text of parts) {
+    try {
+      landed = await web.chat.postMessage({ ...where, text });
+    } catch (error) {
+      failure ??= error;
+      missed += 1;
+    }
+  }
+  if (landed === undefined) {
+    throw failure;
+  }
+  if (missed > 0) {
+    warn(`slack: ${missed} of ${parts.length} messages of a tool's post did not go out (${slackErrorCode(failure) ?? 'no answer from Slack'})`);
+  }
+  return landed;
+};
+
+/**
  * Renders one turn's reply into Slack, one of two ways. Streaming (the
  * `stream` reply mode): post `…` immediately, fold streaming deltas and
  * tool status lines into throttled edits, and finalize with the
@@ -423,8 +490,14 @@ export class ReplyRenderer {
   private saidMidTask = 0;
   /** A judged turn's status, waiting on its first tool call; see `showLoading`. */
   private loadOnFirstTool = false;
-  /** Whether any upload of this turn's landed — a file is something said, placeholder or not. */
+  /** Whether any upload or tool post of this turn's landed — a file or a card is something said, placeholder or not. */
   private uploaded = false;
+  /**
+   * Whether Slack refused an upload or tool post of this turn's. A file
+   * that could not be read is not counted: it is gone or changed, and no
+   * later attempt would post it (AGT-133).
+   */
+  private outputRefused = false;
   /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
   private edited = false;
   /**
@@ -859,6 +932,10 @@ export class ReplyRenderer {
         for (const filePath of collectFilePaths(event.result)) {
           this.queueUpload(filePath);
         }
+        const post = postOf(event.result);
+        if (post !== undefined) {
+          this.queuePost(post);
+        }
       }
     }
   }
@@ -912,6 +989,9 @@ export class ReplyRenderer {
           file: data,
           filename: path.basename(filePath),
           ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+        }).catch((error: unknown) => {
+          this.outputRefused = true;
+          throw error;
         });
         this.uploaded = true;
         // The upload is a post of the app's in this thread, which takes
@@ -923,6 +1003,34 @@ export class ReplyRenderer {
         }
       })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /**
+   * Post a tool's ready-made message (`postToolPost`) in the thread, on the
+   * upload chain and under its rules, so it lands in order with the turn's
+   * files and words and `finalize` waits for it. For every rule here a post
+   * that landed is what a file that landed is: something the turn said,
+   * placed where Slack put it. A repeat of a finished turn queues the ones
+   * the session holds (`turnPostsFor`), which no event delivers.
+   */
+  queuePost(post: ToolPost): void {
+    const handover = this.handover;
+    const after = this.streaming ? undefined : this.after;
+    this.uploadChain = this.uploadChain
+      .then(() => handover)
+      .then(() => after)
+      .then(async () => {
+        const posted = await postToolPost(this.web, { channel: this.channel, thread: this.threadTs }, post, this.warn).catch((error: unknown) => {
+          this.outputRefused = true;
+          throw error;
+        });
+        this.uploaded = true;
+        this.refreshLoading();
+        if (posted.ts !== undefined && (this.uploadedAt === undefined || posted.ts > this.uploadedAt)) {
+          this.uploadedAt = posted.ts;
+        }
+      })
+      .catch((error) => this.warn(`chat.postMessage failed for a tool's post: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   /**
@@ -1233,7 +1341,9 @@ export class ReplyRenderer {
         this.setStatus('');
         await this.statusChain;
       }
-      return this.outcome(false, this.uploaded);
+      // Unless all it had was a file or post Slack refused: then nothing
+      // was said, and that is not the silence it chose.
+      return this.outcome(false, this.uploaded, !this.uploaded && this.outputRefused);
     }
     // The first line lands before the reply is judged: one that already
     // said what the reply says (the model's only words came before a tool
@@ -1270,7 +1380,7 @@ export class ReplyRenderer {
         await this.statusChain;
       }
       const spoke = this.interimPosted || this.uploaded;
-      return this.outcome(this.interimPosted, spoke);
+      return this.outcome(this.interimPosted, spoke, !spoke && this.outputRefused);
     }
     if (!this.ref && this.interimPosted && reply.trim().length === 0) {
       // Nothing posts after this to take the status down, so it is cleared.

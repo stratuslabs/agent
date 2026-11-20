@@ -15,4 +15,6 @@ export interface AgentConnection {
   teamId: string;
   /** Whether a refused loading status has been said for this app yet; see `ReplyRenderer.setStatus`. */
   statusWarned: { value: boolean };
+  /** Whether a missing `reactions:write` has been said for this app yet; see `addSilentReaction`. */
+  reactionWarned: { value: boolean };
 }

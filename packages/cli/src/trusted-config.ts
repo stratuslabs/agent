@@ -8,6 +8,7 @@ import {
   type PrincipalsConfig,
   type PluginsConfig,
   type SlackConfig,
+  type TasksConfig,
 } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 import type { CliApprovalMode } from './parse.ts';
@@ -230,6 +231,28 @@ export const loadServePrincipals = async (
   }
   return block.status === 'present' ? block.value : {};
 };
+
+/** Who an agent's Slack app answers to: the trusted `approvals` and `principals` blocks. */
+export interface SlackPeople {
+  approvals: ApprovalsConfig;
+  principals: PrincipalsConfig;
+}
+
+/**
+ * The two blocks that decide who an agent's Slack app answers to, read
+ * again on every reload so a teammate added or removed while the daemon
+ * runs takes effect without a restart (AGT-337). Through `loadServeApprovals`
+ * and `loadServePrincipals`, so a reload follows the rules start does: a
+ * project-local block is ignored, and one that will not read fails closed.
+ */
+export const loadSlackPeople = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<SlackPeople> => ({
+  approvals: await loadServeApprovals(env, configPath, warn),
+  principals: await loadServePrincipals(env, configPath, warn),
+});
 
 /**
  * The `slack` block — how agents present themselves in Slack — under the
@@ -467,6 +490,79 @@ export const loadServeAutoContinue = async (
     }
   }
   return settings;
+};
+
+/**
+ * How many of one agent's schedules may run a firing at once
+ * (`concurrentScheduledTurns: { "<id>": n }`), under `agentMaxTurns`'s trust
+ * rule and for its reason: a turn spends the operator's tokens, and a soul
+ * can come from someone else's template. An entry that isn't a whole number
+ * of at least 1 is ignored with a warning, so that agent keeps the default
+ * of one at a time.
+ */
+export const loadServeConcurrentScheduledTurns = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<Record<string, number>> => {
+  let block = await readTrustedConfigBlock('concurrentScheduledTurns', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring concurrentScheduledTurns in ${block.path}: a project-local config cannot decide how many turns `
+      + 'an agent runs at once. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('concurrentScheduledTurns', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring concurrentScheduledTurns (${block.error instanceof Error ? block.error.message : String(block.error)})`);
+    return {};
+  }
+  if (block.status !== 'present') {
+    return {};
+  }
+  const value: unknown = block.value;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warn('ignoring concurrentScheduledTurns: expected an object of agent ids to a number of scheduled turns, like { "atlas": 2 }');
+    return {};
+  }
+  const limits: Record<string, number> = {};
+  for (const [agentId, limit] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof limit === 'number' && Number.isInteger(limit) && limit >= 1) {
+      limits[agentId] = limit;
+    } else {
+      warn(`ignoring concurrentScheduledTurns.${agentId}: ${JSON.stringify(limit)} is not a whole number of scheduled turns at once, 1 or more`);
+    }
+  }
+  return limits;
+};
+
+/**
+ * Background tasks (`tasks: { enabled, maxRunningPerAgent }`), under
+ * `concurrentScheduledTurns`'s trust rule and for its reason: a task is a
+ * turn nobody watches, spending the operator's tokens, and a clone must not
+ * decide how many of those run. The config file has already refused a bad
+ * value, so the block that comes back is the one to use. When the
+ * operator's config can't be read, tasks are off: nothing starts unattended
+ * work on a policy nobody could read.
+ */
+export const loadServeTasks = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<TasksConfig> => {
+  let block = await readTrustedConfigBlock('tasks', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring tasks in ${block.path}: a project-local config cannot decide whether agents start background tasks `
+      + 'or how many run at once. Using ~/.stratus/config.json instead.',
+    );
+    block = await readGlobalConfigBlock('tasks', env);
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring tasks (${block.error instanceof Error ? block.error.message : String(block.error)}); background tasks stay off`);
+    return { enabled: false };
+  }
+  return block.status === 'present' ? block.value : {};
 };
 
 /**

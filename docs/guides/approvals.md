@@ -37,6 +37,10 @@ That default is `approvals.posture: "open"`:
   each gated call, and a person is asked only when they can't tell. See
   [The review posture](#the-review-posture).
 
+`stratus setup` asks a new install which one to use, with open preselected,
+and writes the answer; an existing config is never asked. See
+[Setup](../start/setup.md).
+
 A config that can't be read leaves the daemon guarded rather than open. A
 project-local config that tries to set `approvals` is ignored, with a
 warning, and `~/.stratus/config.json`'s approvals apply instead. The daemon
@@ -417,7 +421,10 @@ warning naming the file.
   that started the delegation. This applies only while the sub-session is
   the delegation's: `agent.delegate` reports the sub-session's id, and a
   message sent to that id afterwards continues it as an ordinary
-  conversation, whose parked turns are resumed like any other.
+  conversation, whose parked turns are resumed like any other. A
+  [background task](../reference/config.md#background-tasks)'s worker is
+  not resumed either: the restart cuts the task off, and the conversation
+  that started it is told the task was interrupted.
 - **A delegated call is asked where the work was asked for.** When Nova
   delegates to Quinn and Quinn reaches a gated call, the request goes to
   the conversation at the root of the delegation, through Nova's Slack app
@@ -426,6 +433,8 @@ warning naming the file.
   at a time: there is no **Always allow**, and an `always` sent through the
   control API runs the call once. A standing grant for Quinn comes from
   Quinn's own work or from `stratus grants`, not from Nova's approvers.
+  A background task's call is asked the same way, and the request carries
+  its task id.
 - **A button left behind by a dead daemon corrects itself when clicked.** A
   normal shutdown retracts its buttons; a crash cannot, and the new process
   has no record of what the old one posted. Clicking such a prompt tells

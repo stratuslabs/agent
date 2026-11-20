@@ -12,7 +12,7 @@
 import type { ChannelCredentialRequest, GatewayLike, StratusEvent } from '@stratusagent/core';
 import type { ReplyRenderer } from './reply.ts';
 import type { AgentConnection } from './connection.ts';
-import type { PendingApprovalPost, PendingCredentialPost } from './pending-posts.ts';
+import { mayDecide, type PendingApprovalPost, type PendingCredentialPost } from './pending-posts.ts';
 import {
   APPROVAL_ACTIONS,
   CREDENTIAL_ACK_MS,
@@ -78,6 +78,9 @@ export interface InteractionsDeps extends Pick<ApprovalPrompts, 'retireOrphanedP
   track: (work: Promise<void>) => void;
   connectionFor: (agentId: string) => AgentConnection | undefined;
 }
+
+/** What someone clicking a lookalike of an approval or credential button is told. */
+const NOT_THE_PROMPT = 'That button is not on the request\'s own message, so nothing was recorded.';
 
 export const createInteractions = ({
   warn,
@@ -255,6 +258,18 @@ export const createInteractions = ({
     }
   };
 
+  /**
+   * Whether a click came from the prompt itself: the message the request
+   * was posted as, in its channel. The action id and the request id in a
+   * button's `value` are both readable by anyone in the thread, so without
+   * this a button with the same two on any other message the app posted
+   * would settle the request when an approver clicked it. Nothing posts
+   * one today: a tool's post has its buttons renamed (`sanitizePostBlocks`).
+   * This holds even if that ever changes (AGT-324).
+   */
+  const fromPrompt = (post: { channel: string; ts: string }, args: SlackSocketEventArgs): boolean =>
+    args.body?.message?.ts === post.ts && args.body?.channel?.id === post.channel;
+
   const handleCredentialClick = async (connection: AgentConnection, args: SlackSocketEventArgs, requestId: string): Promise<void> => {
     await args.ack();
     const post = credentialPosts.get(requestId);
@@ -262,6 +277,10 @@ export const createInteractions = ({
       // Live, with the index not caught up yet: retiring it here would
       // strip the button from a request about to be registered as pending.
       await tellClicker(connection, args, 'That credential request is still being posted. Try the button again in a moment.');
+      return;
+    }
+    if (post && !fromPrompt(post, args)) {
+      await tellClicker(connection, args, NOT_THE_PROMPT);
       return;
     }
     if (!post || post.connection !== connection) {
@@ -277,7 +296,7 @@ export const createInteractions = ({
     // By actor, as approvals are: the request sits in a thread anyone in
     // it can read, and a key is a bigger thing to hand over than a click.
     const clicker = args.body?.user?.id;
-    if (!clicker || !post.approvers.has(clicker)) {
+    if (!mayDecide(post, clicker)) {
       await tellClicker(connection, args, `You are not an approver for ${post.agentName}, so you cannot add its credentials.`);
       return;
     }
@@ -315,7 +334,7 @@ export const createInteractions = ({
     // Checked again on the answer, not only on the click: the form is a
     // separate interaction, and the click is not what stores anything.
     const submitter = args.body?.user?.id;
-    if (!submitter || !post.approvers.has(submitter)) {
+    if (!mayDecide(post, submitter)) {
       await refuse(`You are not an approver for ${post.agentName}, so you cannot add its credentials.`);
       return;
     }
@@ -422,7 +441,11 @@ export const createInteractions = ({
     if (post.connection !== connection) {
       return;
     }
-    if (!clicker || !post.approvers.has(clicker)) {
+    if (!fromPrompt(post, args)) {
+      await tellClicker(connection, args, NOT_THE_PROMPT);
+      return;
+    }
+    if (!mayDecide(post, clicker)) {
       // The request stays pending: someone who may not decide clicking is
       // not a decision, and consuming the request would let any channel
       // member deny an agent's work.

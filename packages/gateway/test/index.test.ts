@@ -280,6 +280,29 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     const withFile = await gateway.sessionRouting('thread-o');
     assert.equal(withFile?.lastSpokeAt, at);
 
+    // So is a post (AGT-324): a card the channel put in the thread with no
+    // words beside it. A post from an external result is not one, and is
+    // not counted.
+    const posted = await gateway.store.get('thread-o');
+    assert.ok(posted);
+    const later = '2026-09-12T12:05:00.000Z';
+    const cardResult = (trust: 'agent' | 'external') => ({
+      callId: `card-${trust}`, toolName: 'chat.card', ok: true, trust, output: { post: { text: 'Open PRs: 13' } },
+    });
+    posted.messages.push(
+      { id: 'thread-o:user:p1', role: 'user', content: 'Sam: as a card?', createdAt: later, overheard: true },
+      { id: 'thread-o:tool:card-agent', role: 'tool', name: 'chat.card', content: '{}', createdAt: later, toolResult: cardResult('agent') },
+    );
+    await gateway.store.save(posted);
+    assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, later);
+    const external = await gateway.store.get('thread-o');
+    assert.ok(external);
+    external.messages.push(
+      { id: 'thread-o:tool:card-external', role: 'tool', name: 'mcp.card', content: '{}', createdAt: '2026-09-12T12:10:00.000Z', toolResult: cardResult('external') },
+    );
+    await gateway.store.save(external);
+    assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, later);
+
     // An agent hears only conversations it is already in: nothing is
     // created on its behalf, and "not in that one" is an answer rather
     // than a refusal — a channel asks this for every thread its app can
@@ -480,6 +503,57 @@ test('the watchdog aborts a stalled streaming turn and fails the session cleanly
     assert.equal((await failed).error, 'Run aborted: no activity for 300ms');
   } finally {
     // A failed assertion must not leave the gateway holding the process open.
+    await gateway.stop();
+  }
+});
+
+test('a background task ending on the conversation is not activity for the watchdog of the turn running there', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: anthropic\nmodel: model-slow\n---\n\nYou stall.\n');
+  const warnings: string[] = [];
+  let gateway: ReturnType<typeof createGateway> | undefined;
+  // Once the provider is waited on, tasks this conversation started end
+  // every 50 ms for 3 s while it says nothing (AGT-357). None of that is
+  // the provider working, so the turn is still aborted about 1 s in.
+  const ids = { sessionId: 'stalled-2', agentId: 'slow', workerSessionId: 'stalled-2:delegate:slow:1:t_x', workerAgentId: 'slow' };
+  let sent = 0;
+  let ending: NodeJS.Timeout | undefined;
+  let waitedOnAt = 0;
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      if (init?.signal?.aborted) {
+        reject(new DOMException('aborted', 'AbortError'));
+        return;
+      }
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      if (ending === undefined) {
+        waitedOnAt = Date.now();
+        ending = setInterval(() => {
+          if (sent >= 60) {
+            clearInterval(ending);
+            return;
+          }
+          sent += 1;
+          void gateway?.bus.emit({ type: 'task.completed', ...ids, taskId: `t_${sent}` });
+        }, 50);
+      }
+    })) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  gateway = createGateway({ env, idleTimeoutMs: 1_000, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'stalled-2', agentId: 'slow', userMessage: 'hang' }),
+      (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
+    );
+    const waited = Date.now() - waitedOnAt;
+    assert.ok(waitedOnAt > 0, 'the provider was waited on');
+    assert.ok(waited < 2_500, `the watchdog fired ${waited}ms into the provider wait, not about 1000ms`);
+    assert.ok(sent >= 2, `task events were sent during the stall (${sent})`);
+    const line = warnings.find((warning) => warning.startsWith('watchdog:'));
+    assert.doesNotMatch(line ?? '', /last heard: task\./);
+  } finally {
+    clearInterval(ending);
     await gateway.stop();
   }
 });

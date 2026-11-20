@@ -11,9 +11,9 @@ import {
   linkedDerivedComponent,
   whitelistPathFor,
 } from '@stratusagent/permissions';
-import { type StateEnvironment } from './environment.ts';
-import { memoryAppendNeedsNewline } from './memory.ts';
-import { DEFAULT_STRATUS_AGENT } from './souls.ts';
+import { type StateEnvironment } from '../environment.ts';
+import { memoryAppendNeedsNewline } from '../memory.ts';
+import { DEFAULT_STRATUS_AGENT } from '../souls.ts';
 import {
   agentMemoryFilePath,
   agentSessionDbPath,
@@ -26,7 +26,7 @@ import {
   stratusHomePath,
   legacyMemoryFilePath,
   legacySessionDbPath,
-} from './paths.ts';
+} from '../paths.ts';
 
 // Everything one agent owns moves under `agents/<id>/`: its sessions, its
 // memories, its grants. What stays fleet-level is the schedules, which move

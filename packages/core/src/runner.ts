@@ -17,6 +17,8 @@ import {
   definedTokenCounts,
 } from './providers.ts';
 import {
+  redactedError,
+  redactSecrets,
   startsTurn,
 } from './turns.ts';
 import {
@@ -48,7 +50,6 @@ import {
   type ImageAttachment,
   type ImageReplayBudget,
   InMemorySessionStore,
-  isNoReplyAnswer,
   isReplyOptionalTurn,
   isStoppedEarlyReason,
   isTaintedTrust,
@@ -66,6 +67,7 @@ import {
   type Message,
   messagesWithinContextFloor,
   type ModelProvider,
+  noReplyAnswerOf,
   omitImagesOutsideReplayBudget,
   originOf,
   PENDING_APPROVAL_METADATA_KEY,
@@ -567,6 +569,14 @@ export interface ObserveInput {
    * agent would, because their text is in the transcript either way.
    */
   metadata?: JsonObject;
+  /**
+   * A name for this message, stored on it (`Message.idempotencyKey`) in the
+   * same save, so a host can find it later with `workItemState` or
+   * `carriesKey`. The runner only records it, as it does for a turn's key;
+   * refusing a repeat is the host's job. The gateway uses it for a
+   * background task's fallback notice and never passes a channel's through.
+   */
+  idempotencyKey?: string;
 }
 
 /**
@@ -767,6 +777,23 @@ export interface AgentRunnerOptions {
    * `maxTurns`.
    */
   providerCallGuards?: readonly ProviderCallGuard[];
+  /**
+   * The secret values a failed turn's text is masked against, read when a
+   * turn fails and before anything is done with its text: each becomes
+   * `[redacted]` (`redactSecrets`) in the session's `lastError`, the
+   * `session.failed` event, and the error thrown to the caller, so every
+   * surface that shows a failure — the daemon log, a channel's failure
+   * line, the session record — shows the same masked text. A provider
+   * already masks its own key; this is for everything else a provider,
+   * harness or plugin error can quote. Asked with the failing session, so
+   * a host can add what that agent alone resolves.
+   *
+   * When it rejects, the failure goes out unmasked rather than not at all:
+   * a turn must always end, and a store that cannot be read is most often
+   * the failure being reported, whose own text names a path, not a value.
+   * A host that omits it masks nothing beyond what providers do.
+   */
+  failureSecrets?: (session: Session) => Promise<Iterable<string>>;
 }
 
 /**
@@ -1183,6 +1210,7 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       overheard: true,
       observed: true,
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
     });
 
     // The speaker is judged like any sender: their words are in the
@@ -1911,7 +1939,12 @@ export class AgentRunner {
         // A turn that may stay quiet said so with the marker: from here on
         // it is the silence an empty answer is, before anything records,
         // announces or posts it (card 601).
-        if (isReplyOptionalTurn(session) && isNoReplyAnswer(response)) {
+        // A reaction named with it is kept for the silence recorded below,
+        // on a turn whose message was said to the agent and only there: an
+        // overheard one was never offered one (card 1078).
+        const silent = isReplyOptionalTurn(session) ? noReplyAnswerOf(response) : undefined;
+        const reaction = silent !== undefined && !isUnaddressedTurn(session) ? silent.reaction : undefined;
+        if (silent !== undefined) {
           response = { ...response, parts: [] };
         }
         // Checked before anything of the response is saved: a call made on
@@ -1967,6 +2000,7 @@ export class AgentRunner {
             role: 'assistant',
             content: '',
             createdAt: new Date().toISOString(),
+            ...(reaction !== undefined ? { reaction } : {}),
           });
         }
         // Saved with the answer it describes, so a restart that finishes
@@ -2013,7 +2047,8 @@ export class AgentRunner {
         await this.store.save(session);
         throw error;
       }
-      const lastError = error instanceof Error ? error.message : String(error);
+      const failure = await this.maskedFailure(session, error);
+      const lastError = failure.text;
       // Read off what the provider threw, not the normalized error: an
       // abort replaces it with a fresh `RunAbortedError`, and a harness
       // cancelled mid-turn — the watchdog's doing, most often — has the
@@ -2051,10 +2086,39 @@ export class AgentRunner {
         type: 'session.failed',
         sessionId: session.id,
         error: lastError,
-        ...(error instanceof HostRefusalError ? { refused: true as const } : {}),
+        ...(failure.error instanceof HostRefusalError ? { refused: true as const } : {}),
       });
-      throw error;
+      throw failure.error;
     }
+  }
+
+  /**
+   * A failed turn's error and text with every value `failureSecrets`
+   * names masked (see that option). The error is masked in place where it
+   * can be (`redactedError`), so its class and identity survive: a
+   * refusal still reads as refused, an abort as the caller's abort.
+   */
+  private async maskedFailure(session: Session, error: unknown): Promise<{ error: unknown; text: string }> {
+    const plain = (value: unknown): string => (value instanceof Error ? value.message : String(value));
+    if (!this.options.failureSecrets) {
+      return { error, text: plain(error) };
+    }
+    let secrets: string[];
+    try {
+      secrets = [...await this.options.failureSecrets(session)];
+    } catch {
+      return { error, text: plain(error) };
+    }
+    if (error instanceof Error) {
+      const masked = redactedError(error, secrets);
+      return { error: masked, text: plain(masked) };
+    }
+    // Anything else is shown by its text (a channel stringifies what a
+    // dispatch rejected with), so a value whose text held a secret is
+    // replaced by the masked text; one with nothing to mask stays itself.
+    const text = plain(error);
+    const masked = redactSecrets(text, secrets);
+    return { error: masked === text ? error : masked, text: masked };
   }
 
   /**

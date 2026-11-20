@@ -187,8 +187,20 @@ export const createAdmitter = ({
    * once the sessions named this agent (the cold case). Everything ahead of
    * it on the chain has already been dispatched, and everything still in
    * intake arrived after it, so it cancels the dispatched turns only.
+   *
+   * It also stops the background tasks this conversation started (AGT-357,
+   * decision 3 of agent-plans roadmap/952-background-tasks.md): a person
+   * who says stop means those too. Tasks alone make it a stop, and once
+   * their stops are written one line in `thread` names them.
    */
-  const stopTurns = (connection: AgentConnection, sessionId: string, userId: string, channel: string, fromIntake = false): boolean => {
+  const stopTurns = (
+    connection: AgentConnection,
+    sessionId: string,
+    userId: string,
+    channel: string,
+    thread: string | undefined,
+    fromIntake = false,
+  ): boolean => {
     const running = renderers.get(sessionId) ?? [];
     const inIntake = fromIntake ? 0 : intakeInFlight.get(sessionId) ?? 0;
     const reason = `${SLACK_STOP_REASON}${userId}`;
@@ -206,15 +218,36 @@ export const createAdmitter = ({
     // a stop with nothing running is an ordinary message. The renderers'
     // started turns are among those counted.
     const onSession = getGateway()?.abortTurns?.(sessionId, reason) ?? 0;
-    if (running.length === 0 && inIntake === 0 && onSession === 0) {
+    // Counted at once, like the turns, so a stop with only tasks running is
+    // still a stop and never a message to the agent. A task an earlier stop
+    // reached that hasn't ended yet still counts, and isn't named again.
+    const tasks = getGateway()?.stopTasks?.(sessionId, userId);
+    const openTasks = tasks?.open ?? 0;
+    if (running.length === 0 && inIntake === 0 && onSession === 0 && openTasks === 0) {
       return false;
+    }
+    if (tasks !== undefined && openTasks > 0) {
+      track(tasks.stopped.then(async (stopped) => {
+        if (stopped.length === 0) {
+          return;
+        }
+        const named = stopped.map((id) => `\`${id}\``).join(', ');
+        await connection.web.chat.postMessage({
+          channel,
+          text: `Stopped by <@${userId}>: background task${stopped.length === 1 ? '' : 's'} ${named}.`,
+          ...(thread !== undefined ? { thread_ts: thread } : {}),
+        });
+      }).catch((error: unknown) => {
+        log(`slack: could not say which background tasks ${userId} stopped in ${channel}: ${error instanceof Error ? error.message : String(error)}`);
+      }));
     }
     if (inIntake > 0) {
       stopsBySession.set(sessionId, { count: (stopsBySession.get(sessionId)?.count ?? 0) + 1, by: userId });
     }
     // A renderer's started turn is also one the gateway counts, so this is
     // the larger of the two, not their sum.
-    log(`slack: ${userId} stopped ${Math.max(running.length, onSession) + inIntake} turn(s) of ${connection.config.agentId} in ${channel}`);
+    const taskCount = openTasks > 0 ? ` and ${openTasks} background task(s)` : '';
+    log(`slack: ${userId} stopped ${Math.max(running.length, onSession) + inIntake} turn(s)${taskCount} of ${connection.config.agentId} in ${channel}`);
     return true;
   };
 
@@ -489,7 +522,7 @@ export const createAdmitter = ({
           conversation: event.channel,
           ...(thread ? { thread } : {}),
         });
-        if (stopTurns(connection, stopSession, sender, event.channel)) {
+        if (stopTurns(connection, stopSession, sender, event.channel, thread)) {
           return undefined;
         }
         log(`slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`);

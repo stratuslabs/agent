@@ -19,6 +19,7 @@ import { runSignIn } from './commands/signin.ts';
 import { runDashboard } from './commands/dashboard.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runGrants } from './commands/grants.ts';
+import { runPeople } from './commands/people.ts';
 import { runHealth } from './commands/health.ts';
 import { runEvents } from './commands/events.ts';
 import { runLogs } from './commands/logs.ts';
@@ -32,6 +33,7 @@ import { runSessionRollover } from './commands/session.ts';
 import { runSessions } from './commands/sessions.ts';
 import { runSetup } from './commands/setup.ts';
 import { runSkillAdd, runSkillValidate, runSkillReload, runSkills } from './commands/skills.ts';
+import { runTasks } from './commands/tasks.ts';
 import { runTemplateAdd } from './commands/template.ts';
 import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
@@ -240,6 +242,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
       return await runGrants(command, streams, resolvedEnv);
     }
 
+    if (command.command === 'people') {
+      return await runPeople(command, streams, resolvedEnv);
+    }
+
     if (command.command === 'memory') {
       return await runMemory(command, streams, resolvedEnv);
     }
@@ -250,6 +256,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
 
     if (command.command === 'sessions') {
       return await runSessions(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'tasks') {
+      return await runTasks(command, streams, resolvedEnv);
     }
 
     if (command.command === 'doctor') {

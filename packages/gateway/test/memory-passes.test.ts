@@ -479,6 +479,28 @@ test('a shadow pass writes to the shadow file, never memory, and keeps its own w
   assert.equal(write.status, 'done', 'a shadow claim does not move the write watermark');
 });
 
+test('a shadow pass recalls the facts it wrote this pass, so it supersedes its own instead of saving a duplicate', async (t) => {
+  const env = await setup(t);
+  await env.host.handle.start(AGENT, 'shadow');
+  env.sessions.set('s1', sessionOf('s1', [message('m1', at(1), 'Ava prefers green tea.')]));
+  const recalled: string[][] = [];
+  env.setScript(async (run, remember) => {
+    const recall = (query: string) => run.tools.find((tool) => tool.name === 'memory.recall')!
+      .execute({ query }, sessionOf(run.sessionId, []), {} as never) as Promise<{ results: { id: string; content: string }[] }>;
+    const first = await remember({ fact: 'Ava prefers tea.', kind: 'preference', about: ['Ava'] }) as { id: string };
+    const found = await recall('Ava tea');
+    recalled.push(found.results.map((fact) => fact.content));
+    await remember({ fact: 'Ava prefers green tea.', kind: 'preference', about: ['Ava'], supersedes: [first.id] });
+    recalled.push((await recall('Ava tea')).results.map((fact) => fact.content));
+  });
+  const shadow = await env.host.handle.run({ kind: 'save', agentId: AGENT, sessionId: 's1', reason: 'quiet', mode: 'shadow' });
+  assert.deepEqual([shadow.status, shadow.saved, shadow.superseded], ['done', 2, 1]);
+  assert.deepEqual(recalled, [['Ava prefers tea.'], ['Ava prefers green tea.']]);
+  const lines = (await readFile(agentMemoryShadowFileIn(env.home, AGENT), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((line) => [line.content, line.supersedes]), [['Ava prefers tea.', undefined], ['Ava prefers green tea.', lines[0].id]]);
+  assert.equal((await env.memory.audit(AGENT)).length, 0, 'no real fact changes');
+});
+
 test('a shadow fact is held to the same about cap a real one is', async (t) => {
   const env = await setup(t);
   await env.host.handle.start(AGENT, 'shadow');

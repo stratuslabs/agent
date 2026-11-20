@@ -30,8 +30,12 @@ Usage:
   stratus sessions --status failed
   stratus schedules
   stratus schedules cancel <id>
+  stratus tasks
+  stratus tasks cancel <id>
   stratus grants blair
   stratus grants revoke blair --tool web.fetch
+  stratus people
+  stratus people add U0123ABCD --approver
   stratus memory list blair
   stratus memory search blair deploy pipeline
   stratus memory pin blair blair:memory:...
@@ -154,6 +158,13 @@ Commands:
                    pending_approval|completed|failed|stopped-early>,
                    --limit <n> (default 20), --format json
                    (also: stratus session list)
+  tasks            The running daemon's background tasks: every one running
+                   or not yet in its conversation, newest first, then the 20
+                   most recently finished. Status, agent (and worker), start,
+                   steps, id, and whether the outcome is in the
+                   conversation; never what a task was asked or answered.
+                   --agent <id>, --format json. "stratus tasks cancel <id>"
+                   stops one, and its conversation gets a notice
   credential set   Store a named credential an agent can resolve — a search
                    backend asks for search.apiKey. The value is read from
                    stdin, never from a flag, so it stays out of your shell
@@ -213,6 +224,18 @@ Commands:
                    lists approvals.commands from config: the daemon's own
                    when one is serving, else the file --config names (or
                    the one stratus serve would find)
+  people           Who each agent answers to on Slack and who may approve its
+                   calls: its admit setting, people and approvers, and
+                   whether each list is the shared one or its own. "stratus
+                   people add <member-id>" adds a teammate to the shared
+                   list (--agent <id>: that agent's own list, starting as a
+                   copy of the shared one; --approver: as an approver too).
+                   "stratus people remove <member-id>" takes them off every
+                   list (--agent: that agent only; --approver: approving
+                   only). Edits the trusted config (--config, else
+                   STRATUS_CONFIG, else ~/.stratus/config.json), then
+                   reloads a running daemon, which applies it with no
+                   restart, and says whether it did
   memory list      Show an agent's live memory with the trust label each
                    entry carries — user, agent, unknown (no recorded origin,
                    or written in a conversation with someone not configured

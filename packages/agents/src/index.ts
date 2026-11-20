@@ -106,14 +106,26 @@ export {
   DELEGATION_DEPTH_METADATA_KEY,
   DELEGATED_SESSION_ID_MARKER,
   DEFAULT_MAX_DELEGATION_DEPTH,
+  TASK_ID_METADATA_KEY,
   isDelegatedSession,
   delegatingSessionIdOf,
   outstandingDelegationFor,
   withoutDelegation,
   type DelegateDispatch,
+  type DelegateBackgroundStart,
+  type DelegateBackgroundStarted,
   type DelegateToolOptions,
   createDelegateTool,
 } from './tools/delegate.ts';
+
+export {
+  TASKS_TOOL_NAME,
+  CANCEL_TASK_TOOL_NAME,
+  createTaskTools,
+  type TaskCancelAnswer,
+  type TaskSummary,
+  type TaskToolsHost,
+} from './tools/tasks.ts';
 
 export {
   SCHEDULE_EVERY_TOOL_NAME,
@@ -133,6 +145,8 @@ export {
   type ConversationSayer,
   createMessageSayTool,
   type DefaultThreadResolver,
+  type ReportDestinationResolver,
+  reportsToHint,
   MESSAGE_READ_TOOL_NAME,
   MESSAGE_READ_MAX_LIMIT,
   MESSAGE_READ_BOOKMARK_BUDGET,

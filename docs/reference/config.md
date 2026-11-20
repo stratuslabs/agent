@@ -59,7 +59,7 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `language` | The language every agent writes in, as a tag (`en-GB`, `en-AU`, `fr`). Default `en-US`. A soul's own `language:` outranks it for that agent; anything that is not a tag is refused when the file is read. Allowed in a project-local config: it changes how agents write, nothing they may do — see [Agents](../concepts/agents.md#language) |
 | `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Approval policy: `posture` (`open`, the default, runs gated tools without asking; `guarded` asks; `review` runs them until a conversation reads outside content, then lets `rules` and a reviewer model decide, with `review.model`, `review.shadow` and `review.timeoutMs`), plus how a daemon asks and what it remembers — trusted configs only, see below and [Approvals](../guides/approvals.md#the-review-posture) |
-| `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`principals`, the default, or `anyone`), each with a per-agent `agents` sub-block — trusted configs only, see below |
+| `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), and whether anyone else gets a turn at all: `admit` (`principals`, the default, or `anyone`), each with a per-agent `agents` sub-block — trusted configs only, see below. `stratus people` lists and changes these lists and `approvals.slackApprovers` |
 | `slack` | How agents' replies appear in Slack: `replies` is `final` (the default — Slack's loading status while the agent works, what it writes before each tool posted as the tool starts, then the finished reply), `stream` (a `…` placeholder edited as the reply is written) or `texts` (`final` with each paragraph posted as its own message, at most five, except that a reply tagging another agent stays one message), with a per-agent `agents` sub-block; per agent only, `homeChannels` lists channel ids where it answers top-level messages without a mention; `agentMentions` (default `false`, top level or per agent) lets an agent answer other team agents' bots that mention it, with `team` (name to Slack bot user id, for agents on other daemons) and per-agent `agentMentionsFrom` to narrow who — trusted configs only, see [Slack](../guides/slack.md#how-replies-appear), [home channels](../guides/slack.md#a-home-channel) and [agents tagging each other](../guides/slack.md#when-agents-tag-each-other) |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `events` | The events listener for `stratus serve`: `listen` (`host`, `port`, default `127.0.0.1:4124`), `maxBodyBytes`, and `sources` by id, each with `verify` (`github` or `standard-webhooks`) and `secrets` (credential names). Nothing listens until a source is named — trusted configs only, see [Events](../guides/events.md) |
@@ -69,6 +69,8 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `maxTurns` | How many tool turns one message may take before the agent stops and reports where it got to. Default `40` — trusted configs only, see below |
 | `agentMaxTurns` | Per-agent replacements for `maxTurns`, keyed by agent id. Trusted configs only |
 | `autoContinue` | Agents that keep working past their budget instead of stopping to ask, keyed by agent id: `true` (no cap) or a number of extra budgets per message. Off for agents not listed. Trusted configs only. See [how many turns one message may spend](#how-many-turns-one-message-may-spend) |
+| `concurrentScheduledTurns` | How many of an agent's schedules may run a firing at once, keyed by agent id: `{ "atlas": 2 }`. 1 for agents not listed; one schedule never overlaps itself whatever the number. Trusted configs only. See [Schedules](../guides/schedules.md#limits) |
+| `tasks` | Background tasks: `enabled` (default `true`) lets an agent's `agent.delegate` call pass `background: true`, and `maxRunningPerAgent` caps how many one agent has running at once, keyed by agent id: `{ "atlas": 5 }`, 3 for agents not listed. Trusted configs only. See [Background tasks](#background-tasks) |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -273,6 +275,73 @@ parent's: `agent.delegate` starts a separate dispatch, and each dispatch is
 held to this ceiling. The bound on delegation *depth* is a different
 setting — see [Tools](../guides/tools.md).
 
+## Background tasks
+
+An agent that may delegate can pass `background: true` to
+`agent.delegate`. The call returns a task id at once instead of waiting,
+the work runs as its own delegated session, and its outcome is added to the
+conversation that started it, once, when it ends, as a new turn: in
+Slack, the agent's reply to it is a new message in the thread. The work
+can be the agent's own, which needs no `delegates:` entry, or a
+teammate's that `delegates:` allows. Only one level: a delegated session,
+a task's worker included, can't start a task. Tasks are on unless
+`tasks.enabled` is `false`.
+
+```json
+{
+  "tasks": { "maxRunningPerAgent": { "atlas": 5 } }
+}
+```
+
+- **Cap.** Each agent may have 3 tasks running, or the number
+  `maxRunningPerAgent` gives it. A start past the cap is refused with an
+  error the agent can pass on; nothing queues. Asking again for the same
+  worker and prompt from the same conversation returns the task already
+  running.
+- **Restarts.** A stop or restart doesn't wait for a running task: it cuts
+  it off, and the next start reports it interrupted in its conversation.
+  It is never run again.
+- **Approvals.** A task's gated call is asked in the conversation that
+  started it, as any delegated call is, and the request carries the task
+  id (`taskId` on `tool.approval-requested` and on `GET /api/v1/approvals`
+  rows). The task shows `waiting_approval` until someone answers. With
+  nobody answering, the approval timeout (15 minutes by default) denies the
+  call and the task goes on from there.
+- **Stop.** An approver's `stop` in a Slack conversation also stops the
+  tasks that conversation started, and a line there names them
+  ([stopping a turn](../guides/slack.md#stopping-a-turn)). Each task's
+  outcome then arrives as cancelled. An agent stops its own with
+  `agent.cancelTask`, and the operator any task with `stratus tasks
+  cancel <id>`.
+- **Seeing them.** An agent lists its own with `agent.tasks`.
+  `stratus tasks` lists the running daemon's tasks: every
+  one running or whose outcome isn't in its conversation yet, newest
+  first, then the 20 most recently finished, with the status, agent,
+  steps, task id, and whether the outcome is in the conversation.
+  `--agent <id>` narrows it to the tasks one agent started, and
+  `--format json` adds the conversation and worker session ids. It never
+  shows what a task was asked or answered: that stays in the two sessions.
+  The control API has the same list at `GET /api/v1/tasks` (`?agent=<id>`)
+  and the cancel at `POST /api/v1/tasks/<id>/cancel`; both need the
+  operator token or a dashboard sign-in. A cancel with the token is named
+  "from the CLI" in the notice, and one from a dashboard sign-in "from the
+  dashboard". Each task's start and end is also an event, `task.started`
+  and then `task.completed`, `task.failed`, `task.cancelled` or
+  `task.interrupted`, with `task.waiting-approval` each time it starts
+  waiting on an approval, in the daemon log and on the control API's event
+  stream, with ids only.
+- **Off.** `enabled: false` refuses `background: true` with an error
+  saying so, and agents no longer get `agent.tasks` or `agent.cancelTask`.
+  Tasks a previous run left are still settled at startup, and `stratus
+  tasks` still lists them.
+
+`stratus serve` names the setting when it starts (`background tasks: on,
+up to 3 running per agent (atlas 5)`, or `background tasks: off
+(tasks.enabled is false)`). A project-local
+`stratus.config.json` can't set `tasks`. A value that isn't one (a cap of
+0, `"enabled": "yes"`) is refused when the config loads, so the daemon
+doesn't start on it, and the error names the entry.
+
 ## Prompt caching
 
 `promptCache` marks the stable head of each Anthropic request — the tool
@@ -329,6 +398,8 @@ set.
 | `api` | Which interface and port a daemon binds, and the address credential links point at | [Remote access](../guides/remote-access.md) |
 | `events` | Whether a second port opens for deliveries, on which interface, and who may wake the daemon's agents | [Events](../guides/events.md) |
 | `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |
+| `concurrentScheduledTurns` | How many unattended turns one agent runs at once, which multiplies what its schedules can spend | [Schedules](../guides/schedules.md#limits) |
+| `tasks` | Whether agents start work nobody waits on, and how much of it runs at once | [Background tasks](#background-tasks) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 | `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
 

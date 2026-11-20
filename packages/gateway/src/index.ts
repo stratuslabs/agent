@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   type Message,
   filePathsOf,
+  postOf,
   isUnaddressedTurn,
   carriesKey,
   SENDER_TRUST_METADATA_KEY,
@@ -32,10 +33,13 @@ import {
   latestTurnReply,
   conversationContextFrom,
   STRATUS_SKILL_ID,
+  redactSecrets,
   type AgentDefinition,
   type AgentRuntimeContext,
   type AgentMemoryStore,
+  type ApprovalContext,
   type ApprovalPolicy,
+  type ApprovalRefusal,
   type Executor,
   type ExecutorContribution,
   type JsonObject,
@@ -52,6 +56,7 @@ import {
   CREDENTIAL_REQUEST_TOOL_NAME,
   createForgetTool,
   createPinTool,
+  canonicalDestination,
   createMessageSendTool,
   createMessageSayTool,
   createMessageReadTool,
@@ -63,7 +68,11 @@ import {
   createRecallTool,
   createRememberTool,
   createScheduleTools,
+  createTaskTools,
   DELEGATED_SESSION_ID_MARKER,
+  isDelegatedSession,
+  MESSAGE_SEND_TOOL_NAME,
+  reportsToHint,
   type ParsedSoul,
   type ScheduleDestination,
   loadStratusSkill,
@@ -89,9 +98,12 @@ import {
   isScheduleSessionId,
   SqliteScheduleStore,
   SCHEDULE_SESSION_ID_PREFIX,
+  sendOutcome,
 } from './schedules.ts';
 import { ShardedSessionStore } from './sessions.ts';
 import { createSubAgents } from './sub-agents.ts';
+import { createBackgroundTasks } from './background-tasks.ts';
+import type { TaskRow } from './tasks.ts';
 import { createSteering } from './steering.ts';
 import { createTurnDispatch } from './turn-dispatch.ts';
 import {
@@ -156,6 +168,9 @@ export {
   SCHEDULE_SESSION_ID_PREFIX,
   type PreviousRun,
   type ScheduleStoreLike,
+  sendOutcome,
+  type SendOutcome,
+  undeliveredSendError,
   type SchedulerLimits,
   type SchedulerRuntime,
   type SchedulerRuntimeOptions,
@@ -179,6 +194,8 @@ export {
   type RefusedEventDelivery,
 } from './events.ts';
 export { type MemoryPassDetail } from './memory-passes.ts';
+export { TASKS_OPERATOR_FINISHED_LIMIT, type TaskCancelInput, type TaskCancelResult, type TaskListing } from './background-tasks.ts';
+export { type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
 // The review posture's fixed prompt and case, for the review-step eval
 // (`packages/cli/eval/review-step`), which measures the prompt production
 // sends rather than a copy of it.
@@ -216,6 +233,7 @@ import {
   createFileCredentialResolver,
   credentialValuesFor,
   resolveDaemonCredential,
+  storedSecretValues,
   createHomeMemoryStore,
   drainSharedMemory,
   hasBracketedLegacyStateIn,
@@ -468,6 +486,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         trust: sessionWriteTrust(session),
       };
     },
+    // AGT-335 and AGT-353: how a completed firing's sends ended at its
+    // destination. Tool results only, never the transcript's words.
+    sendOutcome: async (sessionId, destination, idempotencyKey) => {
+      const session = await store.get(sessionId);
+      return session ? sendOutcome(session, destination, idempotencyKey) : undefined;
+    },
+    // The runtime's own line, so no speaker: it is nobody's turn to hear.
+    notify: async (agentId, destination, text) => {
+      const connection = await outboundFor(agentId, destination, destination.thread);
+      await connection.post(text);
+    },
     hasAgent: (agentId) => registry.get(agentId) !== undefined,
     ...(options.schedules ? { limits: options.schedules } : {}),
     // The same stamp check every turn runs, before a slot is claimed — see
@@ -524,6 +553,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     scheduler,
     effectiveApprovalTimeoutMs,
     isStopping: () => stopping,
+    taskApprovalWait: (sessionId) => backgroundTasks.approvalWait(sessionId),
   });
 
 
@@ -580,6 +610,30 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     : options.approvals;
 
   /**
+   * A live firing's refused message.send, told where its schedule reports
+   * (AGT-336). The policy refuses before the tool runs, so the tool's own
+   * hint for a send the channel rejected (AGT-335) never sees it, and a
+   * headless refusal alone leaves the agent nowhere to retry. Only the
+   * agent's words change: the policy has already reported its decision in
+   * its own words, so the log and `permission.decided` read as before. A
+   * send that named the schedule's destination was refused for some other
+   * reason, and any other session gets the policy's answer untouched.
+   */
+  const withRefusalReportHint = (context: ApprovalContext, answer: boolean | ApprovalRefusal): boolean | ApprovalRefusal => {
+    if (context.call.toolName !== MESSAGE_SEND_TOOL_NAME) {
+      return answer;
+    }
+    const reportsTo = scheduler.approvalDestinationFor(context.session);
+    if (reportsTo === undefined || context.tool.destinationFor?.(context.call.input) === canonicalDestination(reportsTo)) {
+      return answer;
+    }
+    const given = typeof answer === 'object' && answer !== null && typeof answer.reason === 'string' ? answer.reason.trim() : '';
+    // The runner's own words for a refusal that gave none, kept.
+    const reason = given || `Tool call denied by approval policy: ${context.call.toolName}`;
+    return { allowed: false, reason: `${reason}${/[.!?…]$/.test(reason) ? '' : '.'} ${reportsToHint(reportsTo)}` };
+  };
+
+  /**
    * Every approval opens a tool phase, whatever policy answers it.
    *
    * `tool.approval-requested` is the broker's event, so it exists only for
@@ -594,7 +648,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         async approve(context) {
           const release = holdApprovalWait(context.session.id);
           try {
-            return await configuredApprovals.approve(context);
+            const answer = await configuredApprovals.approve(context);
+            return answer === true ? answer : withRefusalReportHint(context, answer);
           } finally {
             // Every path out, including a policy that throws. What happens
             // after the answer is the tool events' business, and they are
@@ -1136,7 +1191,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // that reports no id simply has none to hand back.
     const ts = typeof posted === 'object' && posted !== null ? (posted as { ts?: unknown }).ts : undefined;
     return typeof ts === 'string' && ts.length > 0 ? { id: ts } : {};
-  }, { defaultThread: (session, destination) => scheduler.reportThreadFor(session, destination) }));
+  }, {
+    defaultThread: (session, destination) => scheduler.reportThreadFor(session, destination),
+    // Bound exactly as an approval's destination is: a live firing, its schedule.
+    reportsTo: (session) => scheduler.approvalDestinationFor(session),
+  }));
   // A mid-task message goes where the conversation is, through the channel
   // carrying this agent there, and nowhere else (card 1009). A session no
   // channel started (a terminal run, a schedule nobody watches) has nobody
@@ -1359,6 +1418,59 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
 
 
+  // Background tasks (AGT-211): started only when `tasks.enabled`; the
+  // restart sweep runs either way. Everything they reach is declared
+  // further down: late-bound.
+  const backgroundTasks = createBackgroundTasks({
+    options,
+    fleetDb: fleetDbIn(stateDir),
+    stateHome: stateDir,
+    store,
+    bus,
+    dispatchInternal: (input) => dispatchInternal(input),
+    onSessionChain: (sessionId, work) => onSessionChain(sessionId, work),
+    onWorkerChain: (sessionId, work) => onSessionChain(sessionId, work, undefined, { background: true }),
+    settleRepeat: (sessionId, idempotencyKey, agentId) => settleRepeat(sessionId, idempotencyKey, agentId, undefined, undefined),
+    observe: (input) => observer.observe(input),
+    abortTurns: (sessionId, reason) => abortTurns(sessionId, reason),
+    // Through the seams a channel already has: which conversation the
+    // origin session is (`sessionConversation`), its thread from the
+    // session's own conversation record, and the addressable outbound
+    // post, speaking as the origin session so the channel doesn't hear the
+    // notice back into the transcript that already holds it.
+    postToOrigin: async (notice) => {
+      const origin = await store.get(notice.sessionId);
+      const kind = origin?.metadata?.channel;
+      if (origin === undefined || typeof kind !== 'string') {
+        throw new Error(`${notice.sessionId} is not a channel conversation, so there is nowhere to post it`);
+      }
+      const { adapter } = channelCarrying(kind, notice.agentId, (candidate) => candidate.sessionConversation !== undefined);
+      if (!adapter?.sessionConversation) {
+        throw new Error(`no running '${kind}' channel carrying ${notice.agentId} can say which conversation ${notice.sessionId} is`);
+      }
+      const to = adapter.sessionConversation(notice.agentId, notice.sessionId);
+      if (to === undefined) {
+        throw new Error(`the running '${kind}' channel can't say which conversation ${notice.sessionId} is`);
+      }
+      const thread = conversationContextFrom(origin.metadata)?.threadRoot;
+      const connection = await outboundFor(notice.agentId, { channel: kind, to }, thread, { sessionId: notice.sessionId, trust: notice.trust });
+      await connection.post(notice.text);
+    },
+    isStopping: () => stopping,
+    refusal: () => refusal(),
+    log,
+    warn,
+  });
+
+  // The agent's view of its own tasks, offered only while tasks are on
+  // (`tasks.enabled: false` hides them). Rows already there stay readable
+  // to the operator.
+  if (backgroundTasks.toolsHost !== undefined) {
+    for (const taskTool of createTaskTools(backgroundTasks.toolsHost)) {
+      tools.register(taskTool);
+    }
+  }
+
   // dispatchInternal and onSessionChain are declared further down: late-bound.
   const { bindToolCalls, subAgents } = createSubAgents({
     options,
@@ -1372,6 +1484,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     idAtFirstCall,
     hostIdOf,
     isHostSubAgent,
+    ...(backgroundTasks.start !== undefined ? { background: backgroundTasks.start } : {}),
   });
 
 
@@ -1396,6 +1509,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return createHash('sha256').update(JSON.stringify(providerInputs)).digest('hex');
   };
 
+  // What a failed turn's text is masked against before it is recorded,
+  // announced or thrown (`failureSecrets`): every value the credentials
+  // file holds, plus what the failing agent's listed credentials resolve to
+  // now, which adds any the environment supplies. Read per failure, so a
+  // key stored or rotated while the daemon runs is covered.
+  const failureSecrets = async (session: Session): Promise<string[]> => [
+    ...await storedSecretValues(env),
+    ...await credentialValuesFor(createFileCredentialResolver(env), session.agent),
+  ];
+
+  // The keys a runtime resolved, its fallback's included, wherever they came
+  // from (the environment, most often, when they are in no file). The API
+  // adapters strip their own key from what they throw; the codex adapter
+  // hands its key to the transport and does not, so a runner's set carries
+  // its runtime's keys for every provider.
+  const runtimeKeysOf = (config: RuntimeConfig): string[] => {
+    const held = config as { apiKey?: unknown; authToken?: unknown; fallback?: { apiKey?: unknown; authToken?: unknown } };
+    return [held.apiKey, held.authToken, held.fallback?.apiKey, held.fallback?.authToken]
+      .filter((value): value is string => typeof value === 'string' && value !== '');
+  };
+
   // A sub-agent's runner has no memory store, so no turn of it injects or
   // reads the agent's memory; no skill catalog, so its prompt is its
   // instruction and its tools; and grants nothing to every agent, since
@@ -1416,9 +1550,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the runner built just below — late-bound because the runner needs
     // the provider first.
     let hostedRunner: AgentRunner | undefined;
+    // One set for both places a provider's error text leaves the runner:
+    // the switch warning below and a failed turn.
+    const secretsOf = async (session: Session): Promise<string[]> => [...runtimeKeysOf(config), ...await failureSecrets(session)];
     const provider = createRuntimeProvider(
       config,
-      (error) => warn(`default model failed (${error instanceof Error ? error.message : String(error)}); using the fallback model`),
+      async (error, session) => {
+        // Masked like a failed turn's text, since the primary's error can
+        // quote any stored secret. When the store can't be read, the
+        // runtime's own keys are still masked.
+        const secrets = await secretsOf(session).catch(() => runtimeKeysOf(config));
+        warn(`default model failed (${redactSecrets(error instanceof Error ? error.message : String(error), secrets)}); using the fallback model`);
+      },
       async (session, call, context) => {
         if (!hostedRunner) {
           throw new Error('The Stratus runtime is not ready to execute tools yet.');
@@ -1455,6 +1598,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ? { autoContinue, waitingInput: (sessionId: string) => (waitingDispatches.get(sessionId) ?? 0) > 0 }
         : {}),
       providerCallGuards,
+      failureSecrets: secretsOf,
     });
     hostedRunner = runner;
     runners.set(key, runner);
@@ -1643,8 +1787,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // provider await, so the timer arms only when a streaming provider is
     // actually the thing being waited on (never during tool phases,
     // post-switch silent fallbacks, or turn wrap-up).
+    // A background task's start or end names the conversation that started
+    // it (AGT-357), but it isn't this turn's provider doing anything: heard
+    // as activity, every task ending would give a stalled provider a fresh
+    // window. Both subscriptions pass it by.
     const unsubscribeObserver = bus.subscribe((event: StratusEvent) => {
-      if (!('sessionId' in event) || event.sessionId !== sessionId) {
+      if (!('sessionId' in event) || event.sessionId !== sessionId || event.type.startsWith('task.')) {
         return;
       }
       if (event.type === 'provider.delta') {
@@ -1701,7 +1849,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }, { prepend: true });
 
     const unsubscribeDrain = bus.subscribe((event: StratusEvent) => {
-      if (!('sessionId' in event) || event.sessionId !== sessionId) {
+      if (!('sessionId' in event) || event.sessionId !== sessionId || event.type.startsWith('task.')) {
         return;
       }
       if (
@@ -1762,6 +1910,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const waitingDispatches = new Map<string, number>();
   const inflight = new Set<Promise<unknown>>();
+  /** The links in `inflight` that are background task workers: the drain cuts these off instead of waiting for them. */
+  const backgroundLinks = new WeakSet<Promise<unknown>>();
   let stopping = false;
   // Open until `startServing` reads what the last process left, which it
   // does before any channel or the scheduler can deliver work.
@@ -1773,7 +1923,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     : { ...intakeState });
   let heldState = options.held === true;
   /** What a held start left for `promote()`: the channels it did not start, and the sweeps it did not run. */
-  let deferredStart: { adapters: GatewayChannelAdapter[]; orphaned: ReadonlySet<string>; abandoned: string[] } | undefined;
+  let deferredStart: {
+    adapters: GatewayChannelAdapter[];
+    orphaned: ReadonlySet<string>;
+    abandoned: string[];
+    tasks: TaskRow[];
+  } | undefined;
   // Pause and resume run one at a time, each writing the file and then the
   // state, so the two always agree: overlapping, a pause's write could land
   // after a resume removed the file, leaving the daemon paused in memory
@@ -1801,6 +1956,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     } else {
       turnControllers.set(sessionId, new Set([controller]));
     }
+  };
+  /** The gateway's `abortTurns`, also a background task cancel's backstop. */
+  const abortTurns = (sessionId: string, reason: string): number => {
+    const running = turnControllers.get(sessionId) ?? new Set<AbortController>();
+    for (const controller of running) {
+      if (!controller.signal.aborted) {
+        controller.abort(new RunAbortedError(reason));
+      }
+    }
+    return running.size;
   };
   const untrackTurn = (sessionId: string, controller: AbortController): void => {
     const running = turnControllers.get(sessionId);
@@ -1905,6 +2070,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const openBatches = new Map<string, MergeBatch>();
   /** The start-up snapshot `recoverParkedTurns` judges orphans from, for a repeat that gets there first. */
   let orphanedAtStart: ReadonlySet<string> = new Set();
+  /** The worker sessions of the tasks the last process left unsettled: the task sweep's, which the generic sweeps skip. */
+  let taskWorkersAtStart: ReadonlySet<string> = new Set();
 
   /**
    * The runtime one agent would run on right now — config snapshot, soul
@@ -2085,6 +2252,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     activeTurns,
     onTurnRuntime,
     getOrphanedAtStart: () => orphanedAtStart,
+    getTaskWorkersAtStart: () => taskWorkersAtStart,
     runtimeForAgent,
     watchdogStreamsFor,
     reachesHarness,
@@ -2166,6 +2334,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     work: () => Promise<T>,
     /** True once this work no longer counts as queued: a batch steered into the turn ahead (`takeSteered` released it). */
     released?: () => boolean,
+    { background = false }: { background?: boolean } = {},
   ): Promise<T> => {
     const previous = sessionChains.get(sessionId) ?? Promise.resolve();
     queuedWork.set(sessionId, (queuedWork.get(sessionId) ?? 0) + 1);
@@ -2180,6 +2349,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const settled = turn.catch(() => {});
     sessionChains.set(sessionId, settled);
     inflight.add(settled);
+    if (background) {
+      backgroundLinks.add(settled);
+    }
     void settled.finally(() => {
       inflight.delete(settled);
       if (sessionChains.get(sessionId) === settled) {
@@ -2247,6 +2419,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       bus,
       maxTurns,
       providerCallGuards,
+      failureSecrets: async (session) => [...runtimeKeysOf(config), ...await failureSecrets(session)],
     });
     const definition: AgentDefinition = {
       id: source.definition.id,
@@ -2334,7 +2507,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...(request.origin !== undefined ? { origin: request.origin } : {}),
       ...(request.destination !== undefined ? { destination: request.destination } : {}),
       ...(firing !== undefined ? { firing } : {}),
-      delegated: isSubAgentSession(request.session),
+      // Both kinds of run another agent started: an `agent.spawn` sub-agent
+      // and an `agent.delegate` sub-session. Each one's request is the
+      // delegating agent's instruction, and nobody is in it.
+      delegated: isSubAgentSession(request.session) || isDelegatedSession(request.session),
     });
     if (stopReviews.signal.aborted) {
       return { failed: 'cancelled' };
@@ -2754,11 +2930,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
+    log(backgroundTasks.summary);
 
     // Read before anything can dispatch, so this is exactly what the
     // last process left running and not a turn of ours caught in flight.
     // Applied further down, once there is somewhere for the failure to
-    // be heard.
+    // be heard. The background tasks first: their workers are the task
+    // sweep's, and the two lists below are judged without them.
+    const tasksLeft = backgroundTasks.unsettledAtStart();
+    taskWorkersAtStart = new Set(tasksLeft.map((task) => task.workerSessionId));
     const abandoned = await listAbandonedTurns();
     // Likewise: which parked sub-sessions have a parent still inside its
     // agent.delegate call is only answerable while nothing can resume that
@@ -2779,12 +2959,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Held: only the operator's surface comes up, and everything that
       // would touch work waits for promote(), in the same order.
       await startChannels(adapters.filter((adapter) => adapter.servesWhileHeld === true));
-      deferredStart = { adapters: adapters.filter((adapter) => adapter.servesWhileHeld !== true), orphaned, abandoned };
+      deferredStart = { adapters: adapters.filter((adapter) => adapter.servesWhileHeld !== true), orphaned, abandoned, tasks: tasksLeft };
       log('stratusd is held: answering health only, until promoted');
       return;
     }
     await startChannels(adapters);
-    await beginWork(orphaned, abandoned);
+    await beginWork(orphaned, abandoned, tasksLeft);
   };
 
   const startChannels = async (adapters: GatewayChannelAdapter[]): Promise<void> => {
@@ -2840,6 +3020,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const beginWork = async (
     orphaned: ReadonlySet<string>,
     abandoned: string[],
+    tasksLeft: TaskRow[],
   ): Promise<void> => {
     // After the channels, so a catch-up firing has somewhere to report and
     // the missed-window log lines land in a gateway whose surfaces are
@@ -2861,6 +3042,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     void failAbandonedTurns(abandoned).catch((error) => {
       warn(`failing abandoned turns failed: ${error instanceof Error ? error.message : String(error)}`);
     });
+
+    // Not awaited either: a task's notice is a turn in its origin
+    // conversation, queued behind whatever that conversation is doing. The
+    // two sweeps above skip these workers; an origin one of them is
+    // settling gets the notice after it, on that origin's chain.
+    void backgroundTasks.sweep(tasksLeft);
   };
 
   let promoting: Promise<void> | undefined;
@@ -2903,7 +3090,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // start (a newer build stamped the home meanwhile) must leave the
       // daemon held, reporting so, and a retry able to try again.
       try {
-        await beginWork(pending.orphaned, pending.abandoned);
+        await beginWork(pending.orphaned, pending.abandoned, pending.tasks);
       } catch (error) {
         promotionFailure = new Error(
           `This daemon could not begin its work and stays held until it is restarted: ${error instanceof Error ? error.message : String(error)}`,
@@ -2940,6 +3127,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     storesClosed = true;
     scheduleStore.close();
     eventStore?.close();
+    backgroundTasks.close();
     store.close();
   };
 
@@ -3064,6 +3252,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Connected, it is refused with `GatewayStoppingError`, which the
       // channel can answer and keep for the next daemon. Until the set stays
       // empty: a turn queued behind one that finished joins it.
+      // Background task workers aren't waited for: once the rest is done
+      // they are cut off, and then waited for, which is quick.
+      const ordinary = (): Promise<unknown>[] => [...inflight].filter((link) => !backgroundLinks.has(link));
+      while (ordinary().length > 0) {
+        await Promise.allSettled(ordinary());
+      }
+      const cut = backgroundTasks.cutOff();
+      if (cut > 0) {
+        log(`${kind}: cut off ${cut} running background task(s); each is reported interrupted at the next start`);
+      }
       while (inflight.size > 0) {
         await Promise.allSettled([...inflight]);
       }
@@ -3103,6 +3301,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // starts as soon as that one settles, is aborted the same way.
       abortingWith = kind === 'stop' ? STOPPING_TURN_ERROR : RESTARTING_TURN_ERROR;
       stopReviews.abort(new Error('The daemon is stopping.'));
+      // The workers first, so each worker's turn ends with the cut-off
+      // error, not the shutdown's.
+      backgroundTasks.cutOff();
       for (const running of turnControllers.values()) {
         for (const controller of running) {
           controller.abort(shutdownAbort());
@@ -3271,9 +3472,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // placeholder by a process that died before saving its reply). It is
       // a new gateway seam, and it has to be ordered against the overhears
       // queued on the same session chain, so it is not built yet.
+      // A post a tool handed the thread (`postOf`, AGT-324) is speaking the
+      // same way a file is.
       const spoken = (message: Message): boolean =>
         (message.role === 'assistant' && message.content.trim().length > 0)
-        || (message.role === 'tool' && message.toolResult !== undefined && filePathsOf(message.toolResult).length > 0);
+        || (message.role === 'tool' && message.toolResult !== undefined
+          && (filePathsOf(message.toolResult).length > 0 || postOf(message.toolResult) !== undefined));
       const spokeIndex = session.messages.findLastIndex(spoken);
       const lastSpokeAt = spokeIndex >= 0 ? session.messages[spokeIndex]?.createdAt : undefined;
       return {
@@ -3451,14 +3655,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return sideRuns.has(sessionId);
     },
 
-    abortTurns(sessionId, reason) {
-      const running = turnControllers.get(sessionId) ?? new Set<AbortController>();
-      for (const controller of running) {
-        if (!controller.signal.aborted) {
-          controller.abort(new RunAbortedError(reason));
-        }
-      }
-      return running.size;
+    abortTurns,
+
+    cancelTask(taskId, stoppedBy) {
+      return backgroundTasks.cancel(taskId, { stoppedBy });
+    },
+
+    tasks(agentId) {
+      return backgroundTasks.list(agentId);
+    },
+
+    stopTasks(sessionId, stoppedBy) {
+      return backgroundTasks.stopTasks(sessionId, stoppedBy);
     },
 
     pendingApprovals() {
