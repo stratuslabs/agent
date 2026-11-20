@@ -4,7 +4,7 @@
  */
 import type { SessionStatus } from '@stratusagent/core';
 
-import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
+import { type ParsedHelpCommand, readFormatValue, readOptionValue } from './shared.ts';
 
 export interface ParsedSessionCommand {
   command: 'session';
@@ -82,11 +82,7 @@ export const parseSessionsCommand = (command: 'sessions' | 'session', rest: stri
       continue;
     }
     if (token === '--format') {
-      const value = readOptionValue(sessionsRest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      parsed.format = value;
+      parsed.format = readFormatValue(sessionsRest, index, ['text', 'json']);
       index += 1;
       continue;
     }

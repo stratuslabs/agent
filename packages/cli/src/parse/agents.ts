@@ -2,7 +2,7 @@
  * `stratus setup`, `stratus agent new` and `stratus agents`: making agents
  * and listing them.
  */
-import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
+import { type ParsedHelpCommand, readFormatValue, readOptionValue } from './shared.ts';
 
 export interface ParsedSetupCommand {
   command: 'setup';
@@ -43,11 +43,7 @@ export const parseAgentsCommand = (command: 'agents' | 'agent', rest: string[]):
       return { command: 'help' };
     }
     if (argument === '--format') {
-      const value = readOptionValue(agentsRest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      format = value;
+      format = readFormatValue(agentsRest, index, ['text', 'json']);
       index += 1;
       continue;
     }
@@ -106,11 +102,7 @@ export const parseAgentCommand = (rest: string[]): ParsedAgentNewCommand | Parse
       continue;
     }
     if (token === '--format') {
-      const value = readOptionValue(agentRest, index, '--format');
-      if (value !== 'text' && value !== 'json' && value !== 'soul') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      format = value;
+      format = readFormatValue(agentRest, index, ['text', 'json', 'soul']);
       index += 1;
       continue;
     }

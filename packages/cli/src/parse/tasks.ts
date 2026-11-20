@@ -1,7 +1,7 @@
 /*
  * `stratus tasks`: the running daemon's background tasks, and cancelling one.
  */
-import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
+import { type ParsedHelpCommand, readFormatValue, readOptionValue } from './shared.ts';
 
 export interface ParsedTasksCommand {
   command: 'tasks';
@@ -35,11 +35,7 @@ export const parseTasksCommand = (rest: string[]): ParsedTasksCommand | ParsedHe
       continue;
     }
     if (token === '--format') {
-      const value = readOptionValue(tokens, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      parsed.format = value;
+      parsed.format = readFormatValue(tokens, index, ['text', 'json']);
       index += 1;
       continue;
     }

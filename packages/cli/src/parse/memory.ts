@@ -4,7 +4,7 @@
  */
 import { isTrustLevel, TRUST_LEVELS, type TrustLevel } from '@stratusagent/core';
 
-import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
+import { type ParsedHelpCommand, readFormatValue, readOptionValue } from './shared.ts';
 
 export interface ParsedMemoryCommand {
   command: 'memory';
@@ -100,11 +100,7 @@ export const parseMemoryCommand = (rest: string[]): ParsedMemoryCommand | Parsed
       continue;
     }
     if (token === '--format') {
-      const value = readOptionValue(memoryRest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      format = value;
+      format = readFormatValue(memoryRest, index, ['text', 'json']);
       index += 1;
       continue;
     }

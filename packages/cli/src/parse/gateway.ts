@@ -2,7 +2,7 @@
  * `stratus restart`, `stratus health`, `stratus events` and
  * `stratus schedules`: asking the running gateway, or telling it.
  */
-import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
+import { type ParsedHelpCommand, readFormatValue, readOptionValue } from './shared.ts';
 
 export interface ParsedRestartCommand {
   command: 'restart';
@@ -53,11 +53,7 @@ export const parseSchedulesCommand = (command: 'schedules' | 'schedule', rest: s
       return { command: 'help' };
     }
     if (token === '--format') {
-      const value = readOptionValue(tokens, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      format = value;
+      format = readFormatValue(tokens, index, ['text', 'json']);
       index += 1;
       continue;
     }
@@ -132,11 +128,7 @@ export const parseHealthCommand = (command: 'health' | 'events', rest: string[])
       return { command: 'help' };
     }
     if (token === '--format') {
-      const value = readOptionValue(rest, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      parsed.format = value;
+      parsed.format = readFormatValue(rest, index, ['text', 'json']);
       index += 1;
       continue;
     }
