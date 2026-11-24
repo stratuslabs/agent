@@ -814,6 +814,7 @@ export {
   type OutboundMessageRef,
   type SenderPolicy,
   type SessionRouting,
+  type TasksStop,
 } from './channels.ts';
 
 // The memory contract, its in-memory store and the memory block's
@@ -1195,6 +1196,8 @@ export {
   type EventHandler,
   type StratusEvent,
   type SubscribeOptions,
+  type TaskEvent,
+  type TaskEventType,
 } from './events.ts';
 
 // Approval answers and what an approval request carries, in their own

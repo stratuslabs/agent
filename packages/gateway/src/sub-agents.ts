@@ -28,6 +28,7 @@ import {
 } from '@stratusagent/core';
 import {
   createDelegateTool,
+  type DelegateBackgroundStart,
   DEFAULT_MAX_DELEGATION_DEPTH,
   DELEGATED_BY_METADATA_KEY,
   DELEGATION_DEPTH_METADATA_KEY,
@@ -59,6 +60,8 @@ export interface SubAgentsDeps extends Pick<ApprovalBroker, 'liveSubAgentIds' | 
     steer?: (turnSignal: AbortSignal) => Promise<SteeredMessage | undefined>,
   ) => Promise<Session>;
   onSessionChain: <T>(sessionId: string, work: () => Promise<T>, released?: () => boolean) => Promise<T>;
+  /** How `agent.delegate` starts a background task (`background-tasks.ts`); absent while tasks are off. */
+  background?: DelegateBackgroundStart;
 }
 
 export const createSubAgents = ({
@@ -73,9 +76,11 @@ export const createSubAgents = ({
   idAtFirstCall,
   hostIdOf,
   isHostSubAgent,
+  background,
 }: SubAgentsDeps) => {
   tools.register(createDelegateTool({
     registry,
+    ...(background !== undefined ? { background } : {}),
     dispatch: (input) => dispatchInternal({
       sessionId: input.sessionId,
       agentId: input.agent.id,

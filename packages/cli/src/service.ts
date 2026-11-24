@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, realpath, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { CONFIG_INVALID_EXIT_CODE } from './supervisor.ts';
@@ -230,6 +230,43 @@ const servicePathEntry = (env: ServiceEnvironment): { path?: string } => {
   return daemonPath !== undefined ? { path: daemonPath } : {};
 };
 
+/**
+ * For a node binary inside a Homebrew keg (`<prefix>/Cellar/<formula>/<version>/bin/node`),
+ * the formula's stable link (`<prefix>/opt/<formula>/bin/node`), and
+ * whether that link still resolves to this same binary. undefined for a
+ * node anywhere else, or one whose formula has no link.
+ *
+ * Node reports its own path with symlinks resolved, so on a Homebrew Mac
+ * `process.execPath` is the versioned keg. A unit naming it breaks on the
+ * next `brew upgrade`: the old binary can no longer load the upgraded
+ * libraries, and `brew cleanup` deletes it. The opt link is the path brew
+ * keeps pointing at whichever version is installed.
+ */
+export const homebrewNodeLink = async (execPath: string): Promise<{ link: string; current: boolean } | undefined> => {
+  const keg = /^(.+)\/Cellar\/([^/]+)\/[^/]+\/bin\/node$/.exec(execPath);
+  if (!keg?.[1] || !keg[2]) {
+    return undefined;
+  }
+  const link = path.join(keg[1], 'opt', keg[2], 'bin', 'node');
+  let linked: string;
+  try {
+    linked = await realpath(link);
+  } catch {
+    return undefined;
+  }
+  const current = await realpath(execPath).then((own) => own === linked, () => false);
+  return { link, current };
+};
+
+/**
+ * The node path a unit should name for this interpreter: Homebrew's stable
+ * link when it resolves to the same binary, else the path as given.
+ */
+export const stableNodePath = async (execPath: string): Promise<string> => {
+  const brew = await homebrewNodeLink(execPath);
+  return brew?.current ? brew.link : execPath;
+};
+
 export const serviceDefinition = (
   env: ServiceEnvironment,
   runAtLogin: boolean,
@@ -429,16 +466,166 @@ const confirmRunning = async (env: ServiceEnvironment, platform: ServicePlatform
   return answer;
 };
 
+/**
+ * How many more times a start the manager reported running is checked on,
+ * at START_CHECK_INTERVAL_MS: about five seconds.
+ */
+const SETTLE_CHECKS = 10;
+
+/** How much of what a failed start wrote is shown. */
+const STARTUP_OUTPUT_LINES = 20;
+const STARTUP_OUTPUT_BYTES = 8192;
+
+/** Where a start began, so only that start's output is shown. */
+interface StartMark {
+  at: number;
+  /** How long the error log already was; what follows is this start's. */
+  errorLogBytes: number;
+}
+
+/** Taken before the manager is asked to start anything. */
+const markStart = async (env: ServiceEnvironment): Promise<StartMark> => {
+  const at = Date.now();
+  let errorLogBytes = 0;
+  try {
+    errorLogBytes = (await stat(errorLogPath(env))).size;
+  } catch {
+    // No log yet: everything in it will be this start's.
+  }
+  return { at, errorLogBytes };
+};
+
+interface StartAnswer extends RunningAnswer {
+  /** The manager reported it running, then not: it died during startup. */
+  exited?: boolean;
+}
+
+/**
+ * Whether a start the manager accepted left a daemon that stayed up.
+ *
+ * The manager's first "running" is not enough: launchd reports a process
+ * running from the moment it spawns, before dyld or node has loaded
+ * anything, and Products printed "started" over a daemon that had already
+ * died (AGT-363). So after that answer it keeps asking for about five
+ * seconds. Nothing the daemon writes marks the end of its startup:
+ * gateway.json appears once the control API is bound, before the other
+ * channels and the scheduler start, and either can still fail and stop
+ * it. Neither manager restarts a crashed daemon inside the window (launchd
+ * throttles respawns to ten seconds, the unit says RestartSec=5), so a
+ * death shows up as a "no", or systemd's activating (auto-restart). One
+ * later than the window still goes unseen.
+ */
+const confirmStarted = async (env: ServiceEnvironment, platform: ServicePlatform): Promise<StartAnswer> => {
+  const confirmed = await confirmRunning(env, platform);
+  if (confirmed.running !== true) {
+    return confirmed;
+  }
+  const sleep = env.sleep ?? defaultSleep;
+  for (let check = 0; check < SETTLE_CHECKS; check += 1) {
+    await sleep(START_CHECK_INTERVAL_MS);
+    const answer = await askRunning(env, platform);
+    if (answer.running === true) {
+      continue;
+    }
+    if (answer.running === undefined && !answer.transitional) {
+      // A manager that stops answering has not said the daemon stopped,
+      // and its "running" a moment ago stands.
+      return confirmed;
+    }
+    return { ...answer, running: false, exited: true };
+  }
+  return confirmed;
+};
+
+/** The end of what was appended to `file` after `offset` bytes; undefined when it cannot be read. */
+const readAppended = async (file: string, offset: number): Promise<string | undefined> => {
+  let handle: FileHandle;
+  try {
+    handle = await open(file, 'r');
+  } catch {
+    return undefined;
+  }
+  try {
+    const { size } = await handle.stat();
+    // Shorter than at the mark: rotated or truncated since, so all of it is new.
+    const start = size < offset ? 0 : offset;
+    const from = Math.max(start, size - STARTUP_OUTPUT_BYTES);
+    const buffer = Buffer.alloc(size - from);
+    await handle.read(buffer, 0, buffer.length, from);
+    const text = buffer.toString('utf8');
+    // Cut mid-file, the first line is a fragment.
+    return from > start ? text.slice(text.indexOf('\n') + 1) : text;
+  } catch {
+    return undefined;
+  } finally {
+    await handle.close();
+  }
+};
+
+const lastLines = (text: string): string[] => text
+  .split('\n')
+  .map((line) => line.trimEnd())
+  .filter((line) => line.length > 0)
+  .slice(-STARTUP_OUTPUT_LINES)
+  .map((line) => `  ${line}`);
+
+/**
+ * What the daemon wrote, from where its stderr goes: since `mark` for a
+ * start that just failed, or the last lines whenever they were written.
+ */
+const daemonOutput = async (env: ServiceEnvironment, platform: ServicePlatform, mark?: StartMark): Promise<string[]> => {
+  if (platform === 'launchd') {
+    const logPath = errorLogPath(env);
+    const appended = await readAppended(logPath, mark?.errorLogBytes ?? 0);
+    const lines = lastLines(appended ?? '');
+    if (mark !== undefined) {
+      return lines.length > 0 ? [`Written to ${logPath} since this start:`, ...lines] : [`Nothing was written to ${logPath} since this start.`];
+    }
+    return lines.length > 0 ? [`The last lines of ${logPath}:`, ...lines] : [`Nothing has been written to ${logPath}.`];
+  }
+  // The unit leaves stderr to the journal. Reading it can fail (no
+  // persistent user journal, no permission); the pointer below stands then.
+  const journal = await runnerFor(env)('journalctl', [
+    '--user', '-u', SYSTEMD_UNIT,
+    ...(mark !== undefined ? ['--since', `@${Math.floor(mark.at / 1000)}`] : []),
+    '--no-pager', '-o', 'cat', '-n', String(STARTUP_OUTPUT_LINES),
+  ]);
+  const lines = journal.code === 0 ? lastLines(journal.stdout) : [];
+  if (lines.length === 0) {
+    return mark !== undefined ? [] : [`Logs: \`journalctl --user -u ${SYSTEMD_UNIT}\`.`];
+  }
+  return [
+    mark !== undefined
+      ? `From \`journalctl --user -u ${SYSTEMD_UNIT}\` since this start:`
+      : `The last lines from \`journalctl --user -u ${SYSTEMD_UNIT}\`:`,
+    ...lines,
+  ];
+};
+
+/** The end of what an installed stratusd wrote to its error output, for a daemon that is not running. */
+export const recentServiceOutput = async (env: ServiceEnvironment, platform: ServicePlatform): Promise<string[]> =>
+  daemonOutput(env, platform);
+
 /** The lines to show when a start the manager accepted did not leave a running daemon. */
-const notRunningMessages = (env: ServiceEnvironment, platform: ServicePlatform, answer: RunningAnswer): string[] => {
+const notRunningMessages = async (
+  env: ServiceEnvironment,
+  platform: ServicePlatform,
+  answer: StartAnswer,
+  mark: StartMark,
+): Promise<string[]> => {
   const manager = platform === 'launchd' ? 'launchd' : 'systemd';
   if (answer.running === undefined) {
     return [`${manager} accepted stratusd, but did not say whether it is running. Check \`stratus service status\`.`];
   }
   return [
-    `${manager} accepted stratusd, but it is not running ${(START_CHECK_INTERVAL_MS * START_CHECK_ATTEMPTS) / 1000}s later.`,
+    answer.exited
+      ? `${manager} started stratusd, but it exited during startup.`
+      : `${manager} accepted stratusd, but it is not running ${(START_CHECK_INTERVAL_MS * START_CHECK_ATTEMPTS) / 1000}s later.`,
     ...(answer.reason !== undefined ? [answer.reason] : []),
-    `Logs: ${errorLogPath(env)}, and \`stratus logs\`.`,
+    ...await daemonOutput(env, platform, mark),
+    platform === 'launchd'
+      ? `Logs: ${errorLogPath(env)}, and \`stratus logs\`.`
+      : `Logs: \`journalctl --user -u ${SYSTEMD_UNIT}\`, and \`stratus logs\`.`,
   ];
 };
 
@@ -660,6 +847,77 @@ const loadedElsewhere = (env: ServiceEnvironment, loaded: string, action: string
   ],
 });
 
+/**
+ * How many times, at START_CHECK_INTERVAL_MS, launchd is asked whether a
+ * job it still has loaded is gone: past the unit's ExitTimeOut, launchd has
+ * killed it, so the stop timeout plus a margin.
+ */
+const UNLOAD_CHECKS = ((SERVICE_STOP_TIMEOUT_SECONDS + 5) * 1000) / START_CHECK_INTERVAL_MS;
+
+const launchctlDetail = (result: ServiceCommandResult): string => result.stderr.trim() || result.stdout.trim();
+
+/** launchd's refusal to bootstrap a label it still has loaded: "Bootstrap failed: 5: Input/output error". */
+const stillLoadedRefusal = (result: ServiceCommandResult): boolean =>
+  result.code === 5 || /\b5: Input\/output error/i.test(`${result.stderr} ${result.stdout}`);
+
+/**
+ * Asks launchd until it no longer has the job: true once it is gone, false
+ * if it is still loaded when the wait runs out, undefined when launchd did
+ * not answer, since asking again only multiplies its timeout.
+ */
+const waitUntilUnloaded = async (env: ServiceEnvironment, domain: string): Promise<boolean | undefined> => {
+  const run = runnerFor(env);
+  const sleep = env.sleep ?? defaultSleep;
+  for (let check = 0; check < UNLOAD_CHECKS; check += 1) {
+    const printed = await run('launchctl', ['print', `${domain}/${SERVICE_LABEL}`]);
+    if (printed.code !== 0) {
+      return /could not find|no such/i.test(`${printed.stderr} ${printed.stdout}`) ? true : undefined;
+    }
+    await sleep(START_CHECK_INTERVAL_MS);
+  }
+  return false;
+};
+
+/**
+ * Loads the unit into launchd. launchd refuses a bootstrap with error 5
+ * while it still has a job under the label: the bootout before it returned
+ * while the old job was still on its way out, or something loaded it again.
+ * An install during a node upgrade met that refusal and gave up there,
+ * leaving it to manual launchctl work (AGT-364). So that one refusal is
+ * booted out again and, once launchd has let go of the label, bootstrapped
+ * once more. Any other refusal, or a second one, is reported.
+ */
+const bootstrapJob = async (
+  env: ServiceEnvironment,
+  domain: string,
+  unitPath: string,
+): Promise<{ ok: true; messages: string[] } | { ok: false; message: string }> => {
+  const run = runnerFor(env);
+  const first = await run('launchctl', ['bootstrap', domain, unitPath]);
+  if (first.code === 0) {
+    return { ok: true, messages: [] };
+  }
+  if (!stillLoadedRefusal(first)) {
+    return { ok: false, message: `launchctl bootstrap failed: ${launchctlDetail(first)}` };
+  }
+  await run('launchctl', ['bootout', `${domain}/${SERVICE_LABEL}`]);
+  const unloaded = await waitUntilUnloaded(env, domain);
+  const second = await run('launchctl', ['bootstrap', domain, unitPath]);
+  if (second.code !== 0) {
+    return {
+      ok: false,
+      message: `launchctl bootstrap failed: ${launchctlDetail(second)}, again after booting out the old job`
+        + (unloaded === false
+          ? `: launchd still had it loaded ${(UNLOAD_CHECKS * START_CHECK_INTERVAL_MS) / 1000}s later. \`launchctl print ${domain}/${SERVICE_LABEL}\` shows what it is doing.`
+          : '.'),
+    };
+  }
+  return {
+    ok: true,
+    messages: [`launchd refused the new unit once (error 5, a job still loaded under ${SERVICE_LABEL}), so the old job was booted out again and the unit loaded on the second try.`],
+  };
+};
+
 export const installService = async (
   env: ServiceEnvironment = {},
   options: ServiceInstallOptions = {},
@@ -678,7 +936,10 @@ export const installService = async (
   }
   const runAtLogin = options.runAtLogin ?? true;
   const unitPath = serviceUnitPath(env);
-  const definition = serviceDefinition(env, runAtLogin, options.configPath);
+  // The interpreter by the path that survives its upgrades, where there is
+  // one; the daemon's PATH is built from the same value.
+  const execPath = await stableNodePath(env.execPath ?? process.execPath);
+  const definition = serviceDefinition({ ...env, execPath }, runAtLogin, options.configPath);
   await mkdir(path.dirname(unitPath), { recursive: true });
   await mkdir(definition.logDir, { recursive: true, mode: 0o700 });
   await writeFile(
@@ -694,10 +955,12 @@ export const installService = async (
     // Replacing an existing job: bootout first, or bootstrap refuses with
     // "service already loaded" and the new unit never takes effect.
     await run('launchctl', ['bootout', `${domain}/${SERVICE_LABEL}`]);
-    const result = await run('launchctl', ['bootstrap', domain, unitPath]);
-    if (result.code !== 0) {
-      return { ok: false, messages: [...messages, `launchctl bootstrap failed: ${result.stderr.trim() || result.stdout.trim()}`] };
+    const mark = await markStart(env);
+    const loaded = await bootstrapJob(env, domain, unitPath);
+    if (!loaded.ok) {
+      return { ok: false, messages: [...messages, loaded.message] };
     }
+    messages.push(...loaded.messages);
     if (!runAtLogin) {
       // RunAtLoad is false, so bootstrap alone loads the job without
       // starting it. KeepAlive is omitted in that case too: launchd's
@@ -707,17 +970,17 @@ export const installService = async (
       if (started.code !== 0) {
         return { ok: false, messages: [...messages, `launchctl kickstart failed: ${started.stderr.trim() || started.stdout.trim()}`] };
       }
-      const confirmed = await confirmRunning(env, platform);
+      const confirmed = await confirmStarted(env, platform);
       if (confirmed.running !== true) {
-        return { ok: true, running: confirmed.running, messages: [...messages, ...notRunningMessages(env, platform, confirmed)] };
+        return { ok: true, running: confirmed.running, messages: [...messages, ...await notRunningMessages(env, platform, confirmed, mark)] };
       }
       messages.push('stratusd is running. It will not start at login, and will not be restarted if it crashes.');
       return { ok: true, running: true, messages };
     }
-    const confirmed = await confirmRunning(env, platform);
+    const confirmed = await confirmStarted(env, platform);
     messages.push(...(confirmed.running === true
       ? ['stratusd is running, and will start again when you log in.']
-      : notRunningMessages(env, platform, confirmed)));
+      : await notRunningMessages(env, platform, confirmed, mark)));
     // Said plainly rather than left to be discovered: a LaunchAgent is
     // tied to a login session, so a headless machine that reboots without
     // one comes back with no agents running.
@@ -742,6 +1005,7 @@ export const installService = async (
       };
     }
   }
+  const mark = await markStart(env);
   const enable = await run('systemctl', ['--user', ...(runAtLogin ? ['enable', '--now'] : ['start']), SYSTEMD_UNIT]);
   if (enable.code !== 0) {
     return { ok: false, messages: [...messages, `systemctl failed: ${enable.stderr.trim()}`] };
@@ -754,9 +1018,9 @@ export const installService = async (
   if (restart.code !== 0) {
     return { ok: false, messages: [...messages, `systemctl restart failed: ${restart.stderr.trim() || restart.stdout.trim()}`] };
   }
-  const confirmed = await confirmRunning(env, platform);
+  const confirmed = await confirmStarted(env, platform);
   if (confirmed.running !== true) {
-    messages.push(...notRunningMessages(env, platform, confirmed));
+    messages.push(...await notRunningMessages(env, platform, confirmed, mark));
   } else {
     messages.push(runAtLogin
       ? 'stratusd is running, and will start again when you log in.'
@@ -802,11 +1066,11 @@ export const uninstallService = async (env: ServiceEnvironment = {}): Promise<Se
   return { ok: true, messages: [`Removed ${unitPath}. stratusd is stopped and will not start at login.`] };
 };
 
-const startedResult = async (env: ServiceEnvironment, platform: ServicePlatform): Promise<ServiceActionResult> => {
-  const confirmed = await confirmRunning(env, platform);
+const startedResult = async (env: ServiceEnvironment, platform: ServicePlatform, mark: StartMark): Promise<ServiceActionResult> => {
+  const confirmed = await confirmStarted(env, platform);
   return confirmed.running === true
     ? { ok: true, running: true, messages: ['stratusd started.'] }
-    : { ok: true, running: confirmed.running, messages: notRunningMessages(env, platform, confirmed) };
+    : { ok: true, running: confirmed.running, messages: await notRunningMessages(env, platform, confirmed, mark) };
 };
 
 export const startService = async (env: ServiceEnvironment = {}): Promise<ServiceActionResult> => {
@@ -836,9 +1100,10 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
         ],
       };
     }
+    const mark = await markStart(env);
     const result = await run('systemctl', ['--user', 'restart', SYSTEMD_UNIT]);
     return result.code === 0
-      ? startedResult(env, platform)
+      ? startedResult(env, platform, mark)
       : { ok: false, messages: [`Could not start stratusd: ${result.stderr.trim() || result.stdout.trim()}`, 'Is it installed? Run `stratus service install`.'] };
   }
 
@@ -848,12 +1113,13 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
   // makes the documented stop/start pair work; it is expected to fail
   // when the job is still loaded, which is fine.
   const domain = `gui/${uidOf(env)}`;
+  const mark = await markStart(env);
   await run('launchctl', ['bootstrap', domain, serviceUnitPath(env)]);
   // -k restarts a job that is already running, which is what "start"
   // means after a config change.
   const result = await run('launchctl', ['kickstart', '-k', `${domain}/${SERVICE_LABEL}`]);
   return result.code === 0
-    ? startedResult(env, platform)
+    ? startedResult(env, platform, mark)
     : { ok: false, messages: [`Could not start stratusd: ${result.stderr.trim() || result.stdout.trim()}`, 'Is it installed? Run `stratus service install`.'] };
 };
 

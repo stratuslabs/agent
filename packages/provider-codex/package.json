@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/provider-codex",
-  "version": "0.14.16",
+  "version": "0.14.21",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,7 +23,7 @@
     "node": ">=22.16 <23 || >=24"
   },
   "dependencies": {
-    "@openai/codex-sdk": "^0.167.0",
+    "@openai/codex-sdk": "^0.171.0",
     "@stratusagent/core": "workspace:*",
     "@stratusagent/providers": "workspace:*"
   },

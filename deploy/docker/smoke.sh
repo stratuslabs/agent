@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the image and prove it serves: a seeded control API token, a held
-# start and its promotion, and a pause that survives a container restart.
+# start and its promotion, a pause that survives a container restart, and
+# one background task run start to finish on a stand-in provider.
 #
 #   deploy/docker/smoke.sh            # from the repository root
 #
@@ -108,5 +109,31 @@ call GET /intake | grep -q '"paused":true' || fail "the pause did not survive a 
 call GET /health | grep -q '"held":true' || fail "a restart with --held should start held again"
 call POST /promote | grep -q '"held":false' || fail "the second promote did not release the hold"
 call PUT /intake '{"paused":false}' | grep -q '"paused":false' || fail "resume was refused"
+
+echo "--- a background task starts and finishes"
+# The stand-in provider is the release smoke's scripted one, copied into
+# this run's container only: the image never carries it. Its agent starts a
+# background task on itself; scripts/release-smoke/background-task.mjs
+# says what has to hold. Run with the image's own node.
+docker cp scripts/release-smoke/plugin "$NAME:/opt/stratus/node_modules/stratus-plugin-release-smoke"
+docker exec -i "$NAME" sh -c 'mkdir -p ~/.stratus/agents && cat > ~/.stratus/agents/smoke.md' <<'SOUL'
+---
+name: Smoke
+provider: smoke
+tools:
+  - agent.delegate
+  - agent.tasks
+---
+
+Background task smoke agent. Its provider is a script, not a model.
+SOUL
+printf '{"plugins":{"stratus-plugin-release-smoke":{"enabled":true}}}\n' \
+  | docker exec -i "$NAME" sh -c 'umask 077 && cat > ~/.stratus/config.json'
+docker restart "$NAME" >/dev/null
+wait_healthy
+find_api
+call POST /promote | grep -q '"held":false' || fail "the promote before the task check did not release the hold"
+docker exec -i -e SMOKE_TOKEN="$TOKEN" "$NAME" node --input-type=module - http://127.0.0.1:4123/api/v1 smoke \
+  < scripts/release-smoke/background-task.mjs || fail "the background task check failed"
 
 echo "smoke: ok"

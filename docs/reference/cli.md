@@ -63,6 +63,8 @@ stratus channels                       # which agents have secrets for which cha
 stratus channel remove imessage --agent blair
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
+stratus tasks                          # the daemon's background tasks: status, agent, steps, id, whether the outcome is in the conversation
+stratus tasks cancel <id>              # stop one; its conversation gets a notice that it was cancelled
 stratus grants blair                   # what blair may do unattended: standing tool grants, command scopes, sites
 stratus grants revoke blair --tool web.fetch            # take a standing grant back — a running daemon stops honouring it at once
 stratus grants revoke blair --scope "git push"          # or a command scope, by the line the listing shows
@@ -108,6 +110,7 @@ stratus dashboard                      # local browser dashboard
 | `health` | [Deployment](../guides/deployment.md#health-checks) |
 | `sessions` | [Always on](../guides/always-on.md#while-it-runs) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
+| `tasks`, `tasks cancel` | [Background tasks](./config.md#background-tasks) |
 | `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
 | `people`, `people add`, `people remove` | [Slack](../guides/slack.md#adding-and-removing-teammates), [Approvals](../guides/approvals.md#asking-a-human-remote-approval) |
 | `memory list`, `memory search`, `memory audit`, `memory forget` | [Memory](../concepts/memory.md#searching-it-yourself) — every `memory` subcommand works the built-in store, and refuses against a fleet whose config selects another |
