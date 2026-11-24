@@ -141,3 +141,20 @@ test('the built-in agent, an unknown one and a busy one are refused, and nothing
     await harness.stop();
   }
 });
+
+test('an agent with a very long id is archived under a name that still fits', async () => {
+  const home = await newHome();
+  const longId = 'a'.repeat(230);
+  await writeSoul(home, 'long.md', `---\nname: Long\nid: ${longId}\n---\n\nA long id.\n`);
+  const harness = await startApi({ home });
+  try {
+    const removed = await harness.call(`/api/v1/agents/${longId}`, { method: 'DELETE' });
+    assert.equal(removed.status, 200);
+    const { soulMovedTo } = await json<{ soulMovedTo: string }>(removed);
+    assert.ok(Buffer.byteLength(path.basename(soulMovedTo)) < 200, path.basename(soulMovedTo));
+    assert.match(path.basename(soulMovedTo), /^a{100}-[0-9a-f]{12}-/);
+    assert.ok((await readFile(soulMovedTo, 'utf8')).includes('A long id.'));
+  } finally {
+    await harness.stop();
+  }
+});

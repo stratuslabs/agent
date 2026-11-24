@@ -415,8 +415,17 @@ export const rosterRoutes: Route[] = [
         return retireSoulFile(context.env, summary.soulPath, agentId);
       });
       // Off the roster and out of every channel before anything else, so it
-      // stops answering at once.
+      // stops answering at once: from here a dispatch to it is refused.
       await context.gateway.reloadRosterAndChannels();
+      // A turn that started between the busy check above and that reload
+      // is not refused by either, and would run on with the soul it had
+      // cached while its grants went. Stopped, so a delete that answers has
+      // stopped the agent everywhere.
+      for (const row of context.gateway.store.list(agentId)) {
+        if (row.status === 'running' || row.status === 'pending_approval') {
+          context.gateway.abortTurns(row.id, `${agentId} was deleted.`);
+        }
+      }
       // Its schedules would fail at every firing with no agent to run, so
       // they go; a cancel also revokes the destination grant on the row.
       const schedulesCancelled = context.gateway.schedules()

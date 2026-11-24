@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { type Dirent, constants, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import {
   copyFile,
@@ -591,7 +591,7 @@ export const retireSoulFile = async (
   await assertDerivedStatePath(stratusHomePath(env), archive, 'directory');
   await mkdir(archive, { recursive: true, mode: 0o700 });
   const stamp = now.toISOString().replace(/[:.]/g, '-');
-  const destination = path.join(archive, `${agentId}-${stamp}.md`);
+  const destination = path.join(archive, `${archiveStem(agentId)}-${stamp}.md`);
   const entry = await lstat(soulPath);
   const agentsHome = resolveAgentsHome(env);
   if (entry.isSymbolicLink() && agentsHome !== undefined) {
@@ -611,6 +611,26 @@ export const retireSoulFile = async (
   await syncDirectory(path.dirname(soulPath));
   await syncDirectory(archive);
   return destination;
+};
+
+/**
+ * The id as it starts an archive's file name, short enough that the stamp
+ * and extension still fit in one path component. An id has no length limit
+ * of its own beyond fitting its state directory's name, so a long one is
+ * cut, on a character, to 120 bytes and told apart by a hash of the whole.
+ */
+const archiveStem = (agentId: string): string => {
+  if (Buffer.byteLength(agentId) <= 120) {
+    return agentId;
+  }
+  let kept = '';
+  for (const character of agentId) {
+    if (Buffer.byteLength(kept + character) > 100) {
+      break;
+    }
+    kept += character;
+  }
+  return `${kept}-${createHash('sha256').update(agentId).digest('hex').slice(0, 12)}`;
 };
 
 /**
