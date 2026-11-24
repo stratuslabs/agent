@@ -62,6 +62,13 @@ const notes = (request, agentName) => {
 const unsent = new Map();
 
 /**
+ * Answers on their way, by request id. Kept here, not on the card: a live
+ * event rebuilds the card while the request is in flight, and a fresh card
+ * with live buttons would let a second, maybe contradictory, answer go.
+ */
+const sending = new Set();
+
+/**
  * One waiting approval, with its three answers.
  *
  * Shared by Home and the chat, so the two never word the same question
@@ -72,14 +79,13 @@ const unsent = new Map();
 export const approvalCard = (request) => {
   const agent = store.agents.find((candidate) => candidate.id === request.agentId);
   const agentName = agent?.name ?? request.agentId;
-  const offline = store.offlineSince !== undefined;
-  const busy = { value: false };
+  const locked = store.offlineSince !== undefined || sending.has(request.requestId);
 
   const decide = async (answer, buttons) => {
-    if (busy.value) {
+    if (sending.has(request.requestId)) {
       return;
     }
-    busy.value = true;
+    sending.add(request.requestId);
     answeredHere.add(request.requestId);
     unsent.delete(request.requestId);
     for (const button of buttons) button.disabled = true;
@@ -92,14 +98,15 @@ export const approvalCard = (request) => {
         unsent.set(request.requestId, error.message);
       }
     }
+    sending.delete(request.requestId);
     await refreshCore();
   };
 
   const command = commandOf(request);
   const canRemember = !request.oneShot && !request.delegatedFrom && request.risk !== 'dangerous';
-  const deny = el('button', { class: 'btn danger-text', disabled: offline }, 'Deny');
-  const always = canRemember ? el('button', { class: 'btn', disabled: offline }, 'Always allow') : null;
-  const once = el('button', { class: 'btn primary', disabled: offline }, 'Allow once');
+  const deny = el('button', { class: 'btn danger-text', disabled: locked }, 'Deny');
+  const always = canRemember ? el('button', { class: 'btn', disabled: locked }, 'Always allow') : null;
+  const once = el('button', { class: 'btn primary', disabled: locked }, 'Allow once');
   const buttons = [deny, always, once].filter(Boolean);
   deny.addEventListener('click', () => void decide('deny', buttons));
   always?.addEventListener('click', () => void decide('always', buttons));

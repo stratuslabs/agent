@@ -15,10 +15,11 @@ import { store } from '../app.js';
  * Commands declared in the config file are shown but can only be changed
  * there. Revoking is immediate: the next call asks again.
  */
-const byDestination = (grants) => {
+/** Grants grouped by what revoking takes: the API revokes by destination or origin, every tool's grant at once. */
+const groupBy = (grants, key) => {
   const grouped = new Map();
   for (const grant of grants) {
-    grouped.set(grant.destination, [...(grouped.get(grant.destination) ?? []), grant]);
+    grouped.set(grant[key], [...(grouped.get(grant[key]) ?? []), grant]);
   }
   return grouped;
 };
@@ -34,13 +35,19 @@ const rowsFor = (agentId, listing) => [
   ...(listing.commands ?? []).map((grant) => ({
     kind: 'Shell command', chip: grant.command, detail: 'that command by name', at: grant.grantedAt, revoke: { scope: grant.command },
   })),
-  ...(listing.origins ?? []).map((grant) => ({
-    kind: 'Browser site', chip: grant.origin, detail: grant.tool ? `with ${grant.tool}` : grant.description, revoke: { origin: grant.origin },
+  // One row per origin for the same reason as destinations below.
+  ...[...groupBy(listing.origins ?? [], 'origin').values()].map((grants) => ({
+    kind: 'Site',
+    chip: grants[0].origin,
+    detail: grants.some((grant) => grant.tool === undefined)
+      ? grants[0].description
+      : `with ${grants.map((grant) => grant.tool).join(', ')}`,
+    revoke: { origin: grants[0].origin },
   })),
   // One row per destination, not per tool: revoking is by destination and
   // takes every tool's grant for it, so a row per tool would promise to take
   // back one and silently take its siblings too.
-  ...[...byDestination(listing.destinations ?? []).values()].map((grants) => ({
+  ...[...groupBy(listing.destinations ?? [], 'destination').values()].map((grants) => ({
     kind: 'Message destination',
     chip: grants.map((grant) => grant.tool).join(', '),
     detail: grants[0].description,
