@@ -85,19 +85,23 @@ test('an agent off the roster still lists, and an id that is not one is refused 
   }
 });
 
-test('an entry id that is only dots is still forgotten, since it travels in the body', async () => {
+test('an entry id that is only dots, or blank, is still forgotten, since it travels in the body as it is', async () => {
   const home = await newHome();
   // A plugin store or an import may choose any id; the built-in store's
   // import keeps the one it is given.
   const seeded = createHomeMemoryStore({ homeDir: home });
   assert.ok(seeded.importEntries, 'the built-in store imports');
-  await seeded.importEntries('stratus', [{ id: '..', agentId: 'stratus', content: 'An odd id.', createdAt: '2026-11-24T00:00:00.000Z' }]);
+  await seeded.importEntries('stratus', [
+    { id: '..', agentId: 'stratus', content: 'An odd id.', createdAt: '2026-11-24T00:00:00.000Z' },
+    { id: '  ', agentId: 'stratus', content: 'A blank id.', createdAt: '2026-11-24T00:00:01.000Z' },
+  ]);
   const harness = await startApi({ home });
   try {
     const listed = await json<Listed>(await harness.call('/api/v1/agents/stratus/memory'));
     assert.ok(listed.entries.some((entry) => entry.id === '..'));
     const forgotten = await forget(harness.call, 'stratus', '..');
     assert.equal(forgotten.status, 200);
+    assert.equal((await forget(harness.call, 'stratus', '  ')).status, 200, 'a blank id is an id too');
     assert.deepEqual((await json<Listed>(await harness.call('/api/v1/agents/stratus/memory'))).entries, []);
     const missing = await harness.call('/api/v1/agents/stratus/memory/forget', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     assert.equal(missing.status, 400);
