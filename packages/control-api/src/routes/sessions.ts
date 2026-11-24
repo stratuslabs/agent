@@ -26,8 +26,13 @@ export const sessionRoutes: Route[] = [
       if (raw !== null && !/^\d+$/.test(raw)) {
         throw new ApiError(400, 'invalid_limit', 'limit must be a non-negative whole number.');
       }
+      // A title search: what the conversation drawer's search box asks.
+      const query = context.url.searchParams.get('q') ?? undefined;
+      if (query !== undefined && query.length > 200) {
+        throw new ApiError(400, 'invalid_query', 'q is a title search, at most 200 characters.');
+      }
       return {
-        sessions: context.gateway.store.list(agent, raw === null ? undefined : Number(raw)),
+        sessions: context.gateway.store.listTitled(agent, raw === null ? undefined : Number(raw), query),
       };
     },
   },

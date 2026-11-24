@@ -41,10 +41,11 @@ export const api = {
   createAgent: (body) => request('POST', '/agents', body),
   updateAgent: (id, body) => request('PUT', `/agents/${encodeURIComponent(id)}`, body),
   reloadRoster: () => request('POST', '/roster/reload'),
-  sessions: (agent, limit) => {
+  sessions: (agent, limit, q) => {
     const query = new URLSearchParams();
     if (agent) query.set('agent', agent);
     if (limit) query.set('limit', String(limit));
+    if (q) query.set('q', q);
     const suffix = query.toString();
     return request('GET', `/sessions${suffix ? `?${suffix}` : ''}`);
   },

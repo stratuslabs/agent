@@ -46,10 +46,9 @@ const GROUPS = [
 
 /**
  * The conversation drawer: this agent's stored conversations, newest first,
- * grouped by day and filtered by the search box. `titles` holds the real
- * titles of conversations this page has opened (their first message); the
- * rest are named by where they came from until the session list carries a
- * title.
+ * grouped by day and filtered by the search box. Each is called by its title
+ * (its first message, from the listing or from this page's own read of it),
+ * or by where it came from when nothing has been said in it.
  */
 export const conversationDrawer = ({ current, sessions, sessionId, unsent, titles, schedules, search, onOpen, onClose }) => {
   const now = new Date();
