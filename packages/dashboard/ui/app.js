@@ -81,8 +81,10 @@ export const navigate = (route) => {
     if (route.fresh) {
       current.view?.showTab?.('chat');
       current.view?.startSession?.();
-    } else if (route.tab) {
-      current.view?.showTab?.(route.tab);
+    } else {
+      // No tab named is the agent's Chat, which is where its sidebar entry
+      // and its plain URL lead, even from its own Settings.
+      current.view?.showTab?.(route.tab ?? 'chat');
     }
   }
   store.route = route;

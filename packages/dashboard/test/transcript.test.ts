@@ -97,3 +97,20 @@ test('a call input is found only within its own turn', () => {
   assert.deepEqual(items[0]?.input, { path: 'old' });
   assert.equal(items[2]?.input, undefined, 'a reused id in a later turn does not borrow the earlier input');
 });
+
+test('a reused call id after its first call ended starts a new row, with its own decision', () => {
+  const first = { allowed: true, layer: 'grant', reason: 'a standing grant' };
+  const second = { allowed: false, layer: 'approver', reason: 'denied by a person' };
+  const lines = [
+    { text: 'running shell.run…', callId: 'call-1', toolName: 'shell.run', decides: true, phase: 'running', decision: first },
+    { text: 'shell.run finished', callId: 'call-1', toolName: 'shell.run', decides: false, phase: 'done' },
+    { text: 'shell.run is waiting for approval', callId: 'call-1', toolName: 'shell.run', decides: false, phase: 'waiting' },
+    { text: 'shell.run was denied', callId: 'call-1', toolName: 'shell.run', decides: true, phase: 'denied', decision: second },
+  ];
+  const items = transcriptItems({ messages: [], toolLines: lines, streaming: '', settled: new Map() });
+  assert.equal(items.length, 2, 'two calls, two rows');
+  assert.equal(items[0]?.phase, 'done');
+  assert.equal(items[0]?.line, lines[0]);
+  assert.equal(items[1]?.phase, 'denied');
+  assert.equal(items[1]?.line, lines[3]);
+});

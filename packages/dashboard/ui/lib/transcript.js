@@ -75,6 +75,7 @@ const inputFor = (messages, index, result) => {
 
 /** What a live line says about where its call has got to. Older lines carry no phase and read as running. */
 const PHASE_ORDER = { running: 0, waiting: 1, denied: 2, done: 2, failed: 2 };
+const ENDED = new Set(['denied', 'done', 'failed']);
 
 /**
  * The items of one conversation, oldest first: the stored messages, then the
@@ -120,7 +121,10 @@ export const transcriptItems = ({ messages, toolLines, streaming, settled }) => 
     const key = `${line.callId}\u0000${line.toolName}`;
     const phase = line.phase ?? 'running';
     const existing = live.get(key);
-    if (!existing) {
+    // A call that already ended is not this one: an endpoint that numbers
+    // its calls per response reuses ids within a turn, so a line after the
+    // end is the next call with that id, and gets its own row.
+    if (!existing || ENDED.has(existing.phase)) {
       const item = { kind: 'tool', toolName: line.toolName, phase, line };
       live.set(key, item);
       items.push(item);
