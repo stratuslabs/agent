@@ -9,6 +9,7 @@ import {
   latestTurnReply,
   promptTextOf,
   sessionTrustOf,
+  workItemState,
   type ModelProvider,
   type ProviderRequest,
   type ProviderResponse,
@@ -134,6 +135,33 @@ test('observe refuses a session it cannot find, and one with a turn in flight', 
     /has a turn in flight \(pending_approval\)/,
   );
   assert.equal((await runner.store.get('s3'))?.messages.length, 2, 'nothing was appended');
+});
+
+test('an observed message keeps the key it was given, written in the same save, and reads as finished work', async () => {
+  const runner = new AgentRunner({ provider: echoingProvider(), store: new InMemorySessionStore() });
+  await runner.run({ sessionId: 's4', agent: AGENT, userMessage: 'Dylan: start the job' });
+
+  // The gateway writes a background task's fallback notice this way: no
+  // turn runs on it, and the key is how a later sweep finds it instead of
+  // writing a second one.
+  await runner.observe({ sessionId: 's4', message: '[Background task t_1 failed.]', idempotencyKey: 'task:t_1:outcome-fallback' });
+  const stored = (await runner.store.get('s4'))!;
+  const last = stored.messages.at(-1);
+  assert.equal(last?.idempotencyKey, 'task:t_1:outcome-fallback');
+  assert.equal(last?.observed, true);
+  assert.equal(workItemState(stored, 'task:t_1:outcome-fallback'), 'finished');
+
+  // A turn that runs after it is its own work item; the observed key stays finished.
+  stored.status = 'running';
+  stored.messages.push({ id: 's4:user:x', role: 'user', content: 'Dylan: next', createdAt: new Date().toISOString(), idempotencyKey: 'slack:2' });
+  assert.equal(workItemState(stored, 'task:t_1:outcome-fallback'), 'finished');
+  assert.equal(workItemState(stored, 'slack:2'), 'unfinished');
+
+  // The runner only records keys, as it does for a turn: refusing a repeat
+  // is the host's job, so an unkeyed observe is unchanged.
+  await runner.run({ sessionId: 's5', agent: AGENT, userMessage: 'hi' });
+  await runner.observe({ sessionId: 's5', message: 'Dylan: aside' });
+  assert.equal(Object.hasOwn((await runner.store.get('s5'))!.messages.at(-1)!, 'idempotencyKey'), false);
 });
 
 test('promptTextOf quotes every line of an overheard message, whichever line break it used', () => {

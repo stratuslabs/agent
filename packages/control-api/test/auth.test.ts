@@ -40,6 +40,8 @@ test('every route and the WS upgrade reject a request with no credential', async
       ['POST', '/api/v1/sessions/s-1/messages'],
       ['GET', '/api/v1/approvals'],
       ['POST', '/api/v1/approvals'],
+      ['GET', '/api/v1/tasks'],
+      ['POST', '/api/v1/tasks/t_1/cancel'],
       ['GET', '/api/v1/catalog/models'],
       ['GET', '/api/v1/credentials'],
       ['POST', '/api/v1/credentials/verify'],

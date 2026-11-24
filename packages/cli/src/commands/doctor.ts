@@ -43,7 +43,7 @@ import {
   probeProviderModel,
   withoutTrailingSlashes,
 } from '@stratusagent/state';
-import { readServiceCommand } from '../service.ts';
+import { homebrewNodeLink, readServiceCommand, readServiceStatus, recentServiceOutput, type ServiceEnvironment } from '../service.ts';
 import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
 import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
@@ -448,6 +448,27 @@ const chatgptSignInLine = (signIn: ChatGPTSignInSummary, now: number): string =>
   return signIn.expiresAt > now
     ? `${who}, plan usage allowed; access token valid until ${utcMinute(signIn.expiresAt)}, renewed as it runs out`
     : `${who}, plan usage allowed; access token expired ${utcMinute(signIn.expiresAt)}, the next run renews it`;
+};
+
+/**
+ * An installed service the manager says is stopped, with why and the end of
+ * what it wrote, as one finding. Undefined when there is no unit (a daemon
+ * run by hand, or none at all, is not a fault) or when the manager did not
+ * answer, which is not the same as saying it stopped.
+ */
+const serviceDownProblem = async (env: ServiceEnvironment): Promise<string | undefined> => {
+  const status = await readServiceStatus(env);
+  if (status === undefined || !status.installed || status.running !== false) {
+    return undefined;
+  }
+  const manager = status.platform === 'launchd' ? 'launchd' : 'systemd';
+  const reason = status.reason ?? (manager === 'launchd' ? 'launchd has the job loaded but not running.' : 'systemd reports the unit inactive.');
+  return [
+    `The stratusd service is installed (${status.unitPath}), but ${manager} says it is not running. ${reason}`,
+    ...await recentServiceOutput(env, status.platform),
+    // Some reasons already end with it.
+    ...(reason.includes('`stratus service start`') ? [] : ['`stratus service start` starts it again, and says why if it fails.']),
+  ].join('\n    ');
 };
 
 /**
@@ -941,6 +962,22 @@ export const collectDoctorReport = async (
       `The service unit points at a node interpreter that no longer exists (${unitCommand.execPath}), so stratusd cannot start. `
       + 'Run `stratus update` (or `stratus service install`) to rewrite it with current paths.',
     );
+  } else if (unitCommand?.execPath !== undefined) {
+    // The same failure before it happens: a unit written before install
+    // named Homebrew's stable link still pins the versioned keg, and a
+    // `brew upgrade` plus cleanup takes that interpreter away.
+    const brew = await homebrewNodeLink(unitCommand.execPath);
+    if (brew?.current) {
+      problems.push(
+        `The service unit pins node to a versioned Homebrew path (${unitCommand.execPath}). The next \`brew upgrade\` of node replaces it and \`brew cleanup\` deletes it, which stops stratusd. `
+        + `Run \`stratus update\` (or \`stratus service install\`) to rewrite it with ${brew.link}.`,
+      );
+    } else if (brew !== undefined) {
+      problems.push(
+        `The service unit runs a Homebrew node that is no longer linked (${unitCommand.execPath}; ${brew.link} now points at another version). It may already fail to load the upgraded libraries, and \`brew cleanup\` deletes it, which stops stratusd. `
+        + 'Run `stratus update` (or `stratus service install`) to rewrite it with current paths.',
+      );
+    }
   }
   if (unitCommand?.scriptPath !== undefined && !(await pathExists(unitCommand.scriptPath))) {
     problems.push(
@@ -986,6 +1023,15 @@ export const collectDoctorReport = async (
   }
 
   const daemon = await inspectDaemon(env, problems);
+  // With no daemon answering, a stopped service is the finding the rest
+  // wait on, so it goes first. A doctor run on a host whose daemon was down
+  // led with a stray-souls warning instead (AGT-364).
+  if (daemon.state !== 'running') {
+    const down = await serviceDownProblem(serviceEnvFor(env));
+    if (down !== undefined) {
+      problems.unshift(down);
+    }
+  }
   const keyChecks = command.live && resolved ? await checkKeys(resolved, env, problems) : undefined;
 
   return {

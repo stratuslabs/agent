@@ -90,7 +90,12 @@ since a restart is what applies the daemon-level settings in it. No daemon found
 needs none; doctor says `none found (no control API published)` because a
 daemon started with its API off publishes no address either. A damaged
 `gateway.json`, or a daemon that published its address and does not answer, is
-a problem.
+a problem. So is an installed service (`stratus service install`) that
+launchd or systemd says is not running while no daemon answers, and doctor
+lists it first, since the rest waits on it: the manager's reason, then the
+last lines the daemon wrote (`~/.stratus/logs/stratusd.err.log` on macOS,
+the journal on Linux). A manager that does not answer is not taken to mean
+stopped.
 
 ## The usual suspects
 
@@ -128,7 +133,10 @@ a problem.
   the service unit.
 - **The agents stopped answering after a node upgrade** — the service unit
   points at an interpreter that no longer exists. `stratus update` repairs
-  it; [Updating](./updating.md) explains why.
+  it; [Updating](./updating.md) explains why. With Homebrew's node this
+  happens on `brew upgrade` itself (the old version can no longer load the
+  upgraded libraries, and `brew cleanup` deletes it); a unit rewritten by
+  0.14.20 or later names the stable link and survives it.
 - **Slack replies arrive full of `**` and `##`, or some other companion
   behaves like an older build** — the optional packages are global installs
   of their own, so one can lag the CLI loading it. `stratus update --check`
@@ -230,6 +238,10 @@ a problem.
   names the size the server sent; raise that server's `maxResultChars` if
   it is legitimately that large, or narrow the call. See
   [MCP](./mcp.md#the-posture).
+- **An agent's `xcodebuild test` hangs, then says `test runner hung
+  before establishing connection`** — Xcode's test runner can't start
+  inside the shell sandbox on macOS, whatever paths it allows. Run app
+  tests in CI; see [macOS app tests](./shell.md#macos-app-tests).
 - **An agent has forgotten the start of a long conversation** — see below.
 
 ## A conversation that outgrows the model
@@ -282,3 +294,10 @@ example a tool result of several megabytes. There is no earlier history to
 give up, so the turn fails saying exactly that. Cut what the call returns — `maxBytes` on
 `fs.read`, `maxOutputBytes` on `shell.run`, see [Tools](./tools.md) — or
 move that agent to a model with a bigger context window.
+
+## Still stuck
+
+[Open an issue](https://github.com/stratuslabs/agent/issues/new/choose) with
+the bug template. It asks for the version, how you run Stratus and the
+`stratus doctor` or `stratus logs` lines that show the problem. Security
+problems go privately, as [`SECURITY.md`](../../SECURITY.md) describes.

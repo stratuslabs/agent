@@ -168,7 +168,11 @@ export interface ReviewCaseInput {
    * from outside and never count as the request.
    */
   firing?: { kind: 'schedule' | 'trigger'; prompt: string; trust?: TrustLevel };
-  /** A sub-agent's session, whose request is the delegating agent's instruction. */
+  /**
+   * A run another agent started (an `agent.spawn` sub-agent or an
+   * `agent.delegate` sub-session), whose request is the delegating agent's
+   * instruction.
+   */
   delegated?: boolean;
 }
 

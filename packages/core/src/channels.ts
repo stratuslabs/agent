@@ -138,6 +138,23 @@ export interface SessionRouting {
   unaddressed?: boolean;
 }
 
+/** What `GatewayLike.stopTasks` found and did. */
+export interface TasksStop {
+  /**
+   * How many tasks the conversation started are running in this process,
+   * each now stopping. 0 means there was nothing to stop. Counted before
+   * anything is awaited, and a task an earlier stop reached that hasn't
+   * ended yet still counts, the way `abortTurns` counts a stopped turn.
+   */
+  open: number;
+  /**
+   * The tasks whose stop this call wrote, oldest first, once each is
+   * written and its turn aborted. A task that had already finished, or that
+   * an earlier stop reached first, isn't in it. Never rejects.
+   */
+  stopped: Promise<string[]>;
+}
+
 export interface GatewayLike {
   dispatch(input: {
     sessionId: string;
@@ -235,6 +252,16 @@ export interface GatewayLike {
    * signal. The adapter decides who may stop; the host asks nothing.
    */
   abortTurns?(sessionId: string, reason: string): number;
+  /**
+   * Stops every background task a session started that is running in this
+   * process, as `stoppedBy` (a person's id in the channel), the way a
+   * person's Stop in that conversation means it. Each goes through the
+   * host's one cancel, so the stop is written before anything is aborted,
+   * and the task's outcome reaches the conversation as `cancelled`.
+   * Optional: a host without background tasks leaves a Stop reaching turns
+   * only. The adapter decides who may stop; the host asks nothing.
+   */
+  stopTasks?(sessionId: string, stoppedBy: string): TasksStop;
   /**
    * Where a durable session came from, or undefined if there is no such
    * session.
