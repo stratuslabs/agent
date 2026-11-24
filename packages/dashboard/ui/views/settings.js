@@ -226,8 +226,11 @@ export const renderSettings = (section) => {
     const row = (entry) => {
       const confirming = state.removing === entry.provider;
       const users = runningOn(entry.provider);
+      // "May": an agent with a sign-in of its own (`stratus signin`), or a
+      // key the daemon's environment supplies, resolves that first and keeps
+      // working. Neither is something this page can see.
       const warning = users.length > 0
-        ? `${users.join(', ')} ${users.length === 1 ? 'runs' : 'run'} on ${providerName(entry.provider)} and will stop working until it's connected again.`
+        ? `${users.join(', ')} ${users.length === 1 ? 'runs' : 'run'} on ${providerName(entry.provider)} and may stop working until it's connected again, unless ${users.length === 1 ? 'it has' : 'they have'} a sign-in of ${users.length === 1 ? 'its' : 'their'} own or the daemon's environment supplies a key.`
         : `No agent runs on ${providerName(entry.provider)} right now.`;
       return el('div', { class: 'panel-row' },
         el('span', { class: 'tool-icon' }, icon('key-round', 15)),
