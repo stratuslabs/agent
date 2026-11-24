@@ -374,6 +374,7 @@ button.list-row:hover .title { text-decoration: underline; text-underline-offset
 .panel-row .text { flex: 1; min-width: 0; }
 .panel-row .title { font-weight: 500; }
 .panel-row .meta { color: var(--text-2); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.panel-row .meta.warn-text { color: var(--warn); }
 .side-title { font-size: 13px; font-weight: 600; margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; }
 .risk { font-size: 11px; }
 .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 28px; }

@@ -57,6 +57,7 @@ export const api = {
   credentials: () => request('GET', '/credentials'),
   verifyKey: (body) => request('POST', '/credentials/verify', body),
   storeKey: (provider, body) => request('PUT', `/credentials/${encodeURIComponent(provider)}`, body),
+  removeKey: (provider) => request('DELETE', `/credentials/${encodeURIComponent(provider)}`),
   storeChannel: (channel, body) => request('PUT', `/credentials/channels/${encodeURIComponent(channel)}`, body),
   schedules: () => request('GET', '/schedules'),
   removeSchedule: (id) => request('DELETE', `/schedules/${encodeURIComponent(id)}`),
