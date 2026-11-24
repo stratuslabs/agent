@@ -167,6 +167,8 @@ export const createMemorySection = ({ agentId, agentName, update }) => {
 
   return {
     node,
+    /** Reads again, keeping the rows on screen until the new ones land. */
+    reload: () => { void load(); },
     /** Reads on first show; paints from what it has otherwise. */
     refresh() {
       if (state.entries === undefined && !state.error && !state.loading) {

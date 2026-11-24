@@ -582,7 +582,11 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
    * entry being left, so Back skipped over it.
    */
   const showTab = (tab) => {
-    state.tab = tab === 'settings' ? 'settings' : 'chat';
+    const next = tab === 'settings' ? 'settings' : 'chat';
+    if (next === 'settings' && state.tab !== 'settings') {
+      settingsTab.entered();
+    }
+    state.tab = next;
     update();
   };
 

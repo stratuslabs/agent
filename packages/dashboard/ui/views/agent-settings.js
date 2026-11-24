@@ -168,7 +168,7 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
     };
   };
 
-  return () => {
+  const render = () => {
     const current = agent();
     if (!current) {
       return el('p', { class: 'field-note' }, 'This agent is no longer on the roster.');
@@ -195,4 +195,10 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
     memory.refresh();
     return form.node;
   };
+  /**
+   * The tab is kept while someone moves between Chat and Settings, so what
+   * the agent remembered in between is read again on the way back in.
+   */
+  render.entered = () => memory.reload();
+  return render;
 };
