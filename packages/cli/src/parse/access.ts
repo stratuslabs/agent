@@ -7,7 +7,7 @@ import { credentialVariableProblem, isValidAgentId } from '@stratusagent/agents'
 import { CHANNEL_KIND_PATTERN, CREDENTIAL_NAME_PATTERN } from '@stratusagent/state';
 
 import { isSlackMemberId } from '../slack.ts';
-import { type ParsedHelpCommand, readOptionValue } from './shared.ts';
+import { type ParsedHelpCommand, readFormatValue, readOptionValue } from './shared.ts';
 
 export interface ParsedCredentialCommand {
   command: 'credential';
@@ -325,11 +325,7 @@ export const parseGrantsCommand = (rest: string[]): ParsedGrantsCommand | Parsed
       return { command: 'help' };
     }
     if (token === '--format') {
-      const value = readOptionValue(tokens, index, '--format');
-      if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value}`);
-      }
-      parsed.format = value;
+      parsed.format = readFormatValue(tokens, index, ['text', 'json']);
       index += 1;
       continue;
     }
