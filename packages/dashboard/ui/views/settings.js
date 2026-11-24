@@ -36,15 +36,31 @@ export const renderSettings = (section) => {
     return notice ? el('div', { class: `notice ${notice.kind}`, role: notice.kind === 'bad' ? 'alert' : 'status', style: 'margin-top: 12px;' }, notice.text) : null;
   };
 
+  /**
+   * The three reads behind the page, settled on their own: a config file
+   * someone broke by hand should not stop the sign-ins from showing. Each
+   * failure is said in the sections that needed it.
+   */
   const load = async () => {
-    try {
-      const [credentials, models, config] = await Promise.all([api.credentials(), api.models(), api.config()]);
-      state.credentials = credentials;
-      state.models = models.models ?? [];
-      state.config = config.config ?? {};
-    } catch (error) {
-      say('page', error.message, 'bad');
-      return;
+    const [credentials, models, config] = await Promise.allSettled([api.credentials(), api.models(), api.config()]);
+    if (credentials.status === 'fulfilled') {
+      state.credentials = credentials.value;
+    } else {
+      const text = `Could not read the sign-ins: ${credentials.reason.message}`;
+      state.notices.providers = { text, kind: 'bad' };
+      state.notices.channels = { text, kind: 'bad' };
+    }
+    if (models.status === 'fulfilled') {
+      state.models = models.value.models ?? [];
+    } else {
+      state.notices.models = { text: `Could not list the models: ${models.reason.message}`, kind: 'bad' };
+    }
+    if (config.status === 'fulfilled') {
+      state.config = config.value.config ?? {};
+    } else {
+      const text = `Could not read the config file: ${config.reason.message}`;
+      state.notices.models = { text, kind: 'bad' };
+      state.notices.approvals = { text, kind: 'bad' };
     }
     update();
   };
@@ -377,7 +393,9 @@ export const renderSettings = (section) => {
         el('div', { class: 'form-actions', style: 'margin-top: 12px;' }, saveButton)),
       refresh() {
         // Open when the file says nothing: the default the daemon resolves.
-        const current = state.config?.approvals?.posture ?? 'open';
+        // Nothing checked when the file couldn't be read: a guess here would
+        // be a claim about a setting nobody could see.
+        const current = state.config === undefined ? undefined : (state.config.approvals?.posture ?? 'open');
         for (const radio of radios) {
           if (!chosen) {
             radio.checked = radio.value === current;

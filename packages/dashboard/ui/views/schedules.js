@@ -34,7 +34,7 @@ const reportsTo = (destination) => {
  * stops future runs; the conversations past runs started stay.
  */
 export const renderSchedules = () => {
-  const state = { filter: 'all', confirming: undefined, busy: undefined, error: undefined, loaded: false, unreadable: undefined };
+  const state = { filter: 'all', confirming: undefined, busy: undefined, error: undefined, loaded: false };
   const node = el('div', { class: 'page-scroll' });
 
   const remove = async (schedule) => {
@@ -48,8 +48,7 @@ export const renderSchedules = () => {
     }
     state.busy = undefined;
     state.confirming = undefined;
-    const read = await refreshSchedules();
-    state.unreadable = read.ok ? undefined : read.error;
+    await refreshSchedules();
     paint();
   };
 
@@ -98,10 +97,15 @@ export const renderSchedules = () => {
             onClick: () => { state.filter = filter.id; paint(); },
           }, filter.label)))),
       state.error ? el('div', { class: 'notice bad', role: 'alert' }, state.error) : null,
+      // Shown with whatever rows are still on screen: after a failed read
+      // they are the last good one, and may already be out of date.
+      state.loaded && store.schedulesError !== undefined
+        ? el('div', { class: 'notice bad', role: 'alert' }, `Could not read the schedules: ${store.schedulesError}${all.length > 0 ? ' The list below may be out of date.' : ''}`)
+        : null,
       !state.loaded
         ? el('p', { class: 'field-note' }, 'Loading…')
-        : state.unreadable !== undefined && all.length === 0
-          ? el('div', { class: 'notice bad', role: 'alert' }, `Could not read the schedules: ${state.unreadable}`)
+        : store.schedulesError !== undefined && all.length === 0
+          ? null
         : all.length === 0
           ? el('div', { class: 'empty-state' },
               el('span', { class: 'icon-box' }, icon('calendar-clock', 18)),
@@ -121,9 +125,8 @@ export const renderSchedules = () => {
   };
 
   paint();
-  refreshSchedules().then((read) => {
+  refreshSchedules().then(() => {
     state.loaded = true;
-    state.unreadable = read.ok ? undefined : read.error;
     paint();
   });
 

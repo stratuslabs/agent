@@ -3,6 +3,7 @@ import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
 import { icon } from '../lib/icons.js';
 import { sourceOf } from '../lib/sources.js';
+import { createLatest } from '../lib/latest.js';
 import { navigate, store } from '../app.js';
 
 const STATES = {
@@ -25,15 +26,22 @@ const REFRESH_MS = 3000;
  * one that asked, and the worker's own.
  */
 export const renderTasks = () => {
-  const state = { tasks: undefined, error: undefined, loadedAt: 0, busy: new Set() };
+  const state = { tasks: undefined, error: undefined, loadedAt: 0, busy: new Set(), trailing: undefined };
+  const reads = createLatest();
   const node = el('div', { class: 'page-scroll' });
 
   const load = async () => {
     state.loadedAt = Date.now();
+    // Latest-wins: a Stop, the first read and live events can overlap, and
+    // an older listing landing last would undo a newer one.
+    const ticket = reads.begin();
     try {
-      state.tasks = (await api.tasks()).tasks ?? [];
+      const tasks = (await api.tasks()).tasks ?? [];
+      if (!reads.isCurrent(ticket)) return;
+      state.tasks = tasks;
       state.error = undefined;
     } catch (error) {
+      if (!reads.isCurrent(ticket)) return;
       state.error = `Could not read the tasks: ${error.message}`;
     }
     paint();
@@ -127,9 +135,20 @@ export const renderTasks = () => {
     // The page has no stream of its own, so the shell's repaint on any
     // event is the cue to re-read — at most every few seconds.
     update: () => {
-      if (Date.now() - state.loadedAt > REFRESH_MS) {
+      const wait = REFRESH_MS - (Date.now() - state.loadedAt);
+      if (wait <= 0) {
         void load();
+      } else if (state.trailing === undefined) {
+        // An event inside the window still gets read, at its end: it may be
+        // the last one, like the completion of the task on screen.
+        state.trailing = setTimeout(() => {
+          state.trailing = undefined;
+          void load();
+        }, wait);
       }
+    },
+    destroy: () => {
+      clearTimeout(state.trailing);
     },
   };
 };

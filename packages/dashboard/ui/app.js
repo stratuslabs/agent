@@ -28,6 +28,8 @@ export const store = {
   agents: [],
   sessions: [],
   schedules: [],
+  /** Why the newest schedules read failed, if it did; the rows above it are the last good read. */
+  schedulesError: undefined,
   approvals: [],
   /**
    * Approvals that were waiting here and got answered somewhere else —
@@ -172,24 +174,39 @@ export const refreshCore = async () => {
  * Schedules feed Home's "coming up" list and name the conversations a
  * schedule started, so they are read with the routes that show either.
  */
+const scheduleRefresh = createLatest();
+
 export const refreshSchedules = async () => {
+  // Latest-wins, like the core refresh: opening the page, the shell and live
+  // events can each start one, and an older answer landing last would bring
+  // back a removed schedule or hide a new one.
+  const ticket = scheduleRefresh.begin();
   try {
     const listed = await api.schedules();
-    store.schedules = listed.schedules ?? [];
-    render();
-    return { ok: true };
+    if (scheduleRefresh.isCurrent(ticket)) {
+      store.schedules = listed.schedules ?? [];
+      store.schedulesError = undefined;
+    }
   } catch (error) {
-    // Kept as it was: an unreadable list is not an empty one. The caller
-    // that has a page to show it on says so.
-    return { ok: false, error: error.message };
+    if (scheduleRefresh.isCurrent(ticket)) {
+      // The rows stay as last read: an unreadable list is not an empty one,
+      // and the page that shows them says the read failed.
+      store.schedulesError = error.message;
+    }
   }
+  render();
 };
+
+const sessionsRefresh = createLatest();
 
 const refreshForRoute = async () => {
   if (store.route.name === 'home') {
-    const listed = await api.sessions(undefined, 12).catch(() => ({ sessions: [] }));
-    store.sessions = listed.sessions ?? [];
-    render();
+    const ticket = sessionsRefresh.begin();
+    const listed = await api.sessions(undefined, 12).catch(() => undefined);
+    if (listed && sessionsRefresh.isCurrent(ticket)) {
+      store.sessions = listed.sessions ?? [];
+      render();
+    }
   }
   if (store.route.name === 'home' || store.route.name === 'agent' || store.route.name === 'schedules') {
     await refreshSchedules();

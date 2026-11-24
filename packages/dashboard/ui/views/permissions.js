@@ -2,6 +2,7 @@ import { el, when } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
 import { icon } from '../lib/icons.js';
+import { createLatest } from '../lib/latest.js';
 import { store } from '../app.js';
 
 /**
@@ -39,13 +40,19 @@ const rowsFor = (agentId, listing) => [
 
 export const renderPermissions = () => {
   const state = { rows: undefined, errors: [], confirming: undefined, busy: undefined };
+  const reads = createLatest();
   const node = el('div', { class: 'page-scroll' });
 
   const load = async () => {
+    // Latest-wins, so a reload after a revoke is never undone by the first read landing late.
+    const ticket = reads.begin();
     const results = await Promise.all(store.agents.map((agent) => api.grants(agent.id).then(
       (listing) => ({ rows: rowsFor(agent.id, listing) }),
       (error) => ({ error: `${agent.name}: ${error.message}` }),
     )));
+    if (!reads.isCurrent(ticket)) {
+      return;
+    }
     state.rows = results.flatMap((result) => result.rows ?? []);
     state.errors = results.flatMap((result) => (result.error ? [result.error] : []));
     paint();
