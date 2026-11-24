@@ -24,7 +24,7 @@ const signInKind = (entry) => (entry.type === 'oauth_token'
  * projection of the server.
  */
 export const renderSettings = (section) => {
-  const state = { credentials: undefined, models: undefined, config: undefined, notices: {}, busy: false };
+  const state = { credentials: undefined, models: undefined, config: undefined, notices: {}, busy: false, removing: undefined };
   const node = el('div', { class: 'page-scroll' });
 
   const say = (where, text, kind = 'ok') => {
@@ -193,6 +193,69 @@ export const renderSettings = (section) => {
       state.busy = false; update();
     };
 
+    /**
+     * Takes a provider's shared sign-in off this machine. Confirmed in its
+     * row first, naming the agents that run on it: their next turn has
+     * nothing to sign in with.
+     */
+    const remove = async (name) => {
+      state.busy = true; update();
+      try {
+        await api.removeKey(name);
+      } catch (error) {
+        state.removing = undefined;
+        say('providers', error.message, 'bad');
+        state.busy = false; update();
+        return;
+      }
+      state.removing = undefined;
+      if (provider.value === name) {
+        form.hidden = true;
+        value.value = '';
+      }
+      const note = await reread(['credentials', 'models']);
+      // The agent cards say who can't reach a provider now.
+      void refreshCore();
+      say('providers', `Removed the ${providerName(name)} sign-in from ~/.stratus/credentials.json.${note}`, note ? 'bad' : 'ok');
+      state.busy = false; update();
+    };
+
+    /** Who runs on a provider, for the confirmation. */
+    const runningOn = (name) => store.agents.filter((agent) => agent.runsOn?.provider === name).map((agent) => agent.name);
+
+    const row = (entry) => {
+      const confirming = state.removing === entry.provider;
+      const users = runningOn(entry.provider);
+      const warning = users.length > 0
+        ? `${users.join(', ')} ${users.length === 1 ? 'runs' : 'run'} on ${providerName(entry.provider)} and will stop working until it's connected again.`
+        : `No agent runs on ${providerName(entry.provider)} right now.`;
+      return el('div', { class: 'panel-row' },
+        el('span', { class: 'tool-icon' }, icon('key-round', 15)),
+        el('div', { class: 'text' },
+          el('div', { class: 'title' }, providerName(entry.provider)),
+          confirming
+            ? el('div', { class: 'meta warn-text', role: 'status' }, warning)
+            : el('div', { class: 'meta' },
+                el('span', { class: `dot ${entry.stored ? 'working' : 'idle'}` }),
+                entry.stored ? `Connected · ${signInKind(entry)}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}` : 'Not connected')),
+        ...(confirming
+          ? [
+              el('button', { class: 'btn small', disabled: state.busy, onClick: () => { state.removing = undefined; update(); } }, 'Keep'),
+              el('button', { class: 'btn small danger', disabled: state.busy, onClick: () => void remove(entry.provider) }, state.busy ? 'Removing…' : 'Remove'),
+            ]
+          : [
+              entry.stored
+                ? el('button', {
+                    class: 'btn small quiet',
+                    'aria-label': `Remove the ${providerName(entry.provider)} sign-in`,
+                    disabled: state.busy,
+                    onClick: () => { state.removing = entry.provider; update(); },
+                  }, 'Remove')
+                : null,
+              el('button', { class: 'btn small', onClick: () => open(entry.provider) }, entry.stored ? 'Replace' : 'Connect'),
+            ]));
+    };
+
     const list = el('div', { class: 'panel' });
     const verifyButton = el('button', { class: 'btn', onClick: () => void verify() }, 'Verify');
     const saveButton = el('button', { class: 'btn primary', onClick: () => void save() }, 'Save');
@@ -211,14 +274,7 @@ export const renderSettings = (section) => {
         syncOptions(provider, entries.map((entry) => ({ value: entry.provider, label: providerName(entry.provider) })));
         list.replaceChildren(...(entries.length === 0
           ? [el('div', { class: 'panel-row' }, el('span', { class: 'field-note' }, state.credentials ? 'No providers.' : 'Loading…'))]
-          : entries.map((entry) => el('div', { class: 'panel-row' },
-              el('span', { class: 'tool-icon' }, icon('key-round', 15)),
-              el('div', { class: 'text' },
-                el('div', { class: 'title' }, providerName(entry.provider)),
-                el('div', { class: 'meta' },
-                  el('span', { class: `dot ${entry.stored ? 'working' : 'idle'}` }),
-                  entry.stored ? `Connected · ${signInKind(entry)}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}` : 'Not connected')),
-              el('button', { class: 'btn small', onClick: () => open(entry.provider) }, entry.stored ? 'Replace' : 'Connect')))));
+          : entries.map(row)));
         verifyButton.disabled = state.busy;
         saveButton.disabled = state.busy;
       },

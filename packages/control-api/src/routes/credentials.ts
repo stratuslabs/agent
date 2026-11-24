@@ -191,6 +191,35 @@ export const credentialRoutes: Route[] = [
     },
   },
   {
+    method: 'DELETE',
+    pattern: `${API_PREFIX}/credentials/:provider`,
+    async handler(context) {
+      const provider = parseProviderParam(context.params.provider ?? '');
+      // The shared sign-in only. An agent's own (`stratus signin`), the
+      // channel tokens and the named credentials are other namespaces, and
+      // named ones stay add-only away from the machine. This is no wider
+      // than the PUT above, which can already replace this sign-in.
+      // Under the same lock as the PUT: `saveCredentials` writes the whole
+      // provider set, so a removal built on a snapshot taken before another
+      // client's save would erase that save too.
+      const removed = await withCredentialsFileLock(async () => {
+        const credentials = await loadCredentials(context.env);
+        if (credentials[provider] === undefined) {
+          return false;
+        }
+        delete credentials[provider];
+        await saveCredentials(context.env, credentials);
+        return true;
+      });
+      if (!removed) {
+        throw new ApiError(404, 'credential_not_found', `No ${provider} sign-in is stored, so there is nothing to remove. GET /credentials lists the ones that are.`);
+      }
+      // Read per turn, so the next turn runs without it; one already running
+      // finishes on the old one.
+      return { provider, stored: false };
+    },
+  },
+  {
     method: 'PUT',
     pattern: `${API_PREFIX}/credentials/channels/:channel`,
     async handler(context) {
