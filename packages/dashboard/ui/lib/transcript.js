@@ -73,8 +73,7 @@ const inputFor = (messages, index, result) => {
   return undefined;
 };
 
-/** What a live line says about where its call has got to. Older lines carry no phase and read as running. */
-const PHASE_ORDER = { running: 0, waiting: 1, denied: 2, done: 2, failed: 2 };
+/** Phases a call ends in. Older lines carry no phase and read as running. */
 const ENDED = new Set(['denied', 'done', 'failed']);
 
 /**
@@ -130,9 +129,9 @@ export const transcriptItems = ({ messages, toolLines, streaming, settled }) => 
       items.push(item);
       continue;
     }
-    if ((PHASE_ORDER[phase] ?? 0) >= (PHASE_ORDER[existing.phase] ?? 0)) {
-      existing.phase = phase;
-    }
+    // A call's events arrive in order (waiting, then running once
+    // approved, then its end), so its row shows the latest one.
+    existing.phase = phase;
     if (line.decides) {
       existing.line = line;
     }

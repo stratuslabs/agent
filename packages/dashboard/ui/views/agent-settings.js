@@ -94,6 +94,8 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
     };
 
     const notice = el('div', {});
+    // Refreshed with the form, so a saved model change shows here at once.
+    const runsOnNote = el('p', { class: 'field-note' });
     const saveButton = el('button', { class: 'btn primary', onClick: () => void save() }, 'Save changes');
     const tools = soul.agent?.tools ?? [];
 
@@ -107,9 +109,7 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
         el('div', { class: 'field' },
           el('label', { for: 'agent-model' }, 'Model'),
           model,
-          el('p', { class: 'field-note' }, current.runsOn
-            ? `Runs on ${current.runsOn.provider}${current.runsOn.model ? ` · ${current.runsOn.model}` : ''} right now.`
-            : '')),
+          runsOnNote),
         el('div', { class: 'field' },
           el('label', {}, 'Tools'),
           el('p', { class: 'field-note', style: 'margin: 0 0 8px;' }, 'What this agent may call. Gated tools follow your approval setting. To change the list, edit the tools line in its soul file.'),
@@ -160,6 +160,8 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
           listed.unshift({ value: pinned, label: `${soul.model ?? 'its default model'} · ${soul.provider ?? 'default provider'} (not listed right now)` });
         }
         syncOptions(model, [{ value: '', label: 'Use the default model' }, ...listed], pinned);
+        const runsOn = agent()?.runsOn;
+        runsOnNote.textContent = runsOn ? `Runs on ${runsOn.provider}${runsOn.model ? ` · ${runsOn.model}` : ''} right now.` : '';
         const error = getError();
         notice.replaceChildren(
           ...(saved ? [el('div', { class: 'notice ok', role: 'status' }, saved)] : []),

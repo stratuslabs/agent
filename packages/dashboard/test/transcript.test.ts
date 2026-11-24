@@ -114,3 +114,14 @@ test('a reused call id after its first call ended starts a new row, with its own
   assert.equal(items[1]?.phase, 'denied');
   assert.equal(items[1]?.line, lines[3]);
 });
+
+test('an approved call moves from waiting to running, as its events arrive', () => {
+  const lines = [
+    { text: 'shell.run is waiting for approval', callId: 'c1', toolName: 'shell.run', decides: false, phase: 'waiting' },
+    { text: 'running shell.run…', callId: 'c1', toolName: 'shell.run', decides: true, phase: 'running' },
+  ];
+  const items = transcriptItems({ messages: [], toolLines: lines, streaming: '', settled: new Map() });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.phase, 'running');
+  assert.equal(items[0]?.line, lines[1]);
+});
