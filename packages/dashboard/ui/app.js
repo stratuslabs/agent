@@ -404,9 +404,12 @@ const sidebar = () => {
       item('Permissions', 'shield-check', { name: 'permissions' }, route.name === 'permissions'),
       item('Settings', 'settings-2', { name: 'settings' }, route.name === 'settings'),
     ),
-    el('div', { class: `sidebar-foot${offline ? ' bad' : ''}` },
-      el('span', { class: `dot ${offline ? 'bad' : 'ok'}` }),
-      el('span', { class: 'grow' }, offline ? 'Can’t reach Stratus' : 'Running'),
+    // Three states, not two: the API can answer while the event stream is
+    // down (a proxy that drops WebSocket upgrades, say), and then nothing
+    // live arrives — approvals, replies, completions — though reads work.
+    el('div', { class: `sidebar-foot${offline ? ' bad' : ''}`, title: !offline && store.stream === 'offline' ? 'The page can read from Stratus but isn’t getting live updates; it keeps retrying.' : undefined },
+      el('span', { class: `dot ${offline ? 'bad' : store.stream === 'offline' ? 'needs' : 'ok'}` }),
+      el('span', { class: 'grow' }, offline ? 'Can’t reach Stratus' : store.stream === 'offline' ? 'Running · no live updates' : 'Running'),
       el('span', { class: 'mono' }, `v${store.health?.version ?? '—'}`),
     ),
   );
