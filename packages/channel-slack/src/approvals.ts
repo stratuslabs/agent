@@ -146,6 +146,10 @@ export const createApprovalPrompts = ({
     // whether to open the thread, so it carries the arguments too — just
     // the short form.
     const invocationSummary = renderInvocation(event.call.input).summary;
+    // A background task's worker asking: the agent's name alone can't say
+    // which of its jobs this is, so the prompt names the task (AGT-358 set
+    // it from the gateway's own workers, never from metadata).
+    const taskId = event.taskId !== undefined && event.taskId.length > 0 ? event.taskId : undefined;
 
     // The post is the only awaited step, and the only window in which the
     // request can settle behind this function's back — so it is the only
@@ -162,6 +166,7 @@ export const createApprovalPrompts = ({
         text: escapeSlackText(
           `${agentName} wants to run ${event.call.toolName} (${event.risk})`
           + `${event.origin ? ` on ${event.origin}` : ''}`
+          + `${taskId ? ` for background task ${taskId}` : ''}`
           + `${invocationSummary ? `: ${invocationSummary}` : ''}.`,
         ),
         ...(thread ? { thread_ts: thread } : {}),
@@ -175,6 +180,7 @@ export const createApprovalPrompts = ({
           event.oneShot === true,
           event.always,
           event.reviewNote,
+          taskId,
         ),
       });
       post = posted.ts
@@ -188,6 +194,7 @@ export const createApprovalPrompts = ({
             risk: event.risk,
             oneShot: event.oneShot === true,
             ...(event.always !== undefined ? { always: event.always } : {}),
+            ...(taskId ? { taskId } : {}),
             agentId: event.agentId,
             approvers,
           }
@@ -315,7 +322,9 @@ export const createApprovalPrompts = ({
     const by = event.actor
       ? ` by ${post.approvers.has(event.actor) ? `<@${event.actor}>` : escapeSlackText(event.actor)}`
       : '';
-    const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;
+    // The settled line keeps the task, so the record says which job was answered.
+    const task = post.taskId ? `, background task \`${escapeSlackText(post.taskId)}\`` : '';
+    const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk})${task}: ${outcome}${by}.`;
     try {
       await post.connection.web.chat.update({
         channel: post.channel,

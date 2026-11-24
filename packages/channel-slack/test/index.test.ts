@@ -14295,6 +14295,69 @@ test('a delegated call is asked in the delegating thread, through that agent\'s 
   await adapter.stop();
 });
 
+test('a background task\'s approval names the task, and an ordinary one reads as before', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+  const sectionText = (blocks: SlackBlock[] | undefined): string =>
+    String((blocks?.[0] as { text?: { text?: string } } | undefined)?.text?.text ?? '');
+
+  // Ava handed a job to herself in the background, so the prompt's name
+  // alone can't say which of her jobs is asking (AGT-358 put the id on it).
+  gateway.pendingApprovals.add('req-t');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-t',
+    sessionId: 'slack:ava:T1:C1:100.1:delegate:ava:1:t_7k2m9q',
+    metadata: { delegatedBy: 'ava', rootSessionId: 'slack:ava:T1:C1:100.1', delegationDepth: 1, taskId: 't_7k2m9q' },
+    delegatedFrom: {
+      agentId: 'ava',
+      sessionId: 'slack:ava:T1:C1:100.1',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    },
+    taskId: 't_7k2m9q',
+    oneShot: true,
+  }));
+
+  const asked = web.posts.at(-1);
+  assert.equal(asked?.thread_ts, '100.1');
+  assert.equal(asked?.text, 'Ava wants to run shell.run (gated) for background task t_7k2m9q: {"command":"ls"}.');
+  assert.equal(sectionText(asked?.blocks), '*Ava* wants to run `shell.run` (gated) for background task `t_7k2m9q`.');
+
+  // Settled, the record still says which job it was.
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-t', 'U-DYLAN'));
+  assert.equal(web.updates.at(-1)?.text, '*Ava* — `shell.run` (gated), background task `t_7k2m9q`: Allowed once by <@U-DYLAN>.');
+
+  // A request with no task id reads exactly as it did.
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+  const ordinary = web.posts.at(-1);
+  assert.equal(ordinary?.text, 'Ava wants to run shell.run (gated): {"command":"ls"}.');
+  assert.equal(sectionText(ordinary?.blocks), '*Ava* wants to run `shell.run` (gated).');
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-1', 'U-DYLAN', { ts: 'bot-ts-2' }));
+  assert.equal(web.updates.at(-1)?.text, '*Ava* — `shell.run` (gated): Allowed once by <@U-DYLAN>.');
+
+  await adapter.stop();
+});
+
+test('a task id is escaped, never Slack markup', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+  gateway.pendingApprovals.add('req-t');
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-t', taskId: '<!channel>' }));
+  const asked = web.posts.at(-1);
+  assert.doesNotMatch(String(asked?.text), /<!channel>/);
+  assert.doesNotMatch(JSON.stringify(asked?.blocks), /<!channel>/);
+  assert.match(String(asked?.text), /background task &lt;!channel&gt;/);
+  await socket.deliver('interactive', click('stratus_deny', 'req-t', 'U-DYLAN'));
+  const settled = web.updates.at(-1);
+  assert.match(String(settled?.text), /background task `&lt;!channel&gt;`: Denied/);
+  assert.doesNotMatch(JSON.stringify(settled?.blocks), /<!channel>/);
+  await adapter.stop();
+});
+
 test('a delegated call whose chain this adapter carries no agent of is left for another channel', async () => {
   const { web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
