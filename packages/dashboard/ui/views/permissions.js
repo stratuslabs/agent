@@ -79,6 +79,11 @@ export const renderPermissions = () => {
       return;
     }
     state.rows = results.flatMap((result) => result.rows ?? []);
+    // A confirmation whose grant is gone (revoked elsewhere) is dropped,
+    // rather than left waiting to act on whatever now looks like it.
+    if (state.confirming !== undefined && !state.rows.some((row) => !row.config && `${row.agentId}\u0000${JSON.stringify(row.revoke)}` === state.confirming)) {
+      state.confirming = undefined;
+    }
     state.errors = results.flatMap((result) => (result.error ? [result.error] : []));
     paint();
   };
@@ -103,9 +108,12 @@ export const renderPermissions = () => {
     }
   };
 
-  const rowNode = (row, index) => {
+  const rowNode = (row) => {
     const agent = store.agents.find((candidate) => candidate.id === row.agentId);
-    const key = `${row.agentId}:${index}`;
+    // The grant's own identity, never its position: a reload can add or
+    // remove rows, and a confirmation keyed by index would move to a
+    // different grant and revoke that one instead.
+    const key = row.config ? undefined : `${row.agentId}\u0000${JSON.stringify(row.revoke)}`;
     return el('div', { class: 'list-row', style: `padding: 14px 0;${row.stale ? ' opacity: 0.8;' : ''}` },
       agent ? avatar(agent, 24) : null,
       el('div', { style: 'width: 110px; flex: none; font-weight: 500;' }, agent?.name ?? row.agentId),
@@ -125,7 +133,7 @@ export const renderPermissions = () => {
                 el('button', { class: 'btn small', onClick: () => { state.confirming = undefined; paint(); } }, 'Keep'),
                 el('button', { class: 'btn small danger', disabled: state.busy === key, onClick: () => void revoke(row, key) }, state.busy === key ? 'Revoking…' : 'Revoke'),
               ]
-            : el('button', { class: 'btn small danger-text', onClick: () => { state.confirming = key; paint(); } }, 'Revoke')));
+            : el('button', { class: 'btn small danger-text', onClick: () => { clearTimeout(state.trailing); state.trailing = undefined; state.confirming = key; paint(); } }, 'Revoke')));
   };
 
   const paint = () => {
@@ -172,7 +180,10 @@ export const renderPermissions = () => {
       } else if (state.trailing === undefined) {
         state.trailing = setTimeout(() => {
           state.trailing = undefined;
-          void load();
+          // Checked again at fire time: a confirmation may have opened since.
+          if (state.confirming === undefined && state.busy === undefined) {
+            void load();
+          }
         }, wait);
       }
     },
