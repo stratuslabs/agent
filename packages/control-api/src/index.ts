@@ -20,6 +20,7 @@ import {
   type DashboardSession,
 } from './auth.ts';
 import { createCredentialLinkStore } from './credential-links.ts';
+import { createApiDispatches } from './dispatches.ts';
 import { createEventStream, type EventFilter } from './events.ts';
 import { API_PREFIX, ApiError, MAX_BODY_BYTES, isStateChanging, sendError, sendJson } from './http.ts';
 import { allowedMethodsFor, resolveRoute, type DaemonStartup, type RouteContext } from './routes.ts';
@@ -221,6 +222,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   /** What the last stop() found live, for the replacement. */
   let sessionsWhenStopped: DashboardSession[] = [];
   const credentialLinks = createCredentialLinkStore();
+  const dispatches = createApiDispatches();
 
   const handleApiRequest = async (
     gateway: Gateway,
@@ -290,6 +292,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       watchTurn: (sessionId, turnId) => stream?.watchTurn(sessionId, turnId)
         ?? { reported: () => false, release: () => {} },
       credentialLinks,
+      dispatches,
       version: CONTROL_API_VERSION,
     };
 
