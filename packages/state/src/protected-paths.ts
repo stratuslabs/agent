@@ -9,6 +9,7 @@ import type { RuntimeSelection } from './config.ts';
 import { type StateEnvironment } from './environment.ts';
 import {
   agentsDirPath,
+  chatgptSignInPath,
   credentialsPath,
   gatewayInfoPath,
   gatewayTokenPath,
@@ -55,6 +56,7 @@ export const createHostProtectedPaths = (
       const listed = [
         stratusHomePath(env),
         credentialsPath(env),
+        chatgptSignInPath(env),
         gatewayTokenPath(env),
         gatewayInfoPath(env),
         globalConfigPath(env),

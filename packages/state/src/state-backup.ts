@@ -10,6 +10,7 @@ import type { StateStamp } from './migrations/index.ts';
 import {
   agentsDirPath,
   backupsDirPath,
+  chatgptSignInPath,
   credentialsPath,
   gatewayInfoPath,
   gatewayTokenPath,
@@ -86,7 +87,7 @@ const SQLITE_HEADER = 'SQLite format 3\0';
  * `.migrated` file is an original a migration already kept.
  */
 const isLeftOut = (env: StateEnvironment, filePath: string): boolean => {
-  if ([credentialsPath(env), gatewayTokenPath(env), gatewayInfoPath(env)].includes(filePath)) {
+  if ([credentialsPath(env), chatgptSignInPath(env), gatewayTokenPath(env), gatewayInfoPath(env)].includes(filePath)) {
     return true;
   }
   const name = path.basename(filePath);

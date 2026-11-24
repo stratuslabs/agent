@@ -20,6 +20,7 @@ test('the host protects its whole home and names the secret files in it, and exe
   for (const expected of [
     stratus,
     path.join(stratus, 'credentials.json'),
+    path.join(stratus, 'chatgpt-sign-in.json'),
     path.join(stratus, 'gateway-token'),
     path.join(stratus, 'gateway.json'),
     path.join(stratus, 'config.json'),

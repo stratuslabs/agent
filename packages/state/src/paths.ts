@@ -37,6 +37,10 @@ const GATEWAY_INFO_FILENAME = 'gateway.json';
 
 const GRANTS_LOCK_FILENAME = 'grants.lock';
 
+const CHATGPT_SIGN_IN_FILENAME = 'chatgpt-sign-in.json';
+
+const CHATGPT_SIGN_IN_LOCK_FILENAME = 'chatgpt-sign-in.lock';
+
 export const stratusHomePath = (env: StateEnvironment): string =>
   path.join(readHomeDirectory(env), STRATUS_HOME_DIRNAME);
 
@@ -78,6 +82,18 @@ export const logsDirPath = (env: StateEnvironment): string =>
 
 export const credentialsPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), CREDENTIALS_FILENAME);
+
+/**
+ * `~/.stratus/chatgpt-sign-in.json`: the install's Sign in with ChatGPT
+ * session and host ID (see `createChatGPTSignInFile`). Its own file, not a
+ * key in `credentials.json`, because its refresh token rotates.
+ */
+export const chatgptSignInPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), CHATGPT_SIGN_IN_FILENAME);
+
+/** `~/.stratus/chatgpt-sign-in.lock`: held for every write of the ChatGPT sign-in, by any process. */
+export const chatgptSignInLockPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), CHATGPT_SIGN_IN_LOCK_FILENAME);
 
 /** Where credential changes made away from the machine are recorded, one JSON line each. Names only. */
 export const credentialAuditPath = (env: StateEnvironment): string =>

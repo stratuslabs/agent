@@ -1,5 +1,6 @@
 import { chmodSync, closeSync, constants, ftruncateSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import type { StateEnvironment } from './environment.ts';
 import { grantsLockPath } from './paths.ts';
@@ -279,6 +280,27 @@ export const grantWriteSerializer = (env: StateEnvironment, options: { waitMs?: 
     serializeFileWrite(grantsLockPath(env), write, { waitMs: options.waitMs ?? GRANTS_LOCK_WAIT_MS });
 
 /**
+ * Take the lock without blocking the thread: try at once, and while another
+ * process holds it, try again every `pollMs` until `waitMs` has passed, then
+ * `FileLockHeldError`. For a lock whose holder may take a while, such as a
+ * network round trip, where `claimFileLock`'s blocking wait would stall
+ * everything else this process runs for as long.
+ */
+const claimFileLockPolling = async (lockPath: string, waitMs: number, pollMs: number): Promise<FileLock> => {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      return claimFileLock(lockPath);
+    } catch (error) {
+      if (!(error instanceof FileLockHeldError) || Date.now() >= deadline) {
+        throw error;
+      }
+    }
+    await sleep(Math.max(1, Math.min(pollMs, deadline - Date.now())));
+  }
+};
+
+/**
  * Run an async check-and-write under a file lock: queued behind every
  * other write this process makes under the same lock path, so in-process
  * writers take turns rather than block the thread on a lock this process
@@ -286,15 +308,21 @@ export const grantWriteSerializer = (env: StateEnvironment, options: { waitMs?: 
  * it (up to `waitMs`, then `FileLockHeldError` and nothing written). The
  * queue is per lock path for the whole process, not per caller: two stores
  * over one file share it.
+ *
+ * With `pollMs`, waiting for another process does not block the thread
+ * (see `claimFileLockPolling`); without it, the wait blocks, as a short
+ * write lock can afford.
  */
 export const serializeFileWrite = <T>(
   lockPath: string,
   write: () => Promise<T>,
-  options: { waitMs?: number } = {},
+  options: { waitMs?: number; pollMs?: number } = {},
 ): Promise<T> => {
   const key = lockKey(lockPath);
   const run = async (): Promise<T> => {
-    const lock = claimFileLock(lockPath, { waitMs: options.waitMs ?? 0 });
+    const lock = options.pollMs === undefined
+      ? claimFileLock(lockPath, { waitMs: options.waitMs ?? 0 })
+      : await claimFileLockPolling(lockPath, options.waitMs ?? 0, options.pollMs);
     heldHere.add(key);
     try {
       return await write();
