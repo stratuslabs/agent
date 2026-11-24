@@ -38,13 +38,16 @@ const rowsFor = (agentId, listing) => [
   })),
 ].map((row) => ({ ...row, agentId }));
 
+const REFRESH_MS = 3000;
+
 export const renderPermissions = () => {
-  const state = { rows: undefined, errors: [], confirming: undefined, busy: undefined };
+  const state = { rows: undefined, errors: [], confirming: undefined, busy: undefined, loadedAt: 0, trailing: undefined };
   const reads = createLatest();
   const node = el('div', { class: 'page-scroll' });
 
   const load = async () => {
     // Latest-wins, so a reload after a revoke is never undone by the first read landing late.
+    state.loadedAt = Date.now();
     const ticket = reads.begin();
     const results = await Promise.all(store.agents.map((agent) => api.grants(agent.id).then(
       (listing) => ({ rows: rowsFor(agent.id, listing) }),
@@ -128,5 +131,26 @@ export const renderPermissions = () => {
   paint();
   void load();
 
-  return { node };
+  return {
+    node,
+    // A grant made or revoked anywhere else (Slack, another tab, the CLI)
+    // arrives as an event the shell repaints on; re-read then, at most
+    // every few seconds, and once more at the end of the window so the
+    // last event of a burst is never the one dropped.
+    update: () => {
+      if (state.confirming !== undefined || state.busy !== undefined) {
+        return;
+      }
+      const wait = REFRESH_MS - (Date.now() - state.loadedAt);
+      if (wait <= 0) {
+        void load();
+      } else if (state.trailing === undefined) {
+        state.trailing = setTimeout(() => {
+          state.trailing = undefined;
+          void load();
+        }, wait);
+      }
+    },
+    destroy: () => clearTimeout(state.trailing),
+  };
 };

@@ -5,16 +5,18 @@
  * Worked out from data the API already serves, without a verdict from the
  * daemon: the roster's count of running or parked sessions, the pending
  * approvals, and `/health`'s runtimes. A runtime with a `problem` is the
- * daemon saying no provider resolves; it applies to the agents that run on
- * none. An approval outranks everything, because it is the one state a
- * person has to act on.
+ * daemon saying no provider resolves; it applies to the agents whose
+ * `runsOn` says `none`. An absent `runsOn` is not that: the daemon leaves it
+ * out when it can't read the soul it is still serving, which may pin a
+ * provider, so that agent's runtime is unknown, not missing. An approval
+ * outranks everything, because it is the one state a person has to act on.
  */
 export const agentStatus = (agent, { approvals = [], runtimes = [] } = {}) => {
   if (approvals.some((request) => request.agentId === agent.id)) {
     return { kind: 'needs', label: 'Needs you' };
   }
   const problem = runtimes.find((runtime) => typeof runtime.problem === 'string' && runtime.problem.length > 0);
-  if (problem && (agent.runsOn === undefined || agent.runsOn.provider === 'none')) {
+  if (problem && agent.runsOn?.provider === 'none') {
     return { kind: 'provider', label: "Can't reach provider", detail: problem.problem };
   }
   if ((agent.activeSessions ?? 0) > 0) {

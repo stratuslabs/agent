@@ -24,7 +24,7 @@ test("someone else's approval does not change this agent", () => {
 
 test('an agent with no provider it can reach says so, with the reason', () => {
   const runtimes = [{ provider: 'none', credentials: 'none', problem: 'No provider is configured. Run stratus setup.' }];
-  const status = agentStatus({ id: 'cleo', name: 'Cleo', activeSessions: 0 }, { runtimes });
+  const status = agentStatus({ id: 'cleo', name: 'Cleo', runsOn: { provider: 'none' }, activeSessions: 0 }, { runtimes });
   assert.deepEqual(status, { kind: 'provider', label: "Can't reach provider", detail: 'No provider is configured. Run stratus setup.' });
 });
 
@@ -33,9 +33,16 @@ test('a provider problem does not touch an agent that runs on a provider', () =>
   assert.equal(agentStatus(ava, { runtimes }).kind, 'idle');
 });
 
+test('an agent whose runtime the daemon cannot say is not called provider-less', () => {
+  // `/agents` leaves runsOn out when the soul file became unreadable while
+  // the daemon keeps serving its cached soul, which may pin a provider.
+  const runtimes = [{ provider: 'none', credentials: 'none', problem: 'No provider is configured.' }];
+  assert.equal(agentStatus({ id: 'cleo', name: 'Cleo', activeSessions: 0 }, { runtimes }).kind, 'idle');
+});
+
 test('an approval still outranks a provider problem', () => {
   const runtimes = [{ provider: 'none', credentials: 'none', problem: 'No provider.' }];
-  const status = agentStatus({ id: 'cleo', name: 'Cleo' }, { runtimes, approvals: [{ agentId: 'cleo' }] });
+  const status = agentStatus({ id: 'cleo', name: 'Cleo', runsOn: { provider: 'none' } }, { runtimes, approvals: [{ agentId: 'cleo' }] });
   assert.equal(status.kind, 'needs');
 });
 
