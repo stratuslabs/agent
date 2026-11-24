@@ -1,91 +1,82 @@
-import { el } from '../lib/dom.js';
+import { duration, el } from '../lib/dom.js';
 import { api } from '../lib/api.js';
+import { icon } from '../lib/icons.js';
+import { syncOptions, touchOnChange } from '../lib/forms.js';
 import { refreshCore, store } from '../app.js';
 
-const PROVIDERS = ['anthropic', 'openai', 'codex'];
+const PROVIDER_NAMES = { anthropic: 'Anthropic', openai: 'OpenAI', codex: 'Codex' };
+const providerName = (provider) => PROVIDER_NAMES[provider] ?? provider;
+
+/** What a stored sign-in is, in words. */
+const signInKind = (entry) => (entry.type === 'oauth_token'
+  ? entry.provider === 'codex' ? 'ChatGPT sign-in (codex login)' : 'Claude subscription'
+  : 'API key');
 
 /**
- * Bring a `<select>`'s options up to date without disturbing a choice.
+ * Every setting on one page: provider sign-ins, the default model, Slack per
+ * agent, how approvals work, and what this daemon is.
  *
- * The option lists here are data — models a sign-in can reach, agents on the
- * roster — and they arrive after the form is already on screen. Rebuilding
- * the whole pane to show them would throw away everything typed into it, so
- * the select is kept and only its options are replaced, restoring the current
- * value when it survived the refresh.
+ * Each section's form is built once and kept. `update()` runs on every
+ * notice and on both edges of every request; rebuilding a form there would
+ * put a fresh, empty one on screen the moment someone pressed Verify, so a
+ * key that had just been checked was gone before it could be saved. Only
+ * the data-driven parts refresh; what someone typed is state, not a
+ * projection of the server.
  */
-const syncOptions = (select, options, fallback) => {
-  const signature = options.map((option) => option.value).join(' ');
-  if (select.dataset.signature === signature) {
-    return;
-  }
-  select.dataset.signature = signature;
-  // A choice someone made survives; a value the browser merely settled on
-  // does not. The pane renders once before its data arrives, so the picker
-  // starts on whatever the empty option list allowed — and treating that as a
-  // selection meant the configured model never got selected when it finally
-  // appeared, leaving the picker on "follow the default" and the next Save
-  // deleting a pin nobody touched.
-  const chosen = select.dataset.touched === 'yes' ? select.value : fallback;
-  select.replaceChildren(...options.map((option) => el('option', { value: option.value }, option.label)));
-  const wanted = options.some((option) => option.value === chosen) ? chosen : fallback;
-  if (wanted !== undefined) {
-    select.value = wanted;
-  }
-};
-
-/** Mark a select as carrying a real choice rather than a default. */
-const touchOnChange = (select) => {
-  select.addEventListener('change', () => { select.dataset.touched = 'yes'; });
-  return select;
-};
-
 export const renderSettings = (section) => {
-  const state = { credentials: undefined, models: undefined, config: undefined, notice: undefined, busy: false };
-  const node = el('div', { class: 'main solo' });
+  const state = { credentials: undefined, models: undefined, config: undefined, notices: {}, busy: false };
+  const node = el('div', { class: 'page-scroll' });
 
-  const say = (text, kind = 'ok') => {
-    state.notice = { text, kind };
+  const say = (where, text, kind = 'ok') => {
+    state.notices[where] = { text, kind };
     update();
+  };
+  const noticeFor = (where) => {
+    const notice = state.notices[where];
+    return notice ? el('div', { class: `notice ${notice.kind}`, role: notice.kind === 'bad' ? 'alert' : 'status', style: 'margin-top: 12px;' }, notice.text) : null;
   };
 
   const load = async () => {
     try {
-      if (section === 'providers' || section === 'channels') {
-        state.credentials = await api.credentials();
-      }
-      if (section === 'models') {
-        const [models, config] = await Promise.all([api.models(), api.config()]);
-        state.models = models.models ?? [];
-        state.config = config.config ?? {};
-      }
+      const [credentials, models, config] = await Promise.all([api.credentials(), api.models(), api.config()]);
+      state.credentials = credentials;
+      state.models = models.models ?? [];
+      state.config = config.config ?? {};
     } catch (error) {
-      say(error.message, 'bad');
+      say('page', error.message, 'bad');
       return;
     }
     update();
   };
 
-  /**
-   * The pane, built once and kept.
-   *
-   * `update()` runs on every notice and on both edges of every request — the
-   * busy flag alone fires it twice per click. Rebuilding the pane there put a
-   * fresh, empty form on screen the moment someone pressed Verify, so a key
-   * that had just been checked was gone before it could be saved, and Save
-   * would then store an empty credential. Only the data-driven regions
-   * refresh; what someone typed is state, not a projection of the server.
-   */
-  let pane;
-
   // ---- providers ---------------------------------------------------------
 
   const buildProviders = () => {
-    const provider = el('select', {}, ...PROVIDERS.map((name) => el('option', { value: name }, name)));
-    const type = el('select', {},
+    const provider = el('select', { id: 'sign-in-provider' });
+    const type = el('select', { id: 'sign-in-type' },
       el('option', { value: 'api_key' }, 'API key'),
       el('option', { value: 'oauth_token' }, 'Subscription sign-in'));
-    const value = el('input', { type: 'password', placeholder: 'paste the key' });
-    const baseUrl = el('input', { placeholder: 'optional — a proxy or local endpoint' });
+    const value = el('input', { type: 'password', id: 'sign-in-key', placeholder: 'Paste the key', autocomplete: 'off' });
+    const baseUrl = el('input', { id: 'sign-in-endpoint', placeholder: 'Optional: a proxy or local endpoint' });
+    const hint = el('p', { class: 'field-note' });
+    const form = el('div', { class: 'panel', style: 'padding: 16px; margin-top: 12px;', hidden: true });
+
+    const describeType = () => {
+      hint.replaceChildren(type.value === 'api_key'
+        ? 'A key is bound to the endpoint you save it with, and is never sent anywhere else.'
+        : provider.value === 'codex'
+          ? 'This records that this machine uses codex login. Type anything (say, “chatgpt”) as the value; it is never sent anywhere.'
+          : el('span', {}, 'In a terminal, run ', el('code', {}, 'claude setup-token'), ', then paste the token here.'));
+    };
+    type.addEventListener('change', describeType);
+    provider.addEventListener('change', describeType);
+
+    const open = (name) => {
+      form.hidden = false;
+      provider.value = name;
+      describeType();
+      value.focus();
+    };
 
     const verify = async () => {
       state.busy = true; update();
@@ -104,13 +95,14 @@ export const renderSettings = (section) => {
         // endpoints have no models route at all, and "unreachable" there says
         // nothing about whether the key works.
         say(
+          'providers',
           verdict.status === 'ok' ? 'That key works.'
-            : verdict.status === 'rejected' ? `Rejected: ${verdict.detail ?? 'the provider refused it'}`
-              : `Could not check it: ${verdict.detail ?? 'unreachable'} — it may still be fine.`,
+            : verdict.status === 'rejected' ? `${providerName(provider.value)} rejected it: ${verdict.detail ?? 'the provider refused it'}`
+              : `Could not check it: ${verdict.detail ?? 'unreachable'}. It may still be fine.`,
           verdict.status === 'rejected' ? 'bad' : 'ok',
         );
       } catch (error) {
-        say(error.message, 'bad');
+        say('providers', error.message, 'bad');
       }
       state.busy = false; update();
     };
@@ -125,52 +117,51 @@ export const renderSettings = (section) => {
         });
         value.value = '';
         state.credentials = await api.credentials();
-        say('Stored in ~/.stratus/credentials.json (0600).');
+        state.models = (await api.models()).models ?? state.models;
+        form.hidden = true;
+        say('providers', 'Saved in ~/.stratus/credentials.json, readable only by you.');
       } catch (error) {
-        say(error.message, 'bad');
+        say('providers', error.message, 'bad');
       }
       state.busy = false; update();
     };
 
-    const signIns = el('div', { class: 'rows' });
-    const verifyButton = el('button', { onClick: () => void verify() }, 'Verify');
-    const saveButton = el('button', { class: 'primary', onClick: () => void save() }, 'Save');
+    const list = el('div', { class: 'panel' });
+    const verifyButton = el('button', { class: 'btn', onClick: () => void verify() }, 'Verify');
+    const saveButton = el('button', { class: 'btn primary', onClick: () => void save() }, 'Save');
+    const cancelButton = el('button', { class: 'btn quiet', onClick: () => { form.hidden = true; value.value = ''; } }, 'Cancel');
+    form.append(
+      el('div', { class: 'field' }, el('label', { for: 'sign-in-provider' }, 'Provider'), provider),
+      el('div', { class: 'field' }, el('label', { for: 'sign-in-type' }, 'Type'), type),
+      el('div', { class: 'field' }, el('label', { for: 'sign-in-key' }, 'Key or token'), value, hint),
+      el('div', { class: 'field' }, el('label', { for: 'sign-in-endpoint' }, 'Endpoint'), baseUrl),
+      el('div', { class: 'form-actions' }, cancelButton, verifyButton, saveButton));
 
     return {
-      node: el('section', { class: 'card' },
-        el('h2', {}, 'Providers'),
-        signIns,
-        el('p', { class: 'field-note' }, 'Keys are never sent back out — this page can tell you a sign-in exists, not what it is.'),
-        el('h3', {}, 'Add or replace a sign-in'),
-        el('div', { class: 'form-grid' },
-          el('div', {}, el('label', {}, 'Provider'), provider),
-          el('div', {}, el('label', {}, 'Type'), type),
-        ),
-        el('label', {}, 'Key'), value,
-        el('label', {}, 'Endpoint'), baseUrl,
-        el('p', { class: 'field-note' }, 'A key is bound to the endpoint you save it with, and is never sent anywhere else.'),
-        el('p', { class: 'field-note' }, 'A subscription sign-in is a Claude Code setup token for anthropic. For codex it only records that this machine uses `codex login` — type anything (say, "chatgpt") as the value; it is never sent anywhere.'),
-        el('div', { class: 'actions' }, verifyButton, saveButton),
-      ),
+      node: el('div', {}, list, form),
       refresh() {
-        signIns.replaceChildren(...(state.credentials?.providers ?? []).map((entry) => el('div', { class: 'row' },
-          el('div', { class: 'grow' },
-            el('div', { class: 'title' }, entry.provider),
-            el('div', { class: 'sub' }, entry.stored
-              ? `${entry.type === 'oauth_token' ? (entry.provider === 'codex' ? 'ChatGPT sign-in (codex login)' : 'Claude subscription') : 'API key'}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}`
-              : 'not signed in')),
-          el('span', { class: `pill${entry.stored ? ' running' : ''}` }, entry.stored ? 'signed in' : 'none'),
-        )));
+        const entries = state.credentials?.providers ?? [];
+        syncOptions(provider, entries.map((entry) => ({ value: entry.provider, label: providerName(entry.provider) })));
+        list.replaceChildren(...(entries.length === 0
+          ? [el('div', { class: 'panel-row' }, el('span', { class: 'field-note' }, state.credentials ? 'No providers.' : 'Loading…'))]
+          : entries.map((entry) => el('div', { class: 'panel-row' },
+              el('span', { class: 'tool-icon' }, icon('key-round', 15)),
+              el('div', { class: 'text' },
+                el('div', { class: 'title' }, providerName(entry.provider)),
+                el('div', { class: 'meta' },
+                  el('span', { class: `dot ${entry.stored ? 'working' : 'idle'}` }),
+                  entry.stored ? `Connected · ${signInKind(entry)}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}` : 'Not connected')),
+              el('button', { class: 'btn small', onClick: () => open(entry.provider) }, entry.stored ? 'Replace' : 'Connect')))));
         verifyButton.disabled = state.busy;
         saveButton.disabled = state.busy;
       },
     };
   };
 
-  // ---- models ------------------------------------------------------------
+  // ---- default model ----------------------------------------------------
 
   const buildModels = () => {
-    const picker = touchOnChange(el('select', {}));
+    const picker = touchOnChange(el('select', { id: 'default-model', 'aria-label': 'Default model' }));
 
     const save = async () => {
       state.busy = true; update();
@@ -223,24 +214,20 @@ export const renderSettings = (section) => {
         await api.saveConfig(next);
         state.config = (await api.config()).config ?? {};
         await refreshCore();
-        say('Saved. Every agent that does not pin its own follows this.');
+        say('models', 'Saved. Every agent that does not pin its own model follows this.');
       } catch (error) {
-        say(error.message, 'bad');
+        say('models', error.message, 'bad');
       }
       state.busy = false; update();
     };
 
-    const empty = el('p', { class: 'empty' }, 'No models reachable yet — add a provider sign-in first.');
-    const saveButton = el('button', { class: 'primary', onClick: () => void save() }, 'Save');
+    const empty = el('p', { class: 'field-note' }, 'No models reachable yet. Connect a provider first.');
+    const saveButton = el('button', { class: 'btn primary', onClick: () => void save() }, 'Save');
 
     return {
-      node: el('section', { class: 'card' },
-        el('h2', {}, 'Models'),
-        empty,
-        el('label', {}, 'Default model'), picker,
-        el('p', { class: 'field-note' }, 'Listed live from the sign-ins you have. An agent whose soul pins a provider or model keeps it, whatever this says.'),
-        el('div', { class: 'actions' }, saveButton),
-      ),
+      node: el('div', {},
+        el('div', { style: 'display: flex; gap: 10px;' }, picker, saveButton),
+        empty),
       refresh() {
         const config = state.config ?? {};
         // Either half counts as a pin. A config naming only a provider takes
@@ -252,7 +239,7 @@ export const renderSettings = (section) => {
           : '';
         const listed = (state.models ?? []).map((model) => ({
           value: `${model.provider}:${model.id}`,
-          label: `${model.id} — ${model.provider}`,
+          label: `${model.id} · ${providerName(model.provider)}`,
         }));
         // The configured pin, even when the live catalog does not list it —
         // an endpoint that omits the model, a sign-in the provider is
@@ -262,13 +249,13 @@ export const renderSettings = (section) => {
         // true. Labelled for what it is rather than shown as a normal choice.
         if (pinned && !listed.some((option) => option.value === pinned)) {
           const label = config.provider && config.model
-            ? `${config.model} — ${config.provider} (not listed right now)`
+            ? `${config.model} · ${providerName(config.provider)} (not listed right now)`
             : config.provider
-              ? `${config.provider} — its default model`
-              : `${config.model} — whichever provider is default`;
+              ? `${providerName(config.provider)} · its default model`
+              : `${config.model} · whichever provider is default`;
           listed.unshift({ value: pinned, label });
         }
-        syncOptions(picker, [{ value: '', label: 'follow the default' }, ...listed], pinned);
+        syncOptions(picker, [{ value: '', label: 'Follow the setup default' }, ...listed], pinned);
         empty.hidden = (state.models ?? []).length > 0;
         saveButton.disabled = state.busy;
       },
@@ -278,94 +265,172 @@ export const renderSettings = (section) => {
   // ---- channels ----------------------------------------------------------
 
   const buildChannels = () => {
-    const agentPicker = touchOnChange(el('select', {}));
-    const appToken = el('input', { type: 'password', placeholder: 'xapp-…' });
-    const botToken = el('input', { type: 'password', placeholder: 'xoxb-…' });
+    const appToken = el('input', { type: 'password', id: 'slack-app', placeholder: 'xapp-…', autocomplete: 'off' });
+    const botToken = el('input', { type: 'password', id: 'slack-bot', placeholder: 'xoxb-…', autocomplete: 'off' });
+    const form = el('div', { class: 'panel', style: 'padding: 16px; margin-top: 12px;', hidden: true });
+    const formTitle = el('div', { style: 'font-weight: 600; margin-bottom: 12px;' });
+    let target;
+
+    const open = (agent) => {
+      target = agent.id;
+      formTitle.textContent = `Connect ${agent.name} to Slack`;
+      form.hidden = false;
+      appToken.focus();
+    };
 
     const save = async () => {
       state.busy = true; update();
       try {
-        const stored = await api.storeChannel('slack', {
-          agentId: agentPicker.value,
-          appToken: appToken.value,
-          botToken: botToken.value,
-        });
+        const stored = await api.storeChannel('slack', { agentId: target, appToken: appToken.value, botToken: botToken.value });
         appToken.value = '';
         botToken.value = '';
         state.credentials = await api.credentials();
+        form.hidden = true;
         // A daemon that reloads Slack connects the app now; one that
         // started without Slack, or could not reload, needs the restart.
         if (stored.reloaded) {
-          say("Stored. Slack reloaded, so that agent comes online without a restart. If it doesn't, the daemon log says why.");
+          say('channels', "Saved. Slack reloaded, so that agent comes online without a restart. If it doesn't, the daemon log says why.");
         } else if (stored.reason) {
-          say(`Stored. ${stored.reason}`, 'bad');
+          say('channels', `Saved. ${stored.reason}`, 'bad');
         } else {
-          say('Stored. Restart stratusd to bring that agent online in Slack.');
+          say('channels', 'Saved. Restart Stratus to bring that agent online in Slack.');
         }
       } catch (error) {
-        say(error.message, 'bad');
+        say('channels', error.message, 'bad');
       }
       state.busy = false; update();
     };
 
-    const bound = el('div', {});
-    const saveButton = el('button', { class: 'primary', onClick: () => void save() }, 'Save');
+    const list = el('div', { class: 'panel' });
+    const saveButton = el('button', { class: 'btn primary', onClick: () => void save() }, 'Connect');
+    form.append(
+      formTitle,
+      el('p', { class: 'field-note', style: 'margin: 0 0 12px;' }, 'Each agent has its own Slack app. Create it from the manifest that ', el('code', {}, 'stratus setup'), ' prints, then paste the two tokens Slack gives you.'),
+      el('div', { class: 'field' }, el('label', { for: 'slack-app' }, 'App token'), appToken),
+      el('div', { class: 'field' }, el('label', { for: 'slack-bot' }, 'Bot token'), botToken,
+        el('p', { class: 'field-note' }, 'Tokens are stored in ~/.stratus. No agent can read the tokens of the app that carries it.')),
+      el('div', { class: 'form-actions' }, el('button', { class: 'btn quiet', onClick: () => { form.hidden = true; } }, 'Cancel'), saveButton));
 
     return {
-      node: el('section', { class: 'card' },
-        el('h2', {}, 'Channels'),
-        bound,
-        el('h3', {}, 'Connect an agent'),
-        el('label', {}, 'Agent'), agentPicker,
-        el('label', {}, 'App token'), appToken,
-        el('label', {}, 'Bot token'), botToken,
-        el('p', { class: 'field-note' }, 'Channel tokens are gateway secrets in their own namespace — an agent can never read the tokens of the transport carrying it.'),
-        el('div', { class: 'actions' }, saveButton),
-      ),
+      node: el('div', {}, list, form),
       refresh() {
         // The built-in agent included, deliberately. It is the only agent a
         // fresh install has, the gateway dispatches Slack turns to it, and
-        // the CLI's own Channels list starts with it — filtering it out here
-        // left the picker empty on exactly the install that needs it, with a
-        // Save that could only fail validation.
-        syncOptions(
-          agentPicker,
-          store.agents.map((agent) => ({ value: agent.id, label: agent.name })),
-        );
+        // the CLI's own Channels list starts with it.
         const connected = state.credentials?.channels?.slack ?? [];
-        bound.replaceChildren(connected.length === 0
-          ? el('p', { class: 'empty' }, 'No agent is connected to Slack yet.')
-          : el('div', { class: 'rows' }, ...connected.map((agentId) => {
-              const agent = store.agents.find((candidate) => candidate.id === agentId);
-              return el('div', { class: 'row' },
-                el('div', { class: 'grow' },
-                  el('div', { class: 'title' }, agent?.name ?? agentId),
-                  el('div', { class: 'sub' }, 'Slack app connected')),
-                el('span', { class: 'pill running' }, 'slack'),
-              );
-            })));
+        list.replaceChildren(...store.agents.map((agent) => el('div', { class: 'panel-row' },
+          el('span', { class: 'tool-icon' }, icon('hash', 15)),
+          el('div', { class: 'text' },
+            el('div', { class: 'title' }, agent.name),
+            el('div', { class: 'meta' },
+              el('span', { class: `dot ${connected.includes(agent.id) ? 'working' : 'idle'}` }),
+              connected.includes(agent.id) ? 'Slack app connected' : 'Not connected')),
+          el('button', { class: 'btn small', onClick: () => open(agent) }, connected.includes(agent.id) ? 'Replace tokens' : 'Connect'))));
         saveButton.disabled = state.busy;
       },
     };
   };
 
-  const notice = el('div', {});
+  // ---- approvals ---------------------------------------------------------
+
+  const POSTURES = [
+    { id: 'open', label: 'Open', about: 'Gated tools run without asking. Dangerous tools always ask.' },
+    { id: 'guarded', label: 'Guarded', about: 'Gated tools ask you first, unless a grant covers the call.' },
+    { id: 'review', label: 'Review', about: 'A reviewer model decides, and asks you when it is unsure.' },
+  ];
+
+  const buildApprovals = () => {
+    const name = 'posture';
+    const radios = POSTURES.map((posture) => el('input', { type: 'radio', name, value: posture.id, id: `posture-${posture.id}`, style: 'width: auto; margin: 3px 0 0;' }));
+    const saveButton = el('button', { class: 'btn primary', onClick: () => void save() }, 'Save');
+    let chosen;
+    for (const radio of radios) {
+      radio.addEventListener('change', () => { chosen = radio.value; });
+    }
+
+    const save = async () => {
+      if (!chosen) {
+        return;
+      }
+      state.busy = true; update();
+      try {
+        // Re-read and replace the whole document, for the same reason the
+        // model picker does.
+        const config = (await api.config()).config ?? {};
+        await api.saveConfig({ ...config, approvals: { ...(config.approvals ?? {}), posture: chosen } });
+        state.config = (await api.config()).config ?? {};
+        chosen = undefined;
+        say('approvals', 'Saved to config.json. Restart Stratus (stratus restart) so every agent picks it up.');
+      } catch (error) {
+        say('approvals', error.message, 'bad');
+      }
+      state.busy = false; update();
+    };
+
+    return {
+      node: el('div', {},
+        el('div', { class: 'panel' }, ...POSTURES.map((posture, index) => el('label', { class: 'panel-row', for: `posture-${posture.id}`, style: 'cursor: pointer; margin: 0; align-items: flex-start; font-weight: 400;' },
+          radios[index],
+          el('div', { class: 'text' },
+            el('div', { class: 'title' }, posture.label, posture.id === 'open' ? el('span', { class: 'badge', style: 'margin-left: 8px;' }, 'Default') : null),
+            el('div', { class: 'meta' }, posture.about))))),
+        el('div', { class: 'form-actions', style: 'margin-top: 12px;' }, saveButton)),
+      refresh() {
+        // Open when the file says nothing: the default the daemon resolves.
+        const current = state.config?.approvals?.posture ?? 'open';
+        for (const radio of radios) {
+          if (!chosen) {
+            radio.checked = radio.value === current;
+          }
+        }
+        saveButton.disabled = state.busy || !chosen;
+      },
+    };
+  };
+
+  const sections = {
+    providers: { title: 'Providers', about: 'Sign-ins your agents think with. Keys stay on this machine in ~/.stratus and are only sent to the provider they’re for.', build: buildProviders },
+    models: { title: 'Default model', about: 'Agents use this unless their own settings pin another.', build: buildModels },
+    channels: { title: 'Channels', about: 'Let agents answer in Slack. Each agent gets its own Slack app.', build: buildChannels },
+    approvals: { title: 'Approvals', about: 'What happens when an agent calls a gated tool. Agents with their own setting in config.json keep it.', build: buildApprovals },
+  };
+  const panes = Object.fromEntries(Object.entries(sections).map(([id, spec]) => [id, spec.build()]));
+  const noticeSlots = Object.fromEntries(Object.keys(sections).map((id) => [id, el('div', {})]));
+  const pageNotice = el('div', {});
+  const about = el('div', { class: 'panel' });
+
+  node.append(el('div', { class: 'page-body' },
+    el('div', { class: 'page-head' }, el('div', {},
+      el('h1', {}, 'Settings'),
+      el('div', { class: 'sub' }, 'Sign-ins, default model, Slack and approvals.'))),
+    pageNotice,
+    ...Object.entries(sections).map(([id, spec]) => el('section', { class: 'settings-section', id: `settings-${id}` },
+      el('div', {}, el('h2', {}, spec.title), el('p', { class: 'about' }, spec.about)),
+      el('div', {}, panes[id].node, noticeSlots[id]))),
+    el('section', { class: 'settings-section', id: 'settings-about' },
+      el('div', {}, el('h2', {}, 'About'), el('p', { class: 'about' }, 'Everything else lives in the CLI.')),
+      about)));
 
   const update = () => {
-    pane ??= section === 'models' ? buildModels()
-      : section === 'channels' ? buildChannels()
-        : buildProviders();
-    pane.refresh();
-    notice.replaceChildren(
-      ...(state.notice ? [el('div', { class: `notice ${state.notice.kind}` }, state.notice.text)] : []),
-    );
-    if (!node.firstChild) {
-      node.replaceChildren(el('div', { class: 'column' }, pane.node, notice));
+    for (const [id, pane] of Object.entries(panes)) {
+      pane.refresh();
+      noticeSlots[id].replaceChildren(...[noticeFor(id)].filter(Boolean));
     }
+    pageNotice.replaceChildren(...[noticeFor('page')].filter(Boolean));
+    const row = (label, value) => el('div', { class: 'panel-row' }, el('span', { class: 'text', style: 'color: var(--text-2);' }, label), el('span', { class: 'mono' }, value));
+    about.replaceChildren(
+      row('Version', store.health?.version ?? '—'),
+      row('Data', '~/.stratus'),
+      row('Uptime', store.health?.uptimeMs !== undefined ? duration(store.health.uptimeMs) : '—'));
   };
 
   update();
-  void load();
+  void load().then(() => {
+    // An old link to a section, or a click from an agent's settings, lands on it.
+    if (section && sections[section]) {
+      node.querySelector(`#settings-${section}`)?.scrollIntoView({ block: 'start' });
+    }
+  });
 
   // Nothing here re-renders from the event stream: these are forms, and a
   // repaint driven by another agent's activity would take the caret out of

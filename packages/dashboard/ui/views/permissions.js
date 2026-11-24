@@ -1,0 +1,118 @@
+import { el, when } from '../lib/dom.js';
+import { api } from '../lib/api.js';
+import { avatar } from '../lib/avatar.js';
+import { icon } from '../lib/icons.js';
+import { store } from '../app.js';
+
+/**
+ * One row per standing grant, by kind, as the daemon stores them.
+ *
+ * Each says exactly what it covers, because the kinds differ a lot: a whole
+ * tool covers every call to it, a shell command scope covers one base
+ * command and its arguments (never a flag that writes or runs something
+ * else), a browser site one origin, a message destination one conversation.
+ * Commands declared in the config file are shown but can only be changed
+ * there. Revoking is immediate: the next call asks again.
+ */
+const rowsFor = (agentId, listing) => [
+  ...(listing.tools ?? []).map((grant) => ({
+    kind: 'Whole tool', chip: grant.tool, detail: grant.package ? `from ${grant.package}` : 'built in',
+    at: grant.grantedAt, stale: grant.stale, revoke: { tool: grant.tool },
+  })),
+  ...(listing.scopes ?? []).map((grant) => ({
+    kind: 'Shell command', chip: grant.description, detail: 'that command and its arguments', revoke: { scope: grant.description },
+  })),
+  ...(listing.commands ?? []).map((grant) => ({
+    kind: 'Shell command', chip: grant.command, detail: 'that command by name', at: grant.grantedAt, revoke: { scope: grant.command },
+  })),
+  ...(listing.origins ?? []).map((grant) => ({
+    kind: 'Browser site', chip: grant.origin, detail: grant.tool ? `with ${grant.tool}` : grant.description, revoke: { origin: grant.origin },
+  })),
+  ...(listing.destinations ?? []).map((grant) => ({
+    kind: 'Message destination', chip: grant.tool, detail: grant.description, at: grant.grantedAt, stale: grant.stale,
+    revoke: { destination: grant.destination },
+  })),
+  ...(listing.configCommands ?? []).map((command) => ({
+    kind: 'Shell command', chip: command, detail: 'set in config.json', config: true,
+  })),
+].map((row) => ({ ...row, agentId }));
+
+export const renderPermissions = () => {
+  const state = { rows: undefined, errors: [], confirming: undefined, busy: undefined };
+  const node = el('div', { class: 'page-scroll' });
+
+  const load = async () => {
+    const results = await Promise.all(store.agents.map((agent) => api.grants(agent.id).then(
+      (listing) => ({ rows: rowsFor(agent.id, listing) }),
+      (error) => ({ error: `${agent.name}: ${error.message}` }),
+    )));
+    state.rows = results.flatMap((result) => result.rows ?? []);
+    state.errors = results.flatMap((result) => (result.error ? [result.error] : []));
+    paint();
+  };
+
+  const revoke = async (row, key) => {
+    state.busy = key;
+    paint();
+    try {
+      await api.revokeGrant(row.agentId, row.revoke);
+    } catch (error) {
+      state.errors = [`Could not revoke it: ${error.message}`];
+    }
+    state.busy = undefined;
+    state.confirming = undefined;
+    await load();
+  };
+
+  const rowNode = (row, index) => {
+    const agent = store.agents.find((candidate) => candidate.id === row.agentId);
+    const key = `${row.agentId}:${index}`;
+    return el('div', { class: 'list-row', style: `padding: 14px 0;${row.stale ? ' opacity: 0.8;' : ''}` },
+      agent ? avatar(agent, 24) : null,
+      el('div', { style: 'width: 110px; flex: none; font-weight: 500;' }, agent?.name ?? row.agentId),
+      el('div', { class: 'text' },
+        el('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+          el('span', { style: 'color: var(--text-2); font-size: 13px;' }, row.kind),
+          el('span', { class: 'badge mono' }, row.chip),
+          row.detail ? el('span', { style: 'color: var(--text-2); font-size: 13px;' }, row.detail) : null),
+        row.stale ? el('div', { class: 'meta', style: 'color: var(--warn);' }, icon('triangle-alert', 13), el('span', {}, `No longer applies: ${row.stale}`)) : null),
+      el('div', { style: 'width: 150px; flex: none; color: var(--text-2); font-size: 13px;' },
+        row.config ? 'From config' : row.at ? `Granted ${when(row.at)}` : ''),
+      el('div', { style: 'width: 150px; flex: none; display: flex; justify-content: flex-end; gap: 6px;' },
+        row.config
+          ? null
+          : state.confirming === key
+            ? [
+                el('button', { class: 'btn small', onClick: () => { state.confirming = undefined; paint(); } }, 'Keep'),
+                el('button', { class: 'btn small danger', disabled: state.busy === key, onClick: () => void revoke(row, key) }, state.busy === key ? 'Revoking…' : 'Revoke'),
+              ]
+            : el('button', { class: 'btn small danger-text', onClick: () => { state.confirming = key; paint(); } }, 'Revoke')));
+  };
+
+  const paint = () => {
+    const rows = state.rows ?? [];
+    node.replaceChildren(el('div', { class: 'page-body', style: 'max-width: 1040px;' },
+      el('div', { class: 'page-head' }, el('div', {},
+        el('h1', {}, 'Permissions'),
+        el('div', { class: 'sub' }, 'What you’ve allowed with “Always allow.” Revoke a grant and the agent asks again next time.'))),
+      ...state.errors.map((error) => el('div', { class: 'notice bad', role: 'alert' }, error)),
+      state.rows === undefined
+        ? el('p', { class: 'field-note' }, 'Loading…')
+        : rows.length === 0
+          ? el('div', { class: 'empty-state' },
+              el('span', { class: 'icon-box' }, icon('shield-check', 18)),
+              el('h3', {}, 'No permissions yet'),
+              el('p', {}, 'When you choose “Always allow” on an approval, the grant shows up here so you can revoke it.'))
+          : el('div', {},
+              el('div', { class: 'list' }, ...rows.map(rowNode)),
+              el('div', { class: 'notice', style: 'margin-top: 20px; background: var(--bg); color: var(--text-2); display: flex; gap: 8px; align-items: center;' },
+                icon('shield-check', 14),
+                'Grants never widen on their own. Each row covers only what it says.')),
+    ));
+  };
+
+  paint();
+  void load();
+
+  return { node };
+};

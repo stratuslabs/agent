@@ -1,18 +1,29 @@
-import { el } from '../lib/dom.js';
+import { el, when } from '../lib/dom.js';
 import { api } from '../lib/api.js';
+import { icon } from '../lib/icons.js';
 import { endsSettled, settledLines, shadowLineIndex } from '../lib/decisions.js';
+import { conversationTitle, firstLine, sourceOf } from '../lib/sources.js';
 import { transcriptItems } from '../lib/transcript.js';
 import { onEnvelope, store } from '../app.js';
-import { activityPanel, agentHeader, conversationList, sessionPicker } from './agent-panels.js';
+import { approvalCard } from './approval.js';
+import { conversationDrawer, topBar } from './agent-panels.js';
 import { createSettingsTab } from './agent-settings.js';
 import { paintTranscript as paintItems } from './agent-transcript.js';
 
 /** A conversation started from this page, distinguishable from a Slack thread. */
 const newSessionId = (agentId) => `web:${agentId}:${crypto.randomUUID()}`;
 
-export const renderAgent = (agentId, initialSessionId) => {
+export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
   const state = {
-    tab: 'chat',
+    tab: initialTab === 'settings' ? 'settings' : 'chat',
+    /** Whether the conversation drawer is showing. */
+    drawerOpen: true,
+    /**
+     * Real titles, by session id, for conversations this page has read:
+     * the first thing said in them. The session list carries no title, so
+     * the drawer names the rest by where they came from.
+     */
+    titles: new Map(),
     sessions: [],
     sessionId: initialSessionId,
     /**
@@ -113,33 +124,93 @@ export const renderAgent = (agentId, initialSessionId) => {
     error: undefined,
   };
 
-  const node = el('div', { class: 'main' });
-  const transcriptBox = el('div', { class: 'transcript' });
+  const node = el('div', { class: 'chat-layout' });
+  // The thread, the composer and the search box are built once and kept:
+  // `update()` runs on every event from every agent, and rebuilding them
+  // would take the caret out of a half-typed message and the scroll out of
+  // a long transcript.
+  const transcriptColumn = el('div', { class: 'thread-column' });
+  const transcriptBox = el('div', { class: 'thread', role: 'log', 'aria-live': 'polite' }, transcriptColumn);
+  const growComposer = () => {
+    composer.style.height = 'auto';
+    composer.style.height = `${Math.min(composer.scrollHeight, 200)}px`;
+  };
   const composer = el('textarea', {
-    placeholder: 'Message this agent…',
-    rows: 2,
+    rows: 1,
+    'aria-label': 'Message',
+    onInput: () => growComposer(),
     onKeyDown: (event) => {
-      if (event.key === 'Enter' && !event.shiftKey) {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
         void send();
       }
     },
+  });
+  const sendButton = el('button', { class: 'send-btn', 'aria-label': 'Send', onClick: () => void send() }, icon('arrow-up', 16));
+  const composerHint = el('span', { class: 'hint' });
+  const composerBox = el('div', { class: 'composer-wrap' },
+    el('div', { class: 'composer' }, composer, el('div', { class: 'bar' }, composerHint, sendButton)));
+  const search = el('input', {
+    type: 'search',
+    placeholder: 'Search by title',
+    'aria-label': 'Search conversations by title',
+    onInput: () => update(),
   });
 
   const agent = () => store.agents.find((candidate) => candidate.id === agentId);
 
   // ---- transcript --------------------------------------------------------
 
+  /** The open conversation's title: its first message, once there is one. */
+  const titleOfOpen = () => {
+    const first = state.messages.find((message) => message.role === 'user' && message.content);
+    if (first) {
+      return firstLine(first.content, 120);
+    }
+    return state.unsent ? 'New conversation' : conversationTitle({ id: state.sessionId ?? '' }, { schedules: store.schedules });
+  };
+
+  const conversationHeader = () => {
+    if (state.unsent && state.messages.length === 0) {
+      return null;
+    }
+    const source = sourceOf(state.sessionId ?? '', { schedules: store.schedules });
+    const started = state.messages.find((message) => message.createdAt)?.createdAt;
+    const count = state.messages.filter((message) => (message.role === 'user' || message.role === 'assistant') && message.content).length;
+    return el('div', { class: 'conv-header' },
+      el('div', { class: 'title' }, titleOfOpen()),
+      el('div', { class: 'meta' }, icon(source.icon, 13),
+        el('span', {}, `Started on ${source.label}${started ? ` · ${when(started)}` : ''} · ${count} message${count === 1 ? '' : 's'}`)));
+  };
+
   const paintTranscript = () => {
     const settled = state.settled !== undefined && state.settled.sessionId === state.sessionId
       ? settledLines(state.messages, state.settled.lines)
       : new Map();
-    paintItems(transcriptBox, transcriptItems({
+    const items = transcriptItems({
       messages: state.messages,
       toolLines: state.toolLines,
       streaming: state.streaming,
       settled,
-    }));
+    });
+    // An approval this conversation is waiting on belongs where the person
+    // is looking: at the end of the thread, before the reply still arriving.
+    const waiting = store.approvals
+      .filter((request) => request.sessionId === state.sessionId)
+      .map((request) => ({ kind: 'approval', node: approvalCard(request) }));
+    const streamingAt = items.findIndex((item) => item.streaming);
+    if (streamingAt >= 0) {
+      items.splice(streamingAt, 0, ...waiting);
+    } else {
+      items.push(...waiting);
+    }
+    if (state.error) {
+      items.push({ kind: 'approval', node: el('div', { class: 'msg-error', role: 'alert' }, state.error) });
+    }
+    if (state.messages.length > 0 && state.sessionId && !state.unsent) {
+      state.titles.set(state.sessionId, titleOfOpen());
+    }
+    paintItems(transcriptBox, transcriptColumn, items, conversationHeader());
   };
 
   // ---- data --------------------------------------------------------------
@@ -331,7 +402,7 @@ export const renderAgent = (agentId, initialSessionId) => {
   const shadowKey = (callId, toolName) => `${callId}\u0000${toolName}`;
 
   /** One tool status line, with the decision that arrived ahead of it when it is the line one belongs beside. */
-  const addToolLine = (text, callId, toolName, decides) => {
+  const addToolLine = (text, callId, toolName, decides, phase) => {
     const decision = decides ? state.decisions.get(callId) : undefined;
     if (decision !== undefined) {
       state.decisions.delete(callId);
@@ -342,7 +413,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     if (waiting !== undefined && waiting.length === 0) {
       state.shadows.delete(key);
     }
-    state.toolLines = [...state.toolLines, { text, callId, toolName, decides, ...(decision ? { decision } : {}), ...(shadow ? { shadow } : {}) }];
+    state.toolLines = [...state.toolLines, { text, callId, toolName, decides, phase, ...(decision ? { decision } : {}), ...(shadow ? { shadow } : {}) }];
     paintTranscript();
   };
 
@@ -447,16 +518,16 @@ export const renderAgent = (agentId, initialSessionId) => {
         break;
       }
       case 'tool.called':
-        addToolLine(`running ${event.call.toolName}…`, event.call.id, event.call.toolName, true);
+        addToolLine(`running ${event.call.toolName}…`, event.call.id, event.call.toolName, true, 'running');
         break;
       case 'tool.completed':
-        addToolLine(`${event.result.toolName} ${event.result.ok ? 'finished' : 'failed'}`, event.result.callId, event.result.toolName, false);
+        addToolLine(`${event.result.toolName} ${event.result.ok ? 'finished' : 'failed'}`, event.result.callId, event.result.toolName, false, event.result.ok ? 'done' : 'failed');
         break;
       case 'tool.denied':
-        addToolLine(`${event.call.toolName} was denied`, event.call.id, event.call.toolName, true);
+        addToolLine(`${event.call.toolName} was denied`, event.call.id, event.call.toolName, true, 'denied');
         break;
       case 'tool.approval-requested':
-        addToolLine(`${event.call.toolName} is waiting for approval`, event.call.id, event.call.toolName, false);
+        addToolLine(`${event.call.toolName} is waiting for approval`, event.call.id, event.call.toolName, false, 'waiting');
         break;
       case 'session.failed':
         settleTurn(envelope);
@@ -494,17 +565,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     applyEnvelope(envelope);
   });
 
-  // ---- tabs --------------------------------------------------------------
-
-  const chatTab = () => el('div', { class: 'chat' },
-    transcriptBox,
-    state.error ? el('div', { class: 'notice bad' }, state.error) : null,
-    el('div', { class: 'composer' },
-      composer,
-      el('button', { class: 'primary', disabled: state.sending || !state.sessionId, onClick: () => void send() },
-        state.sending ? 'Working…' : 'Send'),
-    ),
-  );
+  // ---- layout ------------------------------------------------------------
 
   const settingsTab = createSettingsTab({
     agentId,
@@ -514,25 +575,54 @@ export const renderAgent = (agentId, initialSessionId) => {
     setError: (message) => { state.error = message; },
   });
 
-  const update = () => {
-    const body = state.tab === 'chat' ? chatTab()
-      : state.tab === 'activity' ? activityPanel({ activity: store.activity, sessions: state.sessions, sessionId: state.sessionId })
-        : settingsTab();
+  const showTab = (tab) => {
+    state.tab = tab === 'settings' ? 'settings' : 'chat';
+    const hash = `#/agents/${encodeURIComponent(agentId)}${state.tab === 'settings' ? '/settings' : ''}`;
+    if (location.hash !== hash) {
+      history.replaceState(null, '', hash);
+    }
+    update();
+  };
 
-    node.replaceChildren(
-      el('div', { class: 'column' },
-        el('section', { class: 'card' },
-          agentHeader({ current: agent(), agentId, tab: state.tab, onTab: (tab) => { state.tab = tab; update(); } }),
-          state.tab === 'chat'
-            ? el('div', {}, el('label', {}, 'Conversation'), sessionPicker({ sessions: state.sessions, sessionId: state.sessionId, onOpen: openSession }))
-            : null,
-          body,
-        ),
-      ),
-      el('div', { class: 'column' },
-        conversationList({ sessions: state.sessions, sessionId: state.sessionId, onOpen: openSession, onNew: startSession }),
-      ),
+  const update = () => {
+    const current = agent();
+    composer.placeholder = `Message ${current?.name ?? 'this agent'}…`;
+    sendButton.disabled = state.sending || !state.sessionId;
+    composerHint.textContent = state.sending ? 'Working…' : '';
+    const drawerScroll = node.querySelector('.drawer .list-scroll')?.scrollTop ?? 0;
+
+    const pane = el('div', { class: 'chat-pane' },
+      topBar({
+        current,
+        agentId,
+        tab: state.tab,
+        onTab: showTab,
+        drawerOpen: state.drawerOpen,
+        onToggleDrawer: () => { state.drawerOpen = !state.drawerOpen; update(); },
+        onNew: () => { showTab('chat'); startSession(); composer.focus(); },
+      }),
+      ...(state.tab === 'chat'
+        ? [transcriptBox, composerBox]
+        : [el('div', { class: 'page-scroll' }, el('div', { class: 'page-body' }, settingsTab()))]),
     );
+    const drawer = state.tab === 'chat' && state.drawerOpen
+      ? conversationDrawer({
+          current,
+          sessions: state.sessions,
+          sessionId: state.sessionId,
+          unsent: state.unsent,
+          titles: state.titles,
+          schedules: store.schedules,
+          search,
+          onOpen: openSession,
+          onClose: () => { state.drawerOpen = false; update(); },
+        })
+      : null;
+    node.replaceChildren(pane, ...(drawer ? [drawer] : []));
+    const scroller = node.querySelector('.drawer .list-scroll');
+    if (scroller) {
+      scroller.scrollTop = drawerScroll;
+    }
     paintTranscript();
   };
 
@@ -593,7 +683,12 @@ export const renderAgent = (agentId, initialSessionId) => {
   };
 
   update();
+  if (fresh) {
+    // Asked for a new conversation (Home's New chat): mint it now, and the
+    // listing below will not replace it with the newest stored one.
+    startSession();
+  }
   void loadSessions();
 
-  return { node, update, openSession, reconcile, destroy: detach };
+  return { node, update, openSession, startSession, showTab, reconcile, destroy: detach };
 };

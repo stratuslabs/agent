@@ -1,11 +1,17 @@
 import { api, connectEvents, ApiError } from './lib/api.js';
-import { clear, el } from './lib/dom.js';
+import { el } from './lib/dom.js';
 import { avatar } from './lib/avatar.js';
+import { icon } from './lib/icons.js';
 import { createLatest } from './lib/latest.js';
-import { renderDashboard } from './views/dashboard.js';
+import { agentStatus } from './lib/status.js';
+import { renderHome } from './views/home.js';
 import { renderAgent } from './views/agent.js';
+import { renderNewAgent } from './views/new-agent.js';
 import { renderSettings } from './views/settings.js';
-import { renderPlugins } from './views/plugins.js';
+import { renderTools } from './views/tools.js';
+import { renderSchedules } from './views/schedules.js';
+import { renderTasks } from './views/tasks.js';
+import { renderPermissions } from './views/permissions.js';
 
 /**
  * Everything the page knows, in one object.
@@ -17,11 +23,18 @@ import { renderPlugins } from './views/plugins.js';
  * would fight the scroll position.
  */
 export const store = {
-  route: { name: 'dashboard' },
+  route: { name: 'home' },
   health: undefined,
   agents: [],
   sessions: [],
+  schedules: [],
   approvals: [],
+  /**
+   * Approvals that were waiting here and got answered somewhere else —
+   * Slack, another tab, the CLI — or ran out, kept briefly so the card
+   * says what happened instead of vanishing. `{ request, answer, reason, at }`.
+   */
+  answered: [],
   activity: [],
   stream: 'connecting',
   /** Set when the daemon stops answering, so the page says so instead of going stale. */
@@ -48,20 +61,32 @@ export const render = () => {
   });
 };
 
+const hashFor = (route) => {
+  switch (route.name) {
+    case 'agent': return `#/agents/${encodeURIComponent(route.agentId)}${route.tab === 'settings' ? '/settings' : ''}`;
+    case 'settings': return route.section ? `#/settings/${route.section}` : '#/settings';
+    case 'home': return '#/';
+    default: return `#/${route.name}`;
+  }
+};
+
 export const navigate = (route) => {
-  // A different session on the same agent is the same view, told to switch —
-  // not a new one, or opening a conversation from the dashboard would
+  // A different session or tab on the same agent is the same view, told to
+  // switch — not a new one, or opening a conversation from Home would
   // discard whatever the composer already had in it.
-  if (route.name === 'agent' && store.route.name === 'agent'
-      && route.agentId === store.route.agentId && route.sessionId) {
-    current.view?.openSession?.(route.sessionId);
+  if (route.name === 'agent' && store.route.name === 'agent' && route.agentId === store.route.agentId) {
+    if (route.sessionId) {
+      current.view?.openSession?.(route.sessionId);
+    }
+    if (route.fresh) {
+      current.view?.showTab?.('chat');
+      current.view?.startSession?.();
+    } else if (route.tab) {
+      current.view?.showTab?.(route.tab);
+    }
   }
   store.route = route;
-  const hash = route.name === 'agent'
-    ? `#/agents/${encodeURIComponent(route.agentId)}`
-    : route.name === 'settings'
-      ? `#/settings/${route.section}`
-      : `#/${route.name}`;
+  const hash = hashFor(route);
   if (location.hash !== hash) {
     history.pushState(null, '', hash);
   }
@@ -69,18 +94,33 @@ export const navigate = (route) => {
   void refreshForRoute();
 };
 
-const routeFromHash = () => {
-  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  if (parts[0] === 'agents' && parts[1]) {
-    return { name: 'agent', agentId: decodeURIComponent(parts[1]) };
+/**
+ * The route a hash names. Older links keep working: `#/dashboard` was Home,
+ * `#/plugins` is Tools, and `#/settings/<section>` lands on the one
+ * Settings page at that section.
+ */
+export const routeFromHash = (hash) => {
+  const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  switch (parts[0]) {
+    case 'agents':
+      if (parts[1]) {
+        return { name: 'agent', agentId: decodeURIComponent(parts[1]), ...(parts[2] === 'settings' ? { tab: 'settings' } : {}) };
+      }
+      return { name: 'home' };
+    case 'settings':
+      return { name: 'settings', ...(parts[1] ? { section: parts[1] } : {}) };
+    case 'plugins':
+    case 'tools':
+      return { name: 'tools' };
+    case 'schedules':
+    case 'tasks':
+    case 'permissions':
+      return { name: parts[0] };
+    case 'new':
+      return { name: 'new' };
+    default:
+      return { name: 'home' };
   }
-  if (parts[0] === 'settings') {
-    return { name: 'settings', section: parts[1] ?? 'providers' };
-  }
-  if (parts[0] === 'plugins') {
-    return { name: 'plugins' };
-  }
-  return { name: 'dashboard' };
 };
 
 // ---- data ----------------------------------------------------------------
@@ -126,11 +166,26 @@ export const refreshCore = async () => {
   render();
 };
 
+/**
+ * Schedules feed Home's "coming up" list and name the conversations a
+ * schedule started, so they are read with the routes that show either.
+ */
+export const refreshSchedules = async () => {
+  const listed = await api.schedules().catch(() => undefined);
+  if (listed) {
+    store.schedules = listed.schedules ?? [];
+    render();
+  }
+};
+
 const refreshForRoute = async () => {
-  if (store.route.name === 'dashboard') {
+  if (store.route.name === 'home') {
     const listed = await api.sessions(undefined, 12).catch(() => ({ sessions: [] }));
     store.sessions = listed.sessions ?? [];
     render();
+  }
+  if (store.route.name === 'home' || store.route.name === 'agent') {
+    await refreshSchedules();
   }
 };
 
@@ -172,6 +227,23 @@ const describe = (envelope) => {
     case 'tool.approval-resolved': return `approval ${event.answer} (${event.reason})`;
     default: return null;
   }
+};
+
+/** Approvals this page answered itself, so they are not reported as answered elsewhere. */
+export const answeredHere = new Set();
+
+const ANSWERED_KEEP_MS = 2 * 60_000;
+
+const noteAnswered = (event) => {
+  const request = store.approvals.find((candidate) => candidate.requestId === event.requestId);
+  if (!request || answeredHere.has(event.requestId)) {
+    return;
+  }
+  const now = Date.now();
+  store.answered = [
+    { request, answer: event.answer, reason: event.reason, at: now },
+    ...store.answered.filter((entry) => now - entry.at < ANSWERED_KEEP_MS),
+  ];
 };
 
 /** Handlers a screen installs to watch its own conversation live. */
@@ -216,10 +288,13 @@ const handleEnvelope = (envelope) => {
 
   // Approvals and roster activity are shared state, so they refresh for
   // everyone rather than only for whoever is looking at the right screen.
-  // The whole core, not the approvals list alone: the "awaiting approval"
-  // count comes from /health, and a list refreshed on its own left the
-  // counter at zero next to a card that said one was waiting.
+  // The whole core, not the approvals list alone: the "needs you" count and
+  // the agents' states are read together, and refreshing one alone left
+  // them disagreeing on screen.
   const type = envelope.event.type;
+  if (type === 'tool.approval-resolved') {
+    noteAnswered(envelope.event);
+  }
   if (type === 'tool.approval-requested' || type === 'tool.approval-resolved') {
     void refreshCore();
   }
@@ -234,75 +309,82 @@ const handleEnvelope = (envelope) => {
 
 // ---- shell ---------------------------------------------------------------
 
-const logo = () => {
+/** The Stratus mark, from the design file. */
+export const stratusMark = (width = 24) => {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('width', '22');
-  svg.setAttribute('height', '22');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('fill', 'none');
+  svg.setAttribute('width', String(width));
+  svg.setAttribute('height', String(Math.round((width / 1.6413) * 10) / 10));
+  svg.setAttribute('viewBox', '0 0 134.39 81.88');
+  svg.setAttribute('aria-hidden', 'true');
   const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  path.setAttribute('d', 'M3 15a4 4 0 0 1 3.2-3.9A5.5 5.5 0 0 1 17 10.3 3.6 3.6 0 0 1 20.5 15 3.5 3.5 0 0 1 17 18H6.5A3.5 3.5 0 0 1 3 15Z');
-  path.setAttribute('stroke', 'currentColor');
-  path.setAttribute('stroke-width', '1.6');
-  path.setAttribute('stroke-linejoin', 'round');
+  path.setAttribute('d', 'M98.57996 26.57001l0-26.57001-73.88996 0 0 38.07001-24.69 0 0 43.80999 28.83997 0 50.25 0 55.29998 0 0-55.33001-35.80999 0 0 0.02002z m-63.06995 19.80999l13.86999 0 0 27.22004-41.09002 0c0-15.03 12.19003-27.22003 27.22003-27.22004z m43.56995 27.22004l-21.39997 0 0-35.52002-24.70001 0 0-1.13001c0-15.82 12.83002-28.64999 28.65002-28.64999 15.82 0 28.64996 12.82999 28.64997 28.64999l0 36.65003-11.20001 0z m47.01001 0l-27.51001 0 0-38.73004 0.29004 0c15.02999 0 27.21997 12.19003 27.21997 27.22003l0 11.51001z');
+  path.setAttribute('fill', 'currentColor');
   svg.append(path);
   return svg;
 };
 
-/**
- * Whether an agent counts as active right now.
- *
- * The API reports a timestamp and a count, deliberately not a verdict — the
- * window is a rendering decision, and it lives here so changing it does not
- * mean upgrading a daemon. Both inputs matter: a turn parked on a human has
- * not saved since it parked, so the timestamp alone would call it idle at
- * exactly the moment it most needs attention.
- */
-const ACTIVE_WINDOW_MS = 10 * 60_000;
-export const isActive = (agent) =>
-  (agent.activeSessions ?? 0) > 0
-  || (agent.lastActiveAt !== undefined && Date.now() - Date.parse(agent.lastActiveAt) < ACTIVE_WINDOW_MS);
+/** An agent's state, as the four words and the dot every screen uses. */
+export const statusOf = (agent) => agentStatus(agent, { approvals: store.approvals, runtimes: store.health?.runtimes ?? [] });
 
 const sidebar = () => {
   const route = store.route;
-  const item = (label, target, extra = {}) => el('button', {
-    class: `nav-item${extra.sub ? ' sub' : ''}${extra.active ? ' active' : ''}`,
+  const item = (label, iconName, target, active) => el('button', {
+    class: `nav-item${active ? ' active' : ''}`,
+    'aria-current': active ? 'page' : undefined,
     onClick: () => navigate(target),
-  }, extra.children ?? label);
+  }, icon(iconName, 16), el('span', { class: 'grow' }, label));
 
-  return el('nav', { class: 'sidebar' },
-    el('div', { class: 'brand' }, logo(), 'Stratus Agent'),
-    item('Dashboard', { name: 'dashboard' }, { active: route.name === 'dashboard' }),
-    item('Plugins', { name: 'plugins' }, { active: route.name === 'plugins' }),
-    el('div', { class: 'nav-section' }, 'Settings'),
-    ...['providers', 'models', 'channels'].map((section) => item(
-      section.charAt(0).toUpperCase() + section.slice(1),
-      { name: 'settings', section },
-      { sub: true, active: route.name === 'settings' && route.section === section },
-    )),
-    el('div', { class: 'nav-section' }, 'Agents'),
-    ...store.agents.map((agent) => item(agent.name, { name: 'agent', agentId: agent.id }, {
-      active: route.name === 'agent' && route.agentId === agent.id,
-      children: el('span', { class: 'agent-row' },
-        avatar(agent),
+  const offline = store.offlineSince !== undefined;
+  return el('nav', { class: 'sidebar', 'aria-label': 'Main' },
+    el('div', { class: 'brand' }, stratusMark(24), 'Stratus'),
+    el('div', { class: 'nav' },
+      item('Home', 'house', { name: 'home' }, route.name === 'home'),
+      item('Schedules', 'calendar-clock', { name: 'schedules' }, route.name === 'schedules'),
+      item('Tasks', 'list-checks', { name: 'tasks' }, route.name === 'tasks'),
+    ),
+    el('div', { class: 'nav' },
+      el('div', { class: 'nav-label' }, 'Agents'),
+      ...store.agents.map((agent) => {
+        const status = statusOf(agent);
+        const active = route.name === 'agent' && route.agentId === agent.id;
+        return el('button', {
+          class: `nav-item agent${active ? ' active' : ''}`,
+          'aria-current': active ? 'page' : undefined,
+          onClick: () => navigate({ name: 'agent', agentId: agent.id }),
+        },
+        avatar(agent, 20),
         el('span', { class: 'grow' }, agent.name),
-        el('span', { class: `dot${isActive(agent) ? '' : ' idle'}`, title: isActive(agent) ? 'active recently' : 'idle' }),
-      ),
-    })),
-    el('div', { class: 'sidebar-foot' },
-      el('span', {}, 'Stratus Agent'),
-      el('span', {}, `v${store.health?.version ?? '—'}`),
+        // The dot is stale while the daemon is unreachable, so it goes grey
+        // rather than keep claiming an agent is working.
+        el('span', { class: `dot ${offline ? 'idle' : status.kind}`, title: offline ? 'unknown while Stratus is unreachable' : status.label }));
+      }),
+      el('button', { class: `nav-item${route.name === 'new' ? ' active' : ''}`, onClick: () => navigate({ name: 'new' }) },
+        el('span', { class: 'plus-box' }, icon('plus', 12)),
+        el('span', { class: 'grow' }, 'New agent')),
+    ),
+    el('div', { class: 'spacer' }),
+    el('div', { class: 'nav' },
+      item('Tools', 'blocks', { name: 'tools' }, route.name === 'tools'),
+      item('Permissions', 'shield-check', { name: 'permissions' }, route.name === 'permissions'),
+      item('Settings', 'settings-2', { name: 'settings' }, route.name === 'settings'),
+    ),
+    el('div', { class: `sidebar-foot${offline ? ' bad' : ''}` },
+      el('span', { class: `dot ${offline ? 'bad' : 'ok'}` }),
+      el('span', { class: 'grow' }, offline ? 'Can’t reach Stratus' : 'Running'),
+      el('span', { class: 'mono' }, `v${store.health?.version ?? '—'}`),
     ),
   );
 };
 
-const signedOut = () => el('div', { class: 'main solo' },
-  el('div', { class: 'card' },
-    el('h2', {}, 'Not signed in'),
-    el('p', {}, 'This browser has no session with stratusd. Sessions live in the daemon’s memory: stratus restart hands them to the new daemon, but a crash or a stop and start signs you out.'),
-    el('p', { class: 'field-note' }, 'Run stratus dashboard in a terminal to open a fresh one.'),
-  ),
-);
+const signedOut = () => el('div', { class: 'page-wrap', style: 'grid-column: 1 / -1; padding: 10px;' },
+  el('div', { class: 'page' }, el('div', { class: 'page-scroll' },
+    el('div', { class: 'page-body narrow' },
+      el('div', { class: 'page-head' }, el('div', {},
+        el('h1', {}, 'Not signed in'),
+        el('div', { class: 'sub' }, 'This browser has no session with Stratus. Sessions live in the daemon’s memory: stratus restart hands them to the new daemon, but a crash or a stop and start signs you out.'))),
+      el('div', { class: 'notice ok', style: 'color: var(--text); background: var(--bg);' },
+        'Run ', el('code', {}, 'stratus dashboard'), ' in a terminal to open a fresh one.'),
+    ))));
 
 /**
  * A view is `{ node, update? }`, and the difference matters.
@@ -318,16 +400,18 @@ let current = { key: undefined, view: undefined };
 
 const routeKey = (route) => route.name === 'agent'
   ? `agent:${route.agentId}`
-  : route.name === 'settings'
-    ? `settings:${route.section}`
-    : route.name;
+  : route.name;
 
 const buildView = (route) => {
   switch (route.name) {
-    case 'agent': return renderAgent(route.agentId, route.sessionId);
+    case 'agent': return renderAgent(route.agentId, route.sessionId, route.tab, route.fresh);
     case 'settings': return renderSettings(route.section);
-    case 'plugins': return renderPlugins();
-    default: return renderDashboard();
+    case 'tools': return renderTools();
+    case 'schedules': return renderSchedules();
+    case 'tasks': return renderTasks();
+    case 'permissions': return renderPermissions();
+    case 'new': return renderNewAgent();
+    default: return renderHome();
   }
 };
 
@@ -352,18 +436,18 @@ const paint = () => {
   } else {
     current.view.update?.();
   }
-  root.replaceChildren(sidebar(), current.view.node);
+  root.replaceChildren(sidebar(), el('main', { class: 'page-wrap' }, el('div', { class: 'page' }, current.view.node)));
 };
 
 // ---- boot ----------------------------------------------------------------
 
 window.addEventListener('popstate', () => {
-  store.route = routeFromHash();
+  store.route = routeFromHash(location.hash);
   render();
   void refreshForRoute();
 });
 
-store.route = routeFromHash();
+store.route = routeFromHash(location.hash);
 await refreshCore();
 await refreshForRoute();
 

@@ -1,77 +1,95 @@
-import { ago, el } from '../lib/dom.js';
+import { el, when } from '../lib/dom.js';
 import { avatar } from '../lib/avatar.js';
-import { shortId } from '../lib/transcript.js';
+import { icon } from '../lib/icons.js';
+import { conversationTitle, firstLine, sourceOf } from '../lib/sources.js';
 
-const TABS = ['chat', 'activity', 'settings'];
-
-/** The agent's name, what it runs on, and the tab buttons. `current` is its roster entry, if it is still there. */
-export const agentHeader = ({ current, agentId, tab, onTab }) => el('div', { class: 'card-head' },
-  el('div', { class: 'row' },
-    current ? avatar(current, 34) : null,
-    el('div', { class: 'grow' },
-      el('div', { class: 'title' }, current?.name ?? agentId),
-      el('div', { class: 'sub' }, current
-        // An absent `runsOn` means the daemon is serving a soul whose
-        // file it can no longer read, so it cannot say what this runs on.
-        // "demo" would be a guess, and a billing claim is not a good
-        // place to guess.
-        ? `${current.runsOn?.provider ?? 'unknown'}${current.runsOn?.model ? ` · ${current.runsOn.model}` : ''} · ${current.memories ?? 0} remembered`
-        : agentId),
-    ),
-  ),
-  el('div', { class: 'actions' },
-    ...TABS.map((name) => el('button', {
-      class: `small${tab === name ? ' primary' : ''}`,
+/**
+ * The bar across the top of an agent: who it is, the Chat and Settings
+ * tabs, and the history and new-chat buttons. `current` is its roster
+ * entry, if it is still there.
+ */
+export const topBar = ({ current, agentId, tab, onTab, drawerOpen, onToggleDrawer, onNew }) => el('div', { class: 'topbar' },
+  current ? avatar(current, 28) : null,
+  el('div', { class: 'who' },
+    el('div', { class: 'name' }, current?.name ?? agentId),
+    // An absent `runsOn` means the daemon is serving a soul whose file it
+    // can no longer read, so it cannot say what this runs on. A guess would
+    // be a billing claim, so it says nothing rather than "demo".
+    el('div', { class: 'role' }, current?.persona
+      ? firstLine(current.persona, 48)
+      : current?.runsOn ? `${current.runsOn.provider}${current.runsOn.model ? ` · ${current.runsOn.model}` : ''}` : '')),
+  el('div', { class: 'tabs', role: 'tablist' },
+    ...['chat', 'settings'].map((name) => el('button', {
+      class: `tab${tab === name ? ' active' : ''}`,
+      role: 'tab',
+      'aria-selected': tab === name ? 'true' : 'false',
       onClick: () => onTab(name),
-    }, name.charAt(0).toUpperCase() + name.slice(1))),
-  ),
+    }, name === 'chat' ? 'Chat' : 'Settings'))),
+  el('div', { class: 'spacer' }),
+  tab === 'chat'
+    ? el('button', {
+        class: 'btn',
+        'aria-pressed': drawerOpen ? 'true' : 'false',
+        title: drawerOpen ? 'Hide conversations' : 'Show conversations',
+        onClick: onToggleDrawer,
+      }, icon('history', 15), 'History')
+    : null,
+  el('button', { class: 'btn primary', onClick: onNew }, icon('square-pen', 15), 'New chat'),
 );
 
-/** The chat tab's conversation selector. */
-export const sessionPicker = ({ sessions, sessionId, onOpen }) => {
-  const picker = el('select', {
-    onChange: (event) => onOpen(event.target.value),
-  }, ...sessions.map((session) => el('option', {
-    value: session.id,
-    selected: session.id === sessionId,
-  }, `${session.status.replace('_', ' ')} · ${ago(session.updatedAt)} · ${shortId(session.id)}`)));
+const GROUPS = [
+  { label: 'Today', test: (age, date, now) => date.toDateString() === now.toDateString() },
+  { label: 'Yesterday', test: (age, date, now) => new Date(now.getTime() - 86_400_000).toDateString() === date.toDateString() },
+  { label: 'Previous 7 days', test: (age) => age < 7 * 86_400_000 },
+  { label: 'Older', test: () => true },
+];
 
-  if (!sessions.some((session) => session.id === sessionId)) {
-    // A conversation this page just started is not in the store yet, so it
-    // would otherwise be missing from the very picker that is selecting it.
-    picker.prepend(el('option', { value: sessionId, selected: true }, 'new conversation'));
+/**
+ * The conversation drawer: this agent's stored conversations, newest first,
+ * grouped by day and filtered by the search box. `titles` holds the real
+ * titles of conversations this page has opened (their first message); the
+ * rest are named by where they came from until the session list carries a
+ * title.
+ */
+export const conversationDrawer = ({ current, sessions, sessionId, unsent, titles, schedules, search, onOpen, onClose }) => {
+  const now = new Date();
+  const titleOf = (session) => titles.get(session.id) ?? conversationTitle(session, { schedules });
+  // The box is the view's own node, kept across repaints like the composer,
+  // so typing in it never loses the caret to an event from another agent.
+  const needle = search.value.trim().toLowerCase();
+  const shown = sessions.filter((session) => !needle || titleOf(session).toLowerCase().includes(needle));
+  const grouped = new Map();
+  for (const session of shown) {
+    const date = new Date(session.updatedAt);
+    const age = now.getTime() - date.getTime();
+    const group = GROUPS.find((candidate) => candidate.test(age, date, now)).label;
+    grouped.set(group, [...(grouped.get(group) ?? []), session]);
   }
-  return picker;
-};
 
-/** The side card: the newest stored conversations, each with an Open button, and New. */
-export const conversationList = ({ sessions, sessionId, onOpen, onNew }) => el('section', { class: 'card' },
-  el('div', { class: 'card-head' },
-    el('h2', {}, 'Conversations'),
-    el('button', { class: 'small', onClick: onNew }, 'New'),
-  ),
-  sessions.length === 0
-    ? el('p', { class: 'empty' }, 'No stored conversations yet.')
-    : el('div', { class: 'rows' }, ...sessions.slice(0, 12).map((session) => el('div', { class: 'row' },
-        el('div', { class: 'grow' },
-          el('div', { class: 'title', title: session.id },
-            session.id === sessionId ? `▸ ${shortId(session.id)}` : shortId(session.id)),
-          el('div', { class: 'sub' }, ago(session.updatedAt))),
-        el('span', { class: `pill ${session.status}` }, session.status.replace('_', ' ')),
-        el('button', { class: 'small', onClick: () => onOpen(session.id) }, 'Open'),
-      ))),
-);
+  const item = (session) => {
+    const source = sourceOf(session.id, { schedules });
+    return el('button', {
+      class: `conv-item${session.id === sessionId ? ' active' : ''}`,
+      'aria-current': session.id === sessionId ? 'true' : undefined,
+      onClick: () => onOpen(session.id),
+    },
+    el('span', { class: 'source-icon' }, icon(source.icon, 13)),
+    el('span', { class: 'text' },
+      el('div', { class: 'title' }, titleOf(session)),
+      el('div', { class: 'meta' }, `${source.label} · ${when(session.updatedAt, now)}${session.status === 'pending_approval' ? ' · needs you' : session.status === 'running' ? ' · working' : session.status === 'failed' ? ' · failed' : ''}`)));
+  };
 
-/** The activity tab: the dashboard's recent activity lines for this agent's conversations. */
-export const activityPanel = ({ activity, sessions, sessionId }) => {
-  const ours = new Set(sessions.map((session) => session.id));
-  ours.add(sessionId);
-  const lines = activity.filter((line) => ours.has(line.sessionId)).slice(0, 80);
-  return lines.length === 0
-    ? el('p', { class: 'empty' }, 'Nothing yet for this agent.')
-    : el('div', { class: 'activity' }, ...lines.map((line) => el('div', { class: 'line' },
-        el('span', { class: 'when' }, ago(new Date(line.at).toISOString())),
-        el('span', { class: 'what', title: line.sessionId },
-          line.agent ? `${line.agent} ${line.text}` : line.text),
-      )));
+  return el('aside', { class: 'drawer open', 'aria-label': `${current?.name ?? 'Agent'}’s conversations` },
+      el('div', { class: 'drawer-head' },
+        el('span', {}, `${current?.name ?? 'Agent'}’s conversations`),
+        el('button', { class: 'btn quiet icon-only', title: 'Hide conversations', onClick: onClose }, icon('panel-right', 16))),
+      el('div', { class: 'search' }, icon('search', 14), search),
+      el('div', { class: 'list-scroll' },
+        unsent ? el('div', {}, el('div', { class: 'conv-group' }, 'Now'),
+          el('div', { class: 'conv-item active' },
+            el('span', { class: 'source-icon' }, icon('globe', 13)),
+            el('span', { class: 'text' }, el('div', { class: 'title' }, 'New conversation'), el('div', { class: 'meta' }, 'Web · not sent yet')))) : null,
+        ...[...grouped.entries()].flatMap(([label, list]) => [el('div', { class: 'conv-group' }, label), ...list.map(item)]),
+        sessions.length === 0 && !unsent ? el('p', { class: 'field-note', style: 'padding: 12px 10px;' }, 'No conversations yet.') : null,
+        sessions.length > 0 && shown.length === 0 ? el('p', { class: 'field-note', style: 'padding: 12px 10px;' }, 'No conversation title matches.') : null));
 };

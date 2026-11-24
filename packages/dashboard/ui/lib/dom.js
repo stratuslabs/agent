@@ -17,6 +17,11 @@ export const el = (tag, props = {}, ...children) => {
     }
     if (key === 'class') {
       node.className = value;
+    } else if (key === 'style') {
+      // Through the CSSOM, never the attribute: the page's CSP has no
+      // 'unsafe-inline' for styles, and a style attribute set by markup or
+      // setAttribute is exactly what that blocks.
+      node.style.cssText = value;
     } else if (key === 'dataset') {
       Object.assign(node.dataset, value);
     } else if (key.startsWith('on') && typeof value === 'function') {
@@ -80,4 +85,28 @@ export const until = (iso) => {
   }
   const ms = Date.parse(iso) - Date.now();
   return ms > 0 ? `in ${duration(ms)}` : 'now';
+};
+
+const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+/** A clock time in the reader's own format, like "2:30 PM". */
+export const clock = (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+/**
+ * A moment said the short way a person would: the time today, "Tomorrow"
+ * or "Yesterday" with the time, the weekday within a week, else the date.
+ */
+export const when = (iso, now = new Date()) => {
+  if (!iso) {
+    return '';
+  }
+  const date = new Date(iso);
+  const day = 86_400_000;
+  if (sameDay(date, now)) return clock(iso);
+  if (sameDay(date, new Date(now.getTime() + day))) return `Tomorrow ${clock(iso)}`;
+  if (sameDay(date, new Date(now.getTime() - day))) return `Yesterday ${clock(iso)}`;
+  if (Math.abs(date.getTime() - now.getTime()) < 6 * day) {
+    return `${date.toLocaleDateString(undefined, { weekday: 'short' })} ${clock(iso)}`;
+  }
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
