@@ -790,7 +790,11 @@ export const createFileCommandWhitelist = (options: {
         throw error;
       }
       const ids = new Set<string>();
-      for (const entry of entries) {
+      for (const listed of entries) {
+        // Some filesystems (NFS, SMB, FUSE) don't say what an entry is, and
+        // skipping those would leave an agent out of an audit list; ask.
+        const known = listed.isDirectory() || listed.isFile() || listed.isSymbolicLink();
+        const entry = known ? listed : Object.assign(await lstat(path.join(options.directory, listed.name)), { name: listed.name });
         // Not followed, as `resolveWhitelistPath` refuses to follow them:
         // a linked `agents/<id>` or `whitelist.json` is not this agent's.
         if (entry.isDirectory()) {
