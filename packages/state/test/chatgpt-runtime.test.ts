@@ -10,12 +10,15 @@ import {
   CHATGPT_PLAN_SCOPE,
   DEFAULT_CHATGPT_MODEL,
   hasChatGPTSignIn,
+  listAgentSummaries,
+  NoProviderConfiguredError,
   PROVIDER_PACKAGE_NAMES,
   createRuntimeProvider,
   openChatGPTSignInFile,
   parseProviderName,
   providerPackagesUsedBy,
   resolveRuntimeConfig,
+  signedInProviders,
 } from '../src/index.ts';
 
 // `provider: chatgpt` runs on the install's ChatGPT sign-in, kept in
@@ -133,6 +136,72 @@ test('provider chatgpt with no sign-in, or a sign-in that ended, refuses with wh
     () => resolveRuntimeConfig({}, envFor(garbled)),
     (error: Error) => /is not valid JSON/.test(error.message) && !error.message.includes('secret'),
   );
+});
+
+test('with nothing choosing a provider, a ChatGPT sign-in counts like any stored sign-in', async () => {
+  // The only sign-in: the run takes it, and says the provider was inferred.
+  const only = await homeWith({ signIn: signedIn() });
+  const resolved = await resolveRuntimeConfig({}, envFor(only));
+  assert.equal(resolved.provider, 'chatgpt');
+  assert.equal(resolved.inferredProvider, 'chatgpt');
+  assert.equal(resolved.provider === 'chatgpt' && resolved.model, DEFAULT_CHATGPT_MODEL);
+  assert.deepEqual(await signedInProviders(envFor(only)), ['chatgpt']);
+
+  // Beside another sign-in it's two, so the run is refused rather than
+  // quietly put on the other one.
+  const both = await homeWith({ signIn: signedIn(), credentials: { anthropic: { type: 'api_key', value: 'sk-ant-stored' } } });
+  await assert.rejects(
+    () => resolveRuntimeConfig({}, envFor(both)),
+    (error: unknown) => error instanceof NoProviderConfiguredError
+      && /sign-ins for anthropic and chatgpt/.test(error.message),
+  );
+  assert.deepEqual(await signedInProviders(envFor(both)), ['anthropic', 'chatgpt']);
+
+  // Anything chosen still wins over the inference.
+  assert.equal((await resolveRuntimeConfig({ provider: 'anthropic' }, envFor(both))).inferredProvider, undefined);
+});
+
+test('a ChatGPT sign-in that can\'t serve a run isn\'t counted when inferring', async () => {
+  const credentials = { openai: { type: 'api_key', value: 'sk-openai-stored' } };
+  const unusable = {
+    'signed out': signedIn({ accessToken: undefined, refreshToken: undefined, expiresAt: undefined }),
+    'no plan usage': signedIn({ scopes: ['openid'] }),
+    'only a host ID': { hostId: 'urn:uuid:host-1' },
+  };
+  for (const [label, signIn] of Object.entries(unusable)) {
+    const alone = await homeWith({ signIn });
+    await assert.rejects(
+      () => resolveRuntimeConfig({}, envFor(alone)),
+      (error: unknown) => error instanceof NoProviderConfiguredError,
+      `${label}: nothing to infer`,
+    );
+    const beside = await homeWith({ signIn, credentials });
+    const resolved = await resolveRuntimeConfig({}, envFor(beside));
+    assert.equal(resolved.provider, 'openai', `${label}: the other sign-in is the only one`);
+    assert.equal(resolved.inferredProvider, 'openai', label);
+  }
+});
+
+test('an unreadable ChatGPT sign-in file refuses an inferred run instead of guessing past it', async () => {
+  // Whether it holds a sign-in isn't known, so neither is whether the
+  // stored key is the only one. The same as an unreadable credentials file.
+  const garbled = await homeWith({
+    signIn: '{"session": "access-secret-1',
+    credentials: { openai: { type: 'api_key', value: 'sk-openai-stored' } },
+  });
+  await assert.rejects(
+    () => resolveRuntimeConfig({}, envFor(garbled)),
+    (error: Error) => /chatgpt-sign-in\.json is not valid JSON/.test(error.message) && !error.message.includes('secret'),
+  );
+  // A chosen provider never reads it for inference.
+  assert.equal((await resolveRuntimeConfig({ provider: 'openai' }, envFor(garbled))).provider, 'openai');
+});
+
+test('the agent listing shows an unpinned agent running on the only sign-in, ChatGPT', async () => {
+  const home = await homeWith({ signIn: signedIn() });
+  const summaries = await listAgentSummaries(envFor(home));
+  const builtIn = summaries.find((entry) => entry.builtIn);
+  assert.deepEqual(builtIn?.runsOn, { provider: 'chatgpt', model: DEFAULT_CHATGPT_MODEL });
 });
 
 test('a chatgpt run refuses any base URL: the sign-in goes only to OpenAI', async () => {
