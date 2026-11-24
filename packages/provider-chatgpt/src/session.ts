@@ -106,7 +106,7 @@ const grantsPlanUsage = (session: ChatGPTSession): boolean => session.scopes.inc
  * a store's error may quote the record, tokens included. Our own errors,
  * which the work inside the lock throws, come through as they are.
  */
-const storageFailed = (what: string, error: unknown): ChatGPTAuthError =>
+export const storageFailed = (what: string, error: unknown): ChatGPTAuthError =>
   error instanceof ChatGPTAuthError ? error : new ChatGPTAuthError('storage_failed', `Couldn't ${what}.`, { cause: error });
 
 const local = async <T>(what: string, call: () => Promise<T>): Promise<T> => {
