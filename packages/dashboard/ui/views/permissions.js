@@ -29,11 +29,19 @@ const rowsFor = (agentId, listing) => [
     kind: 'Whole tool', chip: grant.tool, detail: grant.package ? `from ${grant.package}` : 'built in',
     at: grant.grantedAt, stale: grant.stale, revoke: { tool: grant.tool },
   })),
-  ...(listing.scopes ?? []).map((grant) => ({
-    kind: 'Shell command', chip: grant.description, detail: 'that command and its arguments', revoke: { scope: grant.description },
-  })),
-  ...(listing.commands ?? []).map((grant) => ({
-    kind: 'Shell command', chip: grant.command, detail: 'that command by name', at: grant.grantedAt, revoke: { scope: grant.command },
+  // A command scope and a command-name grant with the same text are one
+  // revocation target (`forgetScope` takes both), so they are one row.
+  ...[...groupBy([
+    ...(listing.scopes ?? []).map((grant) => ({ text: grant.description, byName: false })),
+    ...(listing.commands ?? []).map((grant) => ({ text: grant.command, byName: true, grantedAt: grant.grantedAt })),
+  ], 'text').values()].map((grants) => ({
+    kind: 'Shell command',
+    chip: grants[0].text,
+    detail: grants.every((grant) => grant.byName) ? 'that command by name'
+      : grants.some((grant) => grant.byName) ? 'that command, by name and with its arguments'
+        : 'that command and its arguments',
+    at: grants.map((grant) => grant.grantedAt).filter(Boolean).sort().at(-1),
+    revoke: { scope: grants[0].text },
   })),
   // One row per origin for the same reason as destinations below.
   ...[...groupBy(listing.origins ?? [], 'origin').values()].map((grants) => ({
