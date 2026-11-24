@@ -310,6 +310,47 @@ afterwards is dropped. A command that means to leave something running
 should still redirect that thing's output (`… > /dev/null 2>&1 &`), because
 until the timeout an open pipe looks exactly like a command still working.
 
+## macOS app tests
+
+`xcodebuild test` for a Mac app can't run in the sandbox. It hangs, then
+fails with Xcode's `test runner hung before establishing connection`. Any
+`sandbox-exec` profile does it, even one that allows everything: macOS
+refuses the launchd job xcodebuild creates for the test host (the system
+log shows `deny job-creation`), so the host starts without the setup XCTest
+needs to connect back. No `writablePaths` or `readablePaths` entry changes
+that.
+
+Run app tests in CI instead. A macOS runner on GitHub Actions runs them,
+and iPhone simulator tests, outside any Stratus sandbox:
+
+```yaml
+# .github/workflows/mac-tests.yml
+on: [pull_request, workflow_dispatch]
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: xcodebuild test -scheme MyApp -destination 'platform=macOS'
+```
+
+An agent with a GitHub token in its shell (see
+[stored credentials](../../packages/tool-shell/README.md#stored-credentials-in-the-environment))
+pushes its branch, then starts a run: opening a pull request does, and
+once the workflow is on the default branch, so does
+`gh workflow run mac-tests.yml --ref <branch>` without one. A push alone
+doesn't, since the workflow has no `push` trigger. It finds the run
+with `gh run list --branch <branch> --workflow mac-tests.yml` and checks it
+in a later call with `gh run view <id>`, since a test run usually outlasts
+one command's timeout. `gh run view <id> --log-failed` prints the failing
+steps.
+
+To run them with `shell.run` on the host itself, the operator sets
+`sandbox: "off"` for that agent under `agents` in tool-shell's config, and
+every command that agent sends then runs with the daemon user's full
+access, your credentials included. No setting lifts the sandbox for one
+command, and an agent can't ask for that per call.
+
 ## Why the safe list is short
 
 The safe list is deliberately short, and `cat`, `ls`, and a `grep` that

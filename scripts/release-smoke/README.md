@@ -43,6 +43,18 @@ copy of the script. A checkout with no `node_modules` gets
 `pnpm install --frozen-lockfile` first. `--no-build` skips `pnpm build`.
 `--keep` leaves the scratch directory behind and prints where it is.
 
+## The background task check
+
+`background-task.mjs` drives the same `smoke` provider through one
+background task: an agent calls `agent.delegate` with `background: true` on
+itself, gets a task id at once, and the task must end `completed`, with
+its outcome `delivered` to that conversation and answered there exactly
+once. The Docker and systemd smoke tests in CI run it
+(`deploy/docker/smoke.sh`, `deploy/systemd/smoke.sh`) after copying
+`plugin/` into their install for that run only. It takes the control API's
+base URL and the agent id as arguments and the operator token from
+`SMOKE_TOKEN`.
+
 ## What it does not cover
 
 - **Slack.** It connects no channel, so it does not prove an agent admits

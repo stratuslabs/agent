@@ -211,7 +211,7 @@ export const createInbound = ({
       admitted.fromAgent === undefined &&
       (connection.config.approvers ?? []).includes(userId) &&
       isStopRequest(event.text ?? '', connection.botUserId) &&
-      stopTurns(connection, sessionId, userId, event.channel)
+      stopTurns(connection, sessionId, userId, event.channel, thread)
     ) {
       return;
     }
@@ -302,7 +302,7 @@ export const createInbound = ({
           if (
             (connection.config.approvers ?? []).includes(userId) &&
             isStopRequest(event.text ?? '', connection.botUserId) &&
-            stopTurns(connection, sessionId, userId, event.channel, true)
+            stopTurns(connection, sessionId, userId, event.channel, thread, true)
           ) {
             return undefined;
           }

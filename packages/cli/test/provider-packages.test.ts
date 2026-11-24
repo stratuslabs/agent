@@ -66,6 +66,11 @@ const stubServiceRunner: ServiceRunner = async (command, args) => ({
   stderr: '',
 });
 
+// The pause between a manager's answers, skipped. After the manager says
+// running, install and start keep asking for about five seconds until the
+// daemon publishes gateway.json, and no daemon here ever does (AGT-363).
+const noServiceWait = async (): Promise<void> => {};
+
 const missing = (...names: string[]) => (specifier: string) => !names.includes(specifier);
 
 test('neither the CLI nor state depends on a provider package', async () => {
@@ -199,7 +204,7 @@ test('setup installs the claude-code harness for a subscription even when this s
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'sk-ant-api-shell' },
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: missing(CLAUDE_CODE),
       packageInstaller: async (packages) => {
         installs.push(packages);
@@ -288,7 +293,7 @@ test('setup installs the claude-code harness when the Claude subscription is cho
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Only the harness is missing, so the optional-package offer stays quiet.
       packageResolver: missing(CLAUDE_CODE),
       packageInstaller: async (packages) => {
@@ -317,7 +322,7 @@ test('setup that cannot install the harness exits 1 and does not say ready', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: missing(CLAUDE_CODE),
       packageInstaller: async () => ({ ok: false, message: 'npm exited with code 243' }),
       setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '9\n']),
@@ -346,7 +351,7 @@ test('setup installs no harness for an API-key provider', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: missing(CLAUDE_CODE, CODEX),
       packageInstaller: async (packages) => {
         installs.push(packages);
@@ -372,7 +377,7 @@ test('setup installs the Anthropic adapter for an API key when it is not install
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: missing(ANTHROPIC, CLAUDE_CODE, CODEX),
       packageInstaller: async (packages) => {
         installs.push(packages);
@@ -468,7 +473,7 @@ test('setup\'s test run installs the provider package first, so the first hello 
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'sk-ant-api-x' },
       fetch: helloFetch(log),
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: (specifier) => installed.has(specifier) || missing(ANTHROPIC, CLAUDE_CODE, CODEX)(specifier),
       packageInstaller: async (packages) => {
         log.push(`install ${packages.join(' ')}`);
@@ -497,7 +502,7 @@ test('setup\'s test run that cannot install the provider package says so and sen
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'sk-ant-api-x' },
       fetch: helloFetch(log),
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: missing(ANTHROPIC, CLAUDE_CODE, CODEX),
       packageInstaller: async (packages) => {
         log.push(`install ${packages.join(' ')}`);
@@ -523,7 +528,7 @@ test('setup\'s test run on the demo provider installs nothing', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: missing(ANTHROPIC, CLAUDE_CODE, CODEX),
       packageInstaller: async (packages) => {
         installs.push(packages);
@@ -550,7 +555,7 @@ test('setup\'s test run installs nothing when the provider package is already in
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'sk-ant-api-x' },
       fetch: helloFetch(log),
-      serviceRunner: stubServiceRunner,
+      serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       packageResolver: missing(CLAUDE_CODE, CODEX),
       packageInstaller: async (packages) => {
         log.push(`install ${packages.join(' ')}`);

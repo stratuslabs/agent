@@ -569,6 +569,14 @@ export interface ObserveInput {
    * agent would, because their text is in the transcript either way.
    */
   metadata?: JsonObject;
+  /**
+   * A name for this message, stored on it (`Message.idempotencyKey`) in the
+   * same save, so a host can find it later with `workItemState` or
+   * `carriesKey`. The runner only records it, as it does for a turn's key;
+   * refusing a repeat is the host's job. The gateway uses it for a
+   * background task's fallback notice and never passes a channel's through.
+   */
+  idempotencyKey?: string;
 }
 
 /**
@@ -1202,6 +1210,7 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       overheard: true,
       observed: true,
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
     });
 
     // The speaker is judged like any sender: their words are in the
