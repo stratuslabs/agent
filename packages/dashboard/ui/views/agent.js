@@ -429,9 +429,10 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     update();
     try {
       const result = await api.stopSession(sessionId);
-      if (result.stopped === 0 && result.tasks === 0 && state.sessionId === sessionId) {
-        // Already over: it ended while the click was on its way, and its
-        // end may have been missed. The store says how it went.
+      if (result.stopped === 0 && state.sessionId === sessionId) {
+        // No turn was running: it ended while the click was on its way, and
+        // its end may have been missed. The store says how it went. Tasks
+        // the stop reached don't change that; their stops end no turn here.
         state.stopping = undefined;
         await reconcile();
       }
