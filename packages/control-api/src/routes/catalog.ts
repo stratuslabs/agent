@@ -1,13 +1,37 @@
 import {
   collectAvailableModels,
+  createChatGPTSignInFile,
   discoverActiveConfig,
+  hasChatGPTSignIn,
   isSignedInRuntime,
+  listChatGPTSignInModels,
   loadCredentials,
   resolveRuntimeConfig,
+  type StateEnvironment,
 } from '@stratusagent/state';
 
 import { API_PREFIX } from '../http.ts';
 import type { Route } from '../routes.ts';
+
+/**
+ * The install's ChatGPT account's models, as OpenAI lists them for it, when
+ * its sign-in can serve a run — setup's picker offers the same list. The
+ * token comes from the sign-in file through the token source a turn uses, so
+ * one about to run out is refreshed there, under the file's lock. A listing
+ * that fails, or a sign-in file that can't be read, leaves them out, as a
+ * rejected key leaves its provider out; nothing it threw reaches the answer.
+ */
+const collectChatGPTModels = async (env: StateEnvironment): Promise<Array<{ provider: 'chatgpt'; id: string }>> => {
+  try {
+    if (!await hasChatGPTSignIn(createChatGPTSignInFile(env))) {
+      return [];
+    }
+    const models = await listChatGPTSignInModels(env, env.fetch ? { fetch: env.fetch } : {});
+    return models.map(({ slug }) => ({ provider: 'chatgpt' as const, id: slug }));
+  } catch {
+    return [];
+  }
+};
 
 export const catalogRoutes: Route[] = [
   // ---- catalog -------------------------------------------------------------
@@ -63,16 +87,21 @@ export const catalogRoutes: Route[] = [
         ?? (configApplies && configChosen ? config.baseUrl : undefined);
       const apiKeyEnv = signedIn?.apiKeyEnvVar ?? (configApplies && configChosen ? config.apiKeyEnv : undefined);
       const credentials = await loadCredentials(context.env);
-      const models = await collectAvailableModels(
-        {
-          ...(provider !== undefined ? { provider } : {}),
-          ...(baseUrl !== undefined ? { baseUrl } : {}),
-          ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
-          credentials,
-        },
-        context.env,
-      );
-      return { models };
+      // The ChatGPT account's first, as in setup: its list is short and
+      // chosen by OpenAI. Asked alongside the rest rather than after them.
+      const [chatgpt, models] = await Promise.all([
+        collectChatGPTModels(context.env),
+        collectAvailableModels(
+          {
+            ...(provider !== undefined ? { provider } : {}),
+            ...(baseUrl !== undefined ? { baseUrl } : {}),
+            ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
+            credentials,
+          },
+          context.env,
+        ),
+      ]);
+      return { models: [...chatgpt, ...models] };
     },
   },
   {
