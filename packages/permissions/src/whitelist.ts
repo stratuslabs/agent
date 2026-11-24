@@ -795,7 +795,17 @@ export const createFileCommandWhitelist = (options: {
         // a linked `agents/<id>` or `whitelist.json` is not this agent's.
         if (entry.isDirectory()) {
           const file = whitelistPathFor(options.directory, entry.name);
-          const found = await lstat(file).catch(() => undefined);
+          // Only a file that isn't there is no grant file. Anything else
+          // (a directory with no search permission, an I/O error) fails
+          // the listing: an audit list that quietly leaves an agent out
+          // reads as that agent holding nothing.
+          const found = await lstat(file).catch((error: unknown) => {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code === 'ENOENT' || code === 'ENOTDIR') {
+              return undefined;
+            }
+            throw error;
+          });
           if (found?.isFile() === true) {
             ids.add(entry.name);
           }

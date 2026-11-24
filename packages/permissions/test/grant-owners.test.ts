@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -43,4 +43,22 @@ test('owners is empty before any agent has a directory, and refuses a linked age
   await writeFile(path.join(real, 'ava', 'whitelist.json'), JSON.stringify({ version: 1, scopes: [] }));
   await symlink(real, agents);
   await assert.rejects(createFileCommandWhitelist({ directory: agents, stateHome: home }).owners?.() ?? Promise.resolve());
+});
+
+test('a grant file owners cannot inspect fails the listing rather than leaving that agent out', async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip('root reads through permissions');
+    return;
+  }
+  const { home, agents } = await freshHome();
+  const store = createFileCommandWhitelist({ directory: agents, stateHome: home });
+  await store.rememberTool('ava', { tool: 'demo.echo', grantedAt: '2026-11-24T00:00:00.000Z' });
+  await store.rememberTool('ben', { tool: 'demo.echo', grantedAt: '2026-11-24T00:00:00.000Z' });
+  // Listed by the parent, but nothing inside it can be looked at.
+  await chmod(path.join(agents, 'ben'), 0o000);
+  try {
+    await assert.rejects(store.owners?.() ?? Promise.resolve(), /EACCES|EPERM/);
+  } finally {
+    await chmod(path.join(agents, 'ben'), 0o700);
+  }
 });
