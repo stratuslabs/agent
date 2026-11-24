@@ -278,3 +278,4 @@ The full documentation is at <https://github.com/stratuslabs/agent/tree/main/doc
 - [Memory](https://github.com/stratuslabs/agent/blob/main/docs/concepts/memory.md)
 - [Remote access](https://github.com/stratuslabs/agent/blob/main/docs/guides/remote-access.md)
 - [Troubleshooting](https://github.com/stratuslabs/agent/blob/main/docs/guides/troubleshooting.md)
+- [Known limitations](https://github.com/stratuslabs/agent/blob/main/docs/concepts/limitations.md)
