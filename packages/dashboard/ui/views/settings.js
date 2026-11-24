@@ -41,6 +41,26 @@ export const renderSettings = (section) => {
    * someone broke by hand should not stop the sign-ins from showing. Each
    * failure is said in the sections that needed it.
    */
+  /**
+   * Re-reads after a write that already succeeded. Best effort, and never
+   * the write's verdict: a catalog that can't be listed right now must not
+   * make a stored key look unsaved, or the retry it invites stores an empty
+   * one. Returns a sentence to add when a re-read failed.
+   */
+  const reread = async (parts) => {
+    const failed = [];
+    if (parts.includes('credentials')) {
+      await api.credentials().then((value) => { state.credentials = value; }, () => failed.push('sign-ins'));
+    }
+    if (parts.includes('models')) {
+      await api.models().then((value) => { state.models = value.models ?? state.models; }, () => failed.push('models'));
+    }
+    if (parts.includes('config')) {
+      await api.config().then((value) => { state.config = value.config ?? {}; }, () => failed.push('config file'));
+    }
+    return failed.length > 0 ? ` Couldn't refresh the ${failed.join(' and ')} afterwards; what's shown may be out of date.` : '';
+  };
+
   const load = async () => {
     const [credentials, models, config] = await Promise.allSettled([api.credentials(), api.models(), api.config()]);
     if (credentials.status === 'fulfilled') {
@@ -131,14 +151,16 @@ export const renderSettings = (section) => {
           value: value.value,
           ...(baseUrl.value.trim() ? { baseUrl: baseUrl.value.trim() } : {}),
         });
-        value.value = '';
-        state.credentials = await api.credentials();
-        state.models = (await api.models()).models ?? state.models;
-        form.hidden = true;
-        say('providers', 'Saved in ~/.stratus/credentials.json, readable only by you.');
       } catch (error) {
         say('providers', error.message, 'bad');
+        state.busy = false; update();
+        return;
       }
+      // Stored. From here nothing can make it look unsaved.
+      value.value = '';
+      form.hidden = true;
+      const note = await reread(['credentials', 'models']);
+      say('providers', `Saved in ~/.stratus/credentials.json, readable only by you.${note}`, note ? 'bad' : 'ok');
       state.busy = false; update();
     };
 
@@ -228,12 +250,15 @@ export const renderSettings = (section) => {
           delete next.model;
         }
         await api.saveConfig(next);
-        state.config = (await api.config()).config ?? {};
-        await refreshCore();
-        say('models', 'Saved. Every agent that does not pin its own model follows this.');
       } catch (error) {
         say('models', error.message, 'bad');
+        state.busy = false; update();
+        return;
       }
+      picker.dataset.touched = '';
+      const note = await reread(['config']);
+      await refreshCore();
+      say('models', `Saved. Every agent that does not pin its own model follows this.${note}`, note ? 'bad' : 'ok');
       state.busy = false; update();
     };
 
@@ -296,23 +321,26 @@ export const renderSettings = (section) => {
 
     const save = async () => {
       state.busy = true; update();
+      let stored;
       try {
-        const stored = await api.storeChannel('slack', { agentId: target, appToken: appToken.value, botToken: botToken.value });
-        appToken.value = '';
-        botToken.value = '';
-        state.credentials = await api.credentials();
-        form.hidden = true;
-        // A daemon that reloads Slack connects the app now; one that
-        // started without Slack, or could not reload, needs the restart.
-        if (stored.reloaded) {
-          say('channels', "Saved. Slack reloaded, so that agent comes online without a restart. If it doesn't, the daemon log says why.");
-        } else if (stored.reason) {
-          say('channels', `Saved. ${stored.reason}`, 'bad');
-        } else {
-          say('channels', 'Saved. Restart Stratus to bring that agent online in Slack.');
-        }
+        stored = await api.storeChannel('slack', { agentId: target, appToken: appToken.value, botToken: botToken.value });
       } catch (error) {
         say('channels', error.message, 'bad');
+        state.busy = false; update();
+        return;
+      }
+      appToken.value = '';
+      botToken.value = '';
+      form.hidden = true;
+      const note = await reread(['credentials']);
+      // A daemon that reloads Slack connects the app now; one that
+      // started without Slack, or could not reload, needs the restart.
+      if (stored.reloaded) {
+        say('channels', `Saved. Slack reloaded, so that agent comes online without a restart. If it doesn't, the daemon log says why.${note}`, note ? 'bad' : 'ok');
+      } else if (stored.reason) {
+        say('channels', `Saved. ${stored.reason}${note}`, 'bad');
+      } else {
+        say('channels', `Saved. Restart Stratus to bring that agent online in Slack.${note}`, note ? 'bad' : 'ok');
       }
       state.busy = false; update();
     };
@@ -374,12 +402,14 @@ export const renderSettings = (section) => {
         // model picker does.
         const config = (await api.config()).config ?? {};
         await api.saveConfig({ ...config, approvals: { ...(config.approvals ?? {}), posture: chosen } });
-        state.config = (await api.config()).config ?? {};
-        chosen = undefined;
-        say('approvals', 'Saved to config.json. Restart Stratus (stratus restart) so every agent picks it up.');
       } catch (error) {
         say('approvals', error.message, 'bad');
+        state.busy = false; update();
+        return;
       }
+      chosen = undefined;
+      const note = await reread(['config']);
+      say('approvals', `Saved to config.json. Restart Stratus (stratus restart) so every agent picks it up.${note}`, note ? 'bad' : 'ok');
       state.busy = false; update();
     };
 

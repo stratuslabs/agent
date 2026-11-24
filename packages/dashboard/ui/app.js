@@ -30,6 +30,8 @@ export const store = {
   schedules: [],
   /** Why the newest schedules read failed, if it did; the rows above it are the last good read. */
   schedulesError: undefined,
+  /** The same for Home's recent conversations. */
+  sessionsError: undefined,
   approvals: [],
   /**
    * Approvals that were waiting here and got answered somewhere else —
@@ -202,11 +204,18 @@ const sessionsRefresh = createLatest();
 const refreshForRoute = async () => {
   if (store.route.name === 'home') {
     const ticket = sessionsRefresh.begin();
-    const listed = await api.sessions(undefined, 12).catch(() => undefined);
-    if (listed && sessionsRefresh.isCurrent(ticket)) {
-      store.sessions = listed.sessions ?? [];
-      render();
+    try {
+      const listed = await api.sessions(undefined, 12);
+      if (sessionsRefresh.isCurrent(ticket)) {
+        store.sessions = listed.sessions ?? [];
+        store.sessionsError = undefined;
+      }
+    } catch (error) {
+      if (sessionsRefresh.isCurrent(ticket)) {
+        store.sessionsError = error.message;
+      }
     }
+    render();
   }
   if (store.route.name === 'home' || store.route.name === 'agent' || store.route.name === 'schedules') {
     await refreshSchedules();

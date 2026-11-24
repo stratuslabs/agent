@@ -68,8 +68,14 @@ const upcomingRow = (schedule) => {
     el('span', { class: 'when' }, schedule.nextFireAt ? when(schedule.nextFireAt) : 'next event'));
 };
 
+const ANSWERED_KEEP_MS = 2 * 60_000;
+
+/** A read that failed, said where its section is, above whatever it last showed. */
+const readFailure = (what, error, cached) => el('div', { class: 'notice bad', role: 'alert', style: 'margin-bottom: 8px;' },
+  `Could not read ${what}: ${error}${cached ? ' What’s below may be out of date.' : ''}`);
+
 export const renderHome = () => {
-  const state = { expanded: false };
+  const state = { expanded: false, expiry: undefined };
   const node = el('div', { class: 'page-scroll' });
 
   const update = () => {
@@ -81,7 +87,13 @@ export const renderHome = () => {
       .filter((schedule) => schedule.nextFireAt || (typeof schedule.cadence === 'string' && schedule.cadence.startsWith('on ')))
       .sort((a, b) => (a.nextFireAt ?? '9999').localeCompare(b.nextFireAt ?? '9999'))
       .slice(0, 3);
-    const answered = store.answered.filter((entry) => Date.now() - entry.at < 2 * 60_000).slice(0, 3);
+    const answered = store.answered.filter((entry) => Date.now() - entry.at < ANSWERED_KEEP_MS).slice(0, 3);
+    // An answered row goes when its two minutes are up, whether or not
+    // anything else happens by then.
+    clearTimeout(state.expiry);
+    state.expiry = answered.length > 0
+      ? setTimeout(update, Math.max(0, Math.min(...answered.map((entry) => entry.at + ANSWERED_KEEP_MS - Date.now()))) + 50)
+      : undefined;
 
     const body = el('div', { class: `page-body${offline ? '' : ''}` },
       offline ? offlineBanner() : null,
@@ -96,7 +108,9 @@ export const renderHome = () => {
       agents.length > 0
         ? el('div', { class: `agent-cards${offline ? ' stale' : ''}` }, ...agents.map(agentCard))
         : null,
-      store.sessions.length === 0 && upcoming.length === 0
+      // A failed read is not an empty install: only call it empty when both
+      // lists were actually read.
+      store.sessions.length === 0 && upcoming.length === 0 && store.sessionsError === undefined && store.schedulesError === undefined
         ? el('div', { class: `empty-state${offline ? ' stale' : ''}` },
             fresh ? avatar(fresh, 36) : el('span', { class: 'icon-box' }, icon('message-circle', 18)),
             el('h3', {}, 'No conversations yet'),
@@ -105,15 +119,17 @@ export const renderHome = () => {
         : el('div', { class: `columns${offline ? ' stale' : ''}` },
             el('section', {},
               el('div', { class: 'section-head' }, el('h2', {}, 'Recent conversations')),
+              store.sessionsError !== undefined ? readFailure('the conversations', store.sessionsError, store.sessions.length > 0) : null,
               store.sessions.length === 0
-                ? el('p', { class: 'field-note' }, 'No conversations yet.')
+                ? (store.sessionsError !== undefined ? null : el('p', { class: 'field-note' }, 'No conversations yet.'))
                 : el('div', { class: 'list' }, ...store.sessions.slice(0, 8).map(recentRow))),
             el('section', {},
               el('div', { class: 'section-head' },
                 el('h2', {}, 'Schedules coming up'),
                 el('button', { class: 'link', onClick: () => navigate({ name: 'schedules' }) }, 'View all')),
+              store.schedulesError !== undefined ? readFailure('the schedules', store.schedulesError, upcoming.length > 0) : null,
               upcoming.length === 0
-                ? el('p', { class: 'field-note' }, 'Nothing scheduled. Agents create schedules when you ask them to do something regularly.')
+                ? (store.schedulesError !== undefined ? null : el('p', { class: 'field-note' }, 'Nothing scheduled. Agents create schedules when you ask them to do something regularly.'))
                 : el('div', { class: 'list compact' }, ...upcoming.map(upcomingRow)))),
     );
     node.replaceChildren(body);
@@ -123,5 +139,5 @@ export const renderHome = () => {
   // Nothing here holds a caret or a scroll position worth keeping, so it
   // simply rebuilds — the honest default when there is no reason to be
   // cleverer.
-  return { node, update };
+  return { node, update, destroy: () => clearTimeout(state.expiry) };
 };
