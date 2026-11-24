@@ -40,6 +40,7 @@ export const api = {
   agent: (id) => request('GET', `/agents/${encodeURIComponent(id)}`),
   createAgent: (body) => request('POST', '/agents', body),
   updateAgent: (id, body) => request('PUT', `/agents/${encodeURIComponent(id)}`, body),
+  deleteAgent: (id) => request('DELETE', `/agents/${encodeURIComponent(id)}`),
   reloadRoster: () => request('POST', '/roster/reload'),
   sessions: (agent, limit) => {
     const query = new URLSearchParams();

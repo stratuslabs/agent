@@ -77,6 +77,8 @@ export {
   type AgentsHomePlan,
   type MovedHomeLink,
   resolveAgentsHome,
+  REMOVED_AGENTS_DIRNAME,
+  retireSoulFile,
   surfaceAgentsHome,
   visibleAgentDirIn,
   visibleSoulPathIn,

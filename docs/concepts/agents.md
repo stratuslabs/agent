@@ -291,6 +291,33 @@ Codex, and plugin providers take no effort setting; the log says so. Any
 other value is refused when the soul is read. Like any soul edit, a change
 reaches conversations already under way on their next turn.
 
+## Deleting an agent
+
+The dashboard's Delete agent (agent settings), or `DELETE /api/v1/agents/:id`
+on the control API, takes an agent off the roster without destroying
+anything you can't get back:
+
+- Its soul moves to `~/.stratus/removed-agents/<id>-<time>.md`. When the
+  soul lives in the agents folder (`~/Agents/<id>/soul.md`), that file moves
+  and the link to it goes; the agent's `workspace/` stays in the folder,
+  since those are files it produced. A soul you linked in from somewhere
+  else (a dotfiles checkout) is never moved: only the link is.
+- Its schedules are cancelled, and its standing grants are revoked, so a
+  new agent later given the same id asks again instead of inheriting them.
+- Its conversations and memory stay under `~/.stratus/agents/<id>/`, and so
+  do its own sign-in and Slack tokens in the credentials file
+  (`stratus signin remove` and `stratus channel remove` clear those).
+
+It stops answering everywhere at once. To bring it back, move the soul back
+to `~/.stratus/agents/<id>.md` (or back into its agents-folder directory
+and link it) and reload the roster; creating a new agent with the same id
+picks up its conversations and memory too.
+
+The built-in agent can't be deleted, nor can a soul your config names as
+the default (change the config first). An agent with a conversation running
+or waiting on an approval is refused until that turn is stopped or
+answered.
+
 ## Ids are not labels
 
 Frontmatter may set `id:` explicitly, and it keys the agent's sessions,

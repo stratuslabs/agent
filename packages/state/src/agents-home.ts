@@ -11,6 +11,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   stat,
   symlink,
   unlink,
@@ -553,6 +554,82 @@ export const writeNewSoulFile = async (
   }
   await syncDirectory(path.dirname(hidden));
   return hidden;
+};
+
+/** Where a removed agent's soul is kept, under the Stratus home. */
+export const REMOVED_AGENTS_DIRNAME = 'removed-agents';
+
+/**
+ * Takes an agent off the roster by moving its soul aside, never deleting
+ * it: into `~/.stratus/removed-agents/<id>-<time>.md`, which nothing scans
+ * as a soul or as an agent's state. Putting the file back (or linking it
+ * back) and reloading the roster restores the agent. Returns where it went.
+ *
+ * `soulPath` is the roster entry, `agents/<id>.md`, and what moves depends
+ * on what it is:
+ *
+ * - a file: the file;
+ * - a link into this home's agents folder (`~/Agents/<id>/soul.md`, the
+ *   layout new agents get): the soul it points at, and the link is removed.
+ *   Moving only the link would leave the soul in the folder with nothing
+ *   reading it, which `stratus doctor` rightly reports as a problem, and a
+ *   person browsing the folder would still see the agent there. The
+ *   agent's `workspace/` beside it stays: those are files it produced;
+ * - any other link (a soul kept in a dotfiles checkout): the link itself,
+ *   so the operator's own file is never moved.
+ *
+ * Callers hold the soul lock (`withSoulFileLock`), so a field edit in
+ * flight cannot write the soul back after it moved.
+ */
+export const retireSoulFile = async (
+  env: StateEnvironment,
+  soulPath: string,
+  agentId: string,
+  now: Date = new Date(),
+): Promise<string> => {
+  const archive = path.join(stratusHomePath(env), REMOVED_AGENTS_DIRNAME);
+  await assertDerivedStatePath(stratusHomePath(env), archive, 'directory');
+  await mkdir(archive, { recursive: true, mode: 0o700 });
+  const stamp = now.toISOString().replace(/[:.]/g, '-');
+  const destination = path.join(archive, `${agentId}-${stamp}.md`);
+  const entry = await lstat(soulPath);
+  const agentsHome = resolveAgentsHome(env);
+  if (entry.isSymbolicLink() && agentsHome !== undefined) {
+    const target = path.resolve(path.dirname(soulPath), await readlink(soulPath));
+    if (target === visibleSoulPathIn(agentsHome, agentId) && (await lstatOrUndefined(target))?.isFile() === true) {
+      await moveFile(target, destination);
+      await unlink(soulPath);
+      await syncDirectory(path.dirname(soulPath));
+      // An agent folder left empty goes too, so the folder doesn't list an
+      // agent that is gone; one still holding its workspace stays.
+      await rmdir(path.dirname(target)).catch(() => undefined);
+      return destination;
+    }
+  }
+  // A file, or a link to somewhere that isn't ours: moved as it is.
+  await rename(soulPath, destination);
+  await syncDirectory(path.dirname(soulPath));
+  await syncDirectory(archive);
+  return destination;
+};
+
+/**
+ * A rename, or a copy and a removal across filesystems: an agents folder
+ * named by `STRATUS_AGENTS_DIR` can be on another volume than the home.
+ * Never overwrites: the destination is new.
+ */
+const moveFile = async (from: string, to: string): Promise<void> => {
+  try {
+    await rename(from, to);
+  } catch (error) {
+    if (errnoOf(error) !== 'EXDEV') {
+      throw error;
+    }
+    await copyFile(from, to, constants.COPYFILE_EXCL);
+    await rm(from);
+  }
+  await syncDirectory(path.dirname(to));
+  await syncDirectory(path.dirname(from));
 };
 
 // ---- moving what is already there ------------------------------------------

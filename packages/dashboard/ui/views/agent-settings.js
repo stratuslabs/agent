@@ -3,6 +3,7 @@ import { api } from '../lib/api.js';
 import { icon } from '../lib/icons.js';
 import { syncOptions, touchOnChange } from '../lib/forms.js';
 import { navigate, refreshCore, store } from '../app.js';
+import { createDeleteSection } from './agent-delete.js';
 
 /**
  * The agent's Settings tab: its name, persona and model, read from its soul
@@ -64,6 +65,8 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
    * that created them, exactly as the composer does.
    */
   let form;
+  /** Delete agent, below everything else; never for the built-in agent. */
+  const removal = createDeleteSection({ agentId, agentName: () => agent()?.name ?? agentId });
 
   const buildForm = (current) => {
     const name = el('input', { value: soul.agent?.name ?? current.name, id: 'agent-name' });
@@ -118,6 +121,7 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
             : el('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px;' }, ...tools.map((pattern) => el('span', { class: 'badge mono' }, pattern)))),
         notice,
         el('div', { class: 'form-actions' }, saveButton),
+        removal.node,
       ),
       el('div', {},
         el('div', { class: 'side-title' }, 'Connections'),
@@ -192,6 +196,7 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
     }
     form ??= buildForm(current);
     form.refresh();
+    removal.refresh();
     return form.node;
   };
 };

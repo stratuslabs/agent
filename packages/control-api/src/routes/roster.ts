@@ -1,4 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   formatSoul,
   isValidAgentId,
@@ -8,18 +9,22 @@ import {
 } from '@stratusagent/agents';
 import { LISTENS_MODES, isLanguageTag, isListensMode } from '@stratusagent/core';
 import { RestartUnsupportedError, PauseMessageError } from '@stratusagent/gateway';
+import { WhitelistUnreadableError } from '@stratusagent/permissions';
 import {
+  agentsDirPath,
   claimSoulFile,
   DEFAULT_STRATUS_AGENT,
   listAgentSummaries,
   loadSoulFile,
   parseProviderName,
+  retireSoulFile,
   withSoulFileLock,
   type AgentSummary,
 } from '@stratusagent/state';
 
 import { API_PREFIX, ApiError, optionalString, readJsonObject, requireString } from '../http.ts';
 import type { Route, RouteContext } from '../routes.ts';
+import { revokeEveryGrant } from './grants.ts';
 
 /** Validate a provider name, reporting a bad one as the client's error. */
 const validateProvider = (value: string, field: string): void => {
@@ -363,6 +368,85 @@ export const rosterRoutes: Route[] = [
       });
       await context.gateway.reloadRoster();
       return { agent: written.next.agent, soulPath: written.soulPath };
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: `${API_PREFIX}/agents/:id`,
+    async handler(context) {
+      const agentId = context.params.id ?? '';
+      // Under the soul lock, like an edit: a field edit already in flight
+      // would otherwise write the soul back after it had moved aside.
+      const retired = await withSoulFileLock(async () => {
+        const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
+        const summary = summariesById(summaries).get(agentId);
+        if (!summary || !context.gateway.agents().some((agent) => agent.id === agentId)) {
+          throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}.`);
+        }
+        if (summary.builtIn || !summary.soulPath) {
+          throw new ApiError(409, 'agent_not_removable', `${agentId} is the built-in agent, which has no soul file and can't be deleted.`);
+        }
+        // The config names this soul (`soul`), so the daemon would refuse
+        // to start without it. The fix is in the config, not here.
+        if (summary.default) {
+          throw new ApiError(
+            409,
+            'agent_not_removable',
+            `${agentId} is the default agent your config names (its soul setting points at ${summary.soulPath}). Point the config at another soul, or remove that setting, then delete it.`,
+          );
+        }
+        // Only a soul on the roster's own directory: anything else is a
+        // file this daemon was pointed at, not one it owns.
+        if (path.resolve(path.dirname(summary.soulPath)) !== path.resolve(agentsDirPath(context.env))) {
+          throw new ApiError(409, 'agent_not_removable', `${agentId}'s soul is ${summary.soulPath}, outside the agents directory, so it isn't this daemon's to move.`);
+        }
+        // A running turn, or one parked on an approval, belongs to somebody.
+        // Stop or answer it first; deleting under it would leave the person
+        // waiting on an agent that no longer exists.
+        const active = context.gateway.store.lastActivityByAgent()[agentId]?.activeSessions ?? 0;
+        if (active > 0) {
+          throw new ApiError(
+            409,
+            'agent_busy',
+            `${agentId} has ${active} conversation${active === 1 ? '' : 's'} running or waiting on an approval. Stop ${active === 1 ? 'it' : 'them'} or answer the approval, then delete it.`,
+          );
+        }
+        // Moved aside, never deleted: putting it back restores the agent.
+        return retireSoulFile(context.env, summary.soulPath, agentId);
+      });
+      // Off the roster and out of every channel before anything else, so it
+      // stops answering at once.
+      await context.gateway.reloadRosterAndChannels();
+      // Its schedules would fail at every firing with no agent to run, so
+      // they go; a cancel also revokes the destination grant on the row.
+      const schedulesCancelled = context.gateway.schedules()
+        .filter((record) => record.agentId === agentId)
+        .map((record) => record.id)
+        .filter((id) => context.gateway.cancelSchedule(id));
+      // And its standing grants: a new agent later given this id must ask
+      // again, not inherit what this one was allowed.
+      let grantsRevoked: number | undefined;
+      let grantsNote: string | undefined;
+      if (context.grants) {
+        try {
+          grantsRevoked = await revokeEveryGrant(context.grants, agentId);
+        } catch (error) {
+          if (!(error instanceof WhitelistUnreadableError)) {
+            throw error;
+          }
+          // The soul has moved and can't move back from here, so this is
+          // said rather than thrown: the file is unreadable, which already
+          // honors no grant.
+          grantsNote = error.message;
+        }
+      }
+      return {
+        agentId,
+        soulMovedTo: retired,
+        schedulesCancelled,
+        ...(grantsRevoked !== undefined ? { grantsRevoked } : {}),
+        ...(grantsNote !== undefined ? { grantsNote } : {}),
+      };
     },
   },
   {

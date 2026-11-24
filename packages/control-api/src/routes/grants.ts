@@ -33,6 +33,35 @@ const grantStoreOf = (context: RouteContext): AgentGrantStore => {
   return context.grants;
 };
 
+/**
+ * Takes back every standing grant an agent holds, through the store, so the
+ * daemon's cache drops them with the file. For a deleted agent: a new agent
+ * later given the same id must ask again rather than inherit them. Returns
+ * how many revocations removed something.
+ */
+export const revokeEveryGrant = async (store: AgentGrantStore, agentId: string): Promise<number> => {
+  const listing = describeAgentGrants(await store.grantsFor(agentId));
+  let revoked = 0;
+  const count = (removed: boolean): void => {
+    revoked += removed ? 1 : 0;
+  };
+  for (const grant of listing.tools) {
+    count(await store.forgetTool(agentId, grant.tool));
+  }
+  // A scope and a command granted by name that read the same are one
+  // revocation (`forgetScope` takes both), so each text is asked once.
+  for (const text of new Set([...listing.scopes.map((scope) => scope.description), ...listing.commands.map((grant) => grant.command)])) {
+    count(await store.forgetScope(agentId, text));
+  }
+  for (const origin of new Set(listing.origins.map((grant) => grant.origin))) {
+    count(await store.forgetOrigin(agentId, origin));
+  }
+  for (const destination of new Set(listing.destinations.map((grant) => grant.destination))) {
+    count(await store.forgetDestination(agentId, destination));
+  }
+  return revoked;
+};
+
 export const grantRoutes: Route[] = [
   // ---- grants --------------------------------------------------------------
   {

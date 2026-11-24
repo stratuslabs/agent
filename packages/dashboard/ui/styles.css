@@ -173,6 +173,8 @@ button { font: inherit; color: inherit; }
 .btn.danger-text { border-color: transparent; background: none; color: var(--danger); }
 .btn.danger-text:hover:not(:disabled) { background: var(--danger-soft); }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+/* Above the generic hover, which would put white text on the light hover fill. */
+.btn.danger:hover:not(:disabled) { background: var(--danger); opacity: 0.88; }
 .btn.small { padding: 5px 10px; font-size: 12px; }
 .btn.icon-only { padding: 7px; }
 .btn:disabled { opacity: 0.45; cursor: default; }
@@ -375,6 +377,10 @@ button.list-row:hover .title { text-decoration: underline; text-underline-offset
 .panel-row .title { font-weight: 500; }
 .panel-row .meta { color: var(--text-2); font-size: 13px; display: flex; align-items: center; gap: 6px; }
 .panel-row .meta.warn-text { color: var(--warn); }
+.delete-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; }
+.delete-confirm { border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+.tool-icon.danger { color: var(--danger); }
+.delete-list { margin: 6px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.5; }
 .side-title { font-size: 13px; font-weight: 600; margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; }
 .risk { font-size: 11px; }
 .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 28px; }
