@@ -49,14 +49,27 @@ export const renderSettings = (section) => {
    */
   const reread = async (parts) => {
     const failed = [];
+    // A read that works again clears the failure notice it left on load:
+    // current data under "could not read" is a contradiction.
     if (parts.includes('credentials')) {
-      await api.credentials().then((value) => { state.credentials = value; }, () => failed.push('sign-ins'));
+      await api.credentials().then((value) => {
+        state.credentials = value;
+        delete state.notices.providers;
+        delete state.notices.channels;
+      }, () => failed.push('sign-ins'));
     }
     if (parts.includes('models')) {
-      await api.models().then((value) => { state.models = value.models ?? state.models; }, () => failed.push('models'));
+      await api.models().then((value) => {
+        state.models = value.models ?? state.models;
+        if (state.config !== undefined) delete state.notices.models;
+      }, () => failed.push('models'));
     }
     if (parts.includes('config')) {
-      await api.config().then((value) => { state.config = value.config ?? {}; }, () => failed.push('config file'));
+      await api.config().then((value) => {
+        state.config = value.config ?? {};
+        delete state.notices.approvals;
+        if (state.models !== undefined) delete state.notices.models;
+      }, () => failed.push('config file'));
     }
     return failed.length > 0 ? ` Couldn't refresh the ${failed.join(' and ')} afterwards; what's shown may be out of date.` : '';
   };
@@ -107,10 +120,26 @@ export const renderSettings = (section) => {
     type.addEventListener('change', describeType);
     provider.addEventListener('change', describeType);
 
+    /**
+     * Opens the form for one provider, set from that provider's own stored
+     * sign-in, never from whatever the form last held: a subscription kept
+     * as a subscription, and an endpoint typed for another provider never
+     * carried over to send this one's key somewhere else.
+     */
+    const fillFor = (name) => {
+      const stored = (state.credentials?.providers ?? []).find((entry) => entry.provider === name);
+      provider.value = name;
+      type.value = stored?.type === 'oauth_token' ? 'oauth_token' : 'api_key';
+      baseUrl.value = stored?.baseUrl ?? '';
+      value.value = '';
+      describeType();
+    };
+    // Switching provider inside the form resets it the same way.
+    provider.addEventListener('change', () => fillFor(provider.value));
+
     const open = (name) => {
       form.hidden = false;
-      provider.value = name;
-      describeType();
+      fillFor(name);
       value.focus();
     };
 
