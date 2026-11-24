@@ -165,12 +165,19 @@ const resolveAgentSignIn = async (env: StateEnvironment, agentId: string): Promi
  * as a broken agent.
  */
 /**
- * The providers with a stored sign-in, in a fixed order. When nothing
- * chooses a provider, exactly one of these is the run's provider.
+ * The providers with a stored sign-in, in a fixed order: credentials.json's,
+ * then the ChatGPT sign-in when it can serve a run (`hasChatGPTSignIn`, the
+ * rule a chatgpt run is resolved by). When nothing chooses a provider,
+ * exactly one of these is the run's provider. Throws when either file can't
+ * be read, since then which sign-ins there are isn't known.
  */
-export const signedInProviders = async (env: StateEnvironment): Promise<CredentialProviderName[]> => {
+export const signedInProviders = async (env: StateEnvironment): Promise<Array<CredentialProviderName | 'chatgpt'>> => {
   const stored = await loadCredentials(env);
-  return CREDENTIAL_PROVIDER_NAMES.filter((name) => stored[name] !== undefined);
+  const signedIn: Array<CredentialProviderName | 'chatgpt'> = CREDENTIAL_PROVIDER_NAMES.filter((name) => stored[name] !== undefined);
+  if (await hasChatGPTSignIn(openChatGPTSignInFile(chatgptSignInLocation(env)))) {
+    signedIn.push('chatgpt');
+  }
+  return signedIn;
 };
 
 export class NoProviderConfiguredError extends Error {
@@ -182,7 +189,7 @@ export class NoProviderConfiguredError extends Error {
   }
 }
 
-const noProviderMessage = (signedIn: readonly CredentialProviderName[], envKeys: readonly CredentialProviderName[]): string => {
+const noProviderMessage = (signedIn: readonly string[], envKeys: readonly CredentialProviderName[]): string => {
   if (signedIn.length > 1) {
     return `No provider is chosen, and there are sign-ins for ${signedIn.join(' and ')}, so the run was refused rather than guessing. `
       + 'Pick the default in `stratus setup` → Providers, or set STRATUS_PROVIDER for this run.';
@@ -220,7 +227,7 @@ export const resolveRuntimeConfig = async (
   // Nothing chose one: the only provider with a stored sign-in is the
   // obvious choice, and is reported as inferred. None, or several, is an
   // error. The demo model runs only when something names it.
-  let inferredProvider: CredentialProviderName | undefined;
+  let inferredProvider: CredentialProviderName | 'chatgpt' | undefined;
   if (chosenProvider === undefined) {
     const signedIn = await signedInProviders(env);
     if (signedIn.length !== 1) {
@@ -528,6 +535,9 @@ export const resolveRuntimeConfig = async (
       provider: 'chatgpt',
       model: String(chatgptModel),
       signIn: chatgptLocation,
+      // Returned here, before the shared return that records an inferred
+      // provider for the others.
+      ...(inferredProvider !== undefined ? { inferredProvider } : {}),
       ...(systemPrompt ? { systemPrompt: String(systemPrompt) } : {}),
       ...(env.fetch ? { fetch: env.fetch } : {}),
       ...(soul ? { soul } : {}),
