@@ -29,18 +29,31 @@ export const createMemorySection = ({ agentId, agentName, update }) => {
     loading: false,
   };
 
+  /**
+   * Latest wins: a read started before a forget must not land after the
+   * one started by it and put the forgotten fact back.
+   */
+  let reads = 0;
   const load = async () => {
-    if (state.loading) {
+    const ticket = ++reads;
+    state.loading = true;
+    let entries;
+    let error;
+    try {
+      entries = (await api.memory(agentId)).entries ?? [];
+    } catch (caught) {
+      error = caught;
+    }
+    if (ticket !== reads) {
       return;
     }
-    state.loading = true;
-    try {
-      state.entries = (await api.memory(agentId)).entries ?? [];
-      state.error = undefined;
-    } catch (error) {
-      state.error = `Couldn't read ${agentName()}'s memory: ${error.message}`;
-    }
     state.loading = false;
+    if (error) {
+      state.error = `Couldn't read ${agentName()}'s memory: ${error.message}`;
+    } else {
+      state.entries = entries;
+      state.error = undefined;
+    }
     paint();
     update();
   };
@@ -51,7 +64,11 @@ export const createMemorySection = ({ agentId, agentName, update }) => {
     try {
       await api.forgetMemory(agentId, entry.id);
       state.notice = { kind: 'ok', text: 'Forgotten. It leaves every conversation from the next turn on, and stratus memory audit still shows it.' };
+      // Re-read rather than dropping the row: a fact that superseded older
+      // ones brings them back when it is forgotten, and the list has to show
+      // what the agent will now read.
       state.entries = (state.entries ?? []).filter((candidate) => candidate.id !== entry.id);
+      void load();
       // The roster's count, on the sidebar and agent cards.
       void refreshCore();
     } catch (error) {
@@ -152,7 +169,7 @@ export const createMemorySection = ({ agentId, agentName, update }) => {
     node,
     /** Reads on first show; paints from what it has otherwise. */
     refresh() {
-      if (state.entries === undefined && !state.error) {
+      if (state.entries === undefined && !state.error && !state.loading) {
         void load();
       }
       paint();
