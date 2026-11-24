@@ -374,6 +374,15 @@ button.list-row:hover .title { text-decoration: underline; text-underline-offset
 .panel-row .text { flex: 1; min-width: 0; }
 .panel-row .title { font-weight: 500; }
 .panel-row .meta { color: var(--text-2); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.memory-filter { position: relative; margin-bottom: 10px; }
+.memory-filter .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-2); }
+.memory-filter input { padding-left: 30px; }
+.memory-row { align-items: flex-start; }
+.memory-row .meta { flex-wrap: wrap; margin-top: 6px; }
+.memory-content { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; }
+.memory-content.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.btn.memory-toggle { padding: 2px 0; margin-top: 2px; color: var(--text-2); }
+.memory-actions { flex: none; display: flex; gap: 6px; }
 .side-title { font-size: 13px; font-weight: 600; margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; }
 .risk { font-size: 11px; }
 .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 28px; }

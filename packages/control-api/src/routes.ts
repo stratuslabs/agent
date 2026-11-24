@@ -12,6 +12,7 @@ import { healthRoutes } from './routes/health.ts';
 import { rosterRoutes } from './routes/roster.ts';
 import { sessionRoutes } from './routes/sessions.ts';
 import { grantRoutes } from './routes/grants.ts';
+import { memoryRoutes } from './routes/memory.ts';
 import { memoryPassRoutes } from './routes/memory-passes.ts';
 import { approvalRoutes } from './routes/approvals.ts';
 import { scheduleRoutes } from './routes/schedules.ts';
@@ -114,6 +115,7 @@ export const routes: Route[] = [
   ...rosterRoutes,
   ...sessionRoutes,
   ...grantRoutes,
+  ...memoryRoutes,
   ...memoryPassRoutes,
   ...approvalRoutes,
   ...scheduleRoutes,

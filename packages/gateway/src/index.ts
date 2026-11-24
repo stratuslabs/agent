@@ -3861,6 +3861,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return memoryPassHost.pass(agentId, passId);
     },
 
+    async memoryEntries(agentId) {
+      // `all`, as `stratus memory list` reads it: an operator has to see an
+      // expired fact as expired to decide about it.
+      const { entries } = await memory.list(agentId, { validity: 'all' });
+      // Every pin holding budget, the CLI's question too: a pinned fact
+      // that is out of its window is still pinned.
+      const pinned = memory.pinned ? await memory.pinned(agentId, { include: 'allocated' }) : [];
+      return { entries, pinned: pinned.map((entry) => entry.id) };
+    },
+
+    forgetMemory(agentId, entryId) {
+      return memory.forget(agentId, entryId);
+    },
+
     tools() {
       // From the registry, not from the load records: the risk reported is
       // the one a call will actually be judged at, floor applied, and a

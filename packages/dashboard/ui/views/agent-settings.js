@@ -3,6 +3,7 @@ import { api } from '../lib/api.js';
 import { icon } from '../lib/icons.js';
 import { syncOptions, touchOnChange } from '../lib/forms.js';
 import { navigate, refreshCore, store } from '../app.js';
+import { createMemorySection } from './agent-memory.js';
 
 /**
  * The agent's Settings tab: its name, persona and model, read from its soul
@@ -64,6 +65,8 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
    * that created them, exactly as the composer does.
    */
   let form;
+  /** What the agent remembers, below the form; built-in agents have one too. */
+  const memory = createMemorySection({ agentId, agentName: () => agent()?.name ?? agentId, update });
 
   const buildForm = (current) => {
     const name = el('input', { value: soul.agent?.name ?? current.name, id: 'agent-name' });
@@ -118,6 +121,7 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
             : el('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px;' }, ...tools.map((pattern) => el('span', { class: 'badge mono' }, pattern)))),
         notice,
         el('div', { class: 'form-actions' }, saveButton),
+        memory.node,
       ),
       el('div', {},
         el('div', { class: 'side-title' }, 'Connections'),
@@ -129,13 +133,6 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
               el('div', { class: 'meta' }, slack === undefined ? 'Unknown' : slack.includes(agentId) ? 'Connected' : 'Not connected')),
             el('button', { class: 'btn small', onClick: () => navigate({ name: 'settings', section: 'channels' }) },
               slack?.includes(agentId) ? 'Manage' : 'Connect'))),
-        el('div', { class: 'side-title' }, 'Memory'),
-        el('div', { class: 'panel', style: 'margin-bottom: 24px;' },
-          el('div', { class: 'panel-row' },
-            el('span', { class: 'tool-icon' }, icon('brain', 15)),
-            el('div', { class: 'text' },
-              el('div', { class: 'title' }, `${current.memories ?? 0} fact${current.memories === 1 ? '' : 's'} remembered`),
-              el('p', { class: 'field-note', style: 'margin: 2px 0 0;' }, 'List or forget them with ', el('code', {}, 'stratus memory'), '.')))),
         el('div', { class: 'side-title' }, 'Related'),
         el('div', { class: 'panel' },
           el('button', { class: 'panel-row', style: 'width: 100%; background: none; border-left: 0; border-right: 0; border-bottom: 0; cursor: pointer; text-align: left;', onClick: () => navigate({ name: 'schedules' }) },
@@ -177,11 +174,14 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
       return el('p', { class: 'field-note' }, 'This agent is no longer on the roster.');
     }
     if (current.builtIn) {
-      return el('div', { class: 'empty-state' },
-        el('span', { class: 'icon-box' }, icon('bot', 18)),
-        el('h3', {}, `${current.name} is the built-in agent`),
-        el('p', {}, 'It has no soul file to edit. Create your own agent to give it a name, a persona and its own tools.'),
-        el('button', { class: 'btn primary', style: 'margin-top: 8px;', onClick: () => navigate({ name: 'new' }) }, 'New agent'));
+      memory.refresh();
+      return el('div', {},
+        el('div', { class: 'empty-state' },
+          el('span', { class: 'icon-box' }, icon('bot', 18)),
+          el('h3', {}, `${current.name} is the built-in agent`),
+          el('p', {}, 'It has no soul file to edit. Create your own agent to give it a name, a persona and its own tools.'),
+          el('button', { class: 'btn primary', style: 'margin-top: 8px;', onClick: () => navigate({ name: 'new' }) }, 'New agent')),
+        el('div', { class: 'form-column' }, memory.node));
     }
     if (soulError) {
       return el('div', { class: 'notice bad' }, soulError);
@@ -192,6 +192,7 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
     }
     form ??= buildForm(current);
     form.refresh();
+    memory.refresh();
     return form.node;
   };
 };

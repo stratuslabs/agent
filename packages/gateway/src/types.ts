@@ -17,6 +17,7 @@ import type {
   EventBus,
   ImageAttachment,
   JsonObject,
+  MemoryEntry,
   ObserveEntry,
   Session,
   TasksStop,
@@ -1005,6 +1006,20 @@ export interface Gateway {
    * ledger has no such pass.
    */
   memoryPass(agentId: string, passId: string): Promise<MemoryPassDetail | undefined>;
+  /**
+   * An agent's memory as an operator reviews it (`GET /agents/:id/memory`):
+   * its live entries, expired and not-yet-valid ones included, oldest first,
+   * and the ids holding a pin. From the store this daemon writes to, a
+   * plugin's when one is selected, so what is listed is what the agent
+   * reads. Superseded and forgotten entries are not in it.
+   */
+  memoryEntries(agentId: string): Promise<{ entries: MemoryEntry[]; pinned: string[] }>;
+  /**
+   * Forgets one entry through the same store: its tombstone, so the record
+   * keeps it and an audit still shows it. False when no live entry of this
+   * agent has that id.
+   */
+  forgetMemory(agentId: string, entryId: string): Promise<boolean>;
   /**
    * Every registered tool, with the risk it will actually be judged at and
    * the package it came from.
