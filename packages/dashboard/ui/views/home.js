@@ -81,7 +81,7 @@ export const renderHome = () => {
       .filter((schedule) => schedule.nextFireAt || (typeof schedule.cadence === 'string' && schedule.cadence.startsWith('on ')))
       .sort((a, b) => (a.nextFireAt ?? '9999').localeCompare(b.nextFireAt ?? '9999'))
       .slice(0, 3);
-    const answered = store.answered.filter((entry) => Date.now() - entry.at < 2 * 60_000);
+    const answered = store.answered.filter((entry) => Date.now() - entry.at < 2 * 60_000).slice(0, 3);
 
     const body = el('div', { class: `page-body${offline ? '' : ''}` },
       offline ? offlineBanner() : null,

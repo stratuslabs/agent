@@ -14,6 +14,7 @@ export const avatar = (agent, size = 28) => {
   const node = el('span', { class: 'avatar', 'aria-hidden': 'true' }, initial);
   node.style.width = `${size}px`;
   node.style.height = `${size}px`;
+  node.style.borderRadius = `${Math.round(size * 0.28)}px`;
   node.style.fontSize = `${Math.round(size * 0.44)}px`;
 
   if (theme) {
@@ -22,7 +23,7 @@ export const avatar = (agent, size = 28) => {
       ? `linear-gradient(135deg, ${first}, ${second})`
       : (first ?? `hsl(${theme.hue} 60% 55%)`);
   } else {
-    node.style.background = 'var(--muted-strong)';
+    node.style.background = '#8e8e96';
   }
   return node;
 };

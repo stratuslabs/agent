@@ -38,29 +38,45 @@ ui/
   index.html        the shell
   styles.css        tokens, light and dark
   app.js            store, router, live stream, sidebar
-  lib/              dom helpers, the API client, avatars
-  views/            dashboard, agent, settings, plugins
+  fonts/            Geist and Geist Mono (SIL OFL 1.1)
+  lib/              dom helpers, the API client, avatars, icons, and the
+                    pure helpers the tests cover (status, sources, cadence…)
+  views/            home, agent (chat and settings), new agent, schedules,
+                    tasks, permissions, tools, settings
 ```
 
 ## What the screens do
 
-**Dashboard** — quick stats from `GET /health` (agents, running turns, stored
-sessions, waiting approvals, uptime, and what the daemon is serving with
-which credentials), the approvals panel when anything is parked, recent
-conversations, and a live activity feed.
+**Home** — how many agents are working and how many need you, every
+waiting approval with its three answers (and what *Always allow* would
+remember), one card per agent with its state (Working, Needs you, Idle, or
+Can't reach provider), recent conversations, and the schedules coming up.
+An approval answered somewhere else while the page was open says so for a
+couple of minutes instead of vanishing. When the daemon stops answering, a
+banner says since when and the rest of the page dims.
 
-**Agent** — one agent, three tabs. *Chat* streams a conversation as it
-happens: text arrives token by token, tool calls appear as status lines, and
-the transcript is re-read from the daemon when the turn settles so the page
-never quietly disagrees with what is stored. It is re-read the same way when a message an agent overheard lands in the conversation with no turn at all — `session.observed` is the only sign of it, and the activity feed shows it as *overheard a message*. *Activity* is the same event
-stream filtered to that agent. *Settings* edits the soul — name, persona,
-provider and model pins — through a validated round-trip.
+**Agent** — one agent, two tabs. *Chat* streams a conversation as it
+happens: text arrives token by token, each tool call is one row with where
+it got to, the permission decision beside it, and its input and output a
+click away, and an approval this conversation is waiting on shows inline.
+The transcript is re-read from the daemon when the turn settles so the page
+never quietly disagrees with what is stored. It is re-read the same way when a message an agent overheard lands in the conversation with no turn at all — `session.observed` is the only sign of it. The drawer lists the
+agent's conversations by day, with a search over their titles. *Settings*
+edits the soul — name, persona and model — through a validated round-trip,
+beside its Slack connection, memory count and schedules.
+
+**New agent** — a name, what it should do, and a model, written as a soul
+file by `POST /agents`.
+
+**Schedules** — every schedule, soonest first, with its cadence in words and
+a Remove that asks once. **Tasks** — background work one agent handed to
+another, with Stop for what is still running. **Permissions** — every
+standing grant by kind, with Revoke. **Tools** — the built-in tools and the
+plugins the daemon was configured to load, including any that failed.
 
 **Settings** — provider sign-ins (with a live key check before storing),
-the default model listed from what those sign-ins can actually reach, and
-Slack channel tokens.
-
-**Plugins** — the plugins the daemon was configured to load, including any that failed to resolve. An installed package that is not in the config is not listed.
+the default model listed from what those sign-ins can actually reach, Slack
+tokens per agent, and the approval posture.
 
 ## Two things the page will not do
 

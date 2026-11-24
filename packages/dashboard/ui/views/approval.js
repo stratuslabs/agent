@@ -48,7 +48,7 @@ const notes = (request, agentName) => {
   } else {
     const offer = alwaysOffer(request.always, agentName);
     if (offer) {
-      lines.push({ icon: 'info', text: `${offer} Revoke it in Permissions.` });
+      lines.push({ icon: 'info', text: offer });
     }
   }
   return lines;

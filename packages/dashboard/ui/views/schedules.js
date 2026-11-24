@@ -105,7 +105,13 @@ export const renderSchedules = () => {
               el('h3', {}, 'No schedules yet'),
               el('p', {}, 'Agents create schedules when you ask them to do something regularly, like “every Monday, summarize the open items.”'))
           : el('div', {},
-              el('div', { class: 'list' }, ...shown.map(row)),
+              el('div', { class: 'list-row', style: 'padding: 0 0 8px; color: var(--text-2); font-size: 12px; font-weight: 500;', 'aria-hidden': 'true' },
+                el('span', { style: 'width: 28px;' }),
+                el('span', { class: 'text' }, 'Schedule'),
+                el('span', { style: 'width: 150px; flex: none;' }, 'Runs'),
+                el('span', { style: 'width: 110px; flex: none;' }, 'Reports to'),
+                el('span', { style: 'width: 150px; flex: none;' })),
+              el('div', { class: 'list', style: 'border-top: 1px solid var(--border);' }, ...shown.map(row)),
               shown.length === 0 ? el('p', { class: 'field-note' }, 'None of this kind.') : null,
               el('p', { class: 'field-note', style: 'margin-top: 20px;' }, 'Creating a schedule asks for approval unless your approval setting lets gated tools run. Removing one stops future runs; past conversations stay.')),
     ));

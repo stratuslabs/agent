@@ -22,9 +22,17 @@ const FAMILIES = {
   shell: { label: 'Shell', icon: 'terminal', about: 'Run commands on this machine' },
   fs: { label: 'Files', icon: 'folder', about: 'Read and write files' },
   browser: { label: 'Browser', icon: 'globe', about: 'Drive a browser' },
+  channel: { label: 'Channels', icon: 'hash', about: 'Create, join and invite people to channels through the agent’s own app' },
+  credential: { label: 'Credentials', icon: 'key-round', about: 'Ask you for a named credential the agent does not hold' },
 };
 
 const RANK = { safe: 0, gated: 1, dangerous: 2 };
+
+/** A tool description's first sentence: they are written for the model, and run long. */
+const firstSentence = (text) => {
+  const sentence = String(text ?? '').split(/(?<=[.!?])\s/)[0] ?? '';
+  return sentence.length > 140 ? `${sentence.slice(0, 139)}…` : sentence;
+};
 
 /** A tool's risk as a badge: safe tools run, gated ones follow the approval setting, dangerous ones always ask. */
 export const riskBadge = (risk) => el('span', {
@@ -57,7 +65,7 @@ const familyRow = (family, extra) => {
       el('div', { class: 'plugin-head' },
         el('span', { class: 'title' }, known?.label ?? family.namespace),
         el('span', { class: 'mono', style: 'color: var(--text-2); font-size: 12px;' }, family.tools.map((tool) => tool.name.split('.').slice(1).join('.') || tool.name).join(' · '))),
-      el('div', { class: 'meta' }, known?.about ?? family.tools[0]?.description ?? ''),
+      el('div', { class: 'meta' }, known?.about ?? firstSentence(family.tools[0]?.description)),
       extra ?? null),
     riskBadge(family.risk));
 };
