@@ -66,11 +66,14 @@ export interface RecoveryDeps {
   runnerFor: (config: RuntimeConfig, agentId: string, subAgent?: boolean) => AgentRunner;
   withWatchdog: <T>(
     sessionId: string,
+    agentId: string,
     external: AbortSignal | undefined,
     idleEnabled: boolean,
     fallbackStreams: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ) => Promise<T>;
+  /** A turn's time limit on its controller, until the returned dispose (AGT-371). */
+  armTurnTimeLimit: (sessionId: string, agentId: string, controller: AbortController) => () => void;
   isStopping: () => boolean;
   trackTurn: (sessionId: string, controller: AbortController) => void;
   untrackTurn: (sessionId: string, controller: AbortController) => void;
@@ -83,6 +86,13 @@ export interface RecoveryDeps {
     work: () => Promise<T>,
   ) => Promise<T>;
   getOrphanedAtStart: () => ReadonlySet<string>;
+  /**
+   * The worker sessions of the background tasks the last process left
+   * unsettled, read before the channels start. The task sweep owns them, so
+   * these sweeps skip them: failing one as abandoned would report it
+   * `failed`, and re-asking its parked approval would run it again.
+   */
+  getTaskWorkersAtStart: () => ReadonlySet<string>;
   runtimeForAgent: (source: AgentSource) => Promise<RuntimeConfig>;
   watchdogStreamsFor: (
     session: Pick<Session, 'metadata'> | undefined,
@@ -103,6 +113,7 @@ export const createRecovery = ({
   runtimeContextFor,
   runnerFor,
   withWatchdog,
+  armTurnTimeLimit,
   isStopping,
   trackTurn,
   untrackTurn,
@@ -111,6 +122,7 @@ export const createRecovery = ({
   activeTurns,
   onTurnRuntime,
   getOrphanedAtStart,
+  getTaskWorkersAtStart,
   runtimeForAgent,
   watchdogStreamsFor,
   reachesHarness,
@@ -133,7 +145,8 @@ export const createRecovery = ({
     if (!store.listIdsByStatus) {
       return;
     }
-    const parked = await store.listIdsByStatus('pending_approval');
+    const taskWorkers = getTaskWorkersAtStart();
+    const parked = (await store.listIdsByStatus('pending_approval')).filter((id) => !taskWorkers.has(id));
     if (parked.length === 0) {
       return;
     }
@@ -286,11 +299,15 @@ export const createRecovery = ({
       // outcome. A stop sent during the reads above finds nothing running
       // and reaches the session as an ordinary message, queued behind it.
       const controller = new AbortController();
+      // And its time limit, from now: a fresh clock, as a continued turn
+      // gets, stopped again while the re-asked call waits on a person.
+      let disposeLimit = (): void => {};
       if (record) {
         trackTurn(sessionId, controller);
         if (getAbortingWith() !== undefined) {
           controller.abort(shutdownAbort());
         }
+        disposeLimit = armTurnTimeLimit(sessionId, source.definition.id, controller);
       }
       try {
         await onTurnRuntime(sessionId, { source, config: recoveredConfig }, () => runner.recoverPendingApproval(sessionId, {
@@ -299,6 +316,7 @@ export const createRecovery = ({
           signal: controller.signal,
         }));
       } finally {
+        disposeLimit();
         untrackTurn(sessionId, controller);
         // A recovered firing's row outlived the process that would have
         // retired it, and the firing is over either way — a recovery that
@@ -396,7 +414,9 @@ export const createRecovery = ({
    * the parked sweep above would re-ask that daemon's approvals for the
    * same reason — and no check here would make it supported.
    */
-  const failAbandonedTurns = async (abandoned: string[]): Promise<void> => {
+  const failAbandonedTurns = async (all: string[]): Promise<void> => {
+    const taskWorkers = getTaskWorkersAtStart();
+    const abandoned = all.filter((id) => !taskWorkers.has(id));
     if (abandoned.length === 0) {
       return;
     }
@@ -512,7 +532,7 @@ export const createRecovery = ({
     session.agent = source.definition;
     await store.save(session);
     const runner = runnerFor(config, source.definition.id);
-    return onTurnRuntime(session.id, { source, config }, () => withWatchdog(session.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
+    return onTurnRuntime(session.id, { source, config }, () => withWatchdog(session.id, source.definition.id, undefined, effectiveStreams, fallbackStreams, async (signal) =>
       await runner.continueTurn(session.id, {
         runtime: runtimeContextFor(source, config, switchedToFallback, session.metadata),
         signal,

@@ -1,7 +1,7 @@
 import './home-guard.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -19,6 +19,7 @@ import {
   type ServiceRunner,
 } from '../src/index.ts';
 import { defaultUpdateContinuation } from '../src/commands/update.ts';
+import { stableNodePath } from '../src/service.ts';
 import {
   AGENTS_FOLDER_RECORD,
   AGENTS_HOME_MARKER,
@@ -66,6 +67,11 @@ const runningServiceRunner: ServiceRunner = async (command, args) => {
   return { code: 0, stdout: '', stderr: '' };
 };
 
+// The pause between a manager's answers, skipped. After the manager says
+// running, install and start keep asking for about five seconds until the
+// daemon publishes gateway.json, and no daemon here ever does (AGT-363).
+const noServiceWait = async (): Promise<void> => {};
+
 // Stands in for the fresh process an upgrade hands the rest of the update
 // to: the same command, run again with the hand-off variable set. In-process,
 // so the suite spawns nothing — the fresh module cache is what the real one
@@ -100,7 +106,7 @@ test('readServiceCommand round-trips what installService wrote, on both platform
     const execPath = path.join(home, '100% node', '$HOME-v22', 'node');
     const scriptPath = path.join(home, 'lib', 'bin.js');
     const configPath = path.join(home, 'stratus.config.json');
-    const env = { platform, homeDir: home, cwd: home, execPath, scriptPath, execArgv: [], run: runningServiceRunner };
+    const env = { platform, homeDir: home, cwd: home, execPath, scriptPath, execArgv: [], run: runningServiceRunner, sleep: noServiceWait };
     const installed = await installService(env, { configPath });
     assert.equal(installed.ok, true, installed.messages.join('\n'));
 
@@ -121,7 +127,7 @@ test('update --check reports what it would do and exits 1 only when something is
   const first = await runCli({
     argv: ['update', '--check'],
     streams: actionable.streams,
-    env: { ...env, serviceRunner: runningServiceRunner, packageVersionFetcher: async () => '99.0.0' },
+    env: { ...env, serviceRunner: runningServiceRunner, serviceSleep: noServiceWait, packageVersionFetcher: async () => '99.0.0' },
   });
   assert.equal(first, 1);
   assert.match(actionable.output.stdout, /update available/);
@@ -136,7 +142,7 @@ test('update --check reports what it would do and exits 1 only when something is
   const second = await runCli({
     argv: ['update', '--check'],
     streams: settled.streams,
-    env: { ...env, serviceRunner: runningServiceRunner, packageVersionFetcher: async () => CLI_VERSION },
+    env: { ...env, serviceRunner: runningServiceRunner, serviceSleep: noServiceWait, packageVersionFetcher: async () => CLI_VERSION },
   });
   assert.equal(second, 0);
   assert.match(settled.output.stdout, /Nothing to do/);
@@ -162,7 +168,7 @@ test('update upgrades the companion packages that lag the CLI, in the same npm c
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '99.0.0',
       installedVersionReader: async (specifier) => installed[specifier],
       packageInstaller: async (packages) => {
@@ -200,7 +206,7 @@ test('update brings an installed Anthropic adapter level with the CLI', async ()
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '99.0.0',
       installedVersionReader: async (specifier) => (specifier === '@stratusagent/provider-anthropic' ? '0.13.6' : undefined),
       packageInstaller: async (packages) => {
@@ -230,7 +236,7 @@ test('update loads every module it will use before npm replaces them on disk', a
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '99.0.0',
       installedVersionReader: async () => undefined,
       gatewayLoader: async () => {
@@ -253,7 +259,7 @@ test('a gateway that will not load stops the update before the daemon is stopped
   // restarts the service, and left a running fleet down.
   const home = await freshHome();
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner, sleep: noServiceWait },
     {},
   );
   const { streams, output } = createStreams();
@@ -265,7 +271,7 @@ test('a gateway that will not load stops the update before the daemon is stopped
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '99.0.0',
       installedVersionReader: async () => undefined,
       gatewayLoader: async () => {
@@ -292,7 +298,7 @@ test('update --check reports a companion left behind by a CLI that is already cu
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
       installedVersionReader: async (specifier) =>
         specifier === '@stratusagent/channel-slack' ? '0.10.1' : undefined,
@@ -317,7 +323,7 @@ test('update --check says none are behind when every companion is current', asyn
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
       installedVersionReader: async (specifier) =>
         specifier === '@stratusagent/channel-slack' ? CLI_VERSION : undefined,
@@ -335,7 +341,7 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
   // A unit installed by an older world: a node path that no longer exists.
   const staleNode = path.join(home, 'nvm', 'v20.0.0', 'node');
   const seeded = await installService(
-    { homeDir: home, cwd: home, execPath: staleNode, scriptPath: path.join(home, 'old-bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    { homeDir: home, cwd: home, execPath: staleNode, scriptPath: path.join(home, 'old-bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
     { configPath },
   );
   assert.equal(seeded.ok, true, seeded.messages.join('\n'));
@@ -347,7 +353,7 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
     cwd: home,
     processEnv: {},
     serviceSystemdBooted: true,
-    serviceRunner: runningServiceRunner,
+    serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
     packageVersionFetcher: async () => '99.0.0',
     // Nothing of ours beside the CLI, so this stays a test about the CLI
     // upgrade. Left to the real reader it would answer from the suite's
@@ -374,9 +380,10 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
   assert.deepEqual(installs, [['@stratusagent/cli@latest']]);
 
   // The unit now names this process's interpreter, and kept its config pin.
-  const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner });
+  const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner, sleep: noServiceWait });
   assert.ok(rewritten);
-  assert.equal(rewritten.execPath, process.execPath);
+  // By its stable link where Homebrew has one (see stableNodePath).
+  assert.equal(rewritten.execPath, await stableNodePath(process.execPath));
   assert.equal(rewritten.configPath, configPath);
   assert.ok(!(await readFile(serviceUnitPath({ homeDir: home }), 'utf8')).includes(staleNode));
 
@@ -387,7 +394,7 @@ test('update stops the service, upgrades, migrates, rewrites the unit with curre
 test('an unreachable npm still migrates and repairs the unit — the offline case is the repair case', async () => {
   const home = await freshHome();
   await installService(
-    { homeDir: home, cwd: home, execPath: path.join(home, 'gone-node'), scriptPath: path.join(home, 'gone.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    { homeDir: home, cwd: home, execPath: path.join(home, 'gone-node'), scriptPath: path.join(home, 'gone.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
     {},
   );
 
@@ -400,7 +407,7 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
       cwd: home,
       processEnv: {},
       serviceSystemdBooted: true,
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => undefined,
       // Behind this build, so the installer below is reachable at all: a
       // companion is measured against the CLI when npm cannot say what
@@ -420,8 +427,8 @@ test('an unreachable npm still migrates and repairs the unit — the offline cas
   // Reported, so `--check` still says what an online update would fix.
   assert.match(output.stdout, /1 behind/);
   assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/channel-slack/);
-  const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner });
-  assert.equal(rewritten?.execPath, process.execPath);
+  const rewritten = await readServiceCommand({ homeDir: home, cwd: home, run: runningServiceRunner, sleep: noServiceWait });
+  assert.equal(rewritten?.execPath, await stableNodePath(process.execPath));
 });
 
 test('a home upgraded from 0.14.1 says once which agents lost task notes to the 14-day default', async () => {
@@ -520,7 +527,7 @@ test('readServiceCommand does not mistake a node option operand for the entrypoi
     // A node option whose value is its own argv element — exactly the
     // shape execArgv copies into the unit verbatim.
     execArgv: ['--require', path.join(home, 'preload.cjs')],
-    run: runningServiceRunner,
+    run: runningServiceRunner, sleep: noServiceWait,
   };
   await installService(env, {});
   const command = await readServiceCommand(env);
@@ -541,7 +548,7 @@ test('update refuses to rewrite the unit when the login setting cannot be determ
     return { code: 0, stdout: '', stderr: '' };
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: undecidedRunner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: undecidedRunner, sleep: noServiceWait },
     {},
   );
 
@@ -554,7 +561,7 @@ test('update refuses to rewrite the unit when the login setting cannot be determ
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: undecidedRunner,
+      serviceRunner: undecidedRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -578,7 +585,7 @@ test('update refuses before stopping anything when the unit\'s trusted config wi
     return runningServiceRunner(command, args);
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner, sleep: noServiceWait },
     { configPath: pinned },
   );
   calls.length = 0;
@@ -592,7 +599,7 @@ test('update refuses before stopping anything when the unit\'s trusted config wi
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: runner,
+      serviceRunner: runner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -612,7 +619,7 @@ test('service start refuses a unit whose trusted config will not load', async ()
     return runningServiceRunner(command, args);
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner, sleep: noServiceWait },
     { configPath: pinned },
   );
   calls.length = 0;
@@ -621,7 +628,7 @@ test('service start refuses a unit whose trusted config will not load', async ()
   const code = await runCli({
     argv: ['service', 'start'],
     streams,
-    env: { homeDir: home, cwd: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: runner },
+    env: { homeDir: home, cwd: home, processEnv: {}, servicePlatform: 'linux', serviceRunner: runner, serviceSleep: noServiceWait },
   });
   assert.equal(code, 1);
   assert.match(output.stderr, /Not starting: .*pinned\.json/);
@@ -649,7 +656,7 @@ test('update fails loudly when it cannot restore a deliberately stopped daemon',
     return { code: 0, stdout: '', stderr: '' };
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: stoppedRunner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: stoppedRunner, sleep: noServiceWait },
     {},
   );
   // Deliberately stopped before the update.
@@ -664,7 +671,7 @@ test('update fails loudly when it cannot restore a deliberately stopped daemon',
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: stoppedRunner,
+      serviceRunner: stoppedRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -693,7 +700,7 @@ test('an update that leaves the daemon down on its rewritten unit exits 1', asyn
     return { code: 0, stdout: '', stderr: '' };
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner, sleep: noServiceWait },
     {},
   );
 
@@ -733,7 +740,7 @@ test('update and --check treat state from a newer build as a refusal, before any
     homeDir: home,
     cwd: home,
     processEnv: {},
-    serviceRunner: runningServiceRunner,
+    serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
     packageVersionFetcher: async () => CLI_VERSION,
   };
 
@@ -756,7 +763,7 @@ test('the unit rewrite preserves the working directory the daemon was installed 
   // Installed from a project directory — relative paths in the pinned
   // config resolve against it.
   await installService(
-    { platform: 'linux', homeDir: home, cwd: projectDir, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    { platform: 'linux', homeDir: home, cwd: projectDir, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner, sleep: noServiceWait },
     {},
   );
   const before = await readServiceCommand({ platform: 'linux', homeDir: home });
@@ -773,7 +780,7 @@ test('the unit rewrite preserves the working directory the daemon was installed 
       cwd: elsewhere, // the update runs from a different directory
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -798,7 +805,7 @@ test('a migration failure after the service stop restarts the daemon on its prev
     return { code: 0, stdout: '', stderr: '' };
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner, sleep: noServiceWait },
     {},
   );
   // Make the migration itself throw after the stop: a self-referential
@@ -816,7 +823,7 @@ test('a migration failure after the service stop restarts the daemon on its prev
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: runner,
+      serviceRunner: runner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -843,7 +850,7 @@ test('a home claim that fails after the service stop still restarts the daemon',
     return { code: 0, stdout: '', stderr: '' };
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner, sleep: noServiceWait },
     {},
   );
   // Establishing exclusivity can fail on its own, and by then this command
@@ -862,7 +869,7 @@ test('a home claim that fails after the service stop still restarts the daemon',
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: runner,
+      serviceRunner: runner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -889,7 +896,7 @@ test('update refuses when the manager cannot say whether the daemon is running',
     return { code: 0, stdout: '', stderr: '' };
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: undecidedRunner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: undecidedRunner, sleep: noServiceWait },
     {},
   );
 
@@ -902,7 +909,7 @@ test('update refuses when the manager cannot say whether the daemon is running',
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: undecidedRunner,
+      serviceRunner: undecidedRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -913,7 +920,7 @@ test('update refuses when the manager cannot say whether the daemon is running',
 
 test('a reloading systemd unit is running; a transitional one is unknown, not stopped', async () => {
   const home = await freshHome();
-  await installService({ platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner }, {});
+  await installService({ platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner, sleep: noServiceWait }, {});
   const statusWith = (state: string) => readServiceStatus({
     platform: 'linux',
     homeDir: home,
@@ -953,7 +960,7 @@ test('a failed unit rewrite restores the previous unit and restarts the daemon',
   };
   // Seeded with a working runner so the install itself succeeds.
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: staleNode, scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: staleNode, scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner, sleep: noServiceWait },
     {},
   );
 
@@ -966,7 +973,7 @@ test('a failed unit rewrite restores the previous unit and restarts the daemon',
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: runner,
+      serviceRunner: runner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -987,7 +994,7 @@ test('update --check flags an entrypoint that exists but is not the one this she
   await mkdir(path.dirname(oldEntrypoint), { recursive: true });
   await writeFile(oldEntrypoint, '// old build');
   await installService(
-    { homeDir: home, cwd: home, execPath: process.execPath, scriptPath: oldEntrypoint, execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    { homeDir: home, cwd: home, execPath: process.execPath, scriptPath: oldEntrypoint, execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
     {},
   );
 
@@ -1000,7 +1007,7 @@ test('update --check flags an entrypoint that exists but is not the one this she
       cwd: home,
       processEnv: {},
       serviceSystemdBooted: true,
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -1032,7 +1039,7 @@ test('starting a systemd service reloads the manager first, so the unit on disk 
     calls.push(`${command} ${args.join(' ')}`);
     return { code: 0, stdout: '', stderr: '' };
   };
-  const result = await startService({ platform: 'linux', homeDir: home, run: runner });
+  const result = await startService({ platform: 'linux', homeDir: home, run: runner, sleep: noServiceWait });
   assert.equal(result.ok, true);
   const reloadAt = calls.findIndex((call) => call.includes('daemon-reload'));
   const restartAt = calls.findIndex((call) => call.includes('restart'));
@@ -1043,7 +1050,7 @@ test('starting a systemd service reloads the manager first, so the unit on disk 
 test('doctor names a unit whose interpreter no longer exists', async () => {
   const home = await freshHome();
   await installService(
-    { homeDir: home, cwd: home, execPath: path.join(home, 'nvm', 'v20.0.0', 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner },
+    { homeDir: home, cwd: home, execPath: path.join(home, 'nvm', 'v20.0.0', 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
     {},
   );
 
@@ -1051,13 +1058,152 @@ test('doctor names a unit whose interpreter no longer exists', async () => {
   await runCli({
     argv: ['doctor', '--format', 'json'],
     streams,
-    env: { homeDir: home, cwd: home, processEnv: {}, serviceSystemdBooted: true, serviceRunner: runningServiceRunner },
+    env: { homeDir: home, cwd: home, processEnv: {}, serviceSystemdBooted: true, serviceRunner: runningServiceRunner, serviceSleep: noServiceWait },
   });
   const report = JSON.parse(output.stdout) as { problems: string[] };
   assert.ok(
     report.problems.some((problem) => problem.includes('interpreter that no longer exists')),
     `expected a stale-interpreter problem, got: ${JSON.stringify(report.problems)}`,
   );
+});
+
+// A Homebrew-shaped node install: the binary really lives in a versioned
+// keg (Cellar/node/<version>), and brew repoints opt/node at each upgrade.
+// process.execPath is already resolved through the symlinks, so it is the
+// keg path a shell's `node` reports.
+const homebrewNode = async (home: string, versions: string[], linked: string | undefined) => {
+  const prefix = path.join(home, 'brew');
+  const kegNode = (version: string) => path.join(prefix, 'Cellar', 'node', version, 'bin', 'node');
+  for (const version of versions) {
+    await mkdir(path.dirname(kegNode(version)), { recursive: true });
+    await writeFile(kegNode(version), '#!/bin/sh\n');
+    await chmod(kegNode(version), 0o755);
+  }
+  const link = path.join(prefix, 'opt', 'node');
+  const linkTo = async (version: string) => {
+    await mkdir(path.dirname(link), { recursive: true });
+    await rm(link, { force: true });
+    await symlink(path.join('..', 'Cellar', 'node', version), link);
+  };
+  if (linked !== undefined) {
+    await linkTo(linked);
+  }
+  return { kegNode, stableNode: path.join(link, 'bin', 'node'), stableBin: path.join(link, 'bin'), linkTo };
+};
+
+test('service install names Homebrew\'s stable node link, not the versioned keg a brew upgrade deletes', async () => {
+  const home = await freshHome();
+  const brew = await homebrewNode(home, ['26.1.0'], '26.1.0');
+  const installed = await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('26.1.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], path: '/usr/bin:/bin', systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
+    {},
+  );
+  assert.equal(installed.ok, true, installed.messages.join('\n'));
+
+  const unit = await readServiceCommand({ homeDir: home, cwd: home, systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait });
+  assert.equal(unit?.execPath, brew.stableNode);
+  // The daemon's PATH leads with the same stable directory, so an agent's
+  // `node` or `npx` does not vanish with the keg either.
+  const contents = await readFile(serviceUnitPath({ homeDir: home, systemdBooted: true }), 'utf8');
+  assert.ok(contents.includes(`${brew.stableBin}${path.delimiter}/usr/bin`), contents);
+  assert.ok(!contents.includes('Cellar'), contents);
+});
+
+test('service install keeps a keg path that Homebrew does not link as the formula\'s node', async () => {
+  const home = await freshHome();
+  // This shell runs 25.0.0 from its keg while opt/node points at 26.1.0:
+  // the link would name a different interpreter than the one installing.
+  const brew = await homebrewNode(home, ['25.0.0', '26.1.0'], '26.1.0');
+  await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('25.0.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
+    {},
+  );
+  const unit = await readServiceCommand({ homeDir: home, cwd: home, systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait });
+  assert.equal(unit?.execPath, brew.kegNode('25.0.0'));
+});
+
+const doctorProblems = async (home: string): Promise<string[]> => {
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor', '--format', 'json'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, serviceSystemdBooted: true, serviceRunner: runningServiceRunner, serviceSleep: noServiceWait },
+  });
+  return (JSON.parse(output.stdout) as { problems: string[] }).problems;
+};
+
+test('doctor names a unit pinned to a versioned Homebrew node before an upgrade deletes it', async () => {
+  const home = await freshHome();
+  // A unit written before install named the stable link: the keg path.
+  const brew = await homebrewNode(home, ['26.1.0'], undefined);
+  await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('26.1.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
+    {},
+  );
+  assert.equal((await readServiceCommand({ homeDir: home, cwd: home, systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait }))?.execPath, brew.kegNode('26.1.0'));
+  await brew.linkTo('26.1.0');
+
+  const problems = await doctorProblems(home);
+  const pinned = problems.filter((problem) => problem.includes(brew.kegNode('26.1.0')));
+  assert.equal(pinned.length, 1, JSON.stringify(problems));
+  assert.match(pinned[0] ?? '', /versioned Homebrew path/);
+  assert.ok(pinned[0]?.includes(brew.stableNode), pinned[0]);
+  assert.ok(!problems.some((problem) => problem.includes('interpreter that no longer exists')), JSON.stringify(problems));
+});
+
+test('doctor names a unit still running a Homebrew node that an upgrade has unlinked', async () => {
+  const home = await freshHome();
+  const brew = await homebrewNode(home, ['26.1.0'], undefined);
+  await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('26.1.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
+    {},
+  );
+  // `brew upgrade` installed 26.2.0 and moved the link; cleanup has not run.
+  await homebrewNode(home, ['26.2.0'], '26.2.0');
+
+  const problems = await doctorProblems(home);
+  const pinned = problems.filter((problem) => problem.includes(brew.kegNode('26.1.0')));
+  assert.equal(pinned.length, 1, JSON.stringify(problems));
+  assert.match(pinned[0] ?? '', /no longer linked/);
+});
+
+test('doctor says nothing about a unit that names Homebrew\'s stable node link', async () => {
+  const home = await freshHome();
+  const brew = await homebrewNode(home, ['26.1.0'], '26.1.0');
+  await installService(
+    { homeDir: home, cwd: home, execPath: brew.kegNode('26.1.0'), scriptPath: path.join(home, 'bin.js'), execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
+    {},
+  );
+  const problems = await doctorProblems(home);
+  assert.ok(!problems.some((problem) => problem.includes('Homebrew') || problem.includes('interpreter')), JSON.stringify(problems));
+});
+
+test('update --check does not call a unit written by this shell\'s node a mismatch', async () => {
+  // Discriminating only where the suite itself runs on a Homebrew node:
+  // there, process.execPath is the keg path and install names the opt link,
+  // so comparing the two raw would flag every fresh install.
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home });
+  const entrypoint = process.argv[1];
+  assert.ok(entrypoint !== undefined);
+  await installService(
+    { homeDir: home, cwd: home, scriptPath: entrypoint, execArgv: [], systemdBooted: true, run: runningServiceRunner, sleep: noServiceWait },
+    {},
+  );
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['update', '--check'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceSystemdBooted: true,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.doesNotMatch(output.stdout, /this shell runs/);
 });
 
 test('a registry answer older than this build does not become the target its companions are held to', async () => {
@@ -1077,7 +1223,7 @@ test('a registry answer older than this build does not become the target its com
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '0.0.1',
       installedVersionReader: async (specifier) =>
         specifier === '@stratusagent/channel-slack' ? '0.0.1' : undefined,
@@ -1127,7 +1273,7 @@ test('a prerelease companion is upgraded to the stable release that supersedes i
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
       installedVersionReader: async (specifier) =>
         specifier === '@stratusagent/channel-slack' ? `${CLI_VERSION}-beta.1` : undefined,
@@ -1147,7 +1293,7 @@ test('update leaves the per-agent move pending when something still holds the ho
     homeDir: home,
     cwd: home,
     processEnv: {},
-    serviceRunner: runningServiceRunner,
+    serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
     packageVersionFetcher: async () => CLI_VERSION,
   };
   const { legacySessionDbPath, hasBracketedLegacyState } = await import('@stratusagent/state');
@@ -1194,7 +1340,7 @@ test('update finishes the per-agent move when nothing else holds the home', asyn
     homeDir: home,
     cwd: home,
     processEnv: {},
-    serviceRunner: runningServiceRunner,
+    serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
     packageVersionFetcher: async () => CLI_VERSION,
   };
   const { legacySessionDbPath, agentSessionDbPath, hasBracketedLegacyState } = await import('@stratusagent/state');
@@ -1238,7 +1384,7 @@ test('an upgraded CLI hands the migrations to the new build instead of running t
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '99.0.0',
       installedVersionReader: async () => undefined,
       packageInstaller: async () => ({ ok: true, message: '' }),
@@ -1258,7 +1404,7 @@ test('an upgraded CLI hands the migrations to the new build instead of running t
 test('the hand-off tells the new build the daemon was running, so it restarts it', async () => {
   const home = await freshHome();
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner, sleep: noServiceWait },
     {},
   );
   const handoffs: string[] = [];
@@ -1271,7 +1417,7 @@ test('the hand-off tells the new build the daemon was running, so it restarts it
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '99.0.0',
       installedVersionReader: async () => undefined,
       packageInstaller: async () => ({ ok: true, message: '' }),
@@ -1294,7 +1440,7 @@ test('a new build that cannot be started leaves the update to finish here', asyn
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '99.0.0',
       installedVersionReader: async () => undefined,
       packageInstaller: async () => ({ ok: true, message: '' }),
@@ -1329,7 +1475,7 @@ test('the second half of an update restarts a daemon it refuses to migrate under
     return { code: 0, stdout: '', stderr: '' };
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner, sleep: noServiceWait },
     {},
   );
   await mkdir(path.dirname(stateFilePath({ homeDir: home })), { recursive: true });
@@ -1345,7 +1491,7 @@ test('the second half of an update restarts a daemon it refuses to migrate under
       cwd: home,
       processEnv: { STRATUS_UPDATE_RESUME: 'running' },
       servicePlatform: 'linux',
-      serviceRunner: runner,
+      serviceRunner: runner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
     },
   });
@@ -1395,7 +1541,7 @@ test('a resumed update that throws after taking over still restarts the daemon i
       cwd: home,
       processEnv: { STRATUS_UPDATE_RESUME: 'running' },
       servicePlatform: 'linux',
-      serviceRunner: runner,
+      serviceRunner: runner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => {
         throw new Error('EIO reading the registry cache');
       },
@@ -1417,7 +1563,7 @@ test('update --check counts a pending move into the agents folder as actionable'
   const code = await runCli({
     argv: ['update', '--check'],
     streams: check.streams,
-    env: { ...env, serviceRunner: runningServiceRunner, packageVersionFetcher: async () => CLI_VERSION },
+    env: { ...env, serviceRunner: runningServiceRunner, serviceSleep: noServiceWait, packageVersionFetcher: async () => CLI_VERSION },
   });
   assert.equal(code, 1, check.output.stdout);
   assert.match(check.output.stdout, /agents +1 soul\(s\) and 1 workspace\(s\) to move into .*Agents/);
@@ -1443,7 +1589,7 @@ test('update --check counts links a copied home still points at its old path as 
   const code = await runCli({
     argv: ['update', '--check'],
     streams: check.streams,
-    env: { ...env, serviceRunner: runningServiceRunner, packageVersionFetcher: async () => CLI_VERSION },
+    env: { ...env, serviceRunner: runningServiceRunner, serviceSleep: noServiceWait, packageVersionFetcher: async () => CLI_VERSION },
   });
   assert.equal(code, 1, check.output.stdout);
   assert.match(check.output.stdout, /agents +1 link\(s\) from a home at another path to re-point at .*Agents/);
@@ -1494,7 +1640,7 @@ test('update --check reports configured plugins that release apart from the CLI 
       streams: streams.streams,
       env: {
         ...env,
-        serviceRunner: runningServiceRunner,
+        serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
         packageVersionFetcher: async () => CLI_VERSION,
         installedVersionReader: async (specifier) => versions[specifier],
         pluginReleaseReader: async (name) => {
@@ -1538,7 +1684,7 @@ test('provider-openai releases from the plugins repository now, so update moves 
     streams: streams.streams,
     env: {
       ...env,
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
       installedVersionReader: async (specifier) => (specifier === '@stratusagent/provider-openai' ? '0.13.6' : undefined),
       pluginReleaseReader: async (name) => (name === '@stratusagent/provider-openai' ? releaseOf('0.14.0', providerPlugin) : { status: 'unknown' }),
@@ -1565,7 +1711,7 @@ test('memory-sqlite releases from the plugins repository now, so update moves a 
     streams: streams.streams,
     env: {
       ...env,
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
       installedVersionReader: async (specifier) => (specifier === '@stratusagent/memory-sqlite' ? '0.13.6' : undefined),
       pluginReleaseReader: async (name) => (name === '@stratusagent/memory-sqlite' ? releaseOf('0.14.0', memoryPlugin) : { status: 'unknown' }),
@@ -1589,7 +1735,7 @@ test('update installs each plugin that lags, pinned to the checked release, whil
     return runningServiceRunner(command, args);
   };
   await installService(
-    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner, sleep: noServiceWait },
     {},
   );
   events.length = 0;
@@ -1603,7 +1749,7 @@ test('update installs each plugin that lags, pinned to the checked release, whil
       cwd: home,
       processEnv: {},
       servicePlatform: 'linux',
-      serviceRunner: runner,
+      serviceRunner: runner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
       installedVersionReader: async (specifier) => ({ '@stratusagent/plugin-spawn': '0.1.0', '@stratusagent/plugin-peer': '0.1.0' } as Record<string, string>)[specifier],
       pluginReleaseReader: async () => releaseOf('0.2.0'),
@@ -1643,7 +1789,7 @@ test('on a CLI upgrade the new build updates the plugins, since it is the one th
     homeDir: home,
     cwd: home,
     processEnv: {},
-    serviceRunner: runningServiceRunner,
+    serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
     packageVersionFetcher: async () => '99.0.0',
     installedVersionReader: async (specifier) => (specifier === '@stratusagent/plugin-spawn' ? '0.1.0' : undefined),
     pluginReleaseReader: async () => releaseOf('0.2.0'),
@@ -1674,7 +1820,7 @@ test('a new build that did not take over leaves the plugins for the next update'
       homeDir: home,
       cwd: home,
       processEnv: {},
-      serviceRunner: runningServiceRunner,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => '99.0.0',
       installedVersionReader: async (specifier) => (specifier === '@stratusagent/plugin-spawn' ? '0.1.0' : undefined),
       pluginReleaseReader: async () => releaseOf('0.2.0'),

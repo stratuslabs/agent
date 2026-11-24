@@ -122,10 +122,10 @@ export interface SignInAttempt {
   readonly codeVerifier: string;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const clip = (text: string): string => (text.length > 300 ? `${text.slice(0, 300)}…` : text);
+export const clip = (text: string): string => (text.length > 300 ? `${text.slice(0, 300)}…` : text);
 
 const randomToken = (): string => randomBytes(32).toString('base64url');
 
@@ -253,7 +253,17 @@ export const readCallback = (attempt: SignInAttempt, params: URLSearchParams): C
   return { code, clientId: attempt.clientId };
 };
 
-const send = async (options: RequestOptions, url: string, init: RequestInit, what: string): Promise<{ response: Response; body: unknown }> => {
+/**
+ * One request to OpenAI: the response, its body as JSON (undefined when it
+ * isn't) and as text. A failure to get an answer is `cancelled` when the
+ * caller's signal ended it, and `temporary` otherwise.
+ */
+export const send = async (
+  options: RequestOptions,
+  url: string,
+  init: RequestInit,
+  what: string,
+): Promise<{ response: Response; body: unknown; text: string }> => {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   try {
     const response = await fetchImpl(url, { ...init, ...(options.signal !== undefined ? { signal: options.signal } : {}) });
@@ -264,7 +274,7 @@ const send = async (options: RequestOptions, url: string, init: RequestInit, wha
     } catch {
       body = undefined;
     }
-    return { response, body };
+    return { response, body, text };
   } catch (error) {
     if (options.signal?.aborted === true) {
       throw new ChatGPTAuthError('cancelled', `${what} was cancelled.`, { cause: error });

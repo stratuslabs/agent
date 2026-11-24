@@ -913,8 +913,10 @@ test('credential.request passes a name, a scope defaulting to the agent, a reaso
   await assert.rejects(tool.execute({ name: 'x', scope: 'everyone' }, session), /"scope" is "agent".*or "shared"/);
   await assert.rejects(tool.execute({ name: 'x', via: 'email' }, session), /"via" is "form".*or "link"/);
   assert.equal(asked.length, 3);
-  // A human decides everything after the question, so asking is safe.
+  // A human decides everything after the question, so asking is safe,
+  // until the conversation has read outside content (AGT-372).
   assert.equal(tool.risk, 'safe');
+  assert.equal(tool.riskAfterExternalContent, 'gated');
   assert.ok(GATEWAY_ONLY_TOOL_NAMES.includes(CREDENTIAL_REQUEST_TOOL_NAME));
 });
 

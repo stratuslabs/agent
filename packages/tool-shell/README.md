@@ -208,6 +208,12 @@ Give that agent a stored credential bound to the variable the CLI reads (below),
 or a token through `env`, where it's visible in config, or set `sandbox: "off"`
 for it.
 
+Xcode's app test runner can't start under `sandbox-exec` at all: macOS
+refuses the launchd job `xcodebuild test` creates for the test host, so
+the run hangs whatever the settings above allow. Run app tests in CI, as
+[the shell guide](../../docs/guides/shell.md#macos-app-tests) shows, or set
+`sandbox: "off"` for that agent.
+
 ### Stored credentials in the environment
 
 A stored credential reaches a command as an environment variable in two ways,

@@ -473,6 +473,20 @@ export interface StratusConfigFile {
    */
   agentMaxTurns?: Record<string, number>;
   /**
+   * The longest one turn may run, in minutes, before it is stopped and
+   * fails saying so: wall clock, not counting time spent waiting on a
+   * person's approval. A background task is one worker turn, so it is the
+   * task's limit too. 0 means no limit. Default 120. Trusted config only,
+   * like `maxTurns`: raising it lets a turn spend longer, and lowering it
+   * cuts off the operator's own agents.
+   */
+  turnMinutes?: number;
+  /**
+   * Per-agent replacements for `turnMinutes`, keyed by agent id:
+   * `{ "atlas": 240 }`, 0 for no limit on that agent. Trusted config only.
+   */
+  agentTurnMinutes?: Record<string, number>;
+  /**
    * Agents that keep working past their budget instead of wrapping up,
    * keyed by agent id: `true` with no cap, a number for that many extra
    * allowances per message. Off for any agent not listed. Trusted config
@@ -486,6 +500,20 @@ export interface StratusConfigFile {
    * Trusted config only, like `maxTurns`: it spends the operator's tokens.
    */
   concurrentScheduledTurns?: Record<string, number>;
+  /**
+   * Background tasks (`agent.delegate` with `background: true`). `enabled`
+   * turns starting them on or off; `maxRunningPerAgent` raises or lowers
+   * how many one agent may have running at once, keyed by agent id:
+   * `{ "atlas": 5 }`, 3 for any agent not listed. Trusted config only, like
+   * `maxTurns`: a task is unattended work that spends the operator's tokens.
+   */
+  tasks?: TasksConfig;
+}
+
+/** The `tasks` block of a config file. */
+export interface TasksConfig {
+  enabled?: boolean;
+  maxRunningPerAgent?: Record<string, number>;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */

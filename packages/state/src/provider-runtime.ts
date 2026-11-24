@@ -180,6 +180,16 @@ export const describeServingModel = (config: RuntimeConfig, onFallback: boolean)
   ...(onFallback ? { onFallback: true } : {}),
 });
 
+/**
+ * Told once per session, when the primary failed and that session switched
+ * to the fallback: the primary's error, and the session that switched. A
+ * provider's error text can quote anything it was handed, a stored secret
+ * included, so a host that writes it anywhere masks it first (the daemon
+ * masks it against the same set a failed turn is masked against). A
+ * notice that returns a promise is waited for before the fallback answers.
+ */
+export type FallbackNotice = (error: unknown, session: Session) => void;
+
 // Wraps the fallback runtime as a provider: the primary model serves every
 // turn until it throws, then that session switches to the fallback for
 // good. Stickiness is per session, never per provider instance — a pooled
@@ -190,7 +200,7 @@ export const describeServingModel = (config: RuntimeConfig, onFallback: boolean)
 export const createFallbackWrappedProvider = (
   primary: ModelProvider,
   fallback: ModelProvider,
-  onFallback: (error: unknown) => void,
+  onFallback: FallbackNotice,
   persistSession?: (session: Session) => Promise<void>,
 ): ModelProvider => {
   const fallbackSessions = new Set<string>();
@@ -263,7 +273,14 @@ export const createFallbackWrappedProvider = (
           }
           fallbackSessions.add(request.session.id);
           (request.session.metadata ??= {})[FALLBACK_ACTIVE_METADATA_KEY] = true;
-          onFallback(error);
+          // Awaited, so a host that masks the error first (the daemon reads
+          // its stored secrets) has said so before the fallback answers. A
+          // notice that fails is not a model failure: the switch stands.
+          try {
+            await onFallback(error, request.session);
+          } catch {
+            // Nothing to tell; the fallback still answers.
+          }
           // The switch is durable BEFORE the fallback attempt begins: a
           // daemon killed while the fallback is in flight must not retry
           // the primary on restart — stickiness is the contract.
@@ -535,7 +552,7 @@ const createDeferredProvider = (name: string, build: () => Promise<ModelProvider
 
 export const createRuntimeProvider = (
   config: RuntimeConfig,
-  onFallback?: (error: unknown) => void,
+  onFallback?: FallbackNotice,
   executeTool?: HostedToolExecutor,
   maxTurns?: number,
   persistSession?: (session: Session) => Promise<void>,

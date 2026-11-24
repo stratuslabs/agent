@@ -1,0 +1,590 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+import { recordTurnFailure, type AgentDefinition, type Message, type Session, type StratusEvent } from '@stratusagent/core';
+import { fleetDbIn } from '@stratusagent/state';
+
+import { createBackgroundTasks, liveTaskStatus } from '../src/background-tasks.ts';
+import { ShardedSessionStore } from '../src/sessions.ts';
+import { taskOutcomeKey } from '../src/task-settle.ts';
+import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from '../src/tasks.ts';
+import type { DispatchInput, GatewayOptions } from '../src/types.ts';
+
+// AGT-357: cancelling a background task, at each point spec test 8 names.
+// The background-task host runs here on stand-ins for the gateway's
+// dispatch and chains, so each point can be held still: a worker link not
+// yet started, a dispatch whose turn hasn't begun, a turn in flight, and a
+// turn that has finished but not been settled. The gateway-level cases
+// (a real turn stopped mid-flight, a crash between the stop and the abort)
+// are in background-tasks.test.ts.
+
+const ORIGIN = 'fixture:ava:C1';
+const OTHER = 'fixture:ava:C2';
+const AVA = { id: 'ava', name: 'Ava', instructions: '', tools: [], skills: [], delegates: [] } as unknown as AgentDefinition;
+
+let counter = 0;
+const message = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => {
+  counter += 1;
+  return { id: `m${counter}`, role, content, createdAt: new Date().toISOString(), ...extra };
+};
+
+const until = async (what: string, check: () => Promise<boolean> | boolean, ms = 5_000): Promise<void> => {
+  const deadline = Date.now() + ms;
+  while (!(await check())) {
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${what}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};
+
+/** How the stand-in worker dispatch behaves. */
+type WorkerMode =
+  /** Refused by its signal before its turn begins, as a dispatch whose start hasn't run is: no worker session. */
+  | 'pre-turn'
+  /** Its turn starts and runs until its signal is aborted, then fails as aborted with its session saved. */
+  | 'mid-turn'
+  /** Its turn finishes and is saved, then the dispatch waits for `release` before it resolves: finished, not settled. */
+  | 'finish-then-hold';
+
+const fixture = async (
+  mode: WorkerMode,
+  {
+    holdWorkerLink = false,
+    onRead,
+    onEmit,
+  }: { holdWorkerLink?: boolean; onRead?: (sessionId: string) => void; onEmit?: (event: StratusEvent) => Promise<void> } = {},
+) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-task-cancel-'));
+  const stateDir = path.join(home, '.stratus');
+  await mkdir(stateDir, { recursive: true });
+  const store = new ShardedSessionStore({ stateDir });
+  for (const id of [ORIGIN, OTHER]) {
+    await store.create({
+      id,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'completed',
+      metadata: { channel: 'fixture' },
+      messages: [message('user', 'start a job'), message('assistant', 'Started it.')],
+    } as unknown as Session);
+  }
+
+  const chains = new Map<string, Promise<unknown>>();
+  const onChain = <T>(sessionId: string, work: () => Promise<T>): Promise<T> => {
+    const next = (chains.get(sessionId) ?? Promise.resolve()).then(work, work);
+    chains.set(sessionId, next.catch(() => {}));
+    return next;
+  };
+  let openWorkerLink: () => void = () => {};
+  const workerLinkGate = holdWorkerLink ? new Promise<void>((resolve) => { openWorkerLink = resolve; }) : Promise.resolve();
+  let release: () => void = () => {};
+  const released = new Promise<void>((resolve) => { release = resolve; });
+
+  /** Each worker dispatch: whether its signal was already aborted when it was made. */
+  const workerDispatches: Array<{ abortedAtStart: boolean }> = [];
+  const aborted: Array<{ sessionId: string; reason: string }> = [];
+  const warnings: string[] = [];
+  const events: StratusEvent[] = [];
+
+  const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
+    if (input.sessionId === ORIGIN || input.sessionId === OTHER) {
+      // The outcome notice: a keyed turn the origin answers.
+      const origin = (await store.get(input.sessionId))!;
+      origin.messages.push(message('user', input.userMessage, { idempotencyKey: input.idempotencyKey! }));
+      origin.messages.push(message('assistant', 'noted'));
+      origin.status = 'completed';
+      await store.save(origin);
+      return origin;
+    }
+    const signal = input.signal!;
+    workerDispatches.push({ abortedAtStart: signal.aborted });
+    const abortedNow = (): Promise<never> => new Promise<never>((_resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    if (mode === 'pre-turn') {
+      return abortedNow();
+    }
+    if (signal.aborted) {
+      throw signal.reason;
+    }
+    const worker = await store.create({
+      id: input.sessionId,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'running',
+      metadata: input.metadata ?? {},
+      messages: [message('user', input.userMessage)],
+    } as unknown as Session);
+    if (mode === 'mid-turn') {
+      try {
+        return await abortedNow();
+      } catch (error) {
+        const current = (await store.get(input.sessionId))!;
+        recordTurnFailure(current, error instanceof Error ? error.message : String(error));
+        await store.save(current);
+        throw error;
+      }
+    }
+    worker.messages.push(message('assistant', `did ${input.userMessage}`));
+    worker.status = 'completed';
+    await store.save(worker);
+    await released;
+    return worker;
+  };
+
+  // The host's reads go through here, so a case can act between a read and
+  // what follows it.
+  const seen = {
+    get: async (sessionId: string) => {
+      const session = await store.get(sessionId);
+      onRead?.(sessionId);
+      return session;
+    },
+    save: (session: Session) => store.save(session),
+  } as unknown as ShardedSessionStore;
+  const tasks = createBackgroundTasks({
+    options: { tasks: { enabled: true } } as GatewayOptions,
+    fleetDb: fleetDbIn(stateDir),
+    stateHome: stateDir,
+    store: seen,
+    bus: {
+      emit: async (event) => {
+        events.push(event);
+        await onEmit?.(event);
+      },
+    },
+    dispatchInternal,
+    onSessionChain: onChain,
+    onWorkerChain: async (sessionId, work) => {
+      await workerLinkGate;
+      return onChain(sessionId, work);
+    },
+    settleRepeat: async () => undefined,
+    observe: async () => { throw new Error('no fallback expected'); },
+    postToOrigin: async () => { throw new Error('no fallback expected'); },
+    abortTurns: (sessionId, reason) => {
+      aborted.push({ sessionId, reason });
+      return 0;
+    },
+    isStopping: () => false,
+    refusal: () => new Error('stopping'),
+    log: () => {},
+    warn: (line) => warnings.push(line),
+  });
+  const rows = new SqliteTaskStore(fleetDbIn(stateDir), { stateHome: stateDir });
+
+  const start = async (prompt = 'WORK', originId = ORIGIN): Promise<TaskRow> => {
+    const started = await tasks.start!({
+      origin: (await store.get(originId))!,
+      agent: AVA,
+      prompt,
+      workerSessionId: (id) => `${originId}:delegate:ava:1:${id}`,
+      metadata: {},
+    });
+    return rows.get(started.task)!;
+  };
+  const settled = (taskId: string): Promise<TaskRow> => until(`task ${taskId} to settle`, () => {
+    const row = rows.get(taskId);
+    return row !== undefined && row.delivery !== 'pending';
+  }).then(() => rows.get(taskId)!);
+  const notice = async (taskId: string, originId = ORIGIN): Promise<string | undefined> =>
+    (await store.get(originId))?.messages.find((candidate) => candidate.idempotencyKey === taskOutcomeKey(taskId))?.content;
+
+  return {
+    tasks,
+    rows,
+    store,
+    start,
+    settled,
+    notice,
+    workerDispatches,
+    aborted,
+    warnings,
+    events,
+    openWorkerLink: () => openWorkerLink(),
+    release: () => release(),
+    async close() {
+      release();
+      openWorkerLink();
+      // A worker still waiting on its signal (a failed case) ends here.
+      tasks.cutOff();
+      await Promise.allSettled([...chains.values()]);
+      rows.close();
+      tasks.close();
+      store.close();
+    },
+  };
+};
+
+test('cancel before the start dispatch: the stop is written first, the start is refused by its own signal, and it settles cancelled, never started', async () => {
+  const f = await fixture('pre-turn', { holdWorkerLink: true });
+  try {
+    const row = await f.start();
+    const result = await f.tasks.cancel(row.id, { stoppedBy: 'cli' });
+    assert.equal(result.kind, 'stopping');
+    assert.equal(f.rows.get(row.id)?.stoppedBy, 'cli', 'the stop is on the row before the worker link runs');
+    assert.deepEqual(f.workerDispatches, [], 'nothing was dispatched yet');
+
+    f.openWorkerLink();
+    const final = await f.settled(row.id);
+    assert.deepEqual(f.workerDispatches, [{ abortedAtStart: true }], 'the start went out already stopped');
+    assert.deepEqual([final.status, final.stoppedBy, final.delivery], ['cancelled', 'cli', 'delivered']);
+    assert.equal(await f.store.get(row.workerSessionId), undefined, 'no worker turn ran');
+    assert.match((await f.notice(row.id)) ?? '', /was stopped from the CLI before it started\.\]$/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('cancel after the dispatch, before the worker\'s turn begins: the start is refused and it settles cancelled, never started', async () => {
+  const f = await fixture('pre-turn');
+  try {
+    const row = await f.start();
+    await until('the worker dispatch', () => f.workerDispatches.length === 1);
+    assert.equal(f.workerDispatches[0]?.abortedAtStart, false);
+
+    const result = await f.tasks.cancel(row.id, { stoppedBy: 'dashboard' });
+    assert.equal(result.kind, 'stopping');
+    const final = await f.settled(row.id);
+    assert.deepEqual([final.status, final.stoppedBy], ['cancelled', 'dashboard']);
+    assert.equal(await f.store.get(row.workerSessionId), undefined);
+    assert.match((await f.notice(row.id)) ?? '', /was stopped from the dashboard before it started\.\]$/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('cancel mid-turn: the task\'s signal and the worker\'s running turn are both aborted, and it settles cancelled', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+
+    const result = await f.tasks.cancel(row.id, { stoppedBy: 'agent' });
+    assert.equal(result.kind, 'stopping');
+    assert.equal(result.kind === 'stopping' ? result.task.stoppedBy : undefined, 'agent');
+    assert.deepEqual(f.aborted.map((call) => call.sessionId), [row.workerSessionId], 'the running turn is aborted as a backstop');
+    assert.match(f.aborted[0]!.reason, new RegExp(`^Background task ${row.id} was stopped by the agent\\.$`));
+
+    const final = await f.settled(row.id);
+    assert.deepEqual([final.status, final.stoppedBy], ['cancelled', 'agent']);
+    const worker = await f.store.get(row.workerSessionId);
+    assert.equal(worker?.status, 'failed');
+    assert.equal(worker?.lastError, f.aborted[0]!.reason, 'the worker failed with the stop, its session saved');
+    assert.match((await f.notice(row.id)) ?? '', /was stopped by the agent before its first step finished\.\]$/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('cancel after the worker\'s turn finished, before settling: "already finished", no stop written, and it ends completed', async () => {
+  const f = await fixture('finish-then-hold');
+  try {
+    const row = await f.start();
+    await until('the worker turn to finish', async () => (await f.store.get(row.workerSessionId))?.status === 'completed');
+    assert.equal(f.rows.get(row.id)?.status, 'running', 'not settled yet');
+
+    const result = await f.tasks.cancel(row.id, { stoppedBy: 'cli' });
+    assert.equal(result.kind, 'finished');
+    assert.equal(result.kind === 'finished' ? result.status : undefined, 'completed', 'how it ended, from the worker, though the row still says running');
+    assert.deepEqual(await f.tasks.toolsHost!.cancel(row.id, 'ava'), { kind: 'finished', status: 'completed' });
+    assert.deepEqual((await f.tasks.toolsHost!.list('ava')).map((entry) => entry.status), ['completed'], 'the list reads it from the worker too');
+    assert.equal(f.rows.get(row.id)?.stoppedBy, undefined, 'no stop was written');
+    assert.deepEqual(f.aborted, [], 'nothing was aborted');
+
+    f.release();
+    const final = await f.settled(row.id);
+    assert.deepEqual([final.status, final.stoppedBy], ['completed', undefined]);
+    const text = (await f.notice(row.id)) ?? '';
+    assert.match(text, /completed after 1 step\.\nResult: did WORK\]$/);
+    assert.doesNotMatch(text, /stop/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a task already final, an unknown id, and another agent\'s task: nothing is written', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+
+    assert.deepEqual(await f.tasks.cancel('t_unknown', { stoppedBy: 'cli' }), { kind: 'missing' });
+    // The row's empty stopper means "no stop", so one is refused, not written.
+    for (const stoppedBy of ['', '  ']) {
+      await assert.rejects(f.tasks.cancel(row.id, { stoppedBy }), /must say who asked for it/);
+    }
+    assert.deepEqual(await f.tasks.cancel(row.id, { stoppedBy: 'agent', agentId: 'mia' }), { kind: 'missing' }, 'an agent cancels only its own tasks');
+    assert.equal(f.rows.get(row.id)?.stoppedBy, undefined);
+    assert.deepEqual(f.aborted, []);
+
+    assert.equal((await f.tasks.cancel(row.id, { stoppedBy: 'agent', agentId: 'ava' })).kind, 'stopping');
+    const final = await f.settled(row.id);
+    assert.equal(final.status, 'cancelled');
+
+    const again = await f.tasks.cancel(row.id, { stoppedBy: 'cli' });
+    assert.equal(again.kind, 'finished');
+    assert.equal(f.rows.get(row.id)?.stoppedBy, 'agent', 'the row is unchanged');
+    assert.equal(f.aborted.length, 1, 'nothing more was aborted');
+  } finally {
+    await f.close();
+  }
+});
+
+test('a second cancel while the first is stopping keeps the first stopper and aborts again', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+    // The first stop is recorded but its abort hasn't reached the turn: a
+    // crash would leave this, and so does a turn that ignores its signal.
+    f.rows.recordStop(row.id, 'U123', new Date().toISOString());
+
+    const result = await f.tasks.cancel(row.id, { stoppedBy: 'cli' });
+    assert.equal(result.kind, 'stopping');
+    assert.equal(result.kind === 'stopping' ? result.already : undefined, true);
+    assert.equal(f.rows.get(row.id)?.stoppedBy, 'U123');
+    assert.match(f.aborted[0]?.reason ?? '', /was stopped by U123\.$/);
+    const final = await f.settled(row.id);
+    assert.deepEqual([final.status, final.stoppedBy], ['cancelled', 'U123']);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a task that settles while the cancel reads its worker is reported finished, with nothing written or aborted', async () => {
+  let settleNow: ((sessionId: string) => void) | undefined;
+  const f = await fixture('mid-turn', { onRead: (sessionId) => settleNow?.(sessionId) });
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+    // Settling writes a final status after the cancel read the worker
+    // session as running and before it records the stop.
+    settleNow = (sessionId) => {
+      if (sessionId === row.workerSessionId) {
+        settleNow = undefined;
+        f.rows.setStatus(row.id, 'failed', new Date().toISOString());
+      }
+    };
+    const result = await f.tasks.cancel(row.id, { stoppedBy: 'cli' });
+    assert.equal(result.kind, 'finished');
+    assert.equal(f.rows.get(row.id)?.stoppedBy, undefined, 'no stop on a final row');
+    assert.deepEqual(f.aborted, [], 'nothing was aborted');
+  } finally {
+    await f.close();
+  }
+});
+
+test('the agent\'s list reads a task parked on a person as waiting_approval, with its steps, before settling has said so', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+    const worker = (await f.store.get(row.workerSessionId))!;
+    worker.messages.push(message('assistant', '', { toolCalls: [{ id: 'c1', toolName: 'fs.write', input: {} }] }));
+    worker.status = 'pending_approval';
+    await f.store.save(worker);
+
+    const listed = await f.tasks.toolsHost!.list('ava');
+    assert.deepEqual(listed.map((entry) => [entry.task, entry.status, entry.steps, entry.worker]), [[row.id, 'waiting_approval', 1, 'ava']]);
+    assert.equal(f.rows.get(row.id)?.status, 'running', 'the row itself is unchanged');
+    assert.deepEqual(await f.tasks.toolsHost!.list('mia'), [], 'another agent sees none of them');
+    assert.deepEqual(await f.tasks.toolsHost!.cancel(row.id, 'mia'), { kind: 'missing' });
+  } finally {
+    await f.close();
+  }
+});
+
+test('a task\'s live status: the row\'s once final, else what its worker session says now', () => {
+  const start = message('user', 'Do the job.');
+  const worker = (status: Session['status'], messages: Message[], lastError?: string) =>
+    ({ status, messages, ...(lastError !== undefined ? { lastError } : {}) }) as Pick<Session, 'status' | 'messages' | 'lastError'>;
+  const done = worker('completed', [start, message('assistant', 'done')]);
+  // Final rows are what settling wrote, whatever the worker says.
+  assert.equal(liveTaskStatus({ status: 'failed' }, done), 'failed');
+  // Open rows read the worker.
+  assert.equal(liveTaskStatus({ status: 'running' }, undefined), 'running', 'a start still on its way');
+  assert.equal(liveTaskStatus({ status: 'running' }, worker('idle', [])), 'running', 'a worker session with no turn yet is not "never started"');
+  // The broker marks the row while a question is out and puts it back once
+  // answered (AGT-358). A provider that runs its own loop never parks the
+  // session, so the row is what says it waits.
+  assert.equal(liveTaskStatus({ status: 'waiting_approval' }, worker('running', [start])), 'waiting_approval', 'a question out on a provider that runs its own loop');
+  assert.equal(liveTaskStatus({ status: 'running' }, worker('pending_approval', [start])), 'waiting_approval');
+  assert.equal(liveTaskStatus({ status: 'running' }, done), 'completed', 'finished, not yet settled');
+  assert.equal(liveTaskStatus({ status: 'running' }, worker('failed', [start], 'rate limited')), 'failed');
+  assert.equal(liveTaskStatus({ status: 'running', stoppedBy: 'cli' }, worker('failed', [start], 'stopped')), 'cancelled');
+  assert.equal(liveTaskStatus({ status: 'running', stoppedBy: 'cli' }, worker('running', [start])), 'running', 'still winding down; its stop shows in stoppedBy');
+});
+
+// AGT-357 PR 3: a person's Stop in a conversation reaches the tasks it
+// started (decision 3), through the same cancel.
+
+test('stopping a conversation\'s tasks: each one it started that is running here is counted at once, cancelled as the person, and named once its stop is written', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const first = await f.start('FIRST');
+    const second = await f.start('SECOND');
+    const elsewhere = await f.start('ELSEWHERE', OTHER);
+    await until('the workers to start', async () =>
+      (await Promise.all([first, second, elsewhere].map((row) => f.store.get(row.workerSessionId)))).every((worker) => worker?.status === 'running'));
+
+    const stop = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.equal(stop.open, 2, 'counted before anything is awaited');
+    assert.deepEqual(await stop.stopped, [first.id, second.id], 'oldest first');
+    for (const row of [first, second]) {
+      const final = await f.settled(row.id);
+      assert.deepEqual([final.status, final.stoppedBy], ['cancelled', 'U-DYLAN']);
+      assert.match((await f.notice(row.id)) ?? '', /was stopped by U-DYLAN/);
+    }
+    assert.deepEqual(f.aborted.map((call) => call.sessionId).sort(), [first.workerSessionId, second.workerSessionId].sort());
+    assert.deepEqual([f.rows.get(elsewhere.id)?.status, f.rows.get(elsewhere.id)?.stoppedBy], ['running', undefined], 'another conversation\'s task keeps running');
+  } finally {
+    await f.close();
+  }
+});
+
+test('a second stop while the first is winding down counts the task again but names nothing, and the first stopper is kept', async () => {
+  const f = await fixture('pre-turn', { holdWorkerLink: true });
+  try {
+    const row = await f.start();
+    const first = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.deepEqual([first.open, await first.stopped], [1, [row.id]]);
+    const second = f.tasks.stopTasks(ORIGIN, 'U-OTHER');
+    assert.deepEqual([second.open, await second.stopped], [1, []]);
+    assert.equal(f.rows.get(row.id)?.stoppedBy, 'U-DYLAN');
+
+    f.openWorkerLink();
+    assert.equal((await f.settled(row.id)).status, 'cancelled');
+    const after = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.deepEqual([after.open, await after.stopped], [0, []], 'once it has ended there is nothing to stop');
+  } finally {
+    await f.close();
+  }
+});
+
+test('a task whose worker has already finished is counted until it settles, but nothing is written and it is not named', async () => {
+  const f = await fixture('finish-then-hold');
+  try {
+    const row = await f.start();
+    await until('the worker turn to finish', async () => (await f.store.get(row.workerSessionId))?.status === 'completed');
+    const stop = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.deepEqual([stop.open, await stop.stopped], [1, []]);
+    assert.equal(f.rows.get(row.id)?.stoppedBy, undefined);
+    assert.deepEqual(f.aborted, []);
+    f.release();
+    assert.equal((await f.settled(row.id)).status, 'completed');
+  } finally {
+    await f.close();
+  }
+});
+
+test('an open row no worker of this process is running (the last process left it) is neither counted nor stopped: the restart sweep settles it', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const id = newTaskId();
+    f.rows.claim({
+      id,
+      agentId: 'ava',
+      workerAgentId: 'ava',
+      originSessionId: ORIGIN,
+      workerSessionId: `${ORIGIN}:delegate:ava:1:${id}`,
+      promptDigest: taskPromptDigest('ava', 'LEFT'),
+    }, 3, new Date().toISOString());
+    const stop = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.deepEqual([stop.open, await stop.stopped], [0, []]);
+    assert.equal(f.rows.get(id)?.stoppedBy, undefined);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a cancel that fails is logged with its task id and left out, and the stop never rejects', async () => {
+  let failReads = false;
+  const f = await fixture('mid-turn', {
+    onRead: (sessionId) => {
+      if (failReads && sessionId.includes(':delegate:')) {
+        throw new Error('disk gone');
+      }
+    },
+  });
+  try {
+    const row = await f.start();
+    await until('the worker turn to start', async () => (await f.store.get(row.workerSessionId))?.status === 'running');
+    failReads = true;
+    const stop = f.tasks.stopTasks(ORIGIN, 'U-DYLAN');
+    assert.equal(stop.open, 1);
+    assert.deepEqual(await stop.stopped, []);
+    failReads = false;
+    assert.ok(f.warnings.some((line) => line.includes(row.id) && line.includes('disk gone')), JSON.stringify(f.warnings));
+    assert.equal(f.rows.get(row.id)?.stoppedBy, undefined, 'nothing was written, so nothing claims it stopped');
+  } finally {
+    await f.close();
+  }
+});
+
+test('approval waits: questions out at once mark the task once, only the last answer puts it back to running, and an ended task stays ended', async () => {
+  const f = await fixture('mid-turn');
+  try {
+    const row = await f.start();
+    await until('the worker\'s turn to start', async () => (await f.store.get(row.workerSessionId)) !== undefined);
+    assert.equal(await f.tasks.approvalWait(ORIGIN), undefined, 'the conversation that started it is not its worker');
+    assert.equal(await f.tasks.approvalWait(`${row.workerSessionId}:delegate:ava:2:x`), undefined, 'nor is a session under it');
+
+    const first = await f.tasks.approvalWait(row.workerSessionId);
+    const second = await f.tasks.approvalWait(row.workerSessionId);
+    assert.deepEqual([first?.taskId, second?.taskId], [row.id, row.id]);
+    assert.equal(f.rows.get(row.id)?.status, 'waiting_approval');
+    const types = (): string[] => f.events.map((event) => event.type);
+    assert.deepEqual(types(), ['task.started', 'task.waiting-approval'], 'one wait, however many questions');
+    first!.release();
+    first!.release();
+    assert.equal(f.rows.get(row.id)?.status, 'waiting_approval', 'a second release of the same question counts once; one is still out');
+    second!.release();
+    assert.equal(f.rows.get(row.id)?.status, 'running');
+
+    // A later question is a new wait.
+    const third = await f.tasks.approvalWait(row.workerSessionId);
+    assert.deepEqual(types(), ['task.started', 'task.waiting-approval', 'task.waiting-approval']);
+    // Stopped while it is out: the answer that follows leaves it ended.
+    assert.equal((await f.tasks.cancel(row.id, { stoppedBy: 'cli' })).kind, 'stopping');
+    assert.equal((await f.settled(row.id)).status, 'cancelled');
+    third!.release();
+    assert.equal(f.rows.get(row.id)?.status, 'cancelled');
+    assert.equal(await f.tasks.approvalWait(row.workerSessionId), undefined, 'a worker whose turn ended is no task\'s');
+    assert.deepEqual(types(), ['task.started', 'task.waiting-approval', 'task.waiting-approval', 'task.cancelled']);
+  } finally {
+    await f.close();
+  }
+});
+
+test('approval waits: a question asked while the first is still being announced waits for that announcement too', async () => {
+  let openEmit: () => void = () => {};
+  const held = new Promise<void>((resolve) => { openEmit = resolve; });
+  const f = await fixture('mid-turn', { onEmit: (event) => (event.type === 'task.waiting-approval' ? held : Promise.resolve()) });
+  try {
+    const row = await f.start();
+    await until('the worker\'s turn to start', async () => (await f.store.get(row.workerSessionId)) !== undefined);
+    const returned: string[] = [];
+    const first = f.tasks.approvalWait(row.workerSessionId).then((wait) => { returned.push('first'); return wait; });
+    const second = f.tasks.approvalWait(row.workerSessionId).then((wait) => { returned.push('second'); return wait; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A copy: the reporter would print the array as it is after `finally`.
+    assert.deepEqual([...returned], [], 'neither question goes out before the task is announced as waiting');
+    openEmit();
+    const [one, two] = await Promise.all([first, second]);
+    assert.deepEqual(returned.toSorted(), ['first', 'second']);
+    assert.deepEqual(f.events.filter((event) => event.type === 'task.waiting-approval').length, 1);
+    one!.release();
+    two!.release();
+    assert.equal(f.rows.get(row.id)?.status, 'running');
+  } finally {
+    openEmit();
+    await f.close();
+  }
+});
