@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { chmod, mkdir, open, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { assertDerivedStatePath } from './state-directory.ts';
 
@@ -139,6 +139,15 @@ export interface AgentGrantStore
   forgetTool(agentId: string, tool: string): Promise<boolean>;
   /** Every grant on this destination, or only `tool`'s when one is named. */
   forgetDestination(agentId: string, destination: string, tool?: string): Promise<boolean>;
+  /**
+   * Every agent id with a grant file, sorted: the soul's, and any whose
+   * soul is gone. A grant outlives its agent, and without this the only
+   * way to find one was to already know the id. Names, not grants: the
+   * listing is `grantsFor`. A host that omits it cannot answer the
+   * question, and the control API says so (`501`) rather than reporting
+   * nobody.
+   */
+  owners?(): Promise<string[]>;
 }
 
 interface WhitelistFile {
@@ -766,6 +775,36 @@ export const createFileCommandWhitelist = (options: {
         const kept = grants.destinations.filter((existing) => !sameDestinationGrant(existing, grant));
         await save(agentId, { ...grants, destinations: [...kept, grant] });
       });
+    },
+    async owners() {
+      // The directory the way every read checks a path below the home: a
+      // linked `agents/` would list another tree's ids as this fleet's.
+      await assertDerivedStatePath(options.stateHome, options.directory, 'directory');
+      let entries;
+      try {
+        entries = await readdir(options.directory, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return [];
+        }
+        throw error;
+      }
+      const ids = new Set<string>();
+      for (const entry of entries) {
+        // Not followed, as `resolveWhitelistPath` refuses to follow them:
+        // a linked `agents/<id>` or `whitelist.json` is not this agent's.
+        if (entry.isDirectory()) {
+          const file = whitelistPathFor(options.directory, entry.name);
+          const found = await lstat(file).catch(() => undefined);
+          if (found?.isFile() === true) {
+            ids.add(entry.name);
+          }
+        } else if (entry.isFile() && entry.name.endsWith(LEGACY_WHITELIST_SUFFIX)) {
+          // Still authoritative until the layout migration moves it.
+          ids.add(entry.name.slice(0, -LEGACY_WHITELIST_SUFFIX.length));
+        }
+      }
+      return [...ids].filter((id) => id.length > 0).sort();
     },
     async grantsFor(agentId) {
       const grants = await read(agentId);
