@@ -15,6 +15,14 @@ import { store } from '../app.js';
  * Commands declared in the config file are shown but can only be changed
  * there. Revoking is immediate: the next call asks again.
  */
+const byDestination = (grants) => {
+  const grouped = new Map();
+  for (const grant of grants) {
+    grouped.set(grant.destination, [...(grouped.get(grant.destination) ?? []), grant]);
+  }
+  return grouped;
+};
+
 const rowsFor = (agentId, listing) => [
   ...(listing.tools ?? []).map((grant) => ({
     kind: 'Whole tool', chip: grant.tool, detail: grant.package ? `from ${grant.package}` : 'built in',
@@ -29,9 +37,16 @@ const rowsFor = (agentId, listing) => [
   ...(listing.origins ?? []).map((grant) => ({
     kind: 'Browser site', chip: grant.origin, detail: grant.tool ? `with ${grant.tool}` : grant.description, revoke: { origin: grant.origin },
   })),
-  ...(listing.destinations ?? []).map((grant) => ({
-    kind: 'Message destination', chip: grant.tool, detail: grant.description, at: grant.grantedAt, stale: grant.stale,
-    revoke: { destination: grant.destination },
+  // One row per destination, not per tool: revoking is by destination and
+  // takes every tool's grant for it, so a row per tool would promise to take
+  // back one and silently take its siblings too.
+  ...[...byDestination(listing.destinations ?? []).values()].map((grants) => ({
+    kind: 'Message destination',
+    chip: grants.map((grant) => grant.tool).join(', '),
+    detail: grants[0].description,
+    at: grants.map((grant) => grant.grantedAt).filter(Boolean).sort().at(-1),
+    stale: grants.find((grant) => grant.stale)?.stale,
+    revoke: { destination: grants[0].destination },
   })),
   ...(listing.configCommands ?? []).map((command) => ({
     kind: 'Shell command', chip: command, detail: 'set in config.json', config: true,
@@ -124,7 +139,10 @@ export const renderPermissions = () => {
               el('div', { class: 'list' }, ...rows.map(rowNode)),
               el('div', { class: 'notice', style: 'margin-top: 20px; background: var(--bg); color: var(--text-2); display: flex; gap: 8px; align-items: center;' },
                 icon('shield-check', 14),
-                'Grants never widen on their own. Each row covers only what it says.')),
+                'Grants never widen on their own. Each row covers only what it says.'),
+              // The API lists grants per agent id and has no list of grant
+              // owners, so an agent removed from the roster is not asked about.
+              el('p', { class: 'field-note' }, 'Grants kept for agents no longer on the roster aren’t listed here.')),
     ));
   };
 
