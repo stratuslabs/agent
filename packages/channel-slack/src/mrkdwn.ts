@@ -1256,7 +1256,7 @@ const renderTable = (header: string[], alignments: Alignment[], rows: string[][]
   // `<#C…>`, `<!here>`: Slack acts on all of them in prose and on none of
   // them inside a code block. Slack markup can't hold a bare `<`, so the
   // `<…>` classes leave it out, and a cell of crafted `<a:<a:…` is read in
-  // linear time rather than rescanned from every `<` (card 1090).
+  // linear time rather than rescanned from every `<`.
   const linked = [header, ...rows].some((row) => row.some((cell) =>
     readEmphasis(scan(cell)).links.size > 0
     || /\b(?:https?:\/\/|mailto:)\S|<[a-z][a-z0-9+.-]*:[^<>\s]+>|<[@#!][^<>\s]+>/i.test(cell)));

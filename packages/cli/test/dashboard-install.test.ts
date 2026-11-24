@@ -11,7 +11,7 @@ import { claimHome } from '@stratusagent/gateway';
 import { CLI_VERSION, runCli } from '../src/index.ts';
 
 // `stratus dashboard` is the one command that offers to install the two
-// packages the dashboard needs (card 308): setup and everything else leave
+// packages the dashboard needs: setup and everything else leave
 // them alone, so the offer comes only from someone asking for the dashboard.
 
 const API = '@stratusagent/control-api';

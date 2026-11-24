@@ -131,7 +131,7 @@ test('an unkeyed turn nobody asked for is a turn: it is the latest, and its fail
 });
 
 test('a message absorbed into a merged turn is found by its own key, as that turn', () => {
-  // Card 423: messages queued behind a running turn are answered by one
+  // Messages queued behind a running turn are answered by one
   // turn. The merged message carries every absorbed dispatch's key, so a
   // crash repeat of any of them resolves to that turn instead of running again.
   const merged: Message = { ...user('first\n\nsecond', 'k1'), absorbedKeys: ['k2'] };

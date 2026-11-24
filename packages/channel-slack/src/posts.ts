@@ -1,5 +1,5 @@
 /*
- * What of a tool's post (`postOf` in core, AGT-324) may reach a Slack
+ * What of a tool's post (`postOf` in core) may reach a Slack
  * thread: the blocks a post carries, checked and rewritten before they are
  * sent, and the mention markup taken out of its words. In a module of its
  * own because it is the one place that decides it, and so its tests can

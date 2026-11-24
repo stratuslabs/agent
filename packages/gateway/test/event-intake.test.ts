@@ -131,8 +131,8 @@ const harness = async (overrides: Partial<EventIntakeOptions> = {}, triggers: Ev
 const cloudEvent = (id: string, extra: Record<string, unknown> = {}): string => JSON.stringify({
   specversion: '1.0',
   id,
-  source: 'https://app.agentboard.to/stratus-labs/agent',
-  type: 'to.agentboard.card.moved',
+  source: 'https://tracker.example.com/acme/agent',
+  type: 'com.example.tracker.card.moved',
   subject: 'card/590',
   time: '2026-10-28T00:29:59Z',
   data: { column: 'Todo' },
@@ -289,8 +289,8 @@ test('a structured CloudEvent keeps its attributes, scalar extensions as strings
     attributes: {
       specversion: '1.0',
       id: 'ce-1',
-      source: 'https://app.agentboard.to/stratus-labs/agent',
-      type: 'to.agentboard.card.moved',
+      source: 'https://tracker.example.com/acme/agent',
+      type: 'com.example.tracker.card.moved',
       subject: 'card/590',
       time: '2026-10-28T00:29:59Z',
       actor: 'dylan',

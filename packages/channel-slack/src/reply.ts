@@ -64,7 +64,7 @@ const STATUS_REFRESH_MS = 60_000;
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 export const NO_REPLY_TEXT = '(no reply)';
 /**
- * The most `message.say` lines one turn may post (card 1009). Enough for a
+ * The most `message.say` lines one turn may post. Enough for a
  * question and a heads-up or two; a turn past it is narrating, which is
  * what holding the words between tools exists to stop.
  */
@@ -92,7 +92,7 @@ export interface HandoverClaim {
    * posts the chunks itself; `partial` when the placeholder took the first
    * chunk and Slack refused one of the rest. `whole` is the reply the
    * chunks were cut from, attached to a later chunk that tags another
-   * agent (card 1033).
+   * agent.
    */
   take(chunks: readonly string[], between?: () => Promise<void>, whole?: string): Promise<'complete' | 'partial' | 'untaken'>;
   /** Give the hold back unspent, letting the queued turn finish. */
@@ -108,7 +108,7 @@ export interface HandoverClaim {
  * there was text to say and Slack refused some of it, unlike a turn that
  * decided to say nothing, which is unpublished but not refused. A turn
  * that said nothing in words is refused too when nothing of it landed and
- * Slack refused a file or tool post it produced (AGT-133): that was its
+ * Slack refused a file or tool post it produced: that was its
  * answer, not silence.
  */
 export interface ReplyOutcome {
@@ -240,7 +240,7 @@ const uploadedFileId = (files: readonly SlackUploadedFile[] | undefined): string
   return undefined;
 };
 
-/** What a reply's whole text is called when it goes up with a part that tags another agent (card 1033). */
+/** What a reply's whole text is called when it goes up with a part that tags another agent. */
 const FULL_REPLY_FILENAME = 'full-reply.md';
 
 /**
@@ -275,8 +275,8 @@ const landedShare = async (web: SlackWebLike, result: SlackUploadResult, channel
 
 /**
  * Post one part of a reply. A part that tags another agent, in a reply
- * Slack shows as more than one message, goes up as an upload instead
- * (card 1033): the part is the message, as it would have been, and the
+ * Slack shows as more than one message, goes up as an upload instead:
+ * the part is the message, as it would have been, and the
  * whole reply rides along as `full-reply.md`. The tagged agent admits only
  * the message that names it and reads a text file on it into its turn, so
  * it hears all of the reply rather than the part with its name in it.
@@ -311,7 +311,7 @@ export const postPart = async (
 };
 
 /**
- * Post a tool's ready-made message (`postOf`, AGT-324) as one message of
+ * Post a tool's ready-made message (`postOf`) as one message of
  * its own: its words, converted as reply text is and with their mention
  * markup shown as text, and its Slack blocks once `sanitizePostBlocks` has
  * passed them. Blocks it refuses, or that Slack refuses, leave the words
@@ -397,7 +397,7 @@ export class ReplyRenderer {
    */
   readonly turnId: string = randomUUID();
   /**
-   * What a Slack stop aborts (card 337): the signal this renderer's dispatch
+   * What a Slack stop aborts: the signal this renderer's dispatch
    * runs under, so a stop cancels this turn whether it is running or still
    * queued behind another.
    */
@@ -408,8 +408,8 @@ export class ReplyRenderer {
   /**
    * In `final` and `texts` mode, what the model has said since its last
    * tool call. Only its first words, written before its first tool, are
-   * posted (card 950): one line saying what it set out to do, as the tool
-   * starts. Words it writes after that are held (card 1009): not posted,
+   * posted: one line saying what it set out to do, as the tool
+   * starts. Words it writes after that are held: not posted,
    * and not added to the reply. Slack's own status line is what shows the
    * turn is still working.
    */
@@ -495,7 +495,7 @@ export class ReplyRenderer {
   /**
    * Whether Slack refused an upload or tool post of this turn's. A file
    * that could not be read is not counted: it is gone or changed, and no
-   * later attempt would post it (AGT-133).
+   * later attempt would post it.
    */
   private outputRefused = false;
   /** Whether any edit of this turn's landed — a streamed line Slack took is something said, whatever the final edit's fate. */
@@ -522,7 +522,7 @@ export class ReplyRenderer {
    */
   readonly lazy: boolean;
   /**
-   * A reply-optional turn (card 601): said to the agent, so it shows what
+   * A reply-optional turn: said to the agent, so it shows what
    * any turn shows while it works — status, placeholder, words along the
    * way — but one that ends with nothing to say posts nothing: no
    * `(no reply)`, its placeholder taken back, its status cleared. Unlike a
@@ -546,7 +546,7 @@ export class ReplyRenderer {
   private readonly texts: boolean;
   /**
    * Whether a text tags another agent, which `texts` mode then posts as
-   * one message (card 1014): the tagged agent admits only a message that
+   * one message: the tagged agent admits only a message that
    * names it, so a split reply reached it as the tagged part alone.
    */
   private readonly tagsAnAgent: ((text: string) => Promise<boolean>) | undefined;
@@ -647,14 +647,14 @@ export class ReplyRenderer {
    * One nobody asked for waits for its first tool call: "is thinking…"
    * over every turn that only decides to say nothing is the interruption
    * silence exists to avoid, but one that went to work was missing its
-   * status (card 1009).
+   * status.
    */
   showLoading(head: boolean): void {
     if (this.streaming || this.loading || this.finalized) {
       return;
     }
     if (this.lazy) {
-      // Shown once it calls its first tool instead (card 1009): by then it
+      // Shown once it calls its first tool instead: by then it
       // is working on something, and a status, unlike a placeholder,
       // leaves no trace when the turn still ends silent.
       this.loadOnFirstTool = true;
@@ -704,7 +704,7 @@ export class ReplyRenderer {
    * turn: `message.send` from another of its sessions, say. Slack clears
    * the app's status in a thread on any post of the app's there, so a turn
    * of the same app working in that thread puts its status back rather
-   * than wait for the next refresh (card 1009). Another app's post clears
+   * than wait for the next refresh. Another app's post clears
    * nothing of this one's.
    */
   appPosted(web: SlackWebLike, channel: string, thread: string): void {
@@ -719,7 +719,7 @@ export class ReplyRenderer {
   }
 
   /**
-   * A `message.say` line (card 1009): posted now, after whatever the turn
+   * A `message.say` line: posted now, after whatever the turn
    * has already posted, and resolved once it landed. Refused, with a
    * sentence for the agent, on a turn that has already replied, a
    * streaming turn (its words show as they are written), and past
@@ -1038,9 +1038,9 @@ export class ReplyRenderer {
    * and `texts` mode only: a streaming turn already shows it in its
    * placeholder. Behind the turn ahead and any handover, on the upload
    * chain, so the first line, files, and the reply land in the order they
-   * happened. Words written after that are held, not posted (card 1009),
+   * happened. Words written after that are held, not posted,
    * and so are all of a lazy turn's: a turn nobody asked for must not
-   * speak before it decides to (card 1060).
+   * speak before it decides to.
    */
   private flushInterim(ofThisTurn: boolean): Promise<boolean> | undefined {
     const text = this.interim.trim();
@@ -1052,7 +1052,7 @@ export class ReplyRenderer {
     // Only words before the turn's first tool are a message of their own:
     // after one, a step has run, and what follows is the model working,
     // whether or not the turn opened with a line. It is held: posted, it
-    // is the running commentary a person has to scroll past (card 1009).
+    // is the running commentary a person has to scroll past.
     // A lazy turn's are held from the start, so a hosted-loop reply that
     // joins them in is stripped of them like any other turn's.
     if (this.lazy || this.firstWordsSaid || this.toolCalled) {
@@ -1068,7 +1068,7 @@ export class ReplyRenderer {
    * Post one line of the turn's into its thread, behind the turn ahead and
    * any handover, on the upload chain, so it lands after everything the
    * turn posted before it. Resolves with whether any of it landed. The
-   * first line (card 950) is also what a hosted-loop reply is stripped of;
+   * first line is also what a hosted-loop reply is stripped of;
    * a `message.say` line is not, since the reply never contained it.
    */
   private postLine(text: string, first: boolean): Promise<boolean> {
@@ -1092,7 +1092,7 @@ export class ReplyRenderer {
           // per-turn cap (Codex on #513).
           chunks = first ? await this.chunksOf(text) : [text];
           for (const chunk of chunks) {
-            // A part that tags another agent carries all of these words (card 1033).
+            // A part that tags another agent carries all of these words.
             const whole = chunks.length > 1 && await this.tagsAnAgent?.(chunk) ? text : undefined;
             const posted = await postPart(this.web, { channel: this.channel, thread: this.threadTs, text: chunk, whole }, this.warn);
             this.placeText(posted.ts);
@@ -1127,7 +1127,7 @@ export class ReplyRenderer {
   /**
    * Post what the model said before a call that is about to ask for
    * approval, and resolve once it has landed (or could not), or at once
-   * when there is nothing to post (card 950).
+   * when there is nothing to post.
    *
    * The prompt is posted before the call starts, so waiting for
    * `tool.called` put the question above the line saying what the agent
@@ -1315,7 +1315,7 @@ export class ReplyRenderer {
     // What came before was held, and a provider that hosts its own loop
     // (codex) joins it into the reply, so it is stripped here, before
     // silence is judged: a reply that is only that narration is the
-    // decision to stay out, not something to post (card 1060). Nor are
+    // decision to stay out, not something to post. Nor are
     // held words ever promoted to its answer, as another turn's are below.
     // A reply that is exactly what it streamed after its last tool is its
     // last message alone, from a provider that returns only that: kept
@@ -1353,8 +1353,8 @@ export class ReplyRenderer {
     // Words the turn ended on, written before its last tool call, are its
     // answer: a reply that only repeats them, or an empty one, posts them
     // as the reply. They were held, so this is the first the thread sees
-    // of them. Any other held words stay unsaid (card 1009). That holds on
-    // a reply-optional turn too (card 601): its words between tools were
+    // of them. Any other held words stay unsaid. That holds on
+    // a reply-optional turn too: its words between tools were
     // held, so they are the only way an answer written before its last
     // tool call reaches the thread, and silence is judged after them.
     if (!this.lazy && !this.ref && (this.interimPosted || this.held.length > 0)) {
@@ -1368,7 +1368,7 @@ export class ReplyRenderer {
       }
     }
     // A reply-optional turn that ended with nothing to say, its last words
-    // not held ones that stand in for an answer (card 601).
+    // not held ones that stand in for an answer.
     const silent = this.mayStaySilent && reply.trim().length === 0;
     if (silent && (!this.ref || await this.retract())) {
       // No `(no reply)`, and a placeholder it opened is taken back. Its
@@ -1395,7 +1395,7 @@ export class ReplyRenderer {
     // A first part that tags another agent would reach Slack as an edit of
     // the placeholder, and an edit starts no agent's turn (Slack sends it
     // as message_changed): it is posted as a message of its own instead,
-    // the placeholder taken back (card 1054). One Slack won't let go is
+    // the placeholder taken back. One Slack won't let go is
     // edited, as before.
     if (this.ref && await this.tagsAnAgent?.(chunks[0] ?? '')) {
       await this.retract();
@@ -1411,7 +1411,7 @@ export class ReplyRenderer {
     await this.uploadChain;
     for (const chunk of rest) {
       try {
-        // A part that tags another agent carries the whole reply (card 1033).
+        // A part that tags another agent carries the whole reply.
         const whole = chunks.length > 1 && await this.tagsAnAgent?.(chunk) ? text : undefined;
         const posted = await postPart(this.web, { channel: this.channel, thread: this.threadTs, text: chunk, whole }, this.warn);
         landed = true;
@@ -1649,7 +1649,7 @@ export class ReplyRenderer {
     }
     await drained;
     // A first part that tags another agent is not edited in, since an edit
-    // starts no agent's turn (card 1054): the placeholder is taken back and
+    // starts no agent's turn: the placeholder is taken back and
     // every part posted, and the one reopened below keeps the order.
     const posted = this.ref === given && await this.tagsAnAgent?.(first) === true && await this.retract();
     if (!posted) {
@@ -1671,7 +1671,7 @@ export class ReplyRenderer {
     this.ref = undefined;
     for (const chunk of posted ? chunks : rest) {
       try {
-        // A part that tags another agent carries the whole reply (card 1033).
+        // A part that tags another agent carries the whole reply.
         const full = whole !== undefined && await this.tagsAnAgent?.(chunk) ? whole : undefined;
         await postPart(this.web, { channel: this.channel, thread: this.threadTs, text: chunk, whole: full }, this.warn);
       } catch (error) {

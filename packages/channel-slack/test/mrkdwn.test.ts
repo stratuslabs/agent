@@ -681,7 +681,7 @@ test('a table with a Slack mention in it keeps the mention live', () => {
   }
 });
 
-// Card 1090: the mention check above ran in quadratic time on a cell of
+// The mention check above ran in quadratic time on a cell of
 // repeated `<a:` or `<!`, 2-3 s for one 40,000-character reply. The whole
 // conversion is timed, which takes tens of milliseconds on its own.
 test('a table cell of crafted Slack markup is read in linear time', () => {

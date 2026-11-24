@@ -23,7 +23,7 @@ import type { SlackAgentConfig, SlackInboundEvent, SlackSocketEventArgs } from '
 import type { ThreadTracking } from './threads.ts';
 
 /**
- * Message subtypes that are another agent's bot speaking (card 513): a plain
+ * Message subtypes that are another agent's bot speaking: a plain
  * bot post, an upload with a comment, or a thread reply also sent to the
  * channel. Edits, deletions and joins are never a mention to answer.
  */
@@ -62,7 +62,7 @@ interface Admission {
   overhear: boolean;
   /**
    * An untagged message reaching an agent that judges (`listens: judge`)
-   * that is this agent's to judge (card 541): the person last addressed it
+   * that is this agent's to judge: the person last addressed it
    * by name, or else it owns the thread. It runs a turn nobody asked for,
    * which may stay quiet. With `settled: false` only the sessions can say
    * whose the thread is, and the intake decides.
@@ -72,7 +72,7 @@ interface Admission {
   judgeReason?: string;
   /**
    * An approver's untagged stop in a thread this agent holds, reaching an
-   * agent that listens to mentions or judges (card 337). Still heard if
+   * agent that listens to mentions or judges. Still heard if
    * nothing is running to stop, but if something is, it stops it: the
    * holder rule is what makes an untagged stop this agent's, whatever
    * `listens` says about ordinary replies.
@@ -80,12 +80,12 @@ interface Admission {
   holderStop?: boolean;
   /**
    * The team agent this message came from, when another agent's bot named
-   * this one (card 513). Its words are labelled `unknown`, and it is never
+   * this one. Its words are labelled `unknown`, and it is never
    * a stop or an approver's reply.
    */
   fromAgent?: string;
   /**
-   * Said to this agent, but possibly needing no answer (card 601): another
+   * Said to this agent, but possibly needing no answer: another
    * agent's tagged message, or a person's untagged follow-up in a thread
    * this agent holds on the `thread` rule. Dispatched `replyOptional`, and
    * rendered like a judged turn — nothing posted until it speaks, and a
@@ -182,7 +182,7 @@ export const createAdmitter = ({
    * this process.
    */
   /**
-   * Stop (card 337): cancels every turn this agent is running or has queued
+   * Stop: cancels every turn this agent is running or has queued
    * in this conversation, including messages still in intake, and says
    * nothing was stopped when there was nothing to stop. Synchronous, and
    * called off the intake chain before any dispatch, so a stop is never
@@ -195,8 +195,7 @@ export const createAdmitter = ({
    * it on the chain has already been dispatched, and everything still in
    * intake arrived after it, so it cancels the dispatched turns only.
    *
-   * It also stops the background tasks this conversation started (AGT-357,
-   * decision 3 of agent-plans roadmap/952-background-tasks.md): a person
+   * It also stops the background tasks this conversation started: a person
    * who says stop means those too. Tasks alone make it a stop, and once
    * their stops are written one line in `thread` names them.
    */
@@ -217,7 +216,7 @@ export const createAdmitter = ({
         renderer.controller.abort(new RunAbortedError(reason));
       }
     }
-    // Also a turn no renderer of this process started (card 501): one the
+    // Also a turn no renderer of this process started: one the
     // gateway recovered after a restart, or another caller's on this
     // session. The gateway counts every turn still on the session, one
     // already stopping included, so a repeated stop while a stopped turn
@@ -259,8 +258,8 @@ export const createAdmitter = ({
   };
 
   /**
-   * Agent mentions admitted per thread, then per agent they named (card
-   * 513, AGT-366): each agent here has its own count, so one busy pair in a
+   * Agent mentions admitted per thread, then per agent they named:
+   * each agent here has its own count, so one busy pair in a
    * thread can't silence another agent there. A hop is the message ts, so a
    * copy of one message reaching a second socket, or redelivered, is the
    * same hop, and when it was admitted: only hops admitted in the last
@@ -322,7 +321,7 @@ export const createAdmitter = ({
 
   /**
    * A message another agent's bot posted, for an agent that answers team
-   * agents (`agentMentions`, card 513). Admitted only when it names this
+   * agents (`agentMentions`). Admitted only when it names this
    * agent, comes from a team agent this one listens to, and the thread is
    * under its hop limit; anything else from a bot is dropped, as every
    * bot message was before. Never part of the holder rule: a bot naming an
@@ -559,7 +558,7 @@ export const createAdmitter = ({
     // nothing a later copy could be needed for.
     if (!admitsSender(connection.config, sender)) {
       // An approver the operator did not list as a principal can still stop
-      // the agent (card 337): approving is its own grant. Only when the
+      // the agent: approving is its own grant. Only when the
       // message names this agent (or is a DM to it), and nothing else they
       // say gets through.
       if (
@@ -582,8 +581,8 @@ export const createAdmitter = ({
         return undefined;
       }
       const refusal = `slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`;
-      // Whose message this is, as for an admitted one: the thread's owner's
-      // (card 508), or for a stop, whoever was asked last (card 337).
+      // Whose message this is, as for an admitted one: the thread's owner's,
+      // or for a stop, whoever was asked last.
       const refusedStop = (connection.config.approvers ?? []).includes(sender) && isStopRequest(text, connection.botUserId);
       const held = threadKey === undefined
         ? undefined
@@ -682,13 +681,13 @@ export const createAdmitter = ({
     // An untagged reply. How this agent listens decides what it is: an
     // agent that answers only mentions hears it and nothing more. One that
     // judges takes a turn nobody asked for on it — one it may stay quiet
-    // on — when the reply is its own by the rule every agent shares (card
-    // 541): the agent this person last addressed, else the thread's owner.
+    // on — when the reply is its own by the rule every agent shares:
+    // the agent this person last addressed, else the thread's owner.
     // No window: an owner an hour past its last answer still hears an
     // instruction as its own, and exactly one agent takes each reply.
     const listens = listensOf(connection.config.agentId);
     if (listens === 'mentions' || listens === 'judge') {
-      // Except a stop (card 337): the holder rule decides whose it is, as
+      // Except a stop: the holder rule decides whose it is, as
       // for any agent, and it only acts if there is something to stop. A
       // thread the record has forgotten is left to the sessions, as below,
       // so a stop for a turn that outlived its record still reaches it.
@@ -709,7 +708,7 @@ export const createAdmitter = ({
         const reason = senderAddresseeAt(threadKey, sender, event.ts) === target ? 'addressed it last' : 'owner';
         return { ...admission, overhear: true, judge: true, judgeReason: reason };
       }
-      // An approver's stop is never judged (card 541): it stops the turn of
+      // An approver's stop is never judged: it stops the turn of
       // whoever holds the thread, and with nothing to stop it is only heard.
       return {
         ...admission,
@@ -721,9 +720,9 @@ export const createAdmitter = ({
 
     // The record is what this process has actually seen, in the order it
     // saw it — right even inside the window before a handover reaches the
-    // store. Whose an untagged reply is, is the thread's owner's (card
-    // 508), not the last speaker's — except a stop, which is for whoever
-    // was asked last, since that is the turn it means (card 337).
+    // store. Whose an untagged reply is, is the thread's owner's,
+    // not the last speaker's — except a stop, which is for whoever
+    // was asked last, since that is the turn it means.
     const stopRequest = threadKey !== undefined &&
       (connection.config.approvers ?? []).includes(sender) &&
       isStopRequest(text, connection.botUserId);
@@ -747,8 +746,8 @@ export const createAdmitter = ({
         return { ...admission, overhear: true };
       }
       rememberAddressee(threadKey, connection.config.agentId, event.ts);
-      // Untagged, so it may need nothing back: a thanks, an acknowledgment
-      // (card 601). A stop never gets here as a turn to answer.
+      // Untagged, so it may need nothing back: a thanks, an acknowledgment.
+      // A stop never gets here as a turn to answer.
       return { ...admission, replyOptional: true };
     }
     // Nothing seen for this thread since startup: only the sessions can

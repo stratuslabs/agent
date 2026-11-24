@@ -10,7 +10,7 @@ import { installService } from '../src/index.ts';
 // launchd refuses to bootstrap a label it still has loaded, and on current
 // macOS that refusal reads "Bootstrap failed: 5: Input/output error". An
 // install during a node upgrade hit it and gave up, leaving the fix to
-// manual launchctl work (AGT-364).
+// manual launchctl work.
 
 const quiet = { code: 0, stdout: '', stderr: '' };
 const stillLoaded = { code: 0, stdout: '\tstate = not running\n\truns = 3\n\tlast exit code = 1\n', stderr: '' };

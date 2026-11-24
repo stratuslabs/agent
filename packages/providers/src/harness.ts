@@ -196,7 +196,7 @@ export const describeImageAttachments = (images: readonly ImageAttachment[] | un
  * unaddressed turn's note follows — and `afterOverheard` one said to the
  * agent after an overheard message in its run; see `PromptTextOptions`. An overheard
  * message whose images travel beside the text ends on
- * `OVERHEARD_IMAGES_NOTE`, the label those images follow (card 625).
+ * `OVERHEARD_IMAGES_NOTE`, the label those images follow.
  */
 export const userMessageText = (
   message: Pick<Message, 'content' | 'overheard' | 'images'>,
@@ -281,7 +281,7 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
   }
   // A turn nobody asked for ends on an overheard message carrying its own
   // instruction, and "reply to the latest user message" would countermand
-  // it in the next line. So does a reply-optional one (card 601).
+  // it in the next line. So does a reply-optional one.
   if (latest?.overheard !== true && latest?.replyOptional !== true) {
     lines.push('', 'Continue the conversation by replying to the latest user message.');
   }
@@ -307,7 +307,7 @@ export const renderTranscriptPrompt = (request: ProviderRequest, options: Prompt
  * addressed one before the newest was some turn's prompt.
  *
  * One addressed message with nothing overheard before it renders bare, as
- * it always did; a reply-optional one carries its note (card 601). Falls
+ * it always did; a reply-optional one carries its note. Falls
  * back to the full transcript when there is no user message to isolate, so
  * a caller can never end up sending nothing.
  */
@@ -325,7 +325,7 @@ export const latestUserMessagePrompt = (request: ProviderRequest, options: Promp
   const unheard = since.filter((message) => message.overheard === true || message === newest);
   const inline = options.inlineImages === true;
   // One string, so the overheard frames and the message said to the agent
-  // reach the model as one turn: that message is marked (card 1034). The
+  // reach the model as one turn: that message is marked. The
   // mark follows the whole transcript, not just what is sent: a silent
   // turn's empty reply ends what the harness is sent but not the run, as
   // on every other path.

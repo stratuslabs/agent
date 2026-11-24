@@ -27,7 +27,7 @@ import { ShardedSessionStore } from '../src/sessions.ts';
 import { TASK_CUT_OFF_ERROR, taskFallbackKey, taskOutcomeKey } from '../src/task-settle.ts';
 import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from '../src/tasks.ts';
 
-// AGT-356 PR 4b: the gateway's side of `agent.delegate`'s background mode.
+// The gateway's side of `agent.delegate`'s background mode.
 // The row is claimed against the cap, the worker runs on its own session
 // without the turn that asked waiting for it, and its outcome lands in the
 // origin session once, as a keyed turn or, when that turn fails, as the
@@ -117,7 +117,7 @@ const taskGateway = async (options: {
   onEvent?: (event: StratusEvent) => void;
   /** Gated calls are asked through the gateway's approval broker, as `stratus serve` does, instead of allowed. */
   approvals?: 'remote';
-  /** Each agent's turn time limit (AGT-371); the shared default for the rest. */
+  /** Each agent's turn time limit; the shared default for the rest. */
   turnTimeLimitMsFor?: (agentId: string) => number | undefined;
 } = {}) => {
   const home = options.home ?? await newHome();
@@ -569,7 +569,7 @@ test('each tasks.maxRunningPerAgent entry must be a whole number of at least 1, 
   }
 });
 
-// AGT-356 PR 5: the restart sweep. Each crash point from spec test 7 is the
+// The restart sweep. Each crash point from spec test 7 is the
 // state on disk at that moment: a copy of a live home (`crashCopy`), taken
 // while the first process is at that point, edited only where no live
 // process can stop on the point. The second process starts on the copy.
@@ -906,7 +906,7 @@ test('restart: the sweep prunes settled rows past retention and keeps the rest',
   }
 });
 
-// AGT-356 PR 5b: the drain. A stop or restart doesn't wait for background
+// The drain. A stop or restart doesn't wait for background
 // tasks: once the ordinary turns have drained, every running worker is cut
 // off with the fixed error, so it reads `interrupted`, and its notice, refused
 // while stopping, is delivered by the next start's sweep.
@@ -987,7 +987,7 @@ test('drain: when the window runs out on an ordinary turn, the workers still end
   }
 });
 
-// AGT-357: cancelling a task through the gateway. Each point of spec test 8
+// Cancelling a task through the gateway. Each point of spec test 8
 // is in task-cancel.test.ts on stand-ins; these are the two that need the
 // real turn and a real restart.
 
@@ -1071,7 +1071,7 @@ test('stop: gateway.stopTasks cancels the tasks a conversation started, as the p
   }
 });
 
-// AGT-357 PR 2: the agent's own tools for its tasks.
+// The agent's own tools for its tasks.
 
 test('agent.tasks and agent.cancelTask are offered unless tasks.enabled is false', async () => {
   const off = await taskGateway({ tasks: { enabled: false } });
@@ -1124,7 +1124,7 @@ test('an agent lists its tasks with agent.tasks and stops one with agent.cancelT
   }
 });
 
-// AGT-357 PR 4: the operator's list and cancel, behind `stratus tasks` and
+// The operator's list and cancel, behind `stratus tasks` and
 // the control API.
 
 test('gateway.tasks lists every agent\'s tasks with their live status and no prompt, and gateway.cancelTask stops one from the CLI', async () => {
@@ -1200,7 +1200,7 @@ test('gateway.tasks still lists what a run with tasks on left once tasks are off
   }
 });
 
-// ---- task events (AGT-357 PR 6) ----------------------------------------------
+// ---- task events -------------------------------------------------------------
 
 const taskEvents = (events: StratusEvent[]): StratusEvent[] => events.filter((event) => event.type.startsWith('task.'));
 
@@ -1265,7 +1265,7 @@ test('events: a cancelled task ends with task.cancelled, and one a restart cut o
   }
 });
 
-// AGT-358: a worker's approval question goes to the conversation that
+// A worker's approval question goes to the conversation that
 // started the task, with the task id, and the task waits on it.
 
 test('approvals: a worker\'s gated call is asked in the conversation that started the task, with its task id, and the task waits on the answer', async () => {
@@ -1370,7 +1370,7 @@ test('approvals: an ordinary session\'s question carries no task id and touches 
   }
 });
 
-// AGT-371: a background task is one worker turn, so the worker agent's turn
+// A background task is one worker turn, so the worker agent's turn
 // time limit is the task's. Past it, the task fails saying so, its slot is
 // free, and a wait on a person doesn't count against it.
 

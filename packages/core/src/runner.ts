@@ -396,7 +396,7 @@ export class AllowAllApprovalPolicy implements ApprovalPolicy {
  * What a runner built without `approvals` decides: a `safe` call runs and
  * anything above it is refused. This used to be `AllowAllApprovalPolicy`,
  * so an app embedding the runner that never thought about approvals ran
- * every shell command and file write its model asked for (card 966).
+ * every shell command and file write its model asked for.
  */
 const SAFE_ONLY_APPROVALS: ApprovalPolicy = {
   approve: async ({ risk }) => risk === 'safe',
@@ -432,7 +432,7 @@ export interface RunInput {
    */
   addressed?: boolean;
   /**
-   * Said to the agent, but possibly needing no answer (card 601): the
+   * Said to the agent, but possibly needing no answer: the
    * message is stored `replyOptional`, followed by `REPLY_OPTIONAL_NOTE`,
    * and the turn may end with nothing — an empty answer, or exactly
    * `NO_REPLY_MARKER` — which completes it with an empty assistant
@@ -483,13 +483,13 @@ export interface RunInput {
   /**
    * Asked for what somebody has said since the turn started, at each of
    * its tool steps: after the step's every call has its result and before
-   * the next provider call (card 948). What it hands over goes into the
+   * the next provider call. What it hands over goes into the
    * transcript right there, as a user message marked `steered`, so the
    * agent reads a correction at its next step instead of after its whole
    * turn. The message shares the steps the turn has left: it renews
    * neither the step budget, the auto-continue count nor the failure
    * streak, so however often somebody writes, the turn stops where it
-   * would have (card 996). Its sender lowers the session's trust like any
+   * would have. Its sender lowers the session's trust like any
    * sender; its keys join the turn's message.
    *
    * Never asked before the first provider call, after an answer, once the
@@ -641,7 +641,7 @@ const READ_ONLY_CALLS_AT_ONCE = 8;
  * Waits for a tool call's result, but not past `STOPPED_TOOL_GRACE_MS`
  * after the turn's signal fires.
  *
- * Card 826: a plugin tool that never settles and ignores its signal held
+ * A plugin tool that never settles and ignores its signal held
  * its session `running` until the daemon restarted. Slack's `stop` could
  * not end it, a stop or restart shut down around it, and the message
  * queued behind it in the same session was lost with the process. Every
@@ -1658,9 +1658,9 @@ export class AgentRunner {
         // own. What joins the turn shares the steps it has left. It renews
         // neither the budget, the auto-continue count nor the failure
         // streak, so a conversation that writes at every step can't keep
-        // one turn going past its ceiling (card 996). Never into a turn
+        // one turn going past its ceiling. Never into a turn
         // that may stay quiet: a question folded into one could be lost
-        // to its silence, so it waits and runs as its own (card 601).
+        // to its silence, so it waits and runs as its own.
         if (
           steer !== undefined
           && !wrappingUp
@@ -1938,10 +1938,10 @@ export class AgentRunner {
         await deltaChain;
         // A turn that may stay quiet said so with the marker: from here on
         // it is the silence an empty answer is, before anything records,
-        // announces or posts it (card 601).
+        // announces or posts it.
         // A reaction named with it is kept for the silence recorded below,
         // on a turn whose message was said to the agent and only there: an
-        // overheard one was never offered one (card 1078).
+        // overheard one was never offered one.
         const silent = isReplyOptionalTurn(session) ? noReplyAnswerOf(response) : undefined;
         const reaction = silent !== undefined && !isUnaddressedTurn(session) ? silent.reaction : undefined;
         if (silent !== undefined) {

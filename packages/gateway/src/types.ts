@@ -554,7 +554,7 @@ export interface GatewayOptions {
   idleTimeoutMs?: number;
   /**
    * The longest one turn may run, wall clock, before it is stopped and
-   * fails saying so (AGT-371). A background task is one worker turn, so
+   * fails saying so. A background task is one worker turn, so
    * this is also how long a task may run. Time a turn spends waiting on a
    * person's approval doesn't count. A turn continued after a restart
    * starts a fresh clock. 0 means no limit. Default 2 hours. `stratus serve`
@@ -569,7 +569,7 @@ export interface GatewayOptions {
    */
   turnTimeLimitMsFor?: (agentId: string) => number | undefined;
   /**
-   * The events listener's sources and body limit (card 590), from the
+   * The events listener's sources and body limit, from the
    * trusted config's `events` block. With no sources the event store is
    * never opened, and every delivery is to an unknown source.
    */
@@ -617,7 +617,7 @@ export interface GatewayOptions {
    */
   subAgents?: { maxConcurrentPerTurn?: number };
   /**
-   * Background tasks (AGT-211): `agent.delegate` with `background: true`.
+   * Background tasks: `agent.delegate` with `background: true`.
    * On unless `enabled` is false; while on, the tool offers `background`.
    * The task table in `fleet.db` is kept either way, for the restart sweep.
    * `maxRunningPerAgent` caps the open tasks one agent has started, keyed
@@ -712,8 +712,8 @@ export interface DispatchInput {
   addressed?: boolean;
   /**
    * Said to the agent, but possibly needing no answer — see
-   * `RunInput.replyOptional` in `@stratusagent/core` (card 601). Messages
-   * merged into one turn (card 423) keep it only if every one of them
+   * `RunInput.replyOptional` in `@stratusagent/core`. Messages
+   * merged into one turn keep it only if every one of them
    * carries it: one that owes an answer makes the turn owe it.
    */
   replyOptional?: boolean;
@@ -800,7 +800,7 @@ export interface DispatchInput {
    * The merged turn runs at the least trusted sender in it. A turn nobody
    * asked for (`addressed: false`) is never merged.
    *
-   * Steering (card 948): while the running turn is itself an opted-in,
+   * Steering: while the running turn is itself an opted-in,
    * addressed dispatch for the same agent, the batch waiting behind it is
    * handed to that turn at its next tool step instead (`RunInput.steer`),
    * so the agent reads it before its next call rather than after its whole
@@ -938,7 +938,7 @@ export interface Gateway {
    */
   abortTurns(sessionId: string, reason: string): number;
   /**
-   * Cancels a background task (AGT-211) with the operator's authority, for
+   * Cancels a background task with the operator's authority, for
    * any agent's task: the stop is written on the task's row before anything
    * is aborted, then the task's own signal and its worker's running turn are
    * aborted. `finished` when the task, or its worker's turn, had already
@@ -957,8 +957,8 @@ export interface Gateway {
    */
   tasks(agentId?: string): Promise<TaskListing[]>;
   /**
-   * A person's Stop in a conversation, for the background tasks it started
-   * (AGT-357): cancels each one running in this process through
+   * A person's Stop in a conversation, for the background tasks it started:
+   * cancels each one running in this process through
    * `cancelTask`, as `stoppedBy`. `open` says at once how many there were;
    * `stopped` names the ones this call stopped. See `TasksStop` in
    * `@stratusagent/core`.
@@ -980,7 +980,7 @@ export interface Gateway {
    */
   cancelSchedule(scheduleId: string): boolean;
   /**
-   * One request to the events port (card 590): verified, deduplicated,
+   * One request to the events port: verified, deduplicated,
    * matched against event triggers and recorded, all before the answer.
    * The listener in control-api calls this with the raw body.
    */

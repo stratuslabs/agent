@@ -241,7 +241,7 @@ export interface SlackPeople {
 /**
  * The two blocks that decide who an agent's Slack app answers to, read
  * again on every reload so a teammate added or removed while the daemon
- * runs takes effect without a restart (AGT-337). Through `loadServeApprovals`
+ * runs takes effect without a restart. Through `loadServeApprovals`
  * and `loadServePrincipals`, so a reload follows the rules start does: a
  * project-local block is ignored, and one that will not read fails closed.
  */
@@ -311,7 +311,7 @@ export const loadServeApi = async (
 };
 
 /**
- * The daemon's `events` block (card 590), only from a trusted location.
+ * The daemon's `events` block, only from a trusted location.
  * It opens a port meant to face the internet and decides who may wake the
  * daemon's agents, so a project-local config's block is ignored loudly,
  * the same as `api`.

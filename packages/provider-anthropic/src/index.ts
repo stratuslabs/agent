@@ -401,7 +401,7 @@ const rawTurnsFrom = (session: ProviderRequest['session']): RawTurns => {
  * A user turn's blocks: its images first, then the text — except for an
  * overheard message, whose framed text comes first, then
  * `OVERHEARD_IMAGES_NOTE`, then its images, so no pixel reaches the model
- * ahead of the frame (card 625). An image outside the replay budget
+ * ahead of the frame. An image outside the replay budget
  * becomes a note saying so. The API refuses an empty text block, and a
  * message that is only an image has no text — so the text block is added
  * only when there is text, and a message with neither still sends one so
@@ -511,7 +511,7 @@ const createAnthropicMessages = (
   // turn's note follows it and no other — see `PromptTextOptions`.
   const latest = messages.findLast((message) => message.role === 'user');
   // Said to the agent after an overheard message in the same API turn:
-  // marked, so the frame before it is not read as its own (card 1034).
+  // marked, so the frame before it is not read as its own.
   const afterOverheard = messagesAfterOverheard(messages);
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];

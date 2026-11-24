@@ -185,7 +185,7 @@ test('the built-in rule is handed the values of the credentials the soul lists, 
   }
 });
 
-// Card 1041 (from #539's review): a reviewer call is a side run. It keeps
+// From #539's review: a reviewer call is a side run. It keeps
 // to the reviewed turn's runtime, stays off the conversation surfaces, and
 // is part of what a shutdown waits for.
 

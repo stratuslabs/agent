@@ -21,7 +21,7 @@ import {
 } from '@stratusagent/permissions';
 
 /**
- * AGT-372, with the daemon's own policy: `credential.request` is safe in a
+ * With the daemon's own policy: `credential.request` is safe in a
  * clean conversation and a gated call once the conversation has read
  * external content, so a page that tells the agent to ask a person for a
  * key (with an `env` its shell could then read) gets the same check as any

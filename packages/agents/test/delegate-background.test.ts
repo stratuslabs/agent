@@ -10,7 +10,7 @@ import {
 } from '../src/index.ts';
 
 /**
- * AGT-356 (AGT-211 phase 1): `agent.delegate` with `background: true` hands
+ * `agent.delegate` with `background: true` hands
  * the start to the host and returns a task id at once, instead of waiting
  * for the worker's reply. The host owns the task table, the worker's abort
  * handle and delivering the outcome; the tool owns who may start what.
@@ -85,7 +85,7 @@ test('background: true hands the start to the host and returns the task id at on
 });
 
 test('a turn already stopped starts no task, so a Stop that lands while the call is on its way misses nothing', async () => {
-  // AGT-357: a Stop reaches the tasks a conversation started by reading
+  // A Stop reaches the tasks a conversation started by reading
   // them when it lands. A start checked here, with nothing awaited before
   // the host writes its row, is either refused or already there to stop.
   const { starts, background } = recordingHost();

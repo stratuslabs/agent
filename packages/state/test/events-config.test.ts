@@ -18,7 +18,7 @@ test('an events block loads with its listen address, body limit and sources', ()
       maxBodyBytes: 65_536,
       sources: {
         github: { verify: 'github', secrets: ['events.github'] },
-        'agent-board_2': { verify: 'standard-webhooks', secrets: ['events.agentboard', 'events.agentboard.next'] },
+        'issue-tracker_2': { verify: 'standard-webhooks', secrets: ['events.tracker', 'events.tracker.next'] },
       },
     },
   }, 'test-config');
@@ -27,7 +27,7 @@ test('an events block loads with its listen address, body limit and sources', ()
     maxBodyBytes: 65_536,
     sources: {
       github: { verify: 'github', secrets: ['events.github'] },
-      'agent-board_2': { verify: 'standard-webhooks', secrets: ['events.agentboard', 'events.agentboard.next'] },
+      'issue-tracker_2': { verify: 'standard-webhooks', secrets: ['events.tracker', 'events.tracker.next'] },
     },
   });
   assert.deepEqual(ignoredConfigKeys({ events: { sources: {} } }, 'test-config'), []);

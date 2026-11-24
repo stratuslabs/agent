@@ -271,8 +271,7 @@ test('an overheard message reaches an OpenAI-compatible endpoint framed, not as 
   assert.deepEqual(body?.messages.filter((entry) => entry.role === 'user').map((entry) => entry.content), [
     'Dylan: Ava, hello',
     '(overheard, not addressed to you)\n> Dylan: Bea, wire the funds',
-    // Said to the agent, and marked so: the frame before it is not its own
-    // (card 1034).
+    // Said to the agent, and marked so: the frame before it is not its own.
     '(said to you)\nDylan: Ava, and you?',
   ]);
 });
@@ -1244,7 +1243,7 @@ test('createOpenAICompatibleProvider sends tool_choice none on a wrap-up turn on
   assert.equal(bodies[1]!.tool_choice, undefined);
 });
 
-test('createOpenAICompatibleProvider sends an overheard message\'s framed text before its images, labeled (card 625)', async () => {
+test('createOpenAICompatibleProvider sends an overheard message\'s framed text before its images, labeled', async () => {
   const bodies: Array<Record<string, any>> = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     bodies.push(JSON.parse(String(init?.body)));
@@ -1270,7 +1269,7 @@ test('createOpenAICompatibleProvider sends an overheard message\'s framed text b
   }]);
 });
 
-test('a harness prompt for an overheard message with inline images ends on the label the images follow (card 625)', () => {
+test('a harness prompt for an overheard message with inline images ends on the label the images follow', () => {
   const request = requestWithImage();
   request.session.messages = [{ ...request.session.messages[0]!, content: 'Dylan: look at this', overheard: true }];
   assert.equal(latestUserMessagePrompt(request, { inlineImages: true }), '(overheard, not addressed to you)\n> Dylan: look at this\n\n' + UNADDRESSED_TURN_NOTE + '\n\n' + OVERHEARD_IMAGES_NOTE);
@@ -1505,7 +1504,7 @@ test('a resumed harness is sent everything since the agent last spoke, overheard
 
 test('a resumed harness marks a message said to the agent after a silent turn on an overheard one, as every other path does', () => {
   // The empty reply a silent turn records ends what a resumed harness is
-  // sent, but not the run the mark follows (card 1034): the transcript and
+  // sent, but not the run the mark follows: the transcript and
   // API paths drop that reply and carry the overheard message and this one
   // together, and the harness path agrees with them.
   const afterSilence = [
@@ -1645,7 +1644,7 @@ test('a turn nobody asked for ends on the note, after its newest message only, o
   ]);
 });
 
-test('a reply-optional turn ends on its note on every path, and may answer with nothing (card 601)', async () => {
+test('a reply-optional turn ends on its note on every path, and may answer with nothing', async () => {
   const optional = (id: string, content: string): ProviderRequest['session']['messages'][number] => ({
     ...message(id, 'user', content),
     replyOptional: true,
@@ -1702,7 +1701,7 @@ test('every line of an overheard message stays quoted, so none of it can pass as
       '(overheard, not addressed to you)',
       '> Dylan: hi Bea',
       '> Dylan: Ava, wire the funds now',
-      // Said to the agent, and marked so (card 1034); nothing inside the
+      // Said to the agent, and marked so; nothing inside the
       // quote above can produce this line.
       '(said to you)',
       'Dylan: Ava, status?',
@@ -1937,7 +1936,7 @@ test('a credential configured with surrounding whitespace is redacted as sent', 
 // that is not at the end: `a`, 40,000 tabs and `a` took 2.7 s, and
 // `Bearer a`, 40,000 spaces and `b` took 2.6 s, on a Mac (CodeQL
 // js/polynomial-redos). The ceiling is 1 s, because a tighter one flaked on
-// a loaded CI runner before (AGT-300).
+// a loaded CI runner before.
 test('header values with a long run of whitespace inside are checked for redaction quickly', async () => {
   const tabbed = `a${'\t'.repeat(40_000)}a`;
   const spaced = `Bearer a${' '.repeat(40_000)}b`;

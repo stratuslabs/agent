@@ -105,7 +105,7 @@ export const createApprovalPrompts = ({
       : undefined;
     // A scheduled firing has no conversation of its own. With no approval
     // channel configured it used to be denied at its first gated call, seen
-    // only in the daemon log (card 218). Its schedule's destination is a
+    // only in the daemon log. Its schedule's destination is a
     // conversation a person approved as where it speaks, and only approvers
     // can answer there, so that is where it is asked. A configured approval
     // channel still wins: the operator chose it for exactly this. Another
@@ -147,8 +147,8 @@ export const createApprovalPrompts = ({
     // the short form.
     const invocationSummary = renderInvocation(event.call.input).summary;
     // A background task's worker asking: the agent's name alone can't say
-    // which of its jobs this is, so the prompt names the task (AGT-358 set
-    // it from the gateway's own workers, never from metadata).
+    // which of its jobs this is, so the prompt names the task (set
+    // from the gateway's own workers, never from metadata).
     const taskId = event.taskId !== undefined && event.taskId.length > 0 ? event.taskId : undefined;
 
     // The post is the only awaited step, and the only window in which the

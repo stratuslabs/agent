@@ -8,8 +8,8 @@ import path from 'node:path';
 import { installService, runCli, startService } from '../src/index.ts';
 
 // A daemon the service manager starts can still die a moment later: a
-// dyld error, a native module built for another node. Products on Nov 12
-// printed "stratusd started" over exactly that (AGT-363).
+// dyld error, a native module built for another node. A host once
+// printed "stratusd started" over exactly that.
 
 const quiet = { code: 0, stdout: '', stderr: '' };
 
@@ -79,7 +79,7 @@ test('stratus service start exits 1 and shows what stratusd wrote when it dies r
       processEnv: {},
       servicePlatform: 'darwin',
       serviceSleep: async () => {},
-      // launchd says running at the first ask, the way it did on Products,
+      // launchd says running at the first ask, the way it did on that host,
       // and not running once the process has died.
       serviceRunner: launchd('kickstart', [running, exited], async () => {
         await appendFile(errLogOf(home), `${noise}\n${dyld}\n`);

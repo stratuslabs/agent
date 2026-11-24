@@ -23,7 +23,7 @@ import {
   type SteeredMessage,
 } from '../src/index.ts';
 
-// Card 948: a message sent while a turn works reaches it at its next tool
+// A message sent while a turn works reaches it at its next tool
 // step, instead of waiting for the whole turn to end.
 
 /** What a request looked like when it was made: the session object keeps changing after. */
@@ -143,7 +143,7 @@ const steerEvery = (limit = 50) => {
   return { steer, asked: () => asked };
 };
 
-// Card 996: steering used to renew the step budget, the auto-continue count
+// Steering used to renew the step budget, the auto-continue count
 // and the failure streak, so a conversation that kept writing kept one
 // turn running with no ceiling. A message that joins a turn now shares the
 // steps it has left.
@@ -231,7 +231,7 @@ test('a turn nobody asked for takes nothing steered: its answer may be silence',
   assert.equal(steering.asked(), 0);
 });
 
-test('a reply-optional turn takes nothing steered either: a question folded in could be lost to its silence (card 601)', async () => {
+test('a reply-optional turn takes nothing steered either: a question folded in could be lost to its silence', async () => {
   const provider = createSteppingProvider(1);
   const runner = new AgentRunner({ provider, tools: createStepTools() });
   const steering = steerOnce({ userMessage: 'Dylan: wait, a question' });

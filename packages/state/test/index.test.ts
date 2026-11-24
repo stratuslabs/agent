@@ -2103,7 +2103,7 @@ test('the slack block sets each agent\'s reply mode, per agent over the default,
     slack: { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {}, dee: { replies: 'texts' } } },
   }, 'test-config');
   assert.deepEqual(config.slack, { replies: 'stream', agents: { bea: { replies: 'final' }, cy: {}, dee: { replies: 'texts' } } });
-  // Texting style (card 951) is a third mode, opted into per agent.
+  // Texting style is a third mode, opted into per agent.
   assert.deepEqual(resolveAgentSlack(config.slack, 'dee'), { replies: 'texts', linkPreviews: true, homeChannels: [], agentMentions: false });
   assert.deepEqual(resolveAgentSlack(config.slack, 'ava'), { replies: 'stream', linkPreviews: true, homeChannels: [], agentMentions: false });
   assert.deepEqual(resolveAgentSlack(config.slack, 'bea'), { replies: 'final', linkPreviews: true, homeChannels: [], agentMentions: false });
@@ -2162,17 +2162,17 @@ test('slack linkPreviews is on unless turned off, per agent over the default, an
 
 test('slack homeChannels is per-agent, deduplicated, and refuses anything but channel ids', () => {
   const config = validateConfigFile({
-    slack: { agents: { atlas: { homeChannels: ['C0C1YV12SLC', 'C0C1YV12SLC', 'G0PRIVATE1'] } } },
+    slack: { agents: { atlas: { homeChannels: ['C0EXAMPLE01', 'C0EXAMPLE01', 'G0PRIVATE1'] } } },
   }, 'test-config');
-  assert.deepEqual(resolveAgentSlack(config.slack, 'atlas'), { replies: 'final', linkPreviews: true, homeChannels: ['C0C1YV12SLC', 'G0PRIVATE1'], agentMentions: false });
+  assert.deepEqual(resolveAgentSlack(config.slack, 'atlas'), { replies: 'final', linkPreviews: true, homeChannels: ['C0EXAMPLE01', 'G0PRIVATE1'], agentMentions: false });
   assert.deepEqual(resolveAgentSlack(config.slack, 'blair'), { replies: 'final', linkPreviews: true, homeChannels: [], agentMentions: false });
   // A shared home channel would have every agent answer every message.
   assert.throws(
-    () => validateConfigFile({ slack: { homeChannels: ['C0C1YV12SLC'] } }, 'test-config'),
+    () => validateConfigFile({ slack: { homeChannels: ['C0EXAMPLE01'] } }, 'test-config'),
     /Invalid slack\.homeChannels in config test-config: homeChannels is per-agent/,
   );
   // A channel name, a DM id, or a bare string is a typo that would silently do nothing.
-  for (const homeChannels of ['C0C1YV12SLC', ['#stratus-agent'], ['D0123ABCD'], [42]]) {
+  for (const homeChannels of ['C0EXAMPLE01', ['#stratus-agent'], ['D0123ABCD'], [42]]) {
     assert.throws(
       () => validateConfigFile({ slack: { agents: { atlas: { homeChannels } } } }, 'test-config'),
       /Invalid slack\.agents\.atlas\.homeChannels/,
@@ -2229,13 +2229,13 @@ test('approvals.trustedDomains adds up per agent, normalizes, and refuses anythi
 
 test('approvals.channels adds up per agent and refuses names, bare ids, and anything else', async () => {
   const config = await loadConfigFile(await writeConfig('channels.json', {
-    approvals: { channels: ['slack:T1/C0C1YV12SLC'], agents: { nova: { channels: ['slack:*', ' slack:T1/C0C1YV12SLC ', 'slack:T2/*', 'slack:C0BARE'] } } },
+    approvals: { channels: ['slack:T1/C0EXAMPLE01'], agents: { nova: { channels: ['slack:*', ' slack:T1/C0EXAMPLE01 ', 'slack:T2/*', 'slack:C0BARE'] } } },
   }));
   // A bare id still loads (it covers nothing, and the daemon says so), so an older config never stops startup.
-  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').channels, ['slack:T1/C0C1YV12SLC', 'slack:*', 'slack:T2/*', 'slack:C0BARE']);
-  assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').channels, ['slack:T1/C0C1YV12SLC']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').channels, ['slack:T1/C0EXAMPLE01', 'slack:*', 'slack:T2/*', 'slack:C0BARE']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'blair').channels, ['slack:T1/C0EXAMPLE01']);
   assert.equal(resolveAgentApprovals({}, 'nova').channels, undefined);
-  for (const bad of [['#stratus-agent'], ['C0C1YV12SLC'], ['slack:'], ['*'], ['slack:#general'], ['slack:T1/'], ['slack:/C1'], ['slack:T1/C1/x'], ['slack:*/C1'], ['slack:T0123/general'], ['slack:t0123/C0123'], ['slack:T0123/c0c1yv12slc'], ['slack:general'], ['slack:T0123/D0DM'], ['slack:U0123/C0123'], ['slack:E0123/C0123'], ['slack:E0123/*'], 'slack:*', [3]]) {
+  for (const bad of [['#stratus-agent'], ['C0EXAMPLE01'], ['slack:'], ['*'], ['slack:#general'], ['slack:T1/'], ['slack:/C1'], ['slack:T1/C1/x'], ['slack:*/C1'], ['slack:T0123/general'], ['slack:t0123/C0123'], ['slack:T0123/c0c1yv12slc'], ['slack:general'], ['slack:T0123/D0DM'], ['slack:U0123/C0123'], ['slack:E0123/C0123'], ['slack:E0123/*'], 'slack:*', [3]]) {
     await assert.rejects(
       loadConfigFile(await writeConfig('channels-bad.json', { approvals: { agents: { nova: { channels: bad } } } })),
       /Invalid approvals\.agents\.nova\.channels/,
@@ -2284,17 +2284,17 @@ test('approvals.autonomy parses at the top and per agent, overrides per agent, a
 
 test('approvals.commands parses at the top and per agent, adds up per agent, and refuses a wrong shape', async () => {
   const configPath = await writeConfig('commands.json', {
-    approvals: { commands: ['agentboard', '  ', ' gh pr '], agents: { nova: { commands: ['pnpm test', 'agentboard'] }, bea: {} } },
+    approvals: { commands: ['tracker', '  ', ' gh pr '], agents: { nova: { commands: ['pnpm test', 'tracker'] }, bea: {} } },
   });
   const config = await loadConfigFile(configPath);
-  assert.deepEqual(config.approvals?.commands, ['agentboard', 'gh pr']);
-  // Added together, not overridden: every agent uses agentboard, and Nova
+  assert.deepEqual(config.approvals?.commands, ['tracker', 'gh pr']);
+  // Added together, not overridden: every agent uses tracker, and Nova
   // also runs the tests. Duplicates collapse.
-  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').commands, ['agentboard', 'gh pr', 'pnpm test']);
-  assert.deepEqual(resolveAgentApprovals(config.approvals, 'bea').commands, ['agentboard', 'gh pr']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'nova').commands, ['tracker', 'gh pr', 'pnpm test']);
+  assert.deepEqual(resolveAgentApprovals(config.approvals, 'bea').commands, ['tracker', 'gh pr']);
   assert.equal(resolveAgentApprovals({}, 'nova').commands, undefined);
 
-  const notAList = await writeConfig('commands-string.json', { approvals: { commands: 'agentboard' } });
+  const notAList = await writeConfig('commands-string.json', { approvals: { commands: 'tracker' } });
   await assert.rejects(loadConfigFile(notAList), /Invalid approvals\.commands/);
   const notStrings = await writeConfig('commands-numbers.json', { approvals: { agents: { nova: { commands: [1] } } } });
   await assert.rejects(loadConfigFile(notStrings), /Invalid approvals\.agents\.nova\.commands/);

@@ -1014,7 +1014,7 @@ test('an approved schedule fires headless and reports to its declared destinatio
   assert.equal(firing?.metadata?.[SCHEDULED_TURN_METADATA_KEY], true);
   assert.equal(firing?.messages[0]?.content, 'check the repo and report what changed');
   // …and the undeclared destination was refused exactly as headless
-  // refuses any gated call, with where the schedule reports (AGT-336).
+  // refuses any gated call, with where the schedule reports.
   const results = (firing?.messages ?? []).filter((message) => message.toolResult).map((message) => message.toolResult!);
   assert.equal(results.length, 2);
   assert.equal(results[0]?.ok, true);
@@ -1573,7 +1573,7 @@ test('while intake is paused a one-shot waits, and fires once intake resumes', a
   store.close();
 });
 
-// ---- a report that never arrived (AGT-335) ------------------------------------
+// ---- a report that never arrived ----------------------------------------------
 
 const sendResult = (callId: string, result: { ok: true; destination: string } | { ok: false; error: string }): Message => ({
   id: `m-${callId}`,
@@ -1613,7 +1613,7 @@ test('a firing\'s report is undelivered when a send failed and none reached its 
   assert.equal(undeliveredSendError(ran([other]), eng), undefined);
 });
 
-test('a completed firing\'s sends against its destination come to reached, failed or none (AGT-353)', () => {
+test('a completed firing\'s sends against its destination come to reached, failed or none', () => {
   const eng = { channel: 'slack', to: 'C-ENG', thread: '1791400000.000100' };
   const ran = (messages: Message[], status: Session['status'] = 'completed') => ({ status, messages });
   const failed = sendResult('a', { ok: false, error: 'slack: C-OTHER has no thread 1791400000.000100, so nothing was posted.' });
@@ -1629,7 +1629,7 @@ test('a completed firing\'s sends against its destination come to reached, faile
   assert.equal(sendOutcome(ran([], 'failed'), eng), undefined);
 });
 
-test('with a key, only the turn that key started counts: an event session\'s earlier turns are not this one\'s (AGT-353)', () => {
+test('with a key, only the turn that key started counts: an event session\'s earlier turns are not this one\'s', () => {
   const eng = { channel: 'slack', to: 'C-ENG' };
   const user = (key: string, extra: Partial<Message> = {}): Message => ({
     id: `u-${key}`, role: 'user', content: 'event', createdAt: new Date().toISOString(), idempotencyKey: key, ...extra,
@@ -1655,7 +1655,7 @@ test('with a key, only the turn that key started counts: an event session\'s ear
   assert.equal(sendOutcome(two, eng, 'k3'), undefined);
 });
 
-test('a completed firing whose send never arrived leaves a notice in its destination, and only then (AGT-335)', async () => {
+test('a completed firing whose send never arrived leaves a notice in its destination, and only then', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
   const asked: Array<{ sessionId: string; destination: string }> = [];
@@ -1706,7 +1706,7 @@ test('a completed firing whose send never arrived leaves a notice in its destina
   store.close();
 });
 
-test('no notice for a firing whose schedule was cancelled mid-run, and a notice that fails is only a warning (AGT-335)', async () => {
+test('no notice for a firing whose schedule was cancelled mid-run, and a notice that fails is only a warning', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
   const release = deferred<void>();
@@ -1762,7 +1762,7 @@ test('no notice for a firing whose schedule was cancelled mid-run, and a notice 
   store.close();
 });
 
-test('end to end: a headless firing whose only send fails is told where it reports, and its destination hears so (AGT-335)', async () => {
+test('end to end: a headless firing whose only send fails is told where it reports, and its destination hears so', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
   const slot = new Date(Date.now() - 5).toISOString();
@@ -1836,7 +1836,7 @@ test('end to end: a headless firing whose only send fails is told where it repor
   assert.ok(!posts[0]!.text.includes('posted the report'), 'the final reply is not posted: it was written for nobody');
 });
 
-test('a completed firing that never posted to its destination is one warning, and only then (AGT-353)', async () => {
+test('a completed firing that never posted to its destination is one warning, and only then', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
   const asked: string[] = [];
@@ -1890,7 +1890,7 @@ test('a completed firing that never posted to its destination is one warning, an
   assert.deepEqual(quiet, [
     `schedule quiet: session schedule:quiet:${slot} finished without posting to its destination slack:C-AGENTS (no message.send reached it)`,
   ], warnings.join(' | '));
-  // The warning is a log line only; the failed send keeps AGT-335's notice and its own line.
+  // The warning is a log line only; the failed send keeps its notice and its own line.
   assert.equal(notices.length, 1);
   assert.match(notices[0]!, /^cy's scheduled run didn't report here\./);
   assert.ok(warnings.some((line) => line.startsWith('schedule failed: no send reached slack:C-OPS')), warnings.join(' | '));
@@ -1898,7 +1898,7 @@ test('a completed firing that never posted to its destination is one warning, an
   store.close();
 });
 
-test('the gateway warns when a firing completes without posting to its destination, and not when it posted (AGT-353)', async () => {
+test('the gateway warns when a firing completes without posting to its destination, and not when it posted', async () => {
   const run = async (id: string, replies: Array<() => Response>) => {
     const home = await newHome();
     await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
@@ -1944,7 +1944,7 @@ test('the gateway warns when a firing completes without posting to its destinati
   assert.deepEqual(posted.warnings.filter((line) => line.startsWith('schedule posted:')), []);
 });
 
-test('an event trigger\'s quiet firing warns even after an earlier firing in the same session posted (AGT-353)', async () => {
+test('an event trigger\'s quiet firing warns even after an earlier firing in the same session posted', async () => {
   const { createHmac } = await import('node:crypto');
   const home = await newHome();
   await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
@@ -1964,7 +1964,7 @@ test('an event trigger\'s quiet firing warns even after an earlier firing in the
   rows.close();
   // The first turn posts, then answers; every later call just answers.
   const replies = [
-    () => openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'card 590 moved' }),
+    () => openAiToolCall('message_send', { destination: { channel: 'slack', to: 'C-ENG' }, text: 'the card moved' }),
     () => openAiText('reported'),
     () => openAiText('nothing worth saying this time'),
   ];
@@ -2015,7 +2015,7 @@ test('an event trigger\'s quiet firing warns even after an earlier firing in the
   ], warnings.join(' | '));
 });
 
-test('a headless firing whose send is refused is told where its schedule reports; any other session\'s refusal is unchanged (AGT-336)', async () => {
+test('a headless firing whose send is refused is told where its schedule reports; any other session\'s refusal is unchanged', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
   const slot = new Date(Date.now() - 5).toISOString();
@@ -2107,7 +2107,7 @@ test('a headless firing whose send is refused is told where its schedule reports
   ]);
 });
 
-test('a cancel that lands while the delivery check reads the session still stops the notice (AGT-335)', async () => {
+test('a cancel that lands while the delivery check reads the session still stops the notice', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
   let notified = 0;

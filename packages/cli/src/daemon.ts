@@ -267,8 +267,8 @@ export interface DaemonChannelReload {
 
 /**
  * After channel secrets were stored or removed: if a daemon says it is
- * running, reload its roster, which reloads every channel that can (card
- * 894), and return what each did. Undefined when no daemon says so, so the
+ * running, reload its roster, which reloads every channel that can,
+ * and return what each did. Undefined when no daemon says so, so the
  * caller keeps its own line about the next start. A daemon that answers
  * with an error gives a warning, never a failure: the secret is stored
  * either way.

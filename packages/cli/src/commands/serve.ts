@@ -102,8 +102,8 @@ import {
  */
 /**
  * What the gateway takes from the trusted `events` block: the webhook
- * sources, and the body limit, which also holds plugin-fed events (card 590
- * phase 2), so it goes through even when no webhook source is configured.
+ * sources, and the body limit, which also holds plugin-fed events,
+ * so it goes through even when no webhook source is configured.
  */
 export const gatewayEventOptions = (
   events: EventsConfig,
@@ -487,7 +487,7 @@ const serveHeldHome = async (
     }
   }
 
-  // The events listener (card 590): its own port, opened only when the
+  // The events listener: its own port, opened only when the
   // trusted config names a source, from the same optional package as the
   // control API. An adapter like the API, so it starts after the roster
   // loads, stops before the stores drain, and waits out a held start.
@@ -583,7 +583,7 @@ const serveHeldHome = async (
       // config this daemon started with; who it answers to (`principals`,
       // and the approvers and approval channel in `approvals`) from
       // `people`, which a reload reads again, so a teammate added or
-      // removed reaches a connected app without a restart (AGT-337).
+      // removed reaches a connected app without a restart.
       const slackAgentConfig = (people: SlackPeople) => ([agentId, tokens]: [string, { appToken: string; botToken: string }]) => {
         const route = resolveAgentApprovals(people.approvals, agentId);
         const principals = resolveAgentPrincipals(people.principals, agentId);

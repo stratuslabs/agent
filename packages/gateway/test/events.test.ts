@@ -54,7 +54,7 @@ const accept = (store: SqliteEventStore, eventId: string, firings: NewEventFirin
 test('the coalescing key is source + subject, or source + id for an event with no subject', () => {
   const a = eventCoalescingKey('github', { attributes: { id: '1', subject: 'pull/470' } });
   const b = eventCoalescingKey('github', { attributes: { id: '2', subject: 'pull/470' } });
-  const other = eventCoalescingKey('agentboard', { attributes: { id: '1', subject: 'pull/470' } });
+  const other = eventCoalescingKey('tracker', { attributes: { id: '1', subject: 'pull/470' } });
   const noSubject1 = eventCoalescingKey('github', { attributes: { id: '1' } });
   const noSubject2 = eventCoalescingKey('github', { attributes: { id: '2' } });
   assert.equal(a, b, 'two events on one PR share a key');
@@ -209,7 +209,7 @@ test('activity per source: the last delivery, the last refused one, and counts s
 test('the same event id from two sources is two events', async () => {
   const store = new SqliteEventStore(await newDb());
   assert.equal(accept(store, 'same', []).status, 'unmatched');
-  const other = store.accept({ source: 'agentboard', eventId: 'same', type: 't', receivedAt: T0, firings: [] });
+  const other = store.accept({ source: 'tracker', eventId: 'same', type: 't', receivedAt: T0, firings: [] });
   assert.equal(other.status, 'unmatched');
   store.close();
 });

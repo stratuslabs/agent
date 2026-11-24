@@ -42,7 +42,7 @@ export const canonicalDestination = (destination: ScheduleDestination): string =
  * When a schedule runs. Separate shapes rather than one string, because each
  * is advanced differently: an interval adds itself to the previous slot, a
  * cron expression is searched forward, a one-shot has no next at all, and an
- * event trigger (card 590) has no slots: it fires when a delivery from its
+ * event trigger has no slots: it fires when a delivery from its
  * operator-configured `source` passes its `filter`, so the due scan never
  * sees it.
  */
@@ -100,7 +100,7 @@ export interface ScheduleRecord {
    * How many runs of this schedule in a row ended stopped early
    * (`Session.stoppedEarly`), counted when the next firing is claimed and
    * written with that claim. Absent is 0. At 2 or more the firing is told
-   * it's a repeat (card 858).
+   * it's a repeat.
    */
   stoppedEarlyStreak?: number;
   /**

@@ -17,7 +17,7 @@ const assistant = (id: string, content: string, extra: Partial<Message> = {}): M
   id, role: 'assistant', content, createdAt: at, ...extra,
 });
 
-test('a message said to the agent after an overheard one in the same run starts with the mark (card 1034)', () => {
+test('a message said to the agent after an overheard one in the same run starts with the mark', () => {
   assert.equal(SAID_TO_YOU_MARK, '(said to you)');
   assert.equal(promptTextOf({ content: 'melopilosyan: what is 2+2?' }, { afterOverheard: true }), '(said to you)\nmelopilosyan: what is 2+2?');
   // Nothing after the mark when there is no text, an image-only message.

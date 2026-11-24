@@ -171,7 +171,7 @@ export interface GatewayLike {
     addressed?: boolean;
     /**
      * Said to the agent, but possibly needing no answer — see
-     * `RunInput.replyOptional` in `@stratusagent/core` (card 601). The turn
+     * `RunInput.replyOptional` in `@stratusagent/core`. The turn
      * may end with nothing, and the adapter posts nothing for it. A host
      * without it ignores the field, and the turn then owes an answer.
      */
@@ -223,7 +223,7 @@ export interface GatewayLike {
      * Opts into merged turns: sent while the session's turn runs, this
      * message may be answered by one next turn together with others that
      * queued — or, when the running turn was opted in too, by that turn,
-     * which reads it at its next tool step (steering, card 948). Called
+     * which reads it at its next tool step (steering). Called
      * before the dispatch settles when it was absorbed into a turn another
      * message's caller renders, which posts the answer, so this one takes
      * down anything of its own and posts nothing. A host without it ignores
@@ -675,7 +675,7 @@ export interface ChannelAdapter {
    * Posts one message from the agent into the conversation `sessionId` is
    * replying in, while its turn is still running: what `message.say` asks
    * for when the agent needs the person, or has news for them, before it
-   * finishes (card 1009). Optional: a channel without it, or a session it
+   * finishes. Optional: a channel without it, or a session it
    * has no live turn for, leaves the agent to say it in its reply.
    *
    * Resolves once the message has landed, in order after anything the turn

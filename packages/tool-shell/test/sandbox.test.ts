@@ -949,14 +949,14 @@ test('on Linux, an absent credential location the environment names inside writa
   // under a read-only root either way, so it does not refuse.
   const { seen: elsewhere } = await policyOf(config, fixture, { platform: 'linux', processEnv: { PATH: '/usr/bin:/bin', GH_CONFIG_DIR: path.join(fixture.userHome, 'nowhere', 'gh') } });
   assert.ok(elsewhere, 'linux plans when the absent denial is outside writablePaths');
-  // The fixed built-in list is not refused on (card 605 tracks it): a grant
+  // The fixed built-in list is not refused on (a known gap): a grant
   // of ~/.gradle with no gradle.properties yet keeps working.
   const { seen: gradle } = await policyOf({ writablePaths: ['~/.gradle'] }, fixture, { platform: 'linux', processEnv: { PATH: '/usr/bin:/bin' } });
   assert.ok(gradle, 'linux plans a ~/.gradle grant with gradle.properties absent');
 });
 
 test('on Linux, an absent deniedPaths entry inside the agent\'s workspace is refused, since bwrap could not mask it there either', async () => {
-  // Card 605: the workspace is a writable bind like writablePaths, so an
+  // The workspace is a writable bind like writablePaths, so an
   // absent denial inside it could be created and used by a command.
   const fixture = await fixtureHome();
   const secret = path.join(fixture.workspace, '.env');

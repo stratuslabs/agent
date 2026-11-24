@@ -135,7 +135,7 @@ const isObjectValue = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
- * The post a tool result carries for its conversation (AGT-324): an ok
+ * The post a tool result carries for its conversation: an ok
  * result whose object output has `post: { text, slack?: { blocks } }`,
  * `text` holding more than whitespace. The one reading of that convention,
  * shared by the channel that posts it, the gateway that counts a turn
@@ -867,7 +867,7 @@ export interface Tool {
    * time, in order, because a call may depend on what the one before it
    * did — and calls that each change nothing cannot. So a run of
    * consecutive calls that are all read-only *and* `safe` goes out
-   * together (card 956): only `safe`, because any other call may be held
+   * together: only `safe`, because any other call may be held
    * for a human, and those questions are asked one at a time, in order,
    * with one durable checkpoint per session. A tool that also lowers trust
    * before it runs (`trustBeforeCall`), or whose risk rises with the label

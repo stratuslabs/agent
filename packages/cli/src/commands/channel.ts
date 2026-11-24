@@ -146,7 +146,7 @@ export const runChannel = async (
 
 /**
  * The line after a store or a remove: whether the running daemon picked it
- * up (card 894), or, with no daemon to ask, when one would.
+ * up, or, with no daemon to ask, when one would.
  */
 const sayWhenItApplies = async (streams: CliStreams, env: CliEnvironment, kind: string, done: string, noDaemon: string): Promise<void> => {
   const reload = await reloadRunningDaemonChannels(env);

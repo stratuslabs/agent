@@ -22,7 +22,7 @@ import {
   type SchedulerRuntimeOptions,
 } from '../src/index.ts';
 
-// Card 858 part 2: the next firing of a schedule starts from the run that
+// The next firing of a schedule starts from the run that
 // stopped early. The previous session is the checkpoint, read when the
 // next firing is claimed.
 

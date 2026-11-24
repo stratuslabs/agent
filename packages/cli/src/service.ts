@@ -403,7 +403,7 @@ const askRunning = async (env: ServiceEnvironment, platform: ServicePlatform): P
     if (state === 'running') {
       return { running: true };
     }
-    // A job loaded at boot that launchd never spawned (the Products host
+    // A job loaded at boot that launchd never spawned (seen on a host
     // after a reboot) reads exactly like a stopped one unless its run count
     // is looked at: nothing has exited, nothing has been logged.
     const runs = /^\s*runs\s*=\s*(\d+)/m.exec(printed.stdout)?.[1];
@@ -505,8 +505,8 @@ interface StartAnswer extends RunningAnswer {
  *
  * The manager's first "running" is not enough: launchd reports a process
  * running from the moment it spawns, before dyld or node has loaded
- * anything, and Products printed "started" over a daemon that had already
- * died (AGT-363). So after that answer it keeps asking for about five
+ * anything, and a host printed "started" over a daemon that had already
+ * died. So after that answer it keeps asking for about five
  * seconds. Nothing the daemon writes marks the end of its startup:
  * gateway.json appears once the control API is bound, before the other
  * channels and the scheduler start, and either can still fail and stop
@@ -883,7 +883,7 @@ const waitUntilUnloaded = async (env: ServiceEnvironment, domain: string): Promi
  * while it still has a job under the label: the bootout before it returned
  * while the old job was still on its way out, or something loaded it again.
  * An install during a node upgrade met that refusal and gave up there,
- * leaving it to manual launchctl work (AGT-364). So that one refusal is
+ * leaving it to manual launchctl work. So that one refusal is
  * booted out again and, once launchd has let go of the label, bootstrapped
  * once more. Any other refusal, or a second one, is reported.
  */

@@ -58,7 +58,7 @@ const outcomeCell = (row: TaskListing): string => {
 const errorOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
- * `stratus tasks` lists the running daemon's background tasks (AGT-211):
+ * `stratus tasks` lists the running daemon's background tasks:
  * every one running or owed a delivery, newest first, then the most recently
  * finished. `stratus tasks cancel <id>` stops one, through the daemon, since
  * only the process running a task can stop it. A thin client of

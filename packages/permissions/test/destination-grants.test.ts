@@ -79,13 +79,13 @@ test('always allow on message.read persists for that conversation, past a restar
     },
     destinations: { isPreauthorized: () => false, whitelist: store },
   });
-  assert.equal(ran(await first.approve(call(read, 'C0C6GF7R96X'))), true);
+  assert.equal(ran(await first.approve(call(read, 'C0EXAMPLE02'))), true);
   assert.equal(requests[0]?.always, 'destination', 'the transport is told what always will remember');
 
   const file = JSON.parse(await readFile(whitelistPathFor(directory, 'nova'), 'utf8')) as Record<string, unknown>;
   assert.deepEqual(
     (file.destinations as Array<Record<string, unknown>>).map(({ tool, destination, grantedBy }) => ({ tool, destination, grantedBy })),
-    [{ tool: 'message.read', destination: 'slack:C0C6GF7R96X', grantedBy: 'U-DYLAN' }],
+    [{ tool: 'message.read', destination: 'slack:C0EXAMPLE02', grantedBy: 'U-DYLAN' }],
   );
 
   // A new daemon (a fresh policy and store over the same file), a new
@@ -99,18 +99,18 @@ test('always allow on message.read persists for that conversation, past a restar
       whitelist: createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) }),
     },
   });
-  assert.equal(ran(await restarted.approve(call(read, 'C0C6GF7R96X', 'sess-2'))), true);
-  assert.equal(decisions[0]?.destination, 'slack:C0C6GF7R96X');
+  assert.equal(ran(await restarted.approve(call(read, 'C0EXAMPLE02', 'sess-2'))), true);
+  assert.equal(decisions[0]?.destination, 'slack:C0EXAMPLE02');
   assert.match(decisions[0]?.reason ?? '', /standing grant/);
   // The daemon's grant-use trace needs the grant itself, not prose.
   assert.equal(decisions[0]?.destinationGrant?.tool, 'message.read');
-  assert.equal(decisions[0]?.destinationGrant?.destination, 'slack:C0C6GF7R96X');
+  assert.equal(decisions[0]?.destinationGrant?.destination, 'slack:C0EXAMPLE02');
   assert.equal(decisions[0]?.destinationGrant?.grantedBy, 'U-DYLAN');
 
   // Never wider than what was approved: another channel, or sending to
   // the same one, still has nobody to say yes.
   assert.equal(ran(await restarted.approve(call(read, 'C-OTHER', 'sess-2'))), false);
-  assert.equal(ran(await restarted.approve(call(send, 'C0C6GF7R96X', 'sess-2'))), false);
+  assert.equal(ran(await restarted.approve(call(send, 'C0EXAMPLE02', 'sess-2'))), false);
 });
 
 test('a revoked destination grant asks again on the very next call', async () => {
@@ -222,7 +222,7 @@ test('a grant is bound to the workspace it was made in: the same channel id unde
     request: async () => ({ answer: 'always', actor: 'U-DYLAN' }),
     destinations: { isPreauthorized: () => false, whitelist: store, accountFor: () => team },
   });
-  assert.equal(ran(await granting.approve(call(read, 'C0C6GF7R96X'))), true);
+  assert.equal(ran(await granting.approve(call(read, 'C0EXAMPLE02'))), true);
   const file = JSON.parse(await readFile(whitelistPathFor(directory, 'nova'), 'utf8')) as Record<string, unknown>;
   assert.equal((file.destinations as Array<Record<string, unknown>>)[0]?.account, 'T-ONE', 'the grant records its workspace');
 
@@ -235,14 +235,14 @@ test('a grant is bound to the workspace it was made in: the same channel id unde
     },
   });
   // Same team after a restart: the grant still holds.
-  assert.equal(ran(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-2'))), true);
+  assert.equal(ran(await restart().approve(call(read, 'C0EXAMPLE02', 'sess-2'))), true);
   // The agent's Slack app now belongs to another workspace that happens to
   // reuse the id: nobody approved that conversation.
   team = 'T-TWO';
-  assert.equal(ran(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-3'))), false);
+  assert.equal(ran(await restart().approve(call(read, 'C0EXAMPLE02', 'sess-3'))), false);
   // Not connected at all: the workspace is unknown, so nothing matches.
   team = undefined;
-  assert.equal(ran(await restart().approve(call(read, 'C0C6GF7R96X', 'sess-4'))), false);
+  assert.equal(ran(await restart().approve(call(read, 'C0EXAMPLE02', 'sess-4'))), false);
 });
 
 test('answering always again in the new workspace replaces the old workspace grant', async () => {
@@ -253,12 +253,12 @@ test('answering always again in the new workspace replaces the old workspace gra
     request: async () => ({ answer: 'always', actor: 'U-DYLAN' }),
     destinations: { isPreauthorized: () => false, whitelist: store, accountFor: () => team },
   });
-  assert.equal(ran(await policy.approve(call(send, 'C0C6GF7R96X'))), true);
+  assert.equal(ran(await policy.approve(call(send, 'C0EXAMPLE02'))), true);
   team = 'T-TWO';
-  assert.equal(ran(await policy.approve(call(send, 'C0C6GF7R96X', 'sess-2'))), true);
+  assert.equal(ran(await policy.approve(call(send, 'C0EXAMPLE02', 'sess-2'))), true);
   const grants = await store.destinationsFor('nova');
   assert.deepEqual(grants.map(({ destination, account }) => ({ destination, account })), [
-    { destination: 'slack:C0C6GF7R96X', account: 'T-TWO' },
+    { destination: 'slack:C0EXAMPLE02', account: 'T-TWO' },
   ]);
   assert.match(describeAgentGrants(await store.grantsFor('nova')).destinations[0]?.description ?? '', /T-TWO/);
 });

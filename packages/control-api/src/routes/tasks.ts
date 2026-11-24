@@ -2,7 +2,7 @@ import { API_PREFIX, ApiError } from '../http.ts';
 import type { Route } from '../routes.ts';
 
 /**
- * Background tasks (AGT-211): the operator's list and cancel, which
+ * Background tasks: the operator's list and cancel, which
  * `stratus tasks` and the dashboard read. Status only: ids, who, where and
  * how each stands, never a prompt or a result, the way the session list
  * carries no transcript.

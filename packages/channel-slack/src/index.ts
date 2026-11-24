@@ -85,7 +85,7 @@ const DEDUPE_CAPACITY = 2000;
  */
 const THREAD_ADDRESSEE_CAPACITY = 2000;
 /**
- * How many of one person's mentions one thread remembers (card 541). Only
+ * How many of one person's mentions one thread remembers. Only
  * has to span the lag between two sockets, like `THREAD_HANDOVER_DEPTH`.
  */
 const SENDER_ADDRESSEE_DEPTH = 8;
@@ -96,8 +96,8 @@ const SENDER_ADDRESSEE_DEPTH = 8;
  */
 const THREAD_SENDER_CAPACITY = 64;
 /**
- * How far past this host's clock at `start()` claims count as seen live
- * (card 562). Slack stamps messages by its own clock, so a host clock
+ * How far past this host's clock at `start()` claims count as seen live.
+ * Slack stamps messages by its own clock, so a host clock
  * behind Slack's would date a message sent just before the restart as
  * after it, and a read stopping there would look complete. Reads for
  * messages in this first stretch are treated as stopping short, which
@@ -109,15 +109,15 @@ const LIVE_FROM_MARGIN_MS = 60_000;
 const NOT_LIVE_YET = '9999999999.999999';
 /**
  * How many agent mentions one agent answers in a thread within
- * `AGENT_MENTION_HOP_WINDOW_MS` (card 513, AGT-366): enough for a question,
+ * `AGENT_MENTION_HOP_WINDOW_MS`: enough for a question,
  * an answer and a follow-up each way, and a stop to two agents tagging
  * each other forever. Counted per agent per thread, in memory; a person
  * the agent admits speaking there starts it again, and so does a restart.
  */
 export const AGENT_MENTION_HOP_LIMIT = 4;
 /**
- * How long an answered agent mention counts toward the hop limit
- * (AGT-366). A loop is still cut at the limit, while a slow working
+ * How long an answered agent mention counts toward the hop limit.
+ * A loop is still cut at the limit, while a slow working
  * exchange between agents keeps going without a person stepping in.
  */
 const AGENT_MENTION_HOP_WINDOW_MS = 30 * 60_000;
@@ -141,14 +141,14 @@ const MAX_UNRENDERED_FILES = 20;
 const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 30_000;
 
 /**
- * How long `stop()` waits on a socket that is still starting (card 935).
+ * How long `stop()` waits on a socket that is still starting.
  * Well inside the gateway's shutdown window, so a socket stuck connecting
  * is reported by name rather than as the whole window running out.
  */
 const DEFAULT_STOP_WAIT_MS = 10_000;
 /**
  * How long an approval prompt waits for the words its turn wrote before the
- * call to land first (card 950). Long enough for an ordinary post, short
+ * call to land first. Long enough for an ordinary post, short
  * enough that a slow or refusing Slack never keeps the question from an
  * approver: the turn is parked on that answer.
  */
@@ -176,8 +176,8 @@ const EARLIER_MESSAGE_LIMIT = 40;
 const EARLIER_THREAD_PAGES = 20;
 
 /**
- * How far above a team agent's mention its own files are looked for (card
- * 1061). It bounds the read, one page of a thread's last hour, not which
+ * How far above a team agent's mention its own files are looked for.
+ * It bounds the read, one page of a thread's last hour, not which
  * files count: that is the agent's run of messages just above the tag.
  */
 const TAGGED_FILES_WINDOW_SECONDS = 3600;
@@ -321,14 +321,14 @@ const mentions = (text: string, botUserId: string): boolean =>
 /**
  * The users a message's `<@U123>` and `<@U123|name>` mentions name, in
  * order. The classes leave out `<` so that reading crafted text such as
- * `<@<@<@…` stays linear (card 1090). Slack escapes `<` in message text,
+ * `<@<@<@…` stays linear. Slack escapes `<` in message text,
  * so a real mention never has one inside it.
  */
 const mentionedUsers = (text: string): string[] =>
   [...text.matchAll(/<@([^|<>]+)(?:\|[^<>]*)?>/g)].map((match) => match[1] as string);
 
 /**
- * Whether a message asks this agent to stop (card 337): the word "stop"
+ * Whether a message asks this agent to stop: the word "stop"
  * and nothing else but mentions and closing punctuation, in any case. A
  * message that mentions someone and not this agent is for them. Exported
  * for tests.
@@ -339,7 +339,7 @@ export const isStopRequest = (text: string, botUserId: string): boolean => {
     return false;
   }
   // Anchored at the start, so the engine tries one position rather than
-  // rescanning a long run of `.` from every one of them (card 1090).
+  // rescanning a long run of `.` from every one of them.
   return /^stop\s*[.!]*$/i.test(text.replace(/<@[^|<>]+(?:\|[^<>]*)?>/g, ' ').trim());
 };
 
@@ -435,7 +435,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // placeholder, dispatch call) runs in Slack receipt order.
   const intakeChains = new Map<string, Promise<void>>();
   /**
-   * Stop (card 337), for messages still in intake: how many each session
+   * Stop, for messages still in intake: how many each session
    * has between claiming a place on its chain and reaching `renderers`, and
    * the latest stop to land there. A message compares the stop it claimed
    * its place under with the one in force when it is about to dispatch, so a
@@ -498,7 +498,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   /**
    * Per thread whose record has been cut in the middle (`trimHandovers`),
    * the first claim kept after the cut. Who held the thread between its
-   * first claim and that one is no longer known here (card 559): a message
+   * first claim and that one is no longer known here: a message
    * from then is left to the sessions and a thread read, rather than
    * placed by the first claim, or the latest take, that outlived the cut.
    * Goes with the thread's record.
@@ -509,14 +509,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * message a read covered. A read stops at the message it places, so one
    * for a message from before this process started (delivered late, or a
    * replay after a restart) leaves out every take between that message and
-   * the start (card 562). `liveFrom` is when every socket was up, plus a
+   * the start. `liveFrom` is when every socket was up, plus a
    * margin for clock skew: claims since were seen live. Goes with the
    * thread's record.
    */
   const threadReadUntil = new Map<string, string>();
   let liveFrom: string | undefined;
   /**
-   * Threads whose owner this process can name (card 508): `true` for one
+   * Threads whose owner this process can name: `true` for one
    * whose first message it saw, so the first claim in `threadAddressee` is
    * the owner, or the owner itself when the thread read named it after a
    * restart. Absent for a thread that started before this process did:
@@ -526,8 +526,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const threadOrigins = new Map<string, true | string>();
   /**
-   * Per thread, the agent each person last addressed by name, and when
-   * (card 541). An untagged reply from that person is that agent's —
+   * Per thread, the agent each person last addressed by name, and when.
+   * An untagged reply from that person is that agent's —
    * `@Bea your turn`, then `and?`, is Bea's — ahead of the thread's owner,
    * who keeps every reply from someone who has not addressed anyone else.
    * Recorded by every socket from the message itself, before any refusal,
@@ -636,8 +636,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // outstanding.
   const rendering = new Set<string>();
   const resolvedWhileRendering = new Map<string, Extract<StratusEvent, { type: 'tool.approval-resolved' }>>();
-  // Requests whose prompt is waiting for its turn's line to land first
-  // (card 950), and those of them settled in that wait: a request answered
+  // Requests whose prompt is waiting for its turn's line to land first,
+  // and those of them settled in that wait: a request answered
   // or cancelled before anyone was asked has no prompt to post. Bounded the
   // same way: an id is here only for one bounded wait.
   const askingAfterLine = new Set<string>();
@@ -647,8 +647,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Set as `stop()` begins, so a reload still connecting an app leaves
   // nothing up behind the stop.
   let stopRequested = false;
-  // Sockets between `start()` and `connections`, by the agent they serve
-  // (card 935). A stop can't see them to close them: `connect` closes each
+  // Sockets between `start()` and `connections`, by the agent they serve.
+  // A stop can't see them to close them: `connect` closes each
   // once its start returns, and the stop waits for that, bounded.
   const socketsStarting = new Map<Promise<boolean>, string>();
   // Agents whose socket `connect` could not close for a stop: up still,
@@ -1031,7 +1031,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
-   * Whether `text` tags another agent (card 1014), which `texts` mode then
+   * Whether `text` tags another agent, which `texts` mode then
    * posts as one message: the tagged agent admits only a message that
    * names it, so a reply split a paragraph to a message reached it as the
    * tagged part alone. Another agent is one on this daemon, one on this
@@ -1149,7 +1149,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // as an unlisted person. This fleet's own agents are not: they are
         // the conversation the mention joins — an authenticated peer whose
         // socket failed to start included, since what it said is still its.
-        // Nor is a remote team agent this one answers (card 513): its
+        // Nor is a remote team agent this one answers: its
         // mention is admitted, so what it said before the mention is too.
         return admitsSender(connection.config, message.user ?? '')
           || (message.user !== undefined && [...botIdentities.values()].some(
@@ -1316,7 +1316,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   /**
    * The files a team agent posted just above the message where it tags
-   * this one (card 1061). A turn that makes a screenshot and then asks a
+   * this one. A turn that makes a screenshot and then asks a
    * colleague about it posts the file as a message of its own, above the
    * tag, so the mention arrived with nothing attached: the colleague was
    * asked to inspect something it was never handed, and in a session it
@@ -1730,7 +1730,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   /**
    * An agent's own post into a thread, heard in its own session for that
-   * thread (card 364). A scheduled report or a `message.send` reply is a
+   * thread. A scheduled report or a `message.send` reply is a
    * bot message, which `admit` drops on purpose, and backfill reads a
    * thread only when a session for it is first made, so without this an
    * agent already in the thread never knew it had posted there: a reply
@@ -1832,7 +1832,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       conversation = (await connection.web.conversations.info({ channel: to })).channel;
     } catch (error) {
       // A person's id (U…, or W… on Enterprise Grid) is not a conversation,
-      // so Slack answers channel_not_found for it too (card 1201). Said
+      // so Slack answers channel_not_found for it too. Said
       // plainly, because the fix is not another id or scope: the adapter
       // never opens a DM itself.
       if (slackErrorCode(error) === 'channel_not_found' && SLACK_USER_ID.test(to)) {
@@ -1866,7 +1866,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const speaker = address.speaker;
     /**
      * Slack posts a reply to a thread it has no message for at the top
-     * level and answers `ok` (card 1019: a made-up thread id put an agent's
+     * level and answers `ok` (a made-up thread id put an agent's
      * mid-task line at the top of a channel). The first chunk shows it: that
      * one is taken back, the rest is never sent, and the refusal says what
      * is left in Slack. A reply whose answer leaves `message` out says
@@ -1891,7 +1891,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return {
       async post(text: string): Promise<OutboundMessageRef> {
         const chunks = messageChunks(text.trim().length > 0 ? text : '(empty message)');
-        // Heard in the thread's session (card 364): its place is claimed
+        // Heard in the thread's session: its place is claimed
         // now, before Slack shows anything, and filled once we know what
         // Slack accepted.
         let accepted: (heard: string | undefined) => void = () => {};
@@ -1902,7 +1902,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         let sent = 0;
         try {
           for (const chunk of chunks) {
-            // A part that tags another agent carries the whole text (card 1033).
+            // A part that tags another agent carries the whole text.
             const whole = chunks.length > 1 && await tagsAnAgent(connection, chunk) ? text : undefined;
             const posted = await postPart(web, { channel: channelId, thread, text: chunk, whole }, warn);
             if (thread && sent === 0 && posted.message !== undefined && !posted.message.thread_ts) {
@@ -2267,8 +2267,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
-   * Brings the connected apps in line with the agents to carry now (card
-   * 894): connects an agent whose app is new, or that the roster has only
+   * Brings the connected apps in line with the agents to carry now:
+   * connects an agent whose app is new, or that the roster has only
    * now, or that did not come up before; reconnects one whose tokens
    * changed; disconnects one whose tokens were removed or whose soul is
    * gone. Every other socket is left alone, so a conversation on it never
@@ -2319,7 +2319,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connections.find((connection) => connection.config.agentId === agentId);
     const arriving = [...wanted.values()].filter((config) => serving(config.agentId) === undefined);
 
-    // Who a connected app answers to follows the list just read (AGT-337),
+    // Who a connected app answers to follows the list just read,
     // so a teammate added or removed reaches it without a reconnect: who it
     // admits, who may approve and where it asks. Everything else stays as
     // it connected with. That includes a socket kept on its old tokens
@@ -2408,7 +2408,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     ...(options.loadAgents !== undefined ? { reload } : {}),
     resolveOutbound,
     // A `message.say` line goes to the turn running for that session, in
-    // its thread, through the same agent's app, or nowhere (card 1009).
+    // its thread, through the same agent's app, or nowhere.
     // Running means the gateway's active turn, matched by id as for a
     // credential form: the head of the queue can be a newer message's turn
     // still waiting behind a recovery, which did not come from it.
@@ -2511,7 +2511,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // renderer would fold a question into the answer being streamed.
         // What the turn wrote before the call goes out first, though, so
         // the approver reads the line saying what the agent is doing above
-        // the question it leads to (card 950). The wait is bounded: a line
+        // the question it leads to. The wait is bounded: a line
         // Slack is slow to take must not keep the question from anyone.
         if (event.type === 'tool.approval-requested') {
           const said = head?.sayBeforeAsking(!foreign);
@@ -2530,7 +2530,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           return;
         }
         if (event.type === 'tool.completed' && event.result.ok && (foreign || !head)) {
-          // A tool's post (AGT-324) waits with them, in the order the turn made them.
+          // A tool's post waits with them, in the order the turn made them.
           const post = postOf(event.result);
           const produced: Array<string | ToolPost> = [...collectFilePaths(event.result), ...(post !== undefined ? [post] : [])];
           if (produced.length > 0) {
@@ -2630,7 +2630,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // whole roster's identities known, as a live one would be. Only for the
       // apps that did connect: the rest stay kept for a start where they do.
       // A kept message is from before the restart, so its thread read stops
-      // short of the start, as `liveFrom` already says (card 562).
+      // short of the start, as `liveFrom` already says.
       replayStopping = new AbortController();
       track(replayKept(kept, new Map([...listeners].filter(([agentId]) => connections.some((connection) => connection.config.agentId === agentId))), replayStopping.signal).finally(releaseAllConversations));
     },
@@ -2641,7 +2641,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       releaseAllConversations();
       // Stop intake first, so no new INBOUND event can slip into
       // `inflight` while the drain below runs. A close that is refused
-      // leaves a socket that may still deliver (card 935), and so does one
+      // leaves a socket that may still deliver, and so does one
       // still starting that does not come down in time: the stop rejects
       // naming them, after the drain, and the gateway counts that as not
       // drained, so a restart exits for the service manager rather than

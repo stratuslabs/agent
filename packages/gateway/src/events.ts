@@ -6,8 +6,7 @@ import type { InboundEvent } from '@stratusagent/agents';
 
 import { openFleetDatabase, SCHEDULE_SESSION_ID_PREFIX, utf8Prefix, type SqliteScheduleStoreOptions } from './schedules.ts';
 
-// Event triggers' durable half (card 590, agent-plans
-// roadmap/590-event-triggers.md): deliveries, dedup tombstones and firings,
+// Event triggers' durable half: deliveries, dedup tombstones and firings,
 // in fleet.db next to the schedules a trigger is. The listener decides what a
 // request is and which triggers it matches; the dispatch side decides when a
 // firing goes out. This file owns only what must survive a crash between

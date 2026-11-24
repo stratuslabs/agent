@@ -17,7 +17,7 @@ import {
 } from '../src/index.ts';
 
 /**
- * Card 967: `Tool.riskAfterExternalContent` raises the risk a call is
+ * `Tool.riskAfterExternalContent` raises the risk a call is
  * judged at once its session has read external content, and only then.
  * `agent.delegate` is the tool that needed it; these tests hold the seam.
  */

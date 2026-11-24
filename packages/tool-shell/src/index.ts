@@ -453,7 +453,7 @@ const sandboxed = async (
   // tracked separately rather than turned into a refusal here.
   // The workspace and the working directory are writable binds too, so an
   // operator's deniedPaths entry or a credential location the environment
-  // names inside either is refused the same way (card 605). Only those two
+  // names inside either is refused the same way. Only those two
   // kinds there: another agent's workspace that does not exist yet under a
   // broad cwd (~) is an ordinary state on a fresh install, and refusing
   // every command for it would break setups that work today.

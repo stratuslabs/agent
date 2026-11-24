@@ -1026,7 +1026,7 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
 
 /**
  * The scope an operator declares in config (`approvals.commands`): a
- * command and, optionally, the subcommands it is limited to — `agentboard`,
+ * command and, optionally, the subcommands it is limited to — `make`,
  * `pnpm test`, `gh pr`. Whatever follows the prefix may vary, the way a
  * remembered scope's arguments do, and the same things stay refused: the
  * destructive flags, whatever the built-in list refuses for that command,

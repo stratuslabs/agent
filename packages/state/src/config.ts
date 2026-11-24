@@ -99,10 +99,10 @@ export interface AgentApprovalConfig {
   autonomy?: 'off' | 'workspace';
   /**
    * Commands the operator installed for the agent to use, which run without
-   * asking: `agentboard`, `pnpm test`, `gh pr`. Each is a command and
+   * asking: `gh pr`, `pnpm test`, `make`. Each is a command and
    * optionally the subcommands it is limited to; what follows may vary.
    * Additive, unlike the keys above: an agent's list adds to the top-level
-   * one, because "every agent uses agentboard, and Nova runs the tests" is
+   * one, because "every agent opens PRs, and Nova runs the tests" is
    * the shape this is written in.
    */
   commands?: string[];
@@ -208,7 +208,7 @@ export type PrincipalsAdmit = 'anyone' | 'principals';
  * is how every reply looked before `final` existed. `texts` is `final`
  * with each paragraph posted as a message of its own, the way a person
  * texts: code blocks, lists and a heading with its paragraph stay whole,
- * and a reply is at most five messages (card 951).
+ * and a reply is at most five messages.
  */
 export type SlackReplyMode = 'final' | 'stream' | 'texts';
 
@@ -231,7 +231,7 @@ export interface AgentSlackConfig {
   homeChannels?: string[];
   /**
    * Whether this agent answers when another team agent's Slack bot
-   * mentions it (card 513). Off by default. At the top level it turns it
+   * mentions it. Off by default. At the top level it turns it
    * on for every agent on this daemon; per agent it overrides that either
    * way. A team agent is one of this daemon's own agents or one listed in
    * `slack.team`; no other bot is ever answered.
@@ -292,7 +292,7 @@ export interface ApiConfig {
   publicUrl?: string;
 }
 
-/** How one event source proves who sent a delivery (card 590). */
+/** How one event source proves who sent a delivery. */
 export type EventSourceVerify = 'standard-webhooks' | 'github';
 
 /** One source the events listener takes deliveries for, at `/events/<id>`. */

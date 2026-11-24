@@ -13,7 +13,7 @@ import { taskOutcomeKey } from '../src/task-settle.ts';
 import { newTaskId, SqliteTaskStore, taskPromptDigest, type TaskRow } from '../src/tasks.ts';
 import type { DispatchInput, GatewayOptions } from '../src/types.ts';
 
-// AGT-357: cancelling a background task, at each point spec test 8 names.
+// Cancelling a background task, at each point spec test 8 names.
 // The background-task host runs here on stand-ins for the gateway's
 // dispatch and chains, so each point can be held still: a worker link not
 // yet started, a dispatch whose turn hasn't begun, a turn in flight, and a
@@ -412,7 +412,7 @@ test('a task\'s live status: the row\'s once final, else what its worker session
   assert.equal(liveTaskStatus({ status: 'running' }, undefined), 'running', 'a start still on its way');
   assert.equal(liveTaskStatus({ status: 'running' }, worker('idle', [])), 'running', 'a worker session with no turn yet is not "never started"');
   // The broker marks the row while a question is out and puts it back once
-  // answered (AGT-358). A provider that runs its own loop never parks the
+  // answered. A provider that runs its own loop never parks the
   // session, so the row is what says it waits.
   assert.equal(liveTaskStatus({ status: 'waiting_approval' }, worker('running', [start])), 'waiting_approval', 'a question out on a provider that runs its own loop');
   assert.equal(liveTaskStatus({ status: 'running' }, worker('pending_approval', [start])), 'waiting_approval');
@@ -422,7 +422,7 @@ test('a task\'s live status: the row\'s once final, else what its worker session
   assert.equal(liveTaskStatus({ status: 'running', stoppedBy: 'cli' }, worker('running', [start])), 'running', 'still winding down; its stop shows in stoppedBy');
 });
 
-// AGT-357 PR 3: a person's Stop in a conversation reaches the tasks it
+// A person's Stop in a conversation reaches the tasks it
 // started (decision 3), through the same cancel.
 
 test('stopping a conversation\'s tasks: each one it started that is running here is counted at once, cancelled as the person, and named once its stop is written', async () => {

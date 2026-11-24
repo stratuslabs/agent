@@ -31,7 +31,7 @@ test('memory.recall searches the calling agent’s store; nothing learned yet is
   const store = new InMemoryAgentMemoryStore();
   const recall = createRecallTool(store);
   assert.equal(recall.risk, 'safe');
-  // A response's recalls may run together (card 956); the writers below may not.
+  // A response's recalls may run together; the writers below may not.
   assert.equal(recall.readOnly, true);
 
   const empty = await recall.execute({ query: 'anything at all' }, sessionFor('ava')) as { results: unknown[]; truncated: boolean; strategy: string };

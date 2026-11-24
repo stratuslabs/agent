@@ -16,7 +16,7 @@ const sessionFor = (agentId: string, sessionId = 'sess-1'): Session => {
   };
 };
 
-test('message.say is a safe tool that takes only text and reaches only the conversation the turn is in (card 1009)', async () => {
+test('message.say is a safe tool that takes only text and reaches only the conversation the turn is in', async () => {
   const said: Array<{ sessionId: string; agentId: string; text: string }> = [];
   const tool = createMessageSayTool(async ({ session, text }) => {
     said.push({ sessionId: session.id, agentId: session.agent.id, text });
@@ -74,7 +74,7 @@ test('message.say passes on why a conversation cannot take the message', async (
   await assert.rejects(() => tool.execute({ text: 'hi' }, sessionFor('ava')), /cannot take a mid-task message/);
 });
 
-test('message.send sends an agent that wants to message the person it is replying to over to message.say (card 1009 live check)', () => {
+test('message.send sends an agent that wants to message the person it is replying to over to message.say', () => {
   // On a live Slack check, a model asked to "send me a mid-task message"
   // reached for message.send by its name, made up a thread id, and posted
   // at the channel's top level. Its description now says where that goes.
@@ -83,7 +83,7 @@ test('message.send sends an agent that wants to message the person it is replyin
   assert.match(description, /message\.say/);
 });
 
-test('message.say tells the agent its words between tool calls are not shown, and covers a person who asked to hear mid-task (card 1009 live check)', () => {
+test('message.say tells the agent its words between tool calls are not shown, and covers a person who asked to hear mid-task', () => {
   // On a live Slack check, a model asked for a mid-task message wrote it as
   // text between two tool calls, which Slack holds, and never called a
   // tool: nothing reached the person. The description now carries the fact

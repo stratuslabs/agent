@@ -2,7 +2,7 @@ import type { JsonObject, Session, Tool } from '@stratusagent/core';
 
 import { isDelegatedSession, TASK_ID_METADATA_KEY } from './delegate.ts';
 
-// An agent's own view of its background tasks (AGT-211): `agent.tasks`
+// An agent's own view of its background tasks: `agent.tasks`
 // lists them and `agent.cancelTask` stops one. The host keeps the table and
 // owns the cancel (in the gateway, the one function every way of stopping a
 // task calls). These tools only scope each call to the calling agent and

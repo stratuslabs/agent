@@ -280,7 +280,7 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     const withFile = await gateway.sessionRouting('thread-o');
     assert.equal(withFile?.lastSpokeAt, at);
 
-    // So is a post (AGT-324): a card the channel put in the thread with no
+    // So is a post: a card the channel put in the thread with no
     // words beside it. A post from an external result is not one, and is
     // not counted.
     const posted = await gateway.store.get('thread-o');
@@ -507,7 +507,7 @@ test('the watchdog aborts a stalled streaming turn and fails the session cleanly
   }
 });
 
-// AGT-371: a wall-clock time limit per turn, on top of the idle watchdog,
+// A wall-clock time limit per turn, on top of the idle watchdog,
 // which stays off for a provider that doesn't stream and so can't tell a
 // stall from a slow answer.
 const hangingOpenAi = (answerAfterMs?: number): typeof fetch => ((_url: unknown, init?: RequestInit) =>
@@ -759,7 +759,7 @@ test('a background task ending on the conversation is not activity for the watch
   const warnings: string[] = [];
   let gateway: ReturnType<typeof createGateway> | undefined;
   // Once the provider is waited on, tasks this conversation started end
-  // every 50 ms for 3 s while it says nothing (AGT-357). None of that is
+  // every 50 ms for 3 s while it says nothing. None of that is
   // the provider working, so the turn is still aborted about 1 s in.
   const ids = { sessionId: 'stalled-2', agentId: 'slow', workerSessionId: 'stalled-2:delegate:slow:1:t_x', workerAgentId: 'slow' };
   let sent = 0;
@@ -879,7 +879,7 @@ test('an agent that cannot currently answer still hears, and has it once it can'
     assert.deepEqual(userContents.at(-1), [
       'Dylan: Ava, hello',
       '(overheard, not addressed to you)\n> Dylan: Bea, cover for her?',
-      // Said to Ava after an overheard message, so marked (card 1034).
+      // Said to Ava after an overheard message, so marked.
       '(said to you)\nDylan: Ava, back?',
     ]);
   } finally {
@@ -6476,12 +6476,12 @@ test('approvals transport asks the agent\'s own channel app whether a destinatio
   });
   await gateway.start();
   try {
-    assert.equal(await kindFor?.('ava', 'slack:C0C1YV12SLC'), 'channel');
+    assert.equal(await kindFor?.('ava', 'slack:C0EXAMPLE01'), 'channel');
     assert.equal(await kindFor?.('ava', 'slack:D0DYLAN'), 'direct');
     assert.equal(await kindFor?.('ava', 'slack:C-BROKEN'), undefined, 'a failed lookup is unknown, never a channel');
-    assert.equal(await kindFor?.('ava', 'web:C0C1YV12SLC'), undefined, 'a channel that cannot say reports nothing');
+    assert.equal(await kindFor?.('ava', 'web:C0EXAMPLE01'), undefined, 'a channel that cannot say reports nothing');
     assert.equal(await kindFor?.('ava', 'nochannel'), undefined);
-    assert.deepEqual(asked, [['ava', 'C0C1YV12SLC'], ['ava', 'D0DYLAN'], ['ava', 'C-BROKEN']]);
+    assert.deepEqual(asked, [['ava', 'C0EXAMPLE01'], ['ava', 'D0DYLAN'], ['ava', 'C-BROKEN']]);
   } finally {
     await gateway.stop();
   }
@@ -6510,9 +6510,9 @@ test('approvals transport reports the workspace of the channel a destination nam
   });
   await gateway.start();
   try {
-    assert.equal(accountFor?.('ava', 'slack:C0C6GF7R96X'), 'T-ONE');
-    assert.equal(accountFor?.('bea', 'slack:C0C6GF7R96X'), undefined, 'an agent with no app there has no workspace');
-    assert.equal(accountFor?.('ava', 'web:C0C6GF7R96X'), undefined, 'a channel without accounts reports none');
+    assert.equal(accountFor?.('ava', 'slack:C0EXAMPLE02'), 'T-ONE');
+    assert.equal(accountFor?.('bea', 'slack:C0EXAMPLE02'), undefined, 'an agent with no app there has no workspace');
+    assert.equal(accountFor?.('ava', 'web:C0EXAMPLE02'), undefined, 'a channel without accounts reports none');
     assert.equal(accountFor?.('ava', 'nochannel'), undefined);
   } finally {
     await gateway.stop();

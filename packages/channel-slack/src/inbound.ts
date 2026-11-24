@@ -67,7 +67,7 @@ const SLACK_REACTION_NAMES: Readonly<Record<SilentReaction, string>> = {
 
 /**
  * Leaves the reaction a reply-optional turn named instead of a reply on
- * the message it was on (card 1078). Never fails the turn, which has
+ * the message it was on. Never fails the turn, which has
  * already chosen silence: Slack answering `already_reacted` (a redelivered
  * message) is what was wanted, a missing `reactions:write` is said once
  * per app, and any other refusal is said and dropped.
@@ -200,7 +200,7 @@ export const createInbound = ({
     }
     const { event, isDm, team, userId, thread, sessionId, threadKey, eventKey } = admitted;
 
-    // Stop (card 337), see `stopTurns`. Only a message addressed to this
+    // Stop, see `stopTurns`. Only a message addressed to this
     // agent: an untagged reply this agent merely overhears is the holder's
     // (unless this agent is the holder and only `listens` made it an
     // overhear, see `holderStop`), and one only the sessions can place is
@@ -256,7 +256,7 @@ export const createInbound = ({
       // not to be this agent's leaves an empty link behind, which is all it
       // should cost.
       let overhear = admitted.overhear;
-      // Judged, not ruled (card 541): the intake already placed this reply
+      // Judged, not ruled: the intake already placed this reply
       // with this agent, so it runs a turn nobody asked for, which may stay
       // quiet. A reply only the sessions can place waits for them below.
       let judged = false;
@@ -296,7 +296,7 @@ export const createInbound = ({
             // the rest of the thread is ordered by receipt like any other.
             rememberAddressee(threadKey, connection.config.agentId, event.ts);
           }
-          // Stop (card 337) for a message only the sessions could place:
+          // Stop for a message only the sessions could place:
           // now that they say it is this agent's, it is a stop like the
           // warm one above, not a message to queue behind the turn it stops.
           if (
@@ -308,13 +308,13 @@ export const createInbound = ({
           }
         }
       }
-      // One line per decision a judging agent makes on an untagged reply
-      // (card 541): whether it took the turn, and why. Never the text.
+      // One line per decision a judging agent makes on an untagged reply:
+      // whether it took the turn, and why. Never the text.
       if (admitted.judgeReason !== undefined) {
         const reason = admitted.settled || judged ? admitted.judgeReason : 'another agent\'s, from the thread read';
         log(`slack: judge: ${connection.config.agentId} ${judged ? 'took' : 'heard'} ${event.ts} in ${event.channel} (${reason})`);
       }
-      // Said to this agent, but possibly needing nothing back (card 601):
+      // Said to this agent, but possibly needing nothing back:
       // only for a message this agent answers, and never for a judged one,
       // whose turn already may stay quiet. One line, never the text.
       const replyOptional = admitted.replyOptional === true && !judged && !overhear;
@@ -329,12 +329,12 @@ export const createInbound = ({
       // on it, and its attachments reach the transcript by name, as every
       // attachment did before images.
       // A judged message is one this agent will run a turn on, so its
-      // files are read too (card 625): the kernel stores them on the
+      // files are read too: the kernel stores them on the
       // overheard message, and every provider shows the images after the
       // frame that marks it as somebody else's. Text files land inside the
       // message, so the frame quotes them with the rest of it.
       // A team agent's tag inside a thread carries the files its turn posted
-      // just above it (card 1061), read as if they were attached to the tag.
+      // just above it, read as if they were attached to the tag.
       const files = admitted.fromAgent !== undefined && !overhear && event.thread_ts !== undefined && event.thread_ts !== event.ts
         ? await withFilesJustAbove(connection, { ...event, thread_ts: event.thread_ts }, userId, admitted.fromAgent)
         : event.files ?? [];
@@ -358,7 +358,7 @@ export const createInbound = ({
           deadline,
         );
       // Text is spent from the first file on, so the tag's own files lead:
-      // ones carried from above it (card 1061) must not crowd them out.
+      // ones carried from above it must not crowd them out.
       const ownFiles = new Set(event.files ?? []);
       const ownFirst = [...notImages.filter((file) => ownFiles.has(file)), ...notImages.filter((file) => !ownFiles.has(file))];
       const { texts, saved, unread } = overhear
@@ -383,9 +383,9 @@ export const createInbound = ({
       }
       // A team agent goes by the name the operator gave it, not a profile
       // its own app chose.
-      // A team agent's daemon hears only what tags its bot (card 513), so
+      // A team agent's daemon hears only what tags its bot, so
       // the model gets that tag and decides whether its answer needs it
-      // (Dylan, 2026-10-15: the model tags back, the adapter never does).
+      // (the model tags back, the adapter never does).
       const author = admitted.fromAgent !== undefined
         ? `${admitted.fromAgent} (an agent; it sees your answer only if you tag <@${userId}>)`
         : await authorFor(connection, userId);
@@ -401,7 +401,7 @@ export const createInbound = ({
       // transcript either way.
       // A team agent is below a principal whatever the list says: its
       // words carry whatever its own session was exposed to, which nothing
-      // here can see (card 513).
+      // here can see.
       const senderTrust: TrustLevel = admitted.fromAgent !== undefined ? 'unknown' : senderTrustFor(connection.config, userId);
       // Who can read this, so the agent writes for them, and a thread says
       // it is one. A DM names the other person only when they are one of
@@ -579,7 +579,7 @@ export const createInbound = ({
           repeat = kind;
         },
         // Sent while a turn is running, this message is answered by the
-        // next turn together with everything else that queued (card 423);
+        // next turn together with everything else that queued;
         // the first of them renders that answer. Not a replayed message:
         // it leaves the kept list only on its own confirmed answer, and an
         // answer another message's renderer posts is not one it can see.
@@ -676,7 +676,7 @@ export const createInbound = ({
     if (session && finished) {
       // Counted, not a set: a turn can produce one path twice, and each
       // result is an upload of its own, so one landing does not cover both.
-      // A tool's post (AGT-324) is counted by what it says, the same way.
+      // A tool's post is counted by what it says, the same way.
       const keyOf = (entry: string | ToolPost): string => (typeof entry === 'string' ? `file:${entry}` : `post:${JSON.stringify(entry)}`);
       const landed = new Map<string, number>();
       for (const entry of reportedAhead?.landed ?? []) {
@@ -757,7 +757,7 @@ export const createInbound = ({
         : undefined;
       const { spoke, spokeAt } = await finalized;
       // A reply-optional turn that said nothing may have named a reaction
-      // to leave instead (card 1078), and it goes on this message only if
+      // to leave instead, and it goes on this message only if
       // nothing of the turn's reached the thread.
       if (renderer.mayStaySilent && !spoke && (reply ?? '').trim().length === 0) {
         const reaction = finished ? turnReactionFor(session, dispatchKey) : latestTurnReaction(session);
@@ -778,7 +778,7 @@ export const createInbound = ({
         // the reader's next untagged message is for the lower of the two.
         // Late, either way, for a message typed while the turn was still
         // running, which the other may therefore still take.
-        // Under the owner rule (card 508) only two replies move the thread:
+        // Under the owner rule only two replies move the thread:
         // a judging agent that chose to speak, and the owner answering in
         // its own thread, which takes it back from a judge that spoke above.
         // An answer to a mention is that message's answer and no more.

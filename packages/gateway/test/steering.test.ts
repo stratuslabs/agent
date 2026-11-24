@@ -7,9 +7,9 @@ import path from 'node:path';
 import { sessionTrustOf, turnFailureFor, workItemState } from '@stratusagent/core';
 import { createGateway, GatewayStoppingError } from '../src/index.ts';
 
-// Card 948: a message sent while a turn works reaches it at its next tool
-// step, instead of waiting for the whole turn to end (card 423 then merged
-// it into the next turn).
+// A message sent while a turn works reaches it at its next tool
+// step, instead of waiting for the whole turn to end (it used to be
+// merged into the next turn).
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-steer-'));
 
@@ -277,7 +277,7 @@ test('a turn every caller in it gave up on, steered ones included, is cancelled'
 });
 
 test('a turn stopped while it looks for messages to take in takes none: they run next, as their own turn', async (t) => {
-  // Card 959. Call 1 asks for a tool; call 2 is the next turn, the waiting message's own.
+  // Call 1 asks for a tool; call 2 is the next turn, the waiting message's own.
   const provider = scriptedProvider([openAiToolCall, () => openAiText('Answered second.')], 1);
   const gateway = await startGateway(t, provider.fetchImpl);
   // The store read that judges the waiting keys is where the turn is

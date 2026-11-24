@@ -1025,7 +1025,7 @@ export const collectDoctorReport = async (
   const daemon = await inspectDaemon(env, problems);
   // With no daemon answering, a stopped service is the finding the rest
   // wait on, so it goes first. A doctor run on a host whose daemon was down
-  // led with a stray-souls warning instead (AGT-364).
+  // led with a stray-souls warning instead.
   if (daemon.state !== 'running') {
     const down = await serviceDownProblem(serviceEnvFor(env));
     if (down !== undefined) {

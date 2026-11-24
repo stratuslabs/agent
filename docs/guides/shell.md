@@ -251,8 +251,8 @@ program (`sh`, `python3`, `xargs`, `env`, `sudo`, `find`) get no grant at
 all in a line with other commands; alone, **Always allow** on one still
 stores the narrow scope described above. A line using shell keywords
 (`if`, `for`, `while`, `case`, braces) is not read as commands and asks.
-Commands with subcommands (`git`, `gh`, `pnpm`, `npm`, `cargo`, `make`,
-`agentboard`) keep the command-plus-subcommand scope, so `gh pr` is never
+Commands with subcommands (`git`, `gh`, `pnpm`, `npm`, `cargo`, `make`)
+keep the command-plus-subcommand scope, so `gh pr` is never
 `gh repo delete`.
 
 By-name grants and compound lines apply only when the shell tool runs a

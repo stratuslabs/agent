@@ -14,8 +14,7 @@ import {
 
 import { isOpenTaskStatus, type SqliteTaskStore, type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
 
-// Settling a background task (AGT-211, agent-plans
-// roadmap/952-background-tasks.md, "Delivering the result"): the one
+// Settling a background task: the one
 // function a worker turn's end and the startup sweep both run. It derives
 // how the task ended from the worker session, writes that to the row, and
 // gets the outcome into the origin session's transcript exactly once:

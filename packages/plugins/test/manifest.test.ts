@@ -145,17 +145,17 @@ test('a key a plugin names is merged per name, with the agent winning, and the r
   const block = {
     env: { PATH: '/usr/bin', SHARED_TOKEN: 'fleet' },
     passEnv: ['PATH', 'HOME'],
-    agents: { blair: { env: { AGENTBOARD_TOKEN: 'mine', SHARED_TOKEN: null }, passEnv: ['PATH'] } },
+    agents: { blair: { env: { TRACKER_TOKEN: 'mine', SHARED_TOKEN: null }, passEnv: ['PATH'] } },
   };
 
   // The shape from #205: an agent's own token used to cost it the PATH.
   assert.deepEqual(resolvePluginAgentConfig(block, 'blair', { mergeKeys: ['env'] }), {
-    env: { PATH: '/usr/bin', SHARED_TOKEN: null, AGENTBOARD_TOKEN: 'mine' },
+    env: { PATH: '/usr/bin', SHARED_TOKEN: null, TRACKER_TOKEN: 'mine' },
     // Not named, so still replaced: a list narrowed per agent stays narrow.
     passEnv: ['PATH'],
   });
   // Without the opt-in, nothing about the rule changed.
-  assert.deepEqual(resolvePluginAgentConfig(block, 'blair').env, { AGENTBOARD_TOKEN: 'mine', SHARED_TOKEN: null });
+  assert.deepEqual(resolvePluginAgentConfig(block, 'blair').env, { TRACKER_TOKEN: 'mine', SHARED_TOKEN: null });
 });
 
 test('an agent gets its own settings over the defaults, key by key', () => {

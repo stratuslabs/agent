@@ -7,7 +7,7 @@ import type { WebSocket } from 'ws';
 
 import { createEventStream, type EventEnvelope } from '../src/events.ts';
 
-// Card 992 (from #537's review): a decision worked out off the call path
+// From #537's review: a decision worked out off the call path
 // (the review posture's shadow mode) can arrive after its turn has ended.
 // It is stamped with the turn its call ran in, not whatever runs now.
 
@@ -203,7 +203,7 @@ test('a memory pass\'s completion reaches its agent\'s subscribers, though they 
   assert.deepEqual(forBo, []);
 });
 
-// AGT-357: a background task outlives the turn that started it, so none of
+// A background task outlives the turn that started it, so none of
 // its events is that turn's or whichever turn its conversation runs when it
 // ends.
 test('a background task\'s events carry no turn id, whatever its conversation is running', async () => {

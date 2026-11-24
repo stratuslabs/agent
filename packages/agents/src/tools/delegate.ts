@@ -29,7 +29,7 @@ export const ROOT_SESSION_ID_METADATA_KEY = 'rootSessionId';
 export const DELEGATION_DEPTH_METADATA_KEY = 'delegationDepth';
 
 /**
- * The background task a worker session runs for (AGT-211): the id of its
+ * The background task a worker session runs for: the id of its
  * row in the host's task table. Written only by the host that starts the
  * task, beside the delegation keys above. The host's task sweep keys on it,
  * and its generic restart sweeps leave such a session to that sweep.
@@ -152,7 +152,7 @@ export type DelegateDispatch = (input: {
 }) => Promise<Session>;
 
 /**
- * Starts a background delegation (AGT-211): the host records the task,
+ * Starts a background delegation: the host records the task,
  * starts the worker without waiting for it, and resolves once the start is
  * recorded. It owns the task table, the worker's abort handle, and getting
  * the outcome into `origin` when the worker ends. It rejects, with an error
@@ -231,7 +231,7 @@ export const createDelegateTool = ({
   // fleet, the delegate's own tool calls face the policy again under the
   // delegate's allowlist, and maxDepth bounds the chain.
   //
-  // Gated once the conversation has read external content (card 967).
+  // Gated once the conversation has read external content.
   // Then the choice to delegate may be a web page's, and a delegate runs
   // under its own tools, credentials and memory: the lateral move an
   // injected instruction would take. So it is judged like any other gated
@@ -346,7 +346,7 @@ export const createDelegateTool = ({
       // A turn already stopped starts nothing. Checked with nothing awaited
       // between here and the host writing the row, so a Stop that lands
       // while this call is on its way either refused it here or finds the
-      // task to stop (AGT-357).
+      // task to stop.
       if (context?.signal?.aborted) {
         throw context.signal.reason;
       }

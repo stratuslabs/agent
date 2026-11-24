@@ -120,7 +120,7 @@ const stubServiceRunner = async (command: string, args: string[]) => ({
 });
 
 // The pause between a manager's answers, skipped: after the manager says
-// running, install and start keep asking for about five seconds (AGT-363).
+// running, install and start keep asking for about five seconds.
 const noServiceWait = async (): Promise<void> => {};
 
 // The status asks after a start: the one that said running, then ten more
@@ -2687,12 +2687,12 @@ test('setup offers the Slack package its own choices imply, and nothing for the 
 
   assert.match(output.stdout, /One optional package is not installed/);
   assert.match(output.stdout, /Slack tokens are stored for 1 agent\(s\)/);
-  // The dashboard is offered by `stratus dashboard` when someone runs it
-  // (card 308), never by setup.
+  // The dashboard is offered by `stratus dashboard` when someone runs it,
+  // never by setup.
   assert.doesNotMatch(output.stdout, /control-api|@stratusagent\/dashboard/);
   // At this CLI's own version, as the providers are: the packages ship in
   // lockstep, so an unpinned install on an older CLI pulls a newer adapter
-  // than the core it loads into (card 1173).
+  // than the core it loads into.
   assert.deepEqual(installed, [[`@stratusagent/channel-slack@${CLI_VERSION}`]]);
   assert.match(output.stdout, new RegExp(`Running: npm install -g @stratusagent/channel-slack@${CLI_VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
 });
@@ -9824,7 +9824,7 @@ test('setup says remote approvals are denied when nothing can answer them at all
 });
 
 test('a piped setup on a new install is not asked for a posture and writes none', async () => {
-  // AGT-334 asks for a posture only at a terminal. A script that drives
+  // Setup asks for a posture only at a terminal. A script that drives
   // setup through piped input gets the menus it always got, in the same
   // order, and the config it always got: no approvals block.
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
@@ -10456,8 +10456,8 @@ test('service install says stratusd is running only once launchd reports it runn
 });
 
 test('service install does not claim a LaunchAgent launchd loaded but never started is running', async () => {
-  // The Products host after a reboot: the job loaded, runs = 0, nothing
-  // spawned. "stratusd is running" over that left the fleet silent.
+  // A host after a reboot: the job loaded, runs = 0, nothing spawned.
+  // "stratusd is running" over that left its agents silent.
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const result = await installService({
     platform: 'darwin',
@@ -12314,24 +12314,24 @@ test('stratus grants lists config commands from the file it names, and says when
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-config-'));
   const env = { cwd: home, homeDir: home, processEnv: {} };
   const custom = path.join(home, 'custom.json');
-  await writeFile(custom, JSON.stringify({ approvals: { commands: ['agentboard'], agents: { ava: { commands: ['pnpm test'] } } } }));
+  await writeFile(custom, JSON.stringify({ approvals: { commands: ['tracker'], agents: { ava: { commands: ['pnpm test'] } } } }));
 
   const listing = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'ava', '--config', custom], streams: listing.streams, env }), 0);
   assert.ok(listing.output.stdout.includes(`from approvals.commands in ${custom}`), listing.output.stdout);
-  assert.match(listing.output.stdout, / {4}agentboard\n {4}pnpm test/);
+  assert.match(listing.output.stdout, / {4}tracker\n {4}pnpm test/);
   const asJson = createStreams();
   assert.equal(await runCli({ argv: ['grants', 'ava', '--config', custom, '--format', 'json'], streams: asJson.streams, env }), 0);
   const parsed = JSON.parse(asJson.output.stdout) as { configCommands: string[]; configSource: string };
-  assert.deepEqual(parsed.configCommands, ['agentboard', 'pnpm test']);
+  assert.deepEqual(parsed.configCommands, ['tracker', 'pnpm test']);
   assert.equal(parsed.configSource, custom);
 
   // A remembered scope config still covers: revoked, and told it still runs.
   const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
   await createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents'), stateHome: path.join(home, '.stratus') })
-    .remember('ava', { command: 'agentboard', args: ['task'] });
+    .remember('ava', { command: 'tracker', args: ['task'] });
   const revoke = createStreams();
-  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--scope', 'agentboard task', '--config', custom], streams: revoke.streams, env }), 0);
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--scope', 'tracker task', '--config', custom], streams: revoke.streams, env }), 0);
   assert.match(revoke.output.stderr, /still runs without asking/);
 
   // A config that won't parse is said, not shown as allowing nothing.
@@ -16061,7 +16061,7 @@ test('plugins lets a configured soul take the built-in id over rather than listi
 });
 
 test('plugins does not show a grant to a soul with no tools: list as certain while the tool could still register riskier', async () => {
-  // Card 1038, from Codex on #510: a soul with no `tools:` list gets only the
+  // From the review of #510: a soul with no `tools:` list gets only the
   // tools that *register* as safe. The report reads the manifest, and a tool
   // object may raise its own risk at registration, so a manifest-safe tool
   // is only probably safe. Shown as a plain arrow, the grant could name an
@@ -17121,7 +17121,7 @@ test('chat and run follow the review posture: rules hold, outside content asks a
   assert.doesNotMatch(shadowPiped.output.stderr, /Note: refusing/);
 });
 
-test('who a Slack app answers to is read again on every reload, under the rules start used (AGT-337)', async () => {
+test('who a Slack app answers to is read again on every reload, under the rules start used', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   const configPath = path.join(home, '.stratus', 'config.json');
@@ -18525,7 +18525,7 @@ test('stratus memory list and audit name every fact a merge replaced, and the ev
   assert.deepEqual(merged, { tool: 'memory.remember', ok: true, entry: 'ava:memory:3', supersedes: ['ava:memory:1', 'ava:memory:2'] });
 });
 
-// AGT-357 PR 4: `stratus tasks`, a thin client of the control API's task routes.
+// `stratus tasks`, a thin client of the control API's task routes.
 
 test('parseCommand reads stratus tasks and stratus tasks cancel', () => {
   assert.deepEqual(parseCommand(['tasks']), { command: 'tasks', action: 'list', format: 'text' });

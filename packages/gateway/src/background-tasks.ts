@@ -23,8 +23,7 @@ import { createTaskSettler, deriveTaskOutcome, TASK_CUT_OFF_ERROR, taskEvent, ta
 import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
-// Background tasks in the gateway (AGT-211, agent-plans
-// roadmap/952-background-tasks.md): `agent.delegate`'s background hook.
+// Background tasks in the gateway: `agent.delegate`'s background hook.
 // It claims the row, starts the worker on its own session chain without
 // waiting for it, and settles the task on that chain when the worker's
 // turn ends. A cancel (`cancel`) records its stop before it aborts
@@ -196,7 +195,7 @@ export const createBackgroundTasks = ({
   // Its own connection to fleet.db, like the schedule and event stores.
   // Opened whether or not tasks are on, for the restart sweep.
   const tasks = new SqliteTaskStore(fleetDb, { stateHome });
-  /** Each running task's own stop, for a cancel (AGT-357) and the drain (`cutOff`). */
+  /** Each running task's own stop, for a cancel and the drain (`cutOff`). */
   const controllers = new Map<string, AbortController>();
   /** The task each running worker session is doing, while its turn runs: what an approval question names. */
   const workers = new Map<string, string>();
@@ -435,7 +434,7 @@ export const createBackgroundTasks = ({
   };
 
   /**
-   * A worker's approval question (AGT-358): the task its session is
+   * A worker's approval question: the task its session is
    * running, marked `waiting_approval` until `release`, with
    * `task.waiting-approval` sent before the question goes out. Only a
    * worker this process is running asks: the restart sweep fails a parked

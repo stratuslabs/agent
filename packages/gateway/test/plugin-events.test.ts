@@ -21,7 +21,7 @@ import {
   type EventTrigger,
 } from '../src/index.ts';
 
-// Card 590 phase 2: a plugin source (a GitHub poller, an MCP bridge) feeds
+// A plugin source (a GitHub poller, an MCP bridge) feeds
 // the same dedup, rule filter and firing path a signed delivery takes,
 // through `PluginContext.events`. What's under test is that a plugin's event
 // is held to the same rules as a webhook's, minus the signature, and that a

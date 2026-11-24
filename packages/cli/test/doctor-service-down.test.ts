@@ -9,7 +9,7 @@ import { installService, runCli, type ServiceRunner } from '../src/index.ts';
 
 // With no daemon running, the one finding that explains everything else is
 // that the service is down and why. A doctor run on a host whose daemon
-// was down led with a stray-souls warning instead (AGT-364).
+// was down led with a stray-souls warning instead.
 
 const quiet = { code: 0, stdout: '', stderr: '' };
 const stopped = '\tstate = not running\n\truns = 4\n\tlast exit code = 1\n';

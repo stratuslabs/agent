@@ -61,7 +61,7 @@ export interface ApprovalBrokerDeps {
   isStopping: () => boolean;
   /**
    * The background task a session is the running worker of, marked waiting
-   * on a person (AGT-358); undefined for any other session. Late-bound:
+   * on a person; undefined for any other session. Late-bound:
    * background tasks are made after the broker.
    */
   taskApprovalWait: (sessionId: string) => Promise<TaskApprovalWait | undefined>;
@@ -146,7 +146,7 @@ export const createApprovalBroker = ({
     liveSubAgentIds.has(hostIdOf(session)) || isSubAgentSession(session);
 
   /**
-   * How a running turn's time limit (AGT-371) stops and starts its clock,
+   * How a running turn's time limit stops and starts its clock,
    * registered while the turn runs, and the requests each session has
    * parked on a person. Only that wait stops the clock: an approval policy
    * or a channel's preflight is work that can hang like any other (they
@@ -195,7 +195,7 @@ export const createApprovalBroker = ({
       return { answer: 'deny' };
     }
     const delegatedFrom = await delegationOriginOf(request.session);
-    // A background task's worker (AGT-358): the question names its task,
+    // A background task's worker: the question names its task,
     // and the task waits on the person until it is answered, whatever the
     // answer. Not for a request denied before anyone is asked: during a
     // shutdown, or for a turn already stopped.
