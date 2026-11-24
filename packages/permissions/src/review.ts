@@ -573,7 +573,11 @@ export interface ReviewRequest {
   signal: AbortSignal;
 }
 
-/** The reviewer's answer. `reason` is one line for the agent and the approver, never logged. */
+/**
+ * The reviewer's answer. `reason` is one line for the agent and the approver.
+ * It is logged only for a shadow review (`PermissionDecision.reviewReason`),
+ * where nobody else sees it, and never put on an event.
+ */
 export interface ReviewAnswer {
   verdict: ApprovalVerdict;
   code: ReviewCode;
@@ -621,6 +625,25 @@ export interface ReviewOptions {
 const REVIEW_REASON_LIMIT = 300;
 
 /**
+ * The reviewer's reason as one bounded line: the first line, with every
+ * control and bidi character made a space (the reason is shown at a
+ * terminal prompt and may echo the call's own text), cut to its limit.
+ * Undefined when nothing is left. Anything to be taken out of the reason,
+ * such as a stored value, comes out before this, so the cut can't leave
+ * part of it behind.
+ */
+export const reviewReasonLine = (reason: string): string | undefined => {
+  const line = (reason.trim().split(/\r?\n/)[0] as string)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (line.length === 0) {
+    return undefined;
+  }
+  return line.length > REVIEW_REASON_LIMIT ? `${line.slice(0, REVIEW_REASON_LIMIT)}…` : line;
+};
+
+/**
  * The reviewer's answer if it has the right shape, with an unknown code
  * read as `unclear` and the reason cut to one bounded line; undefined when
  * the verdict or the reason is missing, which counts as a failed review.
@@ -633,16 +656,11 @@ export const readReviewAnswer = (raw: unknown): ReviewAnswer | undefined => {
   if (typeof source.verdict !== 'string' || !VERDICTS.includes(source.verdict)) {
     return undefined;
   }
-  if (typeof source.reason !== 'string' || source.reason.trim().length === 0) {
+  if (typeof source.reason !== 'string') {
     return undefined;
   }
-  // The first line, with every control and bidi character made a space: the
-  // reason is shown at a terminal prompt and may echo the call's own text.
-  const line = (source.reason.trim().split(/\r?\n/)[0] as string)
-    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (line.length === 0) {
+  const reason = reviewReasonLine(source.reason);
+  if (reason === undefined) {
     return undefined;
   }
   const code = typeof source.code === 'string' && (REVIEW_CODES as readonly string[]).includes(source.code) && source.code !== 'review-failed'
@@ -651,6 +669,6 @@ export const readReviewAnswer = (raw: unknown): ReviewAnswer | undefined => {
   return {
     verdict: source.verdict as ApprovalVerdict,
     code,
-    reason: line.length > REVIEW_REASON_LIMIT ? `${line.slice(0, REVIEW_REASON_LIMIT)}…` : line,
+    reason,
   };
 };

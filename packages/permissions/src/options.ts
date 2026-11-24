@@ -233,6 +233,14 @@ export interface PermissionDecision {
   reviewCode?: ReviewCode;
   /** True for a decision worked out without acting on it (`approvals.review.shadow`). */
   shadow?: boolean;
+  /**
+   * A shadow review only: the reviewer's own one-line reason, cut to its
+   * bounded length, control characters spaced out and stored values
+   * redacted. For the host's log, so a shadow run can say why a review
+   * would have asked or blocked. Never set on an enforced decision, and
+   * never on the runner's `permission.decided` event.
+   */
+  reviewReason?: string;
 }
 
 export interface PermissionPolicyOptions {
