@@ -75,7 +75,7 @@ export const createOperatorCommands = (
 /**
  * Whether config entries still let a command run, judged the way the policy
  * judges it: each entry's parsed scope, limits and all, matched against the
- * command. `agentboard` covers `agentboard task`; `head` does not cover
+ * command. `gh pr` covers `gh pr view`; `head` does not cover
  * `head --help`, because the built-in limits on `head` come with the entry.
  */
 export const configCovers = (entries: readonly string[], command: string): boolean => {

@@ -14,7 +14,7 @@ import {
   type SqliteEventStore,
 } from './events.ts';
 
-// What happens to one request on the events port (card 590), in the order
+// What happens to one request on the events port, in the order
 // the spec's failure table gives: unknown source, size, signature, signed
 // rate, content type, body, then dedup and the trigger match. Only a request
 // with a good signature gets a delivery row, and the counters exist only per
@@ -117,7 +117,7 @@ export interface EventIntakeOptions {
   /** The configured sources, read per request. */
   sources(): Readonly<Record<string, EventSourceConfig>>;
   /**
-   * The sources plugins feed through `ingest` (card 590 phase 2), read per
+   * The sources plugins feed through `ingest`, read per
    * event. Never served over HTTP: they have no secret to check a request
    * against. Default none.
    */
@@ -138,7 +138,7 @@ export interface EventIntakeOptions {
 export interface EventIntake {
   receive(request: EventIntakeRequest): Promise<EventIntakeResponse>;
   /**
-   * One event a plugin source fed (card 590 phase 2), under the same size
+   * One event a plugin source fed, under the same size
    * limit, per-source rate, dedup, rule filter and firings as a signed
    * delivery, with no signature to check: the plugin is code the operator
    * installed, and the loader held it to the sources its manifest declares.

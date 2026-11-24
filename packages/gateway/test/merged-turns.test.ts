@@ -7,7 +7,7 @@ import path from 'node:path';
 import { sessionTrustOf, workItemState } from '@stratusagent/core';
 import { createGateway } from '../src/index.ts';
 
-// Card 423: messages that arrive while a session's turn is running are
+// Messages that arrive while a session's turn is running are
 // answered by ONE next turn, not one turn each. No debounce: the batch is
 // whatever queued by the time the running turn ends.
 
@@ -158,7 +158,7 @@ test('a message overheard after a batch opened closes it, so nothing said later 
   const session = await later;
   assert.deepEqual(absorbed, []);
   // "third" follows the overheard message in one run, so it goes marked as
-  // said to the agent (card 1034); the stored message stays as written.
+  // said to the agent; the stored message stays as written.
   assert.deepEqual(provider.prompts, ['first', 'second', '(said to you)\nthird']);
   const users = session.messages.filter((message) => message.role === 'user').map((message) => message.content);
   assert.deepEqual(users, ['first', 'second', 'Bea: overheard', 'third']);
@@ -285,7 +285,7 @@ test('a queued message whose text would push the batch past the merged-text budg
   await gateway.stop();
 });
 
-test('a reply-optional dispatch reaches the turn, and messages merged into one turn may stay quiet only if every one of them may (card 601)', async (t) => {
+test('a reply-optional dispatch reaches the turn, and messages merged into one turn may stay quiet only if every one of them may', async (t) => {
   const provider = gatedProvider();
   const gateway = await startGateway(provider.fetchImpl);
   t.after(() => gateway.stop());

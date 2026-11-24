@@ -22,7 +22,7 @@ import {
   type PluginEventSourceHost,
 } from '../src/index.ts';
 
-// Card 590 phase 2: a plugin feeds events (a poller, a bridge) through
+// A plugin feeds events (a poller, a bridge) through
 // `PluginContext.events`, bound to the source ids its manifest declares, the
 // way a plugin's tools are bound to the names it declares.
 

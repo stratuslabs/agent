@@ -338,7 +338,7 @@ test('a message overheard between turns reaches the API framed, in one user turn
     content: [
       { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: Bea, what do you think?' },
       // Marked as said to the agent, or the frame in the block before it
-      // reads as covering the whole turn (card 1034: in 10 replays without
+      // reads as covering the whole turn (in 10 replays without
       // the mark claude-haiku-4-5 answered a tagged question 0 times, saying
       // things like "I'm not being addressed here, so I'll stay quiet";
       // with it, 10 of 10).
@@ -347,7 +347,7 @@ test('a message overheard between turns reaches the API framed, in one user turn
   });
 });
 
-test('a message said to the agent after a silent turn on an overheard one is marked too, the two merge on the wire (card 1034)', async () => {
+test('a message said to the agent after a silent turn on an overheard one is marked too, the two merge on the wire', async () => {
   const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: '4' }])]);
   const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
   const now = new Date().toISOString();
@@ -408,7 +408,7 @@ test('a turn nobody asked for reaches the API with the note after its newest mes
   await assert.rejects(() => exhausted.generate({ session }), /stop_reason max_tokens/);
 });
 
-test('a reply-optional turn is said to the agent, told it may need nothing back, and may answer with nothing (card 601)', async () => {
+test('a reply-optional turn is said to the agent, told it may need nothing back, and may answer with nothing', async () => {
   const { fetchImpl, requests } = createMockFetch([apiMessage([])]);
   const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
   const now = new Date().toISOString();
@@ -1520,7 +1520,7 @@ test('a user message with images sends them as image blocks ahead of its text', 
   ]);
 });
 
-test('an overheard message sends its framed text first, then its images, labeled as that message\'s (card 625)', async () => {
+test('an overheard message sends its framed text first, then its images, labeled as that message\'s', async () => {
   const { fetchImpl, requests } = createMockFetch([apiMessage([])]);
   const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
   const session = createSession({

@@ -137,8 +137,8 @@ export type StratusEvent =
        */
       scheduleDestination?: ApprovalScheduleDestination;
       /**
-       * The background task asking, when this call is a task's worker
-       * (AGT-211): a renderer names it beside the call, so the person knows
+       * The background task asking, when this call is a task's worker:
+       * a renderer names it beside the call, so the person knows
        * which job is asking. Such a call is a delegated one too, asked where
        * `delegatedFrom` says. Set by the gateway from the workers it is
        * running, never from session metadata a caller could write.
@@ -318,8 +318,8 @@ export type StratusEvent =
    */
   | { type: 'session.stopped-early'; sessionId: string; reason: StoppedEarlyReason; continuations: number }
   /**
-   * A background task started, began waiting on a person, or ended
-   * (AGT-211): `agent.delegate` with `background: true` wrote it, its
+   * A background task started, began waiting on a person, or ended:
+   * `agent.delegate` with `background: true` wrote it, its
    * worker asked for an approval (`task.waiting-approval`, sent before the
    * question; the task is running again once it is answered, which sends
    * nothing), or settling wrote how it ended. Ids only,

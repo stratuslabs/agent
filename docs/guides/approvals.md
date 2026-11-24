@@ -474,22 +474,23 @@ warning naming the file.
 
 ## Commands you installed for your agents
 
-A tool you install on the host for your agents to use (`agentboard`, your
-test runner, `gh`) shouldn't need an approval each time. List it once in
+A tool you install on the host for your agents to use (your issue
+tracker's CLI, your test runner, `gh`) shouldn't need an approval each
+time. List it once in
 `~/.stratus/config.json`:
 
 ```jsonc
 {
   "approvals": {
-    "commands": ["agentboard", "gh pr"],                 // every agent
+    "commands": ["tracker", "gh pr"],                    // every agent
     "agents": { "nova": { "commands": ["pnpm test"] } }  // adds to the list above for nova
   }
 }
 ```
 
 Each entry is a command and, optionally, the subcommands it's limited to.
-Whatever follows may vary: `agentboard` covers `agentboard task get 311`
-and `agentboard list --column todo`, and `pnpm test` covers
+Whatever follows may vary: `tracker` covers `tracker task get 311`
+and `tracker list --column todo`, and `pnpm test` covers
 `pnpm test --filter cli` but not `pnpm publish`. The same things stay
 refused as for an **Always allow** scope: destructive flags like
 `--force`, `-f`, and `--hard`, whatever the built-in list refuses for that
@@ -728,7 +729,7 @@ config:
 
 ```jsonc
 "approvals": {
-  "channels": ["slack:T0123ABCD/C0C1YV12SLC"],
+  "channels": ["slack:T0123ABCD/C0EXAMPLE01"],
   "agents": { "nova": { "channels": ["slack:*"] } }
 }
 ```

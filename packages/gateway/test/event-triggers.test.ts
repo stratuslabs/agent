@@ -23,7 +23,7 @@ import {
   type SchedulerRuntimeOptions,
 } from '../src/index.ts';
 
-// Event triggers end to end inside the scheduler (card 590): a trigger is a
+// Event triggers end to end inside the scheduler: a trigger is a
 // schedule whose cadence is an event; a matched delivery leaves a pending
 // firing; the scheduler decides hold or fire and dispatches through the same
 // path a timed firing takes. The clock is the test's, and ticks are driven
@@ -259,7 +259,7 @@ test('a dispatch that throws marks the firing failed with the reason', async () 
 });
 
 test('a firing a stopping daemon refused or cut short stays claimed, and the next start sends it again under its key', async () => {
-  // Card 590, Fly live check 3: a graceful restart mid-turn marked the
+  // Found in a live check: a graceful restart mid-turn marked the
   // firing failed and the event was never handled. The gateway now leaves a
   // keyed turn its stop cut short for the next start and refuses the
   // dispatch (GatewayStoppingError), as it refuses one that reaches it on
@@ -609,7 +609,7 @@ test('a signed delivery wakes the trigger\'s agent through the gateway: one turn
     const user = body.messages.filter((message) => message.role === 'user').map((message) => String(message.content));
     prompts.push(user[user.length - 1] ?? '');
     const first = { choices: [{ message: { role: 'assistant', content: '', tool_calls: [
-      { id: 'call-1', type: 'function', function: { name: 'message_send', arguments: JSON.stringify({ destination: { channel: 'slack', to: 'C-ENG' }, text: 'Card 590 moved.' }) } },
+      { id: 'call-1', type: 'function', function: { name: 'message_send', arguments: JSON.stringify({ destination: { channel: 'slack', to: 'C-ENG' }, text: 'The card moved.' }) } },
     ] } }] };
     const done = { choices: [{ message: { role: 'assistant', content: 'Reported.' } }] };
     return new Response(JSON.stringify(calls % 2 === 1 ? first : done), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -650,7 +650,7 @@ test('a signed delivery wakes the trigger\'s agent through the gateway: one turn
     while (posts.length === 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.deepEqual(posts, [{ to: 'C-ENG', text: 'Card 590 moved.' }], 'the pre-authorized report went out, headless');
+    assert.deepEqual(posts, [{ to: 'C-ENG', text: 'The card moved.' }], 'the pre-authorized report went out, headless');
     assert.match(prompts[0] ?? '', /^A card moved\. Tell the team\.\n\nEvent from source "board":\n\{"id":"ce-1"/);
 
     const repeat = await gateway.receiveEvent(request);
@@ -699,7 +699,7 @@ test('a signed delivery wakes the trigger\'s agent through the gateway: one turn
 });
 
 test('a graceful stop mid-turn leaves the event\'s turn for the next start, which continues it once and marks the firing fired', async () => {
-  // Card 590, Fly live check 3: a restart that drained for its window and
+  // Found in a live check: a restart that drained for its window and
   // then aborted the event's turn failed the firing, and the event was never
   // handled. Stop, start, and the event is answered once.
   const { createHmac } = await import('node:crypto');
@@ -789,7 +789,7 @@ test('a graceful stop mid-turn leaves the event\'s turn for the next start, whic
   }
 });
 
-test('an event firing that never posted to its trigger\'s destination is a warning naming the trigger (AGT-353)', async () => {
+test('an event firing that never posted to its trigger\'s destination is a warning naming the trigger', async () => {
   let notified = 0;
   const keys: Array<string | undefined> = [];
   const r = await rig({
@@ -823,7 +823,7 @@ test('an event firing that never posted to its trigger\'s destination is a warni
   }
 });
 
-test('an event firing whose send never arrived leaves a notice in its trigger\'s destination (AGT-335)', async () => {
+test('an event firing whose send never arrived leaves a notice in its trigger\'s destination', async () => {
   const notices: Array<{ agentId: string; destination: JsonObject; text: string }> = [];
   const asked: string[] = [];
   const r = await rig({

@@ -188,7 +188,7 @@ export const createEventStream = (gateway: Gateway) => {
     // first stamped that failure with the second turn's id — falsely killing
     // a turn that was fine while the client waiting on the first one never
     // heard anything.
-    // A background task outlives the turn that started it (AGT-357), so its
+    // A background task outlives the turn that started it, so its
     // events are no turn's, least of all whichever one its conversation is
     // running when it ends.
     const current = event.type.startsWith('task.')

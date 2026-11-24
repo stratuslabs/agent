@@ -20,7 +20,7 @@ const DASHBOARD_PACKAGES = [CONTROL_API_PACKAGE, DASHBOARD_PACKAGE];
 
 /**
  * Offers the dashboard's missing packages. This command is the one place
- * they are offered (card 308): setup and the rest leave them alone, since
+ * they are offered: setup and the rest leave them alone, since
  * the control API binds a port and the person to ask is the one who just
  * asked for the dashboard. At this CLI's own version, as the provider
  * packages are: they ship in lockstep, and an unpinned install would put

@@ -58,7 +58,7 @@ test('the marker is the one word both notes tell the model to answer with when i
 
 test('the reply-optional note opens on answering, and says a question or request from anyone gets one', () => {
   // A wording that opened on "This may not need an answer" had models skip
-  // questions, a teammate agent's most of all (live check, card 601).
+  // questions, a teammate agent's most of all (live check).
   assert.match(REPLY_OPTIONAL_NOTE, /^This message was said to you\. Answer it as you normally would/);
   assert.ok(REPLY_OPTIONAL_NOTE.includes('a question or a request always gets an answer, whether a person or an agent sent it'));
   assert.ok(REPLY_OPTIONAL_NOTE.indexOf('answer') < REPLY_OPTIONAL_NOTE.indexOf(NO_REPLY_MARKER));
@@ -229,7 +229,7 @@ test('a reaction outside the set, or on a turn nobody asked for, is plain silenc
   assert.equal(latestTurnReaction(looked), undefined);
   assert.equal('reaction' in (looked.messages.at(-1) ?? {}), false);
 
-  // Card 1078 covers messages said to the agent; overheard chatter gets none.
+  // A reaction is for messages said to the agent; overheard chatter gets none.
   const overheard = new AgentRunner({ provider: decidingProvider(() => 'NO_REPLY thumbsup'), bus: new EventBus(), store: new InMemorySessionStore() });
   const heard = await overheard.run({ sessionId: 'b', agent: AGENT, userMessage: 'Dylan: Bea, nice', addressed: false });
   assert.equal(latestTurnReply(heard), undefined);

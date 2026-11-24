@@ -672,7 +672,7 @@ const userContent = (
   }
   return [
     ...(text.length > 0 ? [{ type: 'input_text' as const, text }] : []),
-    // An overheard message's images are labeled as its own (card 625).
+    // An overheard message's images are labeled as its own.
     ...(message.overheard === true ? [{ type: 'input_text' as const, text: OVERHEARD_IMAGES_NOTE }] : []),
     ...message.images.map((image) => imageInput(image, replayed)),
   ];

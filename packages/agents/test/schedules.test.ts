@@ -191,7 +191,7 @@ test('schedule.on sets an event trigger: a source, a parsed filter, and optional
     prompt: 'Codex reviewed your PR. Handle it.',
     quietHours: { from: '22:00', to: '07:00', timeZone: 'America/New_York' },
     maxPerHour: 6,
-    destination: { channel: 'slack', to: 'C0C1YV12SLC' },
+    destination: { channel: 'slack', to: 'C0EXAMPLE01' },
   }, session);
   assert.deepEqual(handle.created[0]?.cadence, {
     kind: 'event',
@@ -201,7 +201,7 @@ test('schedule.on sets an event trigger: a source, a parsed filter, and optional
     maxPerHour: 6,
   });
   assert.equal(handle.created[0]?.prompt, 'Codex reviewed your PR. Handle it.');
-  assert.deepEqual(handle.created[0]?.destination, { channel: 'slack', to: 'C0C1YV12SLC' });
+  assert.deepEqual(handle.created[0]?.destination, { channel: 'slack', to: 'C0EXAMPLE01' });
 
   await on.execute({ source: 'board', filter: { exact: { type: 'card.moved' } }, prompt: 'A card moved.' }, session);
   assert.deepEqual(handle.created[1]?.cadence, { kind: 'event', source: 'board', filter: { exact: { type: 'card.moved' } } });
@@ -644,7 +644,7 @@ test('message.read cuts a message the bookmarks crowded out only by what they to
   assert.ok(sent <= MESSAGE_READ_TEXT_BUDGET && sent > MESSAGE_READ_TEXT_BUDGET - 3, `sent ${sent}`);
 });
 
-// ---- images on the messages read (card 884) ---------------------------------
+// ---- images on the messages read --------------------------------------------
 
 type ReadImage = { mediaType: 'image/png'; data: string; name?: string };
 /**
@@ -874,7 +874,7 @@ test('message.send names its session as the speaker, at the label its words carr
   assert.deepEqual(sends[1]?.speaker, { sessionId: 'schedule:abc:2', trust: 'external' });
 });
 
-test('a failed send inside a firing names where its schedule reports, so the agent can retry there (AGT-335)', async () => {
+test('a failed send inside a firing names where its schedule reports, so the agent can retry there', async () => {
   const REPORT_THREAD = '1791400000.000100';
   const tool = createMessageSendTool(async (input) => {
     throw new Error(`slack: ${input.destination.to} has no thread ${input.thread ?? '-'}, so nothing was posted.`);
@@ -914,7 +914,7 @@ test('a failed send inside a firing names where its schedule reports, so the age
   assert.equal(ordinary?.message, 'slack: C-OTHER has no thread -, so nothing was posted.');
 });
 
-test('a firing whose schedule reports top-level is pointed at the conversation alone (AGT-335)', async () => {
+test('a firing whose schedule reports top-level is pointed at the conversation alone', async () => {
   const tool = createMessageSendTool(async () => {
     throw new Error('slack: ava\'s app is not a member of C-EXEC — invite it there before it can post.');
   }, { reportsTo: () => ({ channel: 'slack', to: 'C-ENG' }) });

@@ -158,9 +158,9 @@ test('a stop is recorded once, on an open row only, and the first stopper is kep
   const store = new SqliteTaskStore(await newDb());
   const task = newTask();
   store.claim(task, 3, T0);
-  assert.equal(store.recordStop(task.id, 'U3QRT6Q0Y', at(1)), true);
+  assert.equal(store.recordStop(task.id, 'U0EXAMPLE01', at(1)), true);
   assert.equal(store.recordStop(task.id, 'cli', at(2)), false);
-  assert.equal(store.get(task.id)?.stoppedBy, 'U3QRT6Q0Y');
+  assert.equal(store.get(task.id)?.stoppedBy, 'U0EXAMPLE01');
   const done = newTask();
   store.claim(done, 3, at(3));
   store.setStatus(done.id, 'completed', at(4));

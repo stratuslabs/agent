@@ -22,7 +22,7 @@ export interface ParsedHealthCommand {
   format: 'text' | 'json';
 }
 
-/** `stratus events`: what the running daemon's events port has been doing (card 590). */
+/** `stratus events`: what the running daemon's events port has been doing. */
 export interface ParsedEventsCommand {
   command: 'events';
   gateway?: string;

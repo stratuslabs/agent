@@ -152,7 +152,7 @@ export const turnReplyFor = (session: Pick<Session, 'messages'>, idempotencyKey:
 
 /**
  * The reaction a session's latest turn left instead of a reply
- * (`Message.reaction`, card 1078), or undefined. Read off the turn's last
+ * (`Message.reaction`), or undefined. Read off the turn's last
  * assistant message, the silence the runner records, and never past the
  * latest user message: an earlier turn's reaction is not this one's.
  */
@@ -317,7 +317,7 @@ export const turnMessageOf = (session: Pick<Session, 'messages'>): Message | und
 /**
  * A key the turn a message started is known by: its own, or else the first
  * of a dispatch it took in (`absorbedKeys`). A turn whose own message came
- * unkeyed and then took a keyed message in at a tool step (card 948) is a
+ * unkeyed and then took a keyed message in at a tool step is a
  * keyed work item all the same — a restart continues it rather than
  * failing it, and the key reads back its state (`workItemState`).
  */
@@ -407,9 +407,8 @@ export const promptTextOf = (
 ): string => {
   if (message.overheard !== true) {
     // Said to the agent, as written, and marked so when an overheard
-    // message comes before it in the same run (card 1034); a reply-optional
-    // one is told, when it is the turn's, that it may need nothing back
-    // (card 601).
+    // message comes before it in the same run; a reply-optional
+    // one is told, when it is the turn's, that it may need nothing back.
     const said = options.afterOverheard === true
       ? (message.content.length > 0 ? `${SAID_TO_YOU_MARK}\n${message.content}` : SAID_TO_YOU_MARK)
       : message.content;
@@ -428,7 +427,7 @@ export const promptTextOf = (
 /**
  * What a message said to the agent starts with when an overheard message
  * comes before it in the same run of user messages
- * (`PromptTextOptions.afterOverheard`, card 1034).
+ * (`PromptTextOptions.afterOverheard`).
  *
  * Such a run reaches the model as one turn: the Anthropic API path merges
  * consecutive user messages into one user turn of several blocks, and the
@@ -448,7 +447,7 @@ export const SAID_TO_YOU_MARK = '(said to you)';
 /**
  * The messages said to the agent that an overheard message comes before
  * in their run of user messages: the ones `promptTextOf` renders with
- * `afterOverheard` (card 1034).
+ * `afterOverheard`.
  *
  * A run is what a prompt hands the model as one turn. A reply ends it, and
  * so does a tool call or result; a system message and the empty reply a
@@ -504,7 +503,7 @@ export const isUnaddressedTurn = (session: Pick<Session, 'messages'>): boolean =
 /**
  * Whether the turn a session is on may end without a reply: one nobody
  * asked for (`isUnaddressedTurn`), or one whose message was said to the
- * agent but may need no answer (`Message.replyOptional`, card 601). The
+ * agent but may need no answer (`Message.replyOptional`). The
  * rule every provider's empty answer is judged by, and the only turn on
  * which an answer of exactly `NO_REPLY_MARKER` is silence.
  */
@@ -514,8 +513,8 @@ export const isReplyOptionalTurn = (session: Pick<Session, 'messages'>): boolean
 };
 
 /**
- * The reactions a reply-optional turn may leave instead of a reply
- * (card 1078): `NO_REPLY_MARKER` followed by one of these names puts it
+ * The reactions a reply-optional turn may leave instead of a reply:
+ * `NO_REPLY_MARKER` followed by one of these names puts it
  * on the message the turn was on, where the channel can. Fixed and small
  * on purpose, and without an "on it" or "thinking" face: the turn ends
  * silent, so a reaction promising work that never follows would mislead.
@@ -621,15 +620,15 @@ export interface PromptTextOptions {
    * Whether an overheard message comes before this one in its run of user
    * messages (`messagesAfterOverheard`). A message said to the agent then
    * starts with `SAID_TO_YOU_MARK`, so the frame of the overheard one
-   * before it is not read as its own (card 1034). Ignored on an overheard
+   * before it is not read as its own. Ignored on an overheard
    * message.
    */
   afterOverheard?: boolean;
 }
 
 /**
- * The whole answer a turn that may stay quiet gives to say nothing
- * (card 601). Silence itself is not dependable: the Claude Agent SDK's
+ * The whole answer a turn that may stay quiet gives to say nothing.
+ * Silence itself is not dependable: the Claude Agent SDK's
  * query loop answers a response with no visible text by asking the model
  * once more to produce some ("Your previous response had no visible
  * output…"), and the model then explains, in the thread, why it is not
@@ -641,7 +640,7 @@ export const NO_REPLY_MARKER = 'NO_REPLY';
 
 /**
  * What a reply-optional turn is told, after the message it is on
- * (`Message.replyOptional`, card 601). Unlike `UNADDRESSED_TURN_NOTE`, the
+ * (`Message.replyOptional`). Unlike `UNADDRESSED_TURN_NOTE`, the
  * message was said to the agent, so the note leans toward answering: only
  * a message that needs nothing back may get nothing. In the message for the
  * same reason as that note: a harness holding its own history takes only

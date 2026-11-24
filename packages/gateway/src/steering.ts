@@ -1,5 +1,5 @@
 /*
- * What a running turn takes in at its next tool step (card 948): the merged
+ * What a running turn takes in at its next tool step: the merged
  * batch waiting behind it. Moved out of `createGateway` in index.ts as is:
  * the statement is unchanged, inside a factory that takes what it closed
  * over there, and `createGateway` calls it where it was. The one kind of
@@ -45,7 +45,7 @@ export const createSteering = ({
   archivedRepeat,
 }: SteeringDeps) => {
   /**
-   * What a running turn takes in at its next tool step (card 948): the
+   * What a running turn takes in at its next tool step: the
    * merged-turn batch waiting behind it, whole — leader and absorbed alike
    * — when it is for the same agent. The dispatches it takes join `into`,
    * which the running turn settles with its own outcome (`runSteerable`).

@@ -136,8 +136,8 @@ export const createMessageSendTool = (
 });
 
 /**
- * A firing's failed send, told where its schedule reports (AGT-335). Quinn's
- * one-shot sent to the wrong channel, got "has no thread", and ended
+ * A firing's failed send, told where its schedule reports. A one-shot
+ * once sent to the wrong channel, got "has no thread", and ended
  * without trying its own destination, which the error never named. A send
  * that already went exactly there failed for some other reason, so the
  * error is left as the channel wrote it.
@@ -161,7 +161,7 @@ const withReportHint = (
  * The sentence a firing's failed or refused send ends with: where its
  * schedule reports, thread included. One wording for the channel's
  * rejection (above) and the policy's refusal, which the host appends
- * because a refusal happens before this tool runs (AGT-336).
+ * because a refusal happens before this tool runs.
  */
 export const reportsToHint = (reportsTo: ScheduleDestination): string =>
   `This scheduled run reports to ${canonicalDestination(reportsTo)}`
@@ -169,7 +169,7 @@ export const reportsToHint = (reportsTo: ScheduleDestination): string =>
 
 export const MESSAGE_SAY_TOOL_NAME = 'message.say';
 
-/** The most a mid-task message may say: one line, not a report (card 1009). */
+/** The most a mid-task message may say: one line, not a report. */
 export const MESSAGE_SAY_MAX_LENGTH = 500;
 
 /**
@@ -183,7 +183,7 @@ export type ConversationSayer = (input: { session: Session; text: string }) => P
 
 /**
  * A mid-task message to the person the agent is working for, in the
- * conversation it is already replying in (card 1009). Slack holds the
+ * conversation it is already replying in. Slack holds the
  * words a model writes between tool calls, so this is how an agent says
  * something before its reply on purpose: a question only the person can
  * answer, or news they would want before it finishes.

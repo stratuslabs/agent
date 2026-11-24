@@ -265,7 +265,7 @@ export const createInteractions = ({
    * this a button with the same two on any other message the app posted
    * would settle the request when an approver clicked it. Nothing posts
    * one today: a tool's post has its buttons renamed (`sanitizePostBlocks`).
-   * This holds even if that ever changes (AGT-324).
+   * This holds even if that ever changes.
    */
   const fromPrompt = (post: { channel: string; ts: string }, args: SlackSocketEventArgs): boolean =>
     args.body?.message?.ts === post.ts && args.body?.channel?.id === post.channel;

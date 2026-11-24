@@ -219,7 +219,7 @@ const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
  * deliverable arrives whole and a blocker is always said.
  *
  * A task that needs tools opens with one line saying what the agent is
- * about to do (card 950). Models call tools before they write anything, so
+ * about to do. Models call tools before they write anything, so
  * the first post on a long task was a step already finished, and the person
  * learned what the agent had set out to do only from its results. A channel
  * posts the words written before a tool call as they happen, so the first

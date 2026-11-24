@@ -352,7 +352,7 @@ export const runSetup = async (
    *
    * The dashboard is deliberately not offered here: its control API binds a
    * port, and the time to ask about that is when someone runs
-   * `stratus dashboard`, which offers its own packages (card 308).
+   * `stratus dashboard`, which offers its own packages.
    * Declining is a real answer and prints the command.
    *
    * Installed at this CLI's own version, as the providers are: the packages
@@ -559,7 +559,7 @@ export const runSetup = async (
     }
     if (state.channelsDirty || state.pluginChannelEdits.length > 0) {
       // Once every channel's secrets are written: a running daemon reloads
-      // each channel that can (card 894), and the rest wait for its next
+      // each channel that can, and the rest wait for its next
       // start, as they do with no daemon.
       const reload = await reloadRunningDaemonChannels(env);
       const answered = reload !== undefined && 'base' in reload ? reload : undefined;

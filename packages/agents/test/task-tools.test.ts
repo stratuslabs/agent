@@ -15,7 +15,7 @@ import {
   type TaskToolsHost,
 } from '../src/index.ts';
 
-// AGT-357: the agent's own view of its background tasks, and its way to
+// The agent's own view of its background tasks, and its way to
 // stop one. The host (the gateway) owns the table and the cancel; these
 // tools scope every call to the calling agent and say what happened.
 

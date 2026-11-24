@@ -168,7 +168,7 @@ export const runSchedules = async (
       ? `  →  ${canonicalDestination(record.destination)}${record.destination.thread ? ` (thread ${record.destination.thread})` : ''}`
       : '';
     writeLine(streams.stdout, `${record.id}  [${record.agentId}]  ${describeCadence(record.cadence)}${destination}`);
-    // An event trigger has no slot by design (card 590); only a one-shot
+    // An event trigger has no slot by design; only a one-shot
     // without one is spent.
     const next = record.cadence.kind === 'event'
       ? `when a ${record.cadence.source} event matches`

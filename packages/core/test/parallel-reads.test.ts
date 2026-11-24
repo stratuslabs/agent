@@ -20,7 +20,7 @@ import {
 } from '../src/index.ts';
 
 /**
- * Card 956: a response's read-only calls run together. Every gate below is
+ * A response's read-only calls run together. Every gate below is
  * a count of event-loop turns, never a clock, and each has a way to lose:
  * a runner that still ran these calls one at a time reaches the end of the
  * count with the other call not started, and the assertion fails rather

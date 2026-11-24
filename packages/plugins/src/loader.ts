@@ -331,7 +331,7 @@ export interface LoadPluginsOptions {
    */
   providerCallGuards?: ProviderCallGuard[];
   /**
-   * The host's event triggers, for plugins that feed events (card 590).
+   * The host's event triggers, for plugins that feed events.
    * Given, every plugin's `setup` receives `PluginContext.events`, bound to
    * the sources its manifest declares. Omitted, no plugin is handed it.
    */

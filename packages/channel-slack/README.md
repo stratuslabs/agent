@@ -70,7 +70,7 @@ they are the whole model:
    messages that name it, and hears the rest. One with `listens: judge`
    hears everything and runs a turn nobody asked for, told it may answer
    with nothing, on each untagged message that is its own by rule 4: the
-   agent the sender last named, else the thread's owner (card 541). There
+   agent the sender last named, else the thread's owner. There
    is no window: an owner an hour past its last answer still takes an
    untagged instruction in its thread, and only one agent takes each
    message. A judged turn reads the message's images and text files as an

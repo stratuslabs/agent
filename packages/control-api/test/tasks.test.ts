@@ -6,7 +6,7 @@ import { fleetDbPath } from '@stratusagent/state';
 
 import { startApi, type Harness } from './harness.ts';
 
-// AGT-357 PR 4: background tasks over the control API. The rows are written
+// Background tasks over the control API. The rows are written
 // straight into the daemon's fleet.db after it started, so the restart sweep
 // has already run and leaves them alone; what a cancel does to a running
 // worker is the gateway's own suite's (test/background-tasks.test.ts).

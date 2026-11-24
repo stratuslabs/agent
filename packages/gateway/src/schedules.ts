@@ -66,7 +66,7 @@ export interface SqliteScheduleStoreOptions {
  * Open `fleet.db` the way every store sharing it must: the derived-path
  * check, an owner-only directory and file, WAL with a busy timeout, then
  * `schema`, then the sidecars tightened. One implementation, because the
- * schedule store and the event store (card 590) each hold their own
+ * schedule store and the event store each hold their own
  * connection to this file, and a second copy of this sequence is the one
  * that drifts.
  */
@@ -200,8 +200,8 @@ export const utf8Prefix = (text: string, bytes: number): string => {
 };
 
 /**
- * What the next firing of a schedule reads from the one before it (card
- * 858), from the gateway's session store: the status, the stopped-early
+ * What the next firing of a schedule reads from the one before it,
+ * from the gateway's session store: the status, the stopped-early
  * marker, the latest reply and the label that reply carries. Never the
  * transcript.
  */
@@ -325,8 +325,9 @@ export const sendOutcome = (
 };
 
 /**
- * AGT-335's question alone: the failed send's error when `sendOutcome` is
- * `failed`, otherwise undefined. Kept for importers from before AGT-353.
+ * Whether a firing's send failed, alone: the failed send's error when
+ * `sendOutcome` is `failed`, otherwise undefined. Kept for importers from
+ * before `sendOutcome`.
  */
 export const undeliveredSendError = (
   session: { status: SessionStatus; messages: readonly Message[] },
@@ -417,7 +418,7 @@ export interface SchedulerRuntimeOptions {
     idempotencyKey?: string;
   }): Promise<unknown>;
   /**
-   * Event triggers (card 590): the store their firings wait in, and the
+   * Event triggers: the store their firings wait in, and the
    * sources the operator configured. Without it, an `event` cadence is
    * refused at creation: a trigger nothing can deliver to never fires.
    */
@@ -434,7 +435,7 @@ export interface SchedulerRuntimeOptions {
   sessionStatus(sessionId: string): Promise<string | undefined>;
   /**
    * The session a schedule's previous firing ran in, or undefined when it
-   * doesn't exist (card 858). Read when the next firing of an `every` or
+   * doesn't exist. Read when the next firing of an `every` or
    * `cron` schedule is claimed: a run that stopped early is that firing's
    * checkpoint, and a run still going holds the slot back. Without it,
    * every firing starts from its prompt alone, as before.
@@ -444,14 +445,14 @@ export interface SchedulerRuntimeOptions {
    * Once a firing with a destination has finished, how its sends ended
    * there (`sendOutcome`), read from the gateway's session store, and only
    * for a run that completed. `failed` is posted as a notice through
-   * `notify` (AGT-335); `none` is a warning in the log (AGT-353). An event
+   * `notify`; `none` is a warning in the log. An event
    * firing passes its batch key, so only its own turn of the shared
    * session counts. Without it, `undeliveredSend` answers the first
    * question alone, and a run that never posted goes unsaid.
    */
   sendOutcome?(sessionId: string, destination: ScheduleDestination, idempotencyKey?: string): Promise<SendOutcome | undefined>;
   /**
-   * AGT-335: what a finished firing's sends left undelivered
+   * What a finished firing's sends left undelivered
    * (`undeliveredSendError`). Read only when `sendOutcome` is absent.
    * Without either, or without `notify`, a report that never arrived goes
    * unsaid, as before.
@@ -550,7 +551,7 @@ export interface SchedulerRuntime {
   /**
    * Where a live firing's approval may be asked when its channel has no
    * approval channel of its own: the destination its schedule was approved
-   * with, thread included (card 218). Bound exactly as `isPreauthorized`
+   * with, thread included. Bound exactly as `isPreauthorized`
    * is, so metadata alone never steers a prompt into a conversation.
    */
   approvalDestinationFor(session: Session): ScheduleDestination | undefined;
@@ -589,7 +590,7 @@ export interface SchedulerRuntime {
 
 type StoppedRun = PreviousRun & { stoppedEarly: SessionStoppedEarly };
 
-/** What one firing carries from the run before it (card 858). */
+/** What one firing carries from the run before it. */
 interface ResumePlan {
   /** Runs in a row that stopped early, as of this claim. */
   streak: number;
@@ -642,7 +643,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   const activeFirings = new Set<string>();
 
   /**
-   * The outcome source: `sendOutcome`, or AGT-335's `undeliveredSend` for
+   * The outcome source: `sendOutcome`, or the older `undeliveredSend` for
    * a host that wires only that one, which can't tell `none` from `reached`.
    */
   const outcomeOf = async (
@@ -658,9 +659,9 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   };
 
   /**
-   * AGT-335: a firing that tried to report and never got through says so
+   * A firing that tried to report and never got through says so
    * in its destination, instead of ending "completed" with nobody told.
-   * AGT-353: one that never posted there at all is a warning in the log,
+   * One that never posted there at all is a warning in the log,
    * nothing more: a run that posts only when it has news is allowed to
    * stay quiet, but a report that was expected and never came now leaves
    * a trace. Read from the row as it is now, and again after the session
@@ -857,7 +858,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   };
 
   /**
-   * Card 858: a readiness check that failed after an await inside a scan.
+   * A readiness check that failed after an await inside a scan.
    * Carries the reason out to `tick`, which treats it like the check at the
    * top of the tick: the scheduler stops, and at start the failure is
    * `start()`'s rejection.
@@ -887,7 +888,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
 
   /**
    * What the firing about to be claimed carries from the one in
-   * `lastSessionId` (card 858): `'defer'` while that run is still going (a
+   * `lastSessionId`: `'defer'` while that run is still going (a
    * schedule never claims past a run whose outcome it hasn't read, or that
    * run's summary is lost and the streak breaks), otherwise the new streak
    * and the stopped run to resume from, if any. Undefined when the daemon
@@ -1059,7 +1060,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     }
     deferralsWarned.delete(`${record.id}:${slot}`);
 
-    // Card 858: what this firing carries from the one before it. Read here,
+    // What this firing carries from the one before it. Read here,
     // at the claim, so a daemon killed after a wrap-up still leaves the
     // stopped session for this read; it's the one copy of the checkpoint.
     let plan: ResumePlan | undefined;
@@ -1163,7 +1164,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     void firing.finally(() => inflight.delete(firing));
   };
 
-  // ---- event triggers (card 590) ------------------------------------------
+  // ---- event triggers -----------------------------------------------------
 
   let started = false;
   /** When the event tables were last pruned; unset until the first pass after start. */

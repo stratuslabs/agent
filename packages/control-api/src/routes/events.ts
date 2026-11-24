@@ -5,7 +5,7 @@ import type { Route } from '../routes.ts';
 const MAX_EVENT_DELIVERIES_LISTED = 1_000;
 
 export const eventRoutes: Route[] = [
-  // ---- events (card 590) ---------------------------------------------------
+  // ---- events --------------------------------------------------------------
   // Read-only views of the events port's work, for `stratus events` and a
   // dashboard. Under the operator's token like every route here: a delivery
   // row names who sent what (never the body). The delivery path itself is

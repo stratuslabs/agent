@@ -91,7 +91,7 @@ test('a turn dispatched unaddressed stores its message overheard, is told so, an
   assert.equal(defaulted.messages.findLast((message) => message.role === 'user')?.overheard, undefined);
 });
 
-test('a turn nobody asked for carries its images, stored with the overheard message, and may still end in silence (card 625)', async () => {
+test('a turn nobody asked for carries its images, stored with the overheard message, and may still end in silence', async () => {
   // The providers render an overheard message's images after its framed
   // text (OVERHEARD_IMAGES_NOTE), so the kernel no longer refuses them.
   const provider = decidingProvider(() => '');

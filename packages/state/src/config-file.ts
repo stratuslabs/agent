@@ -774,7 +774,7 @@ const parseApprovalRoute = (raw: unknown, configPath: string, where: string): Ag
     // silent drop reads as a daemon that ignores its config.
     if (!Array.isArray(source.commands) || source.commands.some((entry) => typeof entry !== 'string')) {
       throw new Error(
-        `Invalid ${where}.commands in config ${configPath}: expected a list of commands like ["agentboard", "pnpm test"].`,
+        `Invalid ${where}.commands in config ${configPath}: expected a list of commands like ["gh pr", "pnpm test"].`,
       );
     }
     route.commands = (source.commands as string[]).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
@@ -1216,7 +1216,7 @@ export const resolveAgentSlack = (
     replies: slack?.agents?.[agentId]?.replies ?? slack?.replies ?? 'final',
     linkPreviews: slack?.agents?.[agentId]?.linkPreviews ?? slack?.linkPreviews ?? true,
     homeChannels: slack?.agents?.[agentId]?.homeChannels ?? [],
-    // Off unless someone turned it on (card 513).
+    // Off unless someone turned it on.
     agentMentions: slack?.agents?.[agentId]?.agentMentions ?? slack?.agentMentions ?? false,
     ...(agentMentionsFrom !== undefined ? { agentMentionsFrom } : {}),
   };

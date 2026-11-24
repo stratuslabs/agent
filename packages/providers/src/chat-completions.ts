@@ -627,7 +627,7 @@ const createOpenAICompatibleMessages = (
 
   const transcript = transcriptOf(request);
   const latest = latestUserMessageOf(transcript);
-  // Marked as said to the agent after an overheard message (card 1034).
+  // Marked as said to the agent after an overheard message.
   const afterOverheard = messagesAfterOverheard(transcript);
   // Images tool calls returned, held until the run of tool messages ends:
   // a chat-completions tool message is text only, and every call of an
@@ -732,7 +732,7 @@ const userContentParts = (
   }
   return [
     ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
-    // An overheard message's images are labeled as its own (card 625).
+    // An overheard message's images are labeled as its own.
     ...(message.overheard === true ? [{ type: 'text' as const, text: OVERHEARD_IMAGES_NOTE }] : []),
     ...message.images.map((image) => (replayed.has(image)
       ? { type: 'image_url' as const, image_url: { url: `data:${image.mediaType};base64,${image.data}` } }

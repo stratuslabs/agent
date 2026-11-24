@@ -2883,11 +2883,11 @@ test('the grants listing carries the commands this daemon\'s config allows', asy
   const store = createFileCommandWhitelist({ directory, stateHome: path.dirname(directory) });
   const harness = await startApi({
     home,
-    options: { grants: store, configCommands: (agentId: string) => (agentId === 'stratus' ? ['agentboard', 'pnpm test'] : ['agentboard']) },
+    options: { grants: store, configCommands: (agentId: string) => (agentId === 'stratus' ? ['tracker', 'pnpm test'] : ['tracker']) },
   });
   try {
     const listed = await json<{ configCommands: string[] }>(await harness.call('/api/v1/agents/stratus/grants'));
-    assert.deepEqual(listed.configCommands, ['agentboard', 'pnpm test']);
+    assert.deepEqual(listed.configCommands, ['tracker', 'pnpm test']);
   } finally {
     await harness.stop();
   }

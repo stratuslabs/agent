@@ -85,7 +85,7 @@ export const createUnrenderedOutcomes = ({
     let published = true;
     for (const chunk of chunks) {
       try {
-        // A part that tags another agent carries the whole reply (card 1033).
+        // A part that tags another agent carries the whole reply.
         const full = whole !== undefined && chunks.length > 1 && await tagsAnAgent(connection, chunk) ? whole : undefined;
         await postPart(connection.web, { channel, thread, text: chunk, whole: full }, warn);
       } catch (error) {
@@ -167,7 +167,7 @@ export const createUnrenderedOutcomes = ({
     behind: HandoverClaim | undefined,
     files: ReadonlyArray<string | ToolPost>,
   ): Promise<ReportedOutcome> => {
-    // A turn no renderer here was showing (card 501) that a Slack stop
+    // A turn no renderer here was showing that a Slack stop
     // aborted fails with the stop's own reason, so who stopped it is read
     // from the failure itself rather than from a note an outcome may never
     // come to clear.

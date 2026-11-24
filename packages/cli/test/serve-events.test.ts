@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 
 import { gatewayEventOptions } from '../src/commands/serve.ts';
 
-// Card 590 phase 2: a daemon whose only event sources are plugins' still
+// A daemon whose only event sources are plugins' still
 // holds their events to the operator's `events.maxBodyBytes`.
 
 test('the events block reaches the gateway when it sets a body limit, even with no webhook source', () => {

@@ -274,7 +274,7 @@ import {
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
 /**
- * The longest one turn may run before it is stopped (AGT-371). Long enough
+ * The longest one turn may run before it is stopped. Long enough
  * for real work (a coding turn that spends its whole step budget on builds
  * and tests), short enough that a turn stuck where the idle watchdog can't
  * see it (a provider that doesn't stream, a tool that never returns, an
@@ -403,7 +403,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // schedule store's own connection (see its docs for why).
   const scheduleStore = new SqliteScheduleStore(fleetDbIn(stateDir), { stateHome: stateDir });
 
-  // ---- events (card 590) ---------------------------------------------------
+  // ---- events --------------------------------------------------------------
 
   // Opened for the first source, so a daemon that never takes events never
   // grows the tables: at construction for the config's sources, or when the
@@ -519,7 +519,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await outboundFor(agentId, destination);
     },
     sessionStatus: async (sessionId) => (await store.get(sessionId))?.status,
-    // Card 858: the previous firing, for the next one's checkpoint. The
+    // The previous firing, for the next one's checkpoint. The
     // reply and its label, never the transcript.
     previousRun: async (sessionId) => {
       const session = await store.get(sessionId);
@@ -534,7 +534,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         trust: sessionWriteTrust(session),
       };
     },
-    // AGT-335 and AGT-353: how a completed firing's sends ended at its
+    // How a completed firing's sends ended at its
     // destination. Tool results only, never the transcript's words.
     sendOutcome: async (sessionId, destination, idempotencyKey) => {
       const session = await store.get(sessionId);
@@ -660,9 +660,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     : options.approvals;
 
   /**
-   * A live firing's refused message.send, told where its schedule reports
-   * (AGT-336). The policy refuses before the tool runs, so the tool's own
-   * hint for a send the channel rejected (AGT-335) never sees it, and a
+   * A live firing's refused message.send, told where its schedule reports.
+   * The policy refuses before the tool runs, so the tool's own
+   * hint for a send the channel rejected never sees it, and a
    * headless refusal alone leaves the agent nowhere to retry. Only the
    * agent's words change: the policy has already reported its decision in
    * its own words, so the log and `permission.decided` read as before. A
@@ -1247,7 +1247,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     reportsTo: (session) => scheduler.approvalDestinationFor(session),
   }));
   // A mid-task message goes where the conversation is, through the channel
-  // carrying this agent there, and nowhere else (card 1009). A session no
+  // carrying this agent there, and nowhere else. A session no
   // channel started (a terminal run, a schedule nobody watches) has nobody
   // to say it to before the reply.
   tools.register(createMessageSayTool(async ({ session, text }) => {
@@ -1468,7 +1468,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
 
 
-  // Background tasks (AGT-211): started only when `tasks.enabled`; the
+  // Background tasks: started only when `tasks.enabled`; the
   // restart sweep runs either way. Everything they reach is declared
   // further down: late-bound.
   const backgroundTasks = createBackgroundTasks({
@@ -1723,7 +1723,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       && providerContributions.get(registeredProviderNameOf(config.provider))?.streams === true);
 
   /**
-   * A turn's time limit (AGT-371), on the controller that stops the turn,
+   * A turn's time limit, on the controller that stops the turn,
    * until the returned dispose runs. Wall clock, not progress, so it ends
    * what the idle watchdog can't see: a provider that doesn't stream, a
    * tool that never returns. Its clock stops while the turn has a request
@@ -1912,7 +1912,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // actually the thing being waited on (never during tool phases,
     // post-switch silent fallbacks, or turn wrap-up).
     // A background task's start or end names the conversation that started
-    // it (AGT-357), but it isn't this turn's provider doing anything: heard
+    // it, but it isn't this turn's provider doing anything: heard
     // as activity, every task ending would give a stalled provider a fresh
     // window. Both subscriptions pass it by.
     const unsubscribeObserver = bus.subscribe((event: StratusEvent) => {
@@ -2020,7 +2020,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * Work queued on each session's chain that has not started, of every
    * kind (a dispatch, an overheard message, a recovery). What says whether
    * a merged-turn batch is first in line behind the running turn, which
-   * steering needs (card 948): a batch with anything ahead of it would be
+   * steering needs: a batch with anything ahead of it would be
    * answered before what was said first.
    */
   const queuedWork = new Map<string, number>();
@@ -2191,7 +2191,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // for a turn nobody asked for, which `holdsMessage` does not count.
   const liveWorkItems = new Map<string, Map<string, { turn: Promise<Session>; agentId: string | undefined; confirmed: boolean; addressed: boolean }>>();
   /**
-   * The merged turn still taking messages, per session (card 423): led by
+   * The merged turn still taking messages, per session: led by
    * the first opted-in dispatch that queued behind a running turn, closed
    * the moment that dispatch reaches the head of the chain. See
    * `DispatchInput.onAbsorbed`.
@@ -2323,7 +2323,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (error instanceof RunAbortedError && error.resumable) {
         const left = await store.get(input.sessionId).catch(() => undefined);
         // The dispatch's own key, or, for an unkeyed one whose turn took
-        // keyed messages in at a tool step (card 948), the key the turn has
+        // keyed messages in at a tool step, the key the turn has
         // from them: its steered callers are told what a keyed caller is.
         const key = input.idempotencyKey ?? (left === undefined ? undefined : turnKeyOf(turnMessageOf(left)));
         if (left !== undefined && key !== undefined && workItemState(left, key) === 'unfinished' && leftForNextStart(left, error)) {
@@ -2777,7 +2777,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     // Heard after the batch waiting on this session opened, so anything
     // said after it must not be answered ahead of it: the batch takes no
-    // more, and a later message leads the next one (card 423).
+    // more, and a later message leads the next one.
     openBatches.delete(input.sessionId);
     return onSessionChain(input.sessionId, async () => {
       assertStateCompatible(env);
@@ -3612,7 +3612,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // placeholder by a process that died before saving its reply). It is
       // a new gateway seam, and it has to be ordered against the overhears
       // queued on the same session chain, so it is not built yet.
-      // A post a tool handed the thread (`postOf`, AGT-324) is speaking the
+      // A post a tool handed the thread (`postOf`) is speaking the
       // same way a file is.
       const spoken = (message: Message): boolean =>
         (message.role === 'assistant' && message.content.trim().length > 0)

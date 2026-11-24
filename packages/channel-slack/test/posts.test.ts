@@ -6,7 +6,7 @@ import type { JsonValue } from '@stratusagent/core';
 import { neutralizeMentions, sanitizePostBlocks } from '../src/posts.ts';
 
 // What `@chat-adapter/slack` 4.44.0's `cardToBlockKit` made of a json-render
-// card on Nov 7, 2026 (agent-plans research/json-render/chat), trimmed.
+// card on Nov 7, 2026, trimmed.
 const CARD: JsonValue[] = [
   { type: 'header', text: { type: 'plain_text', text: 'Stratus repos, last 7 days', emoji: true } },
   { type: 'context', elements: [{ type: 'mrkdwn', text: 'Live from GitHub at 01:10Z Nov 7' }] },

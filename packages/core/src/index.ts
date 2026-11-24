@@ -85,7 +85,7 @@ export interface Message {
   /**
    * A user message said to the agent that may need no answer: a
    * teammate agent's tagged report, a person's untagged follow-up in a
-   * thread the agent holds (card 601). Dispatched with
+   * thread the agent holds. Dispatched with
    * `RunInput.replyOptional`; never set beside `overheard`, which already
    * lets a turn end in silence. Rendered as said, followed on the newest
    * message by `REPLY_OPTIONAL_NOTE`. Present only when true; an older
@@ -93,8 +93,8 @@ export interface Message {
    */
   replyOptional?: boolean;
   /**
-   * On the empty assistant message a reply-optional turn's silence leaves
-   * (card 1078): the reaction the model named with `NO_REPLY_MARKER`, one
+   * On the empty assistant message a reply-optional turn's silence leaves:
+   * the reaction the model named with `NO_REPLY_MARKER`, one
    * of `SILENT_REACTIONS`, for the channel to put on the message the turn
    * was on. Recorded only on a turn whose message was said to the agent
    * (`replyOptional`), never on an overheard one. Present only when named;
@@ -119,7 +119,7 @@ export interface Message {
   /**
    * The keys of dispatches folded into this message's turn: messages that
    * queued behind a running turn and are answered together with this one,
-   * in one user message (card 423). Every key reader matches these as it
+   * in one user message. Every key reader matches these as it
    * matches `idempotencyKey` (`carriesKey`), so a repeat of an absorbed
    * dispatch is the merged turn, never a second one. Present only when
    * something was absorbed. A turn that took a message at a tool step
@@ -129,7 +129,7 @@ export interface Message {
   absorbedKeys?: string[];
   /**
    * A user message that reached a turn already running, at its next tool
-   * step (card 948): somebody wrote while the agent worked, and it read
+   * step: somebody wrote while the agent worked, and it read
    * that before its next call instead of after its whole turn. It starts
    * no turn. Its dispatches' keys are on the message the turn started on
    * (`absorbedKeys`), so every key reader finds the turn they joined, and

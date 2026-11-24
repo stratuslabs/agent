@@ -50,7 +50,7 @@ const startSaying = async (channel: GatewayChannelAdapter) => {
 const sayResult = (session: { messages: Array<{ role: string; toolResult?: { ok: boolean; output: unknown; error?: string } }> }) =>
   session.messages.find((message) => message.role === 'tool')?.toolResult;
 
-test('message.say reaches the channel that carries the conversation, for that session and agent (card 1009)', async () => {
+test('message.say reaches the channel that carries the conversation, for that session and agent', async () => {
   const said: SayRequest[] = [];
   const gateway = await startSaying({
     name: 'slack',

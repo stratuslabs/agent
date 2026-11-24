@@ -214,7 +214,7 @@ export const createDispatch = ({
       return attach();
     }
 
-    // Merged turns (card 423): an opted-in message behind a running turn
+    // Merged turns: an opted-in message behind a running turn
     // joins the batch already waiting, if there is one for the same agent.
     const mergeable = input.onAbsorbed !== undefined && input.addressed !== false;
     const open = openBatches.get(input.sessionId);
@@ -284,7 +284,7 @@ export const createDispatch = ({
     };
 
     /**
-     * This dispatch's turn with the messages it absorbed (card 423). Each
+     * This dispatch's turn with the messages it absorbed. Each
      * part is judged on its own first, as it would have been alone: one
      * cancelled while it waited is refused, one that repeats a turn the
      * session already holds is that turn. What is left runs as one turn.
@@ -425,7 +425,7 @@ export const createDispatch = ({
       // the watchdog, `abortTurns` and a restart's window stop the turn
       // without touching its callers, and a batch taken into a turn stopped
       // while the store was read would share its failure instead of running
-      // next (card 959). The turn's signal follows the joint one, so this
+      // next. The turn's signal follows the joint one, so this
       // covers every caller giving up too.
       const steer = mergeable
         ? (turnSignal: AbortSignal): Promise<SteeredMessage | undefined> => takeSteered(input.sessionId, input.agentId, steered, (parts) => {

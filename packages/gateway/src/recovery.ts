@@ -72,7 +72,7 @@ export interface RecoveryDeps {
     fallbackStreams: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ) => Promise<T>;
-  /** A turn's time limit on its controller, until the returned dispose (AGT-371). */
+  /** A turn's time limit on its controller, until the returned dispose. */
   armTurnTimeLimit: (sessionId: string, agentId: string, controller: AbortController) => () => void;
   isStopping: () => boolean;
   trackTurn: (sessionId: string, controller: AbortController) => void;

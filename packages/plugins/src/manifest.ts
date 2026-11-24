@@ -72,8 +72,8 @@ export interface PluginContributions {
   /** Executor names `setup()` may register. */
   executors: PluginNamedDeclaration[];
   /**
-   * Event sources the plugin feeds through `PluginContext.events` (card
-   * 590): the ids an agent's `schedule.on` names. Not a registration: the
+   * Event sources the plugin feeds through `PluginContext.events`:
+   * the ids an agent's `schedule.on` names. Not a registration: the
    * declaration is the whole claim, checked against the config's own
    * sources and every other plugin's before the plugin's code runs.
    */

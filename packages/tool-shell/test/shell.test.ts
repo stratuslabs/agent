@@ -117,15 +117,15 @@ test('an agent\'s own env adds to the fleet\'s, and a null withholds a shared va
     {
       passEnv: [],
       env: { PATH: process.env.PATH ?? '/usr/bin:/bin', SHARED_TOKEN: 'fleet' },
-      agents: { blair: { env: { AGENTBOARD_TOKEN: 'blairs', SHARED_TOKEN: null } } },
+      agents: { blair: { env: { TRACKER_TOKEN: 'blairs', SHARED_TOKEN: null } } },
     },
     {},
   );
 
-  const blair = String((await runCommand(tools, 'echo "[$PATH][$AGENTBOARD_TOKEN][$SHARED_TOKEN]"', 'blair')).stdout).trim();
+  const blair = String((await runCommand(tools, 'echo "[$PATH][$TRACKER_TOKEN][$SHARED_TOKEN]"', 'blair')).stdout).trim();
   assert.equal(blair, `[${process.env.PATH ?? '/usr/bin:/bin'}][blairs][]`);
   // Another agent sees only the fleet's — never blair's token.
-  const ava = String((await runCommand(tools, 'echo "[$AGENTBOARD_TOKEN][$SHARED_TOKEN]"', 'ava')).stdout).trim();
+  const ava = String((await runCommand(tools, 'echo "[$TRACKER_TOKEN][$SHARED_TOKEN]"', 'ava')).stdout).trim();
   assert.equal(ava, '[][fleet]');
 
   // A null withholds a name forwarded from the daemon by passEnv too, not

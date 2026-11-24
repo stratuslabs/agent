@@ -15,7 +15,7 @@ import { createDelegateTool, DELEGATE_TOOL_NAME } from '@stratusagent/agents';
 import { createPermissionPolicy, type PermissionPolicyOptions } from '@stratusagent/permissions';
 
 /**
- * Card 967, with the daemon's own policy: `agent.delegate` after external
+ * With the daemon's own policy: `agent.delegate` after external
  * content is decided exactly like any other gated call. Headless, which is
  * what an installed service runs, refuses it; an open posture runs it,
  * unless the external-content gate is on for that agent.

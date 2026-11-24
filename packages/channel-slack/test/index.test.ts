@@ -238,7 +238,7 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
           ...(args.filename ? { filename: args.filename } : {}),
           contents: Buffer.isBuffer(args.file) ? args.file.toString('utf8') : String(args.file),
           wasBuffer: Buffer.isBuffer(args.file),
-          // A comment's upload is a reply part (card 1033), so where it went is recorded too.
+          // A comment's upload is a reply part, so where it went is recorded too.
           ...(args.initial_comment !== undefined ? { initial_comment: args.initial_comment, ...(args.thread_ts !== undefined ? { thread_ts: args.thread_ts } : {}) } : {}),
         });
         web.timeline.push(args.initial_comment ?? args.filename ?? '');
@@ -326,7 +326,7 @@ const sessionWithReply = (id: string, reply: string): Session => {
 
 interface StubGateway extends GatewayLike {
   dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string; images?: ImageAttachment[]; addressed?: boolean; earlier?: Array<{ message: string; metadata?: JsonObject }> }>;
-  /** The messages dispatched as reply-optional (card 601), in dispatch order. */
+  /** The messages dispatched as reply-optional, in dispatch order. */
   replyOptional: string[];
   /** What each agent heard without answering, in the order the gateway was asked. */
   observes: Array<{ sessionId: string; agentId?: string; message: string; metadata?: JsonObject }>;
@@ -573,7 +573,7 @@ test('the loading status comes back once an approval asked mid-turn is answered'
   assert.deepEqual(statuses.slice(before).map((status) => status.status), ['is thinking…']);
 });
 
-test('a post sent into the thread of a working turn puts that turn\'s loading status back (card 1009)', async () => {
+test('a post sent into the thread of a working turn puts that turn\'s loading status back', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C1', { is_member: true });
@@ -1655,7 +1655,7 @@ test('in a shared thread a mention gets the named agent\'s answer, and the same 
   });
 
   // …and Dylan's next untagged reply continues with Bea, whom he just
-  // addressed (card 541). Ava hears it.
+  // addressed. Ava hears it.
   const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
   await socketAva.deliver('message', afterHandover);
   await socketBea.deliver('message', afterHandover);
@@ -1704,12 +1704,12 @@ test('in a shared thread an untagged reply stays with the agent the thread belon
     event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> anything blocking?', ts: '950.2', thread_ts: '950.0', channel: 'C1' },
   });
   // Someone else's untagged reply after that is still Ava's: Sam never
-  // addressed Bea, and Bea, who spoke last, stays quiet (card 508).
+  // addressed Bea, and Bea, who spoke last, stays quiet.
   clock.at('950.3');
   const followUp = channelMessage({ text: 'ok, go ahead', ts: '950.3', thread: '950.0', user: 'U-SAM' });
   await socketAva.deliver('message', followUp);
   await socketBea.deliver('message', followUp);
-  // Dylan's own is Bea's: he addressed her last (card 541).
+  // Dylan's own is Bea's: he addressed her last.
   clock.at('950.4');
   const continued = channelMessage({ text: 'and after that?', ts: '950.4', thread: '950.0' });
   await socketAva.deliver('message', continued);
@@ -1867,7 +1867,7 @@ test('an agent in a shared thread hears what is said to the other one, and posts
     }),
   ]);
 
-  // Warm: the thread is still Ava's (card 508), so an untagged reply from
+  // Warm: the thread is still Ava's, so an untagged reply from
   // someone who has not addressed Bea is hers to answer and Bea's to hear.
   const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0', user: 'U-SAM' });
   await Promise.all([socketAva.deliver('message', afterHandover), socketBea.deliver('message', afterHandover)]);
@@ -2499,7 +2499,7 @@ test('an agent that listens to mentions answers only when named, and hears the r
   );
 });
 
-test('an agent that judges takes a turn nobody asked for on every untagged reply in a thread it owns, however long since it answered (card 541)', async () => {
+test('an agent that judges takes a turn nobody asked for on every untagged reply in a thread it owns, however long since it answered', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.knownConversations.set('C1', { is_member: true });
@@ -2538,7 +2538,7 @@ test('an agent that judges takes a turn nobody asked for on every untagged reply
   await socket.deliver('message', channelMessage({ text: 'still there?', ts: '980.5', thread: '980.0' }));
   await socket.deliver('message', channelMessage({ text: 'much later', ts: '4600.0', thread: '980.0' }));
   // A mention, then a message carrying a screenshot: a turn nobody asked
-  // for still sees it (card 625). The kernel frames the message, pixels
+  // for still sees it. The kernel frames the message, pixels
   // after the words, so judging is not blind to what was attached.
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> back?', ts: '4600.05', thread: '980.0' }));
   const withShot = channelMessage({ text: 'what about this', ts: '4600.1', thread: '980.0' });
@@ -2615,7 +2615,7 @@ test('a turn nobody asked for opens its placeholder on its first text, never on 
   // Turns that have returned. The gateway runs one turn of a session at a
   // time and the stub does not, so each message below waits for the turn
   // before it: two turns of one thread running at once is something the
-  // daemon never does, and a slow runner made this test do it (card 821).
+  // daemon never does, and a slow runner made this test do it.
   let ended = 0;
   const gateway = createStubGateway(async ({ sessionId, userMessage }) => {
     try {
@@ -2722,7 +2722,7 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   await socket.deliver('message', channelMessage({ text: '<@B-BEA> start', ts: '990.5', thread: '990.0' }));
   await socket.settled();
   // Dylan names Ava once: she answers, and the thread stays Bea's, but
-  // Dylan's untagged follow-ups are Ava's to judge (card 541).
+  // Dylan's untagged follow-ups are Ava's to judge.
   clock.at('991.5');
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> look at this', ts: '991.5', thread: '990.0' }));
   await socket.settled();
@@ -2803,7 +2803,7 @@ test('a turn nobody asked for whose placeholder opened but took no edit takes it
 
   // Bea answers first in this process, so it knows the thread is hers;
   // then Dylan names Ava, which makes his untagged follow-ups Ava's to
-  // judge (card 541) without moving the thread.
+  // judge without moving the thread.
   clock.at('1121.5');
   await socket.deliver('message', channelMessage({ text: '<@B-BEA> start', ts: '1121.5', thread: '1120.0' }));
   await socket.settled();
@@ -3084,7 +3084,7 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
     await Promise.all([socketAva.settled(), socketBea.settled()]);
   };
   // Bea answers first, so the thread is hers; then Dylan names Ava, so
-  // his untagged follow-ups are Ava's to judge (card 541).
+  // his untagged follow-ups are Ava's to judge.
   clock.at('1060.05');
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1060.05', thread: '1060.0' }));
   clock.at('1060.07');
@@ -3111,7 +3111,7 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   assert.deepEqual(of('ava'), ['Dylan: look', 'Dylan: say more', 'Dylan: help me', 'name-U-SAM: thanks']);
 });
 
-test('a judge that took the thread still holds it after many exchanges with a third agent (card 508)', async () => {
+test('a judge that took the thread still holds it after many exchanges with a third agent', async () => {
   const sockets = { a: createFakeSocket(), b: createFakeSocket(), c: createFakeSocket() };
   const webs = { a: createFakeWeb('B-AVA', 'T1'), b: createFakeWeb('B-BEA', 'T1'), c: createFakeWeb('B-CY', 'T1') };
   for (const web of Object.values(webs)) {
@@ -3157,7 +3157,7 @@ test('a judge that took the thread still holds it after many exchanges with a th
   const all = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([sockets.a.deliver('message', message), sockets.b.deliver('message', message), sockets.c.deliver('message', message)]);
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
-  // untagged follow-ups are Ava's to judge (card 541).
+  // untagged follow-ups are Ava's to judge.
   clock.at('1080.05');
   await all(channelMessage({ text: '<@B-BEA> start', ts: '1080.05', thread: '1080.0' }));
   clock.at('1080.07');
@@ -3255,7 +3255,7 @@ test('an untagged reply is for whoever\'s reply sits lowest in the thread, not f
   // the delivery wait. Only between gates, since a gated turn never ends.
   const settled = () => Promise.all([socketAva.settled(), socketBea.settled()]);
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
-  // untagged follow-ups are Ava's to judge (card 541), and Sam's are Bea's.
+  // untagged follow-ups are Ava's to judge, and Sam's are Bea's.
   clock.at('1070.05');
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1070.05', thread: '1070.0' }));
   await settled();
@@ -3344,7 +3344,7 @@ test('a judge whose reply sits above a colleague\'s placeholder does not take th
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
-  // untagged follow-ups are Ava's to judge (card 541), and Sam's are Bea's.
+  // untagged follow-ups are Ava's to judge, and Sam's are Bea's.
   clock.at('1080.05');
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1080.05', thread: '1080.0' }));
   clock.at('1080.07');
@@ -3437,7 +3437,7 @@ test('a judging agent that posts a file and says nothing has still spoken, for t
   // Dylan's, so Ava's to judge; she and answers with a file and
   // no words.
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
-  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // untagged follow-ups are Ava's to judge, and Sam's are
   // the owner's.
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1070.05', thread: '1070.0' }));
   await both(channelMessage({ text: '<@B-AVA> look', ts: '1070.07', thread: '1070.0' }));
@@ -3520,7 +3520,7 @@ test('a file sits where the share Slack answers with says, not where the clock d
   // Dylan's, so Ava's to judge; she and answers with a file and
   // no words.
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
-  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // untagged follow-ups are Ava's to judge, and Sam's are
   // the owner's.
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1070.05', thread: '1070.0' }));
   await both(channelMessage({ text: '<@B-AVA> look', ts: '1070.07', thread: '1070.0' }));
@@ -3596,7 +3596,7 @@ test('a judged turn whose file landed but whose words Slack refused has spoken, 
   const both = (message: ReturnType<typeof channelMessage>) =>
     Promise.all([socketAva.deliver('message', message), socketBea.deliver('message', message)]);
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
-  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // untagged follow-ups are Ava's to judge, and Sam's are
   // the owner's.
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1080.05', thread: '1080.0' }));
   await both(channelMessage({ text: '<@B-AVA> look', ts: '1080.07', thread: '1080.0' }));
@@ -3682,7 +3682,7 @@ test('a judged turn that posted a file and then failed has still spoken, for the
     await Promise.all([socketAva.settled(), socketBea.settled()]);
   };
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
-  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // untagged follow-ups are Ava's to judge, and Sam's are
   // the owner's.
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1100.05', thread: '1100.0' }));
   await both(channelMessage({ text: '<@B-AVA> look', ts: '1100.07', thread: '1100.0' }));
@@ -3763,7 +3763,7 @@ test('a judged turn whose streamed line landed but whose final edit Slack refuse
     await Promise.all([socketAva.settled(), socketBea.settled()]);
   };
   // Bea answers first, so the thread is hers; Dylan names Ava, so his
-  // untagged follow-ups are Ava's to judge (card 541), and Sam's are
+  // untagged follow-ups are Ava's to judge, and Sam's are
   // the owner's.
   await both(channelMessage({ text: '<@B-BEA> start', ts: '1110.05', thread: '1110.0' }));
   await both(channelMessage({ text: '<@B-AVA> look', ts: '1110.07', thread: '1110.0' }));
@@ -4013,7 +4013,7 @@ test('a lagging socket reaching an older mention does not change whose the threa
   await socketBea.deliver('message', channelMessage({ text: '<@B-AVA> look at this', ts: '970.1', thread: '970.0' }));
 
   // The untagged reply lands on Ava's socket while Bea's is still catching
-  // up. Dylan last addressed Bea (card 541), and the older mention of Ava
+  // up. Dylan last addressed Bea, and the older mention of Ava
   // that Bea's socket reached late did not undo that: Ava stands down.
   const followUp = channelMessage({ text: 'and?', ts: '970.3', thread: '970.0' });
   await socketAva.deliver('message', followUp);
@@ -4587,7 +4587,7 @@ test('file-bearing tool results upload their contents into the conversation', as
   assert.equal(web.updates.at(-1)?.text, 'here you go');
 });
 
-// ---- a tool's ready-made post (AGT-324) ------------------------------------
+// ---- a tool's ready-made post ----------------------------------------------
 
 const CARD_POST = {
   text: 'Open PRs: 13. <!channel> look',
@@ -5685,7 +5685,7 @@ test('a scheduled turn with no approval channel asks in its schedule\'s destinat
   ]);
   await adapter.start(gateway);
 
-  // Card 218: with no approvalChannel, a firing used to be denied
+  // With no approvalChannel, a firing used to be denied
   // undeliverable at its first gated call, and only the daemon log knew.
   // The schedule's destination is a conversation a person already approved
   // as where it speaks, so its approvers are asked there.
@@ -7499,7 +7499,7 @@ test('resolveOutbound with a thread posts every chunk as a reply under it', asyn
   await adapter.stop();
 });
 
-// Card 1019: Slack answers `ok` to a reply naming a thread it has no message
+// Slack answers `ok` to a reply naming a thread it has no message
 // for, and posts it at the top level. Seen live: an agent's made-up thread id
 // put "Halfway there." at the top of a channel while the tool said it replied.
 test('resolveOutbound refuses a thread Slack does not have, and takes back the top-level post Slack made instead', async () => {
@@ -7608,7 +7608,7 @@ const channelNotFoundError = (): Error => Object.assign(new Error('An API error 
 });
 
 test('resolveOutbound refuses a Slack user id, saying the app only writes in a DM the person already has', async () => {
-  // Card 1201: a person's id (U…, or W… on Enterprise Grid) is not a
+  // A person's id (U…, or W… on Enterprise Grid) is not a
   // conversation, so Slack answers channel_not_found, and the refusal read
   // like a wrong id or a missing scope. The adapter never opens a DM itself.
   const web = createFakeWeb('B-AVA', 'T1');
@@ -9571,7 +9571,7 @@ const credentialRequest = (
 
 /**
  * The ts the fake web gave the prompt carrying `requestId`: approvals and
- * credential forms answer only clicks from their own message (AGT-324).
+ * credential forms answer only clicks from their own message.
  */
 const promptTs = (web: FakeWeb, requestId: string): string =>
   `bot-ts-${web.posts.findIndex((post) => JSON.stringify(post.blocks ?? []).includes(`"value":"${requestId}"`)) + 1}`;
@@ -10209,7 +10209,7 @@ test('a repeat of a turn another delivery is still waiting on posts nothing', as
 });
 
 test('a message absorbed into a merged turn posts nothing, and it asked to be merged', async () => {
-  // Card 423: the merged turn's leading message posts the one answer; an
+  // The merged turn's leading message posts the one answer; an
   // absorbed one takes down what it put up, failure or not.
   for (const fails of [false, true]) {
     let optedIn = false;
@@ -11690,7 +11690,7 @@ test('readConversation never lists bookmarks of a conversation it refuses to rea
   await adapter.stop();
 });
 
-// ---- images on the messages read (card 884) ---------------------------------
+// ---- images on the messages read --------------------------------------------
 
 const READ_MIB = 1024 * 1024;
 const slackImage = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
@@ -12485,14 +12485,15 @@ test('a final reply the model already said before its last tool call is not post
   assert.equal(statuses.at(-1)?.status, '');
 });
 
-// Card 1009: a task posts its first line (card 950) and its reply, and
+// A task posts its first line and its reply, and
 // nothing between them. There is no progress message, and what the model
 // writes between tools after its first line is held: Slack's own status
 // line is what shows the turn is still working.
 
 /**
- * A final-mode adapter for the card 1009 tests. `progressAfterMs: 0` is the
- * setting that opened card 949's progress message at once; it is ignored now.
+ * A final-mode adapter for the mid-task message tests. `progressAfterMs: 0`
+ * is the setting that opened the progress message at once; it is ignored
+ * now.
  */
 const quietAdapter = (overrides: Partial<SlackAdapterOptions['agents'][number]> = {}) => {
   const socket = createFakeSocket();
@@ -12516,7 +12517,7 @@ const runTool = async (gateway: StubGateway, sessionId: string, id: string, tool
 const say = (gateway: StubGateway, sessionId: string, text: string) =>
   gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text } });
 
-test('message.say posts a mid-task line after the first line, between the held words, and puts the status back (card 1009)', async () => {
+test('message.say posts a mid-task line after the first line, between the held words, and puts the status back', async () => {
   for (const replies of ['final', 'texts'] as const) {
     const { socket, web, adapter } = quietAdapter({ replies });
     const statuses = recordStatuses(web);
@@ -12838,7 +12839,7 @@ test('while a task waits on an approval the prompt posts below its first line, a
   assert.ok(!texts.some((text) => text.includes('stale caches')), JSON.stringify(texts));
 });
 
-test('a judged turn shows the loading status from its first tool call, and clears it when it ends silent (card 1009)', async () => {
+test('a judged turn shows the loading status from its first tool call, and clears it when it ends silent', async () => {
   const cases = [
     { name: 'answers after a tool', tool: true, reply: 'Found it.' },
     { name: 'ends silent after a tool', tool: true, reply: '' },
@@ -12910,7 +12911,7 @@ test('a judged turn and a streaming turn post no first line of their own', async
   }
 });
 
-test('a judged turn posts only what it wrote after its last tool, or nothing, whatever its provider returns (card 1060)', async () => {
+test('a judged turn posts only what it wrote after its last tool, or nothing, whatever its provider returns', async () => {
   // A provider that hosts its own loop and joins every message (codex)
   // returns the narration along with the answer; one that returns its last
   // message may return words from before its last tool. Neither is the
@@ -12963,7 +12964,7 @@ test('a judged turn posts only what it wrote after its last tool, or nothing, wh
   }
 });
 
-test('the thread\'s other agents hear a judged turn\'s answer as posted, even where it repeats words it held (card 1060)', async () => {
+test('the thread\'s other agents hear a judged turn\'s answer as posted, even where it repeats words it held', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
@@ -13145,7 +13146,7 @@ test('a provider that answers in one piece still gets its words before a tool po
 });
 
 test('the words before a gated tool are posted before its approval prompt, and only once', async () => {
-  // Card 950: a task opens with one line saying what the agent is about to
+  // A task opens with one line saying what the agent is about to
   // do. When its first tool needs approval, the prompt is posted before the
   // call starts, so holding the line for tool.called put the question above
   // the plan it belongs to, and the approver decided without it.
@@ -13358,8 +13359,8 @@ test('words before a refused call are posted before the next response, never run
   await socket.deliver('app_mention', mention('<@B-AVA> go'));
   await adapter.stop();
 
-  // The first words are a message of their own, whole; the next are held
-  // (card 1009), and do not run into it.
+  // The first words are a message of their own, whole; the next are held,
+  // and do not run into it.
   assert.deepEqual(web.posts.map((post) => post.text), ['Trying the shell.', 'Done.']);
   assert.deepEqual(web.updates, []);
 });
@@ -13500,7 +13501,7 @@ test('on texts, the reply of a turn finished after a restart is split the same w
 });
 
 test('on texts, a reply that tags another agent goes out as one message, so that agent hears all of it', async () => {
-  // Card 1014: the tagged agent admits only a message that names it, so a
+  // The tagged agent admits only a message that names it, so a
   // reply split a paragraph to a message reached it as the tagged part.
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
@@ -13658,7 +13659,7 @@ test('on texts, the reply of a turn finished after a restart that tags another a
 });
 
 /**
- * A reply Slack shows in two parts (card 1033), with the tag in its first
+ * A reply Slack shows in two parts, with the tag in its first
  * paragraph or its last. Plain prose, so the parts read as written.
  */
 const twoPartReply = (tag: string, where: 'first' | 'last'): string => {
@@ -13671,7 +13672,7 @@ const twoPartReply = (tag: string, where: 'first' | 'last'): string => {
 const words = (...texts: Array<string | undefined>): string => texts.join(' ').replace(/\s+/g, ' ').trim();
 
 test('a reply in parts that tags another agent attaches all of it to the tagged part, so that agent hears the whole reply', async () => {
-  // Card 1033: Slack splits a post over about 4,000 characters on its own
+  // Slack splits a post over about 4,000 characters on its own
   // side (live, Nov 1 2026), and the tagged agent admits only the part that
   // names it. The tagged part goes up as an upload instead, the part as its
   // comment and the whole reply as a text file, which the receiver reads in.
@@ -13821,7 +13822,7 @@ test('the part after an upload waits for Slack to place it, so the thread reads 
   assert.deepEqual(web.timeline, [web.uploads[0]?.initial_comment, 'shared:F-1', web.posts[0]?.text]);
 });
 
-test('in stream mode, a reply that tags another agent is posted as a new message and its placeholder taken back, so that agent hears it (card 1054)', async () => {
+test('in stream mode, a reply that tags another agent is posted as a new message and its placeholder taken back, so that agent hears it', async () => {
   // Slack sends an edit to the other agents as message_changed, which never
   // starts a turn (the receiver drops edits), so a reply streamed into its
   // placeholder never reached the agent it tagged.
@@ -13858,7 +13859,7 @@ test('in stream mode, a reply that tags another agent is posted as a new message
   assert.match(beaTurns[0]?.userMessage ?? '', /CI is green on main\.$/);
 });
 
-test('in stream mode, a reply in parts whose first part tags another agent posts every part, the tagged one carrying the whole reply (card 1054)', async () => {
+test('in stream mode, a reply in parts whose first part tags another agent posts every part, the tagged one carrying the whole reply', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const reply = twoPartReply('<@U-NOVA>', 'first');
@@ -13884,7 +13885,7 @@ test('in stream mode, a reply in parts whose first part tags another agent posts
   assert.equal(words(web.uploads[0]?.initial_comment, web.posts[1]?.text), words(reply));
 });
 
-test('a reply that tags another agent stays in its placeholder when Slack will not take the placeholder back (card 1054)', async () => {
+test('a reply that tags another agent stays in its placeholder when Slack will not take the placeholder back', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.chat.delete = async () => {
@@ -13910,7 +13911,7 @@ test('a reply that tags another agent stays in its placeholder when Slack will n
   assert.ok(warnings.some((line) => line.includes('chat.delete failed') && line.includes('cant_delete_message')), warnings.join('\n'));
 });
 
-test('a recovered reply that tags another agent, handed a queued turn\'s placeholder, is posted as a new message above a fresh placeholder (card 1054)', async () => {
+test('a recovered reply that tags another agent, handed a queued turn\'s placeholder, is posted as a new message above a fresh placeholder', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
@@ -13988,7 +13989,7 @@ test('the reply of a turn finished after a restart, in parts and tagging another
 });
 
 test('words before a tool that Slack shows in parts and tag another agent attach all of them to the tagged part', async () => {
-  // Card 1033, Codex on #565: a turn that writes more than one message's
+  // Codex on #565: a turn that writes more than one message's
   // worth before its first tool posts those words as interim messages, and
   // the reply later leaves them out. The tagged part is an upload carrying
   // all of the interim words, as a reply's is.
@@ -14023,7 +14024,7 @@ test('words before a tool that Slack shows in parts and tag another agent attach
 });
 
 test('a recovered reply handed to a queued placeholder, whose overflow part tags another agent, uploads that part', async () => {
-  // Card 1033, Codex on #565: a turn finished after a restart, with a newer
+  // Codex on #565: a turn finished after a restart, with a newer
   // turn's placeholder queued in the thread, edits the placeholder to its
   // first part and posts the rest. A later part that tags another agent
   // carries the whole reply there too.
@@ -14304,7 +14305,7 @@ test('a background task\'s approval names the task, and an ordinary one reads as
     String((blocks?.[0] as { text?: { text?: string } } | undefined)?.text?.text ?? '');
 
   // Ava handed a job to herself in the background, so the prompt's name
-  // alone can't say which of her jobs is asking (AGT-358 put the id on it).
+  // alone can't say which of her jobs is asking, so the id is on it.
   gateway.pendingApprovals.add('req-t');
   await gateway.bus.emit(approvalRequest({
     requestId: 'req-t',
@@ -14437,12 +14438,11 @@ test('another gateway\'s agent speaking in an agent\'s thread does not take it, 
 
   await socket.deliver('message', channelMessage({ text: 'first?', ts: '950.1', thread: '950.0' }));
   await socket.deliver('message', foreignBotMessage({ text: 'Fly Test here', ts: '950.3', thread: '950.0' }));
-  // Fly Test spoke last, but the thread is Ava's (card 508).
+  // Fly Test spoke last, but the thread is Ava's.
   await socket.deliver('message', channelMessage({ text: 'and you?', ts: '950.4', thread: '950.0' }));
   // In a thread Fly Test was speaking in before Ava was named, Ava answers
   // what names her and, from someone who has named nobody, leaves the rest
-  // to Fly Test. Dylan named her, so his untagged follow-up is hers
-  // (card 541).
+  // to Fly Test. Dylan named her, so his untagged follow-up is hers.
   await socket.deliver('message', foreignBotMessage({ text: 'Fly Test here', ts: '951.1', thread: '951.0' }));
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> a word?', ts: '951.2', thread: '951.0' }));
   await socket.deliver('message', channelMessage({ text: 'and then?', ts: '951.3', thread: '951.0' }));
@@ -14539,7 +14539,7 @@ test('a thread another app started belongs to the agent named in it, and one a t
   await socket.deliver('message', channelMessage({ text: 'and the logs?', ts: '995.2', thread: '995.0' }));
   // Nova, a team agent on another daemon, posts a report; Dylan asks Ava
   // one thing under it. The thread is Nova's, but Dylan named Ava, so his
-  // reply after is hers (card 541); Sam, who named nobody, is Nova's.
+  // reply after is hers; Sam, who named nobody, is Nova's.
   await socket.deliver('message', topLevelBot('U-NOVA', 'nightly report', '996.0'));
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> agree?', ts: '996.1', thread: '996.0' }));
   await socket.deliver('message', channelMessage({ text: 'thanks', ts: '996.2', thread: '996.0' }));
@@ -14585,7 +14585,7 @@ test('after a restart, another app posting in an agent\'s thread does not take i
   // Ava's placeholder went up at 963.1, Fly Test posted beneath it at 963.2
   // while she was generating, and the edit filled the placeholder in later.
   // Fly Test is the last voice in the thread, but the thread is Ava's: she
-  // was named in its first message (card 508).
+  // was named in its first message.
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
@@ -14617,7 +14617,7 @@ test('after a restart, the thread read finds the agent that held the thread firs
   // Ava's placeholder went up at 970.1, Fly Test posted at 970.2, Bea
   // answered at 970.3, and Ava's reply finished last: her transcript says
   // 970.5, which the sessions would put after Bea's, but the thread says
-  // Ava was named first and spoke first, so the reply is hers (card 508).
+  // Ava was named first and spoke first, so the reply is hers.
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
@@ -14664,7 +14664,7 @@ test('after a restart, only a mention this agent would admit makes the thread it
   // Live, a refused sender's mention and any bot's mention claim nothing,
   // so the thread read must not count them either: in a thread another
   // app spoke in before this agent was really asked, the thread is not
-  // this agent's (card 508).
+  // this agent's.
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const spokeAt = new Date(970.2 * 1000).toISOString();
@@ -14716,7 +14716,7 @@ test('after a restart, only a mention this agent would admit makes the thread it
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ['Dylan: go on']);
 });
 
-// Card 337: an approver's "stop" in the conversation cancels the agent's turn.
+// An approver's "stop" in the conversation cancels the agent's turn.
 
 test('isStopRequest: the word stop, alone or with this agent named, in any case', () => {
   for (const text of ['stop', 'Stop.', 'STOP!', '  stop  ', '<@B-AVA> stop', 'stop <@B-AVA|ava>']) {
@@ -14727,7 +14727,7 @@ test('isStopRequest: the word stop, alone or with this agent named, in any case'
   }
 });
 
-// Card 1090: anyone who can post where the agent reads can send 40,000
+// Anyone who can post where the agent reads can send 40,000
 // characters of crafted markup, and every agent on the daemon waits while
 // one message is read. Each of these took 1-5 s when the patterns were
 // quadratic.
@@ -14802,7 +14802,7 @@ const stopAdapter = (approvers: string[], replies: 'stream' | 'final' = 'stream'
 const until = async (check: () => boolean): Promise<void> => {
   // At least 200 turns of the event loop and at least two seconds: on a
   // fast machine 200 turns can pass before a timer of a few milliseconds
-  // fires (card 821).
+  // fires.
   const deadline = Date.now() + 2000;
   for (let i = 0; (i < 200 || Date.now() < deadline) && !check(); i += 1) {
     await new Promise((resolve) => setImmediate(resolve));
@@ -15035,8 +15035,7 @@ test('a stop the gateway finds nothing running for is an ordinary message to the
   await adapter.stop();
 });
 
-// AGT-357: Stop also stops the background tasks the conversation started
-// (decision 3 of agent-plans roadmap/952-background-tasks.md), and says
+// Stop also stops the background tasks the conversation started, and says
 // which.
 
 test("an approver's stop with no turn running stops the thread's background tasks and names them in one line", async () => {
@@ -15482,7 +15481,7 @@ test('an untagged stop does not reach a mentions-listening agent when another ag
   await adapter.stop();
 });
 
-// --- Agent-to-agent mentions (card 513) ---------------------------------
+// --- Agent-to-agent mentions --------------------------------------------
 
 /** A message another agent's bot posted: `user` is its bot user, `bot_id` marks it a bot. */
 const botMention = (input: { user: string; text: string; ts: string; thread?: string; type?: 'app_mention' | 'message'; subtype?: string }) => ({
@@ -15625,7 +15624,7 @@ const taggedFilesAdapter = (
 
 const novaFile = (name: string) => ({ id: `F-${name}`, name, mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: `https://files.slack.com/${name}` });
 
-test('an agent tagged right after its tagger posted a file gets that file with the mention (card 1061)', async () => {
+test('an agent tagged right after its tagger posted a file gets that file with the mention', async () => {
   const { socket, gateway, adapter, reads, fetched } = taggedFilesAdapter([
     { ts: '1793500000.000100', user: 'U-DYLAN', text: 'can someone check the dashboard?' },
     { ts: '1793500000.000200', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'looking' },
@@ -15648,7 +15647,7 @@ test('an agent tagged right after its tagger posted a file gets that file with t
   assert.deepEqual(reads, [{ ts: '1793500000.000100', latest: '1793500000.000700', oldest: '1793496400.000700' }]);
 });
 
-test('a tagged agent gets no file when its tagger posted none, and a person\'s or top-level mention reads nothing (card 1061)', async () => {
+test('a tagged agent gets no file when its tagger posted none, and a person\'s or top-level mention reads nothing', async () => {
   const { socket, gateway, adapter, reads } = taggedFilesAdapter([
     { ts: '170.0', user: 'U-DYLAN', text: 'status?' },
     { ts: '170.1', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: 'CI is green' },
@@ -15667,7 +15666,7 @@ test('a tagged agent gets no file when its tagger posted none, and a person\'s o
   assert.deepEqual(reads.map((read) => read.latest), ['170.2']);
 });
 
-test('when the look above a tag fails, the tagged agent still answers the mention, and the failure is said (card 1061)', async () => {
+test('when the look above a tag fails, the tagged agent still answers the mention, and the failure is said', async () => {
   const { socket, gateway, adapter, warnings } = taggedFilesAdapter([], { readFails: true });
   await adapter.start(gateway);
   await socket.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> inspect the attached screenshot', ts: '180.2', thread: '180.0' }));
@@ -15685,7 +15684,7 @@ const novaTagWith = (text: string, ts: string, thread: string, files: Array<Reco
   return { ...mention, event: { ...mention.event, subtype: 'file_share', files } };
 };
 
-test('when the files above a tag would fill the image budget, the tag\'s own image is the one kept (card 1061)', async () => {
+test('when the files above a tag would fill the image budget, the tag\'s own image is the one kept', async () => {
   // Four just under the per-image cap fill what one message's images can
   // carry; the tag's own small image has to win, and the oldest above lose.
   const nearCap = 5 * 1024 * 1024 - 1;
@@ -15703,7 +15702,7 @@ test('when the files above a tag would fill the image budget, the tag\'s own ima
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.images?.map((image) => image.name)), [['b.png', 'c.png', 'd.png', 'mine.png']]);
 });
 
-test('when the files above a tag would fill the text budget, the tag\'s own text file is the one read (card 1061)', async () => {
+test('when the files above a tag would fill the text budget, the tag\'s own text file is the one read', async () => {
   const full = 100 * 1024;
   const log = (name: string, size: number) => ({ id: `F-${name}`, name, mimetype: 'text/plain', size, url_private_download: `https://files.slack.com/${name}` });
   const { socket, gateway, adapter } = taggedFilesAdapter([
@@ -15771,7 +15770,7 @@ test('a delayed copy of an older human message does not reset newer agent hops',
 
 /**
  * Ava and Bea, both on this daemon, both answering Nova (a team agent on
- * another daemon), with a clock the test moves (AGT-366). `bea` adds to
+ * another daemon), with a clock the test moves. `bea` adds to
  * Bea's config.
  */
 const hopAdapter = (bea: Partial<SlackAdapterOptions['agents'][number]> = {}) => {
@@ -15807,7 +15806,7 @@ const hopAdapter = (bea: Partial<SlackAdapterOptions['agents'][number]> = {}) =>
   return { socketAva, socketBea, webAva, webBea, gateway, adapter, logs, warnings, clock, heard, notices, minutes };
 };
 
-test('each agent has its own agent-tag count in a thread, so one busy pair does not silence another agent (AGT-366)', async () => {
+test('each agent has its own agent-tag count in a thread, so one busy pair does not silence another agent', async () => {
   const { socketAva, socketBea, gateway, adapter, heard } = hopAdapter();
   await adapter.start(gateway);
   for (let hop = 1; hop <= 5; hop += 1) {
@@ -15824,7 +15823,7 @@ test('each agent has its own agent-tag count in a thread, so one busy pair does 
   ]);
 });
 
-test('an agent tag stops counting 30 minutes after it arrived, so a slow exchange keeps going (AGT-366)', async () => {
+test('an agent tag stops counting 30 minutes after it arrived, so a slow exchange keeps going', async () => {
   const { socketAva, gateway, adapter, heard, minutes } = hopAdapter();
   await adapter.start(gateway);
   const tag = (round: number) => socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${round}`, ts: `210.${round}`, thread: '210.0' }));
@@ -15854,7 +15853,7 @@ test('an agent tag stops counting 30 minutes after it arrived, so a slow exchang
   ]);
 });
 
-test('a skipped agent tag is said once a window in the thread, untagged, and a person speaking reopens it (AGT-366)', async () => {
+test('a skipped agent tag is said once a window in the thread, untagged, and a person speaking reopens it', async () => {
   const { socketAva, socketBea, webAva, gateway, adapter, heard, notices, warnings, minutes } = hopAdapter();
   await adapter.start(gateway);
   const tag = (round: number) => socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${round}`, ts: `220.${String(round).padStart(2, '0')}`, thread: '220.0' }));
@@ -15900,7 +15899,7 @@ test('a skipped agent tag is said once a window in the thread, untagged, and a p
   assert.equal(notices(webAva).length, 2);
 });
 
-test('a team agent name with Slack markup is neutralized in the skipped-tag line, so it notifies nobody (AGT-366)', async () => {
+test('a team agent name with Slack markup is neutralized in the skipped-tag line, so it notifies nobody', async () => {
   const { socketBea, webBea, gateway, adapter, notices } = hopAdapter({ agentMentions: { team: { '<!channel> <@U-DYLAN>': 'U-NOVA' } } });
   await adapter.start(gateway);
   for (let round = 1; round <= 5; round += 1) {
@@ -15914,7 +15913,7 @@ test('a team agent name with Slack markup is neutralized in the skipped-tag line
   assert.match(text, /&lt;!channel&gt; &lt;@U-DYLAN&gt;'s tag/);
 });
 
-test('a person resets only the agent-tag counts of agents that admit them (AGT-366)', async () => {
+test('a person resets only the agent-tag counts of agents that admit them', async () => {
   const { socketAva, socketBea, gateway, adapter, heard } = hopAdapter({ admit: 'principals', principals: ['U-DYLAN'] });
   await adapter.start(gateway);
   for (let round = 1; round <= 4; round += 1) {
@@ -15938,7 +15937,7 @@ test('a person resets only the agent-tag counts of agents that admit them (AGT-3
   ]);
 });
 
-test('when the skipped-tag line cannot be posted, it is a warning and nothing else changes (AGT-366)', async () => {
+test('when the skipped-tag line cannot be posted, it is a warning and nothing else changes', async () => {
   const { socketAva, webAva, gateway, adapter, heard, warnings } = hopAdapter();
   const post = webAva.chat.postMessage.bind(webAva.chat);
   webAva.chat.postMessage = async (args) => {
@@ -16069,7 +16068,7 @@ test('after a restart, a team agent\'s question to another agent here does not t
       { ts: '190.2', user: 'U-NOVA', bot_id: 'U-NOVA-APP', text: '<@B-BEA> what is blocking?' },
     ],
     // Nova spoke without asking anyone here, after Ava answered: still Ava's
-    // thread (card 508).
+    // thread.
     '191.0': [
       { ts: '191.0', user: 'U-DYLAN', text: '<@B-AVA> plan it' },
       { ts: '191.1', user: 'B-AVA', bot_id: 'B-AVA-APP', text: 'planned' },
@@ -16107,7 +16106,7 @@ test('after a restart, a team agent\'s question to another agent here does not t
   ]);
 });
 
-test('a thread a team agent starts by asking an agent here stays the team agent\'s after the answer (card 508)', async () => {
+test('a thread a team agent starts by asking an agent here stays the team agent\'s after the answer', async () => {
   const { socketAva, socketBea, webAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
   const clock = stampsAfter();
   clock.at('600.0');
@@ -16694,7 +16693,7 @@ test('after a restart, a read for a message sent while the sockets were coming u
 });
 
 test('after a restart, a read for a message sent since the start warms the record fully, and the next reply needs no read', async () => {
-  // Card 562's guard is only for a read that stopped before the start: a
+  // The restart guard is only for a read that stopped before the start: a
   // read for a live message saw every take before it, so the record places
   // the reply after it, even by a take older than the start.
   const ts = (n: number): string => `620.${String(n).padStart(3, '0')}000`;
@@ -16735,7 +16734,7 @@ test('after a restart, a read for a message sent since the start warms the recor
 });
 
 test('after a restart, a reply after a late message that warmed the record is not placed by takes the read stopped short of', async () => {
-  // Card 562: the first message placed after a restart was a late one, so
+  // The first message placed after a restart was a late one, so
   // its thread read stopped at it and warmed the record with only the takes
   // before it: Ava's, then Bea's take 2. Ava took the thread back at take 3
   // before the restart, but the record, noted complete, gave the next
@@ -16774,7 +16773,7 @@ test('after a restart, a reply after a late message that warmed the record is no
 });
 
 test('after a restart, a late message in a thread with more takes than the record keeps is placed by a thread read', async () => {
-  // Card 559 (Codex 4291036888 on #369): the warm record keeps at most
+  // From the review of #369: the warm record keeps at most
   // THREAD_HANDOVER_DEPTH claims, so a thread with more takes loses the
   // middle ones while the record still looks complete. Ava and Bea trade
   // the thread 36 times; a message typed while Bea held it early on is
@@ -17036,7 +17035,7 @@ test('after a restart, a home channel thread stays its home agent\'s when anothe
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava']);
 });
 
-// ---- card 364 phase 2: an agent's own threaded post enters that thread's session
+// ---- an agent's own threaded post enters that thread's session
 
 const ownPostAdapter = async (): Promise<{ adapter: import('@stratusagent/core').ChannelAdapter; web: FakeWeb; gateway: StubGateway; socket: ReturnType<typeof createFakeSocket> }> => {
   const socket = createFakeSocket();
@@ -17209,7 +17208,7 @@ test('the chunks of an own post Slack accepted are heard even when a later chunk
   assert.doesNotMatch(gateway.observes[0]!.message, /b{10}/);
 });
 
-// Judge v2 (card 541): who an untagged thread reply is for, decided from the
+// Judge v2: who an untagged thread reply is for, decided from the
 // thread rather than a 15-minute window. Explicit address first; then the
 // agent the same person last addressed; then the thread's owner.
 const judgeV2Pair = async (listens: { ava: 'judge' | 'thread'; bea: 'judge' | 'thread' } = { ava: 'judge', bea: 'judge' }) => {
@@ -17265,7 +17264,7 @@ const judgeV2Pair = async (listens: { ava: 'judge' | 'thread'; bea: 'judge' | 't
   return { adapter, gateway, both, one, socketAva, socketBea, of, logged };
 };
 
-test('a judged thread reply brings its image and text file to the owner, and to nobody else (card 625)', async () => {
+test('a judged thread reply brings its image and text file to the owner, and to nobody else', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
@@ -17780,8 +17779,8 @@ test('a replayed message a judged turn chose not to answer is not kept again', a
   assert.equal(await readKept(file), undefined);
 });
 
-test('a replayed turn that may stay silent, whose only output Slack refused, stays kept until it lands (AGT-133)', async () => {
-  // A judged turn, and a reply-optional one (card 601), each with a file or
+test('a replayed turn that may stay silent, whose only output Slack refused, stays kept until it lands', async () => {
+  // A judged turn, and a reply-optional one, each with a file or
   // a tool's post as all it had to say. Slack refusing that is not a turn
   // that chose silence: the message stays kept, and the next start repeats
   // the finished turn, which reads its outputs from the session.
@@ -17878,7 +17877,7 @@ test('a replayed turn that may stay silent, whose only output Slack refused, sta
   }
 });
 
-test('a replayed judged turn whose file is gone before it could be read is not kept again: no start could post it (AGT-133)', async () => {
+test('a replayed judged turn whose file is gone before it could be read is not kept again: no start could post it', async () => {
   const file = await keptFile();
   await writeFile(file, JSON.stringify([{ agentId: 'ava', team: 'T1', channel: 'C1', ts: '980.3', threadTs: '980.0', user: 'U-DYLAN', keptAt: Date.now() }]));
   const web = webWithHistory('B-AVA', [{ ts: '980.3', thread_ts: '980.0', user: 'U-DYLAN', text: 'and then' }]);
@@ -18615,7 +18614,7 @@ test('archiveConversation turns Slack\'s refusals into sentences, and says an un
   await adapter.stop();
 });
 
-// Card 894: a Slack app stored while the daemon runs connects on reload().
+// A Slack app stored while the daemon runs connects on reload().
 
 const IDENTITIES: Record<string, [string, string]> = {
   'xoxb-ava': ['B-AVA', 'T1'],
@@ -18859,7 +18858,7 @@ test('a stop while a reload is starting an app\'s socket leaves that socket disc
   assert.equal(beaSocket?.disconnected, true);
 });
 
-// Card 935: a stop that leaves a socket up says so, since the gateway
+// A stop that leaves a socket up says so, since the gateway
 // counts a rejected stop as not drained and a restart then exits for the
 // service manager instead of starting a second daemon beside the socket.
 
@@ -18992,11 +18991,11 @@ test('a reload before start or after stop connects nothing', async () => {
   assert.equal(setup.sockets.length, after);
 });
 
-// Card 601: a turn can end without a reply. A teammate agent's tagged
+// A turn can end without a reply. A teammate agent's tagged
 // report and a person's untagged follow-up in a thread a `thread`-rule agent
 // holds are reply-optional; a direct mention and a DM still owe an answer.
 
-test('an untagged follow-up in a thread the agent holds may get no reply: nothing is posted for it, while a tag and a DM still owe one (card 601)', async () => {
+test('an untagged follow-up in a thread the agent holds may get no reply: nothing is posted for it, while a tag and a DM still owe one', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   let ended = 0;
@@ -19039,7 +19038,7 @@ test('an untagged follow-up in a thread the agent holds may get no reply: nothin
   assert.equal(said.filter((text) => text === '(no reply)').length, 2, said.join(' | '));
 });
 
-test('a teammate agent tagging this one is reply-optional: a report needs no answer, a question gets one (card 601)', async () => {
+test('a teammate agent tagging this one is reply-optional: a report needs no answer, a question gets one', async () => {
   const { socketAva, webAva, gateway, adapter } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
   const dispatch = gateway.dispatch.bind(gateway);
   gateway.dispatch = async (input) => {
@@ -19060,7 +19059,7 @@ test('a teammate agent tagging this one is reply-optional: a report needs no ans
   assert.ok(answered.includes('CI is green.'), answered.join(' | '));
 });
 
-test('a reply-optional turn that fails still says so, unlike a turn nobody asked for (card 601)', async () => {
+test('a reply-optional turn that fails still says so, unlike a turn nobody asked for', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const gateway = createStubGateway(() => {
@@ -19083,7 +19082,7 @@ test('a reply-optional turn that fails still says so, unlike a turn nobody asked
   assert.match(said, /provider exploded/);
 });
 
-test('an addressed turn that answers with only the no-reply word has it posted, and logged (card 601)', async () => {
+test('an addressed turn that answers with only the no-reply word has it posted, and logged', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const logs: string[] = [];
@@ -19104,7 +19103,7 @@ test('an addressed turn that answers with only the no-reply word has it posted, 
   assert.equal(logs.filter((line) => /answered NO_REPLY on a turn that owes an answer/.test(line)).length, 1, logs.join('\n'));
 });
 
-test('on final replies, a reply-optional turn that says nothing posts nothing and takes its loading status down (card 601)', async () => {
+test('on final replies, a reply-optional turn that says nothing posts nothing and takes its loading status down', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const statuses = recordStatuses(web);
@@ -19128,7 +19127,7 @@ test('on final replies, a reply-optional turn that says nothing posts nothing an
   assert.equal(statuses.at(-1)?.status, '');
 });
 
-test('a reply-optional turn that works through tools and then says nothing posts nothing (cards 601, 1009)', async () => {
+test('a reply-optional turn that works through tools and then says nothing posts nothing', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await runTool(gateway, sessionId, 'c1');
     await runTool(gateway, sessionId, 'c2');
@@ -19141,14 +19140,14 @@ test('a reply-optional turn that works through tools and then says nothing posts
   await adapter.stop();
 
   assert.deepEqual(gateway.replyOptional, ['Dylan: deployed, all green']);
-  // No progress message opened to take down (card 1009), and nothing
+  // No progress message opened to take down, and nothing
   // says `(no reply)`.
   assert.deepEqual(web.posts, []);
   assert.deepEqual(web.updates, []);
   assert.deepEqual(web.deletes, []);
 });
 
-test('a reply-optional turn that ends empty after words written before its last tool posts those words as its reply (cards 601, 1009)', async () => {
+test('a reply-optional turn that ends empty after words written before its last tool posts those words as its reply', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await runTool(gateway, sessionId, 'c1');
     await say(gateway, sessionId, 'The deploy log shows one retried step.');
@@ -19179,7 +19178,7 @@ const sessionWithReaction = (id: string, reaction: Message['reaction']): Session
 /** Slack's answer to a call the token has no scope for, as @slack/web-api throws it. */
 const slackError = (code: string): Error => Object.assign(new Error(`An API error occurred: ${code}`), { data: { ok: false, error: code } });
 
-test('a reply-optional turn that stays silent with a reaction puts it on the message, and posts nothing (card 1078)', async () => {
+test('a reply-optional turn that stays silent with a reaction puts it on the message, and posts nothing', async () => {
   const gateway = createStubGateway(({ sessionId }) => sessionWithReaction(sessionId, 'thumbsup'));
   gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:570.0', '2026-01-01T00:00:00.000Z']]));
   const { socket, web, adapter } = quietAdapter();
@@ -19194,7 +19193,7 @@ test('a reply-optional turn that stays silent with a reaction puts it on the mes
   assert.deepEqual(web.updates, []);
 });
 
-test('each silent reaction maps to its Slack name (card 1078)', async () => {
+test('each silent reaction maps to its Slack name', async () => {
   const names: string[] = [];
   for (const [index, reaction] of (['laughing', 'heart', 'tada'] as const).entries()) {
     const thread = `${580 + index}.0`;
@@ -19209,7 +19208,7 @@ test('each silent reaction maps to its Slack name (card 1078)', async () => {
   assert.deepEqual(names, ['laughing', 'heart', 'tada']);
 });
 
-test('a reaction is only left where nothing was said: an answer, a turn that owes one, or plain silence get none (card 1078)', async () => {
+test('a reaction is only left where nothing was said: an answer, a turn that owes one, or plain silence get none', async () => {
   // A reply-optional turn that answered: its words, no reaction.
   const answered = createStubGateway(({ sessionId }) => {
     const session = sessionWithReply(sessionId, 'Glad it works.');
@@ -19243,7 +19242,7 @@ test('a reaction is only left where nothing was said: an answer, a turn that owe
   assert.deepEqual(third.web.posts, []);
 });
 
-test('a silent reply-optional turn whose tool posted a card has spoken, so it leaves no reaction (card 1078, AGT-324)', async () => {
+test('a silent reply-optional turn whose tool posted a card has spoken, so it leaves no reaction', async () => {
   const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
     await gateway.bus.emit({
       type: 'tool.completed',
@@ -19262,7 +19261,7 @@ test('a silent reply-optional turn whose tool posted a card has spoken, so it le
   assert.deepEqual(web.reactions_added, []);
 });
 
-test('an app without reactions:write stays silent and says so once, not on every turn (card 1078)', async () => {
+test('an app without reactions:write stays silent and says so once, not on every turn', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.reactionFails = slackError('missing_scope');
@@ -19293,7 +19292,7 @@ test('an app without reactions:write stays silent and says so once, not on every
   assert.match(scope[0]!, /ava's Slack app can't add reactions/);
 });
 
-test('a reaction Slack already has, or one it refuses for another reason, never fails the turn (card 1078)', async () => {
+test('a reaction Slack already has, or one it refuses for another reason, never fails the turn', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   web.reactionFails = slackError('already_reacted');
@@ -19320,7 +19319,7 @@ test('a reaction Slack already has, or one it refuses for another reason, never 
   assert.equal(warnings.filter((line) => line.includes('message_not_found')).length, 1, warnings.join('\n'));
 });
 
-// AGT-337: a teammate added or removed while the daemon runs. The app stays
+// A teammate added or removed while the daemon runs. The app stays
 // connected; who it admits and who may decide follow the list a reload reads.
 test('a reload gives a connected agent its new principals without reconnecting, and someone removed is refused again', async () => {
   const listing = (principals: string[]) => [{ ...ava, principals, admit: 'principals' as const }];

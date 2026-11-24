@@ -712,12 +712,12 @@ test('a command an operator declares is a prefix whose tail may vary, minus the 
     assert.ok('scope' in result, `${prefix} should be a scope`);
     return result.scope;
   };
-  const agentboard = declared('agentboard');
-  for (const command of ['agentboard task get 311', 'agentboard list --column todo', 'agentboard new "Fix it soon" --priority high']) {
-    assert.equal(matchesScope(analyzeCommand(command), agentboard), true, command);
+  const tracker = declared('tracker');
+  for (const command of ['tracker task get 311', 'tracker list --column todo', 'tracker new "Fix it soon" --priority high']) {
+    assert.equal(matchesScope(analyzeCommand(command), tracker), true, command);
   }
-  assert.equal(matchesScope(analyzeCommand('agentboard task remove 311 --force'), agentboard), false);
-  assert.equal(matchesScope(analyzeCommand('agentboardx list'), agentboard), false);
+  assert.equal(matchesScope(analyzeCommand('tracker task remove 311 --force'), tracker), false);
+  assert.equal(matchesScope(analyzeCommand('trackerx list'), tracker), false);
 
   const tests = declared('pnpm test');
   assert.equal(matchesScope(analyzeCommand('pnpm test --filter @stratusagent/cli'), tests), true);
@@ -754,7 +754,7 @@ test('a command an operator declares is a prefix whose tail may vary, minus the 
   assert.match((commandScopeFromPrefix('git') as { reason: string }).reason, /git branch/);
 
   // Only words: anything else would be a grant nobody wrote.
-  for (const prefix of ['python scripts/tool.py', 'node ./x', 'agentboard "task"', "foo 'bar'", 'agentboard --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
+  for (const prefix of ['python scripts/tool.py', 'node ./x', 'tracker "task"', "foo 'bar'", 'tracker --token x', 'git log | sh', 'rm -rf', 'tool*', '~/bin/tool', '/usr/bin/tool', 'a; b', '']) {
     assert.ok('reason' in commandScopeFromPrefix(prefix), `should refuse: ${prefix}`);
   }
 });

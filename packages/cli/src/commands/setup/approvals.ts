@@ -321,7 +321,7 @@ export const createApprovalSetup = ({
 
   /**
    * The posture, asked once of a new install, at a terminal, before the
-   * main menu (AGT-334). Open stays the default and is preselected, so
+   * main menu. Open stays the default and is preselected, so
    * Enter changes nothing about how agents behave; the point is that the
    * choice is made where the operator can see it, not found later in docs.
    *

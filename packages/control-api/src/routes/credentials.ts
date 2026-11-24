@@ -224,7 +224,7 @@ export const credentialRoutes: Route[] = [
       await withCredentialsFileLock(async () => {
         await saveChannelTransportSecrets(context.env, channel, agentId, secrets);
       });
-      // A channel that reloads picks the secrets up now (card 894); any
+      // A channel that reloads picks the secrets up now; any
       // other reads them at the next start, and `reloaded: false` says so,
       // with the reason when it tried and failed. Stored either way, so a
       // roster that will not load is reported beside the save rather than

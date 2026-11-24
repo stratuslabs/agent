@@ -10,7 +10,7 @@ import {
   type SteeredMessage,
 } from '../src/index.ts';
 
-// Card 958: a provider that runs its own tool loop (Claude Code) never
+// A provider that runs its own tool loop (Claude Code) never
 // hands the runner its steps, so it asks for what was said mid-task itself,
 // right after a hosted call's result, through `ProviderRequest.steer`.
 

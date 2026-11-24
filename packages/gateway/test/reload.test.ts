@@ -428,7 +428,7 @@ test('a stop drains for a bounded window, then aborts what is still running and 
 });
 
 test('a stop that aborts a keyed turn leaves it for the next start, which continues it once', async () => {
-  // Card 590, Fly live check 3: an event firing's turn (keyed by its batch)
+  // Found in a live check: an event firing's turn (keyed by its batch)
   // still running when a graceful restart's window closed was failed with
   // the stop's reason, and the event was lost; a SIGKILL at the same moment
   // would have left it running for the next start to continue. A keyed
@@ -554,7 +554,7 @@ test('a keyed turn a stop already continued once is failed by the next stop, not
 });
 
 test('a stop ends a turn whose tool ignores its abort, and the message queued behind it is refused with the stop\'s reason', async () => {
-  // Card 826, from the Infra runbook check: a plugin tool that never
+  // Found in a live run: a plugin tool that never
   // settles and never looks at its signal held the turn past the abort, the
   // stop shut down around it, and the message waiting behind it in the
   // same session (accepted, 202 with a turn id) died with the process: no

@@ -44,7 +44,7 @@ test('a shadow decision is never shown as a refusal: the policy reports it refus
   assert.equal(decisionTone({ ...base, allowed: false, layer: 'review', shadow: true }), 'warn');
 });
 
-// Card 1053: a shadow decision lands off the call path, often after its
+// A shadow decision lands off the call path, often after its
 // line, and sometimes after its turn has ended.
 
 const line = (callId: string, toolName: string, extra: Record<string, unknown> = {}) =>

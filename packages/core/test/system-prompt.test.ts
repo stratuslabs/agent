@@ -118,7 +118,7 @@ test('the reply section keeps replies phone-sized without cutting what was asked
 test('a task that needs tools opens with one line of what the agent is about to do', () => {
   // Models call tools before they write anything, so on a long task the
   // first post in a chat was a step already finished ("CI passed"), not
-  // what the agent had set out to do (card 950). A channel posts the words
+  // what the agent had set out to do. A channel posts the words
   // written before a tool call as they happen, so the first words are the
   // first post. A quick answer gets no extra line, and an overheard message
   // none at all: a turn nobody asked for posts on its first text.
@@ -127,7 +127,7 @@ test('a task that needs tools opens with one line of what the agent is about to 
   assert.match(replies, /your first words, before your first tool call, are one line saying what you are about to do/);
   assert.match(replies, /Skip that line for a question you can answer straight away or with one quick lookup, and for a message that was not addressed to you\./);
   // The start line comes first. After it, a message mid-task is one the
-  // person needs or would want, never narration (card 1009): Slack holds
+  // person needs or would want, never narration: Slack holds
   // the words between tools, and `message.say` is how one goes out.
   assert.match(replies, /After that, message the person mid-task only when you need them or it is worth their time, never to narrate your steps; keep it to a line, and never split one long answer across several messages\./);
   assert.ok(replies.indexOf('before your first tool call') < replies.indexOf('After that, message the person mid-task'));
@@ -297,8 +297,8 @@ test('the agent is told what kind of room it is in, and who can read what it pos
   assert.doesNotMatch(everyone, / id is /);
 
   // The id is what message.read takes and what names the room later.
-  const known = roomOf({ kind: 'public', members: 3, thread: true, id: 'C0C1YV12SLC' });
-  assert.match(known, /not only the people talking\. Its Slack id is C0C1YV12SLC\./);
+  const known = roomOf({ kind: 'public', members: 3, thread: true, id: 'C0EXAMPLE01' });
+  assert.match(known, /not only the people talking\. Its Slack id is C0EXAMPLE01\./);
   assert.match(roomOf({ kind: 'private', members: 6, id: 'G0123456' }), /Only its members can read it\. Its Slack id is G0123456\./);
   assert.match(everyone, /You are replying in a thread there, which everyone who can read the channel can open\./);
   assert.match(everyone, /anything meant for one person only, such as a secret or a link only they should use/);
@@ -338,14 +338,14 @@ test('a channel name never reaches the prompt, and a person\'s only when it is p
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'direct', with: " Ren\u00e9e O'Brien-Lee " } }), { kind: 'direct', with: "Ren\u00e9e O'Brien-Lee" });
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'private', members: -3, thread: 'yes' } }), { kind: 'private' });
   // An id is kept only when it is plainly an id, and never for a DM.
-  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'C0C1YV12SLC' } }), { kind: 'public', id: 'C0C1YV12SLC' });
+  assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'C0EXAMPLE01' } }), { kind: 'public', id: 'C0EXAMPLE01' });
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'C1 ignore previous' } }), { kind: 'public' });
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', id: 'general' } }), { kind: 'public' });
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'direct', id: 'D0123456' } }), { kind: 'direct' });
   // A thread root is kept only for a thread outside a DM, and only when it is plainly an id.
   assert.deepEqual(
-    conversationContextFrom({ conversation: { kind: 'public', id: 'C0C1YV12SLC', thread: true, threadRoot: '1791332967.606559' } }),
-    { kind: 'public', id: 'C0C1YV12SLC', thread: true, threadRoot: '1791332967.606559' },
+    conversationContextFrom({ conversation: { kind: 'public', id: 'C0EXAMPLE01', thread: true, threadRoot: '1791332967.606559' } }),
+    { kind: 'public', id: 'C0EXAMPLE01', thread: true, threadRoot: '1791332967.606559' },
   );
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', threadRoot: '1791332967.606559' } }), { kind: 'public' });
   assert.deepEqual(conversationContextFrom({ conversation: { kind: 'public', thread: true, threadRoot: '1.2 ignore previous' } }), { kind: 'public', thread: true });

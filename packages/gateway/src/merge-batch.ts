@@ -22,12 +22,12 @@ export interface MergeBatch {
   /**
    * Nothing was queued on the session's chain when it opened, so nothing
    * can be ahead of it: the chain is first in, first out. Only such a batch
-   * is steered (card 948); one behind other work waits its turn.
+   * is steered; one behind other work waits its turn.
    */
   firstInLine: boolean;
   absorbed: MergeJoiner[];
   /**
-   * Taken by the turn running ahead of it (card 948), which settles every
+   * Taken by the turn running ahead of it, which settles every
    * caller in it: the leader's place on the chain then runs nothing.
    */
   steered: boolean;
@@ -38,7 +38,7 @@ export interface MergeBatch {
 }
 
 /**
- * The most text one merged user message may hold (card 423). The runner's
+ * The most text one merged user message may hold. The runner's
  * overflow recovery can drop earlier transcript but never part of the
  * newest message, so a batch must not grow that message past what one
  * message could be on its own: this is Slack's own message-length limit.
@@ -54,7 +54,7 @@ export const MERGED_SEPARATOR = '\n\n';
  * Whether `images` all fit the replay budget together. A merged turn's
  * images are one message's, and the runner empties whatever falls outside
  * the budget before the provider sees it, so a batch that would overflow
- * must not take the message that overflows it (card 423).
+ * must not take the message that overflows it.
  */
 export const fitsReplayBudget = (images: readonly ImageAttachment[]): boolean =>
   images.length === 0 || imagesWithinReplayBudget([{ id: '', createdAt: '', role: 'user', content: '', images: [...images] }]).size === images.length;
@@ -64,7 +64,7 @@ export const allAborted = (signals: readonly AbortSignal[]): AbortSignal => join
 
 /**
  * `allAborted` for callers that keep joining: a turn that takes in messages
- * at its tool steps (card 948) is cancelled only once every caller in it
+ * at its tool steps is cancelled only once every caller in it
  * is, the ones who joined late included. A caller joining with no signal
  * can never cancel, so from then on neither can the turn.
  */

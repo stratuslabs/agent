@@ -20,7 +20,7 @@ import {
 
 /**
  * A plugin tool that neither settles nor looks at its signal — the shape
- * that held a session `running` until the daemon restarted (card 826):
+ * that held a session `running` until the daemon restarted:
  * Slack's `stop` could not end it, and a stop shut down around it, losing
  * the message queued behind it.
  */

@@ -1,5 +1,5 @@
 /**
- * A reply as a few short messages, the way a person texts (card 951).
+ * A reply as a few short messages, the way a person texts.
  *
  * The `texts` reply mode posts each paragraph of a finished reply as a
  * message of its own instead of one block of paragraphs. This file decides

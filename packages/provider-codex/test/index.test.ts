@@ -184,7 +184,7 @@ test('failed turns and empty responses surface as errors', async () => {
     overheard: true,
   });
   assert.deepEqual(await empty.generate({ session: unasked }), { parts: [] });
-  // And on one whose message may need nothing back (card 601).
+  // And on one whose message may need nothing back.
   const optional = createSession();
   optional.messages.push({
     id: 'session-1:user:2',
@@ -633,7 +633,7 @@ test('the idle timer suspends across hosted tool waits and its abort reaches hos
   // The clock is mocked, so the check is about suspension and not speed.
   // With a real 60ms timer, the fake's HTTP round trip into the hosted
   // server could outlast it on a loaded runner, and the timer fired before
-  // the tool started (card 1074). Here time moves only inside the tool,
+  // the tool started. Here time moves only inside the tool,
   // so the timer fires exactly when it was still armed during the wait.
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const IDLE_MS = 60;

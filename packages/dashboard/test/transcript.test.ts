@@ -5,7 +5,7 @@ import { shortId, summariseTool, transcriptItems } from '../ui/lib/transcript.js
 
 test('a short session id is shown whole, a long one keeps both ends', () => {
   assert.equal(shortId('web:ava:1234'), 'web:ava:1234');
-  const long = 'slack:C0C1YV12SLC:1793046557.547839:atlas';
+  const long = 'slack:C0EXAMPLE01:1793046557.547839:atlas';
   assert.equal(shortId(long), `${long.slice(0, 12)}…${long.slice(-8)}`);
   assert.equal(shortId('x'.repeat(28)), 'x'.repeat(28), '28 characters still fit');
 });

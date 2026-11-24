@@ -60,7 +60,7 @@ export interface SlackAgentConfig {
    * while the turn runs and posts the reply once, finished; `stream` posts
    * a `…` placeholder at once and edits it as the reply is written;
    * `texts` is `final` with each paragraph posted as a message of its own,
-   * like texting (card 951, see `textingParts`).
+   * like texting (see `textingParts`).
    */
   replies?: SlackReplyMode;
   /**
@@ -80,8 +80,8 @@ export interface SlackAgentConfig {
    */
   homeChannels?: string[];
   /**
-   * Whether this agent answers a mention from another agent's Slack bot
-   * (card 513). Absent, the default, it ignores every bot, as it always
+   * Whether this agent answers a mention from another agent's Slack bot.
+   * Absent, the default, it ignores every bot, as it always
    * has. Present, it answers a team agent that names it: one of this
    * daemon's own agents, or one listed in `team` (name -> bot user id,
    * for agents served by other daemons). `only`, when set, narrows that
@@ -273,7 +273,7 @@ export interface SlackWebLike {
     uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string; initial_comment?: string }): Promise<SlackUploadResult>;
     /**
      * Where an upload landed, once Slack has shared it: the upload's own
-     * answer does not say (card 1033). Optional: an older fake without it
+     * answer does not say. Optional: an older fake without it
      * leaves a part posted as an upload with no ts, never unposted.
      */
     info?(args: { file: string }): Promise<{ file?: SlackUploadedFile }>;
@@ -380,7 +380,7 @@ export interface SlackWebLike {
   };
   /**
    * Puts an emoji reaction on a message: what a reply-optional turn that
-   * stays silent leaves instead of a reply, when it names one (card 1078).
+   * stays silent leaves instead of a reply, when it names one.
    * Needs `reactions:write`, which the manifest asks for; an app without
    * it stays silent and is told once. Optional so an older SDK or fake
    * still runs, without reactions.
@@ -443,8 +443,8 @@ export interface SlackAdapterOptions {
    */
   approvalPromptWaitMs?: number;
   /**
-   * @deprecated Ignored. Slack no longer gets a progress message (card
-   * 1009); Slack's own status line shows a turn is working. Accepted so a
+   * @deprecated Ignored. Slack no longer gets a progress message;
+   * Slack's own status line shows a turn is working. Accepted so a
    * caller that set it still compiles.
    */
   progressAfterMs?: number;

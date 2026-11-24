@@ -18,7 +18,7 @@ import {
 import { createDelegateTool, DELEGATE_TOOL_NAME } from '../src/index.ts';
 
 /**
- * Card 967: `agent.delegate` runs unattended from a clean conversation and
+ * `agent.delegate` runs unattended from a clean conversation and
  * asks like any other gated call once the conversation has read external
  * content, so text on a page cannot start work as another agent.
  */

@@ -4,7 +4,7 @@ import type { Gateway, GatewayChannelAdapter } from '@stratusagent/gateway';
 
 import { authority } from './authority.ts';
 
-// The events port (card 590): a second HTTP server, apart from the control
+// The events port: a second HTTP server, apart from the control
 // API, that serves `POST /events/<source>` and nothing else. Apart so a
 // deployment can expose it to the internet (a tunnel, a Fly service) while
 // `/api/v1` stays on loopback, and so the control port never serves events.

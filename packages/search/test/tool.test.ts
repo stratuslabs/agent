@@ -54,8 +54,8 @@ test('web.search declares itself safe — a query acts on nothing', async () => 
   const tool = createWebSearchTool({ provider: createRecordingBackend() });
   assert.equal(tool.name, 'web.search');
   assert.equal(tool.risk, 'safe');
-  // Changes nothing, but a response's searches still run one at a time
-  // (card 956): a backend may allow only one request a second.
+  // Changes nothing, but a response's searches still run one at a time:
+  // a backend may allow only one request a second.
   assert.equal(tool.readOnly, undefined);
 });
 

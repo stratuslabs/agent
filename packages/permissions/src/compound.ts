@@ -438,7 +438,7 @@ export const NOT_GRANTABLE_BY_NAME: ReadonlySet<string> = new Set([
  * its destructive-flag limits (`git push` but not `git push --force`).
  */
 export const SUBCOMMAND_COMMANDS: ReadonlySet<string> = new Set([
-  'git', 'gh', 'glab', 'npm', 'pnpm', 'yarn', 'cargo', 'go', 'brew', 'fly', 'flyctl', 'agentboard', 'gcloud',
+  'git', 'gh', 'glab', 'npm', 'pnpm', 'yarn', 'cargo', 'go', 'brew', 'fly', 'flyctl', 'gcloud',
   'aws', 'az', 'terraform', 'kubectl', 'helm', 'pip', 'pip3', 'uv', 'poetry', 'rustup', 'swift', 'xcodebuild',
   'gem', 'bundle', 'make', 'apt', 'apt-get', 'dnf', 'yum', 'corepack', 'nvm', 'mise', 'asdf', 'tmux',
 ]);

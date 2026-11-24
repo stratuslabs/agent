@@ -3,8 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { openFleetDatabase, type SqliteScheduleStoreOptions } from './schedules.ts';
 
-// Background tasks' durable half (AGT-211, agent-plans
-// roadmap/952-background-tasks.md): one row per task, in fleet.db next to
+// Background tasks' durable half: one row per task, in fleet.db next to
 // the schedules and event firings, because a task, like a firing, is work
 // the gateway owes someone later. The row records only who, where and what
 // was asked (the start and any stop). What happened lives in the two
@@ -268,7 +267,7 @@ export class SqliteTaskStore {
 
   /**
    * The tasks one conversation started that are still open, oldest first:
-   * what a person's Stop there reaches (AGT-357). Bounded by the agent's cap.
+   * what a person's Stop there reaches. Bounded by the agent's cap.
    */
   openForOrigin(originSessionId: string): TaskRow[] {
     return (this.db

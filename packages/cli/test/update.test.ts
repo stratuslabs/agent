@@ -69,7 +69,7 @@ const runningServiceRunner: ServiceRunner = async (command, args) => {
 
 // The pause between a manager's answers, skipped. After the manager says
 // running, install and start keep asking for about five seconds until the
-// daemon publishes gateway.json, and no daemon here ever does (AGT-363).
+// daemon publishes gateway.json, and no daemon here ever does.
 const noServiceWait = async (): Promise<void> => {};
 
 // Stands in for the fresh process an upgrade hands the rest of the update

@@ -158,8 +158,8 @@ the proof.
 A tool's result can carry more for the conversation than its words to the
 model. An ok result whose output is an object may name files, `file:
 string` or `files: string[]` (`filePathsOf` in core), and a channel
-uploads them into the thread. It may also carry a **post** (`postOf`,
-AGT-324): a message ready to show, `post: { text, slack?: { blocks } }`.
+uploads them into the thread. It may also carry a **post**
+(`postOf`): a message ready to show, `post: { text, slack?: { blocks } }`.
 `text` is required: it is what a channel with no richer form posts,
 Slack's notification, and Slack's fallback when the blocks can't be shown.
 A channel that doesn't read posts shows nothing of them, and neither does

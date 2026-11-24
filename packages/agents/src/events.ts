@@ -1,7 +1,6 @@
 import type { JsonValue } from '@stratusagent/core';
 
-// The pure half of event triggers (card 590, agent-plans
-// roadmap/590-event-triggers.md): what an event looks like to a trigger, the
+// The pure half of event triggers: what an event looks like to a trigger, the
 // filter that decides whether it fires, and quiet hours. The listener that
 // verifies signatures, the store that dedups deliveries, and the dispatch
 // live in the gateway and control-api. This stays free of them so the CLI can

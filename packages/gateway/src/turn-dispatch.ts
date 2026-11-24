@@ -101,7 +101,7 @@ export const createTurnDispatch = ({
      * Handed the turn's own signal — the one the runner was given, which
      * the watchdog, `abortTurns` and a restart's window abort as well as
      * the callers — so it takes nothing into a turn that is already
-     * stopping (card 959).
+     * stopping.
      */
     steer?: (turnSignal: AbortSignal) => Promise<SteeredMessage | undefined>,
   ): Promise<Session> => {

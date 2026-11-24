@@ -79,7 +79,7 @@ export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
  * The model a ChatGPT sign-in runs when nothing names one: codex's, since a
  * ChatGPT plan serves the codex lineup. Setup's picker offers what the
  * signed-in account lists instead; whether a plan serves this one through
- * the Responses API is checked live (AGT-45), not known here.
+ * the Responses API is checked live, not known here.
  */
 export const DEFAULT_CHATGPT_MODEL = DEFAULT_CODEX_MODEL;
 

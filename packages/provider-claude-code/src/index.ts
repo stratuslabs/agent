@@ -744,7 +744,7 @@ export const createClaudeCodeProvider = ({
           // What somebody said since the turn started, which the runner
           // records right after this result, reaches the CLI before the
           // result does, so the CLI folds it into this result in the same
-          // turn (card 958). Asked only while an attempt can deliver it, and
+          // turn. Asked only while an attempt can deliver it, and
           // after the tool's own time: waiting on the SDK to take a message
           // is the SDK's progress, so the idle watchdog covers it, and an
           // SDK that stops reading fails the turn as stalled (its abort
@@ -1006,7 +1006,7 @@ export const createClaudeCodeProvider = ({
         // and the stream ended without that turn. The message is already
         // in the session right after its tool's result, so returning the
         // first answer would read as an answer to both when the model
-        // never saw it: fail instead (card 1056).
+        // never saw it: fail instead.
         if (answersSteered && (pending?.size ?? 0) > 0) {
           throw new Error(STEER_UNANSWERED);
         }

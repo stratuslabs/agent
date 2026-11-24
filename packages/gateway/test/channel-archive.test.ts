@@ -12,7 +12,7 @@ import type { OptionalModuleHost } from '@stratusagent/plugins';
 
 import { createGateway, type ApprovalTransport } from '../src/index.ts';
 
-// Card 911: `channel.archive` goes through the asking agent's own app, and
+// `channel.archive` goes through the asking agent's own app, and
 // the gateway never archives the conversation the work was asked from —
 // whether a turn asks, a sub-agent of it, or a teammate it delegated to.
 

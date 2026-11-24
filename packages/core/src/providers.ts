@@ -476,7 +476,7 @@ export interface ProviderRequest {
    * For a provider that runs its own tool loop: ask, right after a hosted
    * call's result is in (`executeHostedToolCall`), for what somebody has
    * said since the turn started — the step `RunInput.steer` covers for the
-   * runner's own loop, which never sees a harness's steps (card 958). A
+   * runner's own loop, which never sees a harness's steps. A
    * message handed back is already in the transcript, a `steered` user
    * message right after that result with its keys and its sender's trust,
    * so the provider must get it to the model before the model's next step,

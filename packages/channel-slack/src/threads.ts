@@ -226,7 +226,7 @@ export const createThreadTracking = ({
    * Whose a stop at `ts` is, from the live record: who was asked last as
    * of `ts` (`holderAt`). Undefined when the record cannot say, either
    * because this process has seen nobody asked here by `ts`, or because the
-   * newest entry by then was rebuilt from a thread read (card 508): a
+   * newest entry by then was rebuilt from a thread read: a
    * mention since would not be among them. The stop is then left to a
    * fresh read of the thread, never sent to the owner on a guess.
    */
@@ -263,7 +263,7 @@ export const createThreadTracking = ({
 
   /**
    * Where the record of thread `key` stops knowing every take, for a
-   * message at `ts` after what a thread read covered (card 562): a claim
+   * message at `ts` after what a thread read covered: a claim
    * older than the returned point may have been taken from since, unseen.
    * Undefined when the record is complete as far as `ts`.
    */
@@ -295,7 +295,7 @@ export const createThreadTracking = ({
   };
 
   /**
-   * Who an untagged reply at `ts` belongs to (card 508): the agent the
+   * Who an untagged reply at `ts` belongs to: the agent the
    * thread belongs to, not whoever spoke last. That is the first to hold
    * it — the agent its first message named, a home channel's owner, or the
    * bot (this daemon's or another's) that posted it — unless a judging
@@ -315,7 +315,7 @@ export const createThreadTracking = ({
       return undefined;
     }
     // A take from before the stretch the read left out may have been
-    // superseded there: the question goes to a fresh read (card 562).
+    // superseded there: the question goes to a fresh read.
     const unread = unreadBefore(key, ts);
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
@@ -330,7 +330,7 @@ export const createThreadTracking = ({
    * The agent the thread `key` belongs to, whoever holds it now: the owner
    * the thread read settled, or else the first claim this process saw.
    * Answering in its own thread takes the thread back from a judge that
-   * spoke since (card 508), so the owner is asked for here, not the holder.
+   * spoke since, so the owner is asked for here, not the holder.
    */
   const threadOwner = (key: string): string | undefined => {
     const origin = threadOrigins.get(key);
@@ -405,7 +405,7 @@ export const createThreadTracking = ({
 
   /**
    * Whether a bot message is a team agent asking one of this daemon's
-   * agents something (card 513): a question, not another voice taking the
+   * agents something: a question, not another voice taking the
    * thread. The agent asked answers it, and the thread stays with whoever
    * held it. Used live and when a thread is read back after a restart.
    */
@@ -415,7 +415,7 @@ export const createThreadTracking = ({
 
   /**
    * Whether a bot message is another app starting a thread — an alert, a
-   * deploy note — rather than an agent (card 508). That starts the thread
+   * deploy note — rather than an agent. That starts the thread
    * without owning it, so an agent named under it keeps the conversation it
    * was given. A team agent (`agentMentions.team`) starting one owns it the
    * way an agent here does, and any app replying inside a thread counts as
@@ -510,7 +510,7 @@ export const createThreadTracking = ({
       held.set(candidate.agentId, Number.isFinite(spoke) ? spoke : Number.POSITIVE_INFINITY);
     }
     // Where each last held it, for a stop, which is for whoever was asked
-    // last (card 337), not for the thread's owner.
+    // last, not for the thread's owner.
     const last = new Map<string, number>();
     for (const [agentId, at] of held) {
       last.set(agentId, Number.isFinite(at) ? at : 0);
@@ -523,7 +523,7 @@ export const createThreadTracking = ({
     let lastForeign = 0;
     // Each of these agents' own messages, and whether the message before it
     // had asked it anything: one nobody asked for is a judge taking the
-    // thread, or its owner answering in it (card 508).
+    // thread, or its owner answering in it.
     const posts: Array<{ agentId: string; at: number; ts: string; asked: boolean }> = [];
     let asked = new Set<string>();
     const askedIn = (text: string | undefined): Set<string> => new Set(
@@ -684,8 +684,8 @@ export const createThreadTracking = ({
    * restart forgets nothing.
    *
    * Whose turn it is, is the second. In a thread with several agents an
-   * unaddressed reply belongs to the agent the thread belongs to (card
-   * 508): the first to hold it, read off the thread itself. Only when the
+   * unaddressed reply belongs to the agent the thread belongs to:
+   * the first to hold it, read off the thread itself. Only when the
    * thread can't be read do the sessions decide, and then by `lastSpokeAt`
    * — when each agent last *replied*, not when its session last changed,
    * because a turn saves on tool results and approval checkpoints without
@@ -786,7 +786,7 @@ export const createThreadTracking = ({
     }
     // The thread says who it belongs to: whichever of these agents held it
     // first — its first message named it, or it posted there first — or
-    // another app that spoke before any of them did (card 508). When it
+    // another app that spoke before any of them did. When it
     // can't be read, the sessions decide: the only agent in it, or, as a
     // last resort, the one that spoke last, which is all they record.
     // The agent that posted the root takes part even with no session here:
@@ -805,7 +805,7 @@ export const createThreadTracking = ({
       return engaged.length === 1 ? first.agentId : lastSpeaker(engaged);
     }
     if (mode === 'stop') {
-      // A stop is for whoever was asked last (card 337), as `holderAt` has
+      // A stop is for whoever was asked last, as `holderAt` has
       // it live: the turn it means is that agent's, not the owner's.
       let holder: { agentId: string; at: number } | undefined;
       let tiedLast = false;
@@ -841,7 +841,7 @@ export const createThreadTracking = ({
       }
     }
     // A judging agent that spoke unasked took the thread, and the owner
-    // answering in it took it back, as live (card 508): the latest of those
+    // answering in it took it back, as live: the latest of those
     // holds it. The live record of who took it is lost on a restart; the
     // thread keeps it. Only a judge takes by speaking unasked, as only its
     // turns are judged live; another agent's post there (a message.send)

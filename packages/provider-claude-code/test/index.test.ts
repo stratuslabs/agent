@@ -184,7 +184,7 @@ test('an image on the newest message reaches Claude Code as an image, not a note
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Three items: eggs, milk, bread.' }]);
 });
 
-test('an overheard message reaches Claude Code framed first, its images after the label (card 625)', async () => {
+test('an overheard message reaches Claude Code framed first, its images after the label', async () => {
   const prompts: unknown[] = [];
   const queryFn: ClaudeCodeQueryFn = (params) => {
     prompts.push(params.prompt);
@@ -330,7 +330,7 @@ test('error results and empty responses surface as errors', async () => {
     queryFn: createFakeQuery([{ type: 'result', subtype: 'success', is_error: false, result: '' }]).queryFn,
   });
   assert.deepEqual(await silent.generate({ session: unasked }), { parts: [] });
-  // And on one whose message may need nothing back (card 601); an
+  // And on one whose message may need nothing back; an
   // addressed turn still may not end empty.
   const optional = createSession();
   optional.messages.push({
@@ -1740,7 +1740,7 @@ test('effort reaches the SDK options on fresh and resumed queries, lowered per m
   assert.equal('effort' in unset, false);
 });
 
-// Card 958: a message steered in after a hosted call reaches the Claude
+// A message steered in after a hosted call reaches the Claude
 // Code CLI before that call's result does, so the CLI folds it into the
 // result in the same turn rather than running it as a turn of its own.
 
@@ -1798,7 +1798,7 @@ const createSteeringQuery = (options: { lateFold?: boolean; outOfTurns?: boolean
           : { type: 'result', subtype: 'success', is_error: false, result: 'Built it.', session_id: 'sdk-958', user_message_uuids: [] }) as ClaudeCodeStreamMessage;
         events.push('first result read');
         // A CLI that ends its stream here, input open or not: the turn it
-        // owed the late message never runs (card 1056).
+        // owed the late message never runs.
         if (options.endsEarly === true) {
           return;
         }
@@ -1921,7 +1921,7 @@ test('a steered message waiting when the turn runs out of turns keeps the input 
   assert.deepEqual(response.parts, [{ type: 'text', text: 'Skipped the tests.' }]);
 });
 
-// Card 1056: the CLI's result left a steered message for a turn of its
+// The CLI's result left a steered message for a turn of its
 // own, and then the stream ended without that turn.
 test('a stream that ends while a steered message still waits for its own turn fails the turn instead of passing the first answer off as both', async () => {
   const fake = createSteeringQuery({ lateFold: true, endsEarly: true });
