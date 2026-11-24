@@ -140,10 +140,12 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/sessions/:id` | One session, provider replay state stripped — including `usage`, the token records of every provider call it has made |
 | POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`, `sessionTrust`, `sessionTaintedBy`, `rolledOverFrom`, `rolledOverTo`, `executor`, `contextFloor`, `subAgent`), which answer `400 metadata_reserved`. `senderTrust` may be set to `unknown` to say the message is from someone the operator has not vouched for; it is read for the turn and never stored. Omitted, the sender is the operator; present with any value but a trust label, the sender reads `unknown` — a misspelled authorization is not one. An existing session whose agent has since left the roster answers `404 agent_not_found` |
 | POST | `/sessions/:id/rollover` | Start the conversation over under the same id: the transcript so far is saved as a new session (`<id>:rolledover:<time>-<suffix>`) and the live row is emptied, keeping only the routing metadata a channel needs → `200 { sessionId, archivedAs }`. The remedy for a session from before trust labels existed, which reads `unknown` for as long as it lasts. `409 session_busy` while a turn is running or parked, `409 session_archived` for an archive, `404` for an unknown id |
-| GET | `/approvals` | Calls parked on a human right now |
+| GET | `/approvals` | Calls parked on a human right now. A background task's call carries `taskId` |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-means-one-thing-and-the-request-says-which) |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing, last firing. An event trigger has no next firing and carries `event` (`source`, `filter`, and `quietHours` / `maxPerHour` when set); its last firing is when its newest batch went out. The audit list: each row with a destination is a standing permission to speak |
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
+| GET | `/tasks` | Background tasks (`tasks` in the config): every one running or whose outcome isn't in its conversation yet, newest first, then the 20 most recently finished. Each carries `id`, `agentId` (who started it), `workerAgentId`, `originSessionId`, `workerSessionId`, `status` (`running`, `waiting_approval`, `completed`, `failed`, `cancelled`, `interrupted`, read live from the worker session), `delivery` (`pending`, `delivered`, `dropped`), `stoppedBy` once someone asked for a stop, `steps`, `createdAt`, `updatedAt`, `endedAt`. Never a prompt or a result. `?agent=<id>` for the tasks one agent started. Listed whether or not tasks are on |
+| POST | `/tasks/:id/cancel` | Stop a task: the stop is written on the task before anything is aborted, and its conversation gets a notice that it was cancelled, naming who stopped it: `cli` for a bearer token, `dashboard` for a browser session. `{ task, stopped: true }`, with `already: true` and `stoppedBy` when an earlier cancel had stopped it; `{ task, stopped: false, status }` when it had already ended, and nothing is written. 404 `task_not_found` when no such task exists |
 | GET | `/events/sources` | Per event source, configured or fed by a plugin (whose package is `plugin`): `lastDelivery`, `lastRefusal` (the newest of a refused delivery and a request refused before it left a row), `deliveries` and `firings` by status since `since` (24 hours ago; waiting firings always count), and `refusedBeforeRow` (`badSignature`, `tooLarge`, `rateLimited`, `notReady`) since the daemon started, plus `unknownSource`. `sources` is `{}` when none is configured and no plugin feeds one. What `stratus events` shows |
 | GET | `/events/deliveries` | Delivery rows, newest first: `seq`, `source`, `eventId`, `type`, `subject`, `status`, `reason`, `receivedAt`. Never a body. `?source=`, `?limit=` (1 to 1000, default 100) |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
@@ -655,6 +657,19 @@ retry, a compaction, a message boundary — so a client draws nothing for it.
 message ended in a wrap-up instead of finishing, sent just before its
 `session.completed`, with `reason` and `continuations` and no content. The
 session's `stoppedEarly` says the same until its next message starts.
+`task.started`, `task.completed`, `task.failed`, `task.cancelled` and
+`task.interrupted` joined it with background tasks: a task started, or
+ended, on the conversation that started it (`sessionId`, `agentId`), with
+`taskId`, `workerSessionId` and `workerAgentId` and never what the task was
+asked or answered. A task outlives the turn that started it, so these carry
+no `turnId`. Its end goes out before its outcome is added to the
+conversation, and once: only a restored home that finds a task it had
+called finished was cut off sends `task.interrupted` after it.
+`task.waiting-approval` joined them when a task's worker asks a person to
+approve a call: sent just before the `tool.approval-requested` that
+carries the same `taskId`, and again for a later question once the earlier
+ones are answered. Nothing is sent when one is answered; the task is
+running again.
 `permission.decided` joined it with decisions you can see: why a call was
 allowed or refused, sent just before that call's `tool.called` or
 `tool.denied` with the same `callId`: `toolName`, `risk`, `allowed`,

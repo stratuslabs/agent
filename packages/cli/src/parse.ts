@@ -46,6 +46,7 @@ import {
   parseSignInCommand,
 } from './parse/access.ts';
 import { type ParsedMemoryCommand, parseMemoryCommand } from './parse/memory.ts';
+import { type ParsedTasksCommand, parseTasksCommand } from './parse/tasks.ts';
 import {
   type ParsedSessionCommand,
   type ParsedSessionsCommand,
@@ -105,6 +106,7 @@ export type ParsedCommand =
   | ParsedMemoryCommand
   | ParsedSessionCommand
   | ParsedSessionsCommand
+  | ParsedTasksCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
   | ParsedUpdateCommand
@@ -213,6 +215,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     return parseSessionCommand(rest);
   }
 
+  if (command === 'tasks') {
+    return parseTasksCommand(rest);
+  }
+
   if (command === 'restart') {
     return parseRestartCommand(rest);
   }
@@ -290,6 +296,8 @@ export {
   SESSION_STATUSES,
   STOPPED_EARLY_FILTER,
 } from './parse/sessions.ts';
+
+export { type ParsedTasksCommand } from './parse/tasks.ts';
 
 export {
   type ParsedEventsCommand,

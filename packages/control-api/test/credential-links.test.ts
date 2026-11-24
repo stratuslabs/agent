@@ -7,7 +7,7 @@ import path from 'node:path';
 import type { StratusEvent } from '@stratusagent/core';
 import { createGateway } from '@stratusagent/gateway';
 
-import { createCredentialLinkStore } from '../src/credential-links.ts';
+import { CREDENTIAL_LINK_TTL_MS, createCredentialLinkStore, credentialLinkRefusal } from '../src/credential-links.ts';
 import { createControlApi } from '../src/index.ts';
 
 const openAiText = (text: string): Response =>
@@ -71,7 +71,7 @@ test('a request no channel can show a form for gets a one-time link that adds th
     // No channel started this turn, so there is nowhere to show a form.
     const session = await gateway.dispatch({ sessionId: 'kai-link-1', agentId: 'kai', userMessage: 'open a PR' });
     const { link, local } = linkFrom(session, api.url ?? '');
-    assert.match(link, /^https:\/\/mac-mini\.example\.ts\.net\/api\/v1\/credential-links\/[A-Za-z0-9_-]{43}$/, 'built on api.publicUrl');
+    assert.match(link, /^https:\/\/mac-mini\.example\.ts\.net\/api\/v1\/credential-links\/[A-Za-z0-9_-]{55}$/, 'built on api.publicUrl');
     const output = JSON.stringify(session.messages.find((message) => message.role === 'tool')?.toolResult?.output);
     assert.match(output, /not in a channel that can show your operator a form/);
     assert.match(output, /works once, and expires at/);
@@ -111,10 +111,15 @@ test('a request no channel can show a form for gets a one-time link that adds th
     const provided = events.find((event) => event.type === 'credential.provided');
     assert.equal(provided?.type === 'credential.provided' ? provided.actor : undefined, 'link');
 
-    // Spent: the link answers once.
-    assert.equal((await fetch(local)).status, 404);
+    // Spent: the link answers once, and says so rather than guessing.
+    const spent = await fetch(local);
+    assert.equal(spent.status, 404);
+    const spentPage = await spent.text();
+    assert.match(spentPage, /This link was already used, at \d{4}-\d\d-\d\dT[\d:.]+Z\. A link works once\./);
+    assert.doesNotMatch(spentPage, /expired/);
     const again = await fetch(local, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'value=ghp-other' });
     assert.equal(again.status, 404);
+    assert.match(await again.text(), /This link was already used/);
 
     // The value is nowhere but the credential store.
     assert.doesNotMatch(JSON.stringify([await gateway.store.get('kai-link-1'), events]), /ghp-secret-value/);
@@ -209,21 +214,112 @@ test('a link whose request can no longer be answered is spent with the reason', 
     const refused = await fetch(local, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'value=ghp-1' });
     assert.equal(refused.status, 409);
     assert.match(await refused.text(), /now belongs to bea, not kai, so nothing was stored/);
-    assert.equal((await fetch(local)).status, 404, 'no form left for an answer that cannot land');
+    const closed = await fetch(local);
+    assert.equal(closed.status, 404, 'no form left for an answer that cannot land');
+    assert.match(await closed.text(), /This link was closed at [\d\-T:.]+Z, because its request could no longer be answered\./);
   } finally {
     await gateway.stop();
   }
 });
 
-test('a link token stops opening its form once its time is up', () => {
+const KAI_REQUEST = { requestId: 'r1', agentId: 'kai', agentName: 'Kai', name: 'github.token', scope: 'agent' } as const;
+
+test('a link token stops opening its form once its time is up, and says when it expired', () => {
   let at = 1_000;
   const links = createCredentialLinkStore({ now: () => at, ttlMs: 60_000 });
-  const { token, expiresAt } = links.mint({ requestId: 'r1', agentId: 'kai', agentName: 'Kai', name: 'github.token', scope: 'agent' });
+  const { token, expiresAt } = links.mint(KAI_REQUEST);
   assert.equal(expiresAt, 61_000);
   assert.equal(links.get(token)?.requestId, 'r1');
   at = 61_000;
   assert.equal(links.get(token), undefined);
+  assert.deepEqual(links.refusal(token), { reason: 'expired', at: 61_000 });
   assert.equal(links.get('not-a-token'), undefined);
+});
+
+test('a refused link token gets the real reason: used, closed, from before a restart, or not recognized', () => {
+  let at = 5_000;
+  const links = createCredentialLinkStore({ now: () => at });
+  const used = links.mint(KAI_REQUEST).token;
+  const closed = links.mint({ ...KAI_REQUEST, requestId: 'r2' }).token;
+  at = 6_000;
+  links.retire(used, 'used');
+  at = 7_000;
+  links.retire(closed, 'closed');
+  assert.equal(links.get(used), undefined);
+  assert.deepEqual(links.refusal(used), { reason: 'used', at: 6_000 });
+  assert.deepEqual(links.refusal(closed), { reason: 'closed', at: 7_000 });
+  // A second submission that lost the race to the first: still used.
+  links.retire(used, 'closed');
+  assert.deepEqual(links.refusal(used), { reason: 'used', at: 6_000 });
+  // An answer that landed as the link ran out: used, not expired.
+  const late = links.mint({ ...KAI_REQUEST, requestId: 'r4' }).token;
+  at += CREDENTIAL_LINK_TTL_MS;
+  assert.equal(links.get(late), undefined);
+  links.retire(late, 'used');
+  assert.deepEqual(links.refusal(late), { reason: 'used', at });
+
+  // Another daemon's link, or this one's before it restarted: the store is
+  // in memory, so a link never outlives the process that issued it.
+  const before = createCredentialLinkStore().mint(KAI_REQUEST).token;
+  assert.equal(links.get(before), undefined);
+  assert.deepEqual(links.refusal(before), { reason: 'restarted' });
+  // A link from a build before the check: it can't be told from one cut
+  // short, so it isn't claimed to be a restart.
+  assert.deepEqual(links.refusal('A'.repeat(43)), { reason: 'unrecognized' });
+  assert.deepEqual(links.refusal('A'.repeat(55)), { reason: 'unrecognized' });
+
+  // Cut short, run on, or reformatted in a chat app.
+  const live = links.mint({ ...KAI_REQUEST, requestId: 'r3' }).token;
+  assert.deepEqual(links.refusal(live.slice(0, -1)), { reason: 'unrecognized' });
+  assert.deepEqual(links.refusal(live.slice(0, -4)), { reason: 'unrecognized' }, 'cut by the length of the check');
+  assert.deepEqual(links.refusal(live.slice(0, -12)), { reason: 'unrecognized' }, 'cut to the length of an old token');
+  assert.deepEqual(links.refusal(`${live[0] === 'A' ? 'B' : 'A'}${live.slice(1)}`), { reason: 'unrecognized' }, 'its run id changed');
+  assert.deepEqual(links.refusal(`${before[0] === 'A' ? 'B' : 'A'}${before.slice(1)}`), { reason: 'unrecognized' }, 'another run\'s, changed');
+  assert.deepEqual(links.refusal(`${live}>`), { reason: 'unrecognized' });
+  assert.deepEqual(links.refusal(`${live.slice(0, -1)}${live.endsWith('A') ? 'B' : 'A'}`), { reason: 'unrecognized' });
+  assert.deepEqual(links.refusal(''), { reason: 'unrecognized' });
+  assert.equal(links.get(live)?.requestId, 'r3', 'asking why another token was refused spends nothing');
+});
+
+test('a spent link is remembered for its reason only up to a bound', () => {
+  const links = createCredentialLinkStore({ keepEnded: 2 });
+  const tokens = ['r1', 'r2', 'r3'].map((requestId) => links.mint({ ...KAI_REQUEST, requestId }).token);
+  for (const token of tokens) {
+    links.retire(token, 'used');
+  }
+  // The oldest is forgotten: this daemon issued it, so it is not a restart.
+  assert.deepEqual(links.refusal(tokens[0] ?? ''), { reason: 'unrecognized' });
+  assert.equal(links.refusal(tokens[1] ?? '').reason, 'used');
+  assert.equal(links.refusal(tokens[2] ?? '').reason, 'used');
+});
+
+test('the refusal page names the reason in words a person can act on', () => {
+  assert.match(credentialLinkRefusal({ reason: 'expired', at: Date.UTC(2026, 10, 14, 21, 50) }), /^This link expired at 2026-11-14T21:50:00\.000Z\. Ask the agent to request the credential again\.$/);
+  assert.match(credentialLinkRefusal({ reason: 'used', at: 0 }), /already used, at 1970-01-01T00:00:00\.000Z\. A link works once\./);
+  assert.match(credentialLinkRefusal({ reason: 'closed', at: 0 }), /closed at 1970-01-01T00:00:00\.000Z, because its request could no longer be answered/);
+  assert.match(credentialLinkRefusal({ reason: 'restarted' }), /before the daemon last restarted, or from another daemon\. A link works only on the daemon that issued it/);
+  assert.match(credentialLinkRefusal({ reason: 'unrecognized' }), /doesn't recognize this link\. Check that it was copied whole/);
+});
+
+test('a link from before a restart, or one cut short, is refused with that reason and stores nothing', async () => {
+  const { home, gateway, api } = await startLinking();
+  try {
+    const session = await gateway.dispatch({ sessionId: 'kai-link-3', agentId: 'kai', userMessage: 'go' });
+    const { local } = linkFrom(session, api.url ?? '');
+    const base = local.slice(0, local.lastIndexOf('/') + 1);
+    const before = `${base}${createCredentialLinkStore().mint(KAI_REQUEST).token}`;
+    for (const response of [await fetch(before), await fetch(before, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'value=ghp-1' })]) {
+      assert.equal(response.status, 404);
+      assert.match(await response.text(), /before the daemon last restarted, or from another daemon/);
+    }
+    const cut = await fetch(local.slice(0, -3));
+    assert.equal(cut.status, 404);
+    assert.match(await cut.text(), /doesn&#39;t recognize this link\. Check that it was copied whole/);
+    await assert.rejects(readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'), /ENOENT/);
+    assert.equal((await fetch(local)).status, 200, 'the real link still opens its form');
+  } finally {
+    await gateway.stop();
+  }
 });
 
 test('without api.publicUrl a link is built on the bound address and says it opens only there', async () => {

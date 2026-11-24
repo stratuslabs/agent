@@ -87,8 +87,10 @@ import {
   loadServePlugins,
   loadServeRuntimeSelection,
   loadServeAgentMaxTurns,
+  loadServeTurnMinutes,
   loadServeAutoContinue,
   loadServeConcurrentScheduledTurns,
+  loadServeTasks,
   loadServeMaxTurns,
 } from '../trusted-config.ts';
 
@@ -124,6 +126,25 @@ export const gatewayEventOptions = (
 const reviewFields = (decision: PermissionDecision): string =>
   `${decision.verdict === undefined ? '' : ` verdict=${decision.verdict}`}${decision.reviewCode === undefined ? '' : ` code=${decision.reviewCode}`}`;
 
+/** Longest reviewer line a shadow log line carries; the policy already cuts it to 300. */
+const SHADOW_WHY_LIMIT = 300;
+
+/**
+ * A shadow review's own reason, as ` why="..."`: one line, quoted as JSON so
+ * a quote or backslash in it can't break the fields around it. Shadow only;
+ * an enforced line never carries the reviewer's words.
+ */
+const shadowWhy = (decision: PermissionDecision): string => {
+  if (decision.reviewReason === undefined) {
+    return '';
+  }
+  const line = decision.reviewReason.replace(/\s+/g, ' ').trim();
+  if (line.length === 0) {
+    return '';
+  }
+  return ` why=${JSON.stringify(line.length > SHADOW_WHY_LIMIT ? `${line.slice(0, SHADOW_WHY_LIMIT)}…` : line)}`;
+};
+
 export const refusalLogLine = (decision: PermissionDecision): string =>
   `${decision.agentId}: ${decision.layer === undefined ? '' : `[${decision.layer}] `}${decision.reason}${reviewFields(decision)} (session ${decision.sessionId})`;
 
@@ -138,7 +159,7 @@ export const decisionLogLine = (decision: PermissionDecision): { level: 'log' | 
   if (decision.shadow === true) {
     return {
       level: 'log',
-      line: `${decision.agentId}: shadow ${decision.layer === undefined ? '' : `[${decision.layer}] `}${decision.reason}${reviewFields(decision)} (session ${decision.sessionId})`,
+      line: `${decision.agentId}: shadow ${decision.layer === undefined ? '' : `[${decision.layer}] `}${decision.reason}${reviewFields(decision)}${shadowWhy(decision)} (session ${decision.sessionId})`,
     };
   }
   if (!decision.allowed) {
@@ -380,8 +401,10 @@ const serveHeldHome = async (
   // with no override.
   const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
   const agentMaxTurns = await loadServeAgentMaxTurns(env, command.configPath, warn);
+  const { turnMinutes, agentTurnMinutes } = await loadServeTurnMinutes(env, command.configPath, warn);
   const autoContinue = await loadServeAutoContinue(env, command.configPath, warn);
   const concurrentScheduledTurns = await loadServeConcurrentScheduledTurns(env, command.configPath, warn);
+  const tasks = await loadServeTasks(env, command.configPath, warn);
 
   // Every kind of grant an agent holds — command scopes, origins, standing
   // tool grants — in one file per agent beside its soul, through one store
@@ -926,8 +949,16 @@ const serveHeldHome = async (
     ...(gatewayEvents !== undefined ? { events: gatewayEvents } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
+    ...(turnMinutes !== undefined ? { turnTimeLimitMs: turnMinutes * 60_000 } : {}),
+    ...(Object.keys(agentTurnMinutes).length > 0
+      ? {
+          turnTimeLimitMsFor: (agentId: string) =>
+            (Object.hasOwn(agentTurnMinutes, agentId) ? agentTurnMinutes[agentId]! * 60_000 : undefined),
+        }
+      : {}),
     ...(Object.keys(autoContinue).length > 0 ? { autoContinueFor: (agentId: string) => autoContinue[agentId] } : {}),
     ...(Object.keys(concurrentScheduledTurns).length > 0 ? { schedules: { maxConcurrentByAgent: concurrentScheduledTurns } } : {}),
+    tasks,
     ...(channels.length > 0 ? { channels } : {}),
     // The Slack adapter is host-wired, so its (agent, kind) claims are
     // declared here; a plugin channel claiming one of them is refused at

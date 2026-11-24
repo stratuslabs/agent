@@ -6,14 +6,18 @@
 // JSON object `{ "tool": "<name>", "input": { ... } }` becomes exactly that
 // tool call, and the tool's result comes back as one line,
 // `SMOKE_RESULT <json>`, which the runner parses. Anything else (a
-// scheduled firing's prompt, say) is answered `SMOKE_TEXT <prompt>`.
+// scheduled firing's prompt, say) is answered `SMOKE_TEXT <prompt>`. A
+// message that starts `SMOKE_WAIT <ms>` is answered that much later (at
+// most 10 seconds), so a check can see the turn still running.
 //
 // `smoke.credential` reports whether the named credential `smoke.token`
 // reached it through the agent's allowlist, as a SHA-256 of the value so
 // the value itself never lands in a transcript or a log.
 import { createHash } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const CREDENTIAL = 'smoke.token';
+const WAIT = /^SMOKE_WAIT (\d+)\b/;
 
 const lastUserText = (session) => {
   const message = [...session.messages].reverse().find((entry) => entry.role === 'user');
@@ -58,7 +62,7 @@ export const createPlugin = () => ({
       create() {
         return {
           name: 'smoke',
-          async generate({ session }) {
+          async generate({ session, signal }) {
             const last = session.messages.at(-1);
             if (last?.role === 'tool') {
               const result = last.toolResult;
@@ -72,6 +76,11 @@ export const createPlugin = () => ({
               return { parts: [{ type: 'text', text: `SMOKE_RESULT ${line}` }] };
             }
             const text = lastUserText(session);
+            const wait = WAIT.exec(text);
+            if (wait) {
+              // The turn's abort ends the wait, as a provider must.
+              await sleep(Math.min(Number(wait[1]), 10_000), undefined, { signal });
+            }
             const call = scriptedCall(text);
             if (!call) {
               return { parts: [{ type: 'text', text: `SMOKE_TEXT ${text.slice(0, 200)}` }] };

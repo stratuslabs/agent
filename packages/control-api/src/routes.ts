@@ -15,6 +15,7 @@ import { grantRoutes } from './routes/grants.ts';
 import { memoryPassRoutes } from './routes/memory-passes.ts';
 import { approvalRoutes } from './routes/approvals.ts';
 import { scheduleRoutes } from './routes/schedules.ts';
+import { taskRoutes } from './routes/tasks.ts';
 import { eventRoutes } from './routes/events.ts';
 import { catalogRoutes } from './routes/catalog.ts';
 import { credentialRoutes } from './routes/credentials.ts';
@@ -116,6 +117,7 @@ export const routes: Route[] = [
   ...memoryPassRoutes,
   ...approvalRoutes,
   ...scheduleRoutes,
+  ...taskRoutes,
   ...eventRoutes,
   ...catalogRoutes,
   ...credentialRoutes,
