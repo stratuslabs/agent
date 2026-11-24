@@ -164,6 +164,10 @@ export const sessionRoutes: Route[] = [
       // Armed before the dispatch, so a failure that arrives while the runner
       // is still unwinding is seen rather than missed.
       const watch = context.watchTurn(sessionId, turnId);
+      // Held from here until the dispatch settles, so a stop reaches this
+      // turn while it is still queued or in its preflight, before the
+      // gateway has a controller of its own for it.
+      const held = context.dispatches.hold(sessionId);
       // Deliberately not awaited: a turn runs for as long as a model takes,
       // and the caller watches it on the event stream. The turn id returned
       // here is what lets them recognise it there.
@@ -173,6 +177,7 @@ export const sessionRoutes: Route[] = [
           ...(agentId ? { agentId } : {}),
           userMessage: message,
           turnId,
+          signal: held.signal,
           ...(metadata !== undefined ? { metadata } : {}),
         })
         .catch(async (error: unknown) => {
@@ -196,7 +201,10 @@ export const sessionRoutes: Route[] = [
               .catch(() => undefined);
           });
         })
-        .finally(() => watch.release());
+        .finally(() => {
+          watch.release();
+          held.release();
+        });
 
       context.response.statusCode = 202;
       return { sessionId, turnId };
@@ -207,11 +215,6 @@ export const sessionRoutes: Route[] = [
     pattern: `${API_PREFIX}/sessions/:id/stop`,
     async handler(context) {
       const sessionId = context.params.id ?? '';
-      // The index answers this without reading the conversation, and a
-      // turn that is running has a row: the first save claims the id.
-      if (context.gateway.store.statusOf(sessionId) === undefined) {
-        throw new ApiError(404, 'session_not_found', `No session with id ${sessionId}.`);
-      }
       // Both are the operator's own authority, as for a task's cancel: a
       // browser session is the dashboard, a bearer token anything holding
       // the daemon's token. The reason is what the stopped turn fails with,
@@ -220,13 +223,24 @@ export const sessionRoutes: Route[] = [
       const reason = dashboard ? 'Stopped from the dashboard.' : 'Stopped through the control API.';
       // Slack's stop, without the chat: every turn on the session, a
       // recovered one included, then the background tasks it started,
-      // since a person who says stop means those too. A message queued
-      // behind the turn and not started is left alone (`abortTurns`).
-      const stopped = context.gateway.abortTurns(sessionId, reason);
+      // since a person who says stop means those too. This API's own
+      // dispatches go first, queued ones included, so one waiting behind
+      // the turn being stopped never starts once that turn ends. A message
+      // another caller queued (a Slack thread) is left to that caller's
+      // own signal, as `abortTurns` leaves it.
+      const pending = context.dispatches.abort(sessionId, reason);
+      const running = context.gateway.abortTurns(sessionId, reason);
+      // A first turn still in its preflight has no session yet, which is
+      // why this is checked only once nothing was held for it.
+      if (pending === 0 && running === 0 && context.gateway.store.statusOf(sessionId) === undefined) {
+        throw new ApiError(404, 'session_not_found', `No session with id ${sessionId}.`);
+      }
       const tasks = context.gateway.stopTasks(sessionId, dashboard ? 'dashboard' : 'cli');
-      // Counted at once; nothing here waits for the stops to land. Nothing
-      // running is not an error, so a second click is harmless.
-      return { sessionId, stopped, tasks: tasks.open };
+      // A running dispatch of ours is in both counts, so the larger of the
+      // two, not their sum. Counted at once; nothing here waits for the
+      // stops to land. Nothing running is not an error, so a second click
+      // is harmless.
+      return { sessionId, stopped: Math.max(pending, running), tasks: tasks.open };
     },
   },
   {

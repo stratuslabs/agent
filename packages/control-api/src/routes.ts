@@ -5,6 +5,7 @@ import { DEFAULT_STRATUS_AGENT, type StateEnvironment } from '@stratusagent/stat
 
 import type { Principal } from './auth.ts';
 import type { CredentialLinkStore } from './credential-links.ts';
+import type { ApiDispatches } from './dispatches.ts';
 import { matchPath } from './http.ts';
 
 import { authRoutes } from './routes/auth.ts';
@@ -73,6 +74,8 @@ export interface RouteContext {
   watchTurn: (sessionId: string, turnId: string) => { reported: () => boolean; release: () => void };
   /** The tokens behind credential links. See `createCredentialLinkStore`. */
   credentialLinks: CredentialLinkStore;
+  /** The turns this API dispatched and the gateway has not finished. See `createApiDispatches`. */
+  dispatches: ApiDispatches;
   version: string;
 }
 

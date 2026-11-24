@@ -23,16 +23,17 @@ const hangingFetch = (onCall: () => void): typeof fetch =>
     });
   }) as typeof fetch;
 
-const startHanging = async (): Promise<{ harness: Harness; called: Promise<void> }> => {
+const startHanging = async (): Promise<{ harness: Harness; called: Promise<void>; calls: () => number }> => {
   let reached: () => void = () => {};
+  let count = 0;
   const called = new Promise<void>((resolve) => { reached = resolve; });
   const harness = await startApi({
     env: {
       processEnv: { STRATUS_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'sk-ant-test' },
-      fetch: hangingFetch(() => reached()),
+      fetch: hangingFetch(() => { count += 1; reached(); }),
     },
   });
-  return { harness, called };
+  return { harness, called, calls: () => count };
 };
 
 const signIn = async (harness: Harness): Promise<string> => {
@@ -113,6 +114,47 @@ test('a stop through a bearer token names the control API, and an unknown sessio
     const unknown = await harness.call('/api/v1/sessions/web%3Astratus%3Anobody/stop', { method: 'POST' });
     assert.equal(unknown.status, 404);
     assert.equal((await json<{ error: { code: string } }>(unknown)).error.code, 'session_not_found');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a stop reaches a message this API queued behind a running turn, so it never starts', async () => {
+  const { harness, called, calls } = await startHanging();
+  try {
+    const sessionId = 'web:stratus:queued';
+    let failures = 0;
+    let bothFailed: () => void = () => {};
+    const both = new Promise<void>((resolve) => { bothFailed = resolve; });
+    const off = harness.gateway.bus.subscribe((event) => {
+      if (event.sessionId === sessionId && event.type === 'session.failed') {
+        failures += 1;
+        if (failures === 2) {
+          bothFailed();
+        }
+      }
+    });
+    // Another caller's turn, running: what a Slack thread's would be.
+    const first = harness.gateway.dispatch({ sessionId, agentId: 'stratus', userMessage: 'first' }).catch((error: unknown) => error);
+    await settles(called, 'the first model call');
+    // Then a message through the API, queued behind it. Its turn has no
+    // controller the gateway tracks until it starts.
+    const queued = await harness.call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'second', agentId: 'stratus' }),
+    });
+    assert.equal(queued.status, 202);
+
+    const stop = await harness.call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/stop`, { method: 'POST' });
+    assert.equal(stop.status, 200);
+    assert.equal((await json<{ stopped: number }>(stop)).stopped, 1);
+    await settles(first, 'the running turn');
+    // Both end: the running one aborted, the queued one refused before it
+    // starts. Before, the queued one ran the moment the first one ended.
+    await settles(both, 'both turns failing');
+    off();
+    assert.equal(calls(), 1, 'the queued message never reached the model');
   } finally {
     await harness.stop();
   }

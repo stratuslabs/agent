@@ -330,6 +330,10 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     state.sending = true;
     state.error = undefined;
     state.note = undefined;
+    if (state.stopping === state.sessionId) {
+      // A stop for a turn that ended while nobody was looking at it.
+      state.stopping = undefined;
+    }
     composer.value = '';
     // Which conversation this message is for. Opening or starting another one
     // while the POST is in flight would otherwise stamp this turn's id onto
@@ -374,6 +378,9 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
       for (const envelope of queued) {
         applyEnvelope(envelope);
       }
+      // Stop waits for this answer (see `update`), and nothing else may
+      // repaint the composer before the turn's first event arrives.
+      update();
       if (state.reconcileAfterSend.delete(sentTo)) {
         // The stream came back while this POST was in flight. Now there is a
         // turn id and a stored session, so the store can finally say whether
@@ -593,6 +600,10 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
         break;
       case 'session.completed':
         settleTurn(envelope);
+        if (state.stopping === envelope.sessionId) {
+          // It finished before the stop reached it.
+          state.stopping = undefined;
+        }
         state.sending = false;
         state.turnId = undefined;
         state.turns.delete(envelope.sessionId);
@@ -731,6 +742,11 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     state.turnId = undefined;
     if (state.sessionId) {
       state.turns.delete(state.sessionId);
+    }
+    // The turn a stop was for has ended, however it ended; its marker would
+    // otherwise disable Stop on every later turn here.
+    if (state.stopping === state.sessionId) {
+      state.stopping = undefined;
     }
     state.pending = [];
     state.streaming = '';
