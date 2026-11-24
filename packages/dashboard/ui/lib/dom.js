@@ -18,10 +18,7 @@ export const el = (tag, props = {}, ...children) => {
     if (key === 'class') {
       node.className = value;
     } else if (key === 'style') {
-      // Through the CSSOM, never the attribute: the page's CSP has no
-      // 'unsafe-inline' for styles, and a style attribute set by markup or
-      // setAttribute is exactly what that blocks.
-      node.style.cssText = value;
+      applyStyle(node, value);
     } else if (key === 'dataset') {
       Object.assign(node.dataset, value);
     } else if (key.startsWith('on') && typeof value === 'function') {
@@ -39,6 +36,33 @@ export const el = (tag, props = {}, ...children) => {
     node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
   return node;
+};
+
+/**
+ * Apply a `"prop: value; …"` string one property at a time.
+ *
+ * The page's CSP has no 'unsafe-inline' for styles. A style attribute, from
+ * markup or setAttribute, is what that blocks, and MDN lists a `cssText`
+ * assignment with it; single properties set on the CSSOM are allowed in
+ * every engine. So a style string is never written whole.
+ */
+export const applyStyle = (node, text) => {
+  for (const part of String(text).split(';')) {
+    const colon = part.indexOf(':');
+    if (colon <= 0) {
+      continue;
+    }
+    const name = part.slice(0, colon).trim();
+    let value = part.slice(colon + 1).trim();
+    let priority = '';
+    if (/!important$/i.test(value)) {
+      priority = 'important';
+      value = value.replace(/\s*!important$/i, '');
+    }
+    if (name && value) {
+      node.style.setProperty(name, value, priority);
+    }
+  }
 };
 
 export const clear = (node) => {
