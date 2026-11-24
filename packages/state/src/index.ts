@@ -24,6 +24,8 @@ export {
   type ChatGPTSignInLocation,
   chatgptSignInLocation,
   chatgptSignInStatus,
+  describeChatGPTSignIn,
+  type ChatGPTSignInSummary,
   createChatGPTSignInFile,
   hasChatGPTSignIn,
   openChatGPTSignInFile,
