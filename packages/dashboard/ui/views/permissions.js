@@ -153,6 +153,9 @@ export const renderPermissions = () => {
       ...state.errors.map((error) => el('div', { class: 'notice bad', role: 'alert' }, error)),
       state.rows === undefined
         ? el('p', { class: 'field-note' }, 'Loading…')
+        : rows.length === 0 && state.errors.length > 0
+          // Some agent's grants couldn't be read, so "none" isn't known.
+          ? null
         : rows.length === 0
           ? el('div', { class: 'empty-state' },
               el('span', { class: 'icon-box' }, icon('shield-check', 18)),
