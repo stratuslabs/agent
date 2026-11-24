@@ -503,7 +503,11 @@ whatever its `tools:` says, because the form goes to an approver who
 decides everything after that. The one-time link it can fall back to is a
 bearer credential, so a link needs the soul to list `credential.request`
 (by name, a glob, or `"*"`); a soul with no `tools:` key gets forms only,
-except on a home set up before 0.14.3:
+except on a home set up before 0.14.3. Once the conversation has read
+external content, the request is a gated call that your approvals posture
+decides before any form goes up; see
+[After an agent reads the web](./approvals.md#after-an-agent-reads-the-web).
+A form looks like this:
 
 ```
 Kai is asking for a credential: github.token, for Kai only.

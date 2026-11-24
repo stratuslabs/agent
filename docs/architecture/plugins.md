@@ -1028,7 +1028,8 @@ so the tool can check once more before it acts. A throw or a slow answer reads
 A tool that is fine unattended in a clean conversation but not on a web page's
 say-so may declare `Tool.riskAfterExternalContent`: once the session's label is
 `external`, the runner judges its calls at that risk instead (`resolveCallRisk`),
-and it never lowers `risk`. `agent.delegate` declares `gated` there. Such a tool
+and it never lowers `risk`. `agent.delegate` and `credential.request` declare
+`gated` there. Such a tool
 never runs beside its read-only neighbours, so the label it is judged against
 includes every call before it.
 
