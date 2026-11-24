@@ -88,10 +88,16 @@ export const runSetup = async (
   // Seed from what is already configured, so re-running setup edits instead
   // of clobbering.
   let existing: CliConfigFile = {};
+  // No config file at all: the one case the posture question is for. A
+  // file that exists but can't be read is not a new install, and is not
+  // asked.
+  let newInstall = false;
   try {
     existing = await loadConfigFile(configPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      newInstall = true;
+    } else {
       writeLine(streams.stderr, `Warning: could not read ${configPath} (${error instanceof Error ? error.message : String(error)}); starting fresh.`);
     }
   }
@@ -158,8 +164,11 @@ export const runSetup = async (
     // Carried for the same reason: setup has no screen for it, and a save
     // that dropped it would put every agent back on the shared budget.
     ...(existing.agentMaxTurns !== undefined ? { agentMaxTurns: existing.agentMaxTurns } : {}),
+    ...(existing.turnMinutes !== undefined ? { turnMinutes: existing.turnMinutes } : {}),
+    ...(existing.agentTurnMinutes !== undefined ? { agentTurnMinutes: existing.agentTurnMinutes } : {}),
     ...(existing.autoContinue !== undefined ? { autoContinue: existing.autoContinue } : {}),
     ...(existing.concurrentScheduledTurns !== undefined ? { concurrentScheduledTurns: existing.concurrentScheduledTurns } : {}),
+    ...(existing.tasks !== undefined ? { tasks: existing.tasks } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -235,7 +244,7 @@ export const runSetup = async (
     channelRoster,
     fitMenuRow,
   });
-  const { approvalsSummary, chooseApprovals } = createApprovalSetup({
+  const { approvalsSummary, chooseApprovals, offerPosture } = createApprovalSetup({
     state,
     env,
     serveCommand,
@@ -491,11 +500,20 @@ export const runSetup = async (
     if (state.agentMaxTurns !== undefined) {
       config.agentMaxTurns = state.agentMaxTurns;
     }
+    if (state.turnMinutes !== undefined) {
+      config.turnMinutes = state.turnMinutes;
+    }
+    if (state.agentTurnMinutes !== undefined) {
+      config.agentTurnMinutes = state.agentTurnMinutes;
+    }
     if (state.autoContinue !== undefined) {
       config.autoContinue = state.autoContinue;
     }
     if (state.concurrentScheduledTurns !== undefined) {
       config.concurrentScheduledTurns = state.concurrentScheduledTurns;
+    }
+    if (state.tasks !== undefined) {
+      config.tasks = state.tasks;
     }
 
     await saveConfigFile(configPath, config);
@@ -782,6 +800,7 @@ export const runSetup = async (
     if (envConfigVar && !command.configPath) {
       writeLine(streams.stdout, `${envConfigVar} is set, so the config will be written to ${configPath}.`);
     }
+    await offerPosture(newInstall);
 
     while (true) {
       writeLine(streams.stdout);

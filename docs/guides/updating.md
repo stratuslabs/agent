@@ -476,7 +476,10 @@ version directory — leaves the unit pointing at an interpreter that no
 longer exists. The service stops working and nothing says so; the agents
 just stop answering. `stratus update` rewrites the unit with the current
 node and entrypoint paths, preserving its `--config` pin and login setting,
-and `stratus doctor` flags a stale unit path as a problem. Every step
+and `stratus doctor` flags a stale unit path as a problem. A unit installed
+before 0.14.20 on a Homebrew node pins the versioned keg, which the next
+`brew upgrade` and `brew cleanup` take away; `stratus doctor` names it, and
+`stratus update` rewrites it with Homebrew's stable `opt` link. Every step
 degrades independently — with npm unreachable, `update` skips the package
 upgrade but still migrates and repairs the unit, which is exactly what the
 offline case needs. A daemon that was deliberately stopped before the

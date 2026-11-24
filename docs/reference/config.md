@@ -68,8 +68,11 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `memoryStore` | Which store backs agent memory: `file` (the default) or the name a [plugin memory store](../guides/extending.md#memory-stores) registers — trusted configs only, see below |
 | `maxTurns` | How many tool turns one message may take before the agent stops and reports where it got to. Default `40` — trusted configs only, see below |
 | `agentMaxTurns` | Per-agent replacements for `maxTurns`, keyed by agent id. Trusted configs only |
+| `turnMinutes` | The longest one turn may run, in minutes, before it is stopped and fails saying why. Time spent waiting on an approval doesn't count. `0` means no limit. Default `120` — trusted configs only, see [how long one turn may run](#how-long-one-turn-may-run) |
+| `agentTurnMinutes` | Per-agent replacements for `turnMinutes`, keyed by agent id: `{ "atlas": 240 }`, `0` for no limit on that agent. Trusted configs only |
 | `autoContinue` | Agents that keep working past their budget instead of stopping to ask, keyed by agent id: `true` (no cap) or a number of extra budgets per message. Off for agents not listed. Trusted configs only. See [how many turns one message may spend](#how-many-turns-one-message-may-spend) |
 | `concurrentScheduledTurns` | How many of an agent's schedules may run a firing at once, keyed by agent id: `{ "atlas": 2 }`. 1 for agents not listed; one schedule never overlaps itself whatever the number. Trusted configs only. See [Schedules](../guides/schedules.md#limits) |
+| `tasks` | Background tasks: `enabled` (default `true`) lets an agent's `agent.delegate` call pass `background: true`, and `maxRunningPerAgent` caps how many one agent has running at once, keyed by agent id: `{ "atlas": 5 }`, 3 for agents not listed. Trusted configs only. See [Background tasks](#background-tasks) |
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
@@ -202,9 +205,10 @@ log names the agents it is on for. It applies to the built-in model loop
 (Anthropic and OpenAI-compatible providers) and to the `claude-code`
 runtime, which carries on in the same Claude Code session with a fresh
 budget. The `codex` runtime is not covered yet and wraps up as before. With
-`true` there is no ceiling, and a message that joins the turn mid-task
+`true` there is no step ceiling, and a message that joins the turn mid-task
 (below) doesn't end it, so a runaway turn ends with
-[`stop` in Slack](../guides/slack.md#stopping-a-turn) or a daemon restart.
+[`stop` in Slack](../guides/slack.md#stopping-a-turn), a daemon restart, or
+its [time limit](#how-long-one-turn-may-run).
 
 **A message sent mid-task shares the budget.** On Slack, a message sent
 while the agent works [joins the running turn](../guides/slack.md#how-replies-appear) at its
@@ -274,6 +278,121 @@ parent's: `agent.delegate` starts a separate dispatch, and each dispatch is
 held to this ceiling. The bound on delegation *depth* is a different
 setting — see [Tools](../guides/tools.md).
 
+## How long one turn may run
+
+`maxTurns` counts steps; `turnMinutes` is the clock. A turn that runs
+longer than 2 hours is stopped, however many steps it has left. It catches
+what the step budget and the idle watchdog can't: a provider that doesn't
+stream (the watchdog only watches streaming ones), a tool that never
+returns, an `autoContinue: true` loop.
+
+```json
+{
+  "turnMinutes": 60,
+  "agentTurnMinutes": { "atlas": 240, "nova": 0 }
+}
+```
+
+`agentTurnMinutes` replaces `turnMinutes` for the agents it names, and `0`
+turns the limit off, for everyone or for one agent. Both follow the trust
+rule of `maxTurns`: a project-local config can neither lift the limit nor
+cut the operator's agents off. A daemon restart picks them up, and the
+startup log says the limit and each agent with its own: `turn time limit:
+2 hours per turn (atlas 4 hours, nova none)`.
+
+- **What counts.** Wall-clock time from when the turn starts, tool calls
+  and provider calls alike. Time the turn spends waiting on a person's
+  [approval](../guides/approvals.md) doesn't: the clock stops when the
+  question goes out and goes on, with the time already spent, once it is
+  answered or expires. Deciding whether to ask (rules, the review model, a
+  custom policy) is the turn's own time. A turn that delegates keeps its clock running while the
+  delegated session works, and that session has a clock of its own.
+- **What happens.** The turn is stopped the way a `stop` stops it: the
+  call in flight is cancelled, the session keeps every step it finished,
+  and the turn fails with `Stopped: this turn ran past its time limit of 2
+  hours`, naming these settings. Slack posts it in the thread as the
+  turn's failure. Replying carries on from where it got to, with a fresh
+  clock.
+- **Background tasks.** A task is one turn of its worker, so the worker
+  agent's limit is the task's. A task past it ends `failed`, its outcome
+  in the conversation that started it says why, and its slot is free.
+- **Restarts.** A turn a restart continues starts a fresh clock, and so
+  does one a restart finds parked on an approval, once it is asked again.
+  A turn the limit stopped is failed, never continued.
+
+## Background tasks
+
+An agent that may delegate can pass `background: true` to
+`agent.delegate`. The call returns a task id at once instead of waiting,
+the work runs as its own delegated session, and its outcome is added to the
+conversation that started it, once, when it ends, as a new turn: in
+Slack, the agent's reply to it is a new message in the thread. The work
+can be the agent's own, which needs no `delegates:` entry, or a
+teammate's that `delegates:` allows. Only one level: a delegated session,
+a task's worker included, can't start a task. Tasks are on unless
+`tasks.enabled` is `false`.
+
+```json
+{
+  "tasks": { "maxRunningPerAgent": { "atlas": 5 } }
+}
+```
+
+- **Cap.** Each agent may have 3 tasks running, or the number
+  `maxRunningPerAgent` gives it. A start past the cap is refused with an
+  error the agent can pass on; nothing queues. Asking again for the same
+  worker and prompt from the same conversation returns the task already
+  running.
+- **Restarts.** A stop or restart doesn't wait for a running task: it cuts
+  it off, and the next start reports it interrupted in its conversation.
+  It is never run again.
+- **Time limit.** A task runs for at most its worker agent's
+  [turn time limit](#how-long-one-turn-may-run), 2 hours unless
+  `turnMinutes` or `agentTurnMinutes` says otherwise. Past it the task
+  ends `failed`, saying it ran past its time limit, and frees its slot.
+  Time waiting on an approval doesn't count.
+- **Approvals.** A task's gated call is asked in the conversation that
+  started it, as any delegated call is, and the request carries the task
+  id (`taskId` on `tool.approval-requested` and on `GET /api/v1/approvals`
+  rows), so a Slack prompt says which task is asking. The task shows
+  `waiting_approval` until someone answers. With nobody answering, the
+  approval timeout (15 minutes by default) denies the call and the task
+  goes on from there.
+- **Stop.** An approver's `stop` in a Slack conversation also stops the
+  tasks that conversation started, and a line there names them
+  ([stopping a turn](../guides/slack.md#stopping-a-turn)). Each task's
+  outcome then arrives as cancelled. An agent stops its own with
+  `agent.cancelTask`, and the operator any task with `stratus tasks
+  cancel <id>`.
+- **Seeing them.** An agent lists its own with `agent.tasks`.
+  `stratus tasks` lists the running daemon's tasks: every
+  one running or whose outcome isn't in its conversation yet, newest
+  first, then the 20 most recently finished, with the status, agent,
+  steps, task id, and whether the outcome is in the conversation.
+  `--agent <id>` narrows it to the tasks one agent started, and
+  `--format json` adds the conversation and worker session ids. It never
+  shows what a task was asked or answered: that stays in the two sessions.
+  The control API has the same list at `GET /api/v1/tasks` (`?agent=<id>`)
+  and the cancel at `POST /api/v1/tasks/<id>/cancel`; both need the
+  operator token or a dashboard sign-in. A cancel with the token is named
+  "from the CLI" in the notice, and one from a dashboard sign-in "from the
+  dashboard". Each task's start and end is also an event, `task.started`
+  and then `task.completed`, `task.failed`, `task.cancelled` or
+  `task.interrupted`, with `task.waiting-approval` each time it starts
+  waiting on an approval, in the daemon log and on the control API's event
+  stream, with ids only.
+- **Off.** `enabled: false` refuses `background: true` with an error
+  saying so, and agents no longer get `agent.tasks` or `agent.cancelTask`.
+  Tasks a previous run left are still settled at startup, and `stratus
+  tasks` still lists them.
+
+`stratus serve` names the setting when it starts (`background tasks: on,
+up to 3 running per agent (atlas 5)`, or `background tasks: off
+(tasks.enabled is false)`). A project-local
+`stratus.config.json` can't set `tasks`. A value that isn't one (a cap of
+0, `"enabled": "yes"`) is refused when the config loads, so the daemon
+doesn't start on it, and the error names the entry.
+
 ## Prompt caching
 
 `promptCache` marks the stable head of each Anthropic request — the tool
@@ -331,6 +450,7 @@ set.
 | `events` | Whether a second port opens for deliveries, on which interface, and who may wake the daemon's agents | [Events](../guides/events.md) |
 | `maxTurns` | How long a loop one message can buy, which is both a runaway guard and a spending limit | [Always on](../guides/always-on.md#how-many-turns-one-message-may-spend) |
 | `concurrentScheduledTurns` | How many unattended turns one agent runs at once, which multiplies what its schedules can spend | [Schedules](../guides/schedules.md#limits) |
+| `tasks` | Whether agents start work nobody waits on, and how much of it runs at once | [Background tasks](#background-tasks) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 | `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get, and `stratus serve` says it once at startup, whether or not its runtime resolves | [Security](../concepts/security.md) |
 

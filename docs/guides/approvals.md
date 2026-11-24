@@ -37,6 +37,10 @@ That default is `approvals.posture: "open"`:
   each gated call, and a person is asked only when they can't tell. See
   [The review posture](#the-review-posture).
 
+`stratus setup` asks a new install which one to use, with open preselected,
+and writes the answer; an existing config is never asked. See
+[Setup](../start/setup.md).
+
 A config that can't be read leaves the daemon guarded rather than open. A
 project-local config that tries to set `approvals` is ignored, with a
 warning, and `~/.stratus/config.json`'s approvals apply instead. The daemon
@@ -210,17 +214,21 @@ Each decision is a `permission.decided` event with its verdict, the check
 that made it (`rule`, `review`, or the usual layers) and a fixed code for
 the reviewer's reason (`asked-for`, `not-asked-for`,
 `follows-outside-content`, `sends-secret`, `new-destination`, `unclear`,
-`review-failed`). The reviewer's own words go only to the agent and to the
-approver, since they can echo the call's input. The dashboard's live view
+`review-failed`). The reviewer's own words never go on an event, since they
+can echo the call's input: on an enforced review they go only to the agent
+and to the approver. The dashboard's live view
 shows each decision beside its call, and a shadow one as `would have
 blocked` beside it, drawn dashed, even when the review finishes after the
 turn has. The daemon log gets one line per review
-decision with `verdict=` and `code=` (a shadow one starts with `shadow`),
-which is what to count:
+decision with `verdict=` and `code=`, which is what to count. A shadow one
+starts with `shadow` and also carries the reviewer's one-line reason as
+`why="…"`, with stored credential values redacted, so a shadow run can show
+why review would have asked or blocked. That line can paraphrase the
+conversation, so treat the log as private while shadow is on:
 
 ```text
 approvals: posture review for atlas (model claude-haiku-5-5, shadow: reviewed and logged, never enforced)
-atlas: shadow [review] message.send was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for (session slack:atlas:…)
+atlas: shadow [review] message.send was blocked by the reviewer (not-asked-for) verdict=block code=not-asked-for why="nobody here asked to post in C0123" (session slack:atlas:…)
 ```
 
 To turn it off, set `posture` back to `open` or `guarded`; your rules stay
@@ -276,11 +284,12 @@ page and you have asked for that to cost it its grants; see
 A tool that declares no risk counts as `gated`, never `safe` — forgetting
 to classify something should cost a prompt, not an unattended command. Most
 built-in tools (`demo.echo`, `memory.remember`, `memory.recall`,
-`memory.forget`, `agent.delegate`, `schedule.list`, `schedule.cancel`) are
-`safe`; the built-in exceptions are `schedule.every`, `schedule.at`,
-`schedule.on` and `message.send`, which are `gated` because they act past
-the end of the turn — see [Schedules](./schedules.md). `agent.delegate` is
-`gated` too once the conversation has read external content; see
+`memory.forget`, `agent.delegate`, `credential.request`, `schedule.list`,
+`schedule.cancel`) are `safe`; the built-in exceptions are `schedule.every`,
+`schedule.at`, `schedule.on` and `message.send`, which are `gated` because
+they act past the end of the turn — see [Schedules](./schedules.md).
+`agent.delegate` and `credential.request` are `gated` too once the
+conversation has read external content; see
 [After an agent reads the web](#after-an-agent-reads-the-web). Anything you install is where this
 starts to bite, which is what [Tools](./tools.md) is about.
 
@@ -417,7 +426,10 @@ warning naming the file.
   that started the delegation. This applies only while the sub-session is
   the delegation's: `agent.delegate` reports the sub-session's id, and a
   message sent to that id afterwards continues it as an ordinary
-  conversation, whose parked turns are resumed like any other.
+  conversation, whose parked turns are resumed like any other. A
+  [background task](../reference/config.md#background-tasks)'s worker is
+  not resumed either: the restart cuts the task off, and the conversation
+  that started it is told the task was interrupted.
 - **A delegated call is asked where the work was asked for.** When Nova
   delegates to Quinn and Quinn reaches a gated call, the request goes to
   the conversation at the root of the delegation, through Nova's Slack app
@@ -426,6 +438,8 @@ warning naming the file.
   at a time: there is no **Always allow**, and an `always` sent through the
   control API runs the call once. A standing grant for Quinn comes from
   Quinn's own work or from `stratus grants`, not from Nova's approvers.
+  A background task's call is asked the same way, and the request carries
+  its task id.
 - **A button left behind by a dead daemon corrects itself when clicked.** A
   normal shutdown retracts its buttons; a crash cannot, and the new process
   has no record of what the old one posted. Clicking such a prompt tells
@@ -936,16 +950,29 @@ and a schedule's pre-authorized destination — a schedule that reads the web
 and reports to the channel you approved it for is the job it was approved
 to do, and the page can only change the words it sends there.
 
-One `safe` tool changes with the label itself, whatever `externalContent`
-says: `agent.delegate`. Once a conversation has read external content, a
-delegation is judged as a `gated` call, so your posture, your grants and
-this gate decide it exactly as they would `message.send`. A delegate runs
-under its own tools, credentials and memory, which is the move an
-instruction on a page would want. Under `headless` with `guarded`, it is
-refused; with `open`, it runs unless `externalContent` is `gate`. The
-teammate's own conversation starts at the same label, so the rule holds
-down a chain. A conversation that hasn't read anything from outside
-delegates without asking, as before.
+Two `safe` tools change with the label itself, whatever `externalContent`
+says: `agent.delegate` and `credential.request`. Once a conversation has
+read external content, each call to them is judged as a `gated` call, so
+your posture, your grants and this gate decide it exactly as they would
+`message.send`.
+
+- **`agent.delegate`.** A delegate runs under its own tools, credentials
+  and memory, which is the move an instruction on a page would want. Under
+  `headless` with `guarded`, it is refused; with `open`, it runs unless
+  `externalContent` is `gate`. The teammate's own conversation starts at
+  the same label, so the rule holds down a chain.
+- **`credential.request`.** A page can tell an agent to ask a person for a
+  key, with an `env` its shell could then read, and the form shows the
+  agent's reason, not the page behind it. So the request is judged before
+  any form or link goes up: under `guarded` an approver is asked first
+  unless a grant covers it (under `headless`, it is refused), and under
+  `review` your rules and the reviewer decide. Under `open` the request
+  goes straight to the form, as it does in a clean conversation, unless
+  `externalContent` is `gate`; that setting is the only thing that changes
+  it there.
+
+In a conversation that hasn't read anything from outside, both run without
+a check, as before.
 
 Three limits to know before relying on it:
 

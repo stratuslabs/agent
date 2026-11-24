@@ -319,7 +319,67 @@ export const createApprovalSetup = ({
     }
   };
 
-  return { approvalsSummary, chooseApprovals };
+  /**
+   * The posture, asked once of a new install, at a terminal, before the
+   * main menu (AGT-334). Open stays the default and is preselected, so
+   * Enter changes nothing about how agents behave; the point is that the
+   * choice is made where the operator can see it, not found later in docs.
+   *
+   * Only for a new install: an existing config, with or without a posture
+   * in it, keeps what it has, and a rerun of setup never asks. Only at a
+   * terminal: a script driving setup through piped input gets the menus it
+   * always got, in the same order, so its next line is never read as an
+   * answer to a question it did not know about.
+   *
+   * An answer is written, Enter included: a question answered is a choice,
+   * and it must not change under the operator if a later release moves the
+   * built-in default. Backing out writes nothing and leaves that default.
+   *
+   * Asked before the menu rather than at Save & finish because the menu is
+   * where the consequence can be fixed: Approvals is still headless there,
+   * which refuses what guarded and review would ask about, and its row says
+   * so under the posture just picked.
+   */
+  const offerPosture = async (newInstall: boolean): Promise<void> => {
+    if (!newInstall || !prompter.isInteractive() || prompter.isClosed() || state.approvals?.posture !== undefined) {
+      return;
+    }
+    const postures = ['open', 'guarded', 'review'] as const;
+    const reserved = menuPrefixWidth(postures.length);
+    const choice = await prompter.select(
+      'Approvals — should your agents ask before using tools that can change things?',
+      [
+        fitMenuRow('Open (default)   run them without asking', reserved),
+        fitMenuRow('Guarded          ask you first, or refuse when nobody can answer', reserved),
+        fitMenuRow('Review           a model checks them after an agent reads outside content', reserved),
+      ],
+      {
+        defaultIndex: 0,
+        // Short enough for an 80-column terminal: a footnote may wrap, but
+        // a terminal wraps mid-word.
+        footnote: 'Dangerous tools always ask. Change it later with approvals.posture.',
+      },
+    );
+    if (choice.kind !== 'index') {
+      return;
+    }
+    const posture = postures[choice.index];
+    if (posture === undefined) {
+      return;
+    }
+    state.approvals = { ...(state.approvals ?? {}), posture };
+    // Carried onto the menu screen as notices, one per line, each short
+    // enough not to wrap at 80 columns.
+    writeLine(streams.stdout, `Posture ${posture}. Change it later with approvals.posture in the config file.`);
+    if (posture !== 'open') {
+      // A new install is always headless at this point: nothing has set a
+      // mode yet. `stratus chat` and `stratus run` still ask at the terminal.
+      writeLine(streams.stdout, 'Approvals is headless, so the daemon refuses what it would ask about.');
+      writeLine(streams.stdout, 'Choose Ask in Slack under Approvals to be asked there instead.');
+    }
+  };
+
+  return { approvalsSummary, chooseApprovals, offerPosture };
 };
 
 export type ApprovalSetup = ReturnType<typeof createApprovalSetup>;

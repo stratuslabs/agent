@@ -239,9 +239,13 @@ machines, turn on `agentMentions`:
   its bot is listed as a principal. Nothing here can see what its words were
   built from. It can't stop a turn, and approvals still go to the people in
   `approvals`.
-- Loop guard: a thread takes at most 4 agent mentions in a row on each
-  daemon. After that the agents stop answering each other until a person
-  says something in the thread. The count is kept in memory, so a restart
+- Loop guard: each agent answers at most 4 agent mentions per thread in
+  any 30 minutes. Each agent has its own count, so two agents going back
+  and forth don't use up a third agent's. A tag past the limit gets no
+  answer; the agent says so once in the thread, without tagging anyone,
+  and the daemon log has a warning. Older mentions stop counting after 30
+  minutes, and a person the agent admits saying something in the thread
+  clears its count at once. The count is kept in memory, so a restart
   resets it.
 - It takes effect on restart.
 
@@ -417,6 +421,12 @@ waiting on is cancelled and its card says so. A tool that doesn't stop when
 asked (usually a plugin's) gets 2 seconds, then the turn ends without it.
 Its result says it was left behind and may still be running.
 
+The same `stop` ends the [background tasks](../reference/config.md#background-tasks)
+that conversation started, and one more line names them: "Stopped by @you:
+background task `t_…`." Each task's outcome then arrives in the
+conversation as cancelled. With only tasks running, `stop` still stops them
+rather than reaching the agent as a message.
+
 Only the agent's approvers (`approvals.slackApprovers`) can stop it. From
 anyone else, or when nothing is running, `stop` is an ordinary message. An
 untagged `stop` goes to the agent that holds the thread, including one that
@@ -497,7 +507,11 @@ whatever its `tools:` says, because the form goes to an approver who
 decides everything after that. The one-time link it can fall back to is a
 bearer credential, so a link needs the soul to list `credential.request`
 (by name, a glob, or `"*"`); a soul with no `tools:` key gets forms only,
-except on a home set up before 0.14.3:
+except on a home set up before 0.14.3. Once the conversation has read
+external content, the request is a gated call that your approvals posture
+decides before any form goes up; see
+[After an agent reads the web](./approvals.md#after-an-agent-reads-the-web).
+A form looks like this:
 
 ```
 Kai is asking for a credential: github.token, for Kai only.

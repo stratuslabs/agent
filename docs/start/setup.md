@@ -17,6 +17,24 @@
 Menus are keyboard-driven — arrow keys (or `j`/`k`) to move, Enter to pick,
 digits to jump, Esc to go back.
 
+On a new install, with no config file yet, setup first asks which approvals
+posture your agents run, before the menu:
+
+- **Open** (the default, preselected): tools that can change things run
+  without asking.
+- **Guarded**: they ask you first, or are refused when nobody can answer.
+- **Review**: they run until a conversation reads outside content, then a
+  reviewer model checks each one and asks you when it can't tell.
+
+A dangerous tool asks under every posture. Your answer is written to
+`approvals.posture`, Enter included, so it stays yours if a later release
+changes the default; Esc writes nothing and keeps the default. Under guarded
+or review, set **Approvals** to ask in Slack if the daemon should ask you
+there: headless refuses those calls, while `stratus chat` and `stratus run`
+ask at the terminal. An existing config is never asked, and neither is a run
+with piped input. To change it later, edit `approvals.posture`; see
+[Approvals](../guides/approvals.md).
+
 - **Providers** — sign in to one or more. For Claude, choose how you pay: a
   **Claude Pro/Max subscription** (run `claude setup-token`, paste the token —
   runs route through the Claude Code runtime, so your plan covers usage;

@@ -181,6 +181,7 @@ export {
   type PluginConfigBlock,
   type PluginsConfig,
   type StratusConfigFile,
+  type TasksConfig,
   type FallbackRuntime,
   type IgnoredUntrustedConfig,
   type RuntimeConfig,

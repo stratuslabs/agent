@@ -180,6 +180,31 @@ call GET "/events/deliveries?source=github" | grep -q "\"eventId\":\"${delivery}
 events_out=$(as_stratus events) || fail "stratus events failed"
 grep -q '^github$' <<<"$events_out" || fail "stratus events does not list the github source: $events_out"
 
+echo "--- a background task starts and finishes"
+# The stand-in provider is the release smoke's scripted one, installed
+# beside the packed release for this run only. Its agent starts a
+# background task on itself; scripts/release-smoke/background-task.mjs
+# says what has to hold.
+sudo cp -r "$ROOT/scripts/release-smoke/plugin" "$PREFIX/node_modules/stratus-plugin-release-smoke"
+printf '{"events":{"sources":{"github":{"verify":"github","secrets":["events.github"]}}},"plugins":{"stratus-plugin-release-smoke":{"enabled":true}}}\n' \
+  | sudo -u stratus tee "$STATE/.stratus/config.json" >/dev/null
+sudo -u stratus mkdir -p "$STATE/.stratus/agents"
+sudo -u stratus tee "$STATE/.stratus/agents/smoke.md" >/dev/null <<'SOUL'
+---
+name: Smoke
+provider: smoke
+tools:
+  - agent.delegate
+  - agent.tasks
+---
+
+Background task smoke agent. Its provider is a script, not a model.
+SOUL
+sudo systemctl restart "$UNIT"
+wait_healthy
+SMOKE_TOKEN="$TOKEN" node "$ROOT/scripts/release-smoke/background-task.mjs" "$API" smoke \
+  || fail "the background task check failed"
+
 echo "--- a clean stop inside TimeoutStopSec"
 started=$SECONDS
 sudo systemctl stop "$UNIT"
