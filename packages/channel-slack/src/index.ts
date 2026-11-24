@@ -108,12 +108,19 @@ const LIVE_FROM_MARGIN_MS = 60_000;
 /** `liveFrom` while `start()` runs: later than any message. */
 const NOT_LIVE_YET = '9999999999.999999';
 /**
- * How many agent mentions one thread admits in a row before a person has
- * to speak there again (card 513): enough for a question, an answer and a
- * follow-up each way, and a stop to two agents tagging each other forever.
- * Counted per daemon, in memory; a restart starts it again.
+ * How many agent mentions one agent answers in a thread within
+ * `AGENT_MENTION_HOP_WINDOW_MS` (card 513, AGT-366): enough for a question,
+ * an answer and a follow-up each way, and a stop to two agents tagging
+ * each other forever. Counted per agent per thread, in memory; a person
+ * the agent admits speaking there starts it again, and so does a restart.
  */
 export const AGENT_MENTION_HOP_LIMIT = 4;
+/**
+ * How long an answered agent mention counts toward the hop limit
+ * (AGT-366). A loop is still cut at the limit, while a slow working
+ * exchange between agents keeps going without a person stepping in.
+ */
+const AGENT_MENTION_HOP_WINDOW_MS = 30 * 60_000;
 /**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
@@ -2057,6 +2064,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     SLACK_STOP_REASON,
     mentions,
     AGENT_MENTION_HOP_LIMIT,
+    AGENT_MENTION_HOP_WINDOW_MS,
+    warn,
+    now,
     THREAD_ADDRESSEE_CAPACITY,
     isPersonSpeaking,
     compareSlackTs,

@@ -16,6 +16,7 @@ import {
   type ListensMode,
   RunAbortedError,
 } from '@stratusagent/core';
+import { neutralizeMentions } from './posts.ts';
 import type { ReplyRenderer } from './reply.ts';
 import type { AgentConnection } from './connection.ts';
 import type { SlackAgentConfig, SlackInboundEvent, SlackSocketEventArgs } from './index.ts';
@@ -113,6 +114,9 @@ export interface AdmitterDeps extends Pick<ThreadTracking, 'threadKeyFor' | 'rem
   SLACK_STOP_REASON: string;
   mentions: (text: string, botUserId: string) => boolean;
   AGENT_MENTION_HOP_LIMIT: number;
+  AGENT_MENTION_HOP_WINDOW_MS: number;
+  warn: (line: string) => void;
+  now: () => number;
   THREAD_ADDRESSEE_CAPACITY: number;
   isPersonSpeaking: (event: SlackInboundEvent) => boolean;
   compareSlackTs: (left: string, right: string) => number;
@@ -137,6 +141,9 @@ export const createAdmitter = ({
   SLACK_STOP_REASON,
   mentions,
   AGENT_MENTION_HOP_LIMIT,
+  AGENT_MENTION_HOP_WINDOW_MS,
+  warn,
+  now,
   THREAD_ADDRESSEE_CAPACITY,
   isPersonSpeaking,
   compareSlackTs,
@@ -252,11 +259,28 @@ export const createAdmitter = ({
   };
 
   /**
-   * Agent mentions admitted per thread since a person last spoke there, by
-   * message ts (card 513). A copy of one message reaching a second socket,
-   * or redelivered, is the same hop. Bounded like the addressee map.
+   * Agent mentions admitted per thread, then per agent they named (card
+   * 513, AGT-366): each agent here has its own count, so one busy pair in a
+   * thread can't silence another agent there. A hop is the message ts, so a
+   * copy of one message reaching a second socket, or redelivered, is the
+   * same hop, and when it was admitted: only hops admitted in the last
+   * `AGENT_MENTION_HOP_WINDOW_MS` count. A person an agent admits speaking
+   * in the thread clears that agent's hops from before their message.
+   * `noticedAt` is when the agent last said in the thread that it skipped
+   * a tag, so it says so once a window. Bounded like the addressee map.
    */
-  const agentHops = new Map<string, string[]>();
+  const agentHops = new Map<string, Map<string, { hops: Array<{ ts: string; at: number }>; noticedAt?: number }>>();
+  const hopWindowMinutes = Math.round(AGENT_MENTION_HOP_WINDOW_MS / 60_000);
+
+  /**
+   * The line an agent posts in a thread when it skips a tag at its hop
+   * limit. It names nobody, so it can't start anyone's turn: a configured
+   * team agent name is any string, so Slack markup in it is neutralized.
+   */
+  const hopLimitNotice = (from: string, reopensInMinutes: number): string => neutralizeMentions(
+    `I'm skipping ${from}'s tag: agents have tagged me ${AGENT_MENTION_HOP_LIMIT} times in this thread in the last ${hopWindowMinutes} minutes, which is my limit for agent tags. `
+    + `I'll answer agent tags here again in ${reopensInMinutes} minute${reopensInMinutes === 1 ? '' : 's'}, or as soon as a person posts in this thread.`,
+  );
 
   /**
    * Which team agent a bot user in `team` is, for the agent configured by
@@ -334,16 +358,34 @@ export const createAdmitter = ({
     }
     const thread = event.thread_ts ?? event.ts;
     const threadKey = threadKeyFor({ team, conversation: event.channel, thread });
-    const hops = agentHops.get(threadKey) ?? [];
-    if (!hops.includes(event.ts)) {
+    const agentId = connection.config.agentId;
+    const at = now();
+    const byAgent = agentHops.get(threadKey) ?? new Map<string, { hops: Array<{ ts: string; at: number }>; noticedAt?: number }>();
+    const counted = byAgent.get(agentId);
+    const hops = (counted?.hops ?? []).filter((hop) => at - hop.at < AGENT_MENTION_HOP_WINDOW_MS);
+    if (!hops.some((hop) => hop.ts === event.ts)) {
       if (hops.length >= AGENT_MENTION_HOP_LIMIT) {
+        byAgent.set(agentId, { ...counted, hops });
         if (!alreadySeen(eventKey)) {
-          log(`slack: ${connection.config.agentId} ignored a mention from agent ${name}: the thread reached its hop limit of ${AGENT_MENTION_HOP_LIMIT} agent mentions; a person has to speak there first`);
+          const reopensIn = Math.max(1, Math.ceil((Math.min(...hops.map((hop) => hop.at)) + AGENT_MENTION_HOP_WINDOW_MS - at) / 60_000));
+          warn(`slack: ${agentId} ignored a mention from agent ${name}: it has taken ${AGENT_MENTION_HOP_LIMIT} agent mentions in this thread in the last ${hopWindowMinutes} minutes, its hop limit; it answers agents there again in ${reopensIn} min, or once a person speaks there`);
+          // Said in the thread too, once a window, so the agent that tagged
+          // it (and anyone reading) can see why there's no answer.
+          if (counted?.noticedAt === undefined || at - counted.noticedAt >= AGENT_MENTION_HOP_WINDOW_MS) {
+            byAgent.set(agentId, { hops, noticedAt: at });
+            track(connection.web.chat.postMessage({ channel: event.channel, thread_ts: thread, text: hopLimitNotice(name, reopensIn) }).then(
+              () => undefined,
+              (error: unknown) => {
+                warn(`slack: ${agentId} could not say in ${event.channel} that it skipped a mention from agent ${name}: ${error instanceof Error ? error.message : String(error)}`);
+              },
+            ));
+          }
         }
         return undefined;
       }
+      byAgent.set(agentId, { ...counted, hops: [...hops, { ts: event.ts, at }] });
       agentHops.delete(threadKey);
-      agentHops.set(threadKey, [...hops, event.ts]);
+      agentHops.set(threadKey, byAgent);
       if (agentHops.size > THREAD_ADDRESSEE_CAPACITY) {
         const oldest = agentHops.keys().next();
         if (!oldest.done) {
@@ -380,18 +422,29 @@ export const createAdmitter = ({
     if (getGateway() && event && (event.bot_id !== undefined || event.subtype === 'bot_message')) {
       return admitAgentMention(connection, args);
     }
-    if (event && event.user !== undefined && event.channel_type !== 'im' && isPersonSpeaking(event) && admitsSender(connection.config, event.user)) {
-      // A person this agent admits, speaking in a thread, ends a run of
-      // agent mentions there. Someone it refuses can't restart one. Only
-      // hops before the person's message reset: another agent's socket can
-      // deliver an older human message late, after newer hops.
+    if (event && event.user !== undefined && event.channel_type !== 'im' && isPersonSpeaking(event)) {
+      // A person speaking in a thread ends each run of agent mentions there
+      // for the agents that admit them, judged on each agent's own terms
+      // whichever socket heard it: someone an agent refuses can't restart
+      // its run. Only hops before the person's message reset: another
+      // agent's socket can deliver an older human message late, after
+      // newer hops.
+      const sender = event.user;
       const hopKey = threadKeyFor({ team: args.body?.team_id ?? connection.teamId, conversation: event.channel, thread: event.thread_ts ?? event.ts });
-      const hops = agentHops.get(hopKey);
-      if (hops) {
-        const newer = hops.filter((hop) => compareSlackTs(hop, event.ts) > 0);
-        if (newer.length > 0) {
-          agentHops.set(hopKey, newer);
-        } else {
+      const byAgent = agentHops.get(hopKey);
+      if (byAgent) {
+        for (const [agentId, counted] of byAgent) {
+          if (!admitsSender(agentConfigFor(agentId), sender)) {
+            continue;
+          }
+          const newer = counted.hops.filter((hop) => compareSlackTs(hop.ts, event.ts) > 0);
+          if (newer.length > 0) {
+            byAgent.set(agentId, { ...counted, hops: newer });
+          } else {
+            byAgent.delete(agentId);
+          }
+        }
+        if (byAgent.size === 0) {
           agentHops.delete(hopKey);
         }
       }
