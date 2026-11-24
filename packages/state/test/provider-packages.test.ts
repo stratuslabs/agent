@@ -137,6 +137,8 @@ test('a provider package that is installed but missing one of its own dependenci
   // Same for a file missing inside an installed harness.
   const truncated = missing("Cannot find module '/usr/lib/node_modules/@stratusagent/provider-claude-code/dist/index.js' imported from /usr/lib/node_modules/@stratusagent/state/dist/provider-runtime.js");
   assert.equal(providerPackageNotInstalledError('claude-code', truncated), undefined);
+  const chatgptAbsent = providerPackageNotInstalledError('chatgpt', missing("Cannot find package '@stratusagent/provider-chatgpt' imported from /usr/lib/node_modules/@stratusagent/state/dist/provider-runtime.js"));
+  assert.match(chatgptAbsent?.message ?? '', /runs on a ChatGPT sign-in, and @stratusagent\/provider-chatgpt is not installed/);
   const anthropicAbsent = providerPackageNotInstalledError('anthropic', missing("Cannot find package '@stratusagent/provider-anthropic' imported from /usr/lib/node_modules/@stratusagent/state/dist/provider-runtime.js"));
   assert.match(anthropicAbsent?.message ?? '', /@stratusagent\/provider-anthropic is not installed/);
 });
@@ -165,5 +167,6 @@ test('providerPackagesUsedBy names the package a runtime and its fallback load',
     anthropic: '@stratusagent/provider-anthropic',
     'claude-code': '@stratusagent/provider-claude-code',
     codex: '@stratusagent/provider-codex',
+    chatgpt: '@stratusagent/provider-chatgpt',
   });
 });
