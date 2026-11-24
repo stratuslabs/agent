@@ -4,7 +4,7 @@ import { icon } from '../lib/icons.js';
 import { endsSettled, settledLines, shadowLineIndex } from '../lib/decisions.js';
 import { conversationTitle, firstLine, sourceOf } from '../lib/sources.js';
 import { transcriptItems } from '../lib/transcript.js';
-import { onEnvelope, store } from '../app.js';
+import { navigate, onEnvelope, store } from '../app.js';
 import { approvalCard } from './approval.js';
 import { conversationDrawer, topBar } from './agent-panels.js';
 import { createSettingsTab } from './agent-settings.js';
@@ -575,12 +575,14 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     setError: (message) => { state.error = message; },
   });
 
+  /**
+   * Shows a tab. History is the shell's: a tab click goes through
+   * `navigate`, which pushes the URL and calls this, and Back or Forward
+   * call this from the shell's popstate. Touching history here replaced the
+   * entry being left, so Back skipped over it.
+   */
   const showTab = (tab) => {
     state.tab = tab === 'settings' ? 'settings' : 'chat';
-    const hash = `#/agents/${encodeURIComponent(agentId)}${state.tab === 'settings' ? '/settings' : ''}`;
-    if (location.hash !== hash) {
-      history.replaceState(null, '', hash);
-    }
     update();
   };
 
@@ -596,10 +598,10 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
         current,
         agentId,
         tab: state.tab,
-        onTab: showTab,
+        onTab: (tab) => navigate({ name: 'agent', agentId, ...(tab === 'settings' ? { tab } : {}) }),
         drawerOpen: state.drawerOpen,
         onToggleDrawer: () => { state.drawerOpen = !state.drawerOpen; update(); },
-        onNew: () => { showTab('chat'); startSession(); composer.focus(); },
+        onNew: () => { navigate({ name: 'agent', agentId, fresh: true }); composer.focus(); },
       }),
       ...(state.tab === 'chat'
         ? [transcriptBox, composerBox]

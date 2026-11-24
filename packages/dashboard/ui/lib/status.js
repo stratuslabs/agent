@@ -28,7 +28,9 @@ export const agentStatus = (agent, { approvals = [], runtimes = [] } = {}) => {
 /** The one-line summary under Home's greeting. */
 export const statusLine = (agents, context = {}) => {
   const waiting = (context.approvals ?? []).length;
-  const working = agents.filter((agent) => agentStatus(agent, { runtimes: context.runtimes }).kind === 'working').length;
+  // With the approvals, so an agent parked on one counts as needing you
+  // rather than as working too.
+  const working = agents.filter((agent) => agentStatus(agent, context).kind === 'working').length;
   const head = working > 0 || agents.length > 1
     ? `${working} of ${agents.length} agent${agents.length === 1 ? '' : 's'} working`
     : `${agents.length} agent${agents.length === 1 ? '' : 's'} · nothing running`;

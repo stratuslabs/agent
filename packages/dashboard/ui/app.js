@@ -330,6 +330,9 @@ const handleEnvelope = (envelope) => {
   }
   if (type === 'tool.approval-requested' || type === 'tool.approval-resolved') {
     void refreshCore();
+    // The session moved between running and parked before this event was
+    // sent, so the lists that show its status are re-read too.
+    void refreshForRoute();
   }
   // An overhear belongs here too: it moves the session's own timestamp,
   // which is what the overview orders by, and emits nothing else.
@@ -475,7 +478,13 @@ const paint = () => {
 // ---- boot ----------------------------------------------------------------
 
 window.addEventListener('popstate', () => {
-  store.route = routeFromHash(location.hash);
+  const route = routeFromHash(location.hash);
+  // Back and Forward between an agent's Chat and Settings keep the same
+  // view (same route key), so it is told which tab the URL now names.
+  if (route.name === 'agent' && store.route.name === 'agent' && route.agentId === store.route.agentId) {
+    current.view?.showTab?.(route.tab ?? 'chat');
+  }
+  store.route = route;
   render();
   void refreshForRoute();
 });

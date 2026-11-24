@@ -52,4 +52,8 @@ test('the status line counts working agents and what waits on you', () => {
   assert.equal(statusLine(agents, { approvals: [{ agentId: 'cleo' }, { agentId: 'cleo' }] }), '1 of 3 agents working · 2 need you');
   assert.equal(statusLine(agents, { approvals: [{ agentId: 'cleo' }] }), '1 of 3 agents working · 1 needs you');
   assert.equal(statusLine([ava], {}), '1 agent · nothing running');
+  // An agent parked on an approval has a running session, but it needs you
+  // rather than working, and the line must not count it twice.
+  const parked = [{ ...ava, activeSessions: 1 }];
+  assert.equal(statusLine(parked, { approvals: [{ agentId: 'ava' }] }), '1 agent · nothing running · 1 needs you');
 });
