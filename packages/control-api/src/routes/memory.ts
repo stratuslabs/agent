@@ -1,6 +1,6 @@
 import { effectiveMemoryValidityAt, memoryEntryTrust } from '@stratusagent/core';
 
-import { API_PREFIX, ApiError } from '../http.ts';
+import { API_PREFIX, ApiError, readJsonObject, requireString } from '../http.ts';
 import type { Route } from '../routes.ts';
 import { validGrantsAgentId } from './grants.ts';
 
@@ -36,11 +36,14 @@ export const memoryRoutes: Route[] = [
     },
   },
   {
-    method: 'DELETE',
-    pattern: `${API_PREFIX}/agents/:id/memory/:entryId`,
+    method: 'POST',
+    pattern: `${API_PREFIX}/agents/:id/memory/forget`,
     async handler(context) {
       const agentId = validGrantsAgentId(context.params.id);
-      const entryId = context.params.entryId ?? '';
+      // In the body, not the path: an entry id is the store's to choose, and
+      // one that is `.` or `..` would be collapsed out of a URL by every
+      // client's path normalization before it reached a route.
+      const entryId = requireString(await readJsonObject(context.request), 'entryId');
       if (!await context.gateway.forgetMemory(agentId, entryId)) {
         throw new ApiError(
           404,

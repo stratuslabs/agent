@@ -65,7 +65,7 @@ export const api = {
   grants: (agentId) => request('GET', `/agents/${encodeURIComponent(agentId)}/grants`),
   revokeGrant: (agentId, body) => request('POST', `/agents/${encodeURIComponent(agentId)}/grants/revoke`, body),
   memory: (agentId) => request('GET', `/agents/${encodeURIComponent(agentId)}/memory`),
-  forgetMemory: (agentId, entryId) => request('DELETE', `/agents/${encodeURIComponent(agentId)}/memory/${encodeURIComponent(entryId)}`),
+  forgetMemory: (agentId, entryId) => request('POST', `/agents/${encodeURIComponent(agentId)}/memory/forget`, { entryId }),
   config: () => request('GET', '/config'),
   saveConfig: (config) => request('PUT', '/config', { config }),
 };
