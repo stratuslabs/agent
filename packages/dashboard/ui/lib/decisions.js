@@ -18,6 +18,34 @@ export const decisionNote = (decision) => {
   return [head, decision.layer, decision.reviewCode].filter((part) => part !== undefined && part !== '').join(' · ');
 };
 
+const ALLOWED = {
+  risk: 'Auto',
+  scope: 'Allowed · safe command',
+  autonomy: 'Allowed · workspace',
+  grant: 'Always allowed',
+  approver: 'Approved',
+  rule: 'Rule allowed',
+  review: 'Reviewer allowed',
+};
+const REFUSED = { approver: 'Denied', cancelled: 'Cancelled' };
+
+/**
+ * The short label beside a call in the chat: what was decided, said the
+ * way the check that made it would be recognised — "Always allowed" for a
+ * standing grant, "Denied" for a person's no. A shadow decision changed
+ * nothing, so it keeps `decisionNote`'s "would have" wording; the full
+ * reason stays one hover away.
+ */
+export const decisionLabel = (decision) => {
+  if (decision.shadow === true) {
+    return decisionNote(decision);
+  }
+  if (decision.allowed) {
+    return ALLOWED[decision.layer] ?? `Allowed · ${decision.layer}`;
+  }
+  return REFUSED[decision.layer] ?? `Refused · ${decision.layer}`;
+};
+
 export const decisionTone = (decision) => {
   // Shadow first: the policy reports what it would have done, refusals
   // included, but nothing was refused, so it is never shown as one.

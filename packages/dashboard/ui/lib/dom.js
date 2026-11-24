@@ -17,6 +17,8 @@ export const el = (tag, props = {}, ...children) => {
     }
     if (key === 'class') {
       node.className = value;
+    } else if (key === 'style') {
+      applyStyle(node, value);
     } else if (key === 'dataset') {
       Object.assign(node.dataset, value);
     } else if (key.startsWith('on') && typeof value === 'function') {
@@ -34,6 +36,33 @@ export const el = (tag, props = {}, ...children) => {
     node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
   return node;
+};
+
+/**
+ * Apply a `"prop: value; …"` string one property at a time.
+ *
+ * The page's CSP has no 'unsafe-inline' for styles. A style attribute, from
+ * markup or setAttribute, is what that blocks, and MDN lists a `cssText`
+ * assignment with it; single properties set on the CSSOM are allowed in
+ * every engine. So a style string is never written whole.
+ */
+export const applyStyle = (node, text) => {
+  for (const part of String(text).split(';')) {
+    const colon = part.indexOf(':');
+    if (colon <= 0) {
+      continue;
+    }
+    const name = part.slice(0, colon).trim();
+    let value = part.slice(colon + 1).trim();
+    let priority = '';
+    if (/!important$/i.test(value)) {
+      priority = 'important';
+      value = value.replace(/\s*!important$/i, '');
+    }
+    if (name && value) {
+      node.style.setProperty(name, value, priority);
+    }
+  }
 };
 
 export const clear = (node) => {
@@ -80,4 +109,28 @@ export const until = (iso) => {
   }
   const ms = Date.parse(iso) - Date.now();
   return ms > 0 ? `in ${duration(ms)}` : 'now';
+};
+
+const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+/** A clock time in the reader's own format, like "2:30 PM". */
+export const clock = (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+/**
+ * A moment said the short way a person would: the time today, "Tomorrow"
+ * or "Yesterday" with the time, the weekday within a week, else the date.
+ */
+export const when = (iso, now = new Date()) => {
+  if (!iso) {
+    return '';
+  }
+  const date = new Date(iso);
+  const day = 86_400_000;
+  if (sameDay(date, now)) return clock(iso);
+  if (sameDay(date, new Date(now.getTime() + day))) return `Tomorrow ${clock(iso)}`;
+  if (sameDay(date, new Date(now.getTime() - day))) return `Yesterday ${clock(iso)}`;
+  if (Math.abs(date.getTime() - now.getTime()) < 6 * day) {
+    return `${date.toLocaleDateString(undefined, { weekday: 'short' })} ${clock(iso)}`;
+  }
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };

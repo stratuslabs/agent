@@ -117,10 +117,10 @@ test('the page declares a policy that keeps it talking to its own origin', async
   }
 });
 
-test('the plugins screen reads the catalog rather than describing a roadmap', async () => {
+test('the tools screen reads the catalog rather than describing a roadmap', async () => {
   const host = await serving();
   try {
-    const view = await fetch(`${host.url}/views/plugins.js`);
+    const view = await fetch(`${host.url}/views/tools.js`);
     assert.equal(view.status, 200);
     const source = await view.text();
 

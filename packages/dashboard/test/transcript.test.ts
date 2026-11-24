@@ -29,17 +29,17 @@ test('a long tool output is cut at 260 characters, whatever shape it came in', (
   assert.equal(summariseTool(undefined), '');
 });
 
-test('the transcript skips system messages and text-less assistant turns, then adds live lines and the streaming reply', () => {
+test('the transcript skips system messages and text-less assistant turns, pairs each result with its call, then adds live calls and the streaming reply', () => {
   const messages = [
     { role: 'system', content: 'You are Ava.' },
     { role: 'user', content: 'list my files' },
-    { role: 'assistant', content: '' },
-    { role: 'tool', content: JSON.stringify({ callId: 'c1', toolName: 'fs.list', ok: true, output: 'a.txt' }) },
+    { role: 'assistant', content: '', toolCalls: [{ id: 'c1', toolName: 'fs.list', input: { path: '.' } }] },
+    { role: 'tool', content: 'ignored', toolResult: { callId: 'c1', toolName: 'fs.list', ok: true, output: 'a.txt' } },
     { role: 'assistant', content: 'One file.' },
     { role: 'user', content: 'and now?' },
   ];
   const decided = { text: 'running fs.list…', callId: 'c1', toolName: 'fs.list', decides: true };
-  const live = { text: 'running shell.run…', callId: 'c2', toolName: 'shell.run', decides: true };
+  const live = { text: 'running shell.run…', callId: 'c2', toolName: 'shell.run', decides: true, phase: 'running' };
   const items = transcriptItems({
     messages,
     toolLines: [live],
@@ -48,17 +48,80 @@ test('the transcript skips system messages and text-less assistant turns, then a
   });
   assert.deepEqual(items, [
     { kind: 'user', text: 'list my files' },
-    { kind: 'tool', text: 'fs.list → a.txt', line: decided },
+    { kind: 'tool', toolName: 'fs.list', input: { path: '.' }, phase: 'done', output: 'a.txt', line: decided },
     { kind: 'assistant', text: 'One file.' },
     { kind: 'user', text: 'and now?' },
-    { kind: 'tool', text: 'running shell.run…', line: live },
-    { kind: 'assistant streaming', text: 'Look' },
+    { kind: 'tool', toolName: 'shell.run', phase: 'running', line: live },
+    { kind: 'assistant', text: 'Look', streaming: true },
+  ]);
+});
+
+test('a failed result says why, and a result stored as JSON text still reads', () => {
+  const messages = [
+    { role: 'tool', content: JSON.stringify({ callId: 'c', toolName: 'web.fetch', ok: false, error: 'timed out' }) },
+  ];
+  assert.deepEqual(transcriptItems({ messages, toolLines: [], streaming: '', settled: new Map() }), [
+    { kind: 'tool', toolName: 'web.fetch', phase: 'failed', error: 'timed out', line: undefined },
   ]);
 });
 
 test('a stored tool result with no kept line has none, and nothing streaming adds nothing', () => {
   const messages = [{ role: 'tool', content: 'plain' }];
   assert.deepEqual(transcriptItems({ messages, toolLines: [], streaming: '', settled: new Map() }), [
-    { kind: 'tool', text: 'plain', line: undefined },
+    { kind: 'tool', toolName: 'tool', phase: 'done', output: 'plain', line: undefined },
   ]);
+});
+
+test("a live call's lines fold into one row that shows its latest phase and keeps the decision", () => {
+  const decision = { allowed: true, layer: 'grant', reason: 'a standing grant' };
+  const lines = [
+    { text: 'running shell.run…', callId: 'c9', toolName: 'shell.run', decides: true, phase: 'running', decision },
+    { text: 'shell.run is waiting for approval', callId: 'c9', toolName: 'shell.run', decides: false, phase: 'waiting' },
+    { text: 'shell.run finished', callId: 'c9', toolName: 'shell.run', decides: false, phase: 'done' },
+  ];
+  const items = transcriptItems({ messages: [], toolLines: lines, streaming: '', settled: new Map() });
+  assert.equal(items.length, 1);
+  const [row] = items;
+  assert.equal(row?.phase, 'done');
+  assert.equal(row?.line, lines[0]);
+});
+
+test('a call input is found only within its own turn', () => {
+  const messages = [
+    { role: 'assistant', content: '', toolCalls: [{ id: 'c1', toolName: 'fs.list', input: { path: 'old' } }] },
+    { role: 'tool', content: '', toolResult: { callId: 'c1', toolName: 'fs.list', ok: true, output: 'x' } },
+    { role: 'user', content: 'again' },
+    { role: 'tool', content: '', toolResult: { callId: 'c1', toolName: 'fs.list', ok: true, output: 'y' } },
+  ];
+  const items = transcriptItems({ messages, toolLines: [], streaming: '', settled: new Map() });
+  assert.deepEqual(items[0]?.input, { path: 'old' });
+  assert.equal(items[2]?.input, undefined, 'a reused id in a later turn does not borrow the earlier input');
+});
+
+test('a reused call id after its first call ended starts a new row, with its own decision', () => {
+  const first = { allowed: true, layer: 'grant', reason: 'a standing grant' };
+  const second = { allowed: false, layer: 'approver', reason: 'denied by a person' };
+  const lines = [
+    { text: 'running shell.run…', callId: 'call-1', toolName: 'shell.run', decides: true, phase: 'running', decision: first },
+    { text: 'shell.run finished', callId: 'call-1', toolName: 'shell.run', decides: false, phase: 'done' },
+    { text: 'shell.run is waiting for approval', callId: 'call-1', toolName: 'shell.run', decides: false, phase: 'waiting' },
+    { text: 'shell.run was denied', callId: 'call-1', toolName: 'shell.run', decides: true, phase: 'denied', decision: second },
+  ];
+  const items = transcriptItems({ messages: [], toolLines: lines, streaming: '', settled: new Map() });
+  assert.equal(items.length, 2, 'two calls, two rows');
+  assert.equal(items[0]?.phase, 'done');
+  assert.equal(items[0]?.line, lines[0]);
+  assert.equal(items[1]?.phase, 'denied');
+  assert.equal(items[1]?.line, lines[3]);
+});
+
+test('an approved call moves from waiting to running, as its events arrive', () => {
+  const lines = [
+    { text: 'shell.run is waiting for approval', callId: 'c1', toolName: 'shell.run', decides: false, phase: 'waiting' },
+    { text: 'running shell.run…', callId: 'c1', toolName: 'shell.run', decides: true, phase: 'running' },
+  ];
+  const items = transcriptItems({ messages: [], toolLines: lines, streaming: '', settled: new Map() });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.phase, 'running');
+  assert.equal(items[0]?.line, lines[1]);
 });

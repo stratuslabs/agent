@@ -8,18 +8,27 @@ export const summariseTool: (content: unknown) => string;
 export interface TranscriptMessage {
   role: string;
   content?: unknown;
+  toolCalls?: ReadonlyArray<{ id: string; toolName: string; input: unknown }>;
+  toolResult?: { callId: string; toolName: string; ok: boolean; output?: unknown; error?: string };
 }
+/** A message (`user`, `assistant`) with its text, or a `tool` call with the rest. */
 export interface TranscriptItem {
-  /** The bubble's class after `bubble`: a message role, `tool`, or `assistant streaming`. */
   kind: string;
-  text: unknown;
-  /** On a tool bubble: the call line whose decisions show beside it, if any. */
+  text?: unknown;
+  streaming?: true;
+  toolName?: string;
+  input?: unknown;
+  /** Where a call got to: running, waiting, denied, done or failed. */
+  phase?: string;
+  output?: unknown;
+  error?: string;
+  /** The call line whose decisions show beside it, if any. */
   line?: CallLine;
 }
-/** The bubbles of one conversation: stored messages, then live tool lines, then the streaming reply. */
+/** The items of one conversation: stored messages, then live calls, then the streaming reply. */
 export const transcriptItems: (input: {
   messages: readonly TranscriptMessage[];
-  toolLines: readonly CallLine[];
+  toolLines: readonly (CallLine & { phase?: string })[];
   streaming: string;
   settled: ReadonlyMap<number, CallLine>;
 }) => TranscriptItem[];

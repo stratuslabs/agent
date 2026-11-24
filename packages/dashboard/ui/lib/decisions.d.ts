@@ -33,3 +33,5 @@ export const endsSettled: (
   settled: { sessionId: string; turnId?: string } | undefined,
   envelope: { sessionId: string; turnId?: string; event?: { type: string; shadow?: boolean } },
 ) => boolean;
+/** The short label beside a call: "Always allowed", "Denied", "Reviewer allowed", or a shadow's "would have". */
+export const decisionLabel: (decision: Pick<DecisionView, 'allowed' | 'layer'> & Partial<DecisionView>) => string;

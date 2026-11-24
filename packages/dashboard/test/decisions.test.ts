@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decisionNote, decisionTone, endsSettled, settledLines, shadowLineIndex } from '../ui/lib/decisions.js';
+import { decisionLabel, decisionNote, decisionTone, endsSettled, settledLines, shadowLineIndex } from '../ui/lib/decisions.js';
 
 const base = { allowed: true, layer: 'grant', reason: 'shell.run ran under a standing grant' };
 
@@ -133,4 +133,22 @@ test("a late shadow decision from an older turn leaves the newer turn's lines al
   // A decision on the call path is the turn's own and still ends them.
   const inline = { sessionId: 's1', turnId: 'turn-C', event: { type: 'permission.decided', shadow: false } };
   assert.equal(endsSettled(settled, inline), true);
+});
+
+test('a decision reads as a short label a person recognises, by the check that made it', () => {
+  assert.equal(decisionLabel({ allowed: true, layer: 'risk' }), 'Auto');
+  assert.equal(decisionLabel({ allowed: true, layer: 'scope' }), 'Allowed · safe command');
+  assert.equal(decisionLabel({ allowed: true, layer: 'grant' }), 'Always allowed');
+  assert.equal(decisionLabel({ allowed: true, layer: 'approver' }), 'Approved');
+  assert.equal(decisionLabel({ allowed: true, layer: 'review' }), 'Reviewer allowed');
+  assert.equal(decisionLabel({ allowed: true, layer: 'rule' }), 'Rule allowed');
+  assert.equal(decisionLabel({ allowed: false, layer: 'approver' }), 'Denied');
+  assert.equal(decisionLabel({ allowed: false, layer: 'cancelled' }), 'Cancelled');
+  assert.equal(decisionLabel({ allowed: false, layer: 'grant' }), 'Refused · grant');
+  assert.equal(decisionLabel({ allowed: true, layer: 'something-new' }), 'Allowed · something-new');
+});
+
+test('a shadow decision keeps saying what it would have done', () => {
+  const shadow = { allowed: true, layer: 'review', reason: 'would have asked', verdict: 'ask' as const, shadow: true };
+  assert.equal(decisionLabel(shadow), decisionNote(shadow));
 });

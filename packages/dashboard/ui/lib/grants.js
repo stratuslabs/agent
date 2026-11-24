@@ -16,15 +16,15 @@
 export const alwaysOffer = (always, agentName) => {
   switch (always) {
     case 'tool':
-      return `Always allow grants this tool to ${agentName} until an operator revokes it.`;
+      return `Always allow lets ${agentName} use this tool without asking, until you revoke it in Permissions.`;
     case 'destination':
-      return `Always allow lets ${agentName} use this tool on this conversation without asking, until revoked.`;
+      return `Always allow lets ${agentName} use this tool on this conversation without asking, until you revoke it in Permissions.`;
     case 'session':
       return 'Always allow stops this tool asking again for the rest of this session.';
     case 'scope':
-      return "Always allow remembers this command's scope for this agent, until revoked.";
+      return `Always allow lets ${agentName} run commands in this command's scope without asking, until you revoke it in Permissions.`;
     case 'origin':
-      return 'Always allow remembers this site for this agent, until revoked.';
+      return `Always allow lets ${agentName} use this site without asking, until you revoke it in Permissions.`;
     default:
       // A request from a daemon that does not label its approvals — an older
       // one across an upgrade. Saying nothing beats guessing at a lifetime.

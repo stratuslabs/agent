@@ -3,3 +3,13 @@ Copyright 2026 Stratus Labs
 
 This product is licensed under the Apache License, Version 2.0.
 See the LICENSE file for the full text.
+
+This product bundles the Geist and Geist Mono typefaces (ui/fonts/),
+Copyright (c) 2023 Vercel, in collaboration with basement.studio,
+licensed under the SIL Open Font License, Version 1.1. See ui/fonts/OFL.txt.
+
+This product includes icon shapes from Lucide (ui/lib/icons.js),
+https://lucide.dev, Copyright (c) 2026 Lucide Icons and Contributors,
+licensed under the ISC License, with some icons derived from Feather,
+Copyright (c) 2013-present Cole Bemis, licensed under the MIT License.
+The full license text is in ui/lib/LICENSE-lucide.txt.

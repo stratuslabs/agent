@@ -11,7 +11,7 @@ test('the approval card says what Always allow would grant, so no two lifetimes 
   // where they are.
   assert.equal(
     alwaysOffer('tool', 'Ava'),
-    'Always allow grants this tool to Ava until an operator revokes it.',
+    'Always allow lets Ava use this tool without asking, until you revoke it in Permissions.',
   );
   assert.match(alwaysOffer('session', 'Ava') ?? '', /rest of this session/);
   assert.match(alwaysOffer('scope', 'Ava') ?? '', /command's scope/);
@@ -20,7 +20,7 @@ test('the approval card says what Always allow would grant, so no two lifetimes 
   // session, so the card must say so rather than render a bare button.
   assert.equal(
     alwaysOffer('destination', 'Ava'),
-    'Always allow lets Ava use this tool on this conversation without asking, until revoked.',
+    'Always allow lets Ava use this tool on this conversation without asking, until you revoke it in Permissions.',
   );
 
   // A request carrying no label — an older daemon across an upgrade — says
