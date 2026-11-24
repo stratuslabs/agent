@@ -64,8 +64,12 @@ with piped input. To change it later, edit `approvals.posture`; see
 - **Models** — pick a **default** and a **fallback**, listed live from the
   provider APIs where possible (subscription sign-ins and offline setups fall
   back to the known Claude lineup, and codex always lists its known harness
-  lineup — no endpoint serves it). If the default model errors mid-run, the
-  run automatically retries on the fallback — even across providers.
+  lineup — no endpoint serves it). A ChatGPT sign-in that allows plan usage
+  lists its own models first, as OpenAI lists them for that account; if the
+  list can't be read, setup says why and you can type `chatgpt:<model>`. A
+  model you type goes to the default provider when that provider lists it or
+  nobody does. If the default model errors mid-run, the run automatically
+  retries on the fallback — even across providers.
 - **Agent** — name your agent (or accept a generated identity), describe
   their personality, and their soul file lands in `~/.stratus/agents/`, ready
   to edit. See [Agents](../concepts/agents.md) for what a soul is.
