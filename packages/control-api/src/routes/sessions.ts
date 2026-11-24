@@ -204,6 +204,33 @@ export const sessionRoutes: Route[] = [
   },
   {
     method: 'POST',
+    pattern: `${API_PREFIX}/sessions/:id/stop`,
+    async handler(context) {
+      const sessionId = context.params.id ?? '';
+      // The index answers this without reading the conversation, and a
+      // turn that is running has a row: the first save claims the id.
+      if (context.gateway.store.statusOf(sessionId) === undefined) {
+        throw new ApiError(404, 'session_not_found', `No session with id ${sessionId}.`);
+      }
+      // Both are the operator's own authority, as for a task's cancel: a
+      // browser session is the dashboard, a bearer token anything holding
+      // the daemon's token. The reason is what the stopped turn fails with,
+      // so it is what every surface showing the conversation reads.
+      const dashboard = context.principal?.kind === 'cookie';
+      const reason = dashboard ? 'Stopped from the dashboard.' : 'Stopped through the control API.';
+      // Slack's stop, without the chat: every turn on the session, a
+      // recovered one included, then the background tasks it started,
+      // since a person who says stop means those too. A message queued
+      // behind the turn and not started is left alone (`abortTurns`).
+      const stopped = context.gateway.abortTurns(sessionId, reason);
+      const tasks = context.gateway.stopTasks(sessionId, dashboard ? 'dashboard' : 'cli');
+      // Counted at once; nothing here waits for the stops to land. Nothing
+      // running is not an error, so a second click is harmless.
+      return { sessionId, stopped, tasks: tasks.open };
+    },
+  },
+  {
+    method: 'POST',
     pattern: `${API_PREFIX}/sessions/:id/rollover`,
     async handler(context) {
       const sessionId = context.params.id ?? '';

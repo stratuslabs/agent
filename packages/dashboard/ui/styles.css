@@ -303,6 +303,7 @@ button.list-row:hover .title { text-decoration: underline; text-underline-offset
 .msg-agent { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; line-height: 1.6; }
 .msg-agent.streaming::after { content: '▍'; opacity: 0.5; }
 .msg-error { color: var(--danger); font-size: 14px; }
+.msg-note { color: var(--text-2); font-size: 14px; }
 
 .tool-call { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .tool-call > summary {
@@ -341,6 +342,7 @@ button.list-row:hover .title { text-decoration: underline; text-underline-offset
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
 }
 .send-btn:disabled { opacity: 0.35; cursor: default; }
+.send-btn[hidden] { display: none; }
 
 .drawer { width: 320px; flex: none; display: flex; flex-direction: column; background: var(--surface-2); border-left: 1px solid var(--border); min-height: 0; }
 .drawer-head { height: 59px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 12px 0 18px; border-bottom: 1px solid var(--border); font-weight: 600; }

@@ -50,6 +50,7 @@ export const api = {
   },
   session: (id) => request('GET', `/sessions/${encodeURIComponent(id)}`),
   send: (id, body) => request('POST', `/sessions/${encodeURIComponent(id)}/messages`, body),
+  stopSession: (id) => request('POST', `/sessions/${encodeURIComponent(id)}/stop`),
   approvals: () => request('GET', '/approvals'),
   resolveApproval: (body) => request('POST', '/approvals', body),
   models: () => request('GET', '/catalog/models'),
