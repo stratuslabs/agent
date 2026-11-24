@@ -76,11 +76,107 @@ const refuseLinkedFile = async (filePath: string): Promise<void> => {
   }
 };
 
+/**
+ * Where an install's ChatGPT sign-in and its lock are: paths only, never
+ * what is in the file. A runtime config carries this rather than tokens, so
+ * a refresh, which rewrites the file, never changes the config it runs on.
+ */
+export interface ChatGPTSignInLocation {
+  readonly path: string;
+  readonly lockPath: string;
+}
+
+export const chatgptSignInLocation = (env: StateEnvironment): ChatGPTSignInLocation => ({
+  path: chatgptSignInPath(env),
+  lockPath: chatgptSignInLockPath(env),
+});
+
 export const createChatGPTSignInFile = (
   env: StateEnvironment,
   options: { lockWaitMs?: number } = {},
+): ChatGPTSignInFile => openChatGPTSignInFile(chatgptSignInLocation(env), options);
+
+const filledString = (value: unknown): boolean => typeof value === 'string' && value !== '';
+
+/**
+ * The scope that lets a sign-in use the ChatGPT plan. Restated from
+ * `@stratusagent/provider-chatgpt` (its `CHATGPT_PLAN_SCOPE`) rather than
+ * imported, since state loads that package only when a turn runs on it; a
+ * state test holds the two equal.
+ */
+export const CHATGPT_PLAN_SCOPE = 'chatgpt.tokens.use.direct';
+
+/**
+ * What the saved sign-in can do for a run, by the rule provider-chatgpt's
+ * token source applies before it hands out a token: `none` without an
+ * account (client ID and subject) and both its tokens, as after a refused
+ * refresh cleared them; `plan_usage_not_granted` when the person didn't
+ * allow the ChatGPT plan to be used (OpenAI: no inference then); otherwise
+ * `ready`. Read here so a run is refused up front, like any other provider's
+ * missing key, and a fallback without one is left out. What the tokens are
+ * worth is the provider's question, asked on the turn. A state test holds
+ * this rule to the token source's. Throws as `read` does for a file that
+ * isn't a JSON object.
+ */
+export const chatgptSignInStatus = async (
+  file: Pick<ChatGPTSignInFile, 'read'>,
+): Promise<ChatGPTSignInSummary['status']> => (await describeChatGPTSignIn(file)).status;
+
+/**
+ * What may be said about the saved sign-in where a person reads it
+ * (`stratus doctor`): its `chatgptSignInStatus`, whose account it is (the
+ * email, else the ID-token subject), and when its access token expires.
+ * Never a token: this carries none, so nothing that prints it can leak one.
+ */
+export type ChatGPTSignInSummary =
+  /** `account` is absent when the file holds none; sign-out keeps it. */
+  | { readonly status: 'none'; readonly account?: string }
+  | {
+    readonly status: 'plan_usage_not_granted' | 'ready';
+    readonly account: string;
+    /** Milliseconds since the epoch, when the record has one a Date can hold. */
+    readonly expiresAt?: number;
+  };
+
+/** `chatgptSignInStatus` with the account and expiry. Throws as `read` does. */
+export const describeChatGPTSignIn = async (
+  file: Pick<ChatGPTSignInFile, 'read'>,
+): Promise<ChatGPTSignInSummary> => {
+  const session = (await file.read())?.session;
+  if (typeof session !== 'object' || session === null || Array.isArray(session)) {
+    return { status: 'none' };
+  }
+  const record = session as Record<string, unknown>;
+  const subject = filledString(record.subject) ? record.subject as string : undefined;
+  const account = filledString(record.email) ? record.email as string : subject;
+  if (account === undefined
+    || subject === undefined
+    || !filledString(record.clientId)
+    || !filledString(record.accessToken)
+    || !filledString(record.refreshToken)) {
+    return account === undefined ? { status: 'none' } : { status: 'none', account };
+  }
+  // Only a time a Date can hold (8.64e15 ms either side of the epoch), so
+  // whoever prints it can.
+  const expiry = typeof record.expiresAt === 'number' && Number.isFinite(new Date(record.expiresAt).getTime())
+    ? { expiresAt: record.expiresAt }
+    : {};
+  return {
+    status: Array.isArray(record.scopes) && record.scopes.includes(CHATGPT_PLAN_SCOPE) ? 'ready' : 'plan_usage_not_granted',
+    account,
+    ...expiry,
+  };
+};
+
+/** Whether the saved sign-in can serve a run now (`chatgptSignInStatus` is `ready`). */
+export const hasChatGPTSignIn = async (file: Pick<ChatGPTSignInFile, 'read'>): Promise<boolean> =>
+  (await chatgptSignInStatus(file)) === 'ready';
+
+export const openChatGPTSignInFile = (
+  location: ChatGPTSignInLocation,
+  options: { lockWaitMs?: number } = {},
 ): ChatGPTSignInFile => {
-  const filePath = chatgptSignInPath(env);
+  const filePath = location.path;
   return {
     read: async () => {
       let raw: string;
@@ -110,7 +206,7 @@ export const createChatGPTSignInFile = (
       await replaceOwnerOnlyFile(filePath, `${JSON.stringify(contents, null, 2)}\n`);
     },
     withLock: (work) =>
-      serializeFileWrite(chatgptSignInLockPath(env), async () => {
+      serializeFileWrite(location.lockPath, async () => {
         // Here as well as in the write, so a refresh is never sent whose
         // replacement token the write would then refuse to save.
         await refuseLinkedFile(filePath);

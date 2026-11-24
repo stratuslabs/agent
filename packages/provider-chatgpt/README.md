@@ -1,11 +1,14 @@
 # @stratusagent/provider-chatgpt
 
 Sign in with ChatGPT for Stratus Agent, so agents can run on a ChatGPT plan
-through the OpenAI Responses API. **Not wired up yet, and not published:**
-this package holds the sign-in protocol, the refresh logic and the model
-provider. Where the
-sign-in is saved, the lock shared between processes, and the setup and doctor
-screens come next.
+through the OpenAI Responses API. **Not published yet:** this package holds
+the sign-in protocol, the refresh logic and the model provider. Stratus runs it
+for `provider: chatgpt`, on the sign-in saved in
+`~/.stratus/chatgpt-sign-in.json` under a lock every process shares
+(`@stratusagent/state`'s `createChatGPTSignInFile`). `stratus setup` signs in
+and out under Providers > ChatGPT, through state's `runChatGPTSignIn` and
+`runChatGPTSignOut` (the CLI never imports a provider package). The model
+picker and the account in `stratus doctor` come next.
 
 It follows OpenAI's documentation for open-source hosts
 ([ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source)),
@@ -65,10 +68,13 @@ with no dependencies beyond Node's own `crypto` and `http` and Stratus's
   clears the access, refresh and ID tokens even when OpenAI doesn't confirm,
   and keeps the account and host ID for signing in again.
 - `listChatGPTModels` reads the signed-in account's own model list
-  (`GET /v1/models` on its access token) for setup's picker: the models
+  (`GET /v1/models` on its access token) for setup's picker and the
+  dashboard's Models list (the control API's `GET /catalog/models`): the models
   OpenAI marks to be shown, in its order, each with the slug to run and the
   name to show. A refusal fails in the same words a turn would use, and the
-  list gives up after 15 seconds.
+  list gives up after 15 seconds. `listSignedInChatGPTModels` asks it on a
+  saved sign-in through the token source a turn uses, refreshing a token
+  about to run out under the session lock first.
 
 Every failure is a `ChatGPTAuthError` with a stable `code`: `temporary` keeps
 the tokens, `signin_required` means the refresh token is dead and the user

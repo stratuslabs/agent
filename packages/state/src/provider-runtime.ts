@@ -30,7 +30,9 @@ import { ContextOverflowError, HostRefusalError } from '@stratusagent/core';
 // with none of them.
 import type { ClaudeCodeQueryFn } from '@stratusagent/provider-claude-code';
 import type { CodexRunTurn } from '@stratusagent/provider-codex';
+import { chatgptSignInLocation, openChatGPTSignInFile } from './chatgpt-sign-in.ts';
 import type { RuntimeConfig } from './config.ts';
+import type { StateEnvironment } from './environment.ts';
 import { packageOnDisk } from './package-on-disk.ts';
 import { registeredProviderNameOf } from './provider-names.ts';
 
@@ -437,7 +439,7 @@ export const describeRuntimeEffort = (config: RuntimeConfig): string | undefined
  * one is not installed fails the turn that needs it, with the fix, rather
  * than failing to start.
  */
-export type ProviderPackage = 'anthropic' | 'claude-code' | 'codex';
+export type ProviderPackage = 'anthropic' | 'claude-code' | 'codex' | 'chatgpt';
 
 const PROVIDER_PACKAGES: Record<ProviderPackage, { specifier: string; label: string }> = {
   anthropic: {
@@ -452,6 +454,10 @@ const PROVIDER_PACKAGES: Record<ProviderPackage, { specifier: string; label: str
     specifier: '@stratusagent/provider-codex',
     label: 'the Codex runtime',
   },
+  chatgpt: {
+    specifier: '@stratusagent/provider-chatgpt',
+    label: 'a ChatGPT sign-in',
+  },
 };
 
 /** The package that carries each provider, for whoever has to install one. */
@@ -459,6 +465,7 @@ export const PROVIDER_PACKAGE_NAMES: Readonly<Record<ProviderPackage, string>> =
   anthropic: PROVIDER_PACKAGES.anthropic.specifier,
   'claude-code': PROVIDER_PACKAGES['claude-code'].specifier,
   codex: PROVIDER_PACKAGES.codex.specifier,
+  chatgpt: PROVIDER_PACKAGES.chatgpt.specifier,
 };
 
 /**
@@ -470,6 +477,7 @@ export const PROVIDER_PACKAGE_NAMES: Readonly<Record<ProviderPackage, string>> =
 export const providerPackagesUsedBy = (config: RuntimeConfig): ProviderPackage[] => {
   const of = (runtime: { provider: string; apiKey?: string | undefined; authToken?: string | undefined }): ProviderPackage | undefined => {
     if (runtime.provider === 'codex') return 'codex';
+    if (runtime.provider === 'chatgpt') return 'chatgpt';
     if (runtime.provider !== 'anthropic') return undefined;
     return runsOnHarness(runtime) ? 'claude-code' : 'anthropic';
   };
@@ -508,13 +516,16 @@ type ProviderModules = {
   anthropic: typeof import('@stratusagent/provider-anthropic');
   'claude-code': typeof import('@stratusagent/provider-claude-code');
   codex: typeof import('@stratusagent/provider-codex');
+  chatgpt: typeof import('@stratusagent/provider-chatgpt');
 };
 
 type ProviderOptions<P extends ProviderPackage> = P extends 'anthropic'
   ? Parameters<ProviderModules['anthropic']['createAnthropicProvider']>[0]
   : P extends 'claude-code'
     ? Parameters<ProviderModules['claude-code']['createClaudeCodeProvider']>[0]
-    : Parameters<ProviderModules['codex']['createCodexProvider']>[0];
+    : P extends 'codex'
+      ? Parameters<ProviderModules['codex']['createCodexProvider']>[0]
+      : Parameters<ProviderModules['chatgpt']['createChatGPTProvider']>[0];
 
 const loadProviderPackage = async <P extends ProviderPackage>(pkg: P): Promise<ProviderModules[P]> => {
   // Disk first: Node 24+ remembers a failed import for the life of the
@@ -528,6 +539,110 @@ const loadProviderPackage = async <P extends ProviderPackage>(pkg: P): Promise<P
   } catch (error) {
     throw providerPackageNotInstalledError(pkg, error) ?? error;
   }
+};
+
+/** How long a ChatGPT sign-in waits for the browser to come back. */
+export const CHATGPT_SIGN_IN_TIMEOUT_MS = 5 * 60_000;
+
+export interface ChatGPTSignInRequest {
+  /**
+   * `saved` signs the saved account in again, or a first one when there is
+   * none; `new` adds another account, refused while the saved one is
+   * signed in.
+   */
+  readonly account: 'saved' | 'new';
+  /**
+   * Shows the person the sign-in page. A returning sign-in's URL carries
+   * the saved ID token as a hint, so never log it.
+   */
+  readonly openUrl: (url: string) => void | Promise<void>;
+  readonly fetch?: typeof fetch;
+}
+
+export interface ChatGPTSignInResult {
+  readonly email?: string;
+  /** Whether the person let Stratus Agent use their ChatGPT plan; no turn runs on the sign-in without it. */
+  readonly planUsage: boolean;
+}
+
+export interface ChatGPTSignOutResult {
+  /** False when there was no sign-in to end. */
+  readonly signedOut: boolean;
+  readonly email?: string;
+  /** Present when there was a refresh token to revoke; the tokens are cleared even when OpenAI didn't confirm. */
+  readonly revocation?: { readonly confirmed: boolean; readonly reason?: string };
+}
+
+/**
+ * Signs this install in with ChatGPT in the browser (provider-chatgpt's
+ * flow) and saves it in the sign-in file every run on it reads, under that
+ * file's lock. Here rather than in the CLI, which never imports a provider
+ * adapter: the package loads the way a turn loads it, and a missing one
+ * throws the error that says how to install it. Throws provider-chatgpt's
+ * errors as they are; their messages are written for the person signing in
+ * and carry no token.
+ */
+export const runChatGPTSignIn = async (env: StateEnvironment, request: ChatGPTSignInRequest): Promise<ChatGPTSignInResult> => {
+  const chatgpt = await loadProviderPackage('chatgpt');
+  const file = openChatGPTSignInFile(chatgptSignInLocation(env));
+  const outcome = await chatgpt.signInWithChatGPT({
+    document: file,
+    withSessionLock: (work) => file.withLock(work),
+    account: request.account,
+    openUrl: request.openUrl,
+    timeoutMs: CHATGPT_SIGN_IN_TIMEOUT_MS,
+    ...(request.fetch ? { fetch: request.fetch } : {}),
+  });
+  return { ...(outcome.email !== undefined ? { email: outcome.email } : {}), planUsage: outcome.planUsage };
+};
+
+/**
+ * Signs this install out of ChatGPT: under the sign-in file's lock,
+ * provider-chatgpt revokes the refresh token, then clears the tokens
+ * whether or not OpenAI confirmed. The account stays, for signing in again.
+ */
+export const runChatGPTSignOut = async (env: StateEnvironment, request: { readonly fetch?: typeof fetch } = {}): Promise<ChatGPTSignOutResult> => {
+  const chatgpt = await loadProviderPackage('chatgpt');
+  const file = openChatGPTSignInFile(chatgptSignInLocation(env));
+  const outcome = await chatgpt.signOutOfChatGPT({
+    document: file,
+    withSessionLock: (work) => file.withLock(work),
+    ...(request.fetch ? { fetch: request.fetch } : {}),
+  });
+  return {
+    signedOut: outcome.signedOut,
+    ...(outcome.email !== undefined ? { email: outcome.email } : {}),
+    ...(outcome.revocation !== undefined ? { revocation: outcome.revocation } : {}),
+  };
+};
+
+/** One model the install's ChatGPT account may run: the slug to pass, and the name to show. */
+export interface ChatGPTModelChoice {
+  readonly slug: string;
+  readonly displayName: string;
+}
+
+/**
+ * The models the install's ChatGPT account may run, as OpenAI lists them for
+ * it, for setup's picker. The token comes from the sign-in file through the
+ * token source a turn uses, so one about to run out is refreshed there,
+ * under the file's lock, first. Throws provider-chatgpt's errors as they
+ * are (no sign-in that allows plan usage sends nothing), and the error that
+ * says how to install it when it's missing. None carries a token.
+ */
+export const listChatGPTSignInModels = async (
+  env: StateEnvironment,
+  request: { readonly fetch?: typeof fetch; readonly signal?: AbortSignal } = {},
+): Promise<ChatGPTModelChoice[]> => {
+  const chatgpt = await loadProviderPackage('chatgpt');
+  const file = openChatGPTSignInFile(chatgptSignInLocation(env));
+  const models = await chatgpt.listSignedInChatGPTModels({
+    store: chatgpt.createChatGPTSessionStore(file),
+    withSessionLock: (work) => file.withLock(work),
+    ...(request.fetch ? { fetch: request.fetch } : {}),
+    ...(request.signal ? { signal: request.signal } : {}),
+  });
+  return models.map(({ slug, displayName }) => ({ slug, displayName }));
 };
 
 /**
@@ -648,6 +763,27 @@ export const createRuntimeProvider = (
       ...(maxTurns !== undefined ? { maxTurns } : {}),
     };
     return createDeferredProvider('codex', async () => (await loadProviderPackage('codex')).createCodexProvider(options));
+  }
+
+  if (config.provider === 'chatgpt') {
+    // The Responses API on the install's ChatGPT sign-in. The provider reads
+    // the tokens from the file on each request and refreshes them there,
+    // under the file's lock, which every process that refreshes shares.
+    const { model, signIn } = config;
+    const systemPrompt = config.systemPrompt;
+    const fetchFn = config.fetch;
+    return createDeferredProvider('chatgpt', async () => {
+      const chatgpt = await loadProviderPackage('chatgpt');
+      const file = openChatGPTSignInFile(signIn);
+      const options: ProviderOptions<'chatgpt'> = {
+        model,
+        store: chatgpt.createChatGPTSessionStore(file),
+        withSessionLock: (work) => file.withLock(work),
+        ...(systemPrompt ? { systemPrompt } : {}),
+        ...(fetchFn ? { fetch: fetchFn } : {}),
+      };
+      return chatgpt.createChatGPTProvider(options);
+    });
   }
 
   if (config.provider === 'openai') {

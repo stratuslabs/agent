@@ -9,14 +9,23 @@
 import { readFile } from 'node:fs/promises';
 import { parseSoul } from '@stratusagent/agents';
 import {
+  CHATGPT_SIGN_IN_TIMEOUT_MS,
+  chatgptSignInLocation,
+  chatgptSignInStatus,
   collectAvailableModels as collectModels,
   defaultApiKeyEnvName,
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   defaultModelFor as builtInModelDefault,
+  hasChatGPTSignIn,
   isRegisteredProviderName,
+  listChatGPTSignInModels,
+  openChatGPTSignInFile,
+  PROVIDER_PACKAGE_NAMES,
   readNonEmptyString,
   registeredProviderNameOf,
+  runChatGPTSignIn,
+  runChatGPTSignOut,
   type BuiltinProviderName,
   CREDENTIAL_PROVIDER_NAMES,
   verifyProviderKey,
@@ -26,7 +35,10 @@ import {
   withoutTrailingSlashes,
 } from '@stratusagent/state';
 import { writeLine } from '../../io.ts';
+import { packageInstalled } from '../../loaders.ts';
 import type { CliProviderName } from '../../parse.ts';
+import { installProviderPackages } from '../../provider-packages.ts';
+import { openExternalUrl } from '../dashboard.ts';
 import type { SetupBase } from './context.ts';
 
 export const createProviderSetup = ({
@@ -55,10 +67,11 @@ export const createProviderSetup = ({
    * The sign-in a selection is stored under, or nothing: the demo provider
    * has none, and a provider a plugin registered brings its own through
    * its plugin's config and credentials — setup neither stores nor checks
-   * one for it.
+   * one for it. Nor for chatgpt: its sign-in is a file of its own
+   * (`~/.stratus/chatgpt-sign-in.json`), not a stored credential.
    */
   const credentialProviderOf = (provider: CliProviderName): CredentialProviderName | undefined =>
-    provider === 'demo' || isRegisteredProviderName(provider) ? undefined : provider;
+    provider === 'demo' || provider === 'chatgpt' || isRegisteredProviderName(provider) ? undefined : provider;
 
   const credentialLabel = (provider: CredentialProviderName, credential: StoredCredential): string =>
     credential.type === 'oauth_token'
@@ -76,6 +89,62 @@ export const createProviderSetup = ({
     return 'not signed in';
   };
 
+  /**
+   * The install's ChatGPT account as the menus show it, read from its
+   * sign-in file by `refreshChatGPTAccount`: `ready` and
+   * `plan_usage_not_granted` as a run reads them (`chatgptSignInStatus`),
+   * `signed_out` for an account kept after a sign-out or a refused refresh,
+   * `none` without one. Only the email is kept; no token leaves the file.
+   */
+  type ChatGPTAccount =
+    | { status: 'none' }
+    | { status: 'unreadable'; reason: string }
+    | { status: 'signed_out' | 'plan_usage_not_granted' | 'ready'; email?: string; holdsTokens: boolean };
+  let chatgptAccount: ChatGPTAccount = { status: 'none' };
+
+  const chatgptFile = () => openChatGPTSignInFile(chatgptSignInLocation(env));
+
+  const filled = (value: unknown): value is string => typeof value === 'string' && value !== '';
+
+  const refreshChatGPTAccount = async (): Promise<void> => {
+    let document: Record<string, unknown> | undefined;
+    try {
+      document = await chatgptFile().read();
+    } catch (error) {
+      chatgptAccount = { status: 'unreadable', reason: error instanceof Error ? error.message : String(error) };
+      return;
+    }
+    const status = await chatgptSignInStatus({ read: async () => document });
+    const session = document?.session;
+    const record = typeof session === 'object' && session !== null && !Array.isArray(session)
+      ? session as Record<string, unknown>
+      : undefined;
+    if (record === undefined || !filled(record.clientId) || !filled(record.subject)) {
+      chatgptAccount = { status: 'none' };
+      return;
+    }
+    chatgptAccount = {
+      status: status === 'none' ? 'signed_out' : status,
+      ...(filled(record.email) ? { email: record.email } : {}),
+      holdsTokens: filled(record.accessToken) || filled(record.refreshToken) || filled(record.idToken),
+    };
+  };
+
+  const chatgptRowStatus = (): string => {
+    switch (chatgptAccount.status) {
+      case 'none':
+        return 'not signed in';
+      case 'unreadable':
+        return "can't read its sign-in file";
+      case 'signed_out':
+        return `signed out (${chatgptAccount.email ?? 'saved account'})`;
+      case 'plan_usage_not_granted':
+        return `signed in as ${chatgptAccount.email ?? 'your ChatGPT account'}, without use of your ChatGPT plan`;
+      case 'ready':
+        return `signed in as ${chatgptAccount.email ?? 'your ChatGPT account'}`;
+    }
+  };
+
   const providersSummary = (): string => {
     const parts: string[] = [];
     for (const provider of CREDENTIAL_PROVIDER_NAMES) {
@@ -85,6 +154,9 @@ export const createProviderSetup = ({
       } else if (readNonEmptyString(processEnv[defaultKeyEnvFor(provider)])) {
         parts.push(`${provider} (env key)`);
       }
+    }
+    if (chatgptAccount.status === 'ready' || chatgptAccount.status === 'plan_usage_not_granted') {
+      parts.push('chatgpt (ChatGPT sign-in)');
     }
     if (parts.length === 0) {
       return state.provider === 'demo' ? 'demo — offline, no account' : 'none signed in yet';
@@ -109,6 +181,11 @@ export const createProviderSetup = ({
     }
     if (isRegisteredProviderName(state.provider)) {
       return `served by the plugin that registers ${registeredProviderNameOf(state.provider)}, on its own sign-in`;
+    }
+    if (state.provider === 'chatgpt') {
+      return chatgptAccount.status === 'ready'
+        ? `signed in with ChatGPT as ${chatgptAccount.email ?? 'your ChatGPT account'}`
+        : 'not signed in with ChatGPT yet';
     }
     const credential = state.credentials[state.provider];
     if (credential) {
@@ -295,6 +372,161 @@ export const createProviderSetup = ({
     writeLine(streams.stdout, '✓ Recorded — Codex runs use this machine\'s ChatGPT sign-in. It is verified on your first run.');
   };
 
+  const CHATGPT_PACKAGE = PROVIDER_PACKAGE_NAMES.chatgpt;
+
+  /**
+   * Whether provider-chatgpt, which carries the sign-in and sign-out, is
+   * here, installing it first when it isn't: no provider ships with the
+   * CLI. Installed the way Save and the Test run install a provider, without
+   * a question, since choosing ChatGPT was the decision. False, having said
+   * why, when that fails.
+   */
+  const ensureChatGPTPackage = async (): Promise<boolean> => {
+    if (packageInstalled(CHATGPT_PACKAGE, env)) {
+      return true;
+    }
+    if (await installProviderPackages([CHATGPT_PACKAGE], streams, env) && packageInstalled(CHATGPT_PACKAGE, env)) {
+      return true;
+    }
+    writeLine(streams.stdout, `Signing in with ChatGPT needs ${CHATGPT_PACKAGE}, which isn't installed, so nothing changed. Install it, then choose ChatGPT here again.`);
+    return false;
+  };
+
+  /**
+   * Whether this terminal is a remote one, where a browser opened here
+   * would be the wrong machine's, or none at all. The sign-in page has to
+   * come back to this machine's 127.0.0.1, so the person opens it where
+   * they are and forwards the callback port.
+   */
+  const remoteTerminal = (): boolean =>
+    readNonEmptyString(processEnv.SSH_CONNECTION) !== undefined
+    || readNonEmptyString(processEnv.SSH_CLIENT) !== undefined
+    || readNonEmptyString(processEnv.SSH_TTY) !== undefined
+    || (process.platform === 'linux'
+      && readNonEmptyString(processEnv.DISPLAY) === undefined
+      && readNonEmptyString(processEnv.WAYLAND_DISPLAY) === undefined);
+
+  const callbackPortOf = (url: string): string => {
+    try {
+      return new URL(new URL(url).searchParams.get('redirect_uri') ?? '').port;
+    } catch {
+      return '';
+    }
+  };
+
+  /**
+   * Shows the sign-in page: the system browser on this machine, or the
+   * link to open elsewhere. The link is printed only when it has to be:
+   * a returning sign-in's carries the saved ID token as a hint.
+   */
+  const showChatGPTSignInPage = async (url: string): Promise<void> => {
+    const port = callbackPortOf(url);
+    const printLink = (lead: string): void => {
+      writeLine(streams.stdout, lead);
+      writeLine(streams.stdout, `  ${url}`);
+      writeLine(streams.stdout, `The sign-in comes back to 127.0.0.1:${port} on this machine. If you open the link on another computer, forward that port from it first:`);
+      writeLine(streams.stdout, `  ssh -L ${port}:127.0.0.1:${port} <this machine>`);
+    };
+    if (remoteTerminal()) {
+      printLink('No browser here, so open this link in a browser to sign in with ChatGPT:');
+      return;
+    }
+    try {
+      await (env.openExternal ?? openExternalUrl)(url);
+      writeLine(streams.stdout, 'Opened your browser to sign in with ChatGPT.');
+    } catch (error) {
+      printLink(`Couldn't open a browser here (${error instanceof Error ? error.message : String(error)}). Open this link to sign in with ChatGPT:`);
+    }
+  };
+
+  const signInChatGPT = async (account: 'saved' | 'new'): Promise<void> => {
+    if (!(await ensureChatGPTPackage())) {
+      return;
+    }
+    const minutes = Math.round(CHATGPT_SIGN_IN_TIMEOUT_MS / 60_000);
+    let outcome;
+    try {
+      outcome = await runChatGPTSignIn(env, {
+        account,
+        ...(env.fetch ? { fetch: env.fetch } : {}),
+        openUrl: async (url) => {
+          await showChatGPTSignInPage(url);
+          writeLine(streams.stdout, `Waiting for the sign-in to finish in the browser (up to ${minutes} minutes)…`);
+        },
+      });
+    } catch (error) {
+      // provider-chatgpt's errors are written for the person signing in,
+      // and never carry a token.
+      writeLine(streams.stdout, `✗ ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    } finally {
+      await refreshChatGPTAccount();
+    }
+    const who = outcome.email ?? 'your ChatGPT account';
+    if (!outcome.planUsage) {
+      writeLine(streams.stdout, `Signed in with ChatGPT as ${who}, but you didn't allow Stratus Agent to use your ChatGPT plan, so no agent runs on it. Choose ChatGPT here again and allow it.`);
+      return;
+    }
+    writeLine(streams.stdout, `✓ Signed in with ChatGPT as ${who}.`);
+    await maybeSwitchDefault('chatgpt');
+  };
+
+  const signOutChatGPT = async (): Promise<void> => {
+    if (!(await ensureChatGPTPackage())) {
+      return;
+    }
+    let outcome;
+    try {
+      outcome = await runChatGPTSignOut(env, env.fetch ? { fetch: env.fetch } : {});
+    } catch (error) {
+      writeLine(streams.stdout, `✗ ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    } finally {
+      await refreshChatGPTAccount();
+    }
+    writeLine(streams.stdout, outcome.signedOut
+      ? `Signed out of ChatGPT${outcome.email !== undefined ? ` (${outcome.email})` : ''}.`
+      : 'Stratus Agent was not signed in with ChatGPT here, so there was nothing to sign out of.');
+    if (outcome.revocation !== undefined && !outcome.revocation.confirmed) {
+      writeLine(streams.stdout, `OpenAI didn't confirm it ended the sign-in${outcome.revocation.reason !== undefined ? ` (${outcome.revocation.reason})` : ''}. Its tokens are cleared here anyway; to end it at OpenAI too, remove Stratus Agent from your ChatGPT account's settings at chatgpt.com.`);
+    }
+    if (state.provider === 'chatgpt') {
+      writeLine(streams.stdout, 'chatgpt is still your default provider, so agents can\'t run until you sign in with ChatGPT again or choose another provider here.');
+    }
+  };
+
+  const chooseChatGPT = async (): Promise<void> => {
+    await refreshChatGPTAccount();
+    const current = chatgptAccount;
+    if (current.status === 'unreadable') {
+      writeLine(streams.stdout, `Couldn't read the ChatGPT sign-in file (${current.reason}). Fix or remove ~/.stratus/chatgpt-sign-in.json, then choose ChatGPT here again.`);
+      return;
+    }
+    const who = current.status !== 'none' ? current.email ?? 'your saved account' : undefined;
+    const signedIn = current.status === 'ready' || current.status === 'plan_usage_not_granted';
+    const actions: Array<{ label: string; run: () => Promise<void> }> = [];
+    if (signedIn) {
+      actions.push({ label: `Sign in again as ${who}`, run: () => signInChatGPT('saved') });
+      actions.push({ label: 'Sign out', run: signOutChatGPT });
+    } else if (current.status === 'signed_out') {
+      actions.push({ label: `Continue with ChatGPT as ${who}`, run: () => signInChatGPT('saved') });
+      if (current.holdsTokens) {
+        // A damaged record can keep a token it can't use: sign that out first.
+        actions.push({ label: 'Sign out', run: signOutChatGPT });
+      } else {
+        actions.push({ label: 'Use a different ChatGPT account', run: () => signInChatGPT('new') });
+      }
+    } else {
+      actions.push({ label: 'Continue with ChatGPT', run: () => signInChatGPT('saved') });
+    }
+    writeLine(streams.stdout, 'Sign in with your ChatGPT account, and agents run on your ChatGPT plan instead of an API key.');
+    const answer = await prompter.select('ChatGPT:', [...actions.map((action) => action.label), 'Back']);
+    if (answer.kind !== 'index' || answer.index >= actions.length) {
+      return;
+    }
+    await actions[answer.index]!.run();
+  };
+
   // Changing the default provider invalidates settings that were chosen
   // for the old one: the model and apiKeyEnv are cleared (defaults take
   // over), while the openai base URL is kept — it belongs to the openai
@@ -333,9 +565,13 @@ export const createProviderSetup = ({
   // credential source a real run would consider: the stored sign-in, the
   // generic STRATUS_API_KEY, a configured apiKeyEnv, or the provider's own
   // env var.
-  const providerUsable = (provider: CliProviderName): boolean => {
+  const providerUsable = async (provider: CliProviderName): Promise<boolean> => {
     if (provider === 'demo') {
       return true;
+    }
+    if (provider === 'chatgpt') {
+      // Its sign-in is a file of its own, read as a run would read it.
+      return hasChatGPTSignIn(openChatGPTSignInFile(chatgptSignInLocation(env))).catch(() => false);
     }
     const keyEnvSelector = provider === state.provider
       ? readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
@@ -355,28 +591,35 @@ export const createProviderSetup = ({
 
   // Signing in makes that provider the default only when the current
   // default cannot actually run (demo, or a provider with no usable key).
-  const maybeSwitchDefault = async (provider: CredentialProviderName): Promise<void> => {
-    if (state.provider === 'demo' || (state.provider !== provider && !providerUsable(state.provider))) {
+  const maybeSwitchDefault = async (provider: CredentialProviderName | 'chatgpt'): Promise<void> => {
+    if (state.provider === 'demo' || (state.provider !== provider && !(await providerUsable(state.provider)))) {
       await switchDefaultProvider(provider);
     }
   };
 
   const chooseProviders = async (): Promise<void> => {
+    await refreshChatGPTAccount();
     const answer = await prompter.select('Providers — sign in to one or more:', [
       `Claude (Anthropic) — ${providerSignInStatus('anthropic')}`,
       `OpenAI-compatible — ${providerSignInStatus('openai')}`,
       `Codex (ChatGPT) — ${providerSignInStatus('codex')}`,
+      `ChatGPT — ${chatgptRowStatus()}`,
       'Demo — built-in fake model, offline, no account',
       'Back',
     ]);
 
-    if (answer.kind !== 'index' || answer.index === 4) {
+    if (answer.kind !== 'index' || answer.index === 5) {
+      return;
+    }
+
+    if (answer.index === 4) {
+      await switchDefaultProvider('demo');
+      writeLine(streams.stdout, 'Demo selected — no sign-in needed. Mention "echo" or "tool" in a prompt to see tool calls.');
       return;
     }
 
     if (answer.index === 3) {
-      await switchDefaultProvider('demo');
-      writeLine(streams.stdout, 'Demo selected — no sign-in needed. Mention "echo" or "tool" in a prompt to see tool calls.');
+      await chooseChatGPT();
       return;
     }
 
@@ -416,15 +659,45 @@ export const createProviderSetup = ({
     env,
   );
 
+  /** A model the picker offers: a stored sign-in's, or the ChatGPT account's. */
+  type PickerModel = { provider: CredentialProviderName | 'chatgpt'; id: string; label?: string };
+
+  // The ChatGPT account's own models, as OpenAI lists them for it, when the
+  // sign-in can serve a run. First, because the list is short and chosen by
+  // OpenAI, where an API key's can run past the 30 shown. A list that fails
+  // says why and leaves a model to be typed.
+  const collectChatGPTModels = async (): Promise<PickerModel[]> => {
+    await refreshChatGPTAccount();
+    if (chatgptAccount.status !== 'ready') {
+      return [];
+    }
+    try {
+      const models = await listChatGPTSignInModels(env, env.fetch ? { fetch: env.fetch } : {});
+      return models.map(({ slug, displayName }) => ({
+        provider: 'chatgpt' as const,
+        id: slug,
+        ...(displayName !== slug ? { label: `${slug} — chatgpt (${displayName})` } : {}),
+      }));
+    } catch (error) {
+      // provider-chatgpt's errors never carry a token.
+      writeLine(
+        streams.stdout,
+        `Couldn't list your ChatGPT account's models: ${error instanceof Error ? error.message : String(error)} Type chatgpt:<model> to name one.`,
+      );
+      return [];
+    }
+  };
+
   const pickModel = async (kind: 'default' | 'fallback'): Promise<void> => {
-    const available = await collectAvailableModels();
-    if (available.length === 0) {
+    const available: PickerModel[] = [...await collectChatGPTModels(), ...await collectAvailableModels()];
+    // A ChatGPT sign-in whose list failed can still take a typed model.
+    if (available.length === 0 && chatgptAccount.status !== 'ready') {
       writeLine(streams.stdout, 'No models available yet — sign in to a provider first (menu 1).');
       return;
     }
 
     const shown = available.slice(0, 30);
-    const labels = shown.map((entry) => `${entry.id} — ${entry.provider}`);
+    const labels = shown.map((entry) => entry.label ?? `${entry.id} — ${entry.provider}`);
     const typeItOption = labels.length;
     labels.push('Type a model id…');
     const footnote = available.length > shown.length
@@ -439,26 +712,32 @@ export const createProviderSetup = ({
       return;
     }
 
-    const parseTyped = (typed: string): { provider: CredentialProviderName; id: string } | undefined => {
+    const parseTyped = (typed: string): PickerModel | undefined => {
       if (typed.includes(':')) {
         const [providerPart, ...idParts] = typed.split(':');
         const id = idParts.join(':').trim();
-        if ((providerPart === 'anthropic' || providerPart === 'openai' || providerPart === 'codex') && id) {
+        if ((providerPart === 'anthropic' || providerPart === 'openai' || providerPart === 'codex' || providerPart === 'chatgpt') && id) {
           return { provider: providerPart, id };
         }
-        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5-5 or codex:gpt-5.5.');
+        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5-5, codex:gpt-5.5 or chatgpt:gpt-5.5.');
         return undefined;
       }
       // A typed id that appears in the collected list belongs to that
-      // provider, wherever the default currently points.
-      const listed = available.find((entry) => entry.id === typed);
+      // provider, wherever the default currently points. ChatGPT and Codex
+      // list some of the same ids, so the default provider's entry wins.
+      const listed = available.find((entry) => entry.id === typed && entry.provider === state.provider)
+        ?? available.find((entry) => entry.id === typed);
       const inferred = listed?.provider
-        ?? credentialProviderOf(state.provider)
-        ?? available[0]!.provider;
+        ?? (state.provider === 'chatgpt' ? 'chatgpt' : credentialProviderOf(state.provider))
+        ?? available[0]?.provider;
+      if (inferred === undefined) {
+        writeLine(streams.stdout, 'Use provider:model, e.g. chatgpt:gpt-5.5.');
+        return undefined;
+      }
       return { provider: inferred, id: typed };
     };
 
-    let choice: { provider: CredentialProviderName; id: string } | undefined;
+    let choice: PickerModel | undefined;
     if (answer.kind === 'text') {
       choice = parseTyped(answer.text);
     } else if (answer.index === typeItOption) {
@@ -541,6 +820,9 @@ export const createProviderSetup = ({
     providersSummary,
     modelsSummary,
     signInSummary,
+    refreshChatGPTAccount,
+    /** Whether the ChatGPT sign-in, as last read, can serve a run. */
+    chatgptReady: (): boolean => chatgptAccount.status === 'ready',
     chooseProviders,
     chooseModels,
   };

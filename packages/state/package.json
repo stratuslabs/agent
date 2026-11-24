@@ -32,6 +32,7 @@
   },
   "devDependencies": {
     "@stratusagent/provider-anthropic": "workspace:*",
+    "@stratusagent/provider-chatgpt": "workspace:*",
     "@stratusagent/provider-claude-code": "workspace:*",
     "@stratusagent/provider-codex": "workspace:*",
     "@types/node": "^24.6.0",

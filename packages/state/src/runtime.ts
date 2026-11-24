@@ -9,6 +9,7 @@ import type {
   RuntimeSelection,
 } from './config.ts';
 import { hasAgentSignInEntry, loadAgentSignIns, loadCredentials, type StoredCredential } from './credentials.ts';
+import { chatgptSignInLocation, chatgptSignInStatus, hasChatGPTSignIn, openChatGPTSignInFile } from './chatgpt-sign-in.ts';
 import { credentialsPath } from './paths.ts';
 import { type StateEnvironment, readProcessEnv, readNonEmptyString } from './environment.ts';
 import {
@@ -164,12 +165,19 @@ const resolveAgentSignIn = async (env: StateEnvironment, agentId: string): Promi
  * as a broken agent.
  */
 /**
- * The providers with a stored sign-in, in a fixed order. When nothing
- * chooses a provider, exactly one of these is the run's provider.
+ * The providers with a stored sign-in, in a fixed order: credentials.json's,
+ * then the ChatGPT sign-in when it can serve a run (`hasChatGPTSignIn`, the
+ * rule a chatgpt run is resolved by). When nothing chooses a provider,
+ * exactly one of these is the run's provider. Throws when either file can't
+ * be read, since then which sign-ins there are isn't known.
  */
-export const signedInProviders = async (env: StateEnvironment): Promise<CredentialProviderName[]> => {
+export const signedInProviders = async (env: StateEnvironment): Promise<Array<CredentialProviderName | 'chatgpt'>> => {
   const stored = await loadCredentials(env);
-  return CREDENTIAL_PROVIDER_NAMES.filter((name) => stored[name] !== undefined);
+  const signedIn: Array<CredentialProviderName | 'chatgpt'> = CREDENTIAL_PROVIDER_NAMES.filter((name) => stored[name] !== undefined);
+  if (await hasChatGPTSignIn(openChatGPTSignInFile(chatgptSignInLocation(env)))) {
+    signedIn.push('chatgpt');
+  }
+  return signedIn;
 };
 
 export class NoProviderConfiguredError extends Error {
@@ -181,7 +189,7 @@ export class NoProviderConfiguredError extends Error {
   }
 }
 
-const noProviderMessage = (signedIn: readonly CredentialProviderName[], envKeys: readonly CredentialProviderName[]): string => {
+const noProviderMessage = (signedIn: readonly string[], envKeys: readonly CredentialProviderName[]): string => {
   if (signedIn.length > 1) {
     return `No provider is chosen, and there are sign-ins for ${signedIn.join(' and ')}, so the run was refused rather than guessing. `
       + 'Pick the default in `stratus setup` → Providers, or set STRATUS_PROVIDER for this run.';
@@ -219,7 +227,7 @@ export const resolveRuntimeConfig = async (
   // Nothing chose one: the only provider with a stored sign-in is the
   // obvious choice, and is reported as inferred. None, or several, is an
   // error. The demo model runs only when something names it.
-  let inferredProvider: CredentialProviderName | undefined;
+  let inferredProvider: CredentialProviderName | 'chatgpt' | undefined;
   if (chosenProvider === undefined) {
     const signedIn = await signedInProviders(env);
     if (signedIn.length !== 1) {
@@ -289,6 +297,17 @@ export const resolveRuntimeConfig = async (
     || (fileConfig.fallbackModel !== undefined && (fileConfig.fallbackProvider ?? (fileConfigApplies ? provider : undefined)) === 'anthropic');
   const agentSignIn = anthropicInPlay && agentId !== undefined ? await resolveAgentSignIn(env, agentId) : undefined;
 
+  // The install's ChatGPT sign-in, read only when a chatgpt fallback could
+  // serve the run (a chatgpt primary reads it on its own path below). A file
+  // that can't be read leaves the fallback out rather than failing a run it
+  // exists to rescue.
+  const chatgptLocation = chatgptSignInLocation(env);
+  const fallbackProviderInPlay = fileConfig.fallbackModel !== undefined
+    ? fileConfig.fallbackProvider ?? (fileConfigApplies ? provider : undefined)
+    : undefined;
+  const chatgptFallbackSignedIn = fallbackProviderInPlay === 'chatgpt'
+    && await hasChatGPTSignIn(openChatGPTSignInFile(chatgptLocation)).catch(() => false);
+
   /**
    * A configured fallback model kicks in when the default model errors
    * mid-run. It needs its own working sign-in; without one the fallback is
@@ -331,6 +350,14 @@ export const resolveRuntimeConfig = async (
       // brings its own. Selected by name, and looked up when the provider
       // is built, like a contributed primary.
       return { provider: fallbackProvider, model: fileConfig.fallbackModel };
+    }
+    if (fallbackProvider === 'chatgpt') {
+      // A ChatGPT sign-in is a file of its own, not a key: nothing to
+      // inherit from a primary, and no variable or endpoint to read for it.
+      // Left out, like any fallback without a sign-in, when there is none.
+      return chatgptFallbackSignedIn
+        ? { provider: 'chatgpt', model: fileConfig.fallbackModel, signIn: chatgptLocation }
+        : undefined;
     }
     const sameAsPrimary = primary !== undefined && fallbackProvider === primary.provider;
     // Same precedence as the primary sign-in: environment keys outrank
@@ -473,6 +500,57 @@ export const resolveRuntimeConfig = async (
       registered.fallback = fallback;
     }
     return registered;
+  }
+
+  if (provider === 'chatgpt') {
+    // A ChatGPT sign-in is sent only to OpenAI. A named endpoint can't be
+    // honored, and running on OpenAI's instead would send the prompt
+    // somewhere other than where its owner said, so the run is refused,
+    // as codex refuses one.
+    const namedBaseUrl = selection.baseUrl
+      ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
+      ?? (fileConfigApplies ? fileConfig.baseUrl : undefined);
+    if (namedBaseUrl !== undefined) {
+      throw new Error(
+        `provider=chatgpt does not use a custom base URL: a ChatGPT sign-in is sent only to OpenAI, never to ${String(namedBaseUrl)}. Remove the base URL to run on chatgpt.`,
+      );
+    }
+    const signInStatus = await chatgptSignInStatus(openChatGPTSignInFile(chatgptLocation));
+    if (signInStatus === 'none') {
+      throw new Error('Missing sign-in for provider=chatgpt. Sign in with ChatGPT in `stratus setup`.');
+    }
+    if (signInStatus === 'plan_usage_not_granted') {
+      // The provider's own words for it, said before the run instead of on
+      // its first turn.
+      throw new Error(
+        "This ChatGPT sign-in doesn't allow Stratus Agent to use your ChatGPT plan. Sign in with ChatGPT again in `stratus setup` and allow it, or use an OpenAI API key.",
+      );
+    }
+    const chatgptModel = selection.model
+      ?? readNonEmptyString(processEnv.STRATUS_MODEL)
+      ?? (soulModelApplies ? readNonEmptyString(soul?.model) : undefined)
+      ?? (fileConfigApplies ? fileConfig.model : undefined)
+      ?? defaultModelFor('chatgpt');
+    const chatgpt: RuntimeConfig = {
+      provider: 'chatgpt',
+      model: String(chatgptModel),
+      signIn: chatgptLocation,
+      // Returned here, before the shared return that records an inferred
+      // provider for the others.
+      ...(inferredProvider !== undefined ? { inferredProvider } : {}),
+      ...(systemPrompt ? { systemPrompt: String(systemPrompt) } : {}),
+      ...(env.fetch ? { fetch: env.fetch } : {}),
+      ...(soul ? { soul } : {}),
+      ...(soulPath ? { soulPath } : {}),
+      ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+      ...(language !== undefined ? { language } : {}),
+    };
+    // Nothing for a fallback to inherit: the primary holds no key.
+    const fallback = fallbackProviderInPlay !== undefined ? resolveFallback(fallbackProviderInPlay, undefined) : undefined;
+    if (fallback) {
+      chatgpt.fallback = fallback;
+    }
+    return chatgpt;
   }
 
   const model = selection.model

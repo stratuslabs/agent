@@ -13,6 +13,7 @@
     { "path": "../provider-anthropic" },
     { "path": "../provider-claude-code" },
     { "path": "../provider-codex" },
+    { "path": "../provider-chatgpt" },
     { "path": "../executor-local" },
     { "path": "../permissions" }
   ],

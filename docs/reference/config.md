@@ -12,8 +12,9 @@ Precedence, highest first:
    global `~/.stratus/config.json`
 
 When none of these names a provider, a run uses the one provider you have
-signed in to and says so. With no sign-in, or more than one, the run is
-refused with a pointer to `stratus setup`. The offline `demo` model runs only
+signed in to and says so. A ChatGPT sign-in counts once it allows using your
+ChatGPT plan. With no sign-in, or more than one, the run is refused with a
+pointer to `stratus setup`. The offline `demo` model runs only
 when something names it.
 
 `stratus setup` writes the global file for you; a project can carry its own

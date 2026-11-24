@@ -6,7 +6,7 @@
 import { ResponsesApiError } from '@stratusagent/providers';
 import { ChatGPTAuthError } from './errors.ts';
 import { CHATGPT_RESOURCE, clip, isRecord, send, type RequestOptions } from './protocol.ts';
-import { planErrorLead, withLead } from './provider.ts';
+import { createSignedInTokenSource, planErrorLead, withLead, type SignedInTokenSourceOptions } from './provider.ts';
 
 export interface ChatGPTModel {
   /** What to pass as `model`. */
@@ -86,6 +86,28 @@ export const listChatGPTModels = async (options: ListChatGPTModelsOptions): Prom
     }
     const named = typeof entry.display_name === 'string' && entry.display_name.trim() !== '';
     return [{ slug: entry.slug, displayName: named ? (entry.display_name as string) : entry.slug }];
+  });
+};
+
+export interface ListSignedInChatGPTModelsOptions extends SignedInTokenSourceOptions {
+  readonly signal?: AbortSignal;
+  /** As on `listChatGPTModels`. */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * `listChatGPTModels` on the sign-in in `store`, through the token source a
+ * turn uses: a token about to run out is refreshed under the session lock
+ * first, and with no sign-in that allows plan usage nothing is sent. Fails
+ * as `listChatGPTModels` and the token source do.
+ */
+export const listSignedInChatGPTModels = (options: ListSignedInChatGPTModelsOptions): Promise<ChatGPTModel[]> => {
+  const tokens = createSignedInTokenSource(options);
+  return listChatGPTModels({
+    accessToken: (signal) => tokens.accessToken(signal),
+    ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
 };
 

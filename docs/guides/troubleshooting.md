@@ -29,6 +29,7 @@ Sign-ins
   anthropic Claude subscription (Pro/Max) — runs go through the Claude Code runtime
   openai    not signed in
   codex     not signed in
+  chatgpt   not signed in
 
 Channels
   slack     no agents connected
