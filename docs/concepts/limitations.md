@@ -55,12 +55,14 @@ Each item links to the page that has the full story.
 
 ## Time and money
 
-- **There's no time limit and no spending limit.** A turn or a background
-  task runs for as long as it keeps working, and nothing stops an agent at
-  a dollar or token amount. What caps one message is `maxTurns`, the number
-  of tool steps it may take (40 by default), and `autoContinue: true` lifts
-  even that for an agent. Watch your provider's usage page.
-  [Configuration](../reference/config.md#how-many-turns-one-message-may-spend)
+- **There's no spending limit.** Nothing stops an agent at a dollar or
+  token amount. What bounds one message is `maxTurns`, the number of tool
+  steps it may take (40 by default, and `autoContinue: true` lifts it for
+  an agent), and `turnMinutes`, which stops a turn or a background task
+  after 2 hours, not counting time spent waiting on an approval. Neither
+  limits how many turns an agent runs in a day, so watch your provider's
+  usage page.
+  [Configuration](../reference/config.md#how-long-one-turn-may-run)
 
 ## Memory and conversations
 
