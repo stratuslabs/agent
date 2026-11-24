@@ -167,7 +167,7 @@ export const sessionRoutes: Route[] = [
       // Held from here until the dispatch settles, so a stop reaches this
       // turn while it is still queued or in its preflight, before the
       // gateway has a controller of its own for it.
-      const held = context.dispatches.hold(sessionId);
+      const held = context.dispatches.hold(sessionId, turnId);
       // Deliberately not awaited: a turn runs for as long as a model takes,
       // and the caller watches it on the event stream. The turn id returned
       // here is what lets them recognise it there.
@@ -228,19 +228,25 @@ export const sessionRoutes: Route[] = [
       // the turn being stopped never starts once that turn ends. A message
       // another caller queued (a Slack thread) is left to that caller's
       // own signal, as `abortTurns` leaves it.
-      const pending = context.dispatches.abort(sessionId, reason);
+      // Which turn is running, read before anything is aborted: a running
+      // dispatch of ours is in both counts below, and only that one.
+      const active = context.gateway.activeTurnId(sessionId);
+      const ours = context.dispatches.abort(sessionId, reason);
       const running = context.gateway.abortTurns(sessionId, reason);
       // A first turn still in its preflight has no session yet, which is
       // why this is checked only once nothing was held for it.
-      if (pending === 0 && running === 0 && context.gateway.store.statusOf(sessionId) === undefined) {
+      if (ours.length === 0 && running === 0 && context.gateway.store.statusOf(sessionId) === undefined) {
         throw new ApiError(404, 'session_not_found', `No session with id ${sessionId}.`);
       }
       const tasks = context.gateway.stopTasks(sessionId, dashboard ? 'dashboard' : 'cli');
-      // A running dispatch of ours is in both counts, so the larger of the
-      // two, not their sum. Counted at once; nothing here waits for the
-      // stops to land. Nothing running is not an error, so a second click
-      // is harmless.
-      return { sessionId, stopped: Math.max(pending, running), tasks: tasks.open };
+      // Our held dispatches and the gateway's running turns overlap in at
+      // most the one running turn, when that is ours: another caller's
+      // running turn and ours queued behind it are separate turns, each
+      // stopped. Counted at once; nothing here waits for the stops to
+      // land. Nothing running is not an error, so a second click is
+      // harmless.
+      const overlap = active !== undefined && running > 0 && ours.includes(active) ? 1 : 0;
+      return { sessionId, stopped: ours.length + running - overlap, tasks: tasks.open, reason };
     },
   },
   {

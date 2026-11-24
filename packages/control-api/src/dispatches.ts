@@ -14,26 +14,26 @@ import { RunAbortedError } from '@stratusagent/core';
  */
 export interface ApiDispatches {
   /** Hold a signal for one dispatch, released when the dispatch settles. */
-  hold(sessionId: string): { signal: AbortSignal; release(): void };
+  hold(sessionId: string, turnId: string): { signal: AbortSignal; release(): void };
   /**
-   * Abort every dispatch held on the session with `reason`. Returns how
-   * many are held, each now stopping; one aborted earlier that has not
-   * settled still counts, the way `abortTurns` counts.
+   * Abort every dispatch held on the session with `reason`. Returns the
+   * turn ids held, each now stopping; one aborted earlier that has not
+   * settled is still among them, the way `abortTurns` counts.
    */
-  abort(sessionId: string, reason: string): number;
+  abort(sessionId: string, reason: string): string[];
 }
 
 export const createApiDispatches = (): ApiDispatches => {
-  const bySession = new Map<string, Set<AbortController>>();
+  const bySession = new Map<string, Map<AbortController, string>>();
   return {
-    hold(sessionId) {
+    hold(sessionId, turnId) {
       const controller = new AbortController();
       let held = bySession.get(sessionId);
       if (held === undefined) {
-        held = new Set();
+        held = new Map();
         bySession.set(sessionId, held);
       }
-      held.add(controller);
+      held.set(controller, turnId);
       const set = held;
       return {
         signal: controller.signal,
@@ -48,14 +48,14 @@ export const createApiDispatches = (): ApiDispatches => {
     abort(sessionId, reason) {
       const held = bySession.get(sessionId);
       if (held === undefined) {
-        return 0;
+        return [];
       }
-      for (const controller of held) {
+      for (const controller of held.keys()) {
         if (!controller.signal.aborted) {
           controller.abort(new RunAbortedError(reason));
         }
       }
-      return held.size;
+      return [...held.values()];
     },
   };
 };

@@ -10,6 +10,12 @@ import { conversationDrawer, topBar } from './agent-panels.js';
 import { createSettingsTab } from './agent-settings.js';
 import { paintTranscript as paintItems } from './agent-transcript.js';
 
+/**
+ * What a turn this page stopped fails with: the control API's reason for a
+ * stop from a browser session (`POST /sessions/:id/stop`).
+ */
+const STOPPED_HERE = 'Stopped from the dashboard.';
+
 /** A conversation started from this page, distinguishable from a Slack thread. */
 const newSessionId = (agentId) => `web:${agentId}:${crypto.randomUUID()}`;
 
@@ -585,11 +591,15 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
         break;
       case 'session.failed':
         settleTurn(envelope);
-        if (state.stopping === envelope.sessionId) {
-          state.stopping = undefined;
+        // "Stopped." only when the stop is what ended it: a turn that failed
+        // on its own just before the stop reached it still says why.
+        if (state.stopping === envelope.sessionId && String(event.error ?? '').includes(STOPPED_HERE)) {
           state.note = 'Stopped.';
         } else {
           state.error = event.error;
+        }
+        if (state.stopping === envelope.sessionId) {
+          state.stopping = undefined;
         }
         state.sending = false;
         state.turnId = undefined;

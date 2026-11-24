@@ -76,7 +76,7 @@ test('POST /sessions/:id/stop ends a running turn, says who stopped it, and is h
       headers: { origin: harness.url },
     });
     assert.equal(stop.status, 200);
-    assert.deepEqual(await json(stop), { sessionId, stopped: 1, tasks: 0 });
+    assert.deepEqual(await json(stop), { sessionId, stopped: 1, tasks: 0, reason: 'Stopped from the dashboard.' });
 
     const event = await settles(end, 'the stopped turn');
     assert.equal(event.type, 'session.failed');
@@ -87,7 +87,7 @@ test('POST /sessions/:id/stop ends a running turn, says who stopped it, and is h
     // Nothing runs now. Not an error: a second click is the same request.
     const again = await harness.call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/stop`, { method: 'POST' });
     assert.equal(again.status, 200);
-    assert.deepEqual(await json(again), { sessionId, stopped: 0, tasks: 0 });
+    assert.deepEqual(await json(again), { sessionId, stopped: 0, tasks: 0, reason: 'Stopped through the control API.' });
   } finally {
     await harness.stop();
   }
@@ -148,7 +148,8 @@ test('a stop reaches a message this API queued behind a running turn, so it neve
 
     const stop = await harness.call(`/api/v1/sessions/${encodeURIComponent(sessionId)}/stop`, { method: 'POST' });
     assert.equal(stop.status, 200);
-    assert.equal((await json<{ stopped: number }>(stop)).stopped, 1);
+    // Two turns: another caller's running one and ours queued behind it.
+    assert.equal((await json<{ stopped: number }>(stop)).stopped, 2);
     await settles(first, 'the running turn');
     // Both end: the running one aborted, the queued one refused before it
     // starts. Before, the queued one ran the moment the first one ended.
