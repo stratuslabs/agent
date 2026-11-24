@@ -1,5 +1,5 @@
 import { requestScheme } from '../auth.ts';
-import { sendCredentialPage } from '../credential-links.ts';
+import { credentialLinkRefusal, sendCredentialPage } from '../credential-links.ts';
 import { API_PREFIX, ApiError, readBody } from '../http.ts';
 import type { Route } from '../routes.ts';
 
@@ -73,10 +73,11 @@ export const authRoutes: Route[] = [
     pattern: `${API_PREFIX}/credential-links/:token`,
     selfAuthenticating: true,
     async handler(context) {
-      const record = context.credentialLinks.get(context.params.token ?? '');
+      const token = context.params.token ?? '';
+      const record = context.credentialLinks.get(token);
       sendCredentialPage(context.response, record ? 200 : 404, record
         ? { record }
-        : { error: 'This link has expired or was already used. Ask the agent to request the credential again.' });
+        : { error: credentialLinkRefusal(context.credentialLinks.refusal(token)) });
       return null;
     },
   },
@@ -88,9 +89,7 @@ export const authRoutes: Route[] = [
       const token = context.params.token ?? '';
       const record = context.credentialLinks.get(token);
       if (!record) {
-        sendCredentialPage(context.response, 404, {
-          error: 'This link has expired or was already used. Ask the agent to request the credential again.',
-        });
+        sendCredentialPage(context.response, 404, { error: credentialLinkRefusal(context.credentialLinks.refusal(token)) });
         return null;
       }
       // A browser submits a text area's line breaks as CRLF whatever was
@@ -99,7 +98,7 @@ export const authRoutes: Route[] = [
       const value = (new URLSearchParams(await readBody(context.request)).get('value') ?? '').replace(/\r\n/g, '\n');
       const result = await context.gateway.provideCredential({ requestId: record.requestId, value, actor: 'link' });
       if (result.ok) {
-        context.credentialLinks.retire(token);
+        context.credentialLinks.retire(token, 'used');
         sendCredentialPage(context.response, 200, {
           done: `Added ${record.name} for ${record.agentName}${record.scope === 'shared' ? ' as a shared credential' : ''}. `
             + `${record.agentName} can use it from its next reply`
@@ -109,7 +108,7 @@ export const authRoutes: Route[] = [
       }
       if (result.retired === true) {
         // Final: no value typed here could land, so the link is spent too.
-        context.credentialLinks.retire(token);
+        context.credentialLinks.retire(token, 'closed');
         sendCredentialPage(context.response, 409, { error: result.message });
         return null;
       }

@@ -507,6 +507,303 @@ test('the watchdog aborts a stalled streaming turn and fails the session cleanly
   }
 });
 
+// AGT-371: a wall-clock time limit per turn, on top of the idle watchdog,
+// which stays off for a provider that doesn't stream and so can't tell a
+// stall from a slow answer.
+const hangingOpenAi = (answerAfterMs?: number): typeof fetch => ((_url: unknown, init?: RequestInit) =>
+  new Promise<Response>((resolve, reject) => {
+    if (init?.signal?.aborted) {
+      reject(new DOMException('aborted', 'AbortError'));
+      return;
+    }
+    const timer = answerAfterMs === undefined ? undefined : setTimeout(() => resolve(openAiText('answered late')), answerAfterMs);
+    init?.signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(new DOMException('aborted', 'AbortError'));
+    }, { once: true });
+  })) as typeof fetch;
+
+/**
+ * A request that never answers and takes `ms` to give up once stopped, as a
+ * tool in its grace period does. One made under a signal already stopped
+ * gives up the same way, so a client that tries again can't hang a test.
+ */
+const slowToGiveUp = (ms: number): typeof fetch => ((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+  const giveUp = (): void => {
+    setTimeout(() => reject(new DOMException('aborted', 'AbortError')), ms);
+  };
+  if (init?.signal?.aborted) {
+    giveUp();
+    return;
+  }
+  init?.signal?.addEventListener('abort', giveUp, { once: true });
+})) as typeof fetch;
+
+test('the time limit stops a turn whose provider never answers, and the session says why', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: hangingOpenAi() };
+  const warnings: string[] = [];
+  // No idle timeout: an OpenAI-compatible turn doesn't stream, so the
+  // watchdog never arms for it, and only the time limit can end it.
+  const gateway = createGateway({ env, idleTimeoutMs: 0, turnTimeLimitMs: 300, warn: (line) => warnings.push(line) });
+  const failed = nextEvent(gateway.bus, 'session.failed');
+  await gateway.start();
+  try {
+    const startedAt = Date.now();
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'limited-1', agentId: 'slow', userMessage: 'hang' }),
+      (error: Error) => error instanceof RunAbortedError && /time limit of 300ms/.test(error.message) && !error.resumable,
+    );
+    assert.ok(Date.now() - startedAt >= 290, 'not before the limit');
+    const expected = 'Stopped: this turn ran past its time limit of 300ms. Raise turnMinutes in the daemon\'s config file '
+      + '(or agentTurnMinutes for one agent) for agents that do long work, or reply to carry on from where it got to.';
+    const stored = await gateway.store.get('limited-1');
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.lastError, expected);
+    assert.equal((await failed).error, expected);
+    assert.ok(
+      warnings.some((line) => line === 'time limit: session limited-1 (slow) ran past its time limit of 300ms; stopping the turn'),
+      warnings.join('\n'),
+    );
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('an agent\'s own time limit replaces the shared one, and 0 turns it off', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'long.md', '---\nname: Long\nprovider: openai\nmodel: model-long\n---\n\nYou take your time.\n');
+  await writeSoul(home, 'short.md', '---\nname: Short\nprovider: openai\nmodel: model-short\n---\n\nYou hurry.\n');
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: hangingOpenAi(400) };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    turnTimeLimitMs: 150,
+    turnTimeLimitMsFor: (agentId) => (agentId === 'long' ? 0 : agentId === 'short' ? 100 : undefined),
+  });
+  await gateway.start();
+  try {
+    // Off for this agent: the answer 400ms in is still taken.
+    const session = await gateway.dispatch({ sessionId: 'long-1', agentId: 'long', userMessage: 'take a while' });
+    assert.equal(latestTurnReply(session), 'answered late');
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'short-1', agentId: 'short', userMessage: 'take a while' }),
+      (error: Error) => error instanceof RunAbortedError && /time limit of 100ms/.test(error.message),
+    );
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a turn stopped before its time limit fails with the stop, and the limit never fires after it', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: hangingOpenAi() };
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, turnTimeLimitMs: 300, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  try {
+    const controller = new AbortController();
+    const turn = gateway.dispatch({ sessionId: 'stopped-1', agentId: 'slow', userMessage: 'hang', signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort(new RunAbortedError('Stopped from the test'));
+    await assert.rejects(() => turn, (error: Error) => error.message === 'Stopped from the test');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal((await gateway.store.get('stopped-1'))?.lastError, 'Stopped from the test');
+    assert.deepEqual(warnings.filter((line) => line.startsWith('time limit:')), []);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a turn stopped near its limit isn\'t reported as past it while the stop takes effect', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
+  // A provider that takes 300ms to give up once told to stop, as a tool in
+  // its grace period does: the limit passes inside that window.
+  const slowToStop = slowToGiveUp(300);
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: slowToStop };
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, turnTimeLimitMs: 200, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  try {
+    const controller = new AbortController();
+    const turn = gateway.dispatch({ sessionId: 'near-1', agentId: 'slow', userMessage: 'hang', signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort(new RunAbortedError('Stopped from the test'));
+    await assert.rejects(() => turn, (error: Error) => error.message === 'Stopped from the test');
+    assert.equal((await gateway.store.get('near-1'))?.lastError, 'Stopped from the test');
+    assert.deepEqual(warnings.filter((line) => line.startsWith('time limit:')), []);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a streaming turn its time limit stops isn\'t then reported by the idle watchdog too', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: anthropic\nmodel: model-slow\n---\n\nYou stall.\n');
+  // Silent, and 400ms slow to give up once stopped: the 300ms idle
+  // deadline passes after the 100ms limit has already ended the turn.
+  const slowToStop = slowToGiveUp(400);
+  const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: slowToStop };
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 300, turnTimeLimitMs: 100, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'both-1', agentId: 'slow', userMessage: 'hang' }),
+      (error: Error) => error instanceof RunAbortedError && /time limit of 100ms/.test(error.message),
+    );
+    assert.equal(warnings.filter((line) => line.startsWith('time limit:')).length, 1);
+    assert.deepEqual(warnings.filter((line) => line.startsWith('watchdog:')), []);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+/** An approval policy that never answers: it waits until the turn is stopped, as a policy must. */
+const hangingPolicy = () => ({
+  approve: ({ signal }: { signal?: AbortSignal }) => new Promise<boolean>((_resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  }),
+});
+
+test('a policy that never answers is the turn\'s own time, not a person\'s, and the limit stops it', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const fetchImpl = (async () => openAiToolCall('demo_echo', { text: 'hi' })) as typeof fetch;
+  const asked: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+    idleTimeoutMs: 0,
+    turnTimeLimitMs: 300,
+    approvals: { approve: (context) => { asked.push(context.call.toolName); return hangingPolicy().approve(context); } },
+  });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'policy-1', agentId: 'ava', userMessage: 'echo' }),
+      (error: Error) => error instanceof RunAbortedError && /time limit of 300ms/.test(error.message),
+    );
+    assert.deepEqual(asked, ['demo.echo'], 'the policy was asked, and it is what hung');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a turn recovered from a parked approval after a restart has a time limit too', async () => {
+  const home = await newHome();
+  const stateDir = path.join(home, 'state');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const seed = new ShardedSessionStore({ stateDir });
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'parked-limited',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: { call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }, remaining: [], parkedAt: now },
+    },
+  });
+  seed.close();
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    stateDir,
+    selection: { provider: 'demo' },
+    turnTimeLimitMs: 300,
+    approvals: () => hangingPolicy(),
+    warn: (line) => warnings.push(line),
+  });
+  const failed = nextEvent(gateway.bus, 'session.failed');
+  await gateway.start();
+  try {
+    const event = await settles(failed, 'the recovered turn to fail');
+    assert.equal(event.sessionId, 'parked-limited');
+    assert.match(event.error, /^Stopped: this turn ran past its time limit of 300ms\./);
+    assert.ok(warnings.some((line) => line.startsWith('time limit: session parked-limited (ava)')), warnings.join('\n'));
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a daemon stop that cuts off a turn leaves no time limit running behind it', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: hangingOpenAi() };
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, turnTimeLimitMs: 300, stopDrainTimeoutMs: 20, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  const turn = gateway.dispatch({ sessionId: 'cut-1', agentId: 'slow', userMessage: 'hang' }).catch((error: unknown) => error);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await gateway.stop();
+  const ended = await turn;
+  assert.ok(ended instanceof RunAbortedError && !/time limit/.test(ended.message), String(ended));
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(warnings.filter((line) => line.startsWith('time limit:')), []);
+});
+
+test('a background task ending on the conversation is not activity for the watchdog of the turn running there', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: anthropic\nmodel: model-slow\n---\n\nYou stall.\n');
+  const warnings: string[] = [];
+  let gateway: ReturnType<typeof createGateway> | undefined;
+  // Once the provider is waited on, tasks this conversation started end
+  // every 50 ms for 3 s while it says nothing (AGT-357). None of that is
+  // the provider working, so the turn is still aborted about 1 s in.
+  const ids = { sessionId: 'stalled-2', agentId: 'slow', workerSessionId: 'stalled-2:delegate:slow:1:t_x', workerAgentId: 'slow' };
+  let sent = 0;
+  let ending: NodeJS.Timeout | undefined;
+  let waitedOnAt = 0;
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      if (init?.signal?.aborted) {
+        reject(new DOMException('aborted', 'AbortError'));
+        return;
+      }
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      if (ending === undefined) {
+        waitedOnAt = Date.now();
+        ending = setInterval(() => {
+          if (sent >= 60) {
+            clearInterval(ending);
+            return;
+          }
+          sent += 1;
+          void gateway?.bus.emit({ type: 'task.completed', ...ids, taskId: `t_${sent}` });
+        }, 50);
+      }
+    })) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  gateway = createGateway({ env, idleTimeoutMs: 1_000, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'stalled-2', agentId: 'slow', userMessage: 'hang' }),
+      (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
+    );
+    const waited = Date.now() - waitedOnAt;
+    assert.ok(waitedOnAt > 0, 'the provider was waited on');
+    assert.ok(waited < 2_500, `the watchdog fired ${waited}ms into the provider wait, not about 1000ms`);
+    assert.ok(sent >= 2, `task events were sent during the stall (${sent})`);
+    const line = warnings.find((warning) => warning.startsWith('watchdog:'));
+    assert.doesNotMatch(line ?? '', /last heard: task\./);
+  } finally {
+    clearInterval(ending);
+    await gateway.stop();
+  }
+});
+
 test('the idle watchdog stays off for non-streaming providers', async () => {
   const home = await newHome();
   await writeSoul(home, 'steady.md', '---\nname: Steady\nprovider: openai\nmodel: model-a\n---\n\nYou take your time.\n');

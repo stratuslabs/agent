@@ -32,7 +32,12 @@ export type CredentialRequester = (
  * with a secret is ask for one.
  *
  * `safe`: it asks a question in the conversation the agent is already in,
- * and a human decides everything after that.
+ * and a human decides everything after that. `gated` once the conversation
+ * has read external content (`riskAfterExternalContent`, as `agent.delegate`
+ * has it): a page can tell the agent to ask for a key, with an `env` its
+ * shell can then read, and the form shows the agent's reason, not the page
+ * behind it. So after outside content the request is judged like any other
+ * gated call before a form or link goes up.
  */
 export const createCredentialRequestTool = (requestCredential: CredentialRequester): Tool => ({
   name: CREDENTIAL_REQUEST_TOOL_NAME,
@@ -40,6 +45,7 @@ export const createCredentialRequestTool = (requestCredential: CredentialRequest
     + 'To rotate a key you already hold (expiring, revoked), set replace: true: an approver gets a form in this conversation to enter the new value, which swaps the stored one in place. A replace is never a link, and a shared key needs scope "shared" to say so, since it changes the key for every agent that uses it. '
     + 'For a key a command or script you run with shell.run reads from an environment variable, set env to that variable (GH_TOKEN, TWILIO_AUTH_TOKEN): the form tells the person your shell will be able to read it, and once they add it your commands have it from your next reply, with no config change or restart.',
   risk: 'safe',
+  riskAfterExternalContent: 'gated',
   parameters: {
     type: 'object',
     properties: {

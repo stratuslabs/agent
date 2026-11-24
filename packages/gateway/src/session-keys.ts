@@ -22,6 +22,7 @@ import {
   ROOT_SESSION_ID_METADATA_KEY,
   SCHEDULE_ID_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
+  TASK_ID_METADATA_KEY,
 } from '@stratusagent/agents';
 import { FALLBACK_ACTIVE_METADATA_KEY } from '@stratusagent/state';
 
@@ -166,6 +167,10 @@ export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   // so a caller who could seed it could put words in the agent's mouth.
   CONTEXT_SUMMARY_METADATA_KEY,
   SUB_AGENT_METADATA_KEY,
+  // Which background task a worker session runs for. Only the gateway
+  // writes it: a worker can't start background tasks of its own, and the
+  // restart sweep will key on it.
+  TASK_ID_METADATA_KEY,
 ];
 
 /**

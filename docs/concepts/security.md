@@ -78,7 +78,10 @@ Found a way around one of these? Report it privately, as
   only, with the same approver checks, and only where it's stored: a shared
   key needs the agent to have asked with `scope: "shared"`. Each add or
   replace from chat or a link appends a names-only line to
-  `~/.stratus/credential-audit.log`.
+  `~/.stratus/credential-audit.log`. Once the conversation has read
+  external content, the request itself is judged as a gated call before
+  anyone sees a form, so a page can't have the agent ask for a key
+  unchecked ([Approvals](../guides/approvals.md#after-an-agent-reads-the-web)).
   ([Slack](../guides/slack.md#adding-a-credential-from-slack))
 - **A form can make one key readable by one agent's shell, and says so
   before anything is typed.** A request with `env` (`GH_TOKEN`) shows "Kai's
@@ -241,10 +244,11 @@ little a steered agent can do. For an agent that browses or searches:
   session ids, memory entry ids, and — when a session's trust label drops —
   the label and the name of what lowered it; never prompts, replies, tool
   inputs, shell command text, or the content that did the tainting. The one
-  qualification: a failed session records the error text it failed with.
-  Stored keys and tokens, the credentials the agent's soul lists, and its
-  model key are masked in it, but providers quote the failing request, and
-  a fallback warning is not masked yet, so skim a log before sharing it.
+  qualification: a failed session records the error text it failed with,
+  and the warning written when the default model fails and the fallback
+  takes over carries that model's error. Stored keys and tokens, the
+  credentials the agent's soul lists, and its model key are masked in both,
+  but providers quote the failing request, so skim a log before sharing it.
   ([Logs](../guides/logs.md))
 - **No control API endpoint returns a secret.** Credential reads report
   presence, type, and bound endpoint; session reads strip the Anthropic

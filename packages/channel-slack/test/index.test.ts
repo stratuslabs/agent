@@ -14295,6 +14295,69 @@ test('a delegated call is asked in the delegating thread, through that agent\'s 
   await adapter.stop();
 });
 
+test('a background task\'s approval names the task, and an ordinary one reads as before', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+  const sectionText = (blocks: SlackBlock[] | undefined): string =>
+    String((blocks?.[0] as { text?: { text?: string } } | undefined)?.text?.text ?? '');
+
+  // Ava handed a job to herself in the background, so the prompt's name
+  // alone can't say which of her jobs is asking (AGT-358 put the id on it).
+  gateway.pendingApprovals.add('req-t');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-t',
+    sessionId: 'slack:ava:T1:C1:100.1:delegate:ava:1:t_7k2m9q',
+    metadata: { delegatedBy: 'ava', rootSessionId: 'slack:ava:T1:C1:100.1', delegationDepth: 1, taskId: 't_7k2m9q' },
+    delegatedFrom: {
+      agentId: 'ava',
+      sessionId: 'slack:ava:T1:C1:100.1',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    },
+    taskId: 't_7k2m9q',
+    oneShot: true,
+  }));
+
+  const asked = web.posts.at(-1);
+  assert.equal(asked?.thread_ts, '100.1');
+  assert.equal(asked?.text, 'Ava wants to run shell.run (gated) for background task t_7k2m9q: {"command":"ls"}.');
+  assert.equal(sectionText(asked?.blocks), '*Ava* wants to run `shell.run` (gated) for background task `t_7k2m9q`.');
+
+  // Settled, the record still says which job it was.
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-t', 'U-DYLAN'));
+  assert.equal(web.updates.at(-1)?.text, '*Ava* — `shell.run` (gated), background task `t_7k2m9q`: Allowed once by <@U-DYLAN>.');
+
+  // A request with no task id reads exactly as it did.
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+  const ordinary = web.posts.at(-1);
+  assert.equal(ordinary?.text, 'Ava wants to run shell.run (gated): {"command":"ls"}.');
+  assert.equal(sectionText(ordinary?.blocks), '*Ava* wants to run `shell.run` (gated).');
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-1', 'U-DYLAN', { ts: 'bot-ts-2' }));
+  assert.equal(web.updates.at(-1)?.text, '*Ava* — `shell.run` (gated): Allowed once by <@U-DYLAN>.');
+
+  await adapter.stop();
+});
+
+test('a task id is escaped, never Slack markup', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+  gateway.pendingApprovals.add('req-t');
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-t', taskId: '<!channel>' }));
+  const asked = web.posts.at(-1);
+  assert.doesNotMatch(String(asked?.text), /<!channel>/);
+  assert.doesNotMatch(JSON.stringify(asked?.blocks), /<!channel>/);
+  assert.match(String(asked?.text), /background task &lt;!channel&gt;/);
+  await socket.deliver('interactive', click('stratus_deny', 'req-t', 'U-DYLAN'));
+  const settled = web.updates.at(-1);
+  assert.match(String(settled?.text), /background task `&lt;!channel&gt;`: Denied/);
+  assert.doesNotMatch(JSON.stringify(settled?.blocks), /<!channel>/);
+  await adapter.stop();
+});
+
 test('a delegated call whose chain this adapter carries no agent of is left for another channel', async () => {
   const { web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
@@ -14945,6 +15008,10 @@ test('a stop from someone who is not an approver never asks the gateway to abort
     asked += 1;
     return 1;
   };
+  gateway.stopTasks = () => {
+    asked += 1;
+    return { open: 1, stopped: Promise.resolve(['t_A']) };
+  };
   const { socket, adapter } = stopAdapter(['U-DYLAN']);
   await adapter.start(gateway);
 
@@ -14966,6 +15033,106 @@ test('a stop the gateway finds nothing running for is an ordinary message to the
   await socket.settled();
   assert.equal(gateway.dispatches.length, 1);
   await adapter.stop();
+});
+
+// AGT-357: Stop also stops the background tasks the conversation started
+// (decision 3 of agent-plans roadmap/952-background-tasks.md), and says
+// which.
+
+test("an approver's stop with no turn running stops the thread's background tasks and names them in one line", async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  const asked: Array<[string, string]> = [];
+  gateway.stopTasks = (sessionId, stoppedBy) => {
+    asked.push([sessionId, stoppedBy]);
+    return { open: 2, stopped: Promise.resolve(['t_A', 't_B']) };
+  };
+  const { socket, web, adapter, logs } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.settled();
+  await until(() => web.posts.length === 1);
+  await adapter.stop();
+
+  assert.equal(gateway.dispatches.length, 0, 'the stop is not a turn');
+  assert.deepEqual(asked, [['slack:ava:T1:C1:100.1', 'U-DYLAN']]);
+  assert.deepEqual(web.posts.map((post) => [post.channel, post.text, post.thread_ts]), [['C1', 'Stopped by <@U-DYLAN>: background tasks `t_A`, `t_B`.', '100.1']]);
+  assert.ok(logs.some((line) => line.includes('U-DYLAN stopped 0 turn(s) and 2 background task(s) of ava in C1')), JSON.stringify(logs));
+});
+
+test("an approver's stop stops the running turn and the thread's background task, and says each", async () => {
+  const { gateway, signals } = stoppableGateway();
+  gateway.stopTasks = () => ({ open: 1, stopped: Promise.resolve(['t_A']) });
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  void socket.deliver('app_mention', mention('<@B-AVA> long job'));
+  await until(() => signals.length === 1);
+  await socket.deliver('message', channelMessage({ text: 'stop', ts: '100.2', thread: '100.1' }));
+  await socket.settled();
+  await until(() => web.posts.some((post) => post.text?.includes('background task') === true));
+
+  assert.equal(signals.length, 1, 'the stop is not a turn');
+  assert.equal(signals[0]?.aborted, true);
+  assert.ok(web.updates.some((update) => update.text === 'Stopped by <@U-DYLAN>.'));
+  assert.deepEqual(
+    web.posts.filter((post) => post.text?.includes('background task') === true).map((post) => [post.text, post.thread_ts]),
+    [['Stopped by <@U-DYLAN>: background task `t_A`.', '100.1']],
+  );
+  await adapter.stop();
+});
+
+test('a stop while the thread\'s tasks are still winding down from an earlier one is a stop, and names nothing again', async () => {
+  // The gateway counts a task until it settles, the way it counts a stopped
+  // turn, so a second stop is not queued as a turn that answers "stop".
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  gateway.stopTasks = () => ({ open: 1, stopped: Promise.resolve([]) });
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.3', thread_ts: '100.1' }));
+  await socket.settled();
+  await adapter.stop();
+  assert.equal(gateway.dispatches.length, 0);
+  assert.deepEqual(web.posts, []);
+});
+
+test('a stop whose task cancels fail says nothing about tasks and logs why', async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  gateway.stopTasks = () => ({ open: 1, stopped: Promise.reject(new Error('fleet.db is locked')) });
+  const { socket, web, adapter, logs } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', mention('<@B-AVA> stop', { ts: '100.2', thread_ts: '100.1' }));
+  await socket.settled();
+  await until(() => logs.some((line) => line.includes('fleet.db is locked')));
+  await adapter.stop();
+  assert.equal(gateway.dispatches.length, 0);
+  assert.deepEqual(web.posts, []);
+});
+
+test("an approver's stop in a DM stops the tasks that DM started and says so there", async () => {
+  const gateway = createStubGateway(({ sessionId, userMessage }) => sessionWithReply(sessionId, `heard ${userMessage}`));
+  gateway.abortTurns = () => 0;
+  const asked: string[] = [];
+  gateway.stopTasks = (sessionId) => {
+    asked.push(sessionId);
+    return { open: 1, stopped: Promise.resolve(['t_A']) };
+  };
+  const { socket, web, adapter } = stopAdapter(['U-DYLAN']);
+  await adapter.start(gateway);
+
+  await socket.deliver('message', mention('stop', { type: 'message', ts: '300.2', channel: 'D1', channel_type: 'im' }));
+  await socket.settled();
+  await until(() => web.posts.length === 1);
+  await adapter.stop();
+
+  assert.equal(gateway.dispatches.length, 0);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(web.posts.map((post) => [post.channel, post.text, post.thread_ts]), [['D1', 'Stopped by <@U-DYLAN>: background task `t_A`.', undefined]]);
 });
 
 test('in the default final reply mode a stopped turn posts who stopped it in the thread', async () => {
@@ -15342,6 +15509,7 @@ const agentMentionAdapter = (agentMentions?: { team?: Record<string, string>; on
   const webAva = createFakeWeb('B-AVA', 'T1');
   const webBea = createFakeWeb('B-BEA', 'T1');
   const logs: string[] = [];
+  const warnings: string[] = [];
   const trusts: unknown[] = [];
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'on it'));
   const dispatch = gateway.dispatch.bind(gateway);
@@ -15358,8 +15526,9 @@ const agentMentionAdapter = (agentMentions?: { team?: Record<string, string>; on
     createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
     createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
     log: (line) => logs.push(line),
+    warn: (line) => warnings.push(line),
   });
-  return { socketAva, socketBea, webAva, gateway, adapter, logs, trusts };
+  return { socketAva, socketBea, webAva, gateway, adapter, logs, warnings, trusts };
 };
 
 test('with agent mentions off, another agent tagging this one is ignored', async () => {
@@ -15570,7 +15739,7 @@ test('an untagged message from a team agent is never a turn', async () => {
 });
 
 test('two agents tagging each other in a thread stop at the hop limit, and a person speaking resets it', async () => {
-  const { socketAva, gateway, adapter, logs } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
+  const { socketAva, gateway, adapter, warnings } = agentMentionAdapter({ team: { nova: 'U-NOVA' } });
   await adapter.start(gateway);
   for (let hop = 1; hop <= 6; hop += 1) {
     await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${hop}`, ts: `150.${hop}`, thread: '150.0' }));
@@ -15580,7 +15749,7 @@ test('two agents tagging each other in a thread stop at the hop limit, and a per
   await adapter.stop();
   const fromNova = gateway.dispatches.map((dispatch) => plainAgentLine(dispatch.userMessage)).filter((message) => message.startsWith('nova:'));
   assert.deepEqual(fromNova, ['nova: round 1', 'nova: round 2', 'nova: round 3', 'nova: round 4', 'nova: round 7']);
-  assert.ok(logs.some((line) => line.includes('hop limit')), logs.join('\n'));
+  assert.ok(warnings.some((line) => line.includes('hop limit')), warnings.join('\n'));
 });
 
 test('a delayed copy of an older human message does not reset newer agent hops', async () => {
@@ -15598,6 +15767,193 @@ test('a delayed copy of an older human message does not reset newer agent hops',
   await adapter.stop();
   const fromNova = gateway.dispatches.map((dispatch) => plainAgentLine(dispatch.userMessage)).filter((message) => message.startsWith('nova:'));
   assert.deepEqual(fromNova, ['nova: round 1', 'nova: round 2', 'nova: round 3', 'nova: round 4', 'nova: round 6']);
+});
+
+/**
+ * Ava and Bea, both on this daemon, both answering Nova (a team agent on
+ * another daemon), with a clock the test moves (AGT-366). `bea` adds to
+ * Bea's config.
+ */
+const hopAdapter = (bea: Partial<SlackAdapterOptions['agents'][number]> = {}) => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const logs: string[] = [];
+  const warnings: string[] = [];
+  const clock = { now: Date.UTC(2026, 10, 14, 7, 0) };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'on it'));
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a', agentMentions: { team: { nova: 'U-NOVA' } } },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b', agentMentions: { team: { nova: 'U-NOVA' } }, ...bea },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    log: (line) => logs.push(line),
+    warn: (line) => warnings.push(line),
+    now: () => clock.now,
+  });
+  /** Which agent answered which of Nova's tags, in order. */
+  const heard = () => gateway.dispatches
+    .map((dispatch) => `${dispatch.agentId}: ${plainAgentLine(dispatch.userMessage)}`)
+    .filter((line) => line.includes(' nova: '));
+  /** The lines an agent posted saying it skipped a tag. */
+  const notices = (web: FakeWeb) => web.posts.filter((post) => String(post.text).includes('agent tags'));
+  const minutes = (count: number) => {
+    clock.now += count * 60_000;
+  };
+  return { socketAva, socketBea, webAva, webBea, gateway, adapter, logs, warnings, clock, heard, notices, minutes };
+};
+
+test('each agent has its own agent-tag count in a thread, so one busy pair does not silence another agent (AGT-366)', async () => {
+  const { socketAva, socketBea, gateway, adapter, heard } = hopAdapter();
+  await adapter.start(gateway);
+  for (let hop = 1; hop <= 5; hop += 1) {
+    await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${hop}`, ts: `200.${hop}`, thread: '200.0' }));
+  }
+  await socketBea.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-BEA> are you there?', ts: '200.6', thread: '200.0' }));
+  await adapter.stop();
+  assert.deepEqual(heard(), [
+    'ava: nova: round 1',
+    'ava: nova: round 2',
+    'ava: nova: round 3',
+    'ava: nova: round 4',
+    'bea: nova: are you there?',
+  ]);
+});
+
+test('an agent tag stops counting 30 minutes after it arrived, so a slow exchange keeps going (AGT-366)', async () => {
+  const { socketAva, gateway, adapter, heard, minutes } = hopAdapter();
+  await adapter.start(gateway);
+  const tag = (round: number) => socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${round}`, ts: `210.${round}`, thread: '210.0' }));
+  await tag(1); // minute 0
+  minutes(10);
+  await tag(2); // 10
+  minutes(10);
+  await tag(3); // 20
+  minutes(5);
+  await tag(4); // 25
+  minutes(4);
+  await tag(5); // 29: four in the last 30 minutes, skipped
+  minutes(1);
+  await tag(6); // 30: round 1 no longer counts
+  minutes(1);
+  await tag(7); // 31: rounds 2, 3, 4 and 6 count, skipped
+  minutes(9);
+  await tag(8); // 40: round 2 no longer counts
+  await adapter.stop();
+  assert.deepEqual(heard(), [
+    'ava: nova: round 1',
+    'ava: nova: round 2',
+    'ava: nova: round 3',
+    'ava: nova: round 4',
+    'ava: nova: round 6',
+    'ava: nova: round 8',
+  ]);
+});
+
+test('a skipped agent tag is said once a window in the thread, untagged, and a person speaking reopens it (AGT-366)', async () => {
+  const { socketAva, socketBea, webAva, gateway, adapter, heard, notices, warnings, minutes } = hopAdapter();
+  await adapter.start(gateway);
+  const tag = (round: number) => socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${round}`, ts: `220.${String(round).padStart(2, '0')}`, thread: '220.0' }));
+  for (let round = 1; round <= 4; round += 1) {
+    await tag(round);
+  }
+  minutes(1);
+  await tag(5);
+  // The same tag again (a second subscription, a redelivery) says nothing more.
+  await tag(5);
+  minutes(1);
+  await tag(6);
+  assert.equal(notices(webAva).length, 1, webAva.posts.map((post) => post.text).join('\n'));
+  const [notice] = notices(webAva);
+  assert.equal(notice?.channel, 'C1');
+  assert.equal(notice?.thread_ts, '220.0');
+  assert.doesNotMatch(String(notice?.text), /<@/);
+  assert.match(String(notice?.text), /nova/);
+  assert.match(String(notice?.text), /in 29 minutes/);
+  assert.equal(warnings.filter((line) => line.includes('ava ignored a mention from agent nova')).length, 2, warnings.join('\n'));
+
+  // Bea's socket sees Ava's line as a bot message: it names nobody, so it is no turn.
+  const before = gateway.dispatches.length;
+  await socketBea.deliver('message', { ...botMention({ user: 'B-AVA', text: String(notice?.text), ts: '220.50', thread: '220.0', type: 'message' }), body: { team_id: 'T1', event_id: 'evt-notice' } });
+  assert.equal(gateway.dispatches.length, before);
+
+  // A person speaking clears the count, and the notice with it.
+  await socketAva.deliver('message', channelMessage({ text: 'keep going', ts: '220.60', thread: '220.0' }));
+  for (let round = 61; round <= 65; round += 1) {
+    await tag(round);
+  }
+  await adapter.stop();
+  assert.deepEqual(heard(), [
+    'ava: nova: round 1',
+    'ava: nova: round 2',
+    'ava: nova: round 3',
+    'ava: nova: round 4',
+    'ava: nova: round 61',
+    'ava: nova: round 62',
+    'ava: nova: round 63',
+    'ava: nova: round 64',
+  ]);
+  assert.equal(notices(webAva).length, 2);
+});
+
+test('a team agent name with Slack markup is neutralized in the skipped-tag line, so it notifies nobody (AGT-366)', async () => {
+  const { socketBea, webBea, gateway, adapter, notices } = hopAdapter({ agentMentions: { team: { '<!channel> <@U-DYLAN>': 'U-NOVA' } } });
+  await adapter.start(gateway);
+  for (let round = 1; round <= 5; round += 1) {
+    await socketBea.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-BEA> round ${round}`, ts: `225.${round}`, thread: '225.0' }));
+  }
+  await adapter.stop();
+  assert.equal(gateway.dispatches.filter((dispatch) => dispatch.agentId === 'bea').length, 4);
+  assert.equal(notices(webBea).length, 1, webBea.posts.map((post) => post.text).join('\n'));
+  const text = String(notices(webBea)[0]?.text);
+  assert.doesNotMatch(text, /<[@!]/);
+  assert.match(text, /&lt;!channel&gt; &lt;@U-DYLAN&gt;'s tag/);
+});
+
+test('a person resets only the agent-tag counts of agents that admit them (AGT-366)', async () => {
+  const { socketAva, socketBea, gateway, adapter, heard } = hopAdapter({ admit: 'principals', principals: ['U-DYLAN'] });
+  await adapter.start(gateway);
+  for (let round = 1; round <= 4; round += 1) {
+    await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> ava ${round}`, ts: `230.${round}`, thread: '230.0' }));
+    await socketBea.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-BEA> bea ${round}`, ts: `230.${round}5`, thread: '230.0' }));
+  }
+  // Someone Ava admits and Bea refuses, seen on both sockets.
+  await socketAva.deliver('message', channelMessage({ text: 'carry on', ts: '230.6', thread: '230.0', user: 'U-STRANGER' }));
+  await socketBea.deliver('message', channelMessage({ text: 'carry on', ts: '230.6', thread: '230.0', user: 'U-STRANGER' }));
+  await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-AVA> ava 5', ts: '230.7', thread: '230.0' }));
+  await socketBea.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-BEA> bea 5', ts: '230.75', thread: '230.0' }));
+  // Someone Bea admits, seen only on Ava's socket, still reopens Bea.
+  await socketAva.deliver('message', channelMessage({ text: 'bea too', ts: '230.8', thread: '230.0' }));
+  await socketBea.deliver('app_mention', botMention({ user: 'U-NOVA', text: '<@B-BEA> bea 6', ts: '230.85', thread: '230.0' }));
+  await adapter.stop();
+  assert.deepEqual(heard().filter((line) => line.startsWith('ava')), [
+    'ava: nova: ava 1', 'ava: nova: ava 2', 'ava: nova: ava 3', 'ava: nova: ava 4', 'ava: nova: ava 5',
+  ]);
+  assert.deepEqual(heard().filter((line) => line.startsWith('bea')), [
+    'bea: nova: bea 1', 'bea: nova: bea 2', 'bea: nova: bea 3', 'bea: nova: bea 4', 'bea: nova: bea 6',
+  ]);
+});
+
+test('when the skipped-tag line cannot be posted, it is a warning and nothing else changes (AGT-366)', async () => {
+  const { socketAva, webAva, gateway, adapter, heard, warnings } = hopAdapter();
+  const post = webAva.chat.postMessage.bind(webAva.chat);
+  webAva.chat.postMessage = async (args) => {
+    if (String(args.text).includes('agent tags')) {
+      throw new Error('ratelimited');
+    }
+    return post(args);
+  };
+  await adapter.start(gateway);
+  for (let round = 1; round <= 5; round += 1) {
+    await socketAva.deliver('app_mention', botMention({ user: 'U-NOVA', text: `<@B-AVA> round ${round}`, ts: `240.${round}`, thread: '240.0' }));
+  }
+  await adapter.stop();
+  assert.equal(heard().length, 4);
+  assert.ok(warnings.some((line) => line.includes('ava') && line.includes('ratelimited')), warnings.join('\n'));
 });
 
 test('under admit: principals, a remote team agent\'s earlier messages are kept as context for its mention', async () => {

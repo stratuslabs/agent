@@ -19,6 +19,7 @@ import type {
   JsonObject,
   ObserveEntry,
   Session,
+  TasksStop,
   Tool,
   ToolCall,
   ToolRisk,
@@ -56,6 +57,8 @@ import type {
   RestartStatus,
   SchedulerLimits,
   ShardedSessionStore,
+  TaskCancelResult,
+  TaskListing,
 } from './index.ts';
 
 /**
@@ -400,6 +403,8 @@ export interface PendingApproval {
   delegatedFrom?: ApprovalDelegationOrigin;
   /** Where a scheduled firing's schedule reports — see the event. */
   scheduleDestination?: ApprovalScheduleDestination;
+  /** The background task asking, for a task's worker — see the event. */
+  taskId?: string;
 }
 
 export interface ResolveApprovalInput {
@@ -548,6 +553,22 @@ export interface GatewayOptions {
    */
   idleTimeoutMs?: number;
   /**
+   * The longest one turn may run, wall clock, before it is stopped and
+   * fails saying so (AGT-371). A background task is one worker turn, so
+   * this is also how long a task may run. Time a turn spends waiting on a
+   * person's approval doesn't count. A turn continued after a restart
+   * starts a fresh clock. 0 means no limit. Default 2 hours. `stratus serve`
+   * fills it from the trusted config's `turnMinutes`.
+   */
+  turnTimeLimitMs?: number;
+  /**
+   * One agent's own time limit, replacing `turnTimeLimitMs` for its turns
+   * and the tasks it runs as a worker; 0 is no limit for that agent.
+   * Undefined means the shared one. `stratus serve` fills it from the
+   * trusted config's `agentTurnMinutes`.
+   */
+  turnTimeLimitMsFor?: (agentId: string) => number | undefined;
+  /**
    * The events listener's sources and body limit (card 590), from the
    * trusted config's `events` block. With no sources the event store is
    * never opened, and every delivery is to an unknown source.
@@ -595,6 +616,15 @@ export interface GatewayOptions {
    * It must be a whole number of at least 1, or `createGateway` throws.
    */
   subAgents?: { maxConcurrentPerTurn?: number };
+  /**
+   * Background tasks (AGT-211): `agent.delegate` with `background: true`.
+   * On unless `enabled` is false; while on, the tool offers `background`.
+   * The task table in `fleet.db` is kept either way, for the restart sweep.
+   * `maxRunningPerAgent` caps the open tasks one agent has started, keyed
+   * by agent id (`{ "atlas": 5 }`), 3 for an agent it doesn't name; each
+   * entry must be a whole number of at least 1, or `createGateway` throws.
+   */
+  tasks?: { enabled?: boolean; maxRunningPerAgent?: Readonly<Record<string, number>> };
   /**
    * Which store backs agent memory, by registered name (`file`, or absent,
    * is the built-in). Same trust rule and same refusal as `executor`: a
@@ -907,6 +937,33 @@ export interface Gateway {
    * nothing.
    */
   abortTurns(sessionId: string, reason: string): number;
+  /**
+   * Cancels a background task (AGT-211) with the operator's authority, for
+   * any agent's task: the stop is written on the task's row before anything
+   * is aborted, then the task's own signal and its worker's running turn are
+   * aborted. `finished` when the task, or its worker's turn, had already
+   * ended (nothing is written), `missing` for an unknown id. Settling
+   * reports a stopped task `cancelled` in its conversation. `stoppedBy` is
+   * who asked (`cli`, `dashboard`, or a person's chat id) and is named in
+   * that notice. Works whether or not `tasks.enabled` is on.
+   */
+  cancelTask(taskId: string, stoppedBy: string): Promise<TaskCancelResult>;
+  /**
+   * The background tasks one agent started, or the whole fleet's, for the
+   * operator (`stratus tasks`, `GET /api/v1/tasks`): every one open or owed
+   * a delivery, newest first, then the 20 most recently finished. Ids and
+   * status only, never a prompt or a result. Works whether or not
+   * `tasks.enabled` is on.
+   */
+  tasks(agentId?: string): Promise<TaskListing[]>;
+  /**
+   * A person's Stop in a conversation, for the background tasks it started
+   * (AGT-357): cancels each one running in this process through
+   * `cancelTask`, as `stoppedBy`. `open` says at once how many there were;
+   * `stopped` names the ones this call stopped. See `TasksStop` in
+   * `@stratusagent/core`.
+   */
+  stopTasks(sessionId: string, stoppedBy: string): TasksStop;
   /** Every call parked on a human right now, oldest first. */
   pendingApprovals(): PendingApproval[];
   /**

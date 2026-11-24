@@ -23,6 +23,7 @@ import {
   type PluginConfigBlock,
   type PluginsConfig,
   type StratusConfigFile,
+  type TasksConfig,
 } from './config.ts';
 import { normalizeTrustedDomain, parseReviewRule, trustedDomainProblem, type ReviewRule } from '@stratusagent/permissions';
 
@@ -201,6 +202,35 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
     }
     resolved.agentMaxTurns = { ...(budgets as Record<string, number>) };
   }
+  if (config.turnMinutes !== undefined) {
+    // Refused rather than clamped, like `maxTurns`: a typo here either
+    // lifts the limit everywhere or stops every turn at once.
+    if (!isTurnMinutes(config.turnMinutes)) {
+      throw new Error(
+        `Invalid turnMinutes in config ${configPath}: ${JSON.stringify(config.turnMinutes)}. `
+        + `Use a whole number of minutes, 0 for no limit, up to ${MAX_TURN_MINUTES}.`,
+      );
+    }
+    resolved.turnMinutes = config.turnMinutes;
+  }
+  if (config.agentTurnMinutes !== undefined) {
+    // Refused, not dropped, for the reason `agentMaxTurns` is.
+    const limits = config.agentTurnMinutes as unknown;
+    if (typeof limits !== 'object' || limits === null || Array.isArray(limits)) {
+      throw new Error(
+        `Invalid agentTurnMinutes in config ${configPath}: expected agent ids mapped to minutes, like { "atlas": 240 }.`,
+      );
+    }
+    for (const [agentId, minutes] of Object.entries(limits as Record<string, unknown>)) {
+      if (!isTurnMinutes(minutes)) {
+        throw new Error(
+          `Invalid agentTurnMinutes.${agentId} in config ${configPath}: ${JSON.stringify(minutes)}. `
+          + `Use a whole number of minutes, 0 for no limit, up to ${MAX_TURN_MINUTES}.`,
+        );
+      }
+    }
+    resolved.agentTurnMinutes = { ...(limits as Record<string, number>) };
+  }
   if (config.autoContinue !== undefined) {
     // Refused, not dropped, for the reason `agentMaxTurns` is.
     const entries = config.autoContinue as unknown;
@@ -236,6 +266,10 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
       }
     }
     resolved.concurrentScheduledTurns = { ...(limits as Record<string, number>) };
+  }
+  const tasks = parseTasksConfig(config.tasks, configPath);
+  if (tasks) {
+    resolved.tasks = tasks;
   }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
@@ -329,6 +363,17 @@ const jsonTypeOf = (value: unknown): Extract<IgnoredConfigKey, { reason: 'droppe
 
 const isPlainObject = (value: unknown): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The most minutes `turnMinutes` takes: Node's longest timer delay, past
+ * which a delay isn't a long wait but a 1ms one, so a turn limit set
+ * higher would stop every turn the moment it began.
+ */
+const MAX_TURN_MINUTES = Math.floor(2_147_483_647 / 60_000);
+
+/** A turn time limit in minutes: a whole number, 0 for no limit, within Node's timer range. */
+const isTurnMinutes = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_TURN_MINUTES;
 
 /**
  * Shape-check the `plugins` block, and no more than that.
@@ -448,6 +493,47 @@ export const bindsLoopback = async (host: string, lookup: HostLookup = lookupHos
   } catch {
     return false;
   }
+};
+
+/**
+ * The `tasks` block. Refused, not dropped, when a value is wrong: an
+ * operator who wrote `"enabled": "no"` or a cap of 0 and silently got the
+ * default would find out from tasks that run, or are refused, with nothing
+ * to say why. Keys it doesn't know are left alone, as in the other blocks,
+ * so a config written for a newer build still loads on this one.
+ */
+const parseTasksConfig = (raw: unknown, configPath: string): TasksConfig | undefined => {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid tasks in config ${configPath}: expected an object like { "enabled": true, "maxRunningPerAgent": { "atlas": 5 } }.`);
+  }
+  const source = raw as Record<string, unknown>;
+  const tasks: TasksConfig = {};
+  if (source.enabled !== undefined) {
+    if (typeof source.enabled !== 'boolean') {
+      throw new Error(`Invalid tasks.enabled in config ${configPath}: ${JSON.stringify(source.enabled)}. Use true or false.`);
+    }
+    tasks.enabled = source.enabled;
+  }
+  if (source.maxRunningPerAgent !== undefined) {
+    const limits = source.maxRunningPerAgent;
+    if (typeof limits !== 'object' || limits === null || Array.isArray(limits)) {
+      throw new Error(
+        `Invalid tasks.maxRunningPerAgent in config ${configPath}: expected agent ids mapped to a number of running tasks, like { "atlas": 5 }.`,
+      );
+    }
+    for (const [agentId, limit] of Object.entries(limits as Record<string, unknown>)) {
+      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
+        throw new Error(
+          `Invalid tasks.maxRunningPerAgent.${agentId} in config ${configPath}: ${JSON.stringify(limit)}. Use a whole number of running tasks, 1 or more.`,
+        );
+      }
+    }
+    tasks.maxRunningPerAgent = { ...(limits as Record<string, number>) };
+  }
+  return tasks;
 };
 
 const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {

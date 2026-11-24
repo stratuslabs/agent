@@ -9,6 +9,7 @@ import {
   type ApprovalPolicy,
   type ApprovalRefusal,
   type ApprovalVerdict,
+  redactSecrets,
   sessionTaintedBy,
   sessionTrustOf,
 } from '@stratusagent/core';
@@ -52,6 +53,7 @@ import {
   describeReviewRule,
   matchReviewRule,
   readReviewAnswer,
+  reviewReasonLine,
   type ReviewCode,
   ReviewFailure,
 } from './review.ts';
@@ -175,7 +177,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
    * the reviewer answered for a call that went on to a person.
    */
   const shadowContexts = new WeakSet<ApprovalContext>();
-  const reviewNotes = new WeakMap<ApprovalContext, { verdict: ApprovalVerdict; reviewCode?: ReviewCode }>();
+  const reviewNotes = new WeakMap<ApprovalContext, { verdict: ApprovalVerdict; reviewCode?: ReviewCode; reviewReason?: string }>();
 
   /** A site this agent may read without asking: trusted, or approved for `web.fetch`. */
   const readableSite = async (agentId: string, site: string): Promise<boolean> => {
@@ -207,6 +209,10 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       ...(note?.reviewCode === undefined ? {} : { reviewCode: note.reviewCode }),
       ...(shadow ? { shadow: true } : {}),
     };
+    // The reviewer's own line goes to the host's log, and only for a shadow
+    // review, where nobody else sees it: the numbers alone can't say why a
+    // review would have asked.
+    const why = shadow && note?.reviewReason !== undefined ? { reviewReason: note.reviewReason } : {};
     onDecision?.({
       allowed,
       mode,
@@ -223,12 +229,13 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       ...(destinationGrant === undefined ? {} : { destinationGrant }),
       layer,
       ...reviewed,
+      ...why,
     });
     // The same three fields the log gets, and nothing else: the runner's
     // event carries no command, grant or destination record, so what a
     // dashboard shows is a classification, never the call's input. The
     // review fields are a verdict and a fixed code, never the reviewer's
-    // words.
+    // words, shadow or not.
     context.decided?.({ allowed, layer, reason, ...reviewed });
     // The reason is what the agent is told: it names the check that
     // refused and what would cover the call, which is what lets the agent
@@ -269,7 +276,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     context: ApprovalContext,
     timeoutMs: number,
     resolved: { command?: string; origin?: string; destination?: string },
-  ): Promise<{ answer: ReturnType<typeof readReviewAnswer> & object } | { failed: string } | typeof ABORTED> => {
+  ): Promise<{ answer: ReturnType<typeof readReviewAnswer> & object; said: string } | { failed: string } | typeof ABORTED> => {
     if (context.signal?.aborted) {
       return ABORTED;
     }
@@ -302,7 +309,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }).then(
         (raw) => {
           const answer = readReviewAnswer(raw);
-          return answer === undefined ? { failed: 'unparseable' } : { answer };
+          // `said` is the reason as the reviewer wrote it, before the cut,
+          // for a shadow review's logged line (redacted, then cut).
+          return answer === undefined
+            ? { failed: 'unparseable' }
+            : { answer, said: (raw as { reason: string }).reason };
         },
         (error: unknown) => ({ failed: error instanceof ReviewFailure ? error.kind : 'error' }),
       );
@@ -362,6 +373,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // of them goes to a person and skips everything a grant could cover,
       // since the first step that settles a call wins.
       let reviewAsk: ReviewAsk | undefined;
+      /** The stored values read for the built-in rule, kept to redact a shadow review's logged reason. */
+      let storedSecrets: readonly string[] = [];
       const reviewHooks = [context.tool.commandFor, context.tool.destinationFor, context.tool.originFor]
         .filter((hook) => hook !== undefined).length;
       const reviewed = reviewing && reviewHooks <= 1
@@ -425,6 +438,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             const read = await untilAborted(Promise.race([lookup, timedOut]), context.signal);
             if (read !== ABORTED) {
               secrets = read ?? [];
+              storedSecrets = secrets;
               secretsUnreadable = false;
             } else {
               lookup.catch(() => undefined);
@@ -894,7 +908,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           reviewAsk = { layer: 'review', reason, told: reason, note: `the review couldn't run: ${outcome.failed}` };
         } else {
           const { answer } = outcome;
-          reviewNotes.set(context, { verdict: answer.verdict, reviewCode: answer.code });
+          // Redacted before it is cut: a stored value across the cut would
+          // otherwise leave its first characters in the log.
+          const logged = shadowRun ? reviewReasonLine(redactSecrets(outcome.said, storedSecrets)) : undefined;
+          reviewNotes.set(context, {
+            verdict: answer.verdict,
+            reviewCode: answer.code,
+            ...(logged === undefined ? {} : { reviewReason: logged }),
+          });
           if (answer.verdict === 'allow') {
             // The review took time, and a page can move in it: a yes given
             // for one site must not land a click on another. Same rule as

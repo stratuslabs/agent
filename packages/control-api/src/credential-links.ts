@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 
 import type { CredentialScope } from '@stratusagent/core';
@@ -23,14 +23,40 @@ export interface CredentialLinkRecord {
   expiresAt: number;
 }
 
+/**
+ * Why a token opens no form, so the page can say it instead of guessing:
+ * `expired`, `used` (answered), `closed` (its request can no longer be
+ * answered), `restarted` (issued by another run of the daemon, or by
+ * another daemon altogether), or `unrecognized` (cut short, reformatted,
+ * or spent so long ago it is no longer remembered).
+ */
+export type CredentialLinkRefusal =
+  | { reason: 'expired' | 'used' | 'closed'; at: number }
+  | { reason: 'restarted' | 'unrecognized' };
+
 export interface CredentialLinkStore {
   /** A fresh token for this request. */
   mint(record: Omit<CredentialLinkRecord, 'expiresAt'>): { token: string; expiresAt: number };
   /** The live record behind a token, or undefined once it expired or was spent. */
   get(token: string): CredentialLinkRecord | undefined;
-  /** Spend a token: the request was answered, or can no longer be. */
-  retire(token: string): void;
+  /** Why `get` found no live record for this token. Spends nothing. */
+  refusal(token: string): CredentialLinkRefusal;
+  /** Spend a token: the request was answered (`used`), or can no longer be (`closed`). */
+  retire(token: string, reason: 'used' | 'closed'): void;
 }
+
+/** How many spent or expired tokens are remembered for their reason. */
+const KEEP_ENDED = 1_000;
+/** Characters of the per-process prefix a token starts with. */
+const RUN_ID_LENGTH = 8;
+/** Characters of the 256 random bits after it, as base64url. */
+const SECRET_LENGTH = 43;
+/** Characters of the check that ends it: 3 bytes of a hash of the rest. */
+const CHECK_LENGTH = 4;
+const TOKEN_LENGTH = RUN_ID_LENGTH + SECRET_LENGTH + CHECK_LENGTH;
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+/** Not a secret and not a signature: it only shows the token arrived as it was minted. */
+const checkOf = (body: string): string => createHash('sha256').update(body).digest().subarray(0, 3).toString('base64url');
 
 /**
  * The tokens behind credential links, in memory only.
@@ -41,23 +67,50 @@ export interface CredentialLinkStore {
  * operator chose that over requiring a dashboard session), so it is 256
  * random bits, is spent the moment an answer is final, and dies on its own
  * after `CREDENTIAL_LINK_TTL_MS`.
+ *
+ * Every token starts with a random id for this store and ends with a short
+ * check of everything before it, so a token this store never issued can be
+ * told apart from one it issued and forgot, and from one that changed on
+ * the way: a link from before a restart (or from another daemon) is a
+ * different refusal from a link a chat app cut short. The id says nothing
+ * but "same run or not".
+ * A spent or expired token is remembered with its reason (the newest
+ * `keepEnded` of them); it can never open a form again either way.
  */
-export const createCredentialLinkStore = (options: { now?: () => number; ttlMs?: number } = {}): CredentialLinkStore => {
+export const createCredentialLinkStore = (
+  options: { now?: () => number; ttlMs?: number; keepEnded?: number } = {},
+): CredentialLinkStore => {
   const now = options.now ?? Date.now;
   const ttlMs = options.ttlMs ?? CREDENTIAL_LINK_TTL_MS;
+  const keepEnded = options.keepEnded ?? KEEP_ENDED;
+  const runId = randomBytes(6).toString('base64url');
   const links = new Map<string, CredentialLinkRecord>();
+  const ended = new Map<string, { reason: 'expired' | 'used' | 'closed'; at: number }>();
+  const end = (token: string, reason: 'expired' | 'used' | 'closed', at: number): void => {
+    links.delete(token);
+    ended.delete(token);
+    ended.set(token, { reason, at });
+    while (ended.size > keepEnded) {
+      const oldest = ended.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      ended.delete(oldest);
+    }
+  };
   const sweep = (): void => {
     const at = now();
     for (const [token, record] of links) {
       if (record.expiresAt <= at) {
-        links.delete(token);
+        end(token, 'expired', record.expiresAt);
       }
     }
   };
   return {
     mint(record) {
       sweep();
-      const token = randomBytes(32).toString('base64url');
+      const body = `${runId}${randomBytes(32).toString('base64url')}`;
+      const token = `${body}${checkOf(body)}`;
       const expiresAt = now() + ttlMs;
       links.set(token, { ...record, expiresAt });
       return { token, expiresAt };
@@ -66,10 +119,50 @@ export const createCredentialLinkStore = (options: { now?: () => number; ttlMs?:
       sweep();
       return links.get(token);
     },
-    retire(token) {
-      links.delete(token);
+    refusal(token) {
+      sweep();
+      const known = ended.get(token);
+      if (known !== undefined) {
+        return { ...known };
+      }
+      // Arrived as minted (its check holds), but not this run's: issued
+      // before the daemon restarted, or by another one. Anything whose
+      // check fails was cut short or changed on the way, and so is a link
+      // from a build before the check, which can't be told from one.
+      const body = token.slice(0, -CHECK_LENGTH);
+      const intact = token.length === TOKEN_LENGTH && BASE64URL.test(token) && checkOf(body) === token.slice(-CHECK_LENGTH);
+      return intact && !body.startsWith(runId) ? { reason: 'restarted' } : { reason: 'unrecognized' };
+    },
+    retire(token, reason) {
+      // Only a live token, or one that ran out while its answer was being
+      // stored (that answer landed, so it was used). One already spent
+      // keeps its first reason: a second submission racing the first is
+      // refused as no longer pending, but the link was used, not closed.
+      if (links.has(token) || ended.get(token)?.reason === 'expired') {
+        end(token, reason, now());
+      }
     },
   };
+};
+
+/** What the page says for a refused link: the real reason, and what to do. */
+export const credentialLinkRefusal = (refusal: CredentialLinkRefusal): string => {
+  const again = 'Ask the agent to request the credential again.';
+  switch (refusal.reason) {
+    case 'expired':
+      return `This link expired at ${new Date(refusal.at).toISOString()}. ${again}`;
+    case 'used':
+      return `This link was already used, at ${new Date(refusal.at).toISOString()}. A link works once. `
+        + 'If the key still isn\'t there, ask the agent to request it again.';
+    case 'closed':
+      return `This link was closed at ${new Date(refusal.at).toISOString()}, because its request could no longer be answered. ${again}`;
+    case 'restarted':
+      return 'This link is from before the daemon last restarted, or from another daemon. A link works only on the daemon '
+        + `that issued it, and not after that daemon restarts. ${again} Then open the new link at the address it gives.`;
+    case 'unrecognized':
+      return 'This daemon doesn\'t recognize this link. Check that it was copied whole (a chat app can cut a long link short '
+        + `or change its characters). ${again}`;
+  }
 };
 
 const escapeHtml = (text: string): string =>

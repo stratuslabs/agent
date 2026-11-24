@@ -4,8 +4,10 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  carriesKey,
   leastTrusted,
   SENDER_TRUST_METADATA_KEY,
+  startsTurn,
   type JsonObject,
   type Message,
   type Session,
@@ -269,37 +271,69 @@ export const renderResumeBlock = (
 const UNDELIVERED_ERROR_MAX_CHARS = 300;
 
 /**
- * What a completed firing's `message.send` calls left undelivered
- * (AGT-335): the first failed send's error when one failed, refused
- * included, and no send reached `destination`; otherwise undefined. A run
- * that never tried to send owes its destination nothing, since a firing's
- * reply goes nowhere by design, and a retry that got there settles it. A
- * run still parked on an approval may yet report, and one that failed is
- * a different problem. Reads tool results only, never what the agent said.
+ * How a completed firing's `message.send` calls ended against its
+ * schedule's destination: `reached` when one got there, a retry after a
+ * failure included; `failed` with the first failed send's error, refused
+ * included, when none did; `none` when it never tried, or only sent
+ * elsewhere. Undefined for a run that hasn't completed: one still parked
+ * on an approval may yet report, and one that failed is a different
+ * problem. Reads tool results only, never what the agent said.
+ *
+ * With `idempotencyKey`, only the turn that key started counts, and no
+ * message carrying it means no outcome. An event trigger's firings for
+ * one subject share a session, so an earlier turn's post must not stand
+ * for this one's, nor an earlier failed send be reported again.
  */
-export const undeliveredSendError = (
+export type SendOutcome =
+  | { kind: 'reached' }
+  | { kind: 'failed'; error: string }
+  | { kind: 'none' };
+
+export const sendOutcome = (
   session: { status: SessionStatus; messages: readonly Message[] },
   destination: ScheduleDestination,
-): string | undefined => {
+  idempotencyKey?: string,
+): SendOutcome | undefined => {
   if (session.status !== 'completed') {
     return undefined;
   }
+  let turn = session.messages;
+  if (idempotencyKey !== undefined) {
+    const start = turn.findLastIndex((message) => carriesKey(message, idempotencyKey));
+    if (start < 0) {
+      return undefined;
+    }
+    const next = turn.findIndex((message, index) => index > start && startsTurn(message));
+    turn = turn.slice(start + 1, next < 0 ? undefined : next);
+  }
   const target = canonicalDestination(destination);
   let failed: string | undefined;
-  for (const { toolResult: result } of session.messages) {
+  for (const { toolResult: result } of turn) {
     if (result?.toolName !== MESSAGE_SEND_TOOL_NAME) {
       continue;
     }
     if (result.ok) {
       const output = result.output as { destination?: unknown } | null;
       if (output?.destination === target) {
-        return undefined;
+        return { kind: 'reached' };
       }
     } else {
       failed ??= result.error?.trim() || 'it failed without saying why';
     }
   }
-  return failed;
+  return failed !== undefined ? { kind: 'failed', error: failed } : { kind: 'none' };
+};
+
+/**
+ * AGT-335's question alone: the failed send's error when `sendOutcome` is
+ * `failed`, otherwise undefined. Kept for importers from before AGT-353.
+ */
+export const undeliveredSendError = (
+  session: { status: SessionStatus; messages: readonly Message[] },
+  destination: ScheduleDestination,
+): string | undefined => {
+  const outcome = sendOutcome(session, destination);
+  return outcome?.kind === 'failed' ? outcome.error : undefined;
 };
 
 /**
@@ -407,11 +441,20 @@ export interface SchedulerRuntimeOptions {
    */
   previousRun?(sessionId: string): Promise<PreviousRun | undefined>;
   /**
-   * AGT-335: once a firing with a destination has finished, what its
-   * sends left undelivered (`undeliveredSendError`), read from the
-   * gateway's session store, and only for a run that completed. Without
-   * it, or without `notify`, a report that never arrived goes unsaid, as
-   * before.
+   * Once a firing with a destination has finished, how its sends ended
+   * there (`sendOutcome`), read from the gateway's session store, and only
+   * for a run that completed. `failed` is posted as a notice through
+   * `notify` (AGT-335); `none` is a warning in the log (AGT-353). An event
+   * firing passes its batch key, so only its own turn of the shared
+   * session counts. Without it, `undeliveredSend` answers the first
+   * question alone, and a run that never posted goes unsaid.
+   */
+  sendOutcome?(sessionId: string, destination: ScheduleDestination, idempotencyKey?: string): Promise<SendOutcome | undefined>;
+  /**
+   * AGT-335: what a finished firing's sends left undelivered
+   * (`undeliveredSendError`). Read only when `sendOutcome` is absent.
+   * Without either, or without `notify`, a report that never arrived goes
+   * unsaid, as before.
    */
   undeliveredSend?(sessionId: string, destination: ScheduleDestination): Promise<string | undefined>;
   /**
@@ -599,16 +642,35 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   const activeFirings = new Set<string>();
 
   /**
+   * The outcome source: `sendOutcome`, or AGT-335's `undeliveredSend` for
+   * a host that wires only that one, which can't tell `none` from `reached`.
+   */
+  const outcomeOf = async (
+    sessionId: string,
+    destination: ScheduleDestination,
+    idempotencyKey: string | undefined,
+  ): Promise<SendOutcome | undefined> => {
+    if (options.sendOutcome) {
+      return options.sendOutcome(sessionId, destination, idempotencyKey);
+    }
+    const error = await options.undeliveredSend?.(sessionId, destination);
+    return error !== undefined ? { kind: 'failed', error } : undefined;
+  };
+
+  /**
    * AGT-335: a firing that tried to report and never got through says so
    * in its destination, instead of ending "completed" with nobody told.
-   * Read from the row as it is now, and again after the session read: a
-   * schedule cancelled mid-run, or while that read awaited, took its
-   * destination grant with it, and the runtime doesn't speak there in its
-   * place. Never throws; a notice that can't be posted is a log line.
+   * AGT-353: one that never posted there at all is a warning in the log,
+   * nothing more: a run that posts only when it has news is allowed to
+   * stay quiet, but a report that was expected and never came now leaves
+   * a trace. Read from the row as it is now, and again after the session
+   * read: a schedule cancelled mid-run, or while that read awaited, took
+   * its destination grant with it, and the runtime doesn't speak there in
+   * its place. Never throws; a notice that can't be posted is a log line.
    */
-  const reportUndelivered = async (record: ScheduleRecord, sessionId: string): Promise<void> => {
-    const { undeliveredSend, notify } = options;
-    if (!undeliveredSend || !notify) {
+  const reportUndelivered = async (record: ScheduleRecord, sessionId: string, idempotencyKey?: string): Promise<void> => {
+    const { notify } = options;
+    if (!options.sendOutcome && !(options.undeliveredSend && notify)) {
       return;
     }
     const live = (): ScheduleRecord | undefined => {
@@ -621,18 +683,27 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       if (before?.destination === undefined) {
         return;
       }
-      const error = await undeliveredSend(sessionId, before.destination);
+      const outcome = await outcomeOf(sessionId, before.destination, idempotencyKey);
       // Nothing awaits between this read and the post's start.
       const current = live();
       if (
-        error === undefined
+        outcome === undefined
+        || outcome.kind === 'reached'
         || current?.destination === undefined
         || canonicalDestination(current.destination) !== canonicalDestination(before.destination)
       ) {
         return;
       }
+      if (outcome.kind === 'none') {
+        const what = current.cadence.kind === 'event' ? 'event trigger' : 'schedule';
+        warn(`${what} ${record.id}: session ${sessionId} finished without posting to its destination ${canonicalDestination(current.destination)} (no message.send reached it)`);
+        return;
+      }
+      if (!notify) {
+        return;
+      }
       undelivered = true;
-      await notify(current.agentId, current.destination, renderUndeliveredNotice(current, sessionId, error));
+      await notify(current.agentId, current.destination, renderUndeliveredNotice(current, sessionId, outcome.error));
       warn(`schedule ${record.id}: no send reached ${canonicalDestination(current.destination)} in session ${sessionId}; posted a notice there`);
     } catch (error) {
       const what = undelivered ? 'the notice that no send reached its destination failed' : 'checking whether its report arrived failed';
@@ -1141,7 +1212,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       async () => {
         events?.store.finish(ids, { status: 'fired' }, clock().toISOString());
         log(`event trigger ${record.id} fired — session ${sessionId} completed (${ids.length} event${ids.length === 1 ? '' : 's'})`);
-        await reportUndelivered(record, sessionId);
+        await reportUndelivered(record, sessionId, batchKey);
       },
       (error: unknown) => {
         const reason = error instanceof Error ? error.message : String(error);
