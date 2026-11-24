@@ -1,3 +1,11 @@
+export { signInWithChatGPT, signOutOfChatGPT } from './account.ts';
+export type {
+  ChatGPTAccountOptions,
+  ChatGPTSignInOutcome,
+  ChatGPTSignOutOutcome,
+  SignInWithChatGPTOptions,
+  SignOutOfChatGPTOptions,
+} from './account.ts';
 export { ChatGPTAuthError } from './errors.ts';
 export type { ChatGPTAuthErrorCode } from './errors.ts';
 export { verifyIdToken } from './id-token.ts';
