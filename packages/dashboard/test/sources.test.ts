@@ -26,8 +26,12 @@ test("a schedule's run names the schedule when its prompt is known", () => {
   assert.equal(sourceOf('schedule:gone:slot').prompt, undefined);
 });
 
-test("an event trigger's run names its source", () => {
-  assert.deepEqual(sourceOf('event:t1:github:evt-42'), { kind: 'event', icon: 'zap', label: 'Event · github' });
+test("an event trigger's run is an Event, named by its trigger's source when the trigger is known", () => {
+  // The gateway runs a trigger's firings in the reserved schedule namespace,
+  // keyed by the event: schedule:<trigger id>:event-<hash>.
+  const schedules = [{ id: 't1', cadence: 'on github events', prompt: 'Run the API tests on the new pull request.' }];
+  assert.deepEqual(sourceOf('schedule:t1:event-3f2a', { schedules }), { kind: 'event', icon: 'zap', label: 'Event · github', prompt: schedules[0]?.prompt });
+  assert.deepEqual(sourceOf('schedule:gone:event-3f2a'), { kind: 'event', icon: 'zap', label: 'Event' });
 });
 
 test('anything else is shown for what it is, never as Web', () => {
@@ -45,7 +49,8 @@ test("without one, a schedule's run is titled by its prompt and the rest by wher
   assert.equal(conversationTitle({ id: 'web:ava:1' }), 'Web conversation');
   assert.equal(conversationTitle({ id: 'slack:ava:T:D01' }), 'Slack DM');
   assert.equal(conversationTitle({ id: 'slack:ava:T:C01:1.2' }), 'Slack conversation');
-  assert.equal(conversationTitle({ id: 'event:t:github:e' }), 'github event');
+  assert.equal(conversationTitle({ id: 'schedule:t1:event-3f2a' }, { schedules: [{ id: 't1', cadence: 'on github events', prompt: 'Run the API tests.\nThen report.' }] }), 'Run the API tests.');
+  assert.equal(conversationTitle({ id: 'schedule:gone:event-3f2a' }), 'Event run');
   assert.equal(conversationTitle({ id: 'schedule:gone:slot' }), 'Scheduled run');
 });
 

@@ -1,5 +1,5 @@
 import { el, until } from '../lib/dom.js';
-import { api } from '../lib/api.js';
+import { api, ApiError } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
 import { icon } from '../lib/icons.js';
 import { alwaysOffer } from '../lib/grants.js';
@@ -55,6 +55,13 @@ const notes = (request, agentName) => {
 };
 
 /**
+ * Answers that didn't reach the daemon, by request id, so the card says so
+ * after the repaint that follows. A 409 `approval_not_pending` is not one:
+ * that request was settled somewhere else, and the refresh shows how.
+ */
+const unsent = new Map();
+
+/**
  * One waiting approval, with its three answers.
  *
  * Shared by Home and the chat, so the two never word the same question
@@ -74,11 +81,16 @@ export const approvalCard = (request) => {
     }
     busy.value = true;
     answeredHere.add(request.requestId);
+    unsent.delete(request.requestId);
     for (const button of buttons) button.disabled = true;
     try {
       await api.resolveApproval({ requestId: request.requestId, answer });
-    } catch {
-      // Already settled somewhere else; the refresh below shows how.
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 409 && error.code === 'approval_not_pending')) {
+        // Not sent: say so on the card, which is still waiting.
+        answeredHere.delete(request.requestId);
+        unsent.set(request.requestId, error.message);
+      }
     }
     await refreshCore();
   };
@@ -108,6 +120,9 @@ export const approvalCard = (request) => {
     el('span', { class: 'prompt' }, command.prompt),
     el('span', {}, command.text)),
   ...notes(request, agentName).map((line) => el('div', { class: 'note' }, icon(line.icon, 14), el('span', {}, line.text))),
+  unsent.has(request.requestId)
+    ? el('div', { class: 'notice bad', role: 'alert' }, `Your answer didn't reach Stratus: ${unsent.get(request.requestId)}. It's still waiting; try again.`)
+    : null,
   );
 };
 

@@ -4,9 +4,10 @@
  * The id is the only place this is written down: `web:<agent>:<uuid>` from
  * this page, `slack:<agent>:<team>:<conversation>[:<thread>]` from Slack
  * (a `D…` conversation is a direct message), `schedule:<id>:<slot>` for a
- * schedule's run, `event:<trigger>:<source>:<event>` for an event
- * trigger's, and `…:delegate:…` appended when another agent handed the work
- * over. Anything else is shown by its prefix rather than guessed at.
+ * schedule's run, `schedule:<trigger id>:event-<key>` for an event
+ * trigger's (the gateway runs those in the reserved schedule namespace),
+ * and `…:delegate:…` appended when another agent handed the work over.
+ * Anything else is shown by its prefix rather than guessed at.
  */
 export const sourceOf = (sessionId, { schedules = [] } = {}) => {
   const id = String(sessionId ?? '');
@@ -23,15 +24,14 @@ export const sourceOf = (sessionId, { schedules = [] } = {}) => {
     }
     case 'schedule': {
       const schedule = schedules.find((candidate) => candidate.id === parts[1]);
-      return {
-        kind: 'schedule',
-        icon: 'calendar-clock',
-        label: 'Schedule',
-        ...(schedule?.prompt ? { prompt: schedule.prompt } : {}),
-      };
+      const prompt = schedule?.prompt ? { prompt: schedule.prompt } : {};
+      if ((parts[2] ?? '').startsWith('event-')) {
+        // The trigger's own record says which source it listens to.
+        const source = /^on (.+) events$/.exec(String(schedule?.cadence ?? ''))?.[1];
+        return { kind: 'event', icon: 'zap', label: source ? `Event · ${source}` : 'Event', ...prompt };
+      }
+      return { kind: 'schedule', icon: 'calendar-clock', label: 'Schedule', ...prompt };
     }
-    case 'event':
-      return { kind: 'event', icon: 'zap', label: `Event · ${parts[2] ?? 'unknown'}` };
     default:
       return { kind: 'other', icon: 'message-circle', label: parts[0] || 'Conversation' };
   }
@@ -63,7 +63,7 @@ export const conversationTitle = (session, context = {}) => {
     case 'slack':
       return source.label === 'Slack · DM' ? 'Slack DM' : 'Slack conversation';
     case 'event':
-      return `${source.label.replace(/^Event · /, '')} event`;
+      return source.prompt ? firstLine(source.prompt) : 'Event run';
     case 'delegated':
       return 'Delegated work';
     default:

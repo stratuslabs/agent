@@ -6,7 +6,7 @@ export interface Source {
   prompt?: string;
 }
 export interface SourceContext {
-  schedules?: Array<{ id: string; prompt?: string }>;
+  schedules?: Array<{ id: string; prompt?: string; cadence?: string }>;
 }
 /** Where a conversation came from, read off its session id. */
 export const sourceOf: (sessionId: string, context?: SourceContext) => Source;
