@@ -55,6 +55,8 @@ export interface SetupState {
   maxTokens?: number;
   maxTurns?: number;
   agentMaxTurns?: Record<string, number>;
+  turnMinutes?: number;
+  agentTurnMinutes?: Record<string, number>;
   autoContinue?: Record<string, true | number>;
   concurrentScheduledTurns?: Record<string, number>;
   tasks?: TasksConfig;

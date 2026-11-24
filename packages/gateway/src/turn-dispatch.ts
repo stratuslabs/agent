@@ -51,6 +51,7 @@ export interface TurnDispatchDeps {
   runnerFor: (config: RuntimeConfig, agentId: string, subAgent?: boolean) => AgentRunner;
   withWatchdog: <T>(
     sessionId: string,
+    agentId: string,
     external: AbortSignal | undefined,
     idleEnabled: boolean,
     fallbackStreams: boolean,
@@ -178,7 +179,7 @@ export const createTurnDispatch = ({
     // the fallback counts.
     const hostedLoop = input.idempotencyKey !== undefined && reachesHarness(config, switchedToFallback);
 
-    return settleLeftForNextStart(input, onTurnRuntime(input.sessionId, { source, config }, () => withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
+    return settleLeftForNextStart(input, onTurnRuntime(input.sessionId, { source, config }, () => withWatchdog(input.sessionId, source.definition.id, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
       // The preflight above (agent refresh, config resolution, session
       // load) awaited filesystem work; the entry check has long passed.
       // Recheck before the runner touches durable state, or a dispatch

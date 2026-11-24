@@ -202,6 +202,35 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
     }
     resolved.agentMaxTurns = { ...(budgets as Record<string, number>) };
   }
+  if (config.turnMinutes !== undefined) {
+    // Refused rather than clamped, like `maxTurns`: a typo here either
+    // lifts the limit everywhere or stops every turn at once.
+    if (!isTurnMinutes(config.turnMinutes)) {
+      throw new Error(
+        `Invalid turnMinutes in config ${configPath}: ${JSON.stringify(config.turnMinutes)}. `
+        + `Use a whole number of minutes, 0 for no limit, up to ${MAX_TURN_MINUTES}.`,
+      );
+    }
+    resolved.turnMinutes = config.turnMinutes;
+  }
+  if (config.agentTurnMinutes !== undefined) {
+    // Refused, not dropped, for the reason `agentMaxTurns` is.
+    const limits = config.agentTurnMinutes as unknown;
+    if (typeof limits !== 'object' || limits === null || Array.isArray(limits)) {
+      throw new Error(
+        `Invalid agentTurnMinutes in config ${configPath}: expected agent ids mapped to minutes, like { "atlas": 240 }.`,
+      );
+    }
+    for (const [agentId, minutes] of Object.entries(limits as Record<string, unknown>)) {
+      if (!isTurnMinutes(minutes)) {
+        throw new Error(
+          `Invalid agentTurnMinutes.${agentId} in config ${configPath}: ${JSON.stringify(minutes)}. `
+          + `Use a whole number of minutes, 0 for no limit, up to ${MAX_TURN_MINUTES}.`,
+        );
+      }
+    }
+    resolved.agentTurnMinutes = { ...(limits as Record<string, number>) };
+  }
   if (config.autoContinue !== undefined) {
     // Refused, not dropped, for the reason `agentMaxTurns` is.
     const entries = config.autoContinue as unknown;
@@ -334,6 +363,17 @@ const jsonTypeOf = (value: unknown): Extract<IgnoredConfigKey, { reason: 'droppe
 
 const isPlainObject = (value: unknown): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The most minutes `turnMinutes` takes: Node's longest timer delay, past
+ * which a delay isn't a long wait but a 1ms one, so a turn limit set
+ * higher would stop every turn the moment it began.
+ */
+const MAX_TURN_MINUTES = Math.floor(2_147_483_647 / 60_000);
+
+/** A turn time limit in minutes: a whole number, 0 for no limit, within Node's timer range. */
+const isTurnMinutes = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_TURN_MINUTES;
 
 /**
  * Shape-check the `plugins` block, and no more than that.

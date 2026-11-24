@@ -87,6 +87,7 @@ import {
   loadServePlugins,
   loadServeRuntimeSelection,
   loadServeAgentMaxTurns,
+  loadServeTurnMinutes,
   loadServeAutoContinue,
   loadServeConcurrentScheduledTurns,
   loadServeTasks,
@@ -400,6 +401,7 @@ const serveHeldHome = async (
   // with no override.
   const maxTurns = await loadServeMaxTurns(env, command.configPath, warn);
   const agentMaxTurns = await loadServeAgentMaxTurns(env, command.configPath, warn);
+  const { turnMinutes, agentTurnMinutes } = await loadServeTurnMinutes(env, command.configPath, warn);
   const autoContinue = await loadServeAutoContinue(env, command.configPath, warn);
   const concurrentScheduledTurns = await loadServeConcurrentScheduledTurns(env, command.configPath, warn);
   const tasks = await loadServeTasks(env, command.configPath, warn);
@@ -947,6 +949,13 @@ const serveHeldHome = async (
     ...(gatewayEvents !== undefined ? { events: gatewayEvents } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(Object.keys(agentMaxTurns).length > 0 ? { maxTurnsFor: (agentId: string) => agentMaxTurns[agentId] } : {}),
+    ...(turnMinutes !== undefined ? { turnTimeLimitMs: turnMinutes * 60_000 } : {}),
+    ...(Object.keys(agentTurnMinutes).length > 0
+      ? {
+          turnTimeLimitMsFor: (agentId: string) =>
+            (Object.hasOwn(agentTurnMinutes, agentId) ? agentTurnMinutes[agentId]! * 60_000 : undefined),
+        }
+      : {}),
     ...(Object.keys(autoContinue).length > 0 ? { autoContinueFor: (agentId: string) => autoContinue[agentId] } : {}),
     ...(Object.keys(concurrentScheduledTurns).length > 0 ? { schedules: { maxConcurrentByAgent: concurrentScheduledTurns } } : {}),
     tasks,
