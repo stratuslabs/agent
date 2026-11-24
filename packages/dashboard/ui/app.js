@@ -171,10 +171,15 @@ export const refreshCore = async () => {
  * schedule started, so they are read with the routes that show either.
  */
 export const refreshSchedules = async () => {
-  const listed = await api.schedules().catch(() => undefined);
-  if (listed) {
+  try {
+    const listed = await api.schedules();
     store.schedules = listed.schedules ?? [];
     render();
+    return { ok: true };
+  } catch (error) {
+    // Kept as it was: an unreadable list is not an empty one. The caller
+    // that has a page to show it on says so.
+    return { ok: false, error: error.message };
   }
 };
 
@@ -184,7 +189,7 @@ const refreshForRoute = async () => {
     store.sessions = listed.sessions ?? [];
     render();
   }
-  if (store.route.name === 'home' || store.route.name === 'agent') {
+  if (store.route.name === 'home' || store.route.name === 'agent' || store.route.name === 'schedules') {
     await refreshSchedules();
   }
 };

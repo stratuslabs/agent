@@ -34,7 +34,7 @@ export const renderTasks = () => {
       state.tasks = (await api.tasks()).tasks ?? [];
       state.error = undefined;
     } catch (error) {
-      state.error = error.message;
+      state.error = `Could not read the tasks: ${error.message}`;
     }
     paint();
   };
@@ -42,13 +42,20 @@ export const renderTasks = () => {
   const stop = async (task) => {
     state.busy.add(task.id);
     paint();
+    let failed;
     try {
       await api.stopTask(task.id);
     } catch (error) {
-      state.error = `Could not stop it: ${error.message}`;
+      failed = `Could not stop it: ${error.message}`;
     }
     state.busy.delete(task.id);
     await load();
+    // After the reload, which clears a stale read error: a failed Stop must
+    // still say why the task is still running.
+    if (failed) {
+      state.error = failed;
+      paint();
+    }
   };
 
   const name = (agentId) => store.agents.find((agent) => agent.id === agentId)?.name ?? agentId;

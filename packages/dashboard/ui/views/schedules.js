@@ -34,7 +34,7 @@ const reportsTo = (destination) => {
  * stops future runs; the conversations past runs started stay.
  */
 export const renderSchedules = () => {
-  const state = { filter: 'all', confirming: undefined, busy: undefined, error: undefined, loaded: false };
+  const state = { filter: 'all', confirming: undefined, busy: undefined, error: undefined, loaded: false, unreadable: undefined };
   const node = el('div', { class: 'page-scroll' });
 
   const remove = async (schedule) => {
@@ -48,7 +48,8 @@ export const renderSchedules = () => {
     }
     state.busy = undefined;
     state.confirming = undefined;
-    await refreshSchedules();
+    const read = await refreshSchedules();
+    state.unreadable = read.ok ? undefined : read.error;
     paint();
   };
 
@@ -99,6 +100,8 @@ export const renderSchedules = () => {
       state.error ? el('div', { class: 'notice bad', role: 'alert' }, state.error) : null,
       !state.loaded
         ? el('p', { class: 'field-note' }, 'Loading…')
+        : state.unreadable !== undefined && all.length === 0
+          ? el('div', { class: 'notice bad', role: 'alert' }, `Could not read the schedules: ${state.unreadable}`)
         : all.length === 0
           ? el('div', { class: 'empty-state' },
               el('span', { class: 'icon-box' }, icon('calendar-clock', 18)),
@@ -118,7 +121,11 @@ export const renderSchedules = () => {
   };
 
   paint();
-  refreshSchedules().then(() => { state.loaded = true; paint(); });
+  refreshSchedules().then((read) => {
+    state.loaded = true;
+    state.unreadable = read.ok ? undefined : read.error;
+    paint();
+  });
 
   return { node, update: () => { if (state.loaded && !state.confirming) paint(); } };
 };

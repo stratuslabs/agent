@@ -54,14 +54,21 @@ export const renderPermissions = () => {
   const revoke = async (row, key) => {
     state.busy = key;
     paint();
+    let failed;
     try {
       await api.revokeGrant(row.agentId, row.revoke);
     } catch (error) {
-      state.errors = [`Could not revoke it: ${error.message}`];
+      failed = `Could not revoke it: ${error.message}`;
     }
     state.busy = undefined;
     state.confirming = undefined;
     await load();
+    // After the reload, which replaces the read errors: a failed revoke must
+    // still say why the grant is still there.
+    if (failed) {
+      state.errors = [failed, ...state.errors];
+      paint();
+    }
   };
 
   const rowNode = (row, index) => {
