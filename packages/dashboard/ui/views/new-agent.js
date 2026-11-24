@@ -1,7 +1,7 @@
 import { el } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { syncOptions, touchOnChange } from '../lib/forms.js';
-import { navigate, refreshCore } from '../app.js';
+import { navigate, refreshCore, store } from '../app.js';
 
 /**
  * Persona examples. They only fill in the text box: an example is a
@@ -42,6 +42,11 @@ export const renderNewAgent = () => {
         ...(modelId ? { model: modelId } : {}),
       });
       await refreshCore();
+      // Created whatever the re-read says: if it failed, the roster on screen
+      // is stale, and the new agent shouldn't open as "no longer on the roster".
+      if (!store.agents.some((agent) => agent.id === created.agent.id)) {
+        store.agents = [...store.agents, { activeSessions: 0, ...created.agent }];
+      }
       navigate({ name: 'agent', agentId: created.agent.id, fresh: true });
     } catch (error) {
       notice.replaceChildren(el('div', { class: 'notice bad', role: 'alert' }, error.message));

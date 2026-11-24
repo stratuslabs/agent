@@ -14,6 +14,12 @@ test('a Slack session reads as Slack, and a direct message as a DM', () => {
 
 test('work handed over by another agent reads as delegated, whatever channel it began in', () => {
   assert.equal(sourceOf('slack:ben:T0EXAMPLE:C0EXAMPLE1:1793046557.547839:delegate:ava:1').kind, 'delegated');
+  assert.equal(sourceOf('web:ava:7c0d2b1e:delegate:ben:1:t_01').kind, 'delegated');
+});
+
+test('an agent whose id is "delegate" still has ordinary conversations', () => {
+  assert.equal(sourceOf('web:delegate:7c0d2b1e-8f6a-4c1a-9a51-3f2a6c9d0e11').kind, 'web');
+  assert.equal(sourceOf('slack:delegate:T0EXAMPLE:D0EXAMPLE1').kind, 'slack');
 });
 
 test("a schedule's run names the schedule when its prompt is known", () => {

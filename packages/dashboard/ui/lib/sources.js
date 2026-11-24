@@ -12,7 +12,9 @@
 export const sourceOf = (sessionId, { schedules = [] } = {}) => {
   const id = String(sessionId ?? '');
   const parts = id.split(':');
-  if (parts.includes('delegate')) {
+  // The marker is appended after a whole address (prefix, agent, at least
+  // one part), so an agent whose id is "delegate" isn't mistaken for it.
+  if (parts.indexOf('delegate', 3) >= 3) {
     return { kind: 'delegated', icon: 'users', label: 'Delegated' };
   }
   switch (parts[0]) {
