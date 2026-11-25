@@ -25,12 +25,17 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     /** Whether the conversation drawer is showing. */
     drawerOpen: true,
     /**
-     * Real titles, by session id, for conversations this page has read:
-     * the first thing said in them. The session list carries no title, so
-     * the drawer names the rest by where they came from.
+     * Titles of conversations this page has read, by session id: the first
+     * thing said in them, ahead of the listing's own until it re-reads.
      */
     titles: new Map(),
     sessions: [],
+    /**
+     * What the daemon found for the search box (`GET /sessions?q=`), across
+     * every conversation, not just the ones listed; undefined while the box
+     * is empty.
+     */
+    found: undefined,
     sessionId: initialSessionId,
     /**
      * True while this conversation exists only in the page.
@@ -166,11 +171,38 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
   const composerHint = el('span', { class: 'hint' });
   const composerBox = el('div', { class: 'composer-wrap' },
     el('div', { class: 'composer' }, composer, el('div', { class: 'bar' }, composerHint, sendButton, stopButton)));
+  /**
+   * Searches every conversation, not just the 50 listed, a moment after
+   * typing stops. The list filters what it has at once meanwhile; the
+   * daemon's answer replaces it for the query it answered, latest only.
+   */
+  let searches = 0;
+  let searchTimer;
+  const runSearch = async () => {
+    const ticket = ++searches;
+    const query = search.value.trim();
+    if (!query) {
+      state.found = undefined;
+      update();
+      return;
+    }
+    const listed = await api.sessions(agentId, 50, query).catch(() => undefined);
+    if (ticket !== searches || listed === undefined) {
+      return;
+    }
+    // Tagged with its query: once the box says something else, it no longer applies.
+    state.found = { query, sessions: listed.sessions ?? [] };
+    update();
+  };
   const search = el('input', {
     type: 'search',
     placeholder: 'Search by title',
     'aria-label': 'Search conversations by title',
-    onInput: () => update(),
+    onInput: () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => void runSearch(), 200);
+      update();
+    },
   });
 
   const agent = () => store.agents.find((candidate) => candidate.id === agentId);
@@ -179,7 +211,11 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
 
   /** The open conversation's title: its first message, once there is one. */
   const titleOfOpen = () => {
-    const first = state.messages.find((message) => message.role === 'user' && message.content);
+    // The daemon's rule (`sessionTitle`): what was said to the agent comes
+    // before what it only overheard.
+    const said = (message) => message.role === 'user' && typeof message.content === 'string' && message.content.trim();
+    const first = state.messages.find((message) => said(message) && !message.overheard && !message.observed)
+      ?? state.messages.find(said);
     if (first) {
       return firstLine(first.content, 120);
     }
@@ -236,6 +272,10 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
   const loadSessions = async () => {
     const listed = await api.sessions(agentId, 50).catch(() => ({ sessions: [] }));
     state.sessions = listed.sessions ?? [];
+    if (search.value.trim()) {
+      // A conversation that started or changed may match now.
+      void runSearch();
+    }
     if (!state.sessionId) {
       const newest = state.sessions[0]?.id;
       state.sessionId = newest ?? newSessionId(agentId);
@@ -693,6 +733,7 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
       ? conversationDrawer({
           current,
           sessions: state.sessions,
+          found: state.found,
           sessionId: state.sessionId,
           unsent: state.unsent,
           titles: state.titles,
@@ -779,5 +820,16 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
   }
   void loadSessions();
 
-  return { node, update, openSession, startSession, showTab, reconcile, destroy: detach };
+  return {
+    node,
+    update,
+    openSession,
+    startSession,
+    showTab,
+    reconcile,
+    destroy: () => {
+      clearTimeout(searchTimer);
+      detach();
+    },
+  };
 };

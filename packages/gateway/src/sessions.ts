@@ -96,8 +96,44 @@ const parseStoppedEarly = (stored: unknown): SessionStoppedEarly | undefined => 
     : undefined;
 };
 
-/** One listing row, as `GET /api/v1/sessions` returns it. */
-export type SessionListRow = Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'stoppedEarly'> & { agentId: string };
+/**
+ * One listing row, as `GET /api/v1/sessions` returns it. `title` is the
+ * conversation's first line (`sessionTitle`), absent when it has none.
+ */
+export type SessionListRow = Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'stoppedEarly'> & { agentId: string; title?: string };
+
+/** The longest a conversation's title runs, in characters. */
+export const SESSION_TITLE_MAX = 120;
+
+/**
+ * What a conversation is called: the first line of the first message said
+ * to the agent, whitespace collapsed, cut to `SESSION_TITLE_MAX` with an
+ * ellipsis. A message the agent only overheard (a channel it was in) is
+ * passed over while one said to it exists; with none, the first one at all.
+ * Empty when nobody has said anything.
+ *
+ * Derived from the transcript, never written by anyone, so it can be
+ * recomputed whenever it is missing (a row from before titles were stored,
+ * or one an older build saved without them).
+ */
+export const sessionTitle = (session: Pick<Session, 'messages'>): string => {
+  const said = (message: Session['messages'][number]): boolean =>
+    message.role === 'user' && typeof message.content === 'string' && message.content.trim().length > 0;
+  const first = session.messages.find((message) => said(message) && message.overheard !== true && message.observed !== true)
+    ?? session.messages.find(said);
+  if (first === undefined) {
+    return '';
+  }
+  const line = (first.content.split('\n').find((part) => part.trim().length > 0) ?? '').trim().replace(/\s+/g, ' ');
+  // By code point, so the cut never splits an emoji or a surrogate pair.
+  const characters = Array.from(line);
+  return characters.length > SESSION_TITLE_MAX
+    ? `${characters.slice(0, SESSION_TITLE_MAX - 1).join('').trimEnd()}…`
+    : line;
+};
+
+/** `LIKE` treats these as wildcards; a search for them means the characters. */
+const likePattern = (query: string): string => `%${query.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
 
 /**
  * Sessions hold complete conversations (prompts, replies, tool output,
@@ -253,15 +289,94 @@ export class SqliteSessionStore implements SessionStore {
   constructor(filePath: string, options: SqliteSessionStoreOptions = {}) {
     this.db = openStratusDatabase(filePath, options);
     this.db.exec(SESSIONS_TABLE);
+    // The title column, added to a shard made before it. In the agent's own
+    // database beside the transcript it is read from, never in `fleet.db`,
+    // which holds no conversation content. An older build names its columns
+    // in every statement, so it reads past this one, and its saves leave it
+    // NULL, which the next read fills in again (`titles`).
+    const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'title')) {
+      try {
+        this.db.exec('ALTER TABLE sessions ADD COLUMN title TEXT');
+      } catch (error) {
+        // Another connection added it between the check and the change.
+        if (!/duplicate column/i.test(error instanceof Error ? error.message : String(error))) {
+          throw error;
+        }
+      }
+    }
     this.db.exec('PRAGMA user_version = 0');
     tightenSqliteFile(filePath);
   }
 
   private write(session: Session): Session {
     this.db
-      .prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(session.id, session.agent.id, session.status, JSON.stringify(session), session.createdAt, session.updatedAt);
+      .prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at, title) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(session.id, session.agent.id, session.status, JSON.stringify(session), session.createdAt, session.updatedAt, sessionTitle(session));
     return session;
+  }
+
+  /**
+   * Computes and stores the title of each row that has none yet, one body
+   * at a time. A row with no title is one saved before the column existed
+   * or by an older build; '' is a computed title too (nothing said yet), so
+   * each row is filled at most once.
+   */
+  private fillTitles(ids: string[]): void {
+    const read = this.db.prepare('SELECT body FROM sessions WHERE id = ?');
+    const store = this.db.prepare('UPDATE sessions SET title = ? WHERE id = ? AND title IS NULL');
+    for (const id of ids) {
+      const row = read.get(id) as { body: string } | undefined;
+      if (row === undefined) {
+        continue;
+      }
+      let title = '';
+      try {
+        title = sessionTitle(JSON.parse(row.body) as Session);
+      } catch {
+        // A body that won't parse has no title to give; '' keeps it from
+        // being read again on every listing.
+      }
+      store.run(title, id);
+    }
+  }
+
+  /** Titles by id, for the ids given that this store holds, filling any it lacks. */
+  titles(ids: readonly string[]): Map<string, string> {
+    const titles = new Map<string, string>();
+    // In slices: SQLite caps the parameters one statement can bind.
+    for (let start = 0; start < ids.length; start += 500) {
+      const slice = ids.slice(start, start + 500);
+      const marks = slice.map(() => '?').join(', ');
+      const select = this.db.prepare(`SELECT id, title FROM sessions WHERE id IN (${marks})`);
+      let rows = select.all(...slice) as Array<{ id: string; title: string | null }>;
+      const missing = rows.filter((row) => row.title === null).map((row) => row.id);
+      if (missing.length > 0) {
+        this.fillTitles(missing);
+        rows = select.all(...slice) as Array<{ id: string; title: string | null }>;
+      }
+      for (const row of rows) {
+        titles.set(row.id, row.title ?? '');
+      }
+    }
+    return titles;
+  }
+
+  /**
+   * The ids whose title contains `query`, case-insensitively (ASCII, as
+   * SQLite's `LIKE` folds). Fills every missing title first, so the first
+   * search on a store from before titles reads each old body once; after
+   * that a search is one indexed-free scan of a short column.
+   */
+  searchTitles(query: string): Set<string> {
+    const missing = (this.db.prepare('SELECT id FROM sessions WHERE title IS NULL').all() as Array<{ id: string }>).map((row) => row.id);
+    if (missing.length > 0) {
+      this.fillTitles(missing);
+    }
+    const rows = this.db
+      .prepare("SELECT id FROM sessions WHERE title LIKE ? ESCAPE '\\'")
+      .all(likePattern(query)) as Array<{ id: string }>;
+    return new Set(rows.map((row) => row.id));
   }
 
   async create(input: Omit<Session, 'createdAt' | 'updatedAt'>): Promise<Session> {
@@ -702,6 +817,57 @@ export class ShardedSessionStore implements SessionStore {
 
   list(agentId?: string, limit?: number): SessionListRow[] {
     return this.index.list(agentId, limit);
+  }
+
+  /**
+   * The listing a person reads (`GET /sessions`): `list`, each row with its
+   * title from the agent's own store. With `query`, only conversations whose
+   * title contains it, across every agent with conversations when no agent
+   * is named.
+   *
+   * Separate from `list`, which the event stream and the fleet reader call
+   * for ids and statuses: titles cost a read of each agent's store, and the
+   * first one on an old home a read of every body it has.
+   */
+  listTitled(agentId?: string, limit?: number, query?: string): SessionListRow[] {
+    let rows: SessionListRow[];
+    if (query === undefined || query.trim().length === 0) {
+      rows = this.index.list(agentId, limit);
+    } else {
+      const needle = query.trim();
+      // The agents to ask: the one named, or every agent the index has a
+      // conversation for. Only those, so no store is created to answer.
+      const agents = agentId !== undefined ? [agentId] : Object.keys(this.index.lastActivityByAgent());
+      const matched = new Set<string>();
+      for (const agent of agents) {
+        if (this.index.list(agent, 1).length === 0) {
+          continue;
+        }
+        for (const id of this.shardFor(agent).searchTitles(needle)) {
+          matched.add(id);
+        }
+      }
+      const bound = limit !== undefined && Number.isInteger(limit) && limit >= 0 ? limit : Number.POSITIVE_INFINITY;
+      rows = this.index.list(agentId).filter((row) => matched.has(row.id)).slice(0, bound);
+    }
+    return this.withTitles(rows);
+  }
+
+  private withTitles(rows: SessionListRow[]): SessionListRow[] {
+    const byAgent = new Map<string, string[]>();
+    for (const row of rows) {
+      byAgent.set(row.agentId, [...(byAgent.get(row.agentId) ?? []), row.id]);
+    }
+    const titles = new Map<string, string>();
+    for (const [agent, ids] of byAgent) {
+      for (const [id, title] of this.shardFor(agent).titles(ids)) {
+        titles.set(id, title);
+      }
+    }
+    return rows.map((row) => {
+      const title = titles.get(row.id);
+      return title ? { ...row, title } : row;
+    });
   }
 
   /**
