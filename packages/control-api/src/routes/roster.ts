@@ -1,4 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   formatSoul,
   isValidAgentId,
@@ -8,18 +9,22 @@ import {
 } from '@stratusagent/agents';
 import { LISTENS_MODES, isLanguageTag, isListensMode } from '@stratusagent/core';
 import { RestartUnsupportedError, PauseMessageError } from '@stratusagent/gateway';
+import { WhitelistUnreadableError } from '@stratusagent/permissions';
 import {
+  agentsDirPath,
   claimSoulFile,
   DEFAULT_STRATUS_AGENT,
   listAgentSummaries,
   loadSoulFile,
   parseProviderName,
+  retireSoulFile,
   withSoulFileLock,
   type AgentSummary,
 } from '@stratusagent/state';
 
 import { API_PREFIX, ApiError, optionalString, readJsonObject, requireString } from '../http.ts';
 import type { Route, RouteContext } from '../routes.ts';
+import { revokeEveryGrant } from './grants.ts';
 
 /** Validate a provider name, reporting a bad one as the client's error. */
 const validateProvider = (value: string, field: string): void => {
@@ -217,7 +222,9 @@ export const rosterRoutes: Route[] = [
       }
 
       const notes: string[] = [];
-      const claimed = await claimSoulFile(
+      // Under the soul lock, so an id a delete has just freed can't be
+      // claimed until that delete has taken back its schedules and grants.
+      const claimed = await withSoulFileLock(() => claimSoulFile(
         context.env,
         { ...(name ? { name } : {}), instructions },
         (agent) => formatSoul({
@@ -227,7 +234,7 @@ export const rosterRoutes: Route[] = [
         }),
         (message) => notes.push(message),
         context.configPath,
-      );
+      ));
 
       // The new soul is dispatchable immediately: 07 creates an agent and
       // expects to talk to it without restarting the daemon.
@@ -363,6 +370,137 @@ export const rosterRoutes: Route[] = [
       });
       await context.gateway.reloadRoster();
       return { agent: written.next.agent, soulPath: written.soulPath };
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: `${API_PREFIX}/agents/:id`,
+    async handler(context) {
+      const agentId = context.params.id ?? '';
+      // Its schedules would fail at every firing with no agent to run, so
+      // they go; a cancel also revokes the destination grant on the row.
+      const cancelSchedules = (): string[] => context.gateway.schedules()
+        .filter((record) => record.agentId === agentId)
+        .map((record) => record.id)
+        .filter((id) => context.gateway.cancelSchedule(id));
+      // And its standing grants: a new agent later given this id must ask
+      // again, not inherit what this one was allowed. An unreadable grant
+      // file already honors no grant, and the soul can't move back from
+      // here, so that is said rather than thrown.
+      const revokeGrants = async (): Promise<{ revoked: number; note?: string }> => {
+        if (!context.grants) {
+          return { revoked: 0 };
+        }
+        try {
+          return { revoked: await revokeEveryGrant(context.grants, agentId) };
+        } catch (error) {
+          if (!(error instanceof WhitelistUnreadableError)) {
+            throw error;
+          }
+          return { revoked: 0, note: error.message };
+        }
+      };
+      // Under the soul lock, like an edit: a field edit already in flight
+      // would otherwise write the soul back after it had moved aside. The
+      // schedules and grants go under it too, because creating an agent
+      // takes the same lock: a new agent given this id can't appear until
+      // they're gone, so the cleanup never reaches it.
+      let mayHaveMoved = false;
+      let failure: unknown;
+      let first: { soulMovedTo: string; schedulesCancelled: string[]; grants: { revoked: number; note?: string } } | undefined;
+      try {
+        first = await withSoulFileLock(async () => {
+          const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
+          const summary = summariesById(summaries).get(agentId);
+          if (!summary || !context.gateway.agents().some((agent) => agent.id === agentId)) {
+            throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}.`);
+          }
+          if (summary.builtIn || !summary.soulPath) {
+            throw new ApiError(409, 'agent_not_removable', `${agentId} is the built-in agent, which has no soul file and can't be deleted.`);
+          }
+          // The config names this soul (`soul`), so the daemon would refuse
+          // to start without it. The fix is in the config, not here.
+          if (summary.default) {
+            throw new ApiError(
+              409,
+              'agent_not_removable',
+              `${agentId} is the default agent your config names (its soul setting points at ${summary.soulPath}). Point the config at another soul, or remove that setting, then delete it.`,
+            );
+          }
+          // Only a soul on the roster's own directory: anything else is a
+          // file this daemon was pointed at, not one it owns.
+          if (path.resolve(path.dirname(summary.soulPath)) !== path.resolve(agentsDirPath(context.env))) {
+            throw new ApiError(409, 'agent_not_removable', `${agentId}'s soul is ${summary.soulPath}, outside the agents directory, so it isn't this daemon's to move.`);
+          }
+          // A running turn, or one parked on an approval, belongs to somebody.
+          // Stop or answer it first; deleting under it would leave the person
+          // waiting on an agent that no longer exists.
+          const active = context.gateway.store.lastActivityByAgent()[agentId]?.activeSessions ?? 0;
+          if (active > 0) {
+            throw new ApiError(
+              409,
+              'agent_busy',
+              `${agentId} has ${active} conversation${active === 1 ? '' : 's'} running or waiting on an approval. Stop ${active === 1 ? 'it' : 'them'} or answer the approval, then delete it.`,
+            );
+          }
+          // From here the soul may have moved even if a step throws (the
+          // archive can land and the link's removal fail), so the reload and
+          // the second cleanup below run whatever happens. Both are harmless
+          // if it never moved: the agent is still on the roster then.
+          mayHaveMoved = true;
+          // Moved aside, never deleted: putting it back restores the agent.
+          const soulMovedTo = await retireSoulFile(context.env, summary.soulPath, agentId);
+          return { soulMovedTo, schedulesCancelled: cancelSchedules(), grants: await revokeGrants() };
+        });
+      } catch (error) {
+        if (!mayHaveMoved) {
+          throw error;
+        }
+        failure = error;
+      }
+      // Off the roster and out of every channel, so it stops answering at
+      // once: from here a dispatch to it is refused, and nothing new can be
+      // made for it (a schedule checks the roster right before it's written).
+      await context.gateway.reloadRosterAndChannels();
+      // A turn that started between the busy check and that reload was
+      // refused by neither. It ran on with the soul it had cached, and may
+      // have made a schedule, or a grant through an "Always allow", after
+      // the cleanup above. So it's stopped, and the cleanup runs once more
+      // now that nothing can add to it: also after a failed step above, so
+      // that can't leave a racing turn running. Under the lock, so no new
+      // agent takes the id meanwhile; and not at all if the id is on the
+      // roster (a new agent claimed it, or the soul never moved), because
+      // then what runs under it is its own.
+      let late: { schedulesCancelled: string[]; grants: { revoked: number; note?: string } } | undefined;
+      try {
+        late = await withSoulFileLock(async () => {
+          if (context.gateway.agents().some((agent) => agent.id === agentId)) {
+            return undefined;
+          }
+          for (const row of context.gateway.store.list(agentId)) {
+            if (row.status === 'running' || row.status === 'pending_approval') {
+              context.gateway.abortTurns(row.id, `${agentId} was deleted.`);
+            }
+          }
+          return { schedulesCancelled: cancelSchedules(), grants: await revokeGrants() };
+        });
+      } catch (error) {
+        // The first failure is the one to report; this one followed it.
+        if (failure === undefined) {
+          throw error;
+        }
+      }
+      if (failure !== undefined || first === undefined) {
+        throw failure;
+      }
+      const grantsNote = first.grants.note ?? late?.grants.note;
+      return {
+        agentId,
+        soulMovedTo: first.soulMovedTo,
+        schedulesCancelled: [...first.schedulesCancelled, ...(late?.schedulesCancelled ?? [])],
+        ...(context.grants && grantsNote === undefined ? { grantsRevoked: first.grants.revoked + (late?.grants.revoked ?? 0) } : {}),
+        ...(grantsNote !== undefined ? { grantsNote } : {}),
+      };
     },
   },
   {

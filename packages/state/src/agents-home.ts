@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { type Dirent, constants, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import {
   copyFile,
@@ -11,6 +11,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   stat,
   symlink,
   unlink,
@@ -553,6 +554,117 @@ export const writeNewSoulFile = async (
   }
   await syncDirectory(path.dirname(hidden));
   return hidden;
+};
+
+/** Where a removed agent's soul is kept, under the Stratus home. */
+export const REMOVED_AGENTS_DIRNAME = 'removed-agents';
+
+/**
+ * Takes an agent off the roster by moving its soul aside, never deleting
+ * it: into `~/.stratus/removed-agents/<id>-<time>.md`, which nothing scans
+ * as a soul or as an agent's state. Putting the file back (or linking it
+ * back) and reloading the roster restores the agent. Returns where it went.
+ *
+ * `soulPath` is the roster entry, `agents/<id>.md`, and what moves depends
+ * on what it is:
+ *
+ * - a file: the file;
+ * - a link into this home's agents folder (`~/Agents/<id>/soul.md`, the
+ *   layout new agents get): the soul it points at, and the link is removed.
+ *   Moving only the link would leave the soul in the folder with nothing
+ *   reading it, which `stratus doctor` rightly reports as a problem, and a
+ *   person browsing the folder would still see the agent there. The
+ *   agent's `workspace/` beside it stays: those are files it produced;
+ * - any other link (a soul kept in a dotfiles checkout): the link itself,
+ *   so the operator's own file is never moved.
+ *
+ * Callers hold the soul lock (`withSoulFileLock`), so a field edit in
+ * flight cannot write the soul back after it moved.
+ */
+export const retireSoulFile = async (
+  env: StateEnvironment,
+  soulPath: string,
+  agentId: string,
+  now: Date = new Date(),
+): Promise<string> => {
+  const archive = path.join(stratusHomePath(env), REMOVED_AGENTS_DIRNAME);
+  await assertDerivedStatePath(stratusHomePath(env), archive, 'directory');
+  await mkdir(archive, { recursive: true, mode: 0o700 });
+  const destination = await freeArchivePath(archive, `${archiveStem(agentId)}-${now.toISOString().replace(/[:.]/g, '-')}`);
+  const entry = await lstat(soulPath);
+  const agentsHome = resolveAgentsHome(env);
+  if (entry.isSymbolicLink() && agentsHome !== undefined) {
+    const target = path.resolve(path.dirname(soulPath), await readlink(soulPath));
+    if (target === visibleSoulPathIn(agentsHome, agentId) && (await lstatOrUndefined(target))?.isFile() === true) {
+      await moveFile(target, destination);
+      await unlink(soulPath);
+      await syncDirectory(path.dirname(soulPath));
+      // An agent folder left empty goes too, so the folder doesn't list an
+      // agent that is gone; one still holding its workspace stays.
+      await rmdir(path.dirname(target)).catch(() => undefined);
+      return destination;
+    }
+  }
+  // A file, or a link to somewhere that isn't ours: moved as it is.
+  await rename(soulPath, destination);
+  await syncDirectory(path.dirname(soulPath));
+  await syncDirectory(archive);
+  return destination;
+};
+
+/**
+ * The first archive name not already taken: `<stem>.md`, then `<stem>-2.md`
+ * and on. A rename replaces whatever is at its destination, so the same id
+ * retired twice in one millisecond would otherwise land on the first
+ * archive. Checked then used without a race, because every retire runs
+ * under the soul lock.
+ */
+const freeArchivePath = async (archive: string, stem: string): Promise<string> => {
+  for (let attempt = 1; ; attempt += 1) {
+    const candidate = path.join(archive, `${stem}${attempt === 1 ? '' : `-${attempt}`}.md`);
+    if (await lstatOrUndefined(candidate) === undefined) {
+      return candidate;
+    }
+  }
+};
+
+/**
+ * The id as it starts an archive's file name, short enough that the stamp
+ * and extension still fit in one path component. An id has no length limit
+ * of its own beyond fitting its state directory's name, so a long one is
+ * cut, on a character, to 120 bytes and told apart by a hash of the whole.
+ */
+const archiveStem = (agentId: string): string => {
+  if (Buffer.byteLength(agentId) <= 120) {
+    return agentId;
+  }
+  let kept = '';
+  for (const character of agentId) {
+    if (Buffer.byteLength(kept + character) > 100) {
+      break;
+    }
+    kept += character;
+  }
+  return `${kept}-${createHash('sha256').update(agentId).digest('hex').slice(0, 12)}`;
+};
+
+/**
+ * A rename, or a copy and a removal across filesystems: an agents folder
+ * named by `STRATUS_AGENTS_DIR` can be on another volume than the home.
+ * Never overwrites: the destination is new.
+ */
+const moveFile = async (from: string, to: string): Promise<void> => {
+  try {
+    await rename(from, to);
+  } catch (error) {
+    if (errnoOf(error) !== 'EXDEV') {
+      throw error;
+    }
+    await copyFile(from, to, constants.COPYFILE_EXCL);
+    await rm(from);
+  }
+  await syncDirectory(path.dirname(to));
+  await syncDirectory(path.dirname(from));
 };
 
 // ---- moving what is already there ------------------------------------------

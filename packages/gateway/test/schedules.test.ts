@@ -188,6 +188,31 @@ test('creation refuses an unknown agent and a destination the channel rejects', 
   store.close();
 });
 
+test('an agent that leaves the roster while its destination is checked gets no schedule', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  let onRoster = true;
+  const runtime = runtimeWith(store, {
+    hasAgent: (agentId) => agentId === 'ava' && onRoster,
+    // A delete reloads the roster while the destination check awaits.
+    validateDestination: async () => {
+      onRoster = false;
+    },
+  });
+
+  await assert.rejects(
+    () => runtime.handle.create({
+      agentId: 'ava',
+      cadence: { kind: 'every', intervalMs: 60_000 },
+      prompt: 'x',
+      destination: { channel: 'slack', to: 'C-OK' },
+    }),
+    /Agent not found/,
+  );
+  assert.equal(store.list().length, 0, 'no row for an agent that is gone');
+  store.close();
+});
+
 test('a due schedule fires through dispatch with its slot consumed first', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
