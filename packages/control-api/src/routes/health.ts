@@ -1,5 +1,4 @@
 import {
-  DEFAULT_STRATUS_AGENT,
   listAgentSummaries,
   isSignedInRuntime,
   servedRuntimes,
@@ -115,7 +114,9 @@ export const healthRoutes: Route[] = [
             id: agent.id,
             name: agent.name,
             default: summary?.default ?? false,
-            builtIn: summary?.builtIn ?? agent.id === DEFAULT_STRATUS_AGENT.id,
+            // Always false: every agent has a soul file. Kept for readers
+            // built against the field.
+            builtIn: false,
             // Omitted rather than guessed when no file backs this agent.
             // The gateway keeps dispatching from a cached soul when its file
             // is deleted or momentarily unparseable, and that soul may pin a
