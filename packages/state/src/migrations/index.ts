@@ -32,7 +32,7 @@ import {
   makeAgentStateDirectory,
 } from './layout.ts';
 import { applyPerAgentWorkspaces } from './workspaces.ts';
-import { applyStratusSoul } from './stratus-soul.ts';
+import { applyStratusSoul, usedCodeDefinedAgent } from './stratus-soul.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -601,17 +601,37 @@ const TASK_NOTES_EXPIRY_NOTICE: StateMigration = {
  * Runs only once the per-agent moves (0003, 0004) have, for the reason
  * 0006 gives: before them the agent's sessions and memories may still be in
  * the shared files this does not read, and it would judge the home unused.
- * No backup and no schema bump: it adds a soul and, at most, one key to the
- * config, and an older build serves the same agent from the same state
- * (the config's default soul may take the id there).
+ *
+ * And on a home that shows no use of the agent, an ordinary command leaves
+ * it to `stratus serve` or `stratus update`, which hold the home. "Never
+ * used" is 0003's present-tense question again: a daemon of the older build
+ * may still be serving, and its first turn for the agent can come after the
+ * command looked. Recorded then, the answer would never be asked again, and
+ * that turn's state would have no soul. Until one of them runs, nothing is
+ * written and this reads as pending.
+ *
+ * Except on a home with other migrations still to record (one coming from a
+ * build before 0005 or 0006): waiting would hold their stamp back too, so
+ * their one-time notices would repeat on every command. There the no is
+ * recorded with them, and the narrow race is accepted.
+ *
+ * No backup and no schema bump: it adds a soul and, at most, one key to
+ * each trusted config, and an older build serves the same agent from the
+ * same state (the config's default soul may take the id there).
  */
+const STRATUS_SOUL_MIGRATION_ID = '0007-stratus-agent-soul';
+
 const STRATUS_SOUL_MIGRATION: StateMigration = {
-  id: '0007-stratus-agent-soul',
+  id: STRATUS_SOUL_MIGRATION_ID,
   description: 'write the stratus agent, which lived in code, as a soul on a home that used it',
   needsBackup: false,
   requiresExclusive: async (env) => {
     const applied = (await readStateStamp(env)).applied;
-    return !applied.includes(PER_AGENT_LAYOUT_MIGRATION.id) || !applied.includes(PER_AGENT_WORKSPACES_MIGRATION.id);
+    if (!applied.includes(PER_AGENT_LAYOUT_MIGRATION.id) || !applied.includes(PER_AGENT_WORKSPACES_MIGRATION.id)) {
+      return true;
+    }
+    const othersPending = STATE_MIGRATIONS.some((migration) => migration.id !== STRATUS_SOUL_MIGRATION_ID && !applied.includes(migration.id));
+    return !othersPending && !(await usedCodeDefinedAgent(env));
   },
   apply: applyStratusSoul,
 };

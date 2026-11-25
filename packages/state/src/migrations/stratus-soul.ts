@@ -4,7 +4,7 @@ import { formatSoul } from '@stratusagent/agents';
 import { writeNewSoulFile } from '../agents-home.ts';
 import { saveConfigFile } from '../config-file.ts';
 import type { StratusConfigFile } from '../config.ts';
-import { type StateEnvironment, readWorkingDirectory } from '../environment.ts';
+import { type StateEnvironment, readProcessEnv, readWorkingDirectory } from '../environment.ts';
 import { LEGACY_DEFAULT_AGENT_IDS } from '../home-memory.ts';
 import { loadSqlite } from '../memory-index.ts';
 import {
@@ -61,17 +61,17 @@ const readJsonObject = async (filePath: string): Promise<Record<string, unknown>
 };
 
 /**
- * The global config for adding one key to: `{}` when there is no file, and
- * an error for anything that is not a JSON object, which is the operator's
- * to repair rather than this migration's to replace with one key.
+ * A config for adding one key to: undefined when there is no file, and an
+ * error for anything that is not a JSON object, which is the operator's to
+ * repair rather than this migration's to replace with one key.
  */
-const readConfigObject = async (filePath: string): Promise<Record<string, unknown>> => {
+const readConfigObject = async (filePath: string): Promise<Record<string, unknown> | undefined> => {
   let raw: string;
   try {
     raw = await readFile(filePath, 'utf8');
   } catch (error) {
     if (errnoOf(error) === 'ENOENT') {
-      return {};
+      return undefined;
     }
     throw error;
   }
@@ -81,6 +81,63 @@ const readConfigObject = async (filePath: string): Promise<Record<string, unknow
   }
   return parsed as Record<string, unknown>;
 };
+
+/**
+ * A trusted config a process of this home reads its default soul and its
+ * per-agent settings from. `config` is undefined when the file could not
+ * be read, and `reason` says why.
+ */
+interface TrustedConfig {
+  path: string;
+  config?: Record<string, unknown>;
+  reason?: string;
+}
+
+/**
+ * The global config, and the file STRATUS_CONFIG names when that is
+ * another one, resolved as `resolveConfigLocation` does. A process started
+ * with the variable reads only that file, so a default written to the
+ * global one alone would not reach it. The global one is created when it
+ * is missing, as setup would; a missing STRATUS_CONFIG file is not, since
+ * nothing has been reading it. A `--config` given to a single command is
+ * that command's choice, not the home's, so it is not looked for here.
+ */
+const readTrustedConfigs = async (env: StateEnvironment): Promise<TrustedConfig[]> => {
+  const globalPath = globalConfigPath(env);
+  const explicit = readProcessEnv(env).STRATUS_CONFIG;
+  const pinnedPath = explicit ? path.resolve(readWorkingDirectory(env), explicit) : undefined;
+  const configs: TrustedConfig[] = [];
+  for (const filePath of pinnedPath === undefined || pinnedPath === globalPath ? [globalPath] : [globalPath, pinnedPath]) {
+    try {
+      const config = await readConfigObject(filePath);
+      if (config !== undefined || filePath === globalPath) {
+        configs.push({ path: filePath, config: config ?? {} });
+      }
+    } catch (error) {
+      configs.push({ path: filePath, reason: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return configs;
+};
+
+const defaultSoulOf = (config: Record<string, unknown> | undefined): string | undefined =>
+  typeof config?.soul === 'string' && config.soul.trim() !== '' ? config.soul : undefined;
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const namesTheAgent = (block: Record<string, unknown>): boolean =>
+  isObject(block.agents) && Object.keys(block.agents).some((agentId) => foldedAgentId(agentId) === LEGACY_DEFAULT_AGENT_ID);
+
+/**
+ * Whether a trusted config keeps settings of the agent's own: an `agents`
+ * map naming it in a top-level block (who it admits, who approves its
+ * calls, how it shows in Slack) or one level down (a plugin's settings for
+ * it, under `plugins.<package>`), and any block shaped the same way.
+ */
+const hasPerAgentSettings = (configs: readonly TrustedConfig[]): boolean =>
+  configs.some(({ config }) => Object.values(config ?? {}).some((block) => isObject(block)
+    && (namesTheAgent(block) || Object.values(block).some((inner) => isObject(inner) && namesTheAgent(inner)))));
 
 /** Whether any channel, Slack or one a plugin contributes, has a binding stored for the agent. */
 const hasChannelBinding = async (env: StateEnvironment): Promise<boolean> => {
@@ -131,7 +188,12 @@ const hasSchedule = async (env: StateEnvironment): Promise<boolean> => {
 /**
  * Whether this home used the agent that once lived in code: it has its
  * sessions, memory, grants or workspace, memories under the ids that read
- * as it, a channel binding (Slack or a plugin's), or a schedule.
+ * as it, a channel binding (Slack or a plugin's), a schedule, or settings
+ * of its own in a trusted config.
+ *
+ * A yes holds whoever asks. A no is only true of the moment it was asked,
+ * while a daemon of an older build may still be serving the agent: see
+ * `requiresExclusive` on the migration.
  */
 export const usedCodeDefinedAgent = async (env: StateEnvironment): Promise<boolean> => {
   // The legacy ids too: their memories already read as this agent's (see
@@ -141,7 +203,7 @@ export const usedCodeDefinedAgent = async (env: StateEnvironment): Promise<boole
       return true;
     }
   }
-  return await hasChannelBinding(env) || await hasSchedule(env);
+  return await hasChannelBinding(env) || await hasSchedule(env) || hasPerAgentSettings(await readTrustedConfigs(env));
 };
 
 /**
@@ -161,13 +223,13 @@ const stratusIdOf = async (soulPath: string): Promise<string | undefined> => {
 
 /**
  * A soul that already declares the id, in any case: one in `agents/` under
- * any file name, or the global config's default soul, which older builds
+ * any file name, or a trusted config's default soul, which older builds
  * let take the id over. Writing a second would leave two souls the roster
  * refuses as one id.
  */
 const existingClaim = async (
   env: StateEnvironment,
-  configSoul: string | undefined,
+  configSouls: readonly string[],
 ): Promise<{ path: string; id: string } | undefined> => {
   let files: string[] = [];
   try {
@@ -184,10 +246,13 @@ const existingClaim = async (
       return { path: soulPath, id };
     }
   }
-  if (configSoul !== undefined) {
-    const id = await stratusIdOf(path.resolve(readWorkingDirectory(env), configSoul));
+  for (const configSoul of configSouls) {
+    // Resolved as a run resolves it, and kept that way: it may be written
+    // into the other config as that one's default.
+    const soulPath = path.resolve(readWorkingDirectory(env), configSoul);
+    const id = await stratusIdOf(soulPath);
     if (id !== undefined) {
-      return { path: configSoul, id };
+      return { path: soulPath, id };
     }
   }
   return undefined;
@@ -207,9 +272,9 @@ const SOUL_FILE_NAMES = [`${LEGACY_DEFAULT_AGENT_ID}.md`, `${LEGACY_DEFAULT_AGEN
  * under an agent the person can see, edit and narrow.
  *
  * The soul is the old definition written out: the same id, name and
- * persona, and every tool, which is what the code gave it. With no default
- * soul in the global config, it also becomes the default, so turns that
- * name no agent keep reaching it.
+ * persona, and every tool, which is what the code gave it. It also becomes
+ * the default in each trusted config that has none (the global one, and
+ * STRATUS_CONFIG's), so turns that name no agent keep reaching it.
  *
  * Writes nothing when a soul already declares the id (that file takes the
  * state over now that the id is no longer held back) or the home never
@@ -223,17 +288,16 @@ export const applyStratusSoul = async (env: StateEnvironment): Promise<string | 
     return undefined;
   }
   const notes: string[] = [];
-  const configPath = globalConfigPath(env);
-  let config: Record<string, unknown> | undefined;
-  try {
-    config = await readConfigObject(configPath);
-  } catch (error) {
-    notes.push(`could not read ${configPath} (${error instanceof Error ? error.message : String(error)}), so stratus was not made the default agent`);
+  const configs = await readTrustedConfigs(env);
+  for (const { path: configPath, reason } of configs) {
+    if (reason !== undefined) {
+      notes.push(`could not read ${configPath} (${reason}), so stratus was not made the default agent there`);
+    }
   }
-  const configSoul = typeof config?.soul === 'string' && config.soul.trim() !== '' ? config.soul : undefined;
+  const configSouls = configs.map(({ config }) => defaultSoulOf(config)).filter((soul) => soul !== undefined);
 
   const stateDir = agentStateDirPath(env, LEGACY_DEFAULT_AGENT_ID);
-  const claimed = await existingClaim(env, configSoul);
+  const claimed = await existingClaim(env, configSouls);
   let soulPath: string | undefined;
   if (claimed === undefined) {
     const agent = {
@@ -283,10 +347,30 @@ export const applyStratusSoul = async (env: StateEnvironment): Promise<string | 
     }
   }
 
-  if (soulPath !== undefined && config !== undefined && configSoul === undefined) {
-    // Every other key as it was: this adds one.
-    await saveConfigFile(configPath, { ...config, soul: soulPath } as StratusConfigFile);
-    notes.push('made it the default agent');
+  if (soulPath !== undefined) {
+    const madeDefaultIn: string[] = [];
+    for (const { path: configPath, config } of configs) {
+      if (config === undefined || defaultSoulOf(config) !== undefined) {
+        continue;
+      }
+      try {
+        // Every other key as it was: this adds one.
+        await saveConfigFile(configPath, { ...config, soul: soulPath } as StratusConfigFile);
+        madeDefaultIn.push(configPath);
+      } catch (error) {
+        if (configPath === globalConfigPath(env)) {
+          throw error;
+        }
+        // The operator's file, perhaps mounted read-only: theirs to change,
+        // and no reason to stop every command on this home.
+        notes.push(`could not write ${configPath} (${error instanceof Error ? error.message : String(error)}), so stratus was not made the default agent there`);
+      }
+    }
+    if (madeDefaultIn.length === 1 && madeDefaultIn[0] === globalConfigPath(env)) {
+      notes.push('made it the default agent');
+    } else if (madeDefaultIn.length > 0) {
+      notes.push(`made it the default agent in ${madeDefaultIn.join(' and ')}`);
+    }
   }
   return notes.length > 0 ? notes.join('; ') : undefined;
 };

@@ -13,7 +13,11 @@ import {
   fleetDbPath,
   globalConfigPath,
   loadRosterSouls,
+  readStateStamp,
   runStateMigrations,
+  STATE_MIGRATIONS,
+  STATE_SCHEMA_VERSION,
+  stateFilePath,
   stratusPersona,
 } from '../src/index.ts';
 
@@ -22,7 +26,25 @@ import {
 // its sessions, memory, grants, schedules and Slack app carry on; a home
 // that never used it gets nothing.
 
-const freshHome = async () => ({ homeDir: await mkdtemp(path.join(os.tmpdir(), 'stratus-soul-migration-')) });
+// An empty process environment, so a STRATUS_CONFIG in the shell running
+// the tests never chooses a config for them.
+const freshHome = async (processEnv: NodeJS.ProcessEnv = {}) => ({
+  homeDir: await mkdtemp(path.join(os.tmpdir(), 'stratus-soul-migration-')),
+  processEnv,
+});
+
+const SOUL_MIGRATION_ID = '0007-stratus-agent-soul';
+
+/** A home an older build has served: every migration but this one recorded. */
+const upgradedHome = async () => {
+  const env = await freshHome();
+  await mkdir(path.dirname(stateFilePath(env)), { recursive: true });
+  await writeFile(stateFilePath(env), JSON.stringify({
+    schemaVersion: STATE_SCHEMA_VERSION,
+    applied: STATE_MIGRATIONS.map((migration) => migration.id).filter((id) => id !== SOUL_MIGRATION_ID),
+  }));
+  return env;
+};
 
 const ownSoul = (env: { homeDir: string }) => path.join(agentsDirPath(env), 'stratus.md');
 
@@ -290,3 +312,162 @@ for (const [label, raw] of [['an array', '[]'], ['null', 'null'], ['a number', '
     assert.match(detail, /could not read/);
   });
 }
+
+test('an ordinary command leaves a home with no sign of stratus for serve or update to decide', async () => {
+  const env = await upgradedHome();
+
+  // A daemon of the older build may still be serving this home, and its
+  // first stratus turn can come after this command. A "never used" written
+  // now would never be looked at again.
+  assert.deepEqual((await runStateMigrations(env)).map((result) => result.id), []);
+  assert.equal((await readStateStamp(env)).applied.includes(SOUL_MIGRATION_ID), false);
+  assert.equal(await exists(ownSoul(env)), false);
+
+  // That older daemon's first stratus turn, then the new one starting.
+  await seedMemory(env, 'stratus');
+  await migrate(env);
+  await assertStratusSoul(env);
+  assert.equal((await readStateStamp(env)).applied.includes(SOUL_MIGRATION_ID), true);
+});
+
+test('an ordinary command gives a home that already used stratus its soul', async () => {
+  const env = await upgradedHome();
+  await seedMemory(env, 'stratus');
+
+  assert.deepEqual((await runStateMigrations(env)).map((result) => result.id), [SOUL_MIGRATION_ID]);
+  await assertStratusSoul(env);
+  assert.equal((await readStateStamp(env)).applied.includes(SOUL_MIGRATION_ID), true);
+});
+
+test('a home coming from before the one-time notices records a no with them, so they are said once', async () => {
+  const env = await freshHome();
+  await mkdir(path.dirname(stateFilePath(env)), { recursive: true });
+  // Served by a build with the per-agent moves and nothing after them.
+  await writeFile(stateFilePath(env), JSON.stringify({
+    schemaVersion: STATE_SCHEMA_VERSION,
+    applied: ['0001-owner-only-state-files', '0002-provenance-labels', '0003-per-agent-state-layout', '0004-per-agent-workspaces'],
+  }));
+
+  const first = (await runStateMigrations(env)).map((result) => result.id);
+
+  assert.ok(first.includes(SOUL_MIGRATION_ID), first.join(', '));
+  assert.deepEqual((await readStateStamp(env)).applied, STATE_MIGRATIONS.map((migration) => migration.id));
+  assert.deepEqual(await runStateMigrations(env), []);
+  assert.equal(await exists(ownSoul(env)), false);
+});
+
+test('serve or update records a home with no sign of stratus, and writes nothing', async () => {
+  const env = await upgradedHome();
+  assert.equal(await migrate(env), '');
+  assert.equal((await readStateStamp(env)).applied.includes(SOUL_MIGRATION_ID), true);
+  assert.equal(await exists(ownSoul(env)), false);
+  assert.equal(await readConfig(env), undefined);
+});
+
+for (const block of ['principals', 'approvals', 'slack'] as const) {
+  test(`${block} settings kept for stratus in the config count as using it, and stay as they were`, async () => {
+    const env = await freshHome();
+    const settings = { agents: { stratus: { kept: true } } };
+    await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
+    await writeFile(globalConfigPath(env), `${JSON.stringify({ [block]: settings })}\n`);
+
+    await migrate(env);
+
+    await assertStratusSoul(env);
+    assert.deepEqual(await readConfig(env), { [block]: settings, soul: ownSoul(env) });
+  });
+}
+
+test('a plugin\'s settings for stratus count as using it', async () => {
+  const env = await freshHome();
+  const plugins = { '@stratusagent/tool-fs': { agents: { stratus: { roots: ['/srv'] } } } };
+  await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
+  await writeFile(globalConfigPath(env), `${JSON.stringify({ plugins })}\n`);
+
+  await migrate(env);
+
+  await assertStratusSoul(env);
+  assert.deepEqual(await readConfig(env), { plugins, soul: ownSoul(env) });
+});
+
+test('per-agent settings for another agent do not', async () => {
+  const env = await freshHome();
+  await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
+  await writeFile(globalConfigPath(env), `${JSON.stringify({ principals: { agents: { ava: { kept: true } } } })}\n`);
+  assert.equal(await migrate(env), '');
+  assert.equal(await exists(ownSoul(env)), false);
+});
+
+const pinnedHome = async (pinned: Record<string, unknown> | undefined) => {
+  const base = await freshHome();
+  const pinnedPath = path.join(base.homeDir, 'etc', 'stratus.json');
+  await mkdir(path.dirname(pinnedPath), { recursive: true });
+  if (pinned !== undefined) {
+    await writeFile(pinnedPath, `${JSON.stringify(pinned)}\n`);
+  }
+  return { env: { ...base, processEnv: { STRATUS_CONFIG: pinnedPath } }, pinnedPath };
+};
+
+const readJson = async (filePath: string): Promise<unknown> => JSON.parse(await readFile(filePath, 'utf8')) as unknown;
+
+test('the config STRATUS_CONFIG chooses gets the default too, beside the global one', async () => {
+  const { env, pinnedPath } = await pinnedHome({ provider: 'anthropic' });
+  await seedMemory(env, 'stratus');
+
+  const detail = await migrate(env);
+
+  await assertStratusSoul(env);
+  // A process run with the variable reads only that file, and one run
+  // without it reads only the global one: both kept reaching stratus.
+  assert.deepEqual(await readJson(pinnedPath), { provider: 'anthropic', soul: ownSoul(env) });
+  assert.deepEqual(await readConfig(env), { soul: ownSoul(env) });
+  assert.ok(detail.includes(pinnedPath), detail);
+});
+
+test('settings for stratus in the config STRATUS_CONFIG chooses count as using it', async () => {
+  const { env, pinnedPath } = await pinnedHome({ approvals: { agents: { stratus: { kept: true } } } });
+  await migrate(env);
+  await assertStratusSoul(env);
+  assert.deepEqual(await readJson(pinnedPath), { approvals: { agents: { stratus: { kept: true } } }, soul: ownSoul(env) });
+});
+
+test('a STRATUS_CONFIG config with a default of its own keeps it', async () => {
+  const { env, pinnedPath } = await pinnedHome({ soul: '/srv/ava.md' });
+  await seedMemory(env, 'stratus');
+  await migrate(env);
+  assert.deepEqual(await readJson(pinnedPath), { soul: '/srv/ava.md' });
+  assert.deepEqual(await readConfig(env), { soul: ownSoul(env) });
+});
+
+test('a STRATUS_CONFIG default that declares stratus takes the state over, and nothing is written beside it', async () => {
+  const { env, pinnedPath } = await pinnedHome(undefined);
+  const outside = path.join(env.homeDir, 'srv', 'mine.md');
+  await mkdir(path.dirname(outside), { recursive: true });
+  await writeFile(outside, '---\nname: Mine\nid: stratus\n---\n\nYou are Mine.\n');
+  await writeFile(pinnedPath, `${JSON.stringify({ soul: outside })}\n`);
+  await seedMemory(env, 'stratus');
+
+  await migrate(env);
+
+  // A second soul with the id would be one the daemon on that config
+  // refuses as a duplicate.
+  assert.equal(await exists(ownSoul(env)), false);
+  assert.deepEqual(await readJson(pinnedPath), { soul: outside });
+  // A run without the variable reached the same state as the code's agent,
+  // and now reaches it through that soul.
+  assert.deepEqual(await readConfig(env), { soul: outside });
+});
+
+test('a STRATUS_CONFIG config that cannot be read is named, and the rest still happens', async () => {
+  const { env, pinnedPath } = await pinnedHome(undefined);
+  // A directory where the file should be: unreadable as a config.
+  await mkdir(pinnedPath, { recursive: true });
+  await seedMemory(env, 'stratus');
+
+  const detail = await migrate(env);
+
+  await assertStratusSoul(env);
+  assert.deepEqual(await readConfig(env), { soul: ownSoul(env) });
+  assert.match(detail, /could not read/);
+  assert.match(detail, /etc\/stratus\.json/);
+});

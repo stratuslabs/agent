@@ -45,17 +45,21 @@ On a server or container with fresh state, run `stratus setup` or
 
 Releases before this one served a built-in `stratus` agent from code. An
 install that used it (conversations, memory, a schedule, a Slack app or
-other channel binding, or grants under `stratus`) gets a `stratus.md` soul written on its first start
-after the upgrade, with the same persona and every tool, and it becomes the
-default when none was set. Its conversations, memory, schedules, grants and
-Slack app carry on under the same id. The upgrade never overwrites a file:
+other channel binding, grants, or people, approver or Slack settings under
+`stratus` in its config) gets a `stratus.md` soul written after the upgrade,
+with the same persona and every tool. It becomes the default in your config
+when that has none, and also in the file `STRATUS_CONFIG` names, if you set
+one. Its conversations, memory, schedules, grants and Slack app carry on
+under the same id. The upgrade never overwrites a file:
 if `stratus.md` is another agent's, the soul is written as
 `stratus-agent.md`. It writes nothing when a soul already declares
 `stratus`. A soul whose id differs only in case (`Stratus`) is not taken
 for it, and the upgrade writes nothing beside it either; its start-up note
 says to change that soul's id to `stratus` to keep the old conversations and
 memory. An install that never used it gets nothing, and the agent is simply
-gone from its roster.
+gone from its roster. That last check waits for the daemon's first start on
+the new release, or `stratus update`, so an older daemon still running can't
+start using `stratus` after it was made.
 
 ## Creating an agent
 
