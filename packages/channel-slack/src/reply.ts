@@ -552,9 +552,10 @@ export class ReplyRenderer {
   private readonly tagsAnAgent: ((text: string) => Promise<boolean>) | undefined;
   /**
    * The thread the loading status belongs to: the reply's thread, or the
-   * message itself in a DM, whose reply has no thread to key one on.
+   * message itself in a DM, whose reply has no thread to key one on. A DM
+   * message sent while this turn works moves it there (`moveStatus`).
    */
-  readonly statusThread: string | undefined;
+  statusThread: string | undefined;
   /** Shared by a connection's renderers, so a status Slack refuses is said once, not per message. */
   private readonly statusWarned: { value: boolean };
   private loading = false;
@@ -697,6 +698,29 @@ export class ReplyRenderer {
       return;
     }
     this.setStatus(this.statusText ?? THINKING_STATUS);
+  }
+
+  /**
+   * Key this turn's status to `thread` from now on, taking down any it
+   * shows under the old key. In a DM every message is its own key, so a
+   * status each stacked a "Thinking…" under every message sent while a
+   * long tool ran: a session's renderers all move to its newest message
+   * instead, which then carries the one status, saying what the running
+   * turn is doing.
+   */
+  moveStatus(thread: string): void {
+    if (this.finalized || this.statusThread === thread) {
+      return;
+    }
+    if (!this.statusTimer) {
+      this.statusThread = thread;
+      return;
+    }
+    const text = this.statusText ?? THINKING_STATUS;
+    // On the one chain, so the old key is cleared before the new one shows.
+    this.setStatus('');
+    this.statusThread = thread;
+    this.setStatus(text);
   }
 
   /**
