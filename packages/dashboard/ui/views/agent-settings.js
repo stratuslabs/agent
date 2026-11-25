@@ -123,7 +123,7 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
         el('div', { class: 'side-title' }, 'Connections'),
         el('div', { class: 'panel', style: 'margin-bottom: 24px;' },
           el('div', { class: 'panel-row' },
-            el('span', { class: 'tool-icon' }, icon('hash', 15)),
+            el('span', { class: 'tool-icon' }, icon('slack', 15)),
             el('div', { class: 'text' },
               el('div', { class: 'title' }, 'Slack'),
               el('div', { class: 'meta' }, slack === undefined ? 'Unknown' : slack.includes(agentId) ? 'Connected' : 'Not connected')),

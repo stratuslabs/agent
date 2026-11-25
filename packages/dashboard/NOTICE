@@ -13,3 +13,8 @@ https://lucide.dev, Copyright (c) 2026 Lucide Icons and Contributors,
 licensed under the ISC License, with some icons derived from Feather,
 Copyright (c) 2013-present Cole Bemis, licensed under the MIT License.
 The full license text is in ui/lib/LICENSE-lucide.txt.
+
+The Claude, OpenAI and Slack marks in ui/lib/icons.js are trademarks of
+Anthropic, PBC, OpenAI, and Slack Technologies, LLC respectively. They are
+shown only to identify the service an agent connects to, and are not
+covered by this product's license.

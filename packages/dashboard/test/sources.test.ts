@@ -8,8 +8,8 @@ test('a conversation started on the web reads as Web', () => {
 });
 
 test('a Slack session reads as Slack, and a direct message as a DM', () => {
-  assert.deepEqual(sourceOf('slack:ava:T0EXAMPLE:C0EXAMPLE1:1793046557.547839'), { kind: 'slack', icon: 'hash', label: 'Slack' });
-  assert.deepEqual(sourceOf('slack:ava:T0EXAMPLE:D0EXAMPLE1'), { kind: 'slack', icon: 'message-circle', label: 'Slack · DM' });
+  assert.deepEqual(sourceOf('slack:ava:T0EXAMPLE:C0EXAMPLE1:1793046557.547839'), { kind: 'slack', icon: 'slack', label: 'Slack' });
+  assert.deepEqual(sourceOf('slack:ava:T0EXAMPLE:D0EXAMPLE1'), { kind: 'slack', icon: 'slack', label: 'Slack · DM' });
 });
 
 test('work handed over by another agent reads as delegated, whatever channel it began in', () => {
