@@ -684,6 +684,14 @@ trusted-only rule above. Generalizing `approvals` to
 `approvals.channels.<kind>` was the alternative; it waits for a reason one
 block has to see across channels.
 
+**An adapter says when it showed the whole call.** `resolveApproval` takes
+`shownInFull: true` only from an adapter whose prompt showed every argument,
+nothing truncated. Only that yes is recorded as the person's for the call,
+which is what lets a schedule set after the conversation read outside
+content have its prompt reviewed as their request. An adapter that cuts long
+arguments leaves it off for a cut prompt; one that never sends it still
+settles every call, it just never vouches for one.
+
 **What the contract gives an adapter beyond Slack's shape.** Slack edits a
 placeholder, renders buttons, and is reachable only from a workspace; a
 text-message channel does none of that, so the contract states each as a

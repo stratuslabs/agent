@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { alwaysOffer, ownersUnknown } from '../ui/lib/grants.js';
+import { alwaysOffer, approvalCommand, ownersUnknown } from '../ui/lib/grants.js';
 
 test('the approval card says what Always allow would grant, so no two lifetimes share one button', () => {
   // The defect standing grants exist to close: the same button meant "this session"
@@ -38,4 +38,16 @@ test('a daemon that cannot list grant owners leaves the roster as the list, inst
   assert.equal(ownersUnknown({ status: 500, code: 'internal' }), false);
   assert.equal(ownersUnknown({ status: 0, code: 'network' }), false);
   assert.equal(ownersUnknown(new TypeError('Failed to fetch')), false);
+});
+
+test('an approval card shows a shell call\'s command, and says it showed the whole call only for anything else', () => {
+  assert.deepEqual(
+    approvalCommand({ call: { toolName: 'shell.run', input: { command: 'ls', cwd: '/tmp' } } }),
+    { prompt: '$', text: 'ls', whole: false },
+  );
+  assert.deepEqual(
+    approvalCommand({ call: { toolName: 'schedule.every', input: { every: '1d', prompt: 'Post the standup summary.' } } }),
+    { prompt: 'schedule.every', text: '{"every":"1d","prompt":"Post the standup summary."}', whole: true },
+  );
+  assert.deepEqual(approvalCommand({ call: { toolName: 'notes.add' } }), { prompt: 'notes.add', text: '{}', whole: true });
 });

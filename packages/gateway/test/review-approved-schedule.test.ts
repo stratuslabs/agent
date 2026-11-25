@@ -120,7 +120,7 @@ const requestOf = (text: string): string => /<request>\n([\s\S]*?)\n<\/request>/
 test('a schedule a person approved after the conversation read a page counts as the request when it fires', async () => {
   const { rows, cases } = await setSchedules(createPermissionPolicy({
     mode: 'remote',
-    request: async () => ({ answer: 'once', actor: 'U-APPROVER' }),
+    request: async () => ({ answer: 'once', actor: 'U-APPROVER', shownInFull: true }),
   }));
   assert.equal(rows.length, 1);
   assert.equal(rows[0]?.trust, 'external');
@@ -129,11 +129,23 @@ test('a schedule a person approved after the conversation read a page counts as 
   assert.match(cases[0]!, /approved by a person when it was set/);
 });
 
+test('a yes given on a prompt that cut the call sets the schedule, but its prompt is not counted', async () => {
+  // A channel that truncated the arguments says nothing about what was shown.
+  const { rows, cases } = await setSchedules(createPermissionPolicy({
+    mode: 'remote',
+    request: async () => ({ answer: 'once', actor: 'U-APPROVER' }),
+  }));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.approvedBy, undefined);
+  assert.equal(requestOf(cases[0]!), '(nothing)');
+  assert.match(cases[0]!, /set by a conversation that had read outside content, so it is not counted/);
+});
+
 test('one set on a standing grant, or without asking under the open posture, still has no request', async () => {
   // The first call's "always" is a person's yes; the second runs on the grant it made.
   const granted = await setSchedules(createPermissionPolicy({
     mode: 'remote',
-    request: async () => ({ answer: 'always', actor: 'U-APPROVER' }),
+    request: async () => ({ answer: 'always', actor: 'U-APPROVER', shownInFull: true }),
   }), 2);
   assert.deepEqual(granted.rows.map((row) => row.approvedBy), ['U-APPROVER', undefined]);
   assert.equal(requestOf(granted.cases[0]!), PROMPT);
@@ -143,7 +155,7 @@ test('one set on a standing grant, or without asking under the open posture, sti
   const open = await setSchedules(createPermissionPolicy({
     mode: 'remote',
     openFor: () => true,
-    request: async () => ({ answer: 'once', actor: 'U-APPROVER' }),
+    request: async () => ({ answer: 'once', actor: 'U-APPROVER', shownInFull: true }),
   }));
   assert.equal(open.rows[0]?.trust, 'external');
   assert.equal(open.rows[0]?.approvedBy, undefined);

@@ -52,6 +52,14 @@ export interface ApprovalOutcome {
   answer: ApprovalAnswer;
   /** Channel-native id (a Slack user). */
   actor?: string;
+  /**
+   * True when the surface showed the person the call's whole input, nothing
+   * cut or left out. Only then does the policy name who said yes
+   * (`ApprovalDecision.approvedBy`), which can make a schedule's prompt
+   * count as their request. Absent means no: a surface that cuts long input
+   * still settles the call, it just can't vouch for text the person never saw.
+   */
+  shownInFull?: boolean;
 }
 
 /**

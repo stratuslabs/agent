@@ -33,6 +33,7 @@ export type SettleApproval = (
   answer: ApprovalAnswer,
   reason: ApprovalResolutionReason,
   actor?: string,
+  shownInFull?: boolean,
 ) => void;
 
 /**
@@ -277,7 +278,7 @@ export const createApprovalBroker = ({
     const oneShot = request.oneShot === true || forAnotherAgent;
     const always = forAnotherAgent ? undefined : request.always;
 
-    const settle: SettleApproval = (given, reason, actor) => {
+    const settle: SettleApproval = (given, reason, actor, shownInFull) => {
       const answer: ApprovalAnswer = forAnotherAgent && given === 'always' ? 'once' : given;
       // Identity, not presence: a request that already settled is gone from
       // the registry, and comparing against this exact function is what
@@ -291,7 +292,7 @@ export const createApprovalBroker = ({
         clearTimeout(timer);
       }
       request.signal?.removeEventListener('abort', onAbort);
-      resolve({ answer, ...(actor ? { actor } : {}) });
+      resolve({ answer, ...(actor ? { actor } : {}), ...(shownInFull === true && reason === 'decided' ? { shownInFull } : {}) });
       const emitted = announced.then(() => bus.emit({
         type: 'tool.approval-resolved',
         sessionId: request.session.id,
@@ -408,7 +409,7 @@ export const createApprovalBroker = ({
     if (!parked) {
       return false;
     }
-    parked.settle(input.answer, input.reason ?? 'decided', input.actor);
+    parked.settle(input.answer, input.reason ?? 'decided', input.actor, input.shownInFull);
     return true;
   };
 

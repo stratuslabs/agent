@@ -179,7 +179,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
   const shadowContexts = new WeakSet<ApprovalContext>();
   const reviewNotes = new WeakMap<ApprovalContext, { verdict: ApprovalVerdict; reviewCode?: ReviewCode; reviewReason?: string }>();
   /**
-   * Who said yes to the call, for a context a person answered: the
+   * Who said yes to the call, for a context a person answered on a surface
+   * that showed them the whole call (`ApprovalOutcome.shownInFull`): the
    * transport's name for them, `terminal` for the local prompt, or `remote`
    * for a remote answer that named nobody. Read only by an allowed report,
    * and only into the runner's copy (`ApprovalDecision.approvedBy`).
@@ -1142,7 +1143,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       if (outcome === ABORTED) {
         return report(context, 'cancelled', false, `${call.toolName} was cancelled while awaiting approval`);
       }
-      const { answer, actor } = outcome;
+      const { answer, actor, shownInFull } = outcome;
 
       if (answer === 'deny') {
         return report(
@@ -1182,7 +1183,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
        * happen is the *click* landing somewhere they never saw.
        */
       const allowUnlessMoved = (reason: string, forCommand?: string): Verdict => {
-        approvers.set(context, actor ?? (mode === 'remote' ? 'remote' : 'terminal'));
+        // Named only when the person saw the whole call: a yes given on a
+        // cut prompt runs it, but can't vouch for the part left out.
+        if (shownInFull === true) {
+          approvers.set(context, actor ?? (mode === 'remote' ? 'remote' : 'terminal'));
+        }
         if (!scopedByOrigin) {
           return report(context, 'approver', true, reason, forCommand, undefined, origin);
         }

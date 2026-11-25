@@ -42,7 +42,14 @@ export const approvalRoutes: Route[] = [
       // decision that approver never made. The caller's own label survives
       // as a suffix, which is all it was ever good for.
       const actor = apiActorFor(context.principal, optionalString(body, 'actor'));
-      const settled = context.gateway.resolveApproval({ requestId, answer, actor });
+      // The client's word that it showed the person the call's whole input,
+      // nothing cut. Without it the yes still runs the call, but names
+      // nobody as having asked for it (`ApprovalOutcome.shownInFull`).
+      const shownInFull = body.shownInFull;
+      if (shownInFull !== undefined && typeof shownInFull !== 'boolean') {
+        throw new ApiError(400, 'invalid_body', '"shownInFull" must be a boolean when present.');
+      }
+      const settled = context.gateway.resolveApproval({ requestId, answer, actor, ...(shownInFull === true ? { shownInFull } : {}) });
       if (!settled) {
         // The normal outcome of a button clicked a minute too late. Never a
         // "try again": the request is gone because it was already decided,
