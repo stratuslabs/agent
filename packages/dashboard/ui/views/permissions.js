@@ -3,6 +3,7 @@ import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
 import { icon } from '../lib/icons.js';
 import { createLatest } from '../lib/latest.js';
+import { ownersUnknown } from '../lib/grants.js';
 import { store } from '../app.js';
 
 /**
@@ -80,8 +81,9 @@ export const renderPermissions = () => {
     state.loadedAt = Date.now();
     const ticket = reads.begin();
     // Everyone with a grant file, so grants that outlived their agent are
-    // found too. A daemon that can't say (an older one: 501) leaves the
-    // roster as the list, and the page says what that misses.
+    // found too. A daemon that can't say (a store without owners: 501; an
+    // older daemon without the route: 404) leaves the roster as the list,
+    // and the page says what that misses.
     const owners = await api.grantOwners().then(
       (listed) => ({ ids: listed.agents ?? [] }),
       (error) => ({ error }),
@@ -96,6 +98,7 @@ export const renderPermissions = () => {
       return;
     }
     state.ownersListed = owners.error === undefined;
+    const ownersError = owners.error !== undefined && !ownersUnknown(owners.error) ? owners.error : undefined;
     state.rows = results.flatMap((result) => result.rows ?? []);
     // A confirmation whose grant is gone (revoked elsewhere) is dropped,
     // rather than left waiting to act on whatever now looks like it.
@@ -103,7 +106,7 @@ export const renderPermissions = () => {
       state.confirming = undefined;
     }
     state.errors = [
-      ...(owners.error && owners.error.status !== 501 ? [`Couldn't list agents no longer on the roster: ${owners.error.message}`] : []),
+      ...(ownersError ? [`Couldn't list agents no longer on the roster: ${ownersError.message}`] : []),
       ...results.flatMap((result) => (result.error ? [result.error] : [])),
     ];
     paint();
