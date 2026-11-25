@@ -986,7 +986,7 @@ narrow. They are not a sandbox, and this document does not claim one:
 
 **In the monorepo.** The kernel and everything CI must gate: `core`, `agents`,
 `state`, `gateway`, `permissions`, `plugins` (the loader), `providers`,
-`executor-local`, `cli`, `control-api`, `dashboard`,
+`executor-local`, `cli`, `control-api`,
 `provider-anthropic`, `provider-claude-code`, `channel-slack` — plus the
 capability plugins that each carry a security invariant the kernel's promises
 rest on:
@@ -1037,7 +1037,10 @@ Two more packages ship from this repository today, both added before any
 plugin lived in `stratuslabs/plugins`: `provider-codex` and the MCP bridge
 `plugin-mcp`. Every package here is published under `@stratusagent/` at the
 same version. `provider-openai` and `memory-sqlite` shipped from here until
-0.13.6; both now release from `stratuslabs/plugins` under the same names.
+0.13.6; both now release from `stratuslabs/plugins` under the same names. The
+web dashboard, `@stratusagent/dashboard`, shipped from here through 0.14.x and
+now releases from there on its own versions; the control API loads it by name
+when it is installed.
 
 **First-party, outside.** Same authors, separate repositories:
 
