@@ -127,3 +127,41 @@ test('through the runner, the agent is told why and the dashboard event names th
   });
   assert.doesNotMatch(JSON.stringify(decided), /sk-ant-do-not-log|install\.sh/);
 });
+
+test('only a person\'s yes to this call names who gave it, for the runner to hand the tool', async () => {
+  const notesTool: Tool = { name: 'notes.add', risk: 'gated', async execute() { return null; } };
+  const decide = async (policy: ReturnType<typeof createPermissionPolicy>): Promise<{ ran: boolean; reported: ApprovalDecision[] }> => {
+    const reported: ApprovalDecision[] = [];
+    const answer = await policy.approve({
+      session,
+      call: { id: 'call-9', toolName: 'notes.add', input: {} },
+      tool: notesTool,
+      risk: 'gated',
+      decided: (decision) => reported.push(decision),
+    });
+    return { ran: answer === true, reported };
+  };
+
+  // A remote answer that names its approver, one that names nobody, and the terminal prompt.
+  const named = await decide(createPermissionPolicy({ mode: 'remote', request: async () => ({ answer: 'allow', actor: 'U-APPROVER' }) }));
+  assert.equal(named.ran, true);
+  assert.deepEqual(named.reported.map((decision) => [decision.layer, decision.approvedBy]), [['approver', 'U-APPROVER']]);
+  assert.equal((await decide(createPermissionPolicy({ mode: 'remote', request: async () => 'allow' }))).reported.at(-1)?.approvedBy, 'remote');
+  assert.equal((await decide(createPermissionPolicy({ mode: 'interactive', ask: async () => 'y' }))).reported.at(-1)?.approvedBy, 'terminal');
+
+  // "always" is a yes to this call; the calls its grant covers afterwards are not.
+  const granting = createPermissionPolicy({ mode: 'remote', request: async () => ({ answer: 'always', actor: 'U-APPROVER' }) });
+  assert.equal((await decide(granting)).reported.at(-1)?.approvedBy, 'U-APPROVER');
+  const covered = await decide(granting);
+  assert.equal(covered.ran, true);
+  assert.equal(covered.reported.at(-1)?.layer, 'grant');
+  assert.equal(covered.reported.at(-1)?.approvedBy, undefined);
+
+  // A person's no, a safe tool, and the open posture's fast path.
+  const refused = await decide(createPermissionPolicy({ mode: 'remote', request: async () => ({ answer: 'deny', actor: 'U-APPROVER' }) }));
+  assert.equal(refused.ran, false);
+  assert.equal(refused.reported.at(-1)?.approvedBy, undefined);
+  const open = await decide(createPermissionPolicy({ mode: 'remote', openFor: () => true, request: async () => ({ answer: 'allow', actor: 'U-APPROVER' }) }));
+  assert.equal(open.ran, true);
+  assert.ok(open.reported.every((decision) => decision.approvedBy === undefined));
+});

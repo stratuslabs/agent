@@ -178,6 +178,13 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
    */
   const shadowContexts = new WeakSet<ApprovalContext>();
   const reviewNotes = new WeakMap<ApprovalContext, { verdict: ApprovalVerdict; reviewCode?: ReviewCode; reviewReason?: string }>();
+  /**
+   * Who said yes to the call, for a context a person answered: the
+   * transport's name for them, `terminal` for the local prompt, or `remote`
+   * for a remote answer that named nobody. Read only by an allowed report,
+   * and only into the runner's copy (`ApprovalDecision.approvedBy`).
+   */
+  const approvers = new WeakMap<ApprovalContext, string>();
 
   /** A site this agent may read without asking: trusted, or approved for `web.fetch`. */
   const readableSite = async (agentId: string, site: string): Promise<boolean> => {
@@ -236,7 +243,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     // dashboard shows is a classification, never the call's input. The
     // review fields are a verdict and a fixed code, never the reviewer's
     // words, shadow or not.
-    context.decided?.({ allowed, layer, reason, ...reviewed });
+    const approver = allowed ? approvers.get(context) : undefined;
+    context.decided?.({ allowed, layer, reason, ...reviewed, ...(approver === undefined ? {} : { approvedBy: approver }) });
     // The reason is what the agent is told: it names the check that
     // refused and what would cover the call, which is what lets the agent
     // pick another way instead of trying the same call again.
@@ -1174,6 +1182,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
        * happen is the *click* landing somewhere they never saw.
        */
       const allowUnlessMoved = (reason: string, forCommand?: string): Verdict => {
+        approvers.set(context, actor ?? (mode === 'remote' ? 'remote' : 'terminal'));
         if (!scopedByOrigin) {
           return report(context, 'approver', true, reason, forCommand, undefined, origin);
         }
