@@ -95,7 +95,8 @@ export const rosterSoulsWithConfigured = async (
       if (clash >= 0) {
         entries[clash] = entry;
       } else {
-        entries.push(entry);
+        // First, as the agent a turn that names none reaches.
+        entries.unshift(entry);
       }
     }
   } catch (error) {
