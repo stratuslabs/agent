@@ -84,7 +84,7 @@ export const renderTasks = () => {
           el('span', { class: `badge ${status.tone}` }, icon(status.icon, 12), status.label),
           el('span', {}, `${task.steps} step${task.steps === 1 ? '' : 's'} · started ${when(task.createdAt)}`)),
         task.status === 'interrupted'
-          ? el('div', { class: 'field-note' }, 'Stopped when Stratus restarted.')
+          ? el('div', { class: 'field-note' }, 'Stopped when Stratus Agent restarted.')
           : task.status === 'cancelled' && task.stoppedBy
             ? el('div', { class: 'field-note' }, `Stopped from the ${task.stoppedBy === 'dashboard' ? 'dashboard' : task.stoppedBy}.`)
             : null,

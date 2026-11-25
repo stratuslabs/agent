@@ -78,6 +78,20 @@ test('every route and the WS upgrade reject a request with no credential', async
   }
 });
 
+test('a page request with no session gets a signed-out page that names itself', async () => {
+  const harness = await startApi();
+  try {
+    const page = await harness.call('/schedules', { auth: 'none' });
+    assert.equal(page.status, 401);
+    assert.match(page.headers.get('content-type') ?? '', /text\/html/);
+    const html = await page.text();
+    assert.match(html, /<title>Not signed in · Stratus Agent<\/title>/);
+    assert.match(html, /stratus dashboard/);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('the gateway token file is 0600', async () => {
   const harness = await startApi();
   try {

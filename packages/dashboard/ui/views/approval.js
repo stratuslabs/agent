@@ -128,7 +128,7 @@ export const approvalCard = (request) => {
     el('span', {}, command.text)),
   ...notes(request, agentName).map((line) => el('div', { class: 'note' }, icon(line.icon, 14), el('span', {}, line.text))),
   unsent.has(request.requestId)
-    ? el('div', { class: 'notice bad', role: 'alert' }, `Your answer didn't reach Stratus: ${unsent.get(request.requestId)}. It's still waiting; try again.`)
+    ? el('div', { class: 'notice bad', role: 'alert' }, `Your answer didn't reach Stratus Agent: ${unsent.get(request.requestId)}. It's still waiting; try again.`)
     : null,
   );
 };

@@ -113,7 +113,7 @@ export const renderTools = () => {
           'How to add plugins')),
       state.help
         ? el('div', { class: 'panel', style: 'padding: 16px;' },
-            el('p', { style: 'margin: 0 0 10px;' }, 'Plugins are added on the machine running Stratus. Run this in a terminal and choose Plugins:'),
+            el('p', { style: 'margin: 0 0 10px;' }, 'Plugins are added on the machine running Stratus Agent. Run this in a terminal and choose Plugins:'),
             el('pre', { class: 'cmd' }, 'stratus setup'),
             el('p', { class: 'field-note' }, 'Installing a plugin grants no agent anything: each agent’s soul still lists the tools it may call.'))
         : null,

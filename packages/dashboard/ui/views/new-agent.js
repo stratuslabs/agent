@@ -70,7 +70,7 @@ export const renderNewAgent = () => {
         el('div', { class: 'sub' }, 'Give it a name and a job. You can change everything later.'))),
       el('div', {},
         el('div', { class: 'field' }, el('label', { for: 'new-name' }, 'Name'), name,
-          el('p', { class: 'field-note' }, 'Leave it empty and Stratus picks a name.')),
+          el('p', { class: 'field-note' }, 'Leave it empty and Stratus Agent picks a name.')),
         el('div', { class: 'field' },
           el('label', { for: 'new-persona' }, 'What should it do?'),
           instructions,

@@ -4,6 +4,7 @@ import { avatar } from './lib/avatar.js';
 import { icon } from './lib/icons.js';
 import { createLatest } from './lib/latest.js';
 import { agentStatus } from './lib/status.js';
+import { PRODUCT_NAME, pageTitle } from './lib/title.js';
 import { renderHome } from './views/home.js';
 import { renderAgent } from './views/agent.js';
 import { renderNewAgent } from './views/new-agent.js';
@@ -378,7 +379,7 @@ const sidebar = () => {
 
   const offline = store.offlineSince !== undefined;
   return el('nav', { class: 'sidebar', 'aria-label': 'Main' },
-    el('div', { class: 'brand' }, stratusMark(24), 'Stratus'),
+    el('div', { class: 'brand' }, stratusMark(24), PRODUCT_NAME),
     el('div', { class: 'nav' },
       item('Home', 'house', { name: 'home' }, route.name === 'home'),
       item('Schedules', 'calendar-clock', { name: 'schedules' }, route.name === 'schedules'),
@@ -398,7 +399,7 @@ const sidebar = () => {
         el('span', { class: 'grow' }, agent.name),
         // The dot is stale while the daemon is unreachable, so it goes grey
         // rather than keep claiming an agent is working.
-        el('span', { class: `dot ${offline ? 'idle' : status.kind}`, title: offline ? 'unknown while Stratus is unreachable' : status.label }));
+        el('span', { class: `dot ${offline ? 'idle' : status.kind}`, title: offline ? 'unknown while Stratus Agent is unreachable' : status.label }));
       }),
       el('button', { class: `nav-item${route.name === 'new' ? ' active' : ''}`, onClick: () => navigate({ name: 'new' }) },
         el('span', { class: 'plus-box' }, icon('plus', 12)),
@@ -413,9 +414,9 @@ const sidebar = () => {
     // Three states, not two: the API can answer while the event stream is
     // down (a proxy that drops WebSocket upgrades, say), and then nothing
     // live arrives — approvals, replies, completions — though reads work.
-    el('div', { class: `sidebar-foot${offline ? ' bad' : ''}`, title: !offline && store.stream === 'offline' ? 'The page can read from Stratus but isn’t getting live updates; it keeps retrying.' : undefined },
+    el('div', { class: `sidebar-foot${offline ? ' bad' : ''}`, title: !offline && store.stream === 'offline' ? 'The page can read from Stratus Agent but isn’t getting live updates; it keeps retrying.' : undefined },
       el('span', { class: `dot ${offline ? 'bad' : store.stream === 'offline' ? 'needs' : 'ok'}` }),
-      el('span', { class: 'grow' }, offline ? 'Can’t reach Stratus' : store.stream === 'offline' ? 'Running · no live updates' : 'Running'),
+      el('span', { class: 'grow' }, offline ? 'Can’t reach Stratus Agent' : store.stream === 'offline' ? 'Running · no live updates' : 'Running'),
       el('span', { class: 'mono' }, `v${store.health?.version ?? '—'}`),
     ),
   );
@@ -426,7 +427,7 @@ const signedOut = () => el('div', { class: 'page-wrap', style: 'grid-column: 1 /
     el('div', { class: 'page-body narrow' },
       el('div', { class: 'page-head' }, el('div', {},
         el('h1', {}, 'Not signed in'),
-        el('div', { class: 'sub' }, 'This browser has no session with Stratus. Sessions live in the daemon’s memory: stratus restart hands them to the new daemon, but a crash or a stop and start signs you out.'))),
+        el('div', { class: 'sub' }, 'This browser has no session with Stratus Agent. Sessions live in the daemon’s memory: stratus restart hands them to the new daemon, but a crash or a stop and start signs you out.'))),
       el('div', { class: 'notice ok', style: 'color: var(--text); background: var(--bg);' },
         'Run ', el('code', {}, 'stratus dashboard'), ' in a terminal to open a fresh one.'),
     ))));
@@ -462,6 +463,8 @@ const buildView = (route) => {
 
 const paint = () => {
   const root = document.getElementById('app');
+  // Named for the page, so a row of dashboard tabs can be told apart.
+  document.title = pageTitle(store.route, store.agents);
 
   if (store.route.name === 'signed-out') {
     current.view?.destroy?.();
