@@ -166,6 +166,12 @@ export const renderPermissions = () => {
 
   const paint = () => {
     const rows = state.rows ?? [];
+    // Only when the daemon couldn't list grant owners: then an agent removed
+    // from the roster isn't asked about, so neither the list nor "none" is
+    // the whole story.
+    const ownersNote = state.ownersListed
+      ? null
+      : el('p', { class: 'field-note' }, 'This daemon can’t list grants kept for agents no longer on the roster, so those aren’t shown.');
     node.replaceChildren(el('div', { class: 'page-body', style: 'max-width: 1040px;' },
       el('div', { class: 'page-head' }, el('div', {},
         el('h1', {}, 'Permissions'),
@@ -180,15 +186,14 @@ export const renderPermissions = () => {
           ? el('div', { class: 'empty-state' },
               el('span', { class: 'icon-box' }, icon('shield-check', 18)),
               el('h3', {}, 'No permissions yet'),
-              el('p', {}, 'When you choose “Always allow” on an approval, the grant shows up here so you can revoke it.'))
+              el('p', {}, 'When you choose “Always allow” on an approval, the grant shows up here so you can revoke it.'),
+              ownersNote)
           : el('div', {},
               el('div', { class: 'list' }, ...rows.map(rowNode)),
               el('div', { class: 'notice', style: 'margin-top: 20px; background: var(--bg); color: var(--text-2); display: flex; gap: 8px; align-items: center;' },
                 icon('shield-check', 14),
                 'Grants never widen on their own. Each row covers only what it says.'),
-              // Only when the daemon couldn't list grant owners: then an
-              // agent removed from the roster isn't asked about.
-              state.ownersListed ? null : el('p', { class: 'field-note' }, 'This daemon can’t list grants kept for agents no longer on the roster, so those aren’t shown.')),
+              ownersNote),
     ));
   };
 
