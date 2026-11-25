@@ -102,7 +102,8 @@ stopped.
 - **"Why is this using the demo provider?"** — run `stratus doctor`; some
   file or env var outranks what you set. The
   [precedence chain](../reference/config.md) is: flags → `STRATUS_*` env
-  vars → soul file hints → config file.
+  vars → soul file hints → config file. Under `stratus serve` a soul's
+  `provider:` or `model:` pin outranks the env vars for that agent.
 - **A file an agent produced is not where the docs say it should be** — run
   `stratus doctor`; it names any workspace still at the pre-0.11.5
   `~/.stratus/workspaces/<id>` path, which this build does not read. A

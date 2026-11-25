@@ -703,8 +703,13 @@ export const collectDoctorReport = async (
     // Setup writes the config file, which is the LOWEST precedence of the
     // three — so when an env var or a soul chose demo, "run setup" is
     // advice that changes nothing and leaves every run on demo.
+    //
+    // The variable outranks a soul only for a run. The daemon serves every
+    // agent from one environment, so there it is the default for agents
+    // that pin nothing, and a pinned soul demotes it (`applySoulPins`).
     const fix = envProviderPick
-      ? `Unset ${envProviderPick.name}; it outranks both your config and any soul.`
+      ? `Unset ${envProviderPick.name}; it outranks your config file, and in \`stratus run\` any soul too. `
+        + 'Under `stratus serve` an agent whose soul pins a provider runs on its pin instead.'
       : soul?.provider === 'demo'
         ? `Change or remove the provider pin in ${soulPath}; a soul outranks the config file.`
         : fileConfig.provider === 'demo'

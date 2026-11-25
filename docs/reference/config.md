@@ -11,6 +11,15 @@ Precedence, highest first:
 4. **Config file** — a project-local `stratus.config.json` outranks the
    global `~/.stratus/config.json`
 
+That order is for a run (`stratus run`, `stratus chat`). Under `stratus
+serve`, one environment serves every agent, so `STRATUS_PROVIDER` and
+`STRATUS_MODEL` are the daemon-wide default instead: an agent whose soul
+pins `provider:` or `model:` runs on its pin, and only agents that pin
+nothing follow the variables. When the daemon-wide default names another
+provider (anything but `demo`), its model, endpoint (`STRATUS_BASE_URL`)
+and generic key (`STRATUS_API_KEY`) were chosen for that service, so a
+pinned agent doesn't get them either.
+
 When none of these names a provider, a run uses the one provider you have
 signed in to and says so. A ChatGPT sign-in counts once it allows using your
 ChatGPT plan. With no sign-in, or more than one, the run is refused with a

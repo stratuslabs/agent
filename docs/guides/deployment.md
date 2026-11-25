@@ -62,7 +62,8 @@ stratusd ok at http://0.0.0.0:4123 — version 0.11.6, up 8s, 1 agent, 0 session
 
 The address is the container's own: `0.0.0.0` inside it, published as
 `127.0.0.1:4123` on the host. To prove the plumbing first, put
-`STRATUS_PROVIDER=demo` in `stratusd.env` for the offline demo provider. With
+`STRATUS_PROVIDER=demo` in `stratusd.env` for the offline demo provider
+(an agent whose soul pins a provider keeps its pin). With
 no provider named and no sign-in stored, the daemon starts but refuses every
 turn.
 
