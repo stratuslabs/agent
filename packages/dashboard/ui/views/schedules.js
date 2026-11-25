@@ -20,7 +20,8 @@ const reportsTo = (destination) => {
   }
   const [channel, conversation] = String(destination).split(':');
   if (channel === 'slack') {
-    return conversation?.startsWith('D') ? 'Slack DM' : 'Slack channel';
+    return el('span', { style: 'display: inline-flex; align-items: center; gap: 6px;' },
+      icon('slack', 13), conversation?.startsWith('D') ? 'Slack DM' : 'Slack channel');
   }
   return channel || String(destination);
 };

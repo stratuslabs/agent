@@ -6,6 +6,8 @@ import { refreshCore, store } from '../app.js';
 
 const PROVIDER_NAMES = { anthropic: 'Anthropic', openai: 'OpenAI', codex: 'Codex' };
 const providerName = (provider) => PROVIDER_NAMES[provider] ?? provider;
+/** Each provider's own mark: Anthropic's is Claude's, and Codex is OpenAI's. */
+const PROVIDER_MARKS = { anthropic: 'claude', openai: 'openai', codex: 'openai' };
 
 /** What a stored sign-in is, in words. */
 const signInKind = (entry) => (entry.type === 'oauth_token'
@@ -233,7 +235,7 @@ export const renderSettings = (section) => {
         ? `${users.join(', ')} ${users.length === 1 ? 'runs' : 'run'} on ${providerName(entry.provider)} and may stop working until it's connected again, unless ${users.length === 1 ? 'it has' : 'they have'} a sign-in of ${users.length === 1 ? 'its' : 'their'} own or the daemon's environment supplies a key.`
         : `No agent runs on ${providerName(entry.provider)} right now.`;
       return el('div', { class: 'panel-row' },
-        el('span', { class: 'tool-icon' }, icon('key-round', 15)),
+        el('span', { class: 'tool-icon' }, icon(PROVIDER_MARKS[entry.provider] ?? 'key-round', 15)),
         el('div', { class: 'text' },
           el('div', { class: 'title' }, providerName(entry.provider)),
           confirming
@@ -451,7 +453,7 @@ export const renderSettings = (section) => {
         // the CLI's own Channels list starts with it.
         const connected = state.credentials?.channels?.slack ?? [];
         list.replaceChildren(...store.agents.map((agent) => el('div', { class: 'panel-row' },
-          el('span', { class: 'tool-icon' }, icon('hash', 15)),
+          el('span', { class: 'tool-icon' }, icon('slack', 15)),
           el('div', { class: 'text' },
             el('div', { class: 'title' }, agent.name),
             el('div', { class: 'meta' },

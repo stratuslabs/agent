@@ -22,7 +22,7 @@ export const sourceOf = (sessionId, { schedules = [] } = {}) => {
       return { kind: 'web', icon: 'globe', label: 'Web' };
     case 'slack': {
       const dm = (parts[3] ?? '').startsWith('D');
-      return { kind: 'slack', icon: dm ? 'message-circle' : 'hash', label: dm ? 'Slack · DM' : 'Slack' };
+      return { kind: 'slack', icon: 'slack', label: dm ? 'Slack · DM' : 'Slack' };
     }
     case 'schedule': {
       const schedule = schedules.find((candidate) => candidate.id === parts[1]);
