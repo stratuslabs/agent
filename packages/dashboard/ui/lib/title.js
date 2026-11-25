@@ -1,4 +1,4 @@
-/** What the dashboard calls the product, in the sidebar, the copy and every tab title. */
+/** What the dashboard calls the product: the sidebar brand and every tab title. */
 export const PRODUCT_NAME = 'Stratus Agent';
 
 const PAGES = {
