@@ -45,7 +45,7 @@ On a server or container with fresh state, run `stratus setup` or
 
 Releases before this one served a built-in `stratus` agent from code. An
 install that used it (conversations, memory, a schedule, a Slack app or
-grants under `stratus`) gets a `stratus.md` soul written on its first start
+other channel binding, or grants under `stratus`) gets a `stratus.md` soul written on its first start
 after the upgrade, with the same persona and every tool, and it becomes the
 default when none was set. Its conversations, memory, schedules, grants and
 Slack app carry on under the same id. The upgrade never overwrites a file:

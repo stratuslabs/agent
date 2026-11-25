@@ -122,6 +122,22 @@ test('a Slack app stored for stratus counts as using it', async () => {
   await assertStratusSoul(env);
 });
 
+test('a plugin channel binding stored for stratus counts as using it', async () => {
+  const env = await freshHome();
+  await mkdir(path.dirname(credentialsPath(env)), { recursive: true });
+  await writeFile(credentialsPath(env), JSON.stringify({ channels: { discord: { stratus: { botToken: 'discord-test' } } } }));
+  await migrate(env);
+  await assertStratusSoul(env);
+});
+
+test('a channel binding for another agent does not', async () => {
+  const env = await freshHome();
+  await mkdir(path.dirname(credentialsPath(env)), { recursive: true });
+  await writeFile(credentialsPath(env), JSON.stringify({ channels: { discord: { ava: { botToken: 'discord-test' } }, slack: { ava: { appToken: 'xapp-test', botToken: 'xoxb-test' } } } }));
+  assert.equal(await migrate(env), '');
+  assert.equal(await exists(ownSoul(env)), false);
+});
+
 test('a schedule for stratus counts as using it', async () => {
   const env = await freshHome();
   await mkdir(path.dirname(fleetDbPath(env)), { recursive: true });

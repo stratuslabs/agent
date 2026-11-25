@@ -82,7 +82,8 @@ const readConfigObject = async (filePath: string): Promise<Record<string, unknow
   return parsed as Record<string, unknown>;
 };
 
-const hasSlackApp = async (env: StateEnvironment): Promise<boolean> => {
+/** Whether any channel, Slack or one a plugin contributes, has a binding stored for the agent. */
+const hasChannelBinding = async (env: StateEnvironment): Promise<boolean> => {
   let credentials: Record<string, unknown> | undefined;
   try {
     credentials = await readJsonObject(credentialsPath(env));
@@ -91,10 +92,12 @@ const hasSlackApp = async (env: StateEnvironment): Promise<boolean> => {
     // it; here it just can't say yes.
     return false;
   }
-  const channels = credentials?.channels as Record<string, unknown> | undefined;
-  const slack = channels?.slack as Record<string, unknown> | undefined;
-  return typeof slack === 'object' && slack !== null
-    && Object.keys(slack).some((agentId) => foldedAgentId(agentId) === LEGACY_DEFAULT_AGENT_ID);
+  const channels = credentials?.channels;
+  if (typeof channels !== 'object' || channels === null) {
+    return false;
+  }
+  return Object.values(channels).some((byAgent) => typeof byAgent === 'object' && byAgent !== null
+    && Object.keys(byAgent).some((agentId) => foldedAgentId(agentId) === LEGACY_DEFAULT_AGENT_ID));
 };
 
 const hasSchedule = async (env: StateEnvironment): Promise<boolean> => {
@@ -128,7 +131,7 @@ const hasSchedule = async (env: StateEnvironment): Promise<boolean> => {
 /**
  * Whether this home used the agent that once lived in code: it has its
  * sessions, memory, grants or workspace, memories under the ids that read
- * as it, a Slack app, or a schedule.
+ * as it, a channel binding (Slack or a plugin's), or a schedule.
  */
 export const usedCodeDefinedAgent = async (env: StateEnvironment): Promise<boolean> => {
   // The legacy ids too: their memories already read as this agent's (see
@@ -138,7 +141,7 @@ export const usedCodeDefinedAgent = async (env: StateEnvironment): Promise<boole
       return true;
     }
   }
-  return await hasSlackApp(env) || await hasSchedule(env);
+  return await hasChannelBinding(env) || await hasSchedule(env);
 };
 
 /**
