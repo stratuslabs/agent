@@ -563,6 +563,25 @@ test('runCli prints help text', async () => {
   assert.equal(output.stderr, '');
 });
 
+test('run and chat with no agent exit 1 and say how to make one, before any provider call', async () => {
+  // No agent lives in code to answer a run with no soul.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-nobody-'));
+  let called = false;
+  const fetchSpy = (async () => { called = true; return new Response('{}'); }) as typeof fetch;
+  for (const argv of [['run', '--provider', 'demo', 'hello'], ['chat', '--provider', 'demo']]) {
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv,
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: fetchSpy, stdinStream: Readable.from(['hi\n']) },
+    });
+    assert.equal(exitCode, 1, argv.join(' '));
+    assert.match(output.stderr, /^No agent to run: no soul is set\. Create your first agent with `stratus setup` or `stratus agent new`, or pass --soul <path>\.$/m);
+    assert.doesNotMatch(output.stdout, /Demo provider ready/);
+  }
+  assert.equal(called, false);
+});
+
 test('runCli executes the demo tool loop', async () => {
   const { streams, output } = createStreams();
   const home = await agentHome('stratus-run-home-');
@@ -2521,6 +2540,10 @@ test('setup demo path can test run inline before saving', async () => {
 
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.deepEqual(config, { provider: 'demo', soul: path.join(home, '.stratus', 'agents', 'stratus.md') });
+  // Piped, so the first agent is named Stratus without a question that
+  // would shift a script's answers.
+  assert.match(output.stdout, /Created Stratus, your first agent and the default\./);
+  assert.doesNotMatch(output.stdout, /Name your first agent/);
 });
 
 test('setup test run writes in the language the saved config would run in', async () => {

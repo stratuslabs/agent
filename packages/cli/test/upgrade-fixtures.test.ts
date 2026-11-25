@@ -410,7 +410,9 @@ test('a home written by 0.13.5 and copied to another path starts with all its ag
   const command = recordCommand(doctor);
 
   const before = await serving(home, async (api) => {
-    assert.deepEqual(await rosterIds(api), ['stratus'], 'nothing re-pointed without the record');
+    // Nothing re-pointed without the record, and this home never used the
+    // agent that once lived in code, so the upgrade wrote it no soul.
+    assert.deepEqual(await rosterIds(api), [], 'nothing re-pointed without the record');
   });
   assert.ok(before.includes(`3 link(s) point into ${old} at files that are gone`), before);
   assert.equal(await readlink(path.join(agents, 'ava.md')), path.join(old, 'ava', 'soul.md'), 'left as it was');

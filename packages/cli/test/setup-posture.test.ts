@@ -234,13 +234,19 @@ test('stratus setup at a terminal asks a new install first, and a pick lands in 
     key('\u001b[B'); // down to Guarded
     key('\r');
     await waitFor('Save & finish');
-    key('9');
+    // No agent yet, so setup makes the first one, asking its name; Enter
+    // (typed ahead, since readline echoes its prompt to the real terminal)
+    // keeps Stratus.
+    key('9\r');
   });
 
   assert.equal(exitCode, 0, output);
   // Asked before the menu was ever drawn.
   assert.ok(output.indexOf('should your agents ask') < output.indexOf('Save & finish'));
-  assert.deepEqual((await readConfig(home)).approvals, { posture: 'guarded' });
+  const config = await readConfig(home);
+  assert.deepEqual(config.approvals, { posture: 'guarded' });
+  assert.equal(config.soul, path.join(home, '.stratus', 'agents', 'stratus.md'));
+  assert.match(output, /Created Stratus, your first agent and the default\./);
 });
 
 test('stratus setup at a terminal goes straight to the menu for an existing config, and leaves its approvals alone', { timeout: 20_000 }, async () => {
@@ -250,10 +256,17 @@ test('stratus setup at a terminal goes straight to the menu for an existing conf
 
   const { exitCode, output } = await setupAtTerminal(home, async ({ waitFor, key }) => {
     await waitFor('Save & finish');
-    key('9');
+    key('9Juno\r');
   });
 
   assert.equal(exitCode, 0, output);
   assert.doesNotMatch(output, /should your agents ask/);
-  assert.equal((await readConfig(home)).approvals, undefined);
+  const config = await readConfig(home);
+  assert.equal(config.approvals, undefined);
+  // A typed name is the agent's name and id, and it is the default.
+  assert.equal(config.soul, path.join(home, '.stratus', 'agents', 'juno.md'));
+  const soul = await readFile(path.join(home, '.stratus', 'agents', 'juno.md'), 'utf8');
+  assert.match(soul, /^name: Juno$/m);
+  assert.match(soul, /You are Juno, a personal agent on the Stratus Agent platform/);
+  assert.match(output, /Created Juno, your first agent and the default\./);
 });
