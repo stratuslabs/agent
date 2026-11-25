@@ -7,7 +7,7 @@ import { formatEvent } from '../events.ts';
 import { writeLine } from '../io.ts';
 import { defaultApprovalMode, type ParsedChatCommand } from '../parse.ts';
 import { stratusHeaderLines } from '../prompter.ts';
-import { NO_AGENT_TO_RUN, resolveRuntimeConfig, warnOnCredentialOverride, warnOnUntrustedConfig, createAgentRuntime } from '../runtime.ts';
+import { noAgentToRun, resolveRuntimeConfig, warnOnCredentialOverride, warnOnUntrustedConfig, createAgentRuntime } from '../runtime.ts';
 
 const lastAssistantReply = (session: Session): string => {
   for (let index = session.messages.length - 1; index >= 0; index -= 1) {
@@ -45,7 +45,7 @@ export const runChat = async (
   }, env);
   warnOnUntrustedConfig(runtime, streams);
   if (runtime.soul === undefined) {
-    writeLine(streams.stderr, NO_AGENT_TO_RUN);
+    writeLine(streams.stderr, await noAgentToRun(env));
     return 1;
   }
   const soul = runtime.soul;

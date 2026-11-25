@@ -66,6 +66,13 @@ The address is the container's own: `0.0.0.0` inside it, published as
 no provider named and no sign-in stored, the daemon starts but refuses every
 turn.
 
+A fresh volume has no agent yet either: no agent is defined in code, so the
+daemon refuses every turn until it has one. `docker compose exec stratusd
+stratus agent new` asks for a name and saves the soul in the volume, or
+apply the VM profile below, which brings its own `ops` agent. A volume an
+earlier release used with its built-in `stratus` agent gets a `stratus.md`
+soul on its first start instead, and carries on.
+
 For [`tool-browser`](./browser.md), set `target: browser` in
 [`compose.yaml`](../../deploy/docker/compose.yaml) (and a different
 `image:` tag) and build again: the `browser` target adds Playwright's
@@ -149,6 +156,10 @@ Run every other command as the account, so it reads the same home:
 `sudo -u stratus -H stratus logs -f`. `stratus setup` works the same way;
 decline the always-on service it offers at the end, because this unit is
 the service.
+
+A fresh home has no agent yet, so make one before the first turn:
+`sudo -u stratus -H stratus agent new` at a terminal, or `stratus setup`,
+which makes your first agent if there is none.
 
 `deploy/systemd/smoke.sh` runs these steps on a throwaway Linux machine
 with systemd, from this checkout's packed packages and on the demo

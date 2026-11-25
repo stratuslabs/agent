@@ -42,7 +42,7 @@ import { writeLine, readPromptFromStdin } from './io.ts';
 import { CLI_VERSION } from './npm.ts';
 import { parseCommand, defaultApprovalMode, memoryCommandWritesState } from './parse.ts';
 import {
-  NO_AGENT_TO_RUN,
+  noAgentToRun,
   resolveRuntimeConfig,
   warnOnCredentialOverride,
   warnOnUntrustedConfig,
@@ -297,7 +297,7 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
     warnOnUntrustedConfig(runtime, streams);
     if (runtime.soul === undefined) {
-      writeLine(streams.stderr, NO_AGENT_TO_RUN);
+      writeLine(streams.stderr, await noAgentToRun(resolvedEnv));
       return 1;
     }
     await warnOnCredentialOverride(runtime, streams, resolvedEnv);

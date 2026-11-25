@@ -582,6 +582,27 @@ test('run and chat with no agent exit 1 and say how to make one, before any prov
   assert.equal(called, false);
 });
 
+test('run and chat with agents but no default name them and how to pick one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-run-nodefault-'));
+  const agents = path.join(home, '.stratus', 'agents');
+  await mkdir(agents, { recursive: true });
+  await writeFile(path.join(agents, 'blair.md'), '---\nid: blair\nname: Blair\ntools: ["*"]\n---\n\nYou help.\n');
+  for (const argv of [['run', '--provider', 'demo', 'hello'], ['chat', '--provider', 'demo']]) {
+    const { streams, output } = createStreams();
+    const exitCode = await runCli({
+      argv,
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, stdinStream: Readable.from(['hi\n']) },
+    });
+    assert.equal(exitCode, 1, argv.join(' '));
+    assert.ok(
+      output.stderr.includes(`No default agent is set. Pass --soul with one of yours (blair: ${path.join(agents, 'blair.md')}), or pick a default with \`stratus setup\` → Agent.`),
+      output.stderr,
+    );
+    assert.doesNotMatch(output.stdout, /Demo provider ready/);
+  }
+});
+
 test('runCli executes the demo tool loop', async () => {
   const { streams, output } = createStreams();
   const home = await agentHome('stratus-run-home-');

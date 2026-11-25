@@ -40,6 +40,7 @@ import {
   credentialValuesFor,
   createHomeMemoryStore,
   createRuntimeProvider,
+  loadRosterSouls,
   defaultApiKeyEnvName,
   unlistedToolsFor,
   isSignedInRuntime,
@@ -209,6 +210,27 @@ export const warnOnCredentialOverride = async (
  */
 export const NO_AGENT_TO_RUN = 'No agent to run: no soul is set. Create your first agent with `stratus setup` '
   + 'or `stratus agent new`, or pass --soul <path>.';
+
+/**
+ * What `run` and `chat` say when no soul resolves, for this home: with
+ * agents on the roster but none the default, it names them, since making
+ * another would not help. A roster that will not load gets the plain advice;
+ * `stratus doctor` names what is wrong with it.
+ */
+export const noAgentToRun = async (env: CliEnvironment): Promise<string> => {
+  let entries: Awaited<ReturnType<typeof loadRosterSouls>> = [];
+  try {
+    entries = await loadRosterSouls(env, () => {});
+  } catch {
+    return NO_AGENT_TO_RUN;
+  }
+  if (entries.length === 0) {
+    return NO_AGENT_TO_RUN;
+  }
+  const named = entries.map((entry) => `${entry.soul.agent.id}: ${entry.path}`).join(', ');
+  return `No default agent is set. Pass --soul with one of yours (${named}), `
+    + 'or pick a default with `stratus setup` → Agent.';
+};
 
 export const createAgentRuntime = async (
   streams: CliStreams,
