@@ -5873,11 +5873,12 @@ test('doctor with a daemon that started clean on the config on disk finds no pro
   assert.match(output.stdout, /No problems found\./);
 });
 
-test('doctor with no daemon found says so without claiming it is stopped, and does not call it a problem', async () => {
+test('doctor with no daemon running says so, and does not call it a problem', async () => {
   const { exitCode, output, calls } = await doctorAgainstDaemon('none');
   assert.equal(exitCode, 0, output.stdout);
   assert.deepEqual(calls, []);
-  assert.match(output.stdout, /daemon {4}none found \(no control API published\)/);
+  // Nothing holds the home lock, so none is running (see daemon-without-api.test.ts for one that is).
+  assert.match(output.stdout, /daemon {4}none running/);
   assert.match(output.stdout, /No problems found\./);
 });
 
@@ -18235,7 +18236,7 @@ test('stratus health fails in one sentence when no daemon is serving, and migrat
   assert.equal(await runCli({ argv: ['health'], streams: down.streams, env }), 1);
   assert.match(
     down.output.stderr,
-    /^Error: stratusd is not serving — .*gateway\.json does not exist.*still starting or restarting.*Start it with `stratus serve` or `stratus service start`/,
+    /^Error: stratusd is not running for this home, and no --gateway was given\. Start it with `stratus serve` or `stratus service start`/,
   );
   assert.doesNotMatch(down.output.stderr, /Usage:/);
   assert.doesNotMatch(down.output.stderr, /state migration/);
@@ -18245,7 +18246,7 @@ test('stratus health fails in one sentence when no daemon is serving, and migrat
   assert.equal(await runCli({ argv: ['health', '--format', 'json'], streams: json.streams, env }), 1);
   const payload = JSON.parse(json.output.stdout) as { ok: boolean; error: string };
   assert.equal(payload.ok, false);
-  assert.match(payload.error, /stratusd is not serving/);
+  assert.match(payload.error, /stratusd is not running/);
 
   // Nothing answering where it was pointed — what a gateway.json left
   // behind by a killed daemon produces — says where it looked.

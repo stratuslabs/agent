@@ -1,5 +1,5 @@
 import { gatewayInfoPath } from '@stratusagent/state';
-import { callRunningGateway, gatewayErrorMessage, runningGatewayBase } from '../daemon.ts';
+import { callRunningGateway, gatewayErrorMessage, runningGatewayBase, unpublishedDaemon, withoutApiMessage } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import type { ParsedHealthCommand } from '../parse.ts';
@@ -73,15 +73,27 @@ export const runHealth = async (
 
   // The file is written when the API binds and removed when it stops, so a
   // daemon between the two — starting, or inside an announced restart — is
-  // absent here too. Said, because a probe failing once during a restart is
-  // expected and one failing for minutes is not, and the reader of this line
-  // is deciding which.
+  // absent here too, as is one with no control API at all. The home lock
+  // tells those from no daemon: it is held from start to exit. Said,
+  // because a probe failing once during a restart is expected and one
+  // failing for minutes is not, and the reader of this line is deciding
+  // which.
   const base = await runningGatewayBase(env, command);
   if (!base) {
+    const daemon = unpublishedDaemon(env);
+    if (daemon.state === 'without-api') {
+      return fail(withoutApiMessage(daemon.packageMissing));
+    }
+    if (daemon.state === 'none') {
+      return fail(
+        'stratusd is not running for this home, and no --gateway was given. '
+        + 'Start it with `stratus serve` or `stratus service start`.',
+      );
+    }
     return fail(
       `stratusd is not serving — ${gatewayInfoPath(env)} does not exist, so no daemon has said where it is `
-      + '(none is running, or one is still starting or restarting), and no --gateway was given. '
-      + 'Start it with `stratus serve` or `stratus service start`; a daemon started with --no-api has no control API to ask.',
+      + '(none is running, or one is still starting, restarting, or running without a control API), and no --gateway was given. '
+      + 'Start it with `stratus serve` or `stratus service start`.',
     );
   }
 

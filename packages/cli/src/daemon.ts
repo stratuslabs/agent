@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import {
+  fileLockHeld,
+  homeLockPath,
   readNonEmptyString,
   readProcessEnv,
   readWorkingDirectory,
@@ -7,6 +9,8 @@ import {
   gatewayTokenPath,
   withoutTrailingSlashes,
 } from '@stratusagent/state';
+import { packageInstalled } from './loaders.ts';
+import { CLI_VERSION } from './npm.ts';
 import type { ServiceEnvironment } from './service.ts';
 
 /**
@@ -140,9 +144,57 @@ export const gatewayErrorMessage = async (response: Response): Promise<string> =
   return `HTTP ${response.status}`;
 };
 
+const CONTROL_API_PACKAGE = '@stratusagent/control-api';
+
+/**
+ * What is on this home when no daemon has published a control API.
+ *
+ * The discovery file appears only once a control API binds, and a daemon
+ * from a plain `npm install -g @stratusagent/cli` has none: the package is
+ * optional. That daemon still holds the home lock for its whole life, so
+ * the lock, not the file, says whether one is running. `unknown` when this
+ * process cannot read the lock, as in a sandboxed shell: no holder seen is
+ * not no holder.
+ */
+export type UnpublishedDaemon =
+  | { state: 'none' }
+  | { state: 'without-api'; packageMissing: boolean }
+  | { state: 'unknown' };
+
+export const unpublishedDaemon = (env: CliEnvironment): UnpublishedDaemon => {
+  const held = fileLockHeld(homeLockPath(env));
+  if (held === undefined) {
+    return { state: 'unknown' };
+  }
+  return held ? { state: 'without-api', packageMissing: !packageInstalled(CONTROL_API_PACKAGE, env) } : { state: 'none' };
+};
+
+/** Why a daemon holding the home cannot be asked anything, and what to do. */
+export const withoutApiMessage = (packageMissing: boolean): string =>
+  packageMissing
+    ? `stratusd is running, but without a control API: ${CONTROL_API_PACKAGE} isn't installed, so commands that ask the daemon `
+      + '(health, sessions, tasks, restart, dashboard) can\'t reach it. '
+      + `Install it with \`npm install -g ${CONTROL_API_PACKAGE}@${CLI_VERSION}\`, then restart stratusd: `
+      + '`stratus service stop` and `stratus service start`, or Ctrl+C where it runs and `stratus serve` again.'
+    : 'stratusd is running but has not published a control API: it is still starting or restarting, '
+      + 'or it runs with --no-api or api.enabled: false. Try again in a moment, or check `stratus logs`.';
+
+/**
+ * The sentence for a command that needs the daemon and found no discovery
+ * file. `none` is the caller's own wording for that case, since what to do
+ * about no daemon differs by command.
+ */
+export const unreachableDaemonMessage = (env: CliEnvironment, none: string): string => {
+  const daemon = unpublishedDaemon(env);
+  return daemon.state === 'without-api' ? withoutApiMessage(daemon.packageMissing) : none;
+};
+
 export const noRunningDaemonMessage = (env: CliEnvironment): string =>
-  `no running daemon found — ${gatewayInfoPath(env)} does not exist, and no --gateway was given. `
-  + 'Start one with `stratus serve` or `stratus service start`; a daemon loads ~/.stratus/skills at start.';
+  unreachableDaemonMessage(
+    env,
+    `no running daemon found — ${gatewayInfoPath(env)} does not exist, and no --gateway was given. `
+    + 'Start one with `stratus serve` or `stratus service start`; a daemon loads ~/.stratus/skills at start.',
+  );
 
 /** What a running daemon published about itself, if one is running. */
 interface GatewayInfo {
