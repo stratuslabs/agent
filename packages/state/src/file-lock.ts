@@ -191,6 +191,54 @@ export const claimFileLock = (lockPath: string, options: { waitMs?: number } = {
 };
 
 /**
+ * Whether some holder has the lock at this path right now, asked without
+ * taking it: true, false, or undefined when this process cannot tell.
+ *
+ * For a reader that only wants to know (doctor, health): is there a daemon
+ * on this home even though it published no control API. Claiming the lock
+ * to find out would create the file, and while held for that instant would
+ * refuse the very daemon being asked about; this opens the file read-only,
+ * creates nothing, and needs only a shared lock for one read. A holder's
+ * exclusive transaction refuses that read, which is the answer.
+ *
+ * False for a file that does not exist, is a symlink (a claim refuses one,
+ * so nobody holds it), or is not a database (a claim empties one before
+ * holding it). Undefined when the file is there but this process may not
+ * open or read it, a sandboxed shell for one: no holder seen is not no
+ * holder.
+ *
+ * The one read holds a shared lock for microseconds. A claim made in that
+ * same instant (`claimHome` waits for nothing) would be refused as if the
+ * home were held; the window is small enough that a human-run doctor or a
+ * health check every few seconds will not meet it in practice, and a
+ * refused start says why and can be repeated.
+ */
+export const fileLockHeld = (lockPath: string): boolean | undefined => {
+  try {
+    if (lstatSync(lockPath).isSymbolicLink()) {
+      return false;
+    }
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? false : undefined;
+  }
+  const { DatabaseSync: Database } = sqlite();
+  let db: DatabaseSync;
+  try {
+    db = new Database(lockPath, { readOnly: true });
+  } catch {
+    return undefined;
+  }
+  try {
+    db.prepare('SELECT count(*) FROM sqlite_master').get();
+    return false;
+  } catch (error) {
+    return isBusy(error) ? true : isNotADatabase(error) ? false : undefined;
+  } finally {
+    db.close();
+  }
+};
+
+/**
  * How long a grant read or revoke waits for the other side. A revoke
  * rewrites one small file, so anything longer than this is a process that
  * is stuck rather than busy.

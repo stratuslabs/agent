@@ -132,10 +132,13 @@ export {
   promotedVersionPath,
   gatewayInfoPath,
   grantsLockPath,
+  homeLockPath,
+  updateLockPath,
 } from './paths.ts';
 
 export {
   claimFileLock,
+  fileLockHeld,
   FileLockHeldError,
   type FileLock,
   GRANTS_LOCK_WAIT_MS,

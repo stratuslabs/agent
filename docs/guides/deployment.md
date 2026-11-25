@@ -247,8 +247,10 @@ livenessProbe:
 
 A check that lands inside an announced restart (`stratus restart`) fails:
 the old daemon removes `gateway.json` when it stops serving and the new one
-writes it when its API binds, and the check says "not serving" in between.
-That is what `retries` / `failureThreshold` are for.
+writes it when its API binds, and the check says the daemon is running but
+has not published a control API in between. That is what `retries` /
+`failureThreshold` are for. A daemon without `@stratusagent/control-api`
+fails every check, and the message says the package isn't installed.
 
 A platform check that cannot send the token (a Fly machine check, a
 Kubernetes `httpGet` probe) can use `GET /api/v1/livez`, which needs no

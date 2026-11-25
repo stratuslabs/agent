@@ -1,6 +1,6 @@
 import { escapeControlCharacters } from '@stratusagent/core';
 import { gatewayInfoPath } from '@stratusagent/state';
-import { callRunningGateway, gatewayErrorMessage, runningGatewayBase } from '../daemon.ts';
+import { callRunningGateway, gatewayErrorMessage, runningGatewayBase, unreachableDaemonMessage } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import type { ParsedEventsCommand } from '../parse.ts';
@@ -69,10 +69,11 @@ export const runEvents = async (
 
   const base = await runningGatewayBase(env, command);
   if (!base) {
-    return fail(
+    return fail(unreachableDaemonMessage(
+      env,
       `stratusd is not serving — ${gatewayInfoPath(env)} does not exist, and no --gateway was given. `
       + 'Start it with `stratus serve` or `stratus service start`. The events port runs only inside a serving daemon.',
-    );
+    ));
   }
 
   let payload: EventsPayload;

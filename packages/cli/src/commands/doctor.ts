@@ -44,7 +44,7 @@ import {
   withoutTrailingSlashes,
 } from '@stratusagent/state';
 import { homebrewNodeLink, readServiceCommand, readServiceStatus, recentServiceOutput, type ServiceEnvironment } from '../service.ts';
-import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
+import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor, unpublishedDaemon } from '../daemon.ts';
 import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
@@ -216,7 +216,20 @@ export interface DoctorReport {
  * problems found" while the daemon ran with no plugins and no soul.
  */
 export type DoctorDaemon =
-  | { state: 'no-api' }
+  /**
+   * No control API published and nothing holds the home. `lockUnreadable`
+   * when this process may not read the home lock (a sandboxed shell), so
+   * a daemon may be there after all.
+   */
+  | { state: 'no-api'; lockUnreadable?: true }
+  /**
+   * Holding the home with no control API published: the package is not
+   * installed (`packageMissing`), or the daemon is starting, restarting, or
+   * runs with the API off.
+   */
+  | { state: 'without-api'; packageMissing: boolean }
+  /** `stratus update` holds the home to migrate it; the daemon is stopped until it finishes. */
+  | { state: 'updating' }
   | { state: 'unreachable'; url: string }
   | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string; exposedOn?: string };
 
@@ -303,8 +316,14 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       // Information, not a problem: `stratus run` needs no daemon, and a
-      // daemon started with its control API off publishes no file either.
-      return { state: 'no-api' };
+      // daemon with no control API publishes no file either. The home lock
+      // tells those apart, since a daemon holds it from start to exit.
+      const unpublished = unpublishedDaemon(env);
+      return unpublished.state === 'without-api'
+        ? { state: 'without-api', packageMissing: unpublished.packageMissing }
+        : unpublished.state === 'updating'
+          ? { state: 'updating' }
+          : unpublished.state === 'unknown' ? { state: 'no-api', lockUnreadable: true } : { state: 'no-api' };
     }
     problems.push(`${infoPath} cannot be read (${(error as Error).message}), so doctor cannot find the running daemon. Check its permissions, or remove it and \`stratus restart\`.`);
     return { state: 'no-api' };
@@ -1160,9 +1179,19 @@ export const runDoctor = async (
   writeLine(streams.stdout, 'Daemon');
   const daemon = report.daemon;
   if (daemon.state === 'no-api') {
-    // No published control API: none running, or one started with the API
-    // off. Doctor cannot tell those apart from here, so it does not guess.
-    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}none found (no control API published)`);
+    // Nothing holds the home, or this process may not read the lock (a
+    // sandboxed shell), in which case it does not guess.
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}${daemon.lockUnreadable ? 'none found (no control API published)' : 'none running'}`);
+  } else if (daemon.state === 'without-api') {
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}running without a control API`);
+    if (daemon.packageMissing) {
+      writeLine(streams.stdout, `  ${''.padEnd(10)}@stratusagent/control-api isn't installed, so health, sessions, tasks, restart and dashboard can't reach it.`);
+      writeLine(streams.stdout, `  ${''.padEnd(10)}To add it: npm install -g @stratusagent/control-api@${CLI_VERSION}, then restart stratusd.`);
+    } else {
+      writeLine(streams.stdout, `  ${''.padEnd(10)}It is still starting or restarting, or runs with --no-api or api.enabled: false.`);
+    }
+  } else if (daemon.state === 'updating') {
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}stopped while \`stratus update\` migrates this home`);
   } else if (daemon.state === 'unreachable') {
     writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}did not answer at ${daemon.url}`);
   } else {
