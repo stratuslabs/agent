@@ -228,6 +228,7 @@ interface DaemonHealth {
   startedAt?: string;
   startup?: { warnings?: unknown; configs?: unknown };
   intake?: { paused?: unknown; unreadable?: unknown };
+  agents?: unknown;
 }
 
 const VALUE_TYPE_PHRASE = {
@@ -283,10 +284,10 @@ const ignoredConfigKeyProblems = async (configPath: string): Promise<string[]> =
  */
 const INTAKE_WARNING_PREFIX = 'intake: ';
 /**
- * How the gateway's start-up line for an empty roster begins. Unlike the
- * other start-up warnings it is not stale config a restart re-reads: the
- * daemon picks up a default soul on its next turn, so once an agent exists
- * the line is history, and while none does the fix is to make one.
+ * How the gateway's start-up line for an empty roster begins. Judged by what
+ * the daemon serves now (`agents` in /health), not by the files: making an
+ * agent does not reload a running daemon, so a soul on disk can still leave
+ * it serving nobody. Once it serves one the line is history.
  */
 const NO_AGENTS_WARNING_PREFIX = 'no agents yet: ';
 
@@ -299,7 +300,7 @@ const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | nu
       })
     : [];
 
-const inspectDaemon = async (env: CliEnvironment, problems: string[], hasAgents: boolean): Promise<DoctorDaemon> => {
+const inspectDaemon = async (env: CliEnvironment, problems: string[], agentsOnDisk: boolean): Promise<DoctorDaemon> => {
   // Read here rather than through readGatewayInfo, which folds a damaged
   // file into "none": only a missing file is the benign case.
   const infoPath = gatewayInfoPath(env);
@@ -368,11 +369,15 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[], hasAgents:
       continue;
     }
     if (line.startsWith(NO_AGENTS_WARNING_PREFIX)) {
-      if (!hasAgents) {
-        problems.push(
-          'No agents yet, so the running daemon fails every turn it is handed. '
-          + 'Create one with `stratus setup` or `stratus agent new`.',
-        );
+      // This build always reports the agents it serves; a daemon that
+      // printed this line is this build.
+      const served = Array.isArray(health.agents) ? health.agents.length : 0;
+      if (served === 0) {
+        problems.push(agentsOnDisk
+          ? 'The running daemon started with no agents and has not loaded any since. '
+            + 'Run `stratus restart` so it serves the ones you made.'
+          : 'No agents yet, so the running daemon fails every turn it is handed. '
+            + 'Create one with `stratus setup` or `stratus agent new`.');
       }
       continue;
     }

@@ -220,3 +220,57 @@ test('a second run writes nothing and says nothing', async () => {
   assert.equal(await readFile(ownSoul(env), 'utf8'), soulBefore);
   assert.equal(await readFile(globalConfigPath(env), 'utf8'), configBefore);
 });
+
+test('a stratus.md that is another agent\'s is kept, and the soul goes beside it', async () => {
+  const env = await freshHome();
+  await seedMemory(env, 'stratus');
+  await mkdir(agentsDirPath(env), { recursive: true });
+  const ava = '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n';
+  await writeFile(ownSoul(env), ava);
+
+  const detail = await migrate(env);
+
+  // Ava's file as it was, and Ava never made the default for stratus.
+  assert.equal(await readFile(ownSoul(env), 'utf8'), ava);
+  await assertStratusSoul(env);
+  const beside = path.join(agentsDirPath(env), 'stratus-agent.md');
+  assert.equal(await exists(beside), true);
+  assert.deepEqual(await readConfig(env), { soul: beside });
+  assert.match(detail, /stratus-agent\.md/);
+});
+
+test('a soul whose id differs from stratus only in case is not taken for it', async () => {
+  const env = await freshHome();
+  await seedMemory(env, 'stratus');
+  await mkdir(agentsDirPath(env), { recursive: true });
+  const capital = path.join(agentsDirPath(env), 'capital.md');
+  await writeFile(capital, '---\nname: Capital\nid: Stratus\n---\n\nYou are Capital.\n');
+  await writeFile(globalConfigPath(env), `${JSON.stringify({ provider: 'anthropic' })}\n`);
+
+  const detail = await migrate(env);
+
+  // A second soul would make two ids the roster refuses; adopting it would
+  // hand the state under agents/stratus to an agent whose state directory
+  // is agents/Stratus wherever case does not fold. Neither, and it says so.
+  assert.equal(await exists(ownSoul(env)), false);
+  const roster = await loadRosterSouls(env, () => {});
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id), ['Stratus']);
+  assert.deepEqual(await readConfig(env), { provider: 'anthropic' });
+  assert.match(detail, /capital\.md declares the id Stratus/);
+  assert.match(detail, /id: stratus/);
+});
+
+for (const [label, raw] of [['an array', '[]'], ['null', 'null'], ['a number', '7']] as const) {
+  test(`a config that is ${label} is left alone, and the soul is still written`, async () => {
+    const env = await freshHome();
+    await seedMemory(env, 'stratus');
+    await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
+    await writeFile(globalConfigPath(env), raw);
+
+    const detail = await migrate(env);
+
+    await assertStratusSoul(env);
+    assert.equal(await readFile(globalConfigPath(env), 'utf8'), raw);
+    assert.match(detail, /could not read/);
+  });
+}

@@ -38,18 +38,24 @@ make it the default.
 
 Until there is one, `stratus run` and `stratus chat` exit saying how to make
 one, and a daemon starts but fails each turn with the same advice
-(`stratus doctor` says so too). On a server or container with fresh state,
-run `stratus setup` or `stratus agent new` once, or mount a soul into
-`~/.stratus/agents`.
+(`stratus doctor` says so too). A daemon that started before you made one
+keeps serving nobody until it reloads, so restart it (`stratus restart`).
+On a server or container with fresh state, run `stratus setup` or
+`stratus agent new` once, or mount a soul into `~/.stratus/agents`.
 
 Releases before this one served a built-in `stratus` agent from code. An
 install that used it (conversations, memory, a schedule, a Slack app or
 grants under `stratus`) gets a `stratus.md` soul written on its first start
 after the upgrade, with the same persona and every tool, and it becomes the
 default when none was set. Its conversations, memory, schedules, grants and
-Slack app carry on under the same id. The upgrade never overwrites a file,
-and writes nothing when a soul already declares `stratus`. An install that
-never used it gets nothing, and the agent is simply gone from its roster.
+Slack app carry on under the same id. The upgrade never overwrites a file:
+if `stratus.md` is another agent's, the soul is written as
+`stratus-agent.md`. It writes nothing when a soul already declares
+`stratus`. A soul whose id differs only in case (`Stratus`) is not taken
+for it, and the upgrade writes nothing beside it either; its start-up note
+says to change that soul's id to `stratus` to keep the old conversations and
+memory. An install that never used it gets nothing, and the agent is simply
+gone from its roster.
 
 ## Creating an agent
 

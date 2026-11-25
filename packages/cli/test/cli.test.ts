@@ -98,6 +98,7 @@ import { SESSION_TAINTED_BY_METADATA_KEY, SESSION_TRUST_METADATA_KEY } from '@st
 import type { Session, Tool } from '@stratusagent/core';
 import { BUNDLED_PLUGIN_INDEX } from '../src/plugin-index.ts';
 import { memoryCommandWritesState } from '../src/parse.ts';
+import { reloadRunningDaemonChannels } from '../src/daemon.ts';
 import { addDefaultAgent, agentHome, STRATUS_SOUL } from './default-agent.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -6039,10 +6040,11 @@ test('doctor against a real daemon: what it warned at start stays a problem afte
 
 /**
  * A daemon started before anyone made an agent: what `doctor` says while
- * there is still none, and that it drops the start-up line once one exists,
- * since the default soul is picked up on the next turn without a restart.
+ * there is still none, what it says once one exists on disk but the daemon
+ * has not loaded it (making an agent does not reload a running daemon), and
+ * that the line goes once the daemon serves one.
  */
-test('doctor against a daemon that started with no agents names the fix, and drops it once an agent exists', async () => {
+test('doctor against a daemon that started with no agents names the fix, and drops it once the daemon serves one', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-noagents-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({}), { mode: 0o600 });
@@ -6071,9 +6073,17 @@ test('doctor against a daemon that started with no agents names the fix, and dro
     assert.doesNotMatch(before.output.stdout, /warned at start: no agents yet/);
 
     await addDefaultAgent(home);
+    const unloaded = createStreams();
+    const unloadedCode = await runCli({ argv: ['doctor'], streams: unloaded.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    assert.equal(unloadedCode, 1, unloaded.output.stdout);
+    assert.match(unloaded.output.stdout, /The running daemon started with no agents and has not loaded any since\. Run `stratus restart` so it serves the ones you made\./);
+    assert.doesNotMatch(unloaded.output.stdout, /No agents yet, so/);
+
+    const reloaded = await reloadRunningDaemonChannels({ homeDir: home, cwd: home, processEnv: {} });
+    assert.ok(reloaded !== undefined && !('warning' in reloaded), JSON.stringify(reloaded));
     const after = createStreams();
     await runCli({ argv: ['doctor'], streams: after.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
-    assert.doesNotMatch(after.output.stdout, /no agents yet/i, after.output.stdout);
+    assert.doesNotMatch(after.output.stdout, /no agents yet|started with no agents/i, after.output.stdout);
   } finally {
     controller.abort();
     await serving;

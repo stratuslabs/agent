@@ -60,6 +60,28 @@ const readJsonObject = async (filePath: string): Promise<Record<string, unknown>
     : undefined;
 };
 
+/**
+ * The global config for adding one key to: `{}` when there is no file, and
+ * an error for anything that is not a JSON object, which is the operator's
+ * to repair rather than this migration's to replace with one key.
+ */
+const readConfigObject = async (filePath: string): Promise<Record<string, unknown>> => {
+  let raw: string;
+  try {
+    raw = await readFile(filePath, 'utf8');
+  } catch (error) {
+    if (errnoOf(error) === 'ENOENT') {
+      return {};
+    }
+    throw error;
+  }
+  const parsed = JSON.parse(raw) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('it is not a JSON object');
+  }
+  return parsed as Record<string, unknown>;
+};
+
 const hasSlackApp = async (env: StateEnvironment): Promise<boolean> => {
   let credentials: Record<string, unknown> | undefined;
   try {
@@ -119,22 +141,31 @@ export const usedCodeDefinedAgent = async (env: StateEnvironment): Promise<boole
   return await hasSlackApp(env) || await hasSchedule(env);
 };
 
-const declaresStratus = async (soulPath: string): Promise<boolean> => {
+/**
+ * The id a soul declares when it names the agent's state directory: the
+ * exact id, or one that differs only in case, which shares it only where
+ * the filesystem folds case. Undefined for any other id, or a soul that
+ * cannot be read, which is the roster's to report.
+ */
+const stratusIdOf = async (soulPath: string): Promise<string | undefined> => {
   try {
-    return foldedAgentId((await loadSoulFile(soulPath)).agent.id) === LEGACY_DEFAULT_AGENT_ID;
+    const id = (await loadSoulFile(soulPath)).agent.id;
+    return foldedAgentId(id) === LEGACY_DEFAULT_AGENT_ID ? id : undefined;
   } catch {
-    // An unreadable soul is the roster's to report.
-    return false;
+    return undefined;
   }
 };
 
 /**
- * A soul that already declares the id: one in `agents/` under any file
- * name, or the global config's default soul, which older builds let take
- * the id over. Writing a second would leave two souls on one state
- * directory, which the gateway refuses.
+ * A soul that already declares the id, in any case: one in `agents/` under
+ * any file name, or the global config's default soul, which older builds
+ * let take the id over. Writing a second would leave two souls the roster
+ * refuses as one id.
  */
-const existingClaim = async (env: StateEnvironment, configSoul: string | undefined): Promise<string | undefined> => {
+const existingClaim = async (
+  env: StateEnvironment,
+  configSoul: string | undefined,
+): Promise<{ path: string; id: string } | undefined> => {
   let files: string[] = [];
   try {
     files = (await readdir(agentsDirPath(env))).filter((file) => file.endsWith('.md')).sort();
@@ -145,15 +176,27 @@ const existingClaim = async (env: StateEnvironment, configSoul: string | undefin
   }
   for (const file of files) {
     const soulPath = path.join(agentsDirPath(env), file);
-    if (await declaresStratus(soulPath)) {
-      return soulPath;
+    const id = await stratusIdOf(soulPath);
+    if (id !== undefined) {
+      return { path: soulPath, id };
     }
   }
-  if (configSoul !== undefined && await declaresStratus(path.resolve(readWorkingDirectory(env), configSoul))) {
-    return configSoul;
+  if (configSoul !== undefined) {
+    const id = await stratusIdOf(path.resolve(readWorkingDirectory(env), configSoul));
+    if (id !== undefined) {
+      return { path: configSoul, id };
+    }
   }
   return undefined;
 };
+
+/**
+ * File names the soul may take, in order. The first is the one a person
+ * would look for; the second is for a home where `stratus.md` is some
+ * other agent's, which older builds allowed because only the id was held
+ * back.
+ */
+const SOUL_FILE_NAMES = [`${LEGACY_DEFAULT_AGENT_ID}.md`, `${LEGACY_DEFAULT_AGENT_ID}-agent.md`] as const;
 
 /**
  * Gives a home that used the code-defined `stratus` agent a real soul for
@@ -167,8 +210,10 @@ const existingClaim = async (env: StateEnvironment, configSoul: string | undefin
  *
  * Writes nothing when a soul already declares the id (that file takes the
  * state over now that the id is no longer held back) or the home never
- * used the agent. Idempotent: the soul is written exclusively, and a second
- * run finds it.
+ * used the agent. A soul whose id differs only in case, or soul file names
+ * that are all somebody else's, also get nothing written and no default:
+ * the note says where the state is and what to change. Idempotent: the
+ * soul is written exclusively, and a second run finds it.
  */
 export const applyStratusSoul = async (env: StateEnvironment): Promise<string | undefined> => {
   if (!(await usedCodeDefinedAgent(env))) {
@@ -178,14 +223,15 @@ export const applyStratusSoul = async (env: StateEnvironment): Promise<string | 
   const configPath = globalConfigPath(env);
   let config: Record<string, unknown> | undefined;
   try {
-    config = (await readJsonObject(configPath)) ?? {};
+    config = await readConfigObject(configPath);
   } catch (error) {
     notes.push(`could not read ${configPath} (${error instanceof Error ? error.message : String(error)}), so stratus was not made the default agent`);
   }
   const configSoul = typeof config?.soul === 'string' && config.soul.trim() !== '' ? config.soul : undefined;
 
-  const ownPath = path.join(agentsDirPath(env), `${LEGACY_DEFAULT_AGENT_ID}.md`);
+  const stateDir = agentStateDirPath(env, LEGACY_DEFAULT_AGENT_ID);
   const claimed = await existingClaim(env, configSoul);
+  let soulPath: string | undefined;
   if (claimed === undefined) {
     const agent = {
       id: LEGACY_DEFAULT_AGENT_ID,
@@ -193,21 +239,50 @@ export const applyStratusSoul = async (env: StateEnvironment): Promise<string | 
       instructions: stratusPersona('Stratus'),
       tools: [...EVERY_TOOL],
     };
-    try {
-      await writeNewSoulFile(env, `${agent.id}.md`, agent.id, formatSoul({ agent }));
-      notes.push(`wrote ${ownPath} for the stratus agent, which had lived in code`);
-    } catch (error) {
-      if (errnoOf(error) !== 'EEXIST') {
-        throw error;
+    for (const file of SOUL_FILE_NAMES) {
+      const target = path.join(agentsDirPath(env), file);
+      try {
+        await writeNewSoulFile(env, file, agent.id, formatSoul({ agent }));
+        notes.push(`wrote ${target} for the stratus agent, which had lived in code`);
+        soulPath = target;
+        break;
+      } catch (error) {
+        if (errnoOf(error) !== 'EEXIST') {
+          throw error;
+        }
+      }
+      // Taken. A run beside this one that wrote the soul first is done;
+      // anything else is somebody's file, left as it is.
+      if (await stratusIdOf(target) === LEGACY_DEFAULT_AGENT_ID) {
+        soulPath = target;
+        break;
       }
     }
-  } else if (claimed !== ownPath) {
-    notes.push(`${claimed} already declares the id stratus, so it is that agent now`);
+    if (soulPath === undefined) {
+      notes.push(
+        `${SOUL_FILE_NAMES.map((file) => path.join(agentsDirPath(env), file)).join(' and ')} are taken, so no soul was `
+        + `written for the stratus agent. Its sessions and memory are kept in ${stateDir}: add a soul with id: stratus `
+        + 'to use them again',
+      );
+    }
+  } else if (claimed.id !== LEGACY_DEFAULT_AGENT_ID) {
+    // Not adopted: its state directory is agents/<its id>, which is this
+    // one only where case folds. Not a second soul either: the roster
+    // refuses two ids that differ only in case.
+    notes.push(
+      `${claimed.path} declares the id ${claimed.id}, so no soul was written for the stratus agent. Its sessions and `
+      + `memory are kept in ${stateDir}: change that soul to id: stratus to use them, or to another id to keep it apart`,
+    );
+  } else {
+    soulPath = claimed.path;
+    if (!SOUL_FILE_NAMES.some((file) => path.join(agentsDirPath(env), file) === claimed.path)) {
+      notes.push(`${claimed.path} already declares the id stratus, so it is that agent now`);
+    }
   }
 
-  if (config !== undefined && configSoul === undefined) {
+  if (soulPath !== undefined && config !== undefined && configSoul === undefined) {
     // Every other key as it was: this adds one.
-    await saveConfigFile(configPath, { ...config, soul: claimed ?? ownPath } as StratusConfigFile);
+    await saveConfigFile(configPath, { ...config, soul: soulPath } as StratusConfigFile);
     notes.push('made it the default agent');
   }
   return notes.length > 0 ? notes.join('; ') : undefined;
