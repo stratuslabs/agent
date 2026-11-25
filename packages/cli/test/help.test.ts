@@ -127,11 +127,16 @@ test('a usage error prints the error and one line pointing at that command\'s he
     [['run'], 'A prompt is required. Pass it with --prompt, --stdin, or as a positional argument.', 'stratus run --help'],
     [['agents', '--gateway'], 'Missing value for --gateway', 'stratus agents --help'],
     [['memory', 'list', '--trust', 'nope'], 'Unsupported trust level: nope. Use one of user, agent, unknown, external.', 'stratus memory list --help'],
+    [['agent', 'delete'], 'Unknown agent subcommand: delete. Try: stratus agent new, stratus agent list', 'stratus agent --help'],
+    [['schedule', 'list', '--bogus'], 'Unknown option: --bogus', 'stratus schedule list --help'],
   ] as const) {
     const result = await run([...argv]);
     assert.equal(result.exitCode, 1, argv.join(' '));
     assert.equal(result.stdout, '', argv.join(' '));
     assert.equal(result.stderr, `Error: ${error}\nRun \`${pointer}\` for its usage.\n`, argv.join(' '));
+    const followed = await run(pointer.split(' ').slice(1));
+    assert.equal(followed.exitCode, 0, `${pointer} works`);
+    assert.ok(followed.stdout.length < HELP_TEXT.length / 4, `${pointer} is that command's part`);
   }
 });
 
@@ -139,6 +144,10 @@ test('an unknown command, or help for one, points at the whole list', async () =
   for (const [argv, error] of [
     [['frob'], 'Unknown command: frob'],
     [['help', 'frob'], 'Unknown command: frob'],
+    // Only `schedule list` and `schedule cancel` exist; `schedule --help`
+    // would be the same error, so the pointer must not name it.
+    [['schedule', 'bogus'], 'Unknown command: schedule'],
+    [['plugin', 'bogus'], 'Unknown command: plugin'],
   ] as const) {
     const result = await run([...argv]);
     assert.equal(result.exitCode, 1, argv.join(' '));

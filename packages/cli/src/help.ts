@@ -751,14 +751,13 @@ Soul files:
  * command's description lists as "also:", plus a second word that is an
  * action of the entry, not an entry of its own. Without these, `stratus
  * skill list --help` would find the three `skill …` entries instead of
- * `skills`.
+ * `skills`. Only forms the CLI runs: a bare `stratus schedule` is an
+ * unknown command, so a pointer must not send anyone to its help.
  */
 const ALIASES: Readonly<Record<string, string>> = {
   'agent list': 'agents',
-  schedule: 'schedules',
   'schedule list': 'schedules',
   'schedule cancel': 'schedules',
-  plugin: 'plugins',
   'plugin list': 'plugins',
   'skill list': 'skills',
   'session list': 'sessions',
