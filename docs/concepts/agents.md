@@ -215,8 +215,8 @@ Two well-written example souls live in
 [`examples/souls/`](../../examples/souls) — they double as the format docs.
 A soul's provider/model are hints for a run:
 [`--provider`/`--model` flags and `STRATUS_*` env vars still win](../reference/config.md).
-Under `stratus serve` the pins win instead, and `STRATUS_PROVIDER` and
-`STRATUS_MODEL` are the default for agents that pin nothing.
+Under `stratus serve` each pin wins instead, and `STRATUS_PROVIDER` and
+`STRATUS_MODEL` are only the default for what a soul doesn't pin.
 `provider:` may name a built-in or the name a
 [plugin provider](../guides/extending.md#providers) registers.
 
